@@ -1,0 +1,218 @@
+{
+    "0": {
+        "author_info": {
+            "first": "Dr A'bdul",
+            "middle": null,
+            "last": "Sattar",
+            "suffix": null,
+            "position": 1,
+            "email": null,
+            "affiliations": [
+                "Bridgewater State University"
+            ],
+            "block": "a sattary",
+            "estimated_ethnicity": "ARAB",
+            "estimated_gender": "M",
+            "given_block": "a sattar"
+        },
+        "signature_id": "0",
+        "given_name": "Abdul Sattar",
+        "paper_id": 53235312,
+        "sourced_author_ids": [
+            "1"
+        ],
+        "sourced_author_source": "ORCID"
+    },
+    "1": {
+        "author_info": {
+            "first": "Abdul",
+            "middle": null,
+            "last": "Sattar",
+            "suffix": null,
+            "position": 1,
+            "email": null,
+            "affiliations": [
+                "Bridgewater State University"
+            ],
+            "block": "a sattary",
+            "estimated_ethnicity": "ARAB",
+            "estimated_gender": "M",
+            "given_block": "a sattar"
+        },
+        "signature_id": "1",
+        "given_name": "Abdul Sattar",
+        "paper_id": 27077319,
+        "sourced_author_ids": [
+            "1"
+        ],
+        "sourced_author_source": "DBLP"
+    },
+    "2": {
+        "author_info": {
+            "first": "Abdul",
+            "middle": null,
+            "last": "Sattar",
+            "suffix": null,
+            "position": 1,
+            "email": null,
+            "affiliations": [
+                "Bridgewater State University"
+            ],
+            "block": "a sattary",
+            "estimated_ethnicity": "ARAB",
+            "estimated_gender": "M",
+            "given_block": "a sattar"
+        },
+        "signature_id": "2",
+        "given_name": "Abdul Sattar",
+        "paper_id": 19901392,
+        "sourced_author_ids": [
+            "2"
+        ],
+        "sourced_author_source": "ORCID"
+    },
+    "3": {
+        "author_info": {
+            "first": "Alexander",
+            "middle": null,
+            "last": "Konovalov",
+            "suffix": null,
+            "position": 0,
+            "email": null,
+            "affiliations": [
+                "Moscow State University"
+            ],
+            "block": "a konovalov",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a konovalov"
+        },
+        "signature_id": "3",
+        "given_name": "Alexander Konovalov",
+        "paper_id": 21094749,
+        "sourced_author_ids": [
+            "2"
+        ],
+        "sourced_author_source": "ORCID"
+    },
+    "4": {
+        "author_info": {
+            "first": "Alexander",
+            "middle": null,
+            "last": "Konovalov",
+            "suffix": null,
+            "position": 3,
+            "email": "konovalov@gmail.com",
+            "affiliations": [
+                "Esri"
+            ],
+            "block": "a konovalov",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a konovalov"
+        },
+        "signature_id": "4",
+        "given_name": "Alexander Konovalov",
+        "paper_id": 38029096,
+        "sourced_author_ids": [
+            "A Konovalov"
+        ],
+        "sourced_author_source": "Extracted"
+    },
+    "5": {
+        "author_info": {
+            "first": "Alexander",
+            "middle": null,
+            "last": "Konovalov",
+            "suffix": null,
+            "position": 0,
+            "email": "konovalov@gmail.com",
+            "affiliations": [
+                "Moscow State University"
+            ],
+            "block": "a konovalov",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a konovalov"
+        },
+        "signature_id": "5",
+        "given_name": "Alexander Konovalov",
+        "paper_id": 1,
+        "sourced_author_ids": [
+            "3"
+        ],
+        "sourced_author_source": "ORCID"
+    },
+    "6": {
+        "author_info": {
+            "first": "Alexander",
+            "middle": "Jones",
+            "last": "Konovalov",
+            "suffix": null,
+            "position": 0,
+            "email": "konovalov2@gmail.com",
+            "affiliations": [
+                "Moscow State University"
+            ],
+            "block": "a konovalov",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a konovalov"
+        },
+        "signature_id": "6",
+        "given_name": "Alexander Konovalov",
+        "paper_id": 2,
+        "sourced_author_ids": [
+            "A Konovalov"
+        ],
+        "sourced_author_source": "Extracted"
+    },
+    "7": {
+        "author_info": {
+            "first": "Alexander",
+            "middle": "J.",
+            "last": "Konovalov",
+            "suffix": null,
+            "position": 0,
+            "email": "konovalov2@gmail.com",
+            "affiliations": [
+                "Moscow State University"
+            ],
+            "block": "a konovalov",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a konovalov"
+        },
+        "signature_id": "7",
+        "given_name": "Alexander Konovalov",
+        "paper_id": 2,
+        "sourced_author_ids": [
+            "A Konovalov"
+        ],
+        "sourced_author_source": "Extracted"
+    },
+    "8": {
+        "author_info": {
+            "first": "Alexander",
+            "middle": "James",
+            "last": "Konovalov",
+            "suffix": null,
+            "position": 0,
+            "email": "konovalov2@gmail.com",
+            "affiliations": [
+                "Moscow State University"
+            ],
+            "block": "a konovalov",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a konovalov"
+        },
+        "signature_id": "8",
+        "given_name": "Alexander Konovalov",
+        "paper_id": 2,
+        "sourced_author_ids": [
+            "A Konovalov"
+        ],
+        "sourced_author_source": "Extracted"
+    }
+}

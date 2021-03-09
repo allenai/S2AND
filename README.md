@@ -23,11 +23,11 @@ CFLAGS='-stdlib=libc++' pip install -r requirements.in
 ```
 
 ## Configuration
-Please place a config file at `data/path_config.json`. This file should look like this
+Modify the config file at `data/path_config.json`. This file should look like this
 ```
 {
-    "main_data_dir": "wherever you downloaded the data to",
-    "internal_data_dir": "ignore this one"
+    "main_data_dir": "absolute path to wherever you downloaded the data to",
+    "internal_data_dir": "ignore this one unless you work at AI2"
 }
 ```
 As the dummy file says, `main_data_dir` should be set to the location of wherever you downloaded the data to, and

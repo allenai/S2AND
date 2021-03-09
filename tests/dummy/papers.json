@@ -1,0 +1,238 @@
+{
+    "53235312": {
+        "paper_id": 53235312,
+        "title": "Teach graphics using excel in place of a graphing calculator",
+        "abstract": "Excel spreadsheets were developed to teach the underlying math in a computer graphics course including reviewing basic linear algebra operations, tracing a series of OpenGL transformations, and creating Bezier curves and surfaces with forward differences. Each spreadsheet contains an English overview of the mathematical process and the numerical result of each sub step thus providing a high level of abstraction. Double clicking a numerical result shows the underlying equation and operands used. The authors recommend using Excel in place of a graphing calculator in a computer graphics course.",
+        "journal_name": "ACM SIGCSE Bull.",
+        "venue": "ACM SIGCSE Bull.",
+        "year": 2006,
+        "sources": [
+            "DBLP",
+            "MAG",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 0,
+                "author_name": "Torben Lorenzen"
+            },
+            {
+                "position": 1,
+                "author_name": "Abdul Sattar"
+            }
+        ],
+        "references": []
+    },
+    "27077319": {
+        "paper_id": 27077319,
+        "title": "Objects first using Alice to introduce object constructs in CS1",
+        "abstract": "Java has become the programming language of choice for the first computer programming course in most of the computer science programs in the country. However, Java is a true objected-oriented language and requires instructors to introduce object-oriented constructs (classes, objects and methods) early in the course. This poses a problem for both students (who find the introduction to objects to be very dry and abstract) and instructors (who attempt to enliven this material). In this paper, the authors describe how Alice is used to introduce the essential concepts of object-oriented programming in the beginning of a CS1 Java course.",
+        "journal_name": "ACM SIGCSE Bull.",
+        "venue": "SGCS",
+        "year": 2008,
+        "sources": [
+            "ACM",
+            "DBLP",
+            "Grobid",
+            "MAG",
+            "ScienceParseMerged",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 0,
+                "author_name": "Torben Lorenzen"
+            },
+            {
+                "position": 1,
+                "author_name": "Abdul Sattar"
+            }
+        ],
+        "references": [
+            19901392
+        ]
+    },
+    "19901392": {
+        "paper_id": 19901392,
+        "title": "How to create an online internet course",
+        "abstract": "The authors have developed two hybrid internet courses with one weekly meeting per week instead of the traditional two or three meetings. One course teaches how to use Microsoft Office and is a service course. The other teaches Computer Graphics to computer science majors. The internet materials are structured to use each of the three student learning styles: visual, auditory, and kinesthetic. The steps the authors used to create the internet materials with Adobe Captivate© are presented and parts of a sample lecture are available for download.",
+        "journal_name": "ACM SIGCSE Bull.",
+        "venue": "SGCS",
+        "year": 2008,
+        "sources": [
+            "ACM",
+            "DBLP",
+            "Grobid",
+            "MAG",
+            "ScienceParseMerged",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 0,
+                "author_name": "Torben Lorenzen"
+            },
+            {
+                "position": 1,
+                "author_name": "Abdul Sattar"
+            }
+        ],
+        "references": []
+    },
+    "21094749": {
+        "paper_id": 21094749,
+        "title": "Object-Oriented Data Model for Data Warehouse",
+        "abstract": "Data Warehouse is frequently organized as collection of multidimensional data cubes, which represent data in the form of data values, called measures, associated with multiple dimensions and their multiple levels. However, some application areas need more expressive model for description its data. This paper presents the extension of classical multidimensional model to make Data Warehouse more flexible, natural and simple. The concepts and the basic ideas was taken from the classical multidimensional model to propose an approach based on Object-Oriented Paradigm. In this research Object-Oriented Data Model is used for description of Data Warehouse data and basic operations over this model are provided.",
+        "journal_name": null,
+        "venue": "ADBIS",
+        "year": 2002,
+        "sources": [
+            "Anansi",
+            "DBLP",
+            "MAG",
+            "SPv2",
+            "ScienceParse",
+            "ScienceParseMerged",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 0,
+                "author_name": "Alexander Konovalov"
+            }
+        ],
+        "references": [
+            19901392,
+            38029096
+        ]
+    },
+    "38029096": {
+        "paper_id": 38029096,
+        "title": "The Architecture of ArcIMS, a Distributed Internet Map Server",
+        "abstract": "ESRI® ArcIMS® is an Internet Map Server software that facilitates authoring of maps, designing of Web sites using them, and their publication on the Internet. Its distributed architecture offers customization of server, plugability of components, scalability, load balancing, and fail over/recovery and facilitates 24×7 operations. This paper describes the architecture of ArcIMS 3, its components, and some of the live Web sites that use it. The paper also discusses some considerations for the next version of ArcIMS.",
+        "journal_name": null,
+        "venue": "SSTD",
+        "year": 2001,
+        "sources": [
+            "Anansi",
+            "CiteSeerX",
+            "Crawler",
+            "DBLP",
+            "Grobid",
+            "MAG",
+            "SPv2",
+            "ScienceParse",
+            "ScienceParseMerged",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 5,
+                "author_name": "Mike Tait"
+            },
+            {
+                "position": 4,
+                "author_name": "Andrea Rosso"
+            },
+            {
+                "position": 6,
+                "author_name": "Jay Theodore"
+            },
+            {
+                "position": 1,
+                "author_name": "Roop K. Goyal"
+            },
+            {
+                "position": 0,
+                "author_name": "Russell East"
+            },
+            {
+                "position": 2,
+                "author_name": "Art Haddad"
+            },
+            {
+                "position": 3,
+                "author_name": "Alexander Konovalov"
+            }
+        ],
+        "references": [
+            19901392,
+            53235312
+        ]
+    },
+    "1": {
+        "paper_id": 1,
+        "title": "Object-Oriented Data Model for Data Warehouse",
+        "abstract": "Data Warehouse is frequently organized as collection of multidimensional data cubes, which represent data in the form of data values, called measures, associated with multiple dimensions and their multiple levels. However, some application areas need more expressive model for description its data. This paper presents the extension of classical multidimensional model to make Data Warehouse more flexible, natural and simple. The concepts and the basic ideas was taken from the classical multidimensional model to propose an approach based on Object-Oriented Paradigm. In this research Object-Oriented Data Model is used for description of Data Warehouse data and basic operations over this model are provided.",
+        "journal_name": null,
+        "venue": null,
+        "year": 2002,
+        "sources": [
+            "Anansi",
+            "DBLP",
+            "MAG",
+            "SPv2",
+            "ScienceParse",
+            "ScienceParseMerged",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 0,
+                "author_name": "Alexander Konovalov"
+            }
+        ],
+        "references": [
+            19901392,
+            38029096
+        ]
+    },
+    "2": {
+        "paper_id": 2,
+        "title": "Object-Oriented Data Model for Data Warehouse",
+        "abstract": "Data Warehouse is frequently organized as collection of multidimensional data cubes, which represent data in the form of data values, called measures, associated with multiple dimensions and their multiple levels. However, some application areas need more expressive model for description its data. This paper presents the extension of classical multidimensional model to make Data Warehouse more flexible, natural and simple. The concepts and the basic ideas was taken from the classical multidimensional model to propose an approach based on Object-Oriented Paradigm. In this research Object-Oriented Data Model is used for description of Data Warehouse data and basic operations over this model are provided.",
+        "journal_name": null,
+        "venue": null,
+        "year": 1950,
+        "sources": [
+            "Anansi",
+            "DBLP",
+            "MAG",
+            "SPv2",
+            "ScienceParse",
+            "ScienceParseMerged",
+            "Unpaywall"
+        ],
+        "fields_of_study": [
+            "Computer Science"
+        ],
+        "authors": [
+            {
+                "position": 0,
+                "author_name": "Alexander Konovalov"
+            }
+        ],
+        "references": [
+            19901392,
+            38029096
+        ]
+    }
+}

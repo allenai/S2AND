@@ -1,0 +1,18 @@
+[flake8]
+max-line-length = 120
+
+ignore =
+    # these rules don't play well with black
+    E203  # whitespace before :
+    W503  # line break before binary operator
+    W504  # line break after binary operator
+
+per-file-ignores =
+    # __init__.py files are allowed to have unused imports and lines-too-long
+    s2and/__init__.py:F401
+    s2and/**/__init__.py:F401,E501
+
+    # scripts don't have to respect
+    #  E501: line length
+    #  E402: imports not at top of file (because we mess with sys.path)
+    scripts/**:E501,E402

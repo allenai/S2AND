@@ -1,4 +1,7 @@
 # S2AND
+This repository provides access to the S2AND dataset and S2AND reference model described in the paper `S2AND: A Benchmark and Evaluation System for Author Name Disambiguation` by Shivashankar Subramanian, Daniel King, Doug Downey, Sergey Feldman (https://arxiv.org/abs/2103.07534).
+
+The reference model will be live on semanticscholar.org later this year, but the trained model is available now as part of the data download (see below).
 
 ## Installation
 To install this package, run the following:
@@ -33,7 +36,7 @@ Modify the config file at `data/path_config.json`. This file should look like th
 As the dummy file says, `main_data_dir` should be set to the location of wherever you downloaded the data to, and
 `internal_data_dir` can be ignored, as it is used for some scripts that rely on unreleased data, internal to Semantic Scholar.
 
-## How to use S2AND for training a model
+## How to use S2AND for loading data and training a model
 Once you have downloaded the datasets, you can go ahead and load up one of them:
 
 ```python
@@ -145,6 +148,8 @@ anddata = ANDData(
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
 ```
 
+Our released models are in the `s3` folder referenced above, and are called `production_model.pickle` and `full_union_seed_*.pickle`. They can be loaded the same way, except that the pickled object is a dictionary, with a `clusterer` key.
+
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.
 
@@ -155,4 +160,11 @@ The experiments in the paper were run with the python (3.7.9) package versions i
 The code in this repo is released under the Apache 2.0 license (license included in the repo. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).
 
 ## Citation
-Coming 2021
+@misc{subramanian2021s2and,
+      title={S2AND: A Benchmark and Evaluation System for Author Name Disambiguation}, 
+      author={Shivashankar Subramanian and Daniel King and Doug Downey and Sergey Feldman},
+      year={2021},
+      eprint={2103.07534},
+      archivePrefix={arXiv},
+      primaryClass={cs.DL}
+}

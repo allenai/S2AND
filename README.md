@@ -148,6 +148,8 @@ anddata = ANDData(
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
 ```
 
+Our released models are in the `s3` folder referenced above, and are called `production_model.pickle` and `full_union_seed_*.pickle`. They can be loaded the same way, except that the pickled object is a dictionary, with a `clusterer` key.
+
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.
 

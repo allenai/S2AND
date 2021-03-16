@@ -1,4 +1,7 @@
 # S2AND
+This repository provides access to the S2AND dataset and S2AND reference model described in the paper `S2AND: A Benchmark and Evaluation System for Author Name Disambiguation` by Shivashankar Subramanian, Daniel King, Doug Downey, Sergey Feldman (https://arxiv.org/abs/2103.07534).
+
+The reference model will be live on semanticscholar.org later this year, but the trained model is available now as part of the data download (see below).
 
 ## Installation
 To install this package, run the following:
@@ -33,7 +36,7 @@ Modify the config file at `data/path_config.json`. This file should look like th
 As the dummy file says, `main_data_dir` should be set to the location of wherever you downloaded the data to, and
 `internal_data_dir` can be ignored, as it is used for some scripts that rely on unreleased data, internal to Semantic Scholar.
 
-## How to use S2AND for training a model
+## How to use S2AND for loading data and training a model
 Once you have downloaded the datasets, you can go ahead and load up one of them:
 
 ```python

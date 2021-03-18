@@ -20,7 +20,7 @@ if CONFIG["main_data_dir"] == "absolute path of wherever you downloaded the data
     logger.warning("You haven't set the `main_data_dir` in data/path_config.json! Using data/ as the default data directory.")
     CONFIG["main_data_dir"] = os.path.join(PROJECT_ROOT_PATH, "data")
 
-assert os.path.exists(CONFIG["main_data_dir"]), f'The `main_data_dir` specified in data/path_config.json does not exist."
+assert os.path.exists(CONFIG["main_data_dir"]), f"The `main_data_dir` specified in data/path_config.json does not exist."
     
 # paths
 NAME_COUNTS_PATH = os.path.join(CONFIG["main_data_dir"], "name_counts.pickle")

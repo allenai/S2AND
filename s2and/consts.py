@@ -24,6 +24,9 @@ assert os.path.exists(CONFIG["main_data_dir"]), f"The `main_data_dir` specified 
     
 # paths
 NAME_COUNTS_PATH = os.path.join(CONFIG["main_data_dir"], "name_counts.pickle")
+if not os.path.exists(NAME_COUNTS_PATH):
+    NAME_COUNTS_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and/name_counts.pickle"
+    
 FASTTEXT_PATH = os.path.join(CONFIG["main_data_dir"], "lid.176.bin")
 if not os.path.exists(FASTTEXT_PATH):
     FASTTEXT_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and/lid.176.bin"

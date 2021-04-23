@@ -571,7 +571,7 @@ class Clusterer:
                 for altered_cluster_num in altered_cluster_nums:
                     signature_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
                     reclustered_output, _ = self.predict(
-                        {"block": signature_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=False
+                        {"block": signature_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True
                     )
                     if len(reclustered_output) > 1:
                         for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):

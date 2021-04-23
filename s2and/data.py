@@ -670,6 +670,7 @@ class ANDData:
         low_value: Union[float, int] = 0,
         high_value: Union[float, int] = LARGE_DISTANCE,
         dont_merge_cluster_seeds: bool = True,
+        incremental_dont_use_cluster_seeds: bool = False,
     ) -> Optional[float]:
         """Applies cluster_seeds and generates the default
         constraints which are:
@@ -699,6 +700,8 @@ class ANDData:
         dont_merge_cluster_seeds: bool
             this flag controls whether to use cluster seeds to enforce "dont merge"
             as well as "must merge" constraints
+        incremental_dont_use_cluster_seeds: bool
+            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
 
         Returns
         -------
@@ -717,7 +720,9 @@ class ANDData:
             signature_id_1,
         ) in self.cluster_seeds_disallow:
             return CLUSTER_SEEDS_LOOKUP["disallow"]
-        elif self.cluster_seeds_require.get(signature_id_1, -1) == self.cluster_seeds_require.get(signature_id_2, -2):
+        elif (
+            self.cluster_seeds_require.get(signature_id_1, -1) == self.cluster_seeds_require.get(signature_id_2, -2)
+        ) and (not incremental_dont_use_cluster_seeds):
             return CLUSTER_SEEDS_LOOKUP["require"]
         elif (
             dont_merge_cluster_seeds

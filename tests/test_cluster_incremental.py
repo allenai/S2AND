@@ -41,6 +41,9 @@ class TestClusterer(unittest.TestCase):
         )
 
     def test_predict_incremental(self):
+        # base clustering of the random model would be
+        # {'0': ['0', '1', '2'], '1': ['3', '4', '5', '8'], '2': ['6', '7']}
+
         block = ["3", "4", "5", "6", "7", "8"]
         output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
         expected_output = {"0": ["6", "7", "5"], "1": ["3", "4", "8"]}
@@ -55,6 +58,5 @@ class TestClusterer(unittest.TestCase):
         self.dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
         block = ["3", "4", "8"]
         output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
-        expected_output = {"0": ["1", "2", "5"], "1": ["6", "7", "3", "4"], "2": ["8"]}
-        print(output)
+        expected_output = {"0": ["1", "2", "3", "5", "8"], "1": ["6", "7", "4"]}
         assert output == expected_output

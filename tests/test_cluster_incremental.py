@@ -58,5 +58,5 @@ class TestClusterer(unittest.TestCase):
         self.dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
         block = ["3", "4", "8"]
         output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
-        expected_output = {"0": ["1", "2", "3", "5", "8"], "1": ["6", "7", "4"]}
+        expected_output = {"0": ["1", "2", "5", "3", "8"], "1": ["6", "7", "4"]}
         assert output == expected_output

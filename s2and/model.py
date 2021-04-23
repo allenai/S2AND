@@ -570,6 +570,11 @@ class Clusterer:
                     cluster_seeds_require_inverse[cluster_num].append(signature_id)
                 for altered_cluster_num in altered_cluster_nums:
                     signature_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
+
+                    # Note: incremental_dont_use_cluster_seeds is set to True, because at this stage of incremental clustering
+                    # we are splitting up the claimed profiles that we received from production so that they align with s2and's predictions.
+                    # When doing this, we don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
+                    # s2and's predictions
                     reclustered_output, _ = self.predict(
                         {"block": signature_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True
                     )

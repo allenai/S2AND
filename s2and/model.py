@@ -145,6 +145,7 @@ class Clusterer:
         block_dict: Dict,
         dataset: ANDData,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+        incremental_dont_use_cluster_seeds: bool = False,
     ):
         """
         Helper generator function to yield one pair for batch featurization on the fly
@@ -157,6 +158,8 @@ class Clusterer:
             the dataset
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
+        incremental_dont_use_cluster_seeds: bool
+            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
 
         Returns
         -------
@@ -175,6 +178,7 @@ class Clusterer:
                         signatures[i],
                         signatures[j],
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER
@@ -187,6 +191,7 @@ class Clusterer:
         dataset: ANDData,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         disable_tqdm: bool = False,
+        incremental_dont_use_cluster_seeds: bool = False,
     ) -> Dict[str, np.array]:
         """
         Creates the distance matrices for the input blocks.
@@ -203,6 +208,8 @@ class Clusterer:
             the dictionary of partial supervision provided with this dataset/these blocks
         disable_tqdm: bool
             whether to turn off the tqdm progress bars in this function
+        incremental_dont_use_cluster_seeds: bool
+            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
 
         Returns
         -------
@@ -224,7 +231,12 @@ class Clusterer:
         logger.info("Pairwise probas initialized, starting making all pairs")
 
         # featurize and predict in batches
-        helper_output = self.distance_matrix_helper(block_dict, dataset, partial_supervision)
+        helper_output = self.distance_matrix_helper(
+            block_dict,
+            dataset,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+        )
 
         prev_block_key = ""
         batch_num = 0
@@ -445,6 +457,7 @@ class Clusterer:
         cluster_model_params: Optional[Dict[str, Any]] = None,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         use_s2_clusters: bool = False,
+        incremental_dont_use_cluster_seeds: bool = False,
     ) -> Tuple[Dict[str, List[str]], Optional[Dict[str, np.ndarray]]]:
         """
         Predicts clusters
@@ -463,6 +476,8 @@ class Clusterer:
             the dictionary of partial supervision provided with this dataset/these blocks
         use_s2_clusters: bool
             whether to "predict" using the clusters from Semantic Scholar's old system
+        incremental_dont_use_cluster_seeds: bool
+            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
 
         Returns
         -------
@@ -481,7 +496,12 @@ class Clusterer:
             return dict(pred_clusters), dists
 
         if dists is None:
-            dists = self.make_distance_matrices(block_dict, dataset, partial_supervision)
+            dists = self.make_distance_matrices(
+                block_dict,
+                dataset,
+                partial_supervision,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            )
 
         for block_key in block_dict.keys():
             if block_key in dists and len(block_dict[block_key]) > 1:
@@ -550,7 +570,15 @@ class Clusterer:
                     cluster_seeds_require_inverse[cluster_num].append(signature_id)
                 for altered_cluster_num in altered_cluster_nums:
                     signature_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
-                    reclustered_output, _ = self.predict({"block": signature_ids_for_cluster_num}, dataset)
+
+                    # Note: incremental_dont_use_cluster_seeds is set to True, because at this stage
+                    # of incremental clustering we are splitting up the claimed profiles that we received
+                    # from production so that they align with s2and's predictions. When doing this, we
+                    # don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
+                    # s2and's predictions
+                    reclustered_output, _ = self.predict(
+                        {"block": signature_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True
+                    )
                     if len(reclustered_output) > 1:
                         for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):
                             new_cluster_num = str(altered_cluster_num) + f"_{i}"

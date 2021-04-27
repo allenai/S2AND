@@ -999,7 +999,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
         X = np.asarray(X)
         if len(X.shape) == 1 and self.input_as_observation_matrix:
             raise Exception(
-                "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. 
+                "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. "
                 "If you intended to pass in an observation matrix, it must be 2-D (N x feature_dimension)."
             )
         elif len(X.shape) == 2 and not self.input_as_observation_matrix:

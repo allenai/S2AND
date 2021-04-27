@@ -931,20 +931,36 @@ def intify(x):
 class FastCluster(TransformerMixin, BaseEstimator):
     """
     A scikit-learn wrapper for fastcluster.
-
     Inputs:
-        linkage: string
+        linkage: string (default="average")
             Agglomerative linkage method. Defaults to "average".
             Must be one of "'complete', 'average', 'single,
             'weighted', 'ward', 'centroid', 'median'."
-        eps: float
+        eps: float (default=0.5)
             Cutoff used to determine number of clusters.
-        preserve_input: bool
+        preserve_input: bool (default=True)
             Whether to preserve the X input or modify in place.
             Defaults to False, which modifies in place.
+        input_as_observation_matrix: bool (default=False)
+            If True, the input to fit/transform must be a 2-D array
+            of observation vectors (N by d). If False input to fit/transform
+            must be a 1-D condensed distance matrix, then it must be a
+            (N choose 2) sized vector, where N is the number
+            of original observations paired in the distance matrix, and
+            d is the dimensionality of the vector space.
+
+    Note: FastCluster does *not* support two-dimensional distance matrices
+    as input. They *must* be flattened. For more details, please see:
+    https://cran.r-project.org/web/packages/fastcluster/vignettes/fastcluster.pdf
     """
 
-    def __init__(self, linkage: str = "average", eps: float = 0.5, preserve_input: bool = True):
+    def __init__(
+        self,
+        linkage: str = "average",
+        eps: float = 0.5,
+        preserve_input: bool = True,
+        input_as_observation_matrix: bool = False,
+    ):
         if linkage not in {
             "complete",
             "average",
@@ -962,24 +978,37 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.linkage = linkage
         self.eps = eps
         self.preserve_input = preserve_input
+        self.input_as_observation_matrix = input_as_observation_matrix
         self.labels_ = None
 
     def fit(self, X: np.array) -> np.array:
         """
         Fit the estimator on input data. The results are stored in self.labels_.
-
         Parameters
         ----------
         X: np.array
             The input may be either a 1-D condensed distance matrix
             or a 2-D array of observation vectors. If X is a 1-D condensed distance
             matrix, then it must be (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix.
-
+            of original observations paired in the distance matrix. If X is 2-D
+            then the flag `input_as_observation_matrix` must be set to True in init.
         Returns
         -------
-            self
+        self
         """
+        X = np.asarray(X)
+        if len(X.shape) == 1 and self.input_as_observation_matrix:
+            raise Exception(
+                "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. "
+                "If you intended to pass in a distance matrix, it must be flattened (1-D)"
+            )
+        elif len(X.shape) == 2 and not self.input_as_observation_matrix:
+            raise Exception(
+                "Input to fit is two-dimensional, but input_as_observation_matrix flag is set to False. "
+                "If you intended to pass in an observation matrix, it must be 2-D (N x feature_dimension)."
+            )
+        elif len(X.shape) > 2:
+            raise Exception("The input to fit can only be one-dimensional or two-dimensional.")
         Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
         self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
         return self
@@ -987,7 +1016,6 @@ class FastCluster(TransformerMixin, BaseEstimator):
     def fit_transform(self, X: np.array) -> np.array:
         """
         Fit the estimator on input data, and returns results.
-
         Parameters
         ----------
         X: np.array
@@ -995,7 +1023,6 @@ class FastCluster(TransformerMixin, BaseEstimator):
             or a 2-D array of observation vectors. If X is a 1-D condensed distance
             matrix, then it must be (N choose 2) sized vector, where N is the number
             of original observations paired in the distance matrix.
-
         Returns
         -------
         np.array: A N-length array of clustering labels.

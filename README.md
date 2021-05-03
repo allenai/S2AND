@@ -8,7 +8,7 @@ To install this package, run the following:
 
 ```bash
 git clone https://github.com/allenai/S2AND.git
-cd s2and
+cd S2AND
 conda create -y --name s2and python==3.7
 conda activate s2and
 pip install -r requirements.in

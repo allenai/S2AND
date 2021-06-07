@@ -4,7 +4,7 @@ python scripts/transfer_experiment_seed_paper.py --n_jobs 25 --random_seed 1 2 3
 # We also need leave self in for the table above  but not individual models 
 python scripts/transfer_experiment_seed_paper.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name paper_experiments_multiseed_union_leave_self_in  --leave_self_in --skip_individual_models
 
-# All results hereafter held-out union row only with a single seed
+# Ablation experiments
 python scripts/transfer_experiment_seed_paper.py --n_jobs 25 --random_seed 1 2 3 4 5 --skip_individual_models --experiment_name paper_experiments_baseline
 
 python scripts/transfer_experiment_seed_paper.py --n_jobs 25 --random_seed 1 2 3 4 5 --skip_individual_models --experiment_name paper_experiments_no_nameless_model --dont_use_nameless_model

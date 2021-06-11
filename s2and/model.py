@@ -708,6 +708,13 @@ class Clusterer:
                             # we will allow it to cluster. If it is not, then it has been clustered with a single
                             # character name, and we don't want to allow it
                             if not match_found:
+                                signature = dataset.signatures[unassigned_signature]
+                                first = signature.author_info_first
+                                last = signature.author_info_last
+                                paper_id = signature.paper_id
+                                logger.info(
+                                    f"Incremental clustering prevented a name compatibility issue from being added while clustering {first} {last} on {paper_id}"
+                                )
                                 new_name_disallowed = True
 
                 if new_name_disallowed:

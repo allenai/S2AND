@@ -676,17 +676,16 @@ class Clusterer:
                             for signature_id in main_cluster_signatures
                         ]
                     )
-                    for main_cluster_signature in main_cluster_signatures:
-                        first_1 = dataset.signatures[
-                            main_cluster_signature
-                        ].author_info_first_normalized_without_apostrophe
-                        first_2 = dataset.signatures[
-                            unassigned_signature
-                        ].author_info_first_normalized_without_apostrophe
-                        prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
+                    first_unassigned = dataset.signatures[
+                        unassigned_signature
+                    ].author_info_first_normalized_without_apostrophe
+                    for first_assigned in all_firsts:
+                        prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
+                            first_assigned
+                        )
 
                         if not prefix:
-                            if (first_1 not in all_firsts) and (first_2 not in all_firsts):
+                            if first_unassigned not in all_firsts:
                                 constraint_found = True
 
                 if constraint_found:

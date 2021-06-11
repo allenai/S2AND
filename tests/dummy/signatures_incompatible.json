@@ -70,5 +70,29 @@
             "2"
         ],
         "sourced_author_source": "ORCID"
+    },
+    "4": {
+        "author_info": {
+            "first": "Alan",
+            "middle": null,
+            "last": "Sattar",
+            "suffix": null,
+            "position": 0,
+            "email": null,
+            "affiliations": [
+                "Random affiliation"
+            ],
+            "block": "a sattar",
+            "estimated_ethnicity": "SLAV",
+            "estimated_gender": "M",
+            "given_block": "a sattar"
+        },
+        "signature_id": "4",
+        "given_name": "Alan Sattar",
+        "paper_id": 21094749,
+        "sourced_author_ids": [
+            "2"
+        ],
+        "sourced_author_source": "ORCID"
     }
 }

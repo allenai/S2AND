@@ -42,13 +42,14 @@ class TestClusterer(unittest.TestCase):
     def test_predict_incremental(self):
         """
         signature: first name
-        1: Alexander
+        1: A
         2: Alan
         3: Alec
         4: Alan
+        5: A
 
-        Alexander and Alec are an allowed name pair in the name pairs list.
-        Alexander and the first Alan are seeded in a cluster together.
+        A and Alec would be allowed normally.
+        A and the first Alan are seeded in a cluster together.
         The only feature in this test is affiliation similarity, and (1,3) and (2,4) each
         have the same affiliation, and so the pairwise model would rate them as similar.
 
@@ -68,3 +69,16 @@ class TestClusterer(unittest.TestCase):
         )
         expected_output = {"0": ["1", "2", "3", "4"]}
         assert output == expected_output
+
+        # NOTE: this behavior is expected given the current implementation, but is not ideal
+        # because Alec and Alan were simultaneously added to the A cluster. Noting here in case
+        # this issue comes up later so someone knows where to start.
+        # It is testing that when the claimed cluster only contains signatures with a single character
+        # first name, the added incompatibility rule does not prevent adding to the cluster
+        self.dummy_dataset.altered_cluster_signatures = ["1", "5"]
+        self.dummy_dataset.cluster_seeds_require = {"1": 0, "5": 0}
+        block = ["3", "4"]
+        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
+        expected_output = {"0": ["1", "5", "3", "4"]}
+        assert output == expected_output
+        asdf

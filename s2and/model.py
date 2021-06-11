@@ -686,7 +686,7 @@ class Clusterer:
                         prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
 
                         if not prefix:
-                            if (not first_1 in all_firsts) and (not first_2 in all_firsts):
+                            if (first_1 not in all_firsts) and (first_2 not in all_firsts):
                                 constraint_found = True
 
                 if constraint_found:

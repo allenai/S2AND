@@ -526,7 +526,9 @@ class Clusterer:
 
         return dict(pred_clusters), dists
 
-    def predict_incremental(self, block_signatures: List[str], dataset: ANDData):
+    def predict_incremental(
+        self, block_signatures: List[str], dataset: ANDData, prevent_new_incompatibilities: bool = True
+    ):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
         in using the cluster_seeds parameter of the dataset class, and skips work by simply assigning each
@@ -550,6 +552,11 @@ class Clusterer:
             the signatures in the block to predict from
         dataset: ANDData
             the dataset
+        prevent_new_incompatibilities: bool
+            if True, prevents the addition to a cluster of new first names that are not prefix match,
+            but are in the name pairs list. This can happen if a claimed cluster has D Jones and David Jones,
+            s2and would have split that cluster into two, and then s2and might add Donald Jones to the D Jones cluster,
+            and once remerged, the resulting final cluster would have D Jones, David Jones, and Donald Jones
 
         Returns
         -------
@@ -612,6 +619,7 @@ class Clusterer:
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=self.nameless_featurizer_info,
         )
+
         # get predictions where there isn't partial supervision
         # and fill the rest with partial supervision
         # undoing the offset by LARGE_INTEGER from above
@@ -668,25 +676,26 @@ class Clusterer:
                 if best_cluster_id in recluster_map:
                     best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
 
-                    # restrict reclusterings that would add a new name incompatibility to the main cluster
-                    main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
-                    all_firsts = set(
-                        [
-                            dataset.signatures[signature_id].author_info_first_normalized_without_apostrophe
-                            for signature_id in main_cluster_signatures
-                        ]
-                    )
-                    first_unassigned = dataset.signatures[
-                        unassigned_signature
-                    ].author_info_first_normalized_without_apostrophe
-                    for first_assigned in all_firsts:
-                        prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
-                            first_assigned
+                    if prevent_new_incompatibilities:
+                        # restrict reclusterings that would add a new name incompatibility to the main cluster
+                        main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
+                        all_firsts = set(
+                            [
+                                dataset.signatures[signature_id].author_info_first_normalized_without_apostrophe
+                                for signature_id in main_cluster_signatures
+                            ]
                         )
+                        first_unassigned = dataset.signatures[
+                            unassigned_signature
+                        ].author_info_first_normalized_without_apostrophe
+                        for first_assigned in all_firsts:
+                            prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
+                                first_assigned
+                            )
 
-                        if not prefix:
-                            if first_unassigned not in all_firsts:
-                                constraint_found = True
+                            if not prefix:
+                                if first_unassigned not in all_firsts:
+                                    constraint_found = True
 
                 if constraint_found:
                     singleton_signatures.append(unassigned_signature)

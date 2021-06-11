@@ -713,7 +713,10 @@ class Clusterer:
                                 last = signature.author_info_last
                                 paper_id = signature.paper_id
                                 logger.info(
-                                    f"Incremental clustering prevented a name compatibility issue from being added while clustering {first} {last} on {paper_id}"
+                                    (
+                                        "Incremental clustering prevented a name compatibility issue from being "
+                                        f"added while clustering {first} {last} on {paper_id}"
+                                    )
                                 )
                                 new_name_disallowed = True
 

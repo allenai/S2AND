@@ -686,16 +686,19 @@ class Clusterer:
                                 for signature_id in main_cluster_signatures
                             ]
                         )
+                        all_firsts = {first for first in all_firsts if len(first) > 1}
 
                         # if all the existing first names in the cluster are single characters,
                         # there is nothing else to check
-                        if not all(len(first) == 1 for first in all_firsts):
+                        if len(all_firsts) > 0:
                             first_unassigned = dataset.signatures[
                                 unassigned_signature
                             ].author_info_first_normalized_without_apostrophe
                             match_found = False
                             for first_assigned in all_firsts:
-                                prefix = first_assigned.startswith(first_unassigned)
+                                prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
+                                    first_assigned
+                                )
                                 known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
 
                                 if prefix or known_alias:

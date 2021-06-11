@@ -3,7 +3,7 @@ from __future__ import annotations
 from s2and.eval import b3_precision_recall_fscore
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.data import ANDData
-from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE, LARGE_DISTANCE
+from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
 
 from typing import Dict, Optional, Any, Union, List, Tuple
 from collections import defaultdict

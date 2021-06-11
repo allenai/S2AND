@@ -675,7 +675,6 @@ class Clusterer:
                 # undo the reclustering step
                 new_name_disallowed = False
                 if best_cluster_id in recluster_map:
-                    print("inside recluster")
                     best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
 
                     if prevent_new_incompatibilities:

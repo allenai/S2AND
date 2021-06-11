@@ -40,14 +40,14 @@ class TestClusterer(unittest.TestCase):
         )
 
     def test_predict_incremental(self):
-        block = ["3"]
+        block = ["3", "4"]
         output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
-        expected_output = {"0": ["1", "2"], "1": ["3"]}
+        expected_output = {"0": ["1", "2", "4"], "1": ["3"]}
         assert output == expected_output
 
-        block = ["3"]
+        block = ["3", "4"]
         output = self.dummy_clusterer.predict_incremental(
             block, self.dummy_dataset, prevent_new_incompatibilities=False
         )
-        expected_output = {"0": ["1", "2", "3"]}
+        expected_output = {"0": ["1", "2", "3", "4"]}
         assert output == expected_output

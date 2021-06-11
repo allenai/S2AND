@@ -3,7 +3,7 @@ from __future__ import annotations
 from s2and.eval import b3_precision_recall_fscore
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.data import ANDData
-from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
+from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE, LARGE_DISTANCE
 
 from typing import Dict, Optional, Any, Union, List, Tuple
 from collections import defaultdict
@@ -664,9 +664,35 @@ class Clusterer:
                     best_dist = average_dist
             if best_cluster_id is not None:
                 # undo the reclustering step
+                constraint_found = False
                 if best_cluster_id in recluster_map:
                     best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
-                pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
+
+                    # restrict reclusterings that would add a new name incompatibility to the main cluster
+                    main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
+                    all_firsts = set(
+                        [
+                            dataset.signatures[signature_id].author_info_first_normalized_without_apostrophe
+                            for signature_id in main_cluster_signatures
+                        ]
+                    )
+                    for main_cluster_signature in main_cluster_signatures:
+                        first_1 = dataset.signatures[
+                            main_cluster_signature
+                        ].author_info_first_normalized_without_apostrophe
+                        first_2 = dataset.signatures[
+                            unassigned_signature
+                        ].author_info_first_normalized_without_apostrophe
+                        prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
+
+                        if not prefix:
+                            if (not first_1 in all_firsts) and (not first_2 in all_firsts):
+                                constraint_found = True
+
+                if constraint_found:
+                    singleton_signatures.append(unassigned_signature)
+                else:
+                    pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
             else:
                 singleton_signatures.append(unassigned_signature)
 

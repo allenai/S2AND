@@ -554,9 +554,10 @@ class Clusterer:
             the dataset
         prevent_new_incompatibilities: bool
             if True, prevents the addition to a cluster of new first names that are not prefix match,
-            but are in the name pairs list. This can happen if a claimed cluster has D Jones and David Jones,
-            s2and would have split that cluster into two, and then s2and might add Donald Jones to the D Jones cluster,
-            and once remerged, the resulting final cluster would have D Jones, David Jones, and Donald Jones
+            or in the name pairs list, for at least one existing name in the cluster. This can happen
+            if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
+            and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
+            final cluster would have D Jones, David Jones, and Donald Jones.
 
         Returns
         -------
@@ -672,8 +673,9 @@ class Clusterer:
                     best_dist = average_dist
             if best_cluster_id is not None:
                 # undo the reclustering step
-                constraint_found = False
+                new_name_disallowed = False
                 if best_cluster_id in recluster_map:
+                    print("inside recluster")
                     best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
 
                     if prevent_new_incompatibilities:
@@ -685,19 +687,28 @@ class Clusterer:
                                 for signature_id in main_cluster_signatures
                             ]
                         )
-                        first_unassigned = dataset.signatures[
-                            unassigned_signature
-                        ].author_info_first_normalized_without_apostrophe
-                        for first_assigned in all_firsts:
-                            prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
-                                first_assigned
-                            )
 
-                            if not prefix:
-                                if first_unassigned not in all_firsts:
-                                    constraint_found = True
+                        # if all the existing first names in the cluster are single characters,
+                        # there is nothing else to check
+                        if not all(len(first) == 1 for first in all_firsts):
+                            first_unassigned = dataset.signatures[
+                                unassigned_signature
+                            ].author_info_first_normalized_without_apostrophe
+                            match_found = False
+                            for first_assigned in all_firsts:
+                                prefix = first_assigned.startswith(first_unassigned)
+                                known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
 
-                if constraint_found:
+                                if prefix or known_alias:
+                                    match_found = True
+                                    break
+                            # if the candidate name is a prefix or a name alias for any of the existing names,
+                            # we will allow it to cluster. If it is not, then it has been clustered with a single
+                            # character name, and we don't want to allow it
+                            if not match_found:
+                                new_name_disallowed = True
+
+                if new_name_disallowed:
                     singleton_signatures.append(unassigned_signature)
                 else:
                     pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)

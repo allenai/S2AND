@@ -1,7 +1,7 @@
 {
     "1": {
         "author_info": {
-            "first": "Alexander",
+            "first": "A",
             "middle": null,
             "last": "Sattar",
             "suffix": null,
@@ -94,5 +94,29 @@
             "2"
         ],
         "sourced_author_source": "ORCID"
+    },
+    "5": {
+        "author_info": {
+            "first": "A",
+            "middle": null,
+            "last": "Sattar",
+            "suffix": null,
+            "position": 1,
+            "email": null,
+            "affiliations": [
+                "Random affiliation"
+            ],
+            "block": "a sattar",
+            "estimated_ethnicity": "ARAB",
+            "estimated_gender": "M",
+            "given_block": "a sattar"
+        },
+        "signature_id": "5",
+        "given_name": "Alexander Sattar",
+        "paper_id": 27077319,
+        "sourced_author_ids": [
+            "1"
+        ],
+        "sourced_author_source": "DBLP"
     }
 }

@@ -81,4 +81,3 @@ class TestClusterer(unittest.TestCase):
         output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
         expected_output = {"0": ["1", "5", "3", "4"]}
         assert output == expected_output
-        asdf

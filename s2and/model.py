@@ -526,7 +526,9 @@ class Clusterer:
 
         return dict(pred_clusters), dists
 
-    def predict_incremental(self, block_signatures: List[str], dataset: ANDData):
+    def predict_incremental(
+        self, block_signatures: List[str], dataset: ANDData, prevent_new_incompatibilities: bool = True
+    ):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
         in using the cluster_seeds parameter of the dataset class, and skips work by simply assigning each
@@ -550,6 +552,12 @@ class Clusterer:
             the signatures in the block to predict from
         dataset: ANDData
             the dataset
+        prevent_new_incompatibilities: bool
+            if True, prevents the addition to a cluster of new first names that are not prefix match,
+            or in the name pairs list, for at least one existing name in the cluster. This can happen
+            if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
+            and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
+            final cluster would have D Jones, David Jones, and Donald Jones.
 
         Returns
         -------
@@ -612,6 +620,7 @@ class Clusterer:
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=self.nameless_featurizer_info,
         )
+
         # get predictions where there isn't partial supervision
         # and fill the rest with partial supervision
         # undoing the offset by LARGE_INTEGER from above
@@ -664,9 +673,57 @@ class Clusterer:
                     best_dist = average_dist
             if best_cluster_id is not None:
                 # undo the reclustering step
+                new_name_disallowed = False
                 if best_cluster_id in recluster_map:
                     best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
-                pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
+
+                    if prevent_new_incompatibilities:
+                        # restrict reclusterings that would add a new name incompatibility to the main cluster
+                        main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
+                        all_firsts = set(
+                            [
+                                dataset.signatures[signature_id].author_info_first_normalized_without_apostrophe
+                                for signature_id in main_cluster_signatures
+                            ]
+                        )
+                        all_firsts = {first for first in all_firsts if len(first) > 1}
+
+                        # if all the existing first names in the cluster are single characters,
+                        # there is nothing else to check
+                        if len(all_firsts) > 0:
+                            first_unassigned = dataset.signatures[
+                                unassigned_signature
+                            ].author_info_first_normalized_without_apostrophe
+                            match_found = False
+                            for first_assigned in all_firsts:
+                                prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
+                                    first_assigned
+                                )
+                                known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
+
+                                if prefix or known_alias:
+                                    match_found = True
+                                    break
+                            # if the candidate name is a prefix or a name alias for any of the existing names,
+                            # we will allow it to cluster. If it is not, then it has been clustered with a single
+                            # character name, and we don't want to allow it
+                            if not match_found:
+                                signature = dataset.signatures[unassigned_signature]
+                                first = signature.author_info_first
+                                last = signature.author_info_last
+                                paper_id = signature.paper_id
+                                logger.info(
+                                    (
+                                        "Incremental clustering prevented a name compatibility issue from being "
+                                        f"added while clustering {first} {last} on {paper_id}"
+                                    )
+                                )
+                                new_name_disallowed = True
+
+                if new_name_disallowed:
+                    singleton_signatures.append(unassigned_signature)
+                else:
+                    pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
             else:
                 singleton_signatures.append(unassigned_signature)
 

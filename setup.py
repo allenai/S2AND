@@ -8,7 +8,7 @@ requirements = [r for r in open(requirements_file).read().split("\n") if not re.
 setuptools.setup(
     name="s2and",
     version="0.1",
-    url="https://github.com/allenai/s2and",
+    url="https://github.com/allenai/S2AND",
     packages=setuptools.find_packages(),
     install_requires=requirements,  # dependencies specified in requirements.in
 )

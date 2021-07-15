@@ -1,7 +1,7 @@
 # S2AND
 This repository provides access to the S2AND dataset and S2AND reference model described in the paper `S2AND: A Benchmark and Evaluation System for Author Name Disambiguation` by Shivashankar Subramanian, Daniel King, Doug Downey, Sergey Feldman (https://arxiv.org/abs/2103.07534).
 
-The reference model will be live on semanticscholar.org later this year, but the trained model is available now as part of the data download (see below).
+The reference model is live on semanticscholar.org later this year, and the trained model is available now as part of the data download (see below).
 
 ## Installation
 To install this package, run the following:

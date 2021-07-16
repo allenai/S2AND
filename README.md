@@ -160,11 +160,11 @@ The experiments in the paper were run with the python (3.7.9) package versions i
 The code in this repo is released under the Apache 2.0 license (license included in the repo. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).
 
 ## Citation
-@misc{subramanian2021s2and,
+```
+@inproceedings{subramanian2021s2and,
       title={S2AND: A Benchmark and Evaluation System for Author Name Disambiguation}, 
       author={Shivashankar Subramanian and Daniel King and Doug Downey and Sergey Feldman},
       year={2021},
-      eprint={2103.07534},
-      archivePrefix={arXiv},
-      primaryClass={cs.DL}
+      booktitle = {{JCDL} '21: Proceedings of the {ACM/IEEE} Joint Conference on Digital Libraries in 2021}
 }
+```

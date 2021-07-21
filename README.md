@@ -15,15 +15,18 @@ pip install -r requirements.in
 pip install -e .
 ```
 
-To obtain the training data, run this command after the package is installed (from inside the `S2AND` directory):  
-```[Expected download size is: 50.4 GiB]```
-
-`aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
-
 If you run into cryptic errors about GCC on macOS while installing the requirments, try this instead:
 ```bash
 CFLAGS='-stdlib=libc++' pip install -r requirements.in
 ```
+
+## Data 
+To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  
+```[Expected download size is: 50.4 GiB]```
+
+`aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
+
+Note that this software package comes with tools specifically designed to access and model the dataset.
 
 ## Configuration
 Modify the config file at `data/path_config.json`. This file should look like this

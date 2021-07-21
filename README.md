@@ -26,7 +26,7 @@ To obtain the S2AND dataset, run the following command after the package is inst
 
 `aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
 
-Note that this software package comes with tools specifically designed to access and model this dataset.
+Note that this software package comes with tools specifically designed to access and model the dataset.
 
 ## Configuration
 Modify the config file at `data/path_config.json`. This file should look like this

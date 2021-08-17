@@ -163,11 +163,20 @@ The experiments in the paper were run with the python (3.7.9) package versions i
 The code in this repo is released under the Apache 2.0 license (license included in the repo. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).
 
 ## Citation
+
+If you use S2AND in your research, please cite [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421).
+
 ```
 @inproceedings{subramanian2021s2and,
-      title={S2AND: A Benchmark and Evaluation System for Author Name Disambiguation}, 
-      author={Shivashankar Subramanian and Daniel King and Doug Downey and Sergey Feldman},
+      title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation}, 
+      author={Subramanian, Shivashankar and King, Daniel and Downey, Doug and Feldman, Sergey},
       year={2021},
-      booktitle = {{JCDL} '21: Proceedings of the {ACM/IEEE} Joint Conference on Digital Libraries in 2021}
+      publisher = {Association for Computing Machinery},
+      address = {New York, NY, USA},
+      booktitle = {{JCDL} '21: Proceedings of the {ACM/IEEE} Joint Conference on Digital Libraries in 2021},
+      series = {JCDL '21}
 }
 ```
+
+S2AND is an open-source project developed by [the Allen Institute for Artificial Intelligence (AI2)](http://www.allenai.org).
+AI2 is a non-profit institute with the mission to contribute to humanity through high-impact AI research and engineering.

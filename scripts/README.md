@@ -9,7 +9,7 @@ If you're not internal to AI2, here are scripts you will care about:
 
 *Important* notes about `transfer_experiment_seed_paper.py`: 
 - It assumes that the S2AND data is in `S2AND/data/`. If that's not the case, you'll have to manually enter your data directory into the `DATA_DIR` variable on line 3.
-- If you have a small to medium amount of RAM, use the `--dont_use_cache` flag. It'll be slower, but will not try to fit all of the data into a huge cache.
+- If you have a small to medium amount of RAM, don't use the `--use_cache` flag. Without the cache, it'll be slower, but will not try to fit all of the feature data into memory.
 
 Other scripts in this folder:
 - `blog_post_eval.py`: Computes min edit distance performance numbers that appear only in the blog post.

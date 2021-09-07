@@ -75,7 +75,7 @@ BLOCK_TYPE = "original"
 N_TRAIN_PAIRS_SIZE = 100000
 N_VAL_TEST_SIZE = 10000
 N_ITER = 25
-USE_CACHE = False  # turn on if you aren't planning on changing the features
+USE_CACHE = False  # turn on if you aren't planning on changing the features and have lots of RAM
 PREPROCESS = True
 
 

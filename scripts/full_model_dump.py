@@ -197,6 +197,7 @@ def main():
         cluster_model=FastCluster(),
         search_space=search_space,
         n_jobs=N_JOBS,
+        use_cache=True,
         nameless_classifier=nameless_union_classifier.classifier if nameless_union_classifier is not None else None,
         nameless_featurizer_info=NAMELESS_FEATURIZER_INFO if nameless_union_classifier is not None else None,
     )

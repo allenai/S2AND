@@ -1350,7 +1350,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_cache",
         action="store_true",
-        help="Use this flag to use the cache; cache is makes things faster but uses a *lot* of ram",
+        help="Use this flag to enable the cache; cache makes things faster but uses a *lot* of ram",
     )
 
     args = parser.parse_args()

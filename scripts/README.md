@@ -8,10 +8,10 @@ If you're not internal to AI2, here are scripts you will care about:
 - `tutorial.ipynb`: A guide to the S2AND pipeline that's easier to look at than the above two scripts.
 
 *Important* notes about `transfer_experiment_seed_paper.py`: 
-- It assumes that the S2AND data is in `S2AND/data/`. If that's not the case, you'll have to manually enter your data directory into the `DATA_DIR` variable on line 3.
+- It assumes that the S2AND data is in `<code root path>/data/`. If that's not the case, you'll have to modify the `"main_data_dir"` entry in `data/path_config.json`.
 - If you have a small to medium amount of RAM, don't use the `--use_cache` flag. Without the cache, it'll be slower, but will not try to fit all of the feature data into memory.
 
-Other scripts in this folder:
+Other scripts in this folder (mostly have `use_cache=True`):
 - `blog_post_eval.py`: Computes min edit distance performance numbers that appear only in the blog post.
 - `claims_cluster_eval.py`: Evaluates a model on the Semantic Scholar corrections data (data not released)
 - `full_model_dump.py`: Trains and dumps to disk a full model trained on all of the datasets (including orcid and augmented, which are not released)

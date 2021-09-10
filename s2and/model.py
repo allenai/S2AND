@@ -78,7 +78,7 @@ class Clusterer:
         search_space: Optional[Dict[str, Any]] = None,
         n_iter: int = 25,
         n_jobs: int = 16,
-        use_cache: bool = True,
+        use_cache: bool = False,
         use_default_constraints_as_supervision: bool = True,
         random_state: int = 42,
         nameless_classifier: Optional[Any] = None,

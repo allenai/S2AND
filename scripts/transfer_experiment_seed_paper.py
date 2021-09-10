@@ -380,7 +380,7 @@ def main(
     feature_groups_to_skip: List[str],
     use_linear_pairwise_model: bool,
     gender_ethnicity_available: bool,
-    dont_use_cache: bool,
+    use_cache: bool,
 ):
     if not os.path.exists(os.path.join(DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "metrics")):
         os.makedirs(
@@ -400,7 +400,7 @@ def main(
     INDIVIDUAL_MODELS = not skip_individual_models
     UNION_MODELS = not skip_union_models
     N_TRAIN_PAIRS_SIZE = n_train_pairs_size
-    USE_CACHE = not dont_use_cache
+    USE_CACHE = use_cache
     logger.info(
         (
             f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
@@ -1348,9 +1348,9 @@ if __name__ == "__main__":
         help="Do the signatures have estimated gender/ethnicity of author?",
     )
     parser.add_argument(
-        "--dont_use_cache",
+        "--use_cache",
         action="store_true",
-        help="Use this flag to not use the cache; important if you don't have a lot of ram",
+        help="Use this flag to enable the cache; cache makes things faster but uses a *lot* of ram",
     )
 
     args = parser.parse_args()
@@ -1377,7 +1377,7 @@ if __name__ == "__main__":
             args.feature_groups_to_skip,
             args.use_linear_pairwise_model,
             args.gender_ethnicity_available,
-            args.dont_use_cache,
+            args.use_cache,
         )
         multi_b3_grid.append(b3_f1_grid)
         multi_pairwise_auroc_grid.append(pairwise_auroc_grid)

@@ -22,6 +22,9 @@ DATASETS = [
     "zbmath",
 ]
 
+BIG_BLOCK_CUTOFF = 500
+TOP_BLOCKS_TO_KEEP = 1000
+
 # load all of the artifacts of each dataset
 clusters_all = []
 signatures_all = []
@@ -74,37 +77,30 @@ for dataset in DATASETS:
             print(f"WARNING: Ignoring {file_name} in {dataset}")
 
 
-# the goal is speed so we'll remove the largest blocks (x > 250 signatures)
-# also only keep 3k blocks max.
+# the goal is speed so we'll remove the largest blocks 
+# also only keep top 1000 blocks max.
 # aminer has 32k, inspire has 15k, and kisti has 7k blocks
-signatures_all_filtered = []
-clusters_all_filtered = []
-papers_all_filtered = []
-X_all_filtered = []
-keys_all_filtered = []
 for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers_all, X_all, keys_all):
     blocks = []
     for v in s.values():
         blocks.append(v["author_info"]["block"])
     vc = pd.value_counts(blocks)
-    vc = vc[vc <= 500]  # not too big
-    vc = vc.iloc[:1000]  # and not too many, but the largest ones
+    vc = vc[vc <= BIG_BLOCK_CUTOFF]  # not too big
+    vc = vc.iloc[:TOP_BLOCKS_TO_KEEP]  # and not too many, but the largest ones
     blocks_to_keep = set(vc.index.values)
     s_filtered = {k: v for k, v in s.items() if v["author_info"]["block"] in blocks_to_keep}
 
     # filter the clusters too
     c_filtered = {k: v for k, v in c.items() if np.all([i in s_filtered for i in v["signature_ids"]])}
-    clusters_all_filtered.append(c_filtered)
 
     # go back through the clusters and find the signatures we'll actually need
     # need to do this because sometimes the block name is just... corrupted
     # e.g. "g miller" for most signatures but "g mller" for one...
-    singnature_keys_to_keep = set()
+    signature_keys_to_keep = set()
     for v in c_filtered.values():
-        singnature_keys_to_keep.update(v["signature_ids"])
+        signature_keys_to_keep.update(v["signature_ids"])
 
-    s_filtered = {k: v for k, v in s.items() if k in singnature_keys_to_keep}
-    signatures_all_filtered.append(s_filtered)
+    s_filtered = {k: v for k, v in s.items() if k in signature_keys_to_keep}
 
     # we don't need all the papers anymore. just the ones in signatures
     # also the references of those
@@ -120,21 +116,19 @@ for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers
     keys_filtered_flag = np.array([i in paper_ids for i in k.astype(int)])
     k_filtered = k[keys_filtered_flag]
     X_filtered = X[keys_filtered_flag, :]
-    keys_all_filtered.append(k_filtered)
-    X_all_filtered.append(X_filtered)
 
     # save all of the data
     data_output_dir = os.path.join(DATA_DIR, "s2and_mini", dataset)
     if not os.path.exists(data_output_dir):
         os.mkdir(data_output_dir)
 
-    with open(os.path.join(data_output_dir, f"{dataset}_clusters.pickle"), "w") as _json_file:
+    with open(os.path.join(data_output_dir, f"{dataset}_clusters.json"), "w") as _json_file:
         json.dump(c_filtered, _json_file)
 
-    with open(os.path.join(data_output_dir, f"{dataset}_signatures.pickle"), "w") as _json_file:
+    with open(os.path.join(data_output_dir, f"{dataset}_signatures.json"), "w") as _json_file:
         json.dump(s_filtered, _json_file)
 
-    with open(os.path.join(data_output_dir, f"{dataset}_papers.pickle"), "w") as _json_file:
+    with open(os.path.join(data_output_dir, f"{dataset}_papers.json"), "w") as _json_file:
         json.dump(p_filtered, _json_file)
 
     with open(os.path.join(data_output_dir, f"{dataset}_specter.pickle"), "wb") as _pickle_file:

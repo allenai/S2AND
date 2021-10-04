@@ -77,8 +77,8 @@ for dataset in DATASETS:
             print(f"WARNING: Ignoring {file_name} in {dataset}")
 
 
-# the goal is speed so we'll remove the largest blocks 
-# also only keep top 1000 blocks max.
+# the goal is speed so we'll remove the largest blocks
+# also only keep top 1000 blocks max
 # aminer has 32k, inspire has 15k, and kisti has 7k blocks
 for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers_all, X_all, keys_all):
     blocks = []

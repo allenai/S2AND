@@ -1,8 +1,8 @@
 import os
 import json
 import pickle
+import collections
 import numpy as np
-import pandas as pd
 from s2and.consts import CONFIG
 
 DATA_DIR = CONFIG["main_data_dir"]
@@ -76,6 +76,7 @@ for dataset in DATASETS:
         else:
             print(f"WARNING: Ignoring {file_name} in {dataset}")
 
+print('Finished loading data.  Filtering...')
 
 # the goal is speed so we'll remove the largest blocks
 # also only keep top 1000 blocks max
@@ -84,10 +85,10 @@ for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers
     blocks = []
     for v in s.values():
         blocks.append(v["author_info"]["block"])
-    vc = pd.value_counts(blocks)
-    vc = vc[vc <= BIG_BLOCK_CUTOFF]  # not too big
-    vc = vc.iloc[:TOP_BLOCKS_TO_KEEP]  # and not too many, but the largest ones
-    blocks_to_keep = set(vc.index.values)
+
+    vc = collections.Counter(blocks)
+    blocks_to_keep = set([k for k, v in sorted(vc.items()) if v <= BIG_BLOCK_CUTOFF][:TOP_BLOCKS_TO_KEEP])
+
     s_filtered = {k: v for k, v in s.items() if v["author_info"]["block"] in blocks_to_keep}
 
     # filter the clusters too
@@ -132,4 +133,4 @@ for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers
         json.dump(p_filtered, _json_file)
 
     with open(os.path.join(data_output_dir, f"{dataset}_specter.pickle"), "wb") as _pickle_file:
-        pickle.dump((X, keys), _pickle_file)
+        pickle.dump((X_filtered, k_filtered), _pickle_file)

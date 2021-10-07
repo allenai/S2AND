@@ -76,7 +76,7 @@ for dataset in DATASETS:
         else:
             print(f"WARNING: Ignoring {file_name} in {dataset}")
 
-print('Finished loading data.  Filtering...')
+print("Finished loading data.  Filtering...")
 
 # the goal is speed so we'll remove the largest blocks
 # also only keep top 1000 blocks max

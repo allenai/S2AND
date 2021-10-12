@@ -33,7 +33,7 @@ class NgramJaccardRanker:
     def _unigrams(self, text):
         if text is None or len(text) == 0:
             return collections.Counter()
-        text_split = [word for word in text.split() if word not in STOPWORDS and len(word) > 1]
+        text_split = [word for word in text.lower().split() if word not in STOPWORDS and len(word) > 1]
         unigrams = collections.Counter(text_split)
         return unigrams
 

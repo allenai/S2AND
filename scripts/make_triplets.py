@@ -1,11 +1,9 @@
 import argparse
 import collections
-import itertools
 import gzip
 import json
 import logging
 import os
-import pickle
 
 import tqdm
 import numpy as np
@@ -13,7 +11,7 @@ import numpy as np
 import s2and
 from s2and.data import ANDData
 from s2and.consts import CONFIG
-from s2and.text import get_text_ngrams_words, counter_jaccard, cosine_sim, STOPWORDS
+from s2and.text import counter_jaccard, cosine_sim, STOPWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -163,19 +161,21 @@ def paper_id_to_full(paper_id, raw_papers):
 def main():
     args = parse_cli_args()
 
+    open_fn = None
+    extension = None
     if args.compression == "gzip":
         open_fn = gzip.open
         extension = ".gz"
     elif args.compression == "none":
         open_fn = open
-        extention = ""
+        extension = ""
     else:
         raise ValueError("Invalid compression {}".format(args.compression))
 
     os.makedirs(args.output, exist_ok=True)
-    with open_fn(os.path.join(args.output, "train.jsonl" + extention), "wt") as train_f, open_fn(
-        os.path.join(args.output, "dev.jsonl" + extention), "wt"
-    ) as dev_f, open_fn(os.path.join(args.output, "test.jsonl" + extention), "wt") as test_f:
+    with open_fn(os.path.join(args.output, "train.jsonl" + extension), "wt") as train_f, open_fn(
+        os.path.join(args.output, "dev.jsonl" + extension), "wt"
+    ) as dev_f, open_fn(os.path.join(args.output, "test.jsonl" + extension), "wt") as test_f:
         file_objs = {"train": train_f, "dev": dev_f, "test": test_f}
 
         for dataset_name in DATASETS:

@@ -41,7 +41,7 @@ FEATURES_TO_USE = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
+    # "reference_features",  # speed up prod
     "misc_features",
     "name_counts",
     "embedding_similarity",
@@ -211,7 +211,7 @@ def main():
     models["clusterer"] = union_clusterer
 
     with open(
-        f"full_union_model_script_dump_average_{FEATURIZER_VERSION}.pickle",
+        f"full_union_model_script_dump_average_no_refs_{FEATURIZER_VERSION}.pickle",
         "wb",
     ) as _pickle_file:
         pickle.dump(models, _pickle_file)

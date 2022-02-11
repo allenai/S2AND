@@ -28,12 +28,19 @@ DATASETS = [
 
 class NgramJaccardRanker:
     def __init__(self, papers):
-        self.paper_ngrams = {k: self._unigrams(v["title"]) + self._unigrams(v["abstract"]) for k, v in papers.items()}
+        self.paper_ngrams = {
+            k: self._unigrams(v["title"]) + self._unigrams(v["abstract"])
+            for k, v in papers.items()
+        }
 
     def _unigrams(self, text):
         if text is None or len(text) == 0:
             return collections.Counter()
-        text_split = [word for word in text.lower().split() if word not in STOPWORDS and len(word) > 1]
+        text_split = [
+            word
+            for word in text.lower().split()
+            if word not in STOPWORDS and len(word) > 1
+        ]
         unigrams = collections.Counter(text_split)
         return unigrams
 
@@ -57,7 +64,13 @@ class SpecterRanker:
 
 
 def generate_block_triplets(
-    dataset, block_sigs, rng, num_queries=None, num_positives=None, num_negatives=None, negative_ranker_fn=None
+    dataset,
+    block_sigs,
+    rng,
+    num_queries=None,
+    num_positives=None,
+    num_negatives=None,
+    negative_ranker_fn=None,
 ):
     block_sigs = block_sigs.copy()
     rng.shuffle(block_sigs)
@@ -65,14 +78,30 @@ def generate_block_triplets(
     for query_sig_id in block_sigs[:num_queries]:
         query_sig = dataset.signatures[query_sig_id]
 
-        cluster_sigs = set(dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]]["signature_ids"])
+        cluster_sigs = set(
+            dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]][
+                "signature_ids"
+            ]
+        )
 
         positives = [dataset.signatures[x] for x in cluster_sigs if x != query_sig_id]
         rng.shuffle(positives)
 
-        negatives = [dataset.signatures[x] for x in block_sigs if x not in cluster_sigs]
+        negatives = [
+            dataset.signatures[x]
+            for x in block_sigs
+            if x not in cluster_sigs
+            and len(
+                set(query_sig.author_info_coauthors).intersection(
+                    set(dataset.signatures[x].author_info_coauthors)
+                )
+            )
+            == 0
+        ]
         if negative_ranker_fn:
-            negatives.sort(reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg))
+            negatives.sort(
+                reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg)
+            )
         else:
             rng.shuffle(negatives)
 
@@ -87,7 +116,11 @@ def make_dataset_triplets(args, dataset):
     ranker = NgramJaccardRanker(dataset.raw_papers)
 
     block_splits = dict()
-    block_splits["train"], block_splits["dev"], block_splits["test"] = dataset.split_cluster_signatures()
+    (
+        block_splits["train"],
+        block_splits["dev"],
+        block_splits["test"],
+    ) = dataset.split_cluster_signatures()
 
     triplets = dict()
     for split_name, split_blocks in block_splits.items():
@@ -108,7 +141,99 @@ def make_dataset_triplets(args, dataset):
             pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
         if len(triplets[split_name]) > args.max_triplets_per_dataset_split:
             rng.shuffle(triplets[split_name])
-            triplets[split_name] = triplets[split_name][: args.max_triplets_per_dataset_split]
+            triplets[split_name] = triplets[split_name][
+                : args.max_triplets_per_dataset_split
+            ]
+
+    return triplets
+
+
+def generate_block_rankformat(
+    dataset,
+    block_sigs,
+    rng,
+    num_queries=None,
+    num_positives=None,
+    num_negatives=None,
+    negative_ranker_fn=None,
+):
+    block_sigs = block_sigs.copy()
+    rng.shuffle(block_sigs)
+
+    for query_sig_id in block_sigs[:num_queries]:
+        query_sig = dataset.signatures[query_sig_id]
+
+        cluster_sigs = set(
+            dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]][
+                "signature_ids"
+            ]
+        )
+
+        positives = [dataset.signatures[x] for x in cluster_sigs if x != query_sig_id]
+        rng.shuffle(positives)
+
+        negatives = [
+            dataset.signatures[x]
+            for x in block_sigs
+            if x not in cluster_sigs
+            and len(
+                set(query_sig.author_info_coauthors).intersection(
+                    set(dataset.signatures[x].author_info_coauthors)
+                )
+            )
+            == 0
+        ]
+        if negative_ranker_fn:
+            negatives.sort(
+                reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg)
+            )
+        else:
+            rng.shuffle(negatives)
+
+        positives = positives[:num_positives]
+        negatives = negatives[:num_negatives]
+        if len(positives) >= 1 and len(negatives) >= 1:
+            yield {
+                "query": str(query_sig.paper_id),
+                "positives": [str(x.paper_id) for x in positives],
+                "negatives": [str(x.paper_id) for x in negatives],
+            }
+
+
+def make_dataset_rankformat(args, dataset):
+    rng = np.random.default_rng(args.seed)
+
+    ranker = NgramJaccardRanker(dataset.raw_papers)
+
+    block_splits = dict()
+    (
+        block_splits["train"],
+        block_splits["dev"],
+        block_splits["test"],
+    ) = dataset.split_cluster_signatures()
+
+    triplets = dict()
+    for split_name, split_blocks in block_splits.items():
+        triplets[split_name] = []
+        pbar = tqdm.tqdm(split_blocks.items(), total=len(split_blocks))
+        for block_name, block_sigs in pbar:
+            triplets[split_name].extend(
+                generate_block_rankformat(
+                    dataset,
+                    block_sigs,
+                    rng,
+                    num_queries=args.n_queries_per_block,
+                    num_positives=args.n_pos_per_query,
+                    num_negatives=args.n_neg_per_query,
+                    negative_ranker_fn=ranker,
+                )
+            )
+            pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
+        if len(triplets[split_name]) > args.max_triplets_per_dataset_split:
+            rng.shuffle(triplets[split_name])
+            triplets[split_name] = triplets[split_name][
+                : args.max_triplets_per_dataset_split
+            ]
 
     return triplets
 
@@ -173,28 +298,47 @@ def main():
         raise ValueError("Invalid compression {}".format(args.compression))
 
     os.makedirs(args.output, exist_ok=True)
-    with open_fn(os.path.join(args.output, "train.jsonl" + extension), "wt") as train_f, open_fn(
+    with open_fn(
+        os.path.join(args.output, "train.jsonl" + extension), "wt"
+    ) as train_f, open_fn(
         os.path.join(args.output, "dev.jsonl" + extension), "wt"
-    ) as dev_f, open_fn(os.path.join(args.output, "test.jsonl" + extension), "wt") as test_f:
+    ) as dev_f, open_fn(
+        os.path.join(args.output, "test.jsonl" + extension), "wt"
+    ) as test_f:
         file_objs = {"train": train_f, "dev": dev_f, "test": test_f}
 
         for dataset_name in DATASETS:
             logger.info("loading {}".format(dataset_name))
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
-            triplets = make_dataset_triplets(args, dataset)
+            triplets = make_dataset_rankformat(args, dataset)
             logger.info(
-                "made {} triplets for {}. Saving...".format(sum(len(x) for x in triplets.values()), dataset_name)
+                "made {} examples for {}. Saving...".format(
+                    sum(len(x) for x in triplets.values()), dataset_name
+                )
             )
             for split_name, file_obj in file_objs.items():
                 for row in triplets[split_name]:
+                    pos_candidates = [
+                        paper_id_to_full(x, dataset.raw_papers)
+                        for x in row["positives"]
+                    ]
+                    for x in pos_candidates:
+                        x["score"] = 1
+                    neg_candidates = [
+                        paper_id_to_full(x, dataset.raw_papers)
+                        for x in row["negatives"]
+                    ]
+                    for x in neg_candidates:
+                        x["score"] = 0
                     file_obj.write(
                         json.dumps(
                             {
                                 "dataset": dataset_name,
-                                "seed": paper_id_to_full(row[0], dataset.raw_papers),
-                                "positive": paper_id_to_full(row[1], dataset.raw_papers),
-                                "negative": paper_id_to_full(row[2], dataset.raw_papers),
+                                "query": paper_id_to_full(
+                                    row["query"], dataset.raw_papers
+                                ),
+                                "candidates": pos_candidates + neg_candidates,
                             }
                         )
                         + "\n"

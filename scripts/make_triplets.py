@@ -122,6 +122,11 @@ def make_dataset_triplets(args, dataset):
         block_splits["test"],
     ) = dataset.split_cluster_signatures()
 
+    if args.n_random_neg_per_query != 0:
+        raise ValueError(
+            "TODO: Only hard negatives are supported for this mode.  Need script changes to do random as well."
+        )
+
     triplets = dict()
     for split_name, split_blocks in block_splits.items():
         triplets[split_name] = []
@@ -134,7 +139,7 @@ def make_dataset_triplets(args, dataset):
                     rng,
                     num_queries=args.n_queries_per_block,
                     num_positives=args.n_pos_per_query,
-                    num_negatives=args.n_neg_per_query,
+                    num_negatives=args.n_hard_neg_per_query,
                     negative_ranker_fn=ranker,
                 )
             )
@@ -154,11 +159,16 @@ def generate_block_rankformat(
     rng,
     num_queries=None,
     num_positives=None,
-    num_negatives=None,
+    num_random_negatives=None,
+    num_hard_negatives=None,
     negative_ranker_fn=None,
+    used_pairs=None,
 ):
     block_sigs = block_sigs.copy()
     rng.shuffle(block_sigs)
+
+    if num_hard_negatives != 0 and negative_ranker_fn is None:
+        raise ValueError("Asked for hard negatives but no negative_ranker_fn was given")
 
     for query_sig_id in block_sigs[:num_queries]:
         query_sig = dataset.signatures[query_sig_id]
@@ -169,13 +179,20 @@ def generate_block_rankformat(
             ]
         )
 
-        positives = [dataset.signatures[x] for x in cluster_sigs if x != query_sig_id]
-        rng.shuffle(positives)
+        positives = [
+            dataset.signatures[x]
+            for x in cluster_sigs
+            if x != query_sig_id
+            and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id]))
+            not in used_pairs
+        ]
 
         negatives = [
             dataset.signatures[x]
             for x in block_sigs
             if x not in cluster_sigs
+            and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id]))
+            not in used_pairs
             and len(
                 set(query_sig.author_info_coauthors).intersection(
                     set(dataset.signatures[x].author_info_coauthors)
@@ -183,15 +200,59 @@ def generate_block_rankformat(
             )
             == 0
         ]
-        if negative_ranker_fn:
+
+        # Filter duplicates with two different authors on the same paper
+        new_pos = []
+        pos_pids = set()
+        for x in positives:
+            if x.paper_id in pos_pids:
+                continue
+            pos_pids.add(x.paper_id)
+            new_pos.append(x)
+        positives = new_pos
+
+        new_negs = []
+        neg_pids = set(pos_pids)
+        for x in negatives:
+            if x.paper_id in neg_pids:
+                continue
+            neg_pids.add(x.paper_id)
+            new_negs.append(x)
+        negatives = new_negs
+
+        # Try to keep ratio for papers that don't have enough negatives
+        if len(negatives) < (num_hard_negatives + num_random_negatives):
+            s = num_hard_negatives + num_random_negatives
+            num_hard_negatives = num_hard_negatives // s
+            num_random_negatives = num_random_negatives // s
+
+            # If rounding down reduced total negatives, give the remainder to random
+            r = len(negatives) - (num_hard_negatives + num_random_negatives)
+            num_random_negatives += r
+
+        hard_negatives = []
+        if num_hard_negatives != 0:
             negatives.sort(
                 reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg)
             )
-        else:
+            hard_negatives = negatives[:num_hard_negatives]
+            negatives = negatives[num_hard_negatives:]
+
+        random_negatives = []
+        if num_random_negatives != 0:
             rng.shuffle(negatives)
+            random_negatives = negatives[:num_random_negatives]
+            negatives = negatives[num_random_negatives:]
+
+        negatives = hard_negatives + random_negatives
+        rng.shuffle(negatives)
 
         positives = positives[:num_positives]
-        negatives = negatives[:num_negatives]
+        rng.shuffle(positives)
+
+        for x in positives + negatives:
+            used_pairs.add(tuple(sorted([query_sig.paper_id, x.paper_id])))
+
         if len(positives) >= 1 and len(negatives) >= 1:
             yield {
                 "query": str(query_sig.paper_id),
@@ -200,8 +261,11 @@ def generate_block_rankformat(
             }
 
 
-def make_dataset_rankformat(args, dataset):
+def make_dataset_rankformat(args, dataset, used_pairs=None):
     rng = np.random.default_rng(args.seed)
+
+    if used_pairs is None:
+        used_pairs = set()
 
     ranker = NgramJaccardRanker(dataset.raw_papers)
 
@@ -224,8 +288,10 @@ def make_dataset_rankformat(args, dataset):
                     rng,
                     num_queries=args.n_queries_per_block,
                     num_positives=args.n_pos_per_query,
-                    num_negatives=args.n_neg_per_query,
+                    num_random_negatives=args.n_random_neg_per_query,
+                    num_hard_negatives=args.n_hard_neg_per_query,
                     negative_ranker_fn=ranker,
+                    used_pairs=used_pairs,
                 )
             )
             pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
@@ -267,9 +333,11 @@ def parse_cli_args():
     parser.add_argument("--max_triplets_per_dataset_split", type=int, default=100000)
     parser.add_argument("--n_queries_per_block", type=int, default=None)
     parser.add_argument("--n_pos_per_query", type=int, default=None)
-    parser.add_argument("--n_neg_per_query", type=int, default=None)
+    parser.add_argument("--n_random_neg_per_query", type=int, default=None)
+    parser.add_argument("--n_hard_neg_per_query", type=int, default=None)
     parser.add_argument("--data_dir", default=CONFIG["main_data_dir"])
     parser.add_argument("--compression", default="none", choices=["gzip", "none"])
+    parser.add_argument("--exclude_dataset", default=[], action="append")
     parser.add_argument("--seed", type=int, default=1)
     return parser.parse_args()
 
@@ -307,11 +375,16 @@ def main():
     ) as test_f:
         file_objs = {"train": train_f, "dev": dev_f, "test": test_f}
 
-        for dataset_name in DATASETS:
+        used_query_ids = set()
+        used_id_pairs = set()
+
+        datasets = [d for d in DATASETS if d not in args.exclude_dataset]
+
+        for dataset_name in datasets:
             logger.info("loading {}".format(dataset_name))
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
-            triplets = make_dataset_rankformat(args, dataset)
+            triplets = make_dataset_rankformat(args, dataset, used_pairs=used_id_pairs)
             logger.info(
                 "made {} examples for {}. Saving...".format(
                     sum(len(x) for x in triplets.values()), dataset_name
@@ -319,25 +392,33 @@ def main():
             )
             for split_name, file_obj in file_objs.items():
                 for row in triplets[split_name]:
+                    # Filter duplicates (would lose a bit less data doing this
+                    # in generate_block_*, but should be small enough diff not
+                    # to be worth the trouble)
+                    query_record = paper_id_to_full(row["query"], dataset.raw_papers)
+                    if query_record["corpus_id"] in used_query_ids:
+                        continue
+                    used_query_ids.add(query_record["corpus_id"])
+
                     pos_candidates = [
                         paper_id_to_full(x, dataset.raw_papers)
                         for x in row["positives"]
                     ]
                     for x in pos_candidates:
                         x["score"] = 1
+
                     neg_candidates = [
                         paper_id_to_full(x, dataset.raw_papers)
                         for x in row["negatives"]
                     ]
                     for x in neg_candidates:
                         x["score"] = 0
+
                     file_obj.write(
                         json.dumps(
                             {
                                 "dataset": dataset_name,
-                                "query": paper_id_to_full(
-                                    row["query"], dataset.raw_papers
-                                ),
+                                "query": query_record,
                                 "candidates": pos_candidates + neg_candidates,
                             }
                         )

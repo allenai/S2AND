@@ -12,6 +12,7 @@ from functools import partial
 from tqdm import tqdm
 import logging
 import copy
+import math
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster
@@ -219,8 +220,10 @@ class Clusterer:
         logger.info("Initializing pairwise_probas")
         # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
+        num_pairs = 0
         for block_key, signatures in block_dict.items():
             block_size = len(signatures)
+            num_pairs += int(block_size * (block_size - 1) / 2)
             if isinstance(self.cluster_model, FastCluster):
                 # flattened pdist style
                 pairwise_proba = np.zeros(int(block_size * (block_size - 1) / 2), dtype=np.float16)
@@ -240,8 +243,9 @@ class Clusterer:
 
         prev_block_key = ""
         batch_num = 0
+        num_batches = math.ceil(num_pairs / self.batch_size)
         while True:
-            logger.info(f"Featurizing batch {batch_num}")
+            logger.info(f"Featurizing batch {batch_num}/{num_batches}")
             count = 0
             pairs = []
             indices = []

@@ -1,6 +1,7 @@
 import argparse
 import collections
 import gzip
+import itertools
 import json
 import logging
 import os
@@ -163,26 +164,37 @@ def generate_block_rankformat(
     num_hard_negatives=None,
     negative_ranker_fn=None,
     used_pairs=None,
+    blacklisted_papers=None,
 ):
     block_sigs = block_sigs.copy()
     rng.shuffle(block_sigs)
 
+    if blacklisted_papers is None:
+        blacklisted_papers = set()
+
     if num_hard_negatives != 0 and negative_ranker_fn is None:
         raise ValueError("Asked for hard negatives but no negative_ranker_fn was given")
 
-    for query_sig_id in block_sigs[:num_queries]:
+    for query_sig_id in [
+        x
+        for x in block_sigs
+        if dataset.signatures[x].paper_id not in blacklisted_papers
+    ][:num_queries]:
         query_sig = dataset.signatures[query_sig_id]
 
         cluster_sigs = set(
-            dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]][
+            x
+            for x in dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]][
                 "signature_ids"
             ]
+            if dataset.signatures[x].paper_id not in blacklisted_papers
         )
 
         positives = [
             dataset.signatures[x]
             for x in cluster_sigs
             if x != query_sig_id
+            and dataset.signatures[x].paper_id not in blacklisted_papers
             and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id]))
             not in used_pairs
         ]
@@ -191,6 +203,7 @@ def generate_block_rankformat(
             dataset.signatures[x]
             for x in block_sigs
             if x not in cluster_sigs
+            and dataset.signatures[x].paper_id not in blacklisted_papers
             and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id]))
             not in used_pairs
             and len(
@@ -261,7 +274,7 @@ def generate_block_rankformat(
             }
 
 
-def make_dataset_rankformat(args, dataset, used_pairs=None):
+def make_dataset_rankformat(args, dataset, used_pairs=None, test_papers=None):
     rng = np.random.default_rng(args.seed)
 
     if used_pairs is None:
@@ -275,6 +288,11 @@ def make_dataset_rankformat(args, dataset, used_pairs=None):
         block_splits["dev"],
         block_splits["test"],
     ) = dataset.split_cluster_signatures()
+
+    with open(
+        os.path.join(args.output, "block_sigs_{}.json".format(dataset.name)), "x"
+    ) as f:
+        json.dump(block_splits, f)
 
     triplets = dict()
     for split_name, split_blocks in block_splits.items():
@@ -292,6 +310,7 @@ def make_dataset_rankformat(args, dataset, used_pairs=None):
                     num_hard_negatives=args.n_hard_neg_per_query,
                     negative_ranker_fn=ranker,
                     used_pairs=used_pairs,
+                    blacklisted_papers=(test_papers if split_name != "test" else None),
                 )
             )
             pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
@@ -373,18 +392,46 @@ def main():
     ) as dev_f, open_fn(
         os.path.join(args.output, "test.jsonl" + extension), "wt"
     ) as test_f:
-        file_objs = {"train": train_f, "dev": dev_f, "test": test_f}
+        file_objs = collections.OrderedDict(
+            [("test", test_f), ("dev", dev_f), ("train", train_f)]
+        )
+        # file_objs = collections.OrderedDict([("train", train_f), ("dev", dev_f), ("test", test_f)])
 
         used_query_ids = set()
         used_id_pairs = set()
+        test_papers = set()
 
         datasets = [d for d in DATASETS if d not in args.exclude_dataset]
+
+        # We need to populate the entire test_papers set in advance, because
+        # papers can be shared across datasets and we want to bar ALL of the
+        # test papers (not just the ones we include in triplet data) in case
+        # later we do normal s2and eval using embeddings from the
+        # triplet-trained model
+        for dataset_name in datasets:
+            logger.info("loading {}".format(dataset_name))
+            dataset = load_dataset(args.data_dir, dataset_name, args.seed)
+
+            test_blocks = dataset.split_cluster_signatures()[2]
+            for sig in itertools.chain(*test_blocks.values()):
+                test_papers.add(dataset.signatures[sig].paper_id)
+
+                test_papers |= {
+                    dataset.signatures[x].paper_id
+                    for x in dataset.clusters[dataset.signature_to_cluster_id[sig]][
+                        "signature_ids"
+                    ]
+                }
+
+        logger.info("Reserved {} test papers".format(len(test_papers)))
 
         for dataset_name in datasets:
             logger.info("loading {}".format(dataset_name))
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
-            triplets = make_dataset_rankformat(args, dataset, used_pairs=used_id_pairs)
+            triplets = make_dataset_rankformat(
+                args, dataset, used_pairs=used_id_pairs, test_papers=test_papers
+            )
             logger.info(
                 "made {} examples for {}. Saving...".format(
                     sum(len(x) for x in triplets.values()), dataset_name

@@ -78,11 +78,11 @@ class FeaturizationInfo:
             "venue_similarity": [12],
             "year_diff": [13],
             "title_similarity": [14, 15],
-            "misc_features": [16, 17, 18, 19, 20],
-            "name_counts": [21, 22, 23, 24, 25, 26],
-            "embedding_similarity": [27],
-            "journal_similarity": [28],
-            "advanced_name_similarity": [29, 30, 31, 32],
+            "misc_features": [16, 17],
+            "name_counts": [18, 19, 20, 21, 22, 23],
+            "embedding_similarity": [24],
+            "journal_similarity": [25],
+            "advanced_name_similarity": [26, 27, 28, 29],
         }
 
         self.number_of_features = max(functools.reduce(max, self.feature_group_to_index.values())) + 1  # type: ignore
@@ -95,7 +95,7 @@ class FeaturizationInfo:
             "venue_similarity": ["0"],
             "year_diff": ["-1"],
             "title_similarity": ["1", "1"],
-            "misc_features": ["0", "0", "0", "0", "0"],
+            "misc_features": ["0", "0"],
             "name_counts": ["0", "-1", "-1", "-1", "0", "-1"],
             "embedding_similarity": ["0"],
             "journal_similarity": ["0"],

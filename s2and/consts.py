@@ -27,10 +27,6 @@ NAME_COUNTS_PATH = os.path.join(CONFIG["main_data_dir"], "name_counts.pickle")
 if not os.path.exists(NAME_COUNTS_PATH):
     NAME_COUNTS_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/name_counts.pickle"
 
-FASTTEXT_PATH = os.path.join(CONFIG["main_data_dir"], "lid.176.bin")
-if not os.path.exists(FASTTEXT_PATH):
-    FASTTEXT_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/lid.176.bin"
-
 # feature caching related consts
 CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and")))
 FEATURIZER_VERSION = 1

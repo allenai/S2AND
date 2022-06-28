@@ -60,7 +60,6 @@ class FeaturizationInfo:
             "venue_similarity",
             "year_diff",
             "title_similarity",
-            "reference_features",
             "misc_features",
             "name_counts",
             "embedding_similarity",
@@ -79,12 +78,11 @@ class FeaturizationInfo:
             "venue_similarity": [12],
             "year_diff": [13],
             "title_similarity": [14, 15],
-            "reference_features": [16, 17, 18, 19, 20, 21],
-            "misc_features": [22, 23, 24, 25, 26],
-            "name_counts": [27, 28, 29, 30, 31, 32],
-            "embedding_similarity": [33],
-            "journal_similarity": [34],
-            "advanced_name_similarity": [35, 36, 37, 38],
+            "misc_features": [16, 17, 18, 19, 20],
+            "name_counts": [21, 22, 23, 24, 25, 26],
+            "embedding_similarity": [27],
+            "journal_similarity": [28],
+            "advanced_name_similarity": [29, 30, 31, 32],
         }
 
         self.number_of_features = max(functools.reduce(max, self.feature_group_to_index.values())) + 1  # type: ignore
@@ -97,7 +95,6 @@ class FeaturizationInfo:
             "venue_similarity": ["0"],
             "year_diff": ["-1"],
             "title_similarity": ["1", "1"],
-            "reference_features": ["1", "1", "1", "1", "1", "1"],
             "misc_features": ["0", "0", "0", "0", "0"],
             "name_counts": ["0", "-1", "-1", "-1", "0", "-1"],
             "embedding_similarity": ["0"],
@@ -177,23 +174,11 @@ class FeaturizationInfo:
         if "title_similarity" in self.features_to_use:
             feature_names.extend(["title_overlap_words", "title_overlap_chars"])
 
-        # reference features
-        if "reference_features" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "references_authors_overlap",
-                    "references_titles_overlap",
-                    "references_venues_overlap",
-                    "references_author_blocks_jaccard",
-                    "references_self_citation",
-                    "references_overlap",
-                ]
-            )
 
         # position features
         if "misc_features" in self.features_to_use:
             feature_names.extend(
-                ["position_diff", "abstract_count", "english_count", "same_language", "language_reliability_count"]
+                ["position_diff", "abstract_count"]
             )
 
         # name count features
@@ -440,24 +425,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
         ]
     )
-
-    references_1 = set(paper_1.references)
-    references_2 = set(paper_2.references)
-    features.extend(
-        [
-            counter_jaccard(paper_1.reference_details[0], paper_2.reference_details[0], denominator_max=5000),
-            counter_jaccard(paper_1.reference_details[1], paper_2.reference_details[1]),
-            counter_jaccard(paper_1.reference_details[2], paper_2.reference_details[2]),
-            counter_jaccard(paper_1.reference_details[3], paper_2.reference_details[3]),
-            int(paper_id_2 in references_1 or paper_id_1 in references_2),
-            jaccard(references_1, references_2),
-        ]
-    )
-
-    english_or_unknown_count = int(paper_1.predicted_language in {"en", "un"}) + int(
-        paper_2.predicted_language in {"en", "un"}
-    )
-
+    
     features.extend(
         [
             np.minimum(
@@ -468,9 +436,6 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
                 50,
             ),
             int(paper_1.has_abstract) + int(paper_2.has_abstract),
-            english_or_unknown_count,
-            paper_1.predicted_language == paper_2.predicted_language,
-            int(paper_1.is_reliable) + int(paper_2.is_reliable),
         ]
     )
 
@@ -498,7 +463,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     else:
         specter_sim = NUMPY_NAN
 
-    features.append(specter_sim)  # , abstract_count, english_count])
+    features.append(specter_sim)  
 
     features.append(counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams))
 

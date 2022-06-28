@@ -11,16 +11,12 @@ from numpy.linalg import norm
 from collections import Counter
 
 from text_unidecode import unidecode
-import fasttext
-import pycld2 as cld2
 import jellyfish
 from strsimpy.metric_lcs import MetricLCS
 
 
-from s2and.consts import NUMPY_NAN, FASTTEXT_PATH
-from s2and.file_cache import cached_path
+from s2and.consts import NUMPY_NAN
 
-FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
 
@@ -261,52 +257,6 @@ TEXT_FUNCTIONS = [
     (metric_lcs.distance, "lcs"),
     (jellyfish.jaro_winkler_similarity, "jaro"),
 ]
-
-
-def detect_language(text: str):
-    if len(text.split()) <= 1:
-        return (False, False, "un")
-
-    # fasttext
-    isuppers = [c.isupper() for c in text if c.isalpha()]
-    if len(isuppers) == 0:
-        return (False, False, "un")
-    elif sum(isuppers) / len(isuppers) > 0.9:
-        fasttext_pred = FASTTEXT_MODEL.predict(text.lower().replace("\n", " "))
-        predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
-    else:
-        fasttext_pred = FASTTEXT_MODEL.predict(text.replace("\n", " "))
-        predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
-
-    # cld2
-    try:
-        cld2_pred = cld2.detect(text)
-        predicted_language_2 = cld2_pred[2][0][1]
-        if predicted_language_2 == "un":
-            predicted_language_2 = "un_2"
-    except:  # noqa: E722
-        predicted_language_2 = "un_2"
-
-    if predicted_language_ft == "un_ft" and predicted_language_2 == "un_2":
-        predicted_language = "un"
-        is_reliable = False
-    elif predicted_language_ft == "un_ft":
-        predicted_language = predicted_language_2
-        is_reliable = True
-    elif predicted_language_2 == "un_2":
-        predicted_language = predicted_language_ft
-        is_reliable = True
-    elif predicted_language_2 != predicted_language_ft:
-        predicted_language = "un"
-        is_reliable = False
-    else:
-        predicted_language = predicted_language_2
-        is_reliable = True
-
-    # is_english can now be obtained
-    is_english = predicted_language == "en"
-
-    return is_reliable, is_english, predicted_language
 
 
 def normalize_text(text: Optional[str], special_case_apostrophes: bool = False) -> str:

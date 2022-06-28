@@ -29,7 +29,6 @@ from s2and.text import (
     get_text_ngrams,
     compute_block,
     get_text_ngrams_words,
-    detect_language,
     AFFILIATIONS_STOP_WORDS,
     VENUE_STOP_WORDS,
     NAME_PREFIXES,
@@ -87,9 +86,6 @@ class Paper(NamedTuple):
     title: str
     has_abstract: Optional[bool]
     in_signatures: Optional[bool]
-    is_english: Optional[bool]
-    is_reliable: Optional[bool]
-    predicted_language: Optional[str]
     title_ngrams_words: Optional[Counter]
     authors: List[Author]
     venue: Optional[str]
@@ -99,7 +95,6 @@ class Paper(NamedTuple):
     journal_ngrams: Optional[Counter]
     reference_details: Optional[Tuple[Counter, Counter, Counter, Counter]]
     year: Optional[int]
-    references: Optional[List[int]]
     paper_id: int
 
 
@@ -151,8 +146,6 @@ class ANDData:
         random_seed: random seed
         load_name_counts: Whether or not to load name counts
         n_jobs: number of cpus to use
-        preprocess: whether to preprocess the data (normalization, etc)
-        name_tuples: optionally pass in the already created set of name tuples, to avoid recomputation
     """
 
     def __init__(
@@ -190,8 +183,6 @@ class ANDData:
         random_seed: int = 1111,
         load_name_counts: Union[bool, Dict] = True,
         n_jobs: int = 1,
-        preprocess: bool = True,
-        name_tuples: Set[Tuple[str, str]] = None,
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -221,9 +212,6 @@ class ANDData:
                 title=paper["title"],
                 has_abstract=paper["abstract"] not in {"", None},  # todo: change how we do this given new metadata
                 in_signatures=None,
-                is_english=None,
-                is_reliable=None,
-                predicted_language=None,
                 title_ngrams_words=None,
                 authors=[
                     Author(
@@ -239,7 +227,6 @@ class ANDData:
                 journal_ngrams=None,
                 reference_details=None,
                 year=paper["year"],
-                references=paper.get("references", []),
                 paper_id=paper["paper_id"],
             )
         logger.info("loaded papers")
@@ -380,19 +367,9 @@ class ANDData:
         papers_from_signatures = set([str(signature.paper_id) for signature in self.signatures.values()])
         for paper_id, paper in self.papers.items():
             self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
-        self.preprocess = preprocess
-
-        if name_tuples is None:
-            self.name_tuples = set()
-            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt"), "r") as f2:  # type: ignore
-                for line in f2:
-                    line_split = line.strip().split(",")  # type: ignore
-                    self.name_tuples.add((line_split[0], line_split[1]))
-        else:
-            self.name_tuples = name_tuples
 
         logger.info("preprocessing papers")
-        self.papers = preprocess_papers_parallel(self.papers, self.n_jobs, self.preprocess)
+        self.papers = preprocess_papers_parallel(self.papers, self.n_jobs)
         logger.info("preprocessed papers")
 
         logger.info("preprocessing signatures")
@@ -675,17 +652,7 @@ class ANDData:
         """Applies cluster_seeds and generates the default
         constraints which are:
 
-        First we apply the passed-in cluster_seeds, then:
-
-        (1) if not a.prefix(b) or b.prefix(a) and (a, b) not in self.name_tuples:
-            distance(a, b) = high_value
-
-        (2) if len(a_middle) > 0 and len(b_middle) > 0 and
-            intersection(a_middle_chars, b_middle_chars) == 0:
-            distance(a, b) = high_value
-
-        There is currently no rule to assign low_value but it would be good
-        to potentially add an ORCID rule to use low_value
+        We apply the passed-in cluster_seeds
 
         Parameters
         ----------
@@ -707,9 +674,6 @@ class ANDData:
         -------
         float: the constraint value
         """
-        first_1 = self.signatures[signature_id_1].author_info_first_normalized_without_apostrophe
-        first_2 = self.signatures[signature_id_2].author_info_first_normalized_without_apostrophe
-        middle_1 = self.signatures[signature_id_1].author_info_middle_normalized_without_apostrophe.split()
 
         paper_1 = self.papers[str(self.signatures[signature_id_1].paper_id)]
         paper_2 = self.papers[str(self.signatures[signature_id_2].paper_id)]
@@ -730,55 +694,8 @@ class ANDData:
             and (self.cluster_seeds_require[signature_id_1] != self.cluster_seeds_require[signature_id_2])
         ):
             return CLUSTER_SEEDS_LOOKUP["disallow"]
-        # just-in-case last name constraint: if last names are different, then disallow
-        elif (
-            self.signatures[signature_id_1].author_info_last_normalized
-            != self.signatures[signature_id_2].author_info_last_normalized
-        ):
-            return high_value
-        # just-in-case first initial constraint: if first initials are different, then disallow
-        elif len(first_1) > 0 and len(first_2) > 0 and first_1[0] != first_2[0]:
-            return high_value
-        # and then language constraints
-        elif (paper_1.is_reliable and paper_2.is_reliable) and (
-            paper_1.predicted_language != paper_2.predicted_language
-        ):
-            return high_value
-        # and then name based constraints
         else:
-            signature_2 = self.signatures[signature_id_2]
-            prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
-            known_alias = (first_1, first_2) in self.name_tuples
-            # dont cluster together if the two first names are not prefixes of each other, and the pair
-            # is not present in a provided list of known name pairs
-            if not prefix and not known_alias:
-                return high_value
-            # dont cluster together if there is no intersection between the sets of middle initials
-            # and both sets are not empty
-            elif len(middle_1) > 0:
-                middle_2 = signature_2.author_info_middle_normalized_without_apostrophe.split()
-                if len(middle_2) > 0:
-                    overlapping_affixes = set(middle_2).intersection(middle_1).intersection(DROPPED_AFFIXES)
-                    middle_1_all = [word for word in middle_1 if len(word) > 0 and word not in overlapping_affixes]
-                    middle_2_all = [word for word in middle_2 if len(word) > 0 and word not in overlapping_affixes]
-                    middle_1_words = set([word for word in middle_1_all if len(word) > 1])
-                    middle_2_words = set([word for word in middle_2_all if len(word) > 1])
-                    middle_1_firsts = set([word[0] for word in middle_1_all])
-                    middle_2_firsts = set([word[0] for word in middle_2_all])
-                    conflicting_initials = (
-                        len(middle_1_firsts) > 0
-                        and len(middle_2_firsts) > 0
-                        and len(middle_1_firsts.intersection(middle_2_firsts)) == 0
-                    )
-                    conflicting_full_names = (
-                        len(middle_1_words) > 0
-                        and len(middle_2_words) > 0
-                        and len(middle_1_words.intersection(middle_2_words)) == 0
-                        and set("".join(middle_1_words)) != set("".join(middle_2_words))
-                    )
-                    if conflicting_initials or conflicting_full_names:
-                        return high_value
-        return None
+            return None
 
     def get_signatures_to_block(self) -> Dict[str, str]:
         """
@@ -1325,9 +1242,6 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
 
     key, paper = item
 
-    if paper.in_signatures:
-        is_reliable, is_english, predicted_language = detect_language(paper.title)
-        paper = paper._replace(is_english=is_english, predicted_language=predicted_language, is_reliable=is_reliable)
     title = normalize_text(paper.title)
     title_ngrams_words = get_text_ngrams_words(title)
     authors = [
@@ -1356,48 +1270,7 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     return (key, paper)
 
 
-def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, Paper]:
-    """
-    helper function to perform preprocessing of the reference details for a paper.
-    Note: this happens after the main paper preprocessing has occurred.
-
-    Parameters
-    ----------
-    item: Tuple[str, Paper, List[MiniPaper]]
-        tuple of paper id, Paper object, and list of MiniPaper objects for the references
-
-    Returns
-    -------
-    Tuple[str, Paper]: tuple of paper id and preprocessed Paper object
-    """
-    key, paper, reference_papers = item
-
-    titles = " ".join(filter(None, [paper.title for paper in reference_papers]))
-    venues = " ".join(filter(None, [paper.venue for paper in reference_papers]))
-    journals = " ".join(filter(None, [paper.journal_name for paper in reference_papers]))
-
-    authors: List[str] = list(
-        filter(
-            None,
-            [author.strip() for paper in reference_papers for author in paper.authors],
-        )
-    )
-    blocks = [compute_block(author) for author in authors]
-    names = " ".join(authors)
-    reference_details = (
-        get_text_ngrams(names.strip(), use_bigrams=True, stopwords=None),
-        get_text_ngrams(titles, use_bigrams=True),
-        get_text_ngrams(
-            venues + " " + journals if venues != journals else venues, stopwords=VENUE_STOP_WORDS, use_bigrams=True
-        ),
-        Counter(blocks),
-    )
-    paper = paper._replace(reference_details=reference_details)
-
-    return (key, paper)
-
-
-def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool) -> Dict:
+def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
     """
     helper function to preprocess papers
 
@@ -1407,8 +1280,6 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
         the papers dictionary
     n_jobs: int
         how many cpus to use
-    preprocess: bool
-        whether to do all of the preprocessing, or just a small piece of it
 
     Returns
     -------
@@ -1429,41 +1300,5 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
         for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers 1/2"):
             result = preprocess_paper_1(item)
             output[result[0]] = result[1]
-
-    if preprocess:
-        input_2 = [
-            (
-                key,
-                value,
-                [
-                    MiniPaper(
-                        title=paper.title,
-                        venue=paper.venue,
-                        journal_name=paper.journal_name,
-                        authors=[author.author_name for author in paper.authors],
-                    )
-                    for paper in list(
-                        filter(
-                            None,
-                            [output.get(str(ref_id), None) for ref_id in value.references],
-                        )
-                    )
-                ]
-                if value.references is not None
-                else [],
-            )
-            for key, value in output.items()
-        ]
-        if n_jobs > 1:
-            with multiprocessing.Pool(processes=n_jobs) as p:
-                _max = len(input_2)
-                with tqdm(total=_max, desc="Preprocessing papers 2/2") as pbar:
-                    for key, value in p.imap(preprocess_paper_2, input_2, 100):
-                        output[key] = value
-                        pbar.update()
-        else:
-            for item in tqdm(input_2, total=len(input_2), desc="Preprocessing papers 2/2"):
-                result = preprocess_paper_2(item)
-                output[result[0]] = result[1]
 
     return output

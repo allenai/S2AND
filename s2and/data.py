@@ -68,8 +68,6 @@ class Signature(NamedTuple):
     author_info_position: int
     author_info_block: str
     author_info_given_block: Optional[str]
-    author_info_estimated_gender: Optional[str]
-    author_info_estimated_ethnicity: Optional[str]
     paper_id: int
     sourced_author_source: Optional[str]
     sourced_author_ids: List[str]
@@ -80,7 +78,6 @@ class Signature(NamedTuple):
 class Author(NamedTuple):
     author_name: str
     position: int
-
 
 class Paper(NamedTuple):
     title: str
@@ -93,7 +90,6 @@ class Paper(NamedTuple):
     title_ngrams_chars: Optional[Counter]
     venue_ngrams: Optional[Counter]
     journal_ngrams: Optional[Counter]
-    reference_details: Optional[Tuple[Counter, Counter, Counter, Counter]]
     year: Optional[int]
     paper_id: int
 
@@ -225,7 +221,6 @@ class ANDData:
                 title_ngrams_chars=None,
                 venue_ngrams=None,
                 journal_ngrams=None,
-                reference_details=None,
                 year=paper["year"],
                 paper_id=paper["paper_id"],
             )
@@ -233,6 +228,7 @@ class ANDData:
 
         logger.info("loading signatures")
         self.signatures = self.maybe_load_json(signatures)
+        
         # convert dictionary to namedtuples for memory reduction
         for signature_id, signature in self.signatures.items():
             self.signatures[signature_id] = Signature(
@@ -258,8 +254,6 @@ class ANDData:
                 author_info_position=signature["author_info"]["position"],
                 author_info_block=signature["author_info"]["block"],
                 author_info_given_block=signature["author_info"].get("given_block", None),
-                author_info_estimated_gender=signature["author_info"].get("estimated_gender", None),
-                author_info_estimated_ethnicity=signature["author_info"].get("estimated_ethnicity", None),
                 paper_id=signature["paper_id"],
                 sourced_author_source=signature.get("sourced_author_source", None),
                 sourced_author_ids=signature.get("sourced_author_ids", []),
@@ -1257,15 +1251,14 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
         venue = normalize_text(paper.venue)
         journal_name = normalize_text(paper.journal_name)
         paper = paper._replace(venue=venue, journal_name=journal_name)
-        if paper.in_signatures:
-            title_ngrams_chars = get_text_ngrams(paper.title, use_bigrams=True)
-            venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
-            journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
-            paper = paper._replace(
-                title_ngrams_chars=title_ngrams_chars,
-                venue_ngrams=venue_ngrams,
-                journal_ngrams=journal_ngrams,
-            )
+        title_ngrams_chars = get_text_ngrams(paper.title, use_bigrams=True)
+        venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
+        journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
+        paper = paper._replace(
+            title_ngrams_chars=title_ngrams_chars,
+            venue_ngrams=venue_ngrams,
+            journal_ngrams=journal_ngrams,
+        )
 
     return (key, paper)
 

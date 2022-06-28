@@ -232,8 +232,6 @@ def facet_eval(
 
     Returns
     -------
-    Dict: B3 F1 broken down by perceived estimated gender.
-    Dict: B3 F1 broken down by perceived estimated ethnicity.
     Dict: B3 F1 broken down by number of paper authors.
     Dict: B3 F1 broken down by year.
     Dict: B3 F1 broken down by block size.
@@ -260,37 +258,7 @@ def facet_eval(
     for cluster_id, cluster_dict in dataset.clusters.items():
         cluster_len_dict[cluster_id] = len(cluster_dict["signature_ids"])
 
-    # for homonymity and synonymity we need to check all pairs
-    homonymity: Dict[str, int] = defaultdict(int)
-    synonymity: Dict[str, int] = defaultdict(int)
-    denominator: Dict[str, int] = defaultdict(int)
-    signature_keys = list(metrics_per_signature.keys())
-    for i, signature_key_a in enumerate(signature_keys):
-        for signature_key_b in signature_keys[i + 1 :]:
-            signature_a = dataset.signatures[signature_key_a]
-            signature_b = dataset.signatures[signature_key_b]
-            # these counts only make sense within blocks
-            if block_type == "original":
-                same_block = signature_a.author_info_given_block == signature_b.author_info_given_block
-            elif block_type == "s2":
-                same_block = signature_a.author_info_block == signature_b.author_info_block
-            if same_block:
-                same_name = signature_a.author_info_full_name == signature_b.author_info_full_name
-                same_cluster = (
-                    dataset.signature_to_cluster_id[signature_key_a] == dataset.signature_to_cluster_id[signature_key_b]
-                )
-                if same_name and not same_cluster:
-                    homonymity[signature_key_a] += 1
-                    homonymity[signature_key_b] += 1
-                elif not same_name and same_cluster:
-                    synonymity[signature_key_a] += 1
-                    synonymity[signature_key_b] += 1
-                denominator[signature_key_a] += 1
-                denominator[signature_key_b] += 1
-
     # Keep track of facet specific f-score performance
-    gender_f1 = defaultdict(list)
-    ethnicity_f1 = defaultdict(list)
     author_num_f1 = defaultdict(list)
     year_f1 = defaultdict(list)
     block_len_f1 = defaultdict(list)
@@ -314,14 +282,6 @@ def facet_eval(
         cluster_id = dataset.signature_to_cluster_id[signature_key]
         signature = dataset.signatures[signature_key]
         paper = dataset.papers[str(signature.paper_id)]
-
-        if signature.author_info_estimated_gender is not None:
-            gender_f1[signature.author_info_estimated_gender].append(f1)
-            _signature_dict["estimated_gender"] = signature.author_info_estimated_gender
-
-        if signature.author_info_estimated_ethnicity is not None:
-            ethnicity_f1[signature.author_info_estimated_ethnicity[0:3]].append(f1)
-            _signature_dict["estimated_ethnicity"] = signature.author_info_estimated_ethnicity
 
         author_num_f1[len(paper.authors)].append(f1)
         year_f1[paper.year].append(f1)
@@ -377,18 +337,6 @@ def facet_eval(
             block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
             _signature_dict["block size"] = block_len_dict[signature.author_info_block]
 
-        if homonymity[signature_key] > 0:
-            homonymity_f1[np.round(homonymity[signature_key] / denominator[signature_key], 2)].append(f1)
-            _signature_dict["homonymity"] = np.round(homonymity[signature_key] / denominator[signature_key], 2)
-        else:
-            _signature_dict["homonymity"] = 0
-
-        if synonymity[signature_key] > 0:
-            synonymity_f1[np.round(synonymity[signature_key] / denominator[signature_key], 2)].append(f1)
-            _signature_dict["synonymity"] = np.round(synonymity[signature_key] / denominator[signature_key], 2)
-        else:
-            _signature_dict["synonymity"] = 0
-
         _signature_dict["signature_id"] = signature_key
         _signature_dict["precision"] = p
         _signature_dict["recall"] = r
@@ -400,14 +348,10 @@ def facet_eval(
         signature_lookup.append(_signature_dict)
 
     return (
-        gender_f1,
-        ethnicity_f1,
         author_num_f1,
         year_f1,
         block_len_f1,
         cluster_len_f1,
-        homonymity_f1,
-        synonymity_f1,
         firstname_f1,
         affiliation_f1,
         email_f1,

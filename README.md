@@ -47,7 +47,7 @@ from os.path import join
 from s2and.data import ANDData
 
 dataset_name = "pubmed"
-parent_dir = "data/pubmed/
+parent_dir = f"data/{dataset_name}"
 dataset = ANDData(
     signatures=join(parent_dir, f"{dataset_name}_signatures.json"),
     papers=join(parent_dir, f"{dataset_name}_papers.json"),

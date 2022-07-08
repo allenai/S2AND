@@ -46,8 +46,8 @@ Once you have downloaded the datasets, you can go ahead and load up one of them:
 from os.path import join
 from s2and.data import ANDData
 
-dataset_name = "test"
-parent_dir = "data/test/"
+dataset_name = "pubmed"
+parent_dir = f"data/{dataset_name}"
 dataset = ANDData(
     authors=join(parent_dir, f"{dataset_name}_authors.json"),
     papers=join(parent_dir, f"{dataset_name}_papers.json"),

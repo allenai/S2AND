@@ -18,7 +18,7 @@ class TestClusterer(unittest.TestCase):
             "tests/dummy/papers.json",
             clusters="tests/dummy/clusters.json",
             cluster_seeds={"1": {"2": "require"}},
-            altered_cluster_signatures=["1", "2"],
+            altered_cluster_papers=["1", "2"],
             name="dummy",
             load_name_counts=True,
         )
@@ -75,7 +75,7 @@ class TestClusterer(unittest.TestCase):
         # this issue comes up later so someone knows where to start.
         # It is testing that when the claimed cluster only contains signatures with a single character
         # first name, the added incompatibility rule does not prevent adding to the cluster
-        self.dummy_dataset.altered_cluster_signatures = ["1", "5"]
+        self.dummy_dataset.altered_cluster_papers = ["1", "5"]
         self.dummy_dataset.cluster_seeds_require = {"1": 0, "5": 0}
         block = ["3", "4"]
         output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)

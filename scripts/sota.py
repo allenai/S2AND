@@ -283,7 +283,7 @@ def main(
         logger.info(f"signature keys {train_signatures, val_signatures, test_signatures}")
 
         anddata = ANDData(
-            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
+            authors=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="train",
@@ -303,9 +303,9 @@ def main(
             train_blocks=train_blocks,
             val_blocks=val_blocks,
             test_blocks=test_blocks,
-            train_signatures=train_signatures,
-            val_signatures=val_signatures,
-            test_signatures=test_signatures,
+            train_papers=train_signatures,
+            val_papers=val_signatures,
+            test_papers=test_signatures,
             train_ratio=train_ratio,
             val_ratio=val_ratio,
             test_ratio=test_ratio,

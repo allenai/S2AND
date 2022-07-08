@@ -116,7 +116,7 @@ def make_dataset_triplets(args, dataset):
 def load_dataset(data_dir, dataset_name, seed, n_jobs=8):
     dataset_dir = os.path.join(data_dir, dataset_name)
     dataset = ANDData(
-        signatures=os.path.join(dataset_dir, dataset_name + "_signatures.json"),
+        authors=os.path.join(dataset_dir, dataset_name + "_signatures.json"),
         papers=os.path.join(dataset_dir, dataset_name + "_papers.json"),
         name=dataset_name,
         mode="train",

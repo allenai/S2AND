@@ -2,7 +2,7 @@ import string
 import re
 from typing import List, Set, Tuple
 
-from s2and.data import ANDData
+from s2and.data import PDData
 from s2and.text import jaccard, normalize_text
 
 # This file is helper functions for comparing aspects of author disambiguation to
@@ -20,14 +20,14 @@ def normalized_affiliation_tokens(s: List[str]) -> Set[str]:
     return s_split.difference(STOPWORDS)
 
 
-def affiliation_fuzzy_match(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData) -> float:
+def affiliation_fuzzy_match(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData) -> float:
     affiliations_1 = [
-        normalized_affiliation_tokens(dataset.signatures[signature].author_info_affiliations)
+        normalized_affiliation_tokens(dataset.papers[signature].author_info_affiliations)
         for signature in cluster_candidate_1
     ]
 
     affiliations_2 = [
-        normalized_affiliation_tokens(dataset.signatures[signature].author_info_affiliations)
+        normalized_affiliation_tokens(dataset.papers[signature].author_info_affiliations)
         for signature in cluster_candidate_2
     ]
 
@@ -38,19 +38,19 @@ def affiliation_fuzzy_match(cluster_candidate_1: List[str], cluster_candidate_2:
     return affiliations_jaccard
 
 
-def year_gap_is_small(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData) -> bool:
+def year_gap_is_small(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData) -> bool:
     years_1 = set(
         [
-            dataset.papers[str(dataset.signatures[signature].paper_id)].year
+            dataset.papers[str(dataset.papers[signature].paper_id)].year
             for signature in cluster_candidate_1
-            if dataset.papers[str(dataset.signatures[signature].paper_id)].year is not None
+            if dataset.papers[str(dataset.papers[signature].paper_id)].year is not None
         ]
     )
     years_2 = set(
         [
-            dataset.papers[str(dataset.signatures[signature].paper_id)].year
+            dataset.papers[str(dataset.papers[signature].paper_id)].year
             for signature in cluster_candidate_2
-            if dataset.papers[str(dataset.signatures[signature].paper_id)].year is not None
+            if dataset.papers[str(dataset.papers[signature].paper_id)].year is not None
         ]
     )
 
@@ -65,13 +65,13 @@ def year_gap_is_small(cluster_candidate_1: List[str], cluster_candidate_2: List[
     return is_small
 
 
-def has_year_gap(cluster_candidate_1: List[str], dataset: ANDData) -> bool:
+def has_year_gap(cluster_candidate_1: List[str], dataset: PDData) -> bool:
     years_1 = list(
         set(
             [
-                dataset.papers[str(dataset.signatures[signature].paper_id)].year
+                dataset.papers[str(dataset.papers[signature].paper_id)].year
                 for signature in cluster_candidate_1
-                if dataset.papers[str(dataset.signatures[signature].paper_id)].year is not None
+                if dataset.papers[str(dataset.papers[signature].paper_id)].year is not None
             ]
         )
     )
@@ -83,7 +83,7 @@ def has_year_gap(cluster_candidate_1: List[str], dataset: ANDData) -> bool:
 
 
 def trusted_ids_are_compatible(
-    cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData, orcid_only: bool = False
+    cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData, orcid_only: bool = False
 ) -> bool:
     orcid_1 = set()
     orcid_2 = set()
@@ -92,14 +92,14 @@ def trusted_ids_are_compatible(
         dblp_2 = set()
 
     for signature_id in cluster_candidate_1:
-        signature = dataset.signatures[signature_id]
+        signature = dataset.papers[signature_id]
         if signature.sourced_author_source == "ORCID":
             orcid_1.update(signature.sourced_author_ids)
         elif signature.sourced_author_source == "DBLP" and not orcid_only:
             dblp_1.update(signature.sourced_author_ids)
 
     for signature_id in cluster_candidate_2:
-        signature = dataset.signatures[signature_id]
+        signature = dataset.papers[signature_id]
         if signature.sourced_author_source == "ORCID":
             orcid_2.update(signature.sourced_author_ids)
         elif signature.sourced_author_source == "DBLP" and not orcid_only:
@@ -113,19 +113,19 @@ def trusted_ids_are_compatible(
         return orcid_ok and dblp_ok
 
 
-def emails_match_exactly(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData) -> bool:
+def emails_match_exactly(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData) -> bool:
     emails_1 = set(
         [
-            dataset.signatures[signature].author_info_email
+            dataset.papers[signature].author_info_email
             for signature in cluster_candidate_1
-            if dataset.signatures[signature].author_info_email is not None
+            if dataset.papers[signature].author_info_email is not None
         ]
     )
     emails_2 = set(
         [
-            dataset.signatures[signature].author_info_email
+            dataset.papers[signature].author_info_email
             for signature in cluster_candidate_2
-            if dataset.signatures[signature].author_info_email is not None
+            if dataset.papers[signature].author_info_email is not None
         ]
     )
 
@@ -137,7 +137,7 @@ def emails_match_exactly(cluster_candidate_1: List[str], cluster_candidate_2: Li
 
 
 def trusted_ids_match_exactly(
-    cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData, orcid_only: bool = False
+    cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData, orcid_only: bool = False
 ) -> bool:
     orcid_1 = set()
     orcid_2 = set()
@@ -146,14 +146,14 @@ def trusted_ids_match_exactly(
         dblp_2 = set()
 
     for signature_id in cluster_candidate_1:
-        signature = dataset.signatures[signature_id]
+        signature = dataset.papers[signature_id]
         if signature.sourced_author_source == "ORCID":
             orcid_1.update(signature.sourced_author_ids)
         elif signature.sourced_author_source == "DBLP" and not orcid_only:
             dblp_1.update(signature.sourced_author_ids)
 
     for signature_id in cluster_candidate_2:
-        signature = dataset.signatures[signature_id]
+        signature = dataset.papers[signature_id]
         if signature.sourced_author_source == "ORCID":
             orcid_2.update(signature.sourced_author_ids)
         elif signature.sourced_author_source == "DBLP" and not orcid_only:
@@ -181,13 +181,13 @@ def trusted_ids_match_exactly(
     return False
 
 
-def names_are_compatible(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData) -> bool:
+def names_are_compatible(cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData) -> bool:
     last_names_first_initials_1 = set()
     full_first_names_1 = set()
     full_middle_names_1 = set()
     middle_initials_1 = set()
     for signature_id in cluster_candidate_1:
-        signature = dataset.signatures[signature_id]
+        signature = dataset.papers[signature_id]
         first = normalize_text(signature.author_info_first)
         middle = normalize_text(signature.author_info_middle)
         last = normalize_text(signature.author_info_last)
@@ -210,7 +210,7 @@ def names_are_compatible(cluster_candidate_1: List[str], cluster_candidate_2: Li
     full_middle_names_2 = set()
     middle_initials_2 = set()
     for signature_id in cluster_candidate_2:
-        signature = dataset.signatures[signature_id]
+        signature = dataset.papers[signature_id]
         first = normalize_text(signature.author_info_first)
         middle = normalize_text(signature.author_info_middle)
         last = normalize_text(signature.author_info_last)
@@ -252,12 +252,12 @@ def names_are_compatible(cluster_candidate_1: List[str], cluster_candidate_2: Li
 
 
 def sergeys_rule(
-    cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: ANDData, name_tuples: Set[Tuple[str, str]]
+    cluster_candidate_1: List[str], cluster_candidate_2: List[str], dataset: PDData, name_tuples: Set[Tuple[str, str]]
 ) -> bool:
     for signature_id_a in cluster_candidate_1:
-        first_a = dataset.signatures[signature_id_a].author_info_first_normalized_without_apostrophe
+        first_a = dataset.papers[signature_id_a].author_info_first_normalized_without_apostrophe
         for signature_id_b in cluster_candidate_2:
-            first_b = dataset.signatures[signature_id_b].author_info_first_normalized_without_apostrophe
+            first_b = dataset.papers[signature_id_b].author_info_first_normalized_without_apostrophe
             prefix = first_a.startswith(first_b) or first_b.startswith(first_a)
             known_alias = (first_a, first_b) in name_tuples
             if not prefix and not known_alias:

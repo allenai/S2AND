@@ -1,6 +1,6 @@
 from typing import Optional, Union, Dict, List, Any, Tuple, Set, NamedTuple
 
-import os
+import random
 import json
 import numpy as np
 import pandas as pd
@@ -15,11 +15,10 @@ from collections import defaultdict, Counter
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 
-from s2and.sampling import sampling, random_sampling
+
 from s2and.consts import (
     NUMPY_NAN,
     NAME_COUNTS_PATH,
-    PROJECT_ROOT_PATH,
     LARGE_DISTANCE,
     CLUSTER_SEEDS_LOOKUP,
 )
@@ -27,12 +26,10 @@ from s2and.file_cache import cached_path
 from s2and.text import (
     normalize_text,
     get_text_ngrams,
-    compute_block,
     get_text_ngrams_words,
     AFFILIATIONS_STOP_WORDS,
     VENUE_STOP_WORDS,
     NAME_PREFIXES,
-    DROPPED_AFFIXES,
 )
 
 logger = logging.getLogger("s2and")
@@ -45,7 +42,7 @@ class NameCounts(NamedTuple):
     last_first_initial: Optional[int]
 
 
-class Signature(NamedTuple):
+class Author(NamedTuple):
     author_info_first: Optional[str]
     author_info_first_normalized_without_apostrophe: Optional[str]
     author_info_middle: Optional[str]
@@ -56,34 +53,20 @@ class Signature(NamedTuple):
     author_info_suffix: Optional[str]
     author_info_first_normalized: Optional[str]
     author_info_middle_normalized: Optional[str]
-    author_info_coauthors: Optional[List[str]]
-    author_info_coauthor_blocks: Optional[List[str]]
     author_info_full_name: Optional[str]
     author_info_affiliations: List[str]
     author_info_affiliations_n_grams: Optional[Counter]
-    author_info_coauthor_n_grams: Optional[Counter]
     author_info_email: Optional[str]
     author_info_email_prefix_ngrams: Optional[Counter]
     author_info_name_counts: Optional[NameCounts]
     author_info_position: int
-    author_info_block: str
-    author_info_given_block: Optional[str]
-    paper_id: int
-    sourced_author_source: Optional[str]
-    sourced_author_ids: List[str]
-    author_id: Optional[int]
-    signature_id: str
-
-
-class Author(NamedTuple):
-    author_name: str
-    position: int
 
 class Paper(NamedTuple):
     title: str
+    abstract: str
     has_abstract: Optional[bool]
-    in_signatures: Optional[bool]
     title_ngrams_words: Optional[Counter]
+    abstract_ngrams_words: Optional[Counter]
     authors: List[Author]
     venue: Optional[str]
     journal_name: Optional[str]
@@ -92,40 +75,32 @@ class Paper(NamedTuple):
     journal_ngrams: Optional[Counter]
     year: Optional[int]
     paper_id: int
+    block: Optional[str]
 
 
-class MiniPaper(NamedTuple):
-    title: str
-    venue: Optional[str]
-    journal_name: Optional[str]
-    authors: List[str]
-
-
-class ANDData:
+class PDData:
     """
-    The main class for holding our representation of an author disambiguation dataset
+    The main class for holding our representation of an paper disambiguation data
 
     Input:
-        signatures: path to the signatures json file (or the json object)
         papers: path to the papers information json file (or the json object)
         name: name of the dataset, used for caching computed features
         mode: 'train' or 'inference'; if 'inference', everything related to splitting will be ignored
         clusters: path to the clusters json file (or the json object)
         specter_embeddings: path to the specter embeddings pickle (or the dictionary object)
         cluster_seeds: path to the cluster seed json file (or the json object)
-        altered_cluster_signatures: path to the signature ids \n-separated txt file (or a list or set object)
-            Clusters that these signatures appear in will be marked as "altered"
+        altered_cluster_papers: path to the paper ids \n-separated txt file (or a list or set object)
+            Clusters that these papers appear in will be marked as "altered"
         train_pairs: path to predefined train pairs csv (or the dataframe object)
         val_pairs: path to predefined val pairs csv (or the dataframe object)
         test_pairs: path to predefined test pairs csv (or the dataframe object)
         train_blocks: path to predefined train blocks (or the json object)
         val_blocks: path to predefined val blocks (or the json object)
         test_blocks: path to predefined test blocks (or the json object)
-        train_signatures: path to predefined train signatures (or the json object)
-        val_signatures: path to predefined val signatures (or the json object)
-        test_signatures: path to predefined test signatures (or the json object)
-        block_type: can be either "s2" or "original"
-        unit_of_data_split: options are ("signatures", "blocks", "time")
+        train_papers: path to predefined train papers (or the json object)
+        val_papers: path to predefined val papers (or the json object)
+        test_papers: path to predefined test papers (or the json object)
+        unit_of_data_split: options are ("papers", "blocks", "time")
         num_clusters_for_block_size: probably leave as default,
             controls train/val/test splits based on block size
         train_ratio: training ratio of instances for clustering
@@ -134,9 +109,7 @@ class ANDData:
         train_pairs_size: number of training pairs for learning the linkage function
         val_pairs_size: number of validation pairs for fine-tuning the linkage function parameters
         test_pairs_size: number of test pairs for evaluating the linkage function
-        pair_sampling_block: sample pairs from only within blocks?,
         pair_sampling_balanced_classes: sample a balanced number of positive and negative pairs?,
-        pair_sampling_balanced_homonym_synonym: sample a balanced number of homonymous and synonymous pairs?,
         all_test_pairs_flag: With blocking, for the linkage function evaluation task, should the test
             contain all possible pairs from test blocks, or the given number of pairs (test_pairs_size)
         random_seed: random seed
@@ -146,24 +119,22 @@ class ANDData:
 
     def __init__(
         self,
-        signatures: Union[str, Dict],
         papers: Union[str, Dict],
         name: str,
         mode: str = "train",
         clusters: Optional[Union[str, Dict]] = None,
         specter_embeddings: Optional[Union[str, Dict]] = None,
         cluster_seeds: Optional[Union[str, Dict]] = None,
-        altered_cluster_signatures: Optional[Union[str, List, Set]] = None,
+        altered_cluster_papers: Optional[Union[str, List, Set]] = None,
         train_pairs: Optional[Union[str, List]] = None,
         val_pairs: Optional[Union[str, List]] = None,
         test_pairs: Optional[Union[str, List]] = None,
         train_blocks: Optional[Union[str, List]] = None,
         val_blocks: Optional[Union[str, List]] = None,
         test_blocks: Optional[Union[str, List]] = None,
-        train_signatures: Optional[Union[str, List]] = None,
-        val_signatures: Optional[Union[str, List]] = None,
-        test_signatures: Optional[Union[str, List]] = None,
-        block_type: str = "s2",
+        train_papers: Optional[Union[str, List]] = None,
+        val_papers: Optional[Union[str, List]] = None,
+        test_papers: Optional[Union[str, List]] = None,
         unit_of_data_split: str = "blocks",
         num_clusters_for_block_size: int = 1,
         train_ratio: float = 0.8,
@@ -172,23 +143,12 @@ class ANDData:
         train_pairs_size: int = 30000,
         val_pairs_size: int = 5000,
         test_pairs_size: int = 5000,
-        pair_sampling_block: bool = True,
-        pair_sampling_balanced_classes: bool = False,
-        pair_sampling_balanced_homonym_synonym: bool = False,
         all_test_pairs_flag: bool = False,
         random_seed: int = 1111,
         load_name_counts: Union[bool, Dict] = True,
         n_jobs: int = 1,
     ):
         if mode == "train":
-            if train_blocks is not None and block_type != "original":
-                raise Exception(
-                    "If you are passing in training/val/test blocks, then you probably want original blocks."
-                )
-
-            if unit_of_data_split == "blocks" and not pair_sampling_block:
-                raise Exception("Block-based cluster splits are not compatible with sampling stratgies 0 and 1.")
-
             if (clusters is not None and train_pairs is not None) or (
                 clusters is None and train_pairs is None and train_blocks is None
             ):
@@ -202,65 +162,48 @@ class ANDData:
 
         logger.info("loading papers")
         self.papers = self.maybe_load_json(papers)
+        
         # convert dictionary to namedtuples for memory reduction
         for paper_id, paper in self.papers.items():
             self.papers[paper_id] = Paper(
-                title=paper["title"],
-                has_abstract=paper["abstract"] not in {"", None},  # todo: change how we do this given new metadata
-                in_signatures=None,
+                title=paper.get("title", ''),
+                abstract=paper.get("abstract", None),
+                has_abstract=paper.get("abstract", None) not in {"", None},
                 title_ngrams_words=None,
+                abstract_ngrams_words=None,
                 authors=[
                     Author(
-                        author_name=author["author_name"],
-                        position=author["position"],
+                        author_info_first=author["first"],
+                        author_info_first_normalized_without_apostrophe=None,
+                        author_info_middle=' '.join(author["middle"]),
+                        author_info_middle_normalized_without_apostrophe=None,
+                        author_info_last_normalized=None,
+                        author_info_last=author["last"],
+                        author_info_suffix_normalized=None,
+                        author_info_suffix=author["suffix"],
+                        author_info_first_normalized=None,
+                        author_info_middle_normalized=None,
+                        author_info_full_name=None,
+                        author_info_affiliations=author["affiliations"],
+                        author_info_affiliations_n_grams=None,
+                        author_info_email=author["email"],
+                        author_info_email_prefix_ngrams=None,
+                        author_info_name_counts=None,
+                        author_info_position=author["position"],
                     )
                     for author in paper["authors"]
                 ],
-                venue=paper["venue"],
-                journal_name=paper["journal_name"],
+                venue=paper.get("venue", None),
+                journal_name=paper.get('journal_name', None),
                 title_ngrams_chars=None,
                 venue_ngrams=None,
                 journal_ngrams=None,
-                year=paper["year"],
+                year=paper.get("year", None),
                 paper_id=paper["paper_id"],
+                block=paper.get("block", None),
             )
         logger.info("loaded papers")
 
-        logger.info("loading signatures")
-        self.signatures = self.maybe_load_json(signatures)
-        
-        # convert dictionary to namedtuples for memory reduction
-        for signature_id, signature in self.signatures.items():
-            self.signatures[signature_id] = Signature(
-                author_info_first=signature["author_info"]["first"],
-                author_info_first_normalized_without_apostrophe=None,
-                author_info_middle=signature["author_info"]["middle"],
-                author_info_middle_normalized_without_apostrophe=None,
-                author_info_last_normalized=None,
-                author_info_last=signature["author_info"]["last"],
-                author_info_suffix_normalized=None,
-                author_info_suffix=signature["author_info"]["suffix"],
-                author_info_first_normalized=None,
-                author_info_middle_normalized=None,
-                author_info_coauthors=None,
-                author_info_coauthor_blocks=None,
-                author_info_full_name=None,
-                author_info_affiliations=signature["author_info"]["affiliations"],
-                author_info_affiliations_n_grams=None,
-                author_info_coauthor_n_grams=None,
-                author_info_email=signature["author_info"]["email"],
-                author_info_email_prefix_ngrams=None,
-                author_info_name_counts=None,
-                author_info_position=signature["author_info"]["position"],
-                author_info_block=signature["author_info"]["block"],
-                author_info_given_block=signature["author_info"].get("given_block", None),
-                paper_id=signature["paper_id"],
-                sourced_author_source=signature.get("sourced_author_source", None),
-                sourced_author_ids=signature.get("sourced_author_ids", []),
-                author_id=signature.get("author_id", None),
-                signature_id=signature["signature_id"],
-            )
-        logger.info("loaded signatures")
         self.name = name
         self.mode = mode
         logger.info("loading clusters")
@@ -269,22 +212,22 @@ class ANDData:
         self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
         logger.info("loaded specter, loading cluster seeds")
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
-        self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
+        self.altered_cluster_papers = self.maybe_load_list(altered_cluster_papers)
         self.cluster_seeds_disallow = set()
         self.cluster_seeds_require = {}
         self.max_seed_cluster_id = None
         if cluster_seeds_dict is not None:
             cluster_num = 0
-            for signature_id_a, values in cluster_seeds_dict.items():
+            for paper_id_a, values in cluster_seeds_dict.items():
                 root_added = False
-                for signature_id_b, constraint_string in values.items():
+                for paper_id_b, constraint_string in values.items():
                     if constraint_string == "disallow":
-                        self.cluster_seeds_disallow.add((signature_id_a, signature_id_b))
+                        self.cluster_seeds_disallow.add((paper_id_a, paper_id_b))
                     elif constraint_string == "require":
                         if not root_added:
-                            self.cluster_seeds_require[signature_id_a] = cluster_num
+                            self.cluster_seeds_require[paper_id_a] = cluster_num
                             root_added = True
-                        self.cluster_seeds_require[signature_id_b] = cluster_num
+                        self.cluster_seeds_require[paper_id_b] = cluster_num
                 cluster_num += 1
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
@@ -294,10 +237,9 @@ class ANDData:
         self.train_blocks = self.maybe_load_json(train_blocks)
         self.val_blocks = self.maybe_load_json(val_blocks)
         self.test_blocks = self.maybe_load_json(test_blocks)
-        self.train_signatures = self.maybe_load_json(train_signatures)
-        self.val_signatures = self.maybe_load_json(val_signatures)
-        self.test_signatures = self.maybe_load_json(test_signatures)
-        self.block_type = block_type
+        self.train_papers = self.maybe_load_json(train_papers)
+        self.val_papers = self.maybe_load_json(val_papers)
+        self.test_papers = self.maybe_load_json(test_papers)
         self.unit_of_data_split = unit_of_data_split
         self.num_clusters_for_block_size = num_clusters_for_block_size
         self.train_ratio = train_ratio
@@ -306,40 +248,31 @@ class ANDData:
         self.train_pairs_size = train_pairs_size
         self.val_pairs_size = val_pairs_size
         self.test_pairs_size = test_pairs_size
-        self.pair_sampling_block = pair_sampling_block
-        self.pair_sampling_balanced_classes = pair_sampling_balanced_classes
-        self.pair_sampling_balanced_homonym_synonym = pair_sampling_balanced_homonym_synonym
         self.all_test_pairs_flag = all_test_pairs_flag
         self.random_seed = random_seed
 
         if self.clusters is None:
-            self.signature_to_cluster_id = None
+            self.paper_to_cluster_id = None
 
         if self.mode == "train":
             if self.clusters is not None:
-                self.signature_to_cluster_id = {}
-                logger.info("making signature to cluster id")
+                self.paper_to_cluster_id = {}
+                logger.info("making paper to cluster id")
                 for cluster_id, cluster_info in self.clusters.items():
-                    for signature in cluster_info["signature_ids"]:
-                        self.signature_to_cluster_id[signature] = cluster_id
-                logger.info("made signature to cluster id")
+                    for paper_id in cluster_info["paper_ids"]:
+                        self.paper_to_cluster_id[str(paper_id)] = cluster_id
+                logger.info("made paper to cluster id")
         elif self.mode == "inference":
-            # sampling within blocks and exhaustive flag is turned on
-            self.pair_sampling_block = True
-            self.pair_sampling_balanced_classes = False
-            self.pair_sampling_balanced_homonym_synonym = False
             self.all_test_pairs_flag = True
-            self.block_type = "s2"  # pure inference is for S2 probably?
         else:
             raise Exception(f"Unknown mode: {self.mode}")
 
-        name_counts_loaded = False
+        self.load_name_counts = load_name_counts
         if isinstance(load_name_counts, dict):
             self.first_dict = load_name_counts["first_dict"]
             self.last_dict = load_name_counts["last_dict"]
             self.first_last_dict = load_name_counts["first_last_dict"]
             self.last_first_initial_dict = load_name_counts["last_first_initial_dict"]
-            name_counts_loaded = True
         elif load_name_counts:
             logger.info("loading name counts")
             with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
@@ -353,153 +286,52 @@ class ANDData:
             self.last_dict = last_dict
             self.first_last_dict = first_last_dict
             self.last_first_initial_dict = last_first_initial_dict
-            name_counts_loaded = True
             logger.info("loaded name counts")
 
         self.n_jobs = n_jobs
-        self.signature_to_block = self.get_signatures_to_block()
-        papers_from_signatures = set([str(signature.paper_id) for signature in self.signatures.values()])
-        for paper_id, paper in self.papers.items():
-            self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
+        self.paper_to_block = self.get_papers_to_block()
 
         logger.info("preprocessing papers")
         self.papers = preprocess_papers_parallel(self.papers, self.n_jobs)
         logger.info("preprocessed papers")
 
-        logger.info("preprocessing signatures")
-        self.preprocess_signatures(name_counts_loaded)
-        logger.info("preprocessed signatures")
+        # name counts for each author
+        # has to happen after papers + authors are preprocessed
+        for paper_id in self.papers.keys():
+            paper = self.papers[paper_id]
+            authors = [
+                self.lookup_name_counts(author, load_name_counts) for author in paper.authors
+            ]
+            self.papers[paper_id] = paper._replace(authors=authors)
 
-    @staticmethod
-    def get_full_name_for_features(signature: Signature, include_last: bool = True, include_suffix: bool = True) -> str:
-        """
-        Creates the full name from the name parts.
-
-        Parameters
-        ----------
-        signature: Signature
-            the signature to create the full name for
-        include_last: bool
-            whether to include the last name
-        include_suffix: bool
-            whether to include the suffix
-
-        Returns
-        -------
-        string: the full name
-        """
-        first = signature.author_info_first_normalized_without_apostrophe or signature.author_info_first
-        middle = signature.author_info_middle_normalized_without_apostrophe or signature.author_info_middle
-        last = signature.author_info_last_normalized or signature.author_info_last
-        suffix = signature.author_info_suffix_normalized or signature.author_info_suffix
-        list_of_parts = [first, middle]
-        if include_last:
-            list_of_parts.append(last)
-        if include_suffix:
-            list_of_parts.append(suffix)
-        name_parts = [part.strip() for part in list_of_parts if part is not None and len(part) != 0]
-        return " ".join(name_parts)
-
-    def preprocess_signatures(self, load_name_counts: bool):
-        """
-        Preprocess the signatures, doing lots of normalization and feature creation
-
-        Parameters
-        ----------
-        load_name_counts: bool
-            whether name counts were loaded (mostly just here so we can not load them when running tests)
-
-        Returns
-        -------
-        nothing, modifies self.signatures
-        """
-        for signature_id, signature in tqdm(self.signatures.items(), desc="Preprocessing signatures"):
-            # our normalization scheme is to normalize first and middle separately,
-            # join them, then take the first token of the combined join
-            first_normalized = normalize_text(signature.author_info_first or "")
-            first_normalized_without_apostrophe = normalize_text(
-                signature.author_info_first or "", special_case_apostrophes=True
+    def lookup_name_counts(self, author, load_name_counts):
+        if load_name_counts:
+            first_last_for_count = (
+                author.author_info_first_normalized + " " + author.author_info_last_normalized
+            ).strip()
+            first_initial = (
+                author.author_info_first_normalized
+                if len(author.author_info_first_normalized) > 0
+                else ""
             )
-
-            middle_normalized = normalize_text(signature.author_info_middle or "")
-            first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
-            if first_middle_normalized_split[0] in NAME_PREFIXES:
-                first_middle_normalized_split = first_middle_normalized_split[1:]
-            first_middle_normalized_split_without_apostrophe = (
-                first_normalized_without_apostrophe + " " + middle_normalized
-            ).split(" ")
-            if first_middle_normalized_split_without_apostrophe[0] in NAME_PREFIXES:
-                first_middle_normalized_split_without_apostrophe = first_middle_normalized_split_without_apostrophe[1:]
-
-            coauthors: Optional[List[str]] = None
-            if len(self.papers) != 0:
-                paper = self.papers[str(signature.paper_id)]
-                coauthors = [
-                    author.author_name for author in paper.authors if author.position != signature.author_info_position
-                ]
-
-            signature = signature._replace(
-                author_info_first_normalized=first_middle_normalized_split[0],
-                author_info_first_normalized_without_apostrophe=first_middle_normalized_split_without_apostrophe[0],
-                author_info_middle_normalized=" ".join(first_middle_normalized_split[1:]),
-                author_info_middle_normalized_without_apostrophe=" ".join(
-                    first_middle_normalized_split_without_apostrophe[1:]
-                ),
-                author_info_last_normalized=normalize_text(signature.author_info_last),
-                author_info_suffix_normalized=normalize_text(signature.author_info_suffix or ""),
-                author_info_coauthors=set(coauthors) if coauthors is not None else None,
-                author_info_coauthor_blocks=set([compute_block(author) for author in coauthors])
-                if coauthors is not None
-                else None,
+            last_first_initial_for_count = (author.author_info_last_normalized + " " + first_initial).strip()
+            counts = NameCounts(
+                first=self.first_dict.get(author.author_info_first_normalized, 1)
+                if len(author.author_info_first_normalized) > 1
+                else np.nan,
+                last=self.last_dict.get(author.author_info_last_normalized, 1),
+                first_last=self.first_last_dict.get(first_last_for_count, 1)
+                if len(author.author_info_first_normalized) > 1
+                else np.nan,
+                last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
             )
-
-            if self.preprocess:
-                affiliations = [normalize_text(affiliation) for affiliation in signature.author_info_affiliations]
-                affiliations_n_grams = get_text_ngrams_words(
-                    " ".join(affiliations),
-                    AFFILIATIONS_STOP_WORDS,
-                )
-
-                email_prefix = (
-                    signature.author_info_email.split("@")[0]
-                    if signature.author_info_email is not None and len(signature.author_info_email) > 0
-                    else None
-                )
-
-                if load_name_counts:
-                    first_last_for_count = (
-                        signature.author_info_first_normalized + " " + signature.author_info_last_normalized
-                    ).strip()
-                    first_initial = (
-                        signature.author_info_first_normalized
-                        if len(signature.author_info_first_normalized) > 0
-                        else ""
-                    )
-                    last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
-                    counts = NameCounts(
-                        first=self.first_dict.get(signature.author_info_first_normalized, 1)
-                        if len(signature.author_info_first_normalized) > 1
-                        else np.nan,
-                        last=self.last_dict.get(signature.author_info_last_normalized, 1),
-                        first_last=self.first_last_dict.get(first_last_for_count, 1)
-                        if len(signature.author_info_first_normalized) > 1
-                        else np.nan,
-                        last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
-                    )
-                else:
-                    counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
-
-                signature = signature._replace(
-                    author_info_full_name=ANDData.get_full_name_for_features(signature).strip(),
-                    author_info_affiliations=affiliations,
-                    author_info_affiliations_n_grams=affiliations_n_grams,
-                    author_info_coauthor_n_grams=get_text_ngrams(" ".join(coauthors), stopwords=None, use_bigrams=True)
-                    if coauthors is not None
-                    else Counter(),
-                    author_info_email_prefix_ngrams=get_text_ngrams(email_prefix, stopwords=None, use_bigrams=True),
-                    author_info_name_counts=counts,
-                )
-            self.signatures[signature_id] = signature
+        else:
+            counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
+            
+        author = author._replace(
+            author_info_name_counts=counts,
+        )
+        return author
 
     @staticmethod
     def maybe_load_json(path_or_json: Optional[Union[str, Union[List, Dict]]]) -> Any:
@@ -585,59 +417,27 @@ class ANDData:
         else:
             return path_or_pickle
 
-    def get_original_blocks(self) -> Dict[str, List[str]]:
-        """
-        Gets the block dict based on the blocks provided with the dataset
-
-        Returns
-        -------
-        Dict: mapping from block id to list of signatures in the block
-        """
-        block = {}
-        for signature_id, signature in self.signatures.items():
-            block_id = signature.author_info_given_block
-            if block_id not in block:
-                block[block_id] = [signature_id]
-            else:
-                block[block_id].append(signature_id)
-        return block
-
-    def get_s2_blocks(self) -> Dict[str, List[str]]:
+    def get_blocks(self) -> Dict[str, List[str]]:
         """
         Gets the block dict based on the blocks provided by Semantic Scholar data
 
         Returns
         -------
-        Dict: mapping from block id to list of signatures in the block
+        Dict: mapping from block id to list of papers in the block
         """
         block: Dict[str, List[str]] = {}
-        for signature_id, signature in self.signatures.items():
-            block_id = signature.author_info_block
+        for paper_id, paper in self.papers.items():
+            block_id = paper.block
             if block_id not in block:
-                block[block_id] = [signature_id]
+                block[block_id] = [paper_id]
             else:
-                block[block_id].append(signature_id)
+                block[block_id].append(paper_id)
         return block
-
-    def get_blocks(self) -> Dict[str, List[str]]:
-        """
-        Gets the block dict
-
-        Returns
-        -------
-        Dict: mapping from block id to list of signatures in the block
-        """
-        if self.block_type == "s2":
-            return self.get_s2_blocks()
-        elif self.block_type == "original":
-            return self.get_original_blocks()
-        else:
-            raise Exception(f"Unknown block type: {self.block_type}")
 
     def get_constraint(
         self,
-        signature_id_1: str,
-        signature_id_2: str,
+        paper_id_1: str,
+        paper_id_2: str,
         low_value: Union[float, int] = 0,
         high_value: Union[float, int] = LARGE_DISTANCE,
         dont_merge_cluster_seeds: bool = True,
@@ -650,10 +450,10 @@ class ANDData:
 
         Parameters
         ----------
-        signature_id_1: string
-            one signature id in the pair
-        signature_id_2: string
-            the other signature id in the pair
+        paper_id_1: string
+            one paper id in the pair
+        paper_id_2: string
+            the other paper id in the pair
         low_value: float
             value to assign to same person override
         high_value: float
@@ -669,42 +469,43 @@ class ANDData:
         float: the constraint value
         """
 
-        paper_1 = self.papers[str(self.signatures[signature_id_1].paper_id)]
-        paper_2 = self.papers[str(self.signatures[signature_id_2].paper_id)]
+        # TODO: do we need rules of any kind here?
+        paper_1 = self.papers[str(self.papers[paper_id_1].paper_id)]
+        paper_2 = self.papers[str(self.papers[paper_id_2].paper_id)]
 
         # cluster seeds have precedence
-        if (signature_id_1, signature_id_2) in self.cluster_seeds_disallow or (
-            signature_id_2,
-            signature_id_1,
+        if (paper_id_1, paper_id_2) in self.cluster_seeds_disallow or (
+            paper_id_2,
+            paper_id_1,
         ) in self.cluster_seeds_disallow:
             return CLUSTER_SEEDS_LOOKUP["disallow"]
         elif (
-            self.cluster_seeds_require.get(signature_id_1, -1) == self.cluster_seeds_require.get(signature_id_2, -2)
+            self.cluster_seeds_require.get(paper_id_1, -1) == self.cluster_seeds_require.get(paper_id_2, -2)
         ) and (not incremental_dont_use_cluster_seeds):
             return CLUSTER_SEEDS_LOOKUP["require"]
         elif (
             dont_merge_cluster_seeds
-            and (signature_id_1 in self.cluster_seeds_require and signature_id_2 in self.cluster_seeds_require)
-            and (self.cluster_seeds_require[signature_id_1] != self.cluster_seeds_require[signature_id_2])
+            and (paper_id_1 in self.cluster_seeds_require and paper_id_2 in self.cluster_seeds_require)
+            and (self.cluster_seeds_require[paper_id_1] != self.cluster_seeds_require[paper_id_2])
         ):
             return CLUSTER_SEEDS_LOOKUP["disallow"]
         else:
             return None
 
-    def get_signatures_to_block(self) -> Dict[str, str]:
+    def get_papers_to_block(self) -> Dict[str, str]:
         """
-        Creates a dictionary mapping signature id to block key
+        Creates a dictionary mapping paper id to block key
 
         Returns
         -------
-        Dict: the signature to block dictionary
+        Dict: the papers to block dictionary
         """
-        signatures_to_block: Dict[str, str] = {}
+        paper_to_block: Dict[str, str] = {}
         block_dict = self.get_blocks()
-        for block_key, signatures in block_dict.items():
-            for signature in signatures:
-                signatures_to_block[signature] = block_key
-        return signatures_to_block
+        for block_key, papers in block_dict.items():
+            for paper_id in papers:
+                paper_to_block[paper_id] = block_key
+        return paper_to_block
 
     def split_blocks_helper(
         self, blocks_dict: Dict[str, List[str]]
@@ -723,9 +524,9 @@ class ANDData:
         """
         x = []
         y = []
-        for block_id, signature in blocks_dict.items():
+        for block_id, papers in blocks_dict.items():
             x.append(block_id)
-            y.append(len(signature))
+            y.append(len(papers))
 
         clustering_model = KMeans(
             n_clusters=self.num_clusters_for_block_size,
@@ -753,34 +554,34 @@ class ANDData:
 
         return train_block_dict, val_block_dict, test_block_dict
 
-    def group_signature_helper(self, signature_list: List[str]) -> Dict[str, List[str]]:
+    def group_paper_helper(self, paper_list: List[str]) -> Dict[str, List[str]]:
         """
-        creates a block dict containing a specific input signature list
+        creates a block dict containing a specific input paper list
 
         Parameters
         ----------
-        signature_list: List
-            the list of signatures to include
+        paper_list: List
+            the list of papers to include
 
         Returns
         -------
-        Dict: the block dict for the input signatures
+        Dict: the block dict for the input papers
         """
-        block_to_signatures: Dict[str, List[str]] = {}
+        block_to_papers: Dict[str, List[str]] = {}
 
-        for s in signature_list:
-            if self.signature_to_block[s] not in block_to_signatures:
-                block_to_signatures[self.signature_to_block[s]] = [s]
+        for s in paper_list:
+            if self.paper_to_block[s] not in block_to_papers:
+                block_to_papers[self.paper_to_block[s]] = [s]
             else:
-                block_to_signatures[self.signature_to_block[s]].append(s)
-        return block_to_signatures
+                block_to_papers[self.paper_to_block[s]].append(s)
+        return block_to_papers
 
-    def split_cluster_signatures(
+    def split_cluster_papers(
         self,
     ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
         Splits the block dict into train/val/test blocks based on split type requested.
-        Options for splitting are `signatures`, `blocks`, and `time`
+        Options for splitting are `papers`, `blocks`, and `time`
 
         Returns
         -------
@@ -789,21 +590,21 @@ class ANDData:
         blocks = self.get_blocks()
         assert self.train_ratio + self.val_ratio + self.test_ratio == 1, "train/val/test ratio should add to 1"
 
-        if self.unit_of_data_split == "signatures":
-            signature_keys = list(self.signatures.keys())
-            train_signatures, val_test_signatures = train_test_split(
-                signature_keys,
+        if self.unit_of_data_split == "papers":
+            paper_keys = list(self.papers.keys())
+            train_papers, val_test_papers = train_test_split(
+                paper_keys,
                 test_size=self.val_ratio + self.test_ratio,
                 random_state=self.random_seed,
             )
-            val_signatures, test_signatures = train_test_split(
-                val_test_signatures,
+            val_papers, test_papers = train_test_split(
+                val_test_papers,
                 test_size=self.test_ratio / (self.val_ratio + self.test_ratio),
                 random_state=self.random_seed,
             )
-            train_block_dict = self.group_signature_helper(train_signatures)
-            val_block_dict = self.group_signature_helper(val_signatures)
-            test_block_dict = self.group_signature_helper(test_signatures)
+            train_block_dict = self.group_paper_helper(train_papers)
+            val_block_dict = self.group_paper_helper(val_papers)
+            test_block_dict = self.group_paper_helper(test_papers)
             return train_block_dict, val_block_dict, test_block_dict
 
         elif self.unit_of_data_split == "blocks":
@@ -815,32 +616,32 @@ class ANDData:
             return train_block_dict, val_block_dict, test_block_dict
 
         elif self.unit_of_data_split == "time":
-            signature_to_year = {}
-            for signature_id, signature in self.signatures.items():
+            paper_to_year = {}
+            for paper_id, paper in self.papers.items():
                 # paper_id should be kept as string, so it can be matched to papers.json
-                paper_id = str(signature.paper_id)
-                if self.papers[paper_id].year is None:
-                    signature_to_year[signature_id] = 0
+                paper_id = str(paper.paper_id)
+                if paper.year is None:
+                    paper_to_year[paper_id] = 0
                 else:
-                    signature_to_year[signature_id] = self.papers[paper_id].year
+                    paper_to_year[paper_id] = paper.year
 
-            train_size = int(len(signature_to_year) * self.train_ratio)
-            val_size = int(len(signature_to_year) * self.val_ratio)
-            signatures_sorted_by_year = [i[0] for i in (sorted(signature_to_year.items(), key=lambda x: x[1]))]
+            train_size = int(len(paper_to_year) * self.train_ratio)
+            val_size = int(len(paper_to_year) * self.val_ratio)
+            papers_sorted_by_year = [i[0] for i in (sorted(paper_to_year.items(), key=lambda x: x[1]))]
 
-            train_signatures = signatures_sorted_by_year[0:train_size]
-            val_signatures = signatures_sorted_by_year[train_size : train_size + val_size]
-            test_signatures = signatures_sorted_by_year[train_size + val_size : len(signatures_sorted_by_year)]
+            train_papers = papers_sorted_by_year[0:train_size]
+            val_papers = papers_sorted_by_year[train_size : train_size + val_size]
+            test_papers = papers_sorted_by_year[train_size + val_size : len(papers_sorted_by_year)]
 
-            train_block_dict = self.group_signature_helper(train_signatures)
-            val_block_dict = self.group_signature_helper(val_signatures)
-            test_block_dict = self.group_signature_helper(test_signatures)
+            train_block_dict = self.group_paper_helper(train_papers)
+            val_block_dict = self.group_paper_helper(val_papers)
+            test_block_dict = self.group_paper_helper(test_papers)
             return train_block_dict, val_block_dict, test_block_dict
 
         else:
             raise Exception(f"Unknown unit_of_data_split: {self.unit_of_data_split}")
 
-    def split_cluster_signatures_fixed(
+    def split_cluster_papers_fixed(
         self,
     ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
@@ -859,30 +660,30 @@ class ANDData:
         val_block_dict: Dict[str, List[str]] = {}
         test_block_dict: Dict[str, List[str]] = {}
 
-        logger.info("split_cluster_signatures_fixed")
+        logger.info("split_cluster_papers_fixed")
         if self.val_blocks is None:
             logger.info("Val blocks are None")
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
             logger.info(f"train_prob {train_prob, self.train_ratio, self.val_ratio}")
             np.random.seed(self.random_seed)
             split_prob = np.random.rand(len(self.train_blocks))
-            for block_id, signature in blocks.items():
+            for block_id, paper_ids in blocks.items():
                 if block_id in self.train_blocks:
                     lookup = self.train_blocks.index(block_id)
                     if split_prob[lookup] < train_prob:
-                        train_block_dict[block_id] = signature
+                        train_block_dict[block_id] = paper_ids
                     else:
-                        val_block_dict[block_id] = signature
+                        val_block_dict[block_id] = paper_ids
                 elif block_id in self.test_blocks:
-                    test_block_dict[block_id] = signature
+                    test_block_dict[block_id] = paper_ids
         else:
-            for block_id, signature in blocks.items():
+            for block_id, paper_ids in blocks.items():
                 if block_id in self.train_blocks:
-                    train_block_dict[block_id] = signature
+                    train_block_dict[block_id] = paper_ids
                 elif block_id in self.val_blocks:
-                    val_block_dict[block_id] = signature
+                    val_block_dict[block_id] = paper_ids
                 elif block_id in self.test_blocks:
-                    test_block_dict[block_id] = signature
+                    test_block_dict[block_id] = paper_ids
 
         logger.info(f"shuffled train/val/test {len(train_block_dict), len(val_block_dict), len(test_block_dict)}")
 
@@ -898,11 +699,11 @@ class ANDData:
 
         return train_block_dict, val_block_dict, test_block_dict
 
-    def split_data_signatures_fixed(
+    def split_data_papers_fixed(
         self,
     ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
-        Splits the block dict into train/val/test blocks based on a fixed signature
+        Splits the block dict into train/val/test blocks based on a fixed paper
         based split
 
         Returns
@@ -913,36 +714,36 @@ class ANDData:
         val_block_dict: Dict[str, List[str]] = {}
         test_block_dict: Dict[str, List[str]] = {}
 
-        test_signatures = self.test_signatures
-        logger.info("fixed signatures split")
+        test_papers = self.test_papers
+        logger.info("fixed papers split")
 
-        if self.val_signatures is None:
-            train_signatures = []
-            val_signatures = []
+        if self.val_papers is None:
+            train_papers = []
+            val_papers = []
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
             np.random.seed(self.random_seed)
-            split_prob = np.random.rand(len(self.train_signatures))
-            for signature, p in zip(self.train_signatures, split_prob):
+            split_prob = np.random.rand(len(self.train_papers))
+            for paper, p in zip(self.train_papers, split_prob):
                 if p < train_prob:
-                    train_signatures.append(signature)
+                    train_papers.append(paper)
                 else:
-                    val_signatures.append(signature)
-            logger.info(f"size of signatures {len(train_signatures), len(val_signatures)}")
+                    val_papers.append(paper)
+            logger.info(f"size of papers {len(train_papers), len(val_papers)}")
         else:
-            train_signatures = self.train_signatures
-            val_signatures = self.val_signatures
+            train_papers = self.train_papers
+            val_papers = self.val_papers
 
-        train_block_dict = self.group_signature_helper(train_signatures)
-        val_block_dict = self.group_signature_helper(val_signatures)
-        test_block_dict = self.group_signature_helper(test_signatures)
+        train_block_dict = self.group_paper_helper(train_papers)
+        val_block_dict = self.group_paper_helper(val_papers)
+        test_block_dict = self.group_paper_helper(test_papers)
 
         return train_block_dict, val_block_dict, test_block_dict
 
     def split_pairs(
         self,
-        train_signatures: Dict[str, List[str]],
-        val_signatures: Dict[str, List[str]],
-        test_signatures: Dict[str, List[str]],
+        train_papers_dict: Dict[str, List[str]],
+        val_papers_dict: Dict[str, List[str]],
+        test_papers_dict: Dict[str, List[str]],
     ) -> Tuple[
         List[Tuple[str, str, Union[int, float]]],
         List[Tuple[str, str, Union[int, float]]],
@@ -953,64 +754,62 @@ class ANDData:
 
         Parameters
         ----------
-        train_signatures: Dict
+        train_papers_dict: Dict
             the train block dict
-        val_signatures: Dict
+        val_papers_dict: Dict
             the val block dict
-        test_signatures: Dict
+        test_papers_dict: Dict
             the test block dict
 
         Returns
         -------
-        train/val/test pairs, where each pair is (signature_id_1, signature_id_2, label)
+        train/val/test pairs, where each pair is (paper_id_1, paper_id_2, label)
         """
         assert (
-            isinstance(train_signatures, dict)
-            and isinstance(val_signatures, dict)
-            and isinstance(test_signatures, dict)
+            isinstance(train_papers_dict, dict)
+            and isinstance(val_papers_dict, dict)
+            and isinstance(test_papers_dict, dict)
         )
         train_pairs = self.pair_sampling(
             self.train_pairs_size,
-            [],
-            train_signatures,
+            train_papers_dict,
         )
         val_pairs = (
             self.pair_sampling(
                 self.val_pairs_size,
-                [],
-                val_signatures,
+                val_papers_dict,
             )
-            if len(val_signatures) > 0
+            if len(val_papers_dict) > 0
             else []
         )
 
-        test_pairs = self.pair_sampling(self.test_pairs_size, [], test_signatures, self.all_test_pairs_flag)
+        test_pairs = self.pair_sampling(self.test_pairs_size, test_papers_dict, self.all_test_pairs_flag)
 
         return train_pairs, val_pairs, test_pairs
 
-    def construct_cluster_to_signatures(
+    def construct_cluster_to_papers(
         self,
         block_dict: Dict[str, List[str]],
     ) -> Dict[str, List[str]]:
         """
-        creates a dictionary mapping cluster to signatures
+        creates a dictionary mapping cluster to papers
 
         Parameters
         ----------
         block_dict: Dict
-            the block dict to construct cluster to signatures for
+            the block dict to construct cluster to papers for
 
         Returns
         -------
-        Dict: the dictionary mapping cluster to signatures
+        Dict: the dictionary mapping cluster to papers
         """
-        cluster_to_signatures = defaultdict(list)
-        for signatures in block_dict.values():
-            for signature in signatures:
-                true_cluster_id = self.signature_to_cluster_id[signature]
-                cluster_to_signatures[true_cluster_id].append(signature)
+        cluster_to_papers = defaultdict(list)
+        for papers in block_dict.values():
+            for paper in papers:
+                true_cluster_id = self.paper_to_cluster_id[paper]
+                cluster_to_papers[true_cluster_id].append(paper)
 
-        return dict(cluster_to_signatures)
+        return dict(cluster_to_papers)
 
     def fixed_pairs(
         self,
@@ -1024,7 +823,7 @@ class ANDData:
 
         Returns
         -------
-        train/val/test pairs, where each pair is (signature_id_1, signature_id_2, label)
+        train/val/test pairs, where each pair is (paper_id_1, paper_id_2, label)
         """
         assert (
             self.train_pairs is not None and self.test_pairs is not None
@@ -1056,40 +855,18 @@ class ANDData:
 
         Returns
         -------
-        all pairs, where each pair is (signature_id_1, signature_id_2, label)
+        all pairs, where each pair is (paper_id_1, paper_id_2, label)
         """
         all_pairs_output = self.pair_sampling(
             0,  # ignored when all_test_pairs_flag is True
-            [],  # no training/test pairs
             self.get_blocks(),
             self.all_test_pairs_flag,
         )
         return all_pairs_output
 
-    def get_full_name(self, signature_id: str) -> str:
-        """
-        Creates the full name from the name parts.
-
-        Parameters
-        ----------
-        signature_id: str
-            the signature id to create the full name for
-
-        Returns
-        -------
-        string: the full name
-        """
-        first = self.signatures[signature_id].author_info_first
-        middle = self.signatures[signature_id].author_info_middle
-        last = self.signatures[signature_id].author_info_last
-        suffix = self.signatures[signature_id].author_info_suffix
-        name_parts = [part.strip() for part in [first, middle, last, suffix] if part is not None]
-        return " ".join(name_parts)
-
     def pair_sampling(
         self,
         sample_size: int,
-        signature_ids: List[str],
         blocks: Dict[str, List[str]],
         all_pairs: bool = False,
     ) -> List[Tuple[str, str, Union[int, float]]]:
@@ -1100,123 +877,127 @@ class ANDData:
         ----------
         sample_size: integer
             The desired sample size
-        signature_ids: list
-            List of signature ids from which pairs can be sampled from.
+        paper_ids: list
+            List of paper ids from which pairs can be sampled from.
             List must be provided if blocking is not used
         blocks: dict
-            It has block ids as keys, and list of signature ids under each block as values.
+            It has block ids as keys, and list of paper ids under each block as values.
             Must be provided when blocking is used
         all_pairs: bool
             Whether or not to return all pairs
 
         Returns
         -------
-        list: list of signature pairs
+        list: list of paper pairs
         """
-        assert (
-            (not self.pair_sampling_block and self.pair_sampling_balanced_classes)
-            or (self.pair_sampling_block and self.pair_sampling_balanced_classes)
-            or (
-                self.pair_sampling_block
-                and not self.pair_sampling_balanced_homonym_synonym
-                and not self.pair_sampling_balanced_classes
-            )
-        ), f"You chose sample within blocks? {self.pair_sampling_block}, sample balanced pos/neg?\
-             {self.pair_sampling_balanced_classes}, sample balanced homonym/synonym?\
-              {self.pair_sampling_balanced_homonym_synonym}. This is not a valid combination.\
-               Not using blocks and not doing balancing is not supported, and homonym/synonym\
-                balancing without pos/neg balancing is not supported"
 
-        same_name_different_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        same_name_same_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        different_name_same_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        different_name_different_cluster: List[Tuple[str, str, Union[int, float]]] = []
         possible: List[Tuple[str, str, Union[int, float]]] = []
 
-        if not self.pair_sampling_block:
-            for i, s1 in enumerate(signature_ids):
-                for s2 in signature_ids[i + 1 :]:
-                    s1_name = self.get_full_name(s1)
-                    s2_name = self.get_full_name(s2)
-                    s1_cluster = self.signature_to_cluster_id[s1]
-                    s2_cluster = self.signature_to_cluster_id[s2]
-                    if s1_cluster == s2_cluster:
-                        if s1_name == s2_name:
-                            same_name_same_cluster.append((s1, s2, 1))
-                        else:
-                            different_name_same_cluster.append((s1, s2, 1))
-                    else:
-                        if s1_name == s2_name:
-                            same_name_different_cluster.append((s1, s2, 0))
-                        else:
-                            different_name_different_cluster.append((s1, s2, 0))
-        elif not self.pair_sampling_balanced_homonym_synonym and not self.pair_sampling_balanced_classes:
-            for _, signatures in blocks.items():
-                for i, s1 in enumerate(signatures):
-                    for s2 in signatures[i + 1 :]:
-                        if self.signature_to_cluster_id is not None:
-                            s1_cluster = self.signature_to_cluster_id[s1]
-                            s2_cluster = self.signature_to_cluster_id[s2]
-                            if s1_cluster == s2_cluster:
-                                possible.append((s1, s2, 1))
-                            else:
-                                possible.append((s1, s2, 0))
-                        else:
-                            possible.append((s1, s2, NUMPY_NAN))
-        else:
-            for _, signatures in blocks.items():
-                for i, s1 in enumerate(signatures):
-                    for s2 in signatures[i + 1 :]:
-                        s1_name = self.get_full_name(s1)
-                        s2_name = self.get_full_name(s2)
-                        s1_cluster = self.signature_to_cluster_id[s1]
-                        s2_cluster = self.signature_to_cluster_id[s2]
+        for _, papers in blocks.items():
+            for i, s1 in enumerate(papers):
+                for s2 in papers[i + 1 :]:
+                    if self.paper_to_cluster_id is not None:
+                        s1_cluster = self.paper_to_cluster_id[s1]
+                        s2_cluster = self.paper_to_cluster_id[s2]
                         if s1_cluster == s2_cluster:
-                            if s1_name == s2_name:
-                                same_name_same_cluster.append((s1, s2, 1))
-                            else:
-                                different_name_same_cluster.append((s1, s2, 1))
+                            possible.append((s1, s2, 1))
                         else:
-                            if s1_name == s2_name:
-                                same_name_different_cluster.append((s1, s2, 0))
-                            else:
-                                different_name_different_cluster.append((s1, s2, 0))
+                            possible.append((s1, s2, 0))
+                    else:
+                        possible.append((s1, s2, NUMPY_NAN))
 
         if all_pairs:
-            if (
-                self.pair_sampling_balanced_homonym_synonym
-                or self.pair_sampling_balanced_classes
-                or not self.pair_sampling_block
-            ):
-                all_pairs_output: List[Tuple[str, str, Union[int, float]]] = (
-                    same_name_different_cluster
-                    + same_name_same_cluster
-                    + different_name_same_cluster
-                    + different_name_different_cluster
-                )
-                return all_pairs_output
-            else:
-                return possible
+            pairs = possible
         else:
-            if self.pair_sampling_balanced_classes:
-                pairs = sampling(
-                    same_name_different_cluster,
-                    different_name_same_cluster,
-                    same_name_same_cluster,
-                    different_name_different_cluster,
-                    sample_size,
-                    self.pair_sampling_balanced_homonym_synonym,
-                    self.random_seed,
-                )
-            elif (
-                self.pair_sampling_block
-                and not self.pair_sampling_balanced_classes
-                and not self.pair_sampling_balanced_homonym_synonym
-            ):
-                sample_size = min(len(possible), sample_size)
-                pairs = random_sampling(possible, sample_size, self.random_seed)
+            random.seed(self.random_seed)
+            pairs = random.sample(possible, min(len(possible), sample_size))
+        return pairs
 
-            return pairs
+
+def get_full_name_for_features(author: Author, include_last: bool = True, include_suffix: bool = True) -> str:
+    """
+    Creates the full name from the name parts.
+
+    Parameters
+    ----------
+    authir: Author
+        the author to create the full name for
+    include_last: bool
+        whether to include the last name
+    include_suffix: bool
+        whether to include the suffix
+
+    Returns
+    -------
+    string: the full name
+    """
+    first = author.author_info_first_normalized_without_apostrophe or author.author_info_first
+    middle = author.author_info_middle_normalized_without_apostrophe or author.author_info_middle
+    last = author.author_info_last_normalized or author.author_info_last
+    suffix = author.author_info_suffix_normalized or author.author_info_suffix
+    list_of_parts = [first, middle]
+    if include_last:
+        list_of_parts.append(last)
+    if include_suffix:
+        list_of_parts.append(suffix)
+    name_parts = [part.strip() for part in list_of_parts if part is not None and len(part) != 0]
+    return " ".join(name_parts)
+
+
+def preprocess_authors(author):
+    """
+    Preprocess the authors, doing lots of normalization and feature creation
+    """
+
+    # our normalization scheme is to normalize first and middle separately,
+    # join them, then take the first token of the combined join
+    first_normalized = normalize_text(author.author_info_first or "")
+    first_normalized_without_apostrophe = normalize_text(
+        author.author_info_first or "", special_case_apostrophes=True
+    )
+
+    middle_normalized = normalize_text(author.author_info_middle or "")
+    first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
+    if first_middle_normalized_split[0] in NAME_PREFIXES:
+        first_middle_normalized_split = first_middle_normalized_split[1:]
+    first_middle_normalized_split_without_apostrophe = (
+        first_normalized_without_apostrophe + " " + middle_normalized
+    ).split(" ")
+    if first_middle_normalized_split_without_apostrophe[0] in NAME_PREFIXES:
+        first_middle_normalized_split_without_apostrophe = first_middle_normalized_split_without_apostrophe[1:]
+
+
+    author = author._replace(
+        author_info_first_normalized=first_middle_normalized_split[0],
+        author_info_first_normalized_without_apostrophe=first_middle_normalized_split_without_apostrophe[0],
+        author_info_middle_normalized=" ".join(first_middle_normalized_split[1:]),
+        author_info_middle_normalized_without_apostrophe=" ".join(
+            first_middle_normalized_split_without_apostrophe[1:]
+        ),
+        author_info_last_normalized=normalize_text(author.author_info_last),
+        author_info_suffix_normalized=normalize_text(author.author_info_suffix or ""),
+    )
+
+    affiliations = [normalize_text(affiliation) for affiliation in author.author_info_affiliations]
+    affiliations_n_grams = get_text_ngrams_words(
+        " ".join(affiliations),
+        AFFILIATIONS_STOP_WORDS,
+    )
+
+    email_prefix = (
+        author.author_info_email.split("@")[0]
+        if author.author_info_email is not None and len(author.author_info_email) > 0
+        else None
+    )
+
+    author = author._replace(
+        author_info_full_name=get_full_name_for_features(author).strip(),
+        author_info_affiliations=affiliations,
+        author_info_affiliations_n_grams=affiliations_n_grams,
+        author_info_email_prefix_ngrams=get_text_ngrams(email_prefix, stopwords=None, use_bigrams=True),
+    )
+    
+    return author
 
 
 def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
@@ -1232,33 +1013,28 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     -------
     Tuple[str, Paper]: tuple of paper id and preprocessed Paper object
     """
-    global global_preprocess  # type: ignore
 
     key, paper = item
 
     title = normalize_text(paper.title)
+    abstract = normalize_text(paper.abstract)
     title_ngrams_words = get_text_ngrams_words(title)
+    abstract_ngrams_words = get_text_ngrams_words(abstract)
     authors = [
-        Author(
-            position=author.position,
-            author_name=normalize_text(author.author_name),
-        )
-        for author in paper.authors
+        preprocess_authors(author) for author in paper.authors
     ]
-    paper = paper._replace(title=title, title_ngrams_words=title_ngrams_words, authors=authors)
-
-    if global_preprocess:  # type: ignore
-        venue = normalize_text(paper.venue)
-        journal_name = normalize_text(paper.journal_name)
-        paper = paper._replace(venue=venue, journal_name=journal_name)
-        title_ngrams_chars = get_text_ngrams(paper.title, use_bigrams=True)
-        venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
-        journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
-        paper = paper._replace(
-            title_ngrams_chars=title_ngrams_chars,
-            venue_ngrams=venue_ngrams,
-            journal_ngrams=journal_ngrams,
-        )
+    paper = paper._replace(title=title, title_ngrams_words=title_ngrams_words, abstract_ngrams_words=abstract_ngrams_words, authors=authors)
+    venue = normalize_text(paper.venue)
+    journal_name = normalize_text(paper.journal_name)
+    paper = paper._replace(venue=venue, journal_name=journal_name)
+    title_ngrams_chars = get_text_ngrams(paper.title, use_bigrams=True)
+    venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
+    journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
+    paper = paper._replace(
+        title_ngrams_chars=title_ngrams_chars,
+        venue_ngrams=venue_ngrams,
+        journal_ngrams=journal_ngrams,
+    )
 
     return (key, paper)
 
@@ -1278,8 +1054,6 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
     -------
     Dict: the preprocessed papers dictionary
     """
-    global global_preprocess  # type: ignore
-    global_preprocess = preprocess  # type: ignore
 
     output = {}
     if n_jobs > 1:
@@ -1295,3 +1069,7 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
             output[result[0]] = result[1]
 
     return output
+
+
+if __name__ == "__main__":
+    pddata = PDData(papers='data/test/test_papers.json', clusters='data/test/test_clusters.json', name='test')

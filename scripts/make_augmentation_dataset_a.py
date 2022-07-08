@@ -74,7 +74,7 @@ for dataset_name in DATASETS_TO_TRAIN:
         test_pairs_path = os.path.join(DATA_DIR, dataset_name, "test_pairs.csv")
 
     anddata = ANDData(
-        signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
+        authors=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
         papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
         name=dataset_name,
         mode="train",

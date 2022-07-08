@@ -46,13 +46,12 @@ Once you have downloaded the datasets, you can go ahead and load up one of them:
 from os.path import join
 from s2and.data import ANDData
 
-dataset_name = "pubmed"
-parent_dir = "data/pubmed/
+dataset_name = "test"
+parent_dir = "data/test/"
 dataset = ANDData(
-    signatures=join(parent_dir, f"{dataset_name}_signatures.json"),
+    authors=join(parent_dir, f"{dataset_name}_authors.json"),
     papers=join(parent_dir, f"{dataset_name}_papers.json"),
     mode="train",
-    specter_embeddings=join(parent_dir, f"{dataset_name}_specter.pickle"),
     clusters=join(parent_dir, f"{dataset_name}_clusters.json"),
     block_type="s2",
     train_pairs_size=100000,

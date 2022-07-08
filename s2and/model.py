@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from s2and.eval import b3_precision_recall_fscore
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from s2and.data import ANDData
+from s2and.data import PDData
 from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
 
 from typing import Dict, Optional, Any, Union, List, Tuple
@@ -144,7 +144,7 @@ class Clusterer:
     def distance_matrix_helper(
         self,
         block_dict: Dict,
-        dataset: ANDData,
+        dataset: PDData,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]],
         incremental_dont_use_cluster_seeds: bool = False,
     ):
@@ -155,7 +155,7 @@ class Clusterer:
         ----------
         block_dict: Dict
             the block dictionary
-        dataset: ANDData
+        dataset: PDData
             the dataset
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
@@ -189,7 +189,7 @@ class Clusterer:
     def make_distance_matrices(
         self,
         block_dict: Dict[str, List[str]],
-        dataset: ANDData,
+        dataset: PDData,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         disable_tqdm: bool = False,
         incremental_dont_use_cluster_seeds: bool = False,
@@ -203,7 +203,7 @@ class Clusterer:
         ----------
         block_dict: Dict
             the block dictionary to make distances for
-        dataset: ANDData
+        dataset: PDData
             the dataset
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
@@ -334,7 +334,7 @@ class Clusterer:
 
     def fit(
         self,
-        datasets: Union[ANDData, List[ANDData]],
+        datasets: Union[PDData, List[PDData]],
         val_dists_precomputed: Dict[str, Dict[str, np.array]] = None,
         metric_for_hyperopt: str = "b3",
     ) -> Clusterer:
@@ -343,7 +343,7 @@ class Clusterer:
 
         Parameters
         ----------
-        datasets: List[ANDData]
+        datasets: List[PDData]
             the list of datasets to use for validations
         val_dists_precomputed: Dict
             precomputed distance matrices
@@ -356,7 +356,7 @@ class Clusterer:
         """
         assert metric_for_hyperopt in {"b3", "ratio"}
         logger.info("Fitting clusterer")
-        if isinstance(datasets, ANDData):
+        if isinstance(datasets, PDData):
             datasets = [datasets]
         val_block_dict_list = []
         val_cluster_to_signatures_list = []
@@ -364,7 +364,7 @@ class Clusterer:
         weights = []
         for dataset in datasets:
             # blocks
-            train_block_dict, val_block_dict, _ = dataset.split_cluster_signatures()
+            train_block_dict, val_block_dict, _ = dataset.split_cluster_papers()
             # incremental setting uses all the signatures in train and val
             # block-wise split uses only validation set for building the clustering model
             if dataset.unit_of_data_split == "time" or dataset.unit_of_data_split == "signatures":
@@ -377,7 +377,7 @@ class Clusterer:
             val_block_dict_list.append(val_block_dict)
 
             # block ground truth labels: cluster_to_signatures
-            val_cluster_to_signatures = dataset.construct_cluster_to_signatures(val_block_dict)
+            val_cluster_to_signatures = dataset.construct_cluster_to_papers(val_block_dict)
             val_cluster_to_signatures_list.append(val_cluster_to_signatures)
 
             # distance matrix
@@ -456,7 +456,7 @@ class Clusterer:
     def predict(
         self,
         block_dict: Dict[str, List[str]],
-        dataset: ANDData,
+        dataset: PDData,
         dists: Optional[Dict[str, np.array]] = None,
         cluster_model_params: Optional[Dict[str, Any]] = None,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
@@ -470,7 +470,7 @@ class Clusterer:
         ----------
         block_dict: Dict
             the block dict to predict clusters from
-        dataset: ANDData
+        dataset: PDData
             the dataset
         dists: Dict
             (optional) precomputed distance matrices
@@ -494,7 +494,7 @@ class Clusterer:
         if use_s2_clusters:
             for _, signature_list in block_dict.items():
                 for _signature in signature_list:
-                    s2_cluster_key = dataset.signatures[_signature].author_id
+                    s2_cluster_key = dataset.papers[_signature].author_id
                     pred_clusters[s2_cluster_key].append(_signature)
 
             return dict(pred_clusters), dists
@@ -531,7 +531,7 @@ class Clusterer:
         return dict(pred_clusters), dists
 
     def predict_incremental(
-        self, block_signatures: List[str], dataset: ANDData, prevent_new_incompatibilities: bool = True
+        self, block_signatures: List[str], dataset: PDData, prevent_new_incompatibilities: bool = True
     ):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
@@ -539,7 +539,7 @@ class Clusterer:
         unassigned signature to the closest cluster if distance is less than eps, and then separately cluster all
         the unassigned signatures that are not within eps of any existing cluster.
 
-        Corrected, claimed profiles should be noted via the altered_cluster_signatures parameter (in ANDData).
+        Corrected, claimed profiles should be noted via the altered_cluster_signatures parameter (in PDData).
         Then predict_incremental performs a pre-clustering step on each altered cluster to determine how
         S2AND would divide it into clusters. Mentions are incrementally added to these new subclusters,
         then reassembled to restore the complete claimed profile when S2AND returns results.
@@ -554,7 +554,7 @@ class Clusterer:
         ----------
         block_signatures: List[str]
             the signatures in the block to predict from
-        dataset: ANDData
+        dataset: PDData
             the dataset
         prevent_new_incompatibilities: bool
             if True, prevents the addition to a cluster of new first names that are not prefix match,
@@ -569,10 +569,10 @@ class Clusterer:
         """
         recluster_map = {}
         cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
-        if dataset.altered_cluster_signatures is not None:
+        if dataset.altered_cluster_papers is not None:
             altered_cluster_nums = set(
                 dataset.cluster_seeds_require[altered_signature_id]
-                for altered_signature_id in dataset.altered_cluster_signatures
+                for altered_signature_id in dataset.altered_cluster_papers
             )
             if len(altered_cluster_nums) > 0:
                 cluster_seeds_require_inverse: Dict[int, list] = {}
@@ -686,7 +686,7 @@ class Clusterer:
                         main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
                         all_firsts = set(
                             [
-                                dataset.signatures[signature_id].author_info_first_normalized_without_apostrophe
+                                dataset.papers[signature_id].author_info_first_normalized_without_apostrophe
                                 for signature_id in main_cluster_signatures
                             ]
                         )
@@ -695,7 +695,7 @@ class Clusterer:
                         # if all the existing first names in the cluster are single characters,
                         # there is nothing else to check
                         if len(all_firsts) > 0:
-                            first_unassigned = dataset.signatures[
+                            first_unassigned = dataset.papers[
                                 unassigned_signature
                             ].author_info_first_normalized_without_apostrophe
                             match_found = False
@@ -712,7 +712,7 @@ class Clusterer:
                             # we will allow it to cluster. If it is not, then it has been clustered with a single
                             # character name, and we don't want to allow it
                             if not match_found:
-                                signature = dataset.signatures[unassigned_signature]
+                                signature = dataset.papers[unassigned_signature]
                                 first = signature.author_info_first
                                 last = signature.author_info_last
                                 paper_id = signature.paper_id

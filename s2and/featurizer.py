@@ -10,7 +10,7 @@ from collections import Counter
 
 from tqdm import tqdm
 
-from s2and.data import ANDData
+from s2and.data import PDData
 from s2and.consts import (
     CACHE_ROOT,
     NUMPY_NAN,
@@ -304,8 +304,8 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
 
     features = []
 
-    signature_1 = global_dataset.signatures[work_input[0]]  # type: ignore
-    signature_2 = global_dataset.signatures[work_input[1]]  # type: ignore
+    signature_1 = global_dataset.papers[work_input[0]]  # type: ignore
+    signature_2 = global_dataset.papers[work_input[1]]  # type: ignore
 
     paper_id_1 = signature_1.paper_id
     paper_id_2 = signature_2.paper_id
@@ -501,7 +501,7 @@ def parallel_helper(piece_of_work: Tuple, worker_func: Callable):
 
 def many_pairs_featurize(
     signature_pairs: List[Tuple[str, str, Union[int, float]]],
-    dataset: ANDData,
+    dataset: PDData,
     featurizer_info: FeaturizationInfo,
     n_jobs: int,
     use_cache: bool,
@@ -517,7 +517,7 @@ def many_pairs_featurize(
     ----------
     signature_pairs: List[pairs]
         the pairs to featurize
-    dataset: ANDData
+    dataset: PDData
         the dataset containing the relevant data
     featurizer_info: FeaturizationInfo
         the FeautrizationInfo object containing the listing of features to use
@@ -670,7 +670,7 @@ def many_pairs_featurize(
 
 
 def featurize(
-    dataset: ANDData,
+    dataset: PDData,
     featurizer_info: FeaturizationInfo,
     n_jobs: int = 1,
     use_cache: bool = False,
@@ -684,7 +684,7 @@ def featurize(
 
     Parameters
     ----------
-    dataset: ANDData
+    dataset: PDData
         the dataset containing the relevant data
     featurizer_info: FeaturizationInfo
         the FeautrizationInfo object containing the listing of features to use
@@ -731,19 +731,19 @@ def featurize(
                     train_signatures,
                     val_signatures,
                     test_signatures,
-                ) = dataset.split_cluster_signatures_fixed()
-            elif dataset.train_signatures is not None:
+                ) = dataset.split_cluster_papers_fixed()
+            elif dataset.train_papers is not None:
                 (
                     train_signatures,
                     val_signatures,
                     test_signatures,
-                ) = dataset.split_data_signatures_fixed()
+                ) = dataset.split_data_papers_fixed()
             else:
                 (
                     train_signatures,
                     val_signatures,
                     test_signatures,
-                ) = dataset.split_cluster_signatures()  # type: ignore
+                ) = dataset.split_cluster_papers()  # type: ignore
 
             train_pairs, val_pairs, test_pairs = dataset.split_pairs(train_signatures, val_signatures, test_signatures)
 

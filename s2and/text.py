@@ -579,30 +579,6 @@ def jaccard(
     return score
 
 
-def compute_block(name: str) -> str:
-    """
-    Compute block for a name.
-    Override for other definition of blocks. This function gives block as first initial + last name.
-
-    Parameters
-    ----------
-    name: string
-        the name to block
-
-    Returns
-    -------
-    string: the block string
-    """
-    if len(name) == 0:
-        return ""
-
-    name_parts = name.split(" ")
-    if len(name_parts) == 1:
-        return name_parts[0]
-    block = name_parts[0][0] + " " + name_parts[-1]
-    return block
-
-
 def diff(value_1: Optional[float], value_2: Optional[float], default_val: float = NUMPY_NAN) -> float:
     """
     Compute absolute difference between two values.

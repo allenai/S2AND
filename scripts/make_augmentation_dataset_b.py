@@ -91,7 +91,7 @@ def main(
         logger.info(f"processing dataset {dataset_name}")
         logger.info(f"loading dataset {dataset_name}")
         anddata = ANDData(
-            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
+            authors=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="inference",

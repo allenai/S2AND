@@ -39,7 +39,7 @@ class TestData(unittest.TestCase):
             train_block_dict,
             val_block_dict,
             test_block_dict,
-        ) = self.qian_dataset.split_cluster_signatures()
+        ) = self.qian_dataset.split_cluster_papers()
         train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
             train_block_dict, val_block_dict, test_block_dict
         )
@@ -118,7 +118,7 @@ class TestData(unittest.TestCase):
     def test_initialization(self):
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={},
+                authors={},
                 papers={},
                 clusters={},
                 name="",
@@ -131,7 +131,7 @@ class TestData(unittest.TestCase):
 
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={},
+                authors={},
                 papers={},
                 clusters={},
                 name="",
@@ -144,7 +144,7 @@ class TestData(unittest.TestCase):
 
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={},
+                authors={},
                 papers={},
                 name="",
                 mode="train",
@@ -156,7 +156,7 @@ class TestData(unittest.TestCase):
 
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={},
+                authors={},
                 papers={},
                 name="",
                 mode="train",
@@ -169,7 +169,7 @@ class TestData(unittest.TestCase):
 
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={},
+                authors={},
                 papers={},
                 name="",
                 mode="train",
@@ -181,7 +181,7 @@ class TestData(unittest.TestCase):
 
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={},
+                authors={},
                 papers={},
                 name="",
                 mode="train",
@@ -191,10 +191,10 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
-        assert dataset.signature_to_cluster_id is None
+        dataset = ANDData(authors={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
+        assert dataset.paper_to_cluster_id is None
 
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
+        dataset = ANDData(authors={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
         assert dataset.pair_sampling_block
         assert not dataset.pair_sampling_balanced_classes
         assert not dataset.pair_sampling_balanced_homonym_synonym
@@ -203,10 +203,10 @@ class TestData(unittest.TestCase):
 
         with pytest.raises(Exception):
             dataset = ANDData(
-                signatures={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
+                authors={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
             )
 
     def test_construct_cluster_to_signatures(self):
-        cluster_to_signatures = self.dummy_dataset.construct_cluster_to_signatures({"a": ["0", "1"], "b": ["3", "4"]})
+        cluster_to_signatures = self.dummy_dataset.construct_cluster_to_papers({"a": ["0", "1"], "b": ["3", "4"]})
         expected_cluster_to_signatures = {"1": ["0", "1"], "3": ["3", "4"]}
         assert cluster_to_signatures == expected_cluster_to_signatures

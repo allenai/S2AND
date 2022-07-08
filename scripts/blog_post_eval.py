@@ -136,7 +136,7 @@ def main(
 
         logger.info(f"loading dataset {dataset_name}")
         anddata = ANDData(
-            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
+            authors=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="train",
@@ -289,7 +289,7 @@ def main(
         block_dir = os.path.join(BLOCK_DATASETS_DIR, block_key)
         logger.info(f"Loading dataset {block_key}")
         claims_dataset = ANDData(
-            signatures=os.path.join(block_dir, "claims_signatures.json"),
+            authors=os.path.join(block_dir, "claims_signatures.json"),
             papers=os.path.join(block_dir, "claims_papers.json"),
             mode="inference",
             specter_embeddings=os.path.join(block_dir, "claims_specter.pickle"),

@@ -82,7 +82,7 @@ def main(model_path: str, n_jobs: int = 20, use_constraints: bool = True):
         block_dir = os.path.join(BLOCK_DATASETS_DIR, block_key)
         logger.info(f"Loading dataset {block_key}")
         dataset = ANDData(
-            signatures=os.path.join(block_dir, "claims_signatures.json"),
+            authors=os.path.join(block_dir, "claims_signatures.json"),
             papers=os.path.join(block_dir, "claims_papers.json"),
             mode="inference",
             specter_embeddings=os.path.join(block_dir, "claims_specter.pickle"),

@@ -8,7 +8,7 @@ from collections import Counter
 
 if TYPE_CHECKING:  # need this for circular import issues
     from s2and.model import Clusterer
-    from s2and.data import ANDData
+    from s2and.data import PDData
 
 import os
 from os.path import join
@@ -36,7 +36,7 @@ sns.set(context="talk")
 
 
 def cluster_eval(
-    dataset: "ANDData",
+    dataset: "PDData",
     clusterer: "Clusterer",
     split: str = "test",
     use_s2_clusters: bool = False,
@@ -47,7 +47,7 @@ def cluster_eval(
 
     Parameters
     ----------
-    dataset: ANDData
+    dataset: PDData
         Dataset that has ground truth
     clusterer: Clusterer
         Clusterer object that will do predicting.
@@ -70,7 +70,7 @@ def cluster_eval(
         raise Exception("Split must be one of: {train, val, test}!")
 
     # block ground truth labels: cluster_to_signatures
-    cluster_to_signatures = dataset.construct_cluster_to_signatures(block_dict)
+    cluster_to_signatures = dataset.construct_cluster_to_papers(block_dict)
 
     # predict
     pred_clusters, _ = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters)
@@ -104,7 +104,7 @@ def cluster_eval(
 
 
 def incremental_cluster_eval(
-    dataset: "ANDData", clusterer: "Clusterer", split: str = "test"
+    dataset: "PDData", clusterer: "Clusterer", split: str = "test"
 ) -> Tuple[Dict[str, Tuple[float, float, float]], Dict[str, Tuple[float, float, float]]]:
     """
     Performs clusterwise evaluation for the incremental clustering setting.
@@ -113,7 +113,7 @@ def incremental_cluster_eval(
 
     Parameters
     ----------
-    dataset: ANDData
+    dataset: PDData
         Dataset that has ground truth
     clusterer: Clusterer
         Clusterer object that will do predicting.
@@ -130,7 +130,7 @@ def incremental_cluster_eval(
         train_block_dict,
         val_block_dict,
         test_block_dict,
-    ) = dataset.split_cluster_signatures()
+    ) = dataset.split_cluster_papers()
     # evaluation must happen only on test-signatures in blocks, so remove train/val signatures
     observed_signatures = set()
     for _, signatures in train_block_dict.items():
@@ -143,12 +143,12 @@ def incremental_cluster_eval(
     if split == "test":
         for block_key, _ in test_block_dict.items():
             eval_block_dict_full[block_key] = block_dict[block_key]
-        cluster_to_signatures = dataset.construct_cluster_to_signatures(test_block_dict)
+        cluster_to_signatures = dataset.construct_cluster_to_papers(test_block_dict)
         for _, signatures in val_block_dict.items():
             for signature in signatures:
                 observed_signatures.add(signature)
     elif split == "val":
-        cluster_to_signatures = dataset.construct_cluster_to_signatures(val_block_dict)
+        cluster_to_signatures = dataset.construct_cluster_to_papers(val_block_dict)
         eval_block_dict_full = copy.deepcopy(val_block_dict)
         for block_key, signatures in train_block_dict.items():
             if block_key in eval_block_dict_full:
@@ -161,7 +161,7 @@ def incremental_cluster_eval(
     # considers the supervision as distances
     for i, signature_i in enumerate(list_obs_signatures):
         for signature_j in list_obs_signatures[i + 1 : len(list_obs_signatures)]:
-            if dataset.signature_to_cluster_id[signature_i] == dataset.signature_to_cluster_id[signature_j]:
+            if dataset.paper_to_cluster_id[signature_i] == dataset.paper_to_cluster_id[signature_j]:
                 partial_supervision[(signature_i, signature_j)] = 0
             else:
                 partial_supervision[(signature_i, signature_j)] = 1
@@ -169,7 +169,7 @@ def incremental_cluster_eval(
     # predict on test-blocks
     pred_clusters, _ = clusterer.predict(eval_block_dict_full, dataset, partial_supervision=partial_supervision)
     # to avoid sparsity in b3 computation, we use all the signatures' ground-truth
-    full_cluster_to_signatures = dataset.construct_cluster_to_signatures(pred_clusters)
+    full_cluster_to_signatures = dataset.construct_cluster_to_papers(pred_clusters)
 
     eval_only_pred_clusters = {}
     for cluster_key, signatures in pred_clusters.items():
@@ -194,7 +194,7 @@ def incremental_cluster_eval(
 
 
 def facet_eval(
-    dataset: "ANDData",
+    dataset: "PDData",
     metrics_per_signature: Dict[str, Tuple[float, float, float]],
     block_type: str = "original",
 ) -> Tuple[
@@ -223,7 +223,7 @@ def facet_eval(
 
     Parameters
     ----------
-    dataset: ANDData Input dataset
+    dataset: PDData Input dataset
     metrics_per_signature: Dict
         B3 P/R/F1 per signature.
         Second output of cluster_eval function.
@@ -279,8 +279,8 @@ def facet_eval(
 
         _signature_dict = dict()
 
-        cluster_id = dataset.signature_to_cluster_id[signature_key]
-        signature = dataset.signatures[signature_key]
+        cluster_id = dataset.paper_to_cluster_id[signature_key]
+        signature = dataset.papers[signature_key]
         paper = dataset.papers[str(signature.paper_id)]
 
         author_num_f1[len(paper.authors)].append(f1)
@@ -804,7 +804,7 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
 
 
 def claims_eval(
-    dataset: "ANDData",
+    dataset: "PDData",
     clusterer: "Clusterer",
     claims_pairs: List[Tuple[str, str, int, str, str]],
     directory_for_caching: Optional[str] = None,
@@ -816,7 +816,7 @@ def claims_eval(
 
     Parameters
     ----------
-    dataset: ANDData
+    dataset: PDData
         a dataset of the block to evaluate
     clusterer: Clusterer
         the Clusterer to evaluate
@@ -881,7 +881,7 @@ def claims_eval(
         for signature in cluster_signatures:
             paper_id, _ = signature.split("___")
             paper = dataset.papers[paper_id]
-            signature_info = dataset.signatures[signature]
+            signature_info = dataset.papers[signature]
             title = paper.title
             authors = [author.author_name for author in paper.authors]
             affiliations = signature_info.author_info_affiliations

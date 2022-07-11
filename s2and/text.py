@@ -368,7 +368,7 @@ def get_text_ngrams(
         return Counter()
 
     if stopwords is not None:
-        text = " ".join([word for word in text.split(" ") if word not in stopwords and len(word) > 2])
+        text = " ".join([word for word in text.split(" ") if word not in stopwords])
 
     unigrams = []  # type: ignore
     if use_unigrams:

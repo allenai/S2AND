@@ -208,11 +208,6 @@ def facet_eval(
     Dict[int, List],
     Dict[int, List],
     Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
     List[dict],
 ]:
     """
@@ -249,22 +244,20 @@ def facet_eval(
     else:
         raise Exception("block_type must one of: {'original', 's2'}!")
 
-    for block_key, signature_ids in blocks.items():
-        block_len_dict[block_key] = len(signature_ids)
+    for block_key, paper_ids in blocks.items():
+        block_len_dict[block_key] = len(paper_ids)
 
     # we need to know the length of each cluster
     assert dataset.clusters is not None
     cluster_len_dict = {}
     for cluster_id, cluster_dict in dataset.clusters.items():
-        cluster_len_dict[cluster_id] = len(cluster_dict["signature_ids"])
+        cluster_len_dict[cluster_id] = len(cluster_dict["paper_ids"])
 
     # Keep track of facet specific f-score performance
     author_num_f1 = defaultdict(list)
     year_f1 = defaultdict(list)
     block_len_f1 = defaultdict(list)
     cluster_len_f1 = defaultdict(list)
-    homonymity_f1 = defaultdict(list)
-    synonymity_f1 = defaultdict(list)
     # keep track feature availability facet specific f-score
     firstname_f1 = defaultdict(list)
     affiliation_f1 = defaultdict(list)
@@ -337,7 +330,7 @@ def facet_eval(
             block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
             _signature_dict["block size"] = block_len_dict[signature.author_info_block]
 
-        _signature_dict["signature_id"] = signature_key
+        _signature_dict["paper_id"] = signature_key
         _signature_dict["precision"] = p
         _signature_dict["recall"] = r
         _signature_dict["f1"] = f1
@@ -681,8 +674,8 @@ def cluster_precision_recall_fscore(
 
     Reference
     ---------
-    Levin, Michael, et al. "Citation‐based bootstrapping for
-    large‐scale author disambiguation." Journal of the American Society for Information
+    Levin, Michael, et al. "Citation-based bootstrapping for
+    large-scale author disambiguation." Journal of the American Society for Information
     Science and Technology (2012): 1030-1047.
     """
 
@@ -801,200 +794,7 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
         mf1 = mf1 / len(test_block)
 
         return np.round(mprecision, 3), np.round(mrecall, 3), np.round(mf1, 3)
-
-
-def claims_eval(
-    dataset: "PDData",
-    clusterer: "Clusterer",
-    claims_pairs: List[Tuple[str, str, int, str, str]],
-    directory_for_caching: Optional[str] = None,
-    output_shap: bool = False,
-    optional_name: Optional[str] = None,
-) -> Dict[str, Union[int, float]]:
-    """
-    Evaluates predicted clusters on one block of the Semantic Scholar corrections data
-
-    Parameters
-    ----------
-    dataset: PDData
-        a dataset of the block to evaluate
-    clusterer: Clusterer
-        the Clusterer to evaluate
-    claims_pairs: List
-        a list of the claims pairs data to check clusters against
-        each pair is (sig id 1, sig id 2, label, block key 1, block key 2)
-    directory_for_caching: string
-        the directory to write output too, won't write if it is None
-    output_shap: bool
-        whether to output shaps for the incorrect pairs (slow)
-    optional_name: str
-        what name to use to write output instead of the featurizer version
-
-    Returns
-    -------
-    Dict: dictionary of metrics for this block based on claims data
-    """
-    blocks = dataset.get_blocks()
-    preds, dists = clusterer.predict(blocks, dataset)
-
-    all_block_signatures = set()
-    for signatures in blocks.values():
-        all_block_signatures.update(signatures)
-
-    all_pred_signatures = set()
-    for signatures in preds.values():
-        all_pred_signatures.update(signatures)
-
-    assert all_block_signatures == all_pred_signatures, "Uh oh, blocks and preds have different signatures"
-
-    signature_to_cluster = {}
-    for cluster_key, signatures in preds.items():
-        for signature in signatures:
-            signature_to_cluster[signature] = cluster_key
-
-    sig_pairs = []
-    tp, fp, tn, fn = 0, 0, 0, 0
-    for signature_id_1, signature_id_2, label, _, _ in claims_pairs:
-        cluster_1 = signature_to_cluster.get(signature_id_1, None)
-        cluster_2 = signature_to_cluster.get(signature_id_2, None)
-        if cluster_1 is None or cluster_2 is None:
-            continue
-
-        same_cluster_pred = cluster_1 == cluster_2
-        same_cluster_gold = label
-
-        sig_pairs.append((signature_id_1, signature_id_2, same_cluster_pred, same_cluster_gold))
-
-        if same_cluster_gold and same_cluster_pred:
-            tp += 1
-        elif same_cluster_gold and not same_cluster_pred:
-            fn += 1
-        elif not same_cluster_gold and same_cluster_pred:
-            fp += 1
-        elif not same_cluster_gold and not same_cluster_pred:
-            tn += 1
-
-    logger.info("Computing predictions (output_to_write)")
-    output_to_write: Dict[str, Any] = {}
-    for cluster_key, cluster_signatures in preds.items():
-        cluster_output = []
-        for signature in cluster_signatures:
-            paper_id, _ = signature.split("___")
-            paper = dataset.papers[paper_id]
-            signature_info = dataset.papers[signature]
-            title = paper.title
-            authors = [author.author_name for author in paper.authors]
-            affiliations = signature_info.author_info_affiliations
-            cluster_output.append((paper_id, signature, title, affiliations, authors))
-        output_to_write[cluster_key] = cluster_output
-
-    output_to_write["sig_pairs_wrong"] = []
-    output_to_write["sig_pairs_right"] = []
-    for id1, id2, pred_same, gold_same in tqdm(sig_pairs):
-        paper_id1, _ = id1.split("___")
-        paper1 = dataset.papers[paper_id1]
-        title1 = paper1.title
-
-        paper_id2, _ = id2.split("___")
-        paper2 = dataset.papers[paper_id2]
-        title2 = paper2.title
-
-        logger.handlers[0].level = logging.ERROR
-
-        output_to_write["sig_pairs_right" if pred_same == gold_same else "sig_pairs_wrong"].append(
-            (id1, id2, title1, title2, pred_same, gold_same)
-        )
-
-        if output_shap and directory_for_caching is not None:
-            features, _, nameless_features = many_pairs_featurize(
-                [(id1, id2, np.nan)],
-                dataset,
-                clusterer.featurizer_info,
-                n_jobs=10,
-                use_cache=True,
-                chunk_size=100,
-                nameless_featurizer_info=clusterer.nameless_featurizer_info,
-            )
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                clusterer.classifier.booster_.params["objective"] = "binary"
-                shap_output = shap.TreeExplainer(clusterer.classifier).shap_values(features)[1]
-                clusterer.nameless_classifier.booster_.params["objective"] = "binary"  # type: ignore
-                shap_output_nameless = shap.TreeExplainer(clusterer.nameless_classifier).shap_values(nameless_features)[
-                    1
-                ]
-
-                title = f"{id1}-{id2}"
-                plt.figure(1)
-                shap.summary_plot(
-                    shap_output,
-                    features,
-                    plot_type="dot",
-                    feature_names=clusterer.featurizer_info.get_feature_names(),
-                    show=False,
-                    max_display=len(clusterer.featurizer_info.get_feature_names()),
-                )
-                plt.title(f"SHAP Values for {title}")
-                plt.tight_layout()
-                plt.savefig(join(directory_for_caching, f"{title}_shap.png"))
-                plt.clf()
-                plt.close()
-
-                plt.figure(1)
-                shap.summary_plot(
-                    shap_output_nameless,
-                    nameless_features,
-                    plot_type="dot",
-                    feature_names=clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
-                    show=False,
-                    max_display=len(clusterer.nameless_featurizer_info.get_feature_names()),  # type: ignore
-                )
-                plt.title(f"SHAP Values for {title}")
-                plt.tight_layout()
-                plt.savefig(join(directory_for_caching, f"{title}_shap_nameless.png"))
-                plt.clf()
-                plt.close()
-
-    logger.handlers[0].level = logging.INFO
-    if directory_for_caching is not None:
-        logger.info("Writing predictions to disk")
-        suffix: Union[int, str]
-        if optional_name is None:
-            suffix = clusterer.featurizer_info.featurizer_version
-        else:
-            suffix = optional_name
-        with open(join(directory_for_caching, f"preds_{suffix}.json"), "w") as _json_file:
-            json.dump(output_to_write, _json_file)
-
-        logger.info("Writing dists to disk")
-        with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
-            pickle.dump(dists, _pkl_file)
-        logger.info("Done dumping")
-
-    precision = tp / (tp + fp) if tp + fp > 0 else np.nan
-    recall = tp / (tp + fn) if tp + fn > 0 else np.nan
-    f1 = (
-        (2 * precision * recall) / (precision + recall)
-        if not np.isnan(precision) and not np.isnan(recall) and (precision + recall) > 0
-        else np.nan
-    )
-    min_edit_score, min_edit_count, number_of_mistaken_ids = min_pair_edit(output_to_write)
-    output = {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "tp": tp,
-        "tn": tn,
-        "fp": fp,
-        "fn": fn,
-        "total": tp + tn + fp + fn,
-        "min_edit_score": min_edit_score,
-        "min_edit_count": min_edit_count,
-        "number_of_mistaken_ids": number_of_mistaken_ids,
-    }
-    return output
-
+    
 
 def min_pair_edit(preds):
     """Find minimum number of cluster changes

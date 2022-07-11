@@ -6,7 +6,6 @@ import json
 import numpy as np
 import functools
 import logging
-from collections import Counter
 
 from tqdm import tqdm
 
@@ -19,15 +18,9 @@ from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
 )
 from s2and.text import (
-    equal,
-    equal_middle,
     diff,
-    name_counts,
     TEXT_FUNCTIONS,
-    name_text_features,
-    jaccard,
     counter_jaccard,
-    cosine_sim,
 )
 
 logger = logging.getLogger("s2and")
@@ -53,53 +46,33 @@ class FeaturizationInfo:
     def __init__(
         self,
         features_to_use: List[str] = [
-            "name_similarity",
-            "affiliation_similarity",
-            "email_similarity",
-            "coauthor_similarity",
+            "author_similarity",
             "venue_similarity",
             "year_diff",
             "title_similarity",
-            "misc_features",
-            "name_counts",
-            "embedding_similarity",
-            "journal_similarity",
-            "advanced_name_similarity",
+            "abstract_similarity",
         ],
         featurizer_version: int = FEATURIZER_VERSION,
     ):
         self.features_to_use = features_to_use
 
         self.feature_group_to_index = {
-            "name_similarity": [0, 1, 2, 3, 4, 5],
-            "affiliation_similarity": [6],
-            "email_similarity": [7, 8],
-            "coauthor_similarity": [9, 10, 11],
-            "venue_similarity": [12],
-            "year_diff": [13],
-            "title_similarity": [14, 15],
-            "misc_features": [16, 17],
-            "name_counts": [18, 19, 20, 21, 22, 23],
-            "embedding_similarity": [24],
-            "journal_similarity": [25],
-            "advanced_name_similarity": [26, 27, 28, 29],
+            "author_similarity": [0, 1, 2, 3],
+            "venue_similarity": [4, 5],
+            "year_diff": [6],
+            "title_similarity": [7, 8],
+            "abstract_similarity": [9, 10],
+
         }
 
         self.number_of_features = max(functools.reduce(max, self.feature_group_to_index.values())) + 1  # type: ignore
 
         lightgbm_monotone_constraints = {
-            "name_similarity": ["1", "1", "1", "0", "0", "0"],
-            "affiliation_similarity": ["0"],
-            "email_similarity": ["1", "1"],
-            "coauthor_similarity": ["1", "0", "1"],
-            "venue_similarity": ["0"],
+            "author_similarity": ["1", "1", "1", "1"],
+            "venue_similarity": ["1", "1"],
             "year_diff": ["-1"],
             "title_similarity": ["1", "1"],
-            "misc_features": ["0", "0"],
-            "name_counts": ["0", "-1", "-1", "-1", "0", "-1"],
-            "embedding_similarity": ["0"],
-            "journal_similarity": ["0"],
-            "advanced_name_similarity": ["0", "0", "0", "0"],
+            "abstract_similarity": ["1", "1"],
         }
 
         self.lightgbm_monotone_constraints = ",".join(
@@ -131,84 +104,36 @@ class FeaturizationInfo:
         """
         feature_names = []
 
-        # name features
-        if "name_similarity" in self.features_to_use:
+        # affiliation features
+        if "author_similarity" in self.features_to_use:
             feature_names.extend(
                 [
-                    "first_names_equal",
-                    "middle_initials_overlap",
-                    "middle_names_equal",
-                    "middle_one_missing",
-                    "single_char_first",
-                    "single_char_middle",
+                    "author_names_similarity",
+                    "author_affiliations_similarity",
+                    "author_email_prefix_similarity",
+                    "author_email_suffix_similarity",
                 ]
             )
-
-        # affiliation features
-        if "affiliation_similarity" in self.features_to_use:
-            feature_names.append("affiliation_overlap")
 
         # email features
-        if "email_similarity" in self.features_to_use:
-            feature_names.extend(["email_prefix_equal", "email_suffix_equal"])
-
-        # co author features
-        if "coauthor_similarity" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "coauthor_overlap",
-                    "coauthor_similarity",
-                    "coauthor_match",
-                ]
-            )
-
-        # venue features
         if "venue_similarity" in self.features_to_use:
-            feature_names.append("venue_overlap")
+            feature_names.extend(["journal_similarity", "venue_similarity"])
 
         # year features
         if "year_diff" in self.features_to_use:
             feature_names.append("year_diff")
-
-        # title features
+            
         if "title_similarity" in self.features_to_use:
-            feature_names.extend(["title_overlap_words", "title_overlap_chars"])
+            feature_names.extend(["title_word_similarity", "title_character_similarity"])
+            
+        if "abstract_similarity" in self.features_to_use:
+            feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
 
-
-        # position features
-        if "misc_features" in self.features_to_use:
-            feature_names.extend(
-                ["position_diff", "abstract_count"]
-            )
-
-        # name count features
-        if "name_counts" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "first_name_count_min",
-                    "last_first_name_count_min",
-                    "last_name_count_min",
-                    "last_first_initial_count_min",
-                    "first_name_count_max",
-                    "last_first_name_count_max",
-                ]
-            )
-
-        # specter features
-        if "embedding_similarity" in self.features_to_use:
-            feature_names.append("specter_cosine_sim")
-
-        if "journal_similarity" in self.features_to_use:
-            feature_names.append("journal_overlap")
-
-        if "advanced_name_similarity" in self.features_to_use:
-            similarity_names = [func[1] for func in TEXT_FUNCTIONS]
-            feature_names.extend(similarity_names)
 
         return feature_names
 
     @staticmethod
-    def feature_cache_key(signature_pair: Tuple) -> str:
+    def feature_cache_key(paper_pair: Tuple) -> str:
         """
         returns the key in the feature cache dictionary for a signature pair
 
@@ -221,7 +146,7 @@ class FeaturizationInfo:
         -------
         string: the cache key
         """
-        return signature_pair[0] + "___" + signature_pair[1]
+        return paper_pair[0] + "___" + paper_pair[1]
 
     def cache_directory(self, dataset_name: str) -> str:
         """
@@ -283,7 +208,7 @@ NUM_FEATURES = FeaturizationInfo().number_of_features
 
 def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tuple[List[Union[int, float]], int]:
     """
-    Creates the features array for a single signature pair
+    Creates the features array for a single paper pair
     NOTE: This function uses a global variable to support faster multiprocessing. That means that this function
     should only be called from the many_pairs_featurize function below (or if you have carefully set your own global
     variable)
@@ -291,7 +216,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     Parameters
     ----------
     work_input: Tuple[str, str]
-        pair of signature ids
+        pair of paper ids
     index: int
         the index of the pair in the list of all pairs,
         used to keep track of cached features
@@ -304,111 +229,44 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
 
     features = []
 
-    signature_1 = global_dataset.papers[work_input[0]]  # type: ignore
-    signature_2 = global_dataset.papers[work_input[1]]  # type: ignore
-
-    paper_id_1 = signature_1.paper_id
-    paper_id_2 = signature_2.paper_id
-
+    paper_id_1 = work_input[0]
+    paper_id_2 = work_input[1]
+    
     paper_1 = global_dataset.papers[str(paper_id_1)]  # type: ignore
     paper_2 = global_dataset.papers[str(paper_id_2)]  # type: ignore
 
+    # author-related features
     features.extend(
         [
-            equal(
-                signature_1.author_info_first_normalized_without_apostrophe,
-                signature_2.author_info_first_normalized_without_apostrophe,
-            ),
             counter_jaccard(
-                Counter(
-                    [
-                        p[0]
-                        for p in signature_1.author_info_middle_normalized_without_apostrophe.split(" ")
-                        if len(p) > 0
-                    ]
-                ),
-                Counter(
-                    [
-                        p[0]
-                        for p in signature_2.author_info_middle_normalized_without_apostrophe.split(" ")
-                        if len(p) > 0
-                    ]
-                ),
-            ),
-            equal_middle(
-                signature_1.author_info_middle_normalized_without_apostrophe,
-                signature_2.author_info_middle_normalized_without_apostrophe,
-            ),
-            (
-                len(signature_1.author_info_middle_normalized_without_apostrophe) == 0
-                and len(signature_2.author_info_middle_normalized_without_apostrophe) != 0
-            )
-            or (
-                len(signature_2.author_info_middle_normalized_without_apostrophe) == 0
-                and len(signature_1.author_info_middle_normalized_without_apostrophe) != 0
-            ),
-            len(signature_1.author_info_first_normalized_without_apostrophe) == 1
-            or len(signature_2.author_info_first_normalized_without_apostrophe) == 1,
-            any(len(middle) == 1 for middle in signature_1.author_info_middle_normalized_without_apostrophe.split(" "))
-            or any(
-                len(middle) == 1 for middle in signature_2.author_info_middle_normalized_without_apostrophe.split(" ")
-            ),
-        ]
-    )
-
-    features.append(
-        counter_jaccard(
-            signature_1.author_info_affiliations_n_grams,
-            signature_2.author_info_affiliations_n_grams,
-        )
-    )
-
-    email_prefix_1: Optional[str] = None
-    email_prefix_2: Optional[str] = None
-    email_suffix_1: Optional[str] = None
-    email_suffix_2: Optional[str] = None
-    if (
-        signature_1.author_info_email is not None
-        and len(signature_1.author_info_email) > 0
-        and signature_2.author_info_email is not None
-        and len(signature_2.author_info_email) > 0
-    ):
-        email_1 = signature_1.author_info_email
-        email_2 = signature_2.author_info_email
-        email_1 = email_1 if "@" in email_1 else email_1 + "@MISSING"
-        email_2 = email_2 if "@" in email_2 else email_2 + "@MISSING"
-        split_email_1 = email_1.split("@")
-        split_email_2 = email_2.split("@")
-        email_prefix_1 = "".join(split_email_1[:-1])
-        email_prefix_2 = "".join(split_email_2[:-1])
-        email_suffix_1 = split_email_1[-1]
-        email_suffix_2 = split_email_2[-1]
-
-    features.extend(
-        [
-            email_prefix_1 == email_prefix_2
-            if email_prefix_1 is not None and email_prefix_2 is not None
-            else NUMPY_NAN,
-            email_suffix_1 == email_suffix_2
-            if email_suffix_1 is not None and email_suffix_2 is not None
-            else NUMPY_NAN,
-        ]
-    )
-
-    features.extend(
-        [
-            jaccard(signature_1.author_info_coauthor_blocks, signature_2.author_info_coauthor_blocks),
-            counter_jaccard(
-                signature_1.author_info_coauthor_n_grams,
-                signature_2.author_info_coauthor_n_grams,
+                paper_1.author_info_coauthor_n_grams,
+                paper_2.author_info_coauthor_n_grams,
                 denominator_max=5000,
             ),
-            jaccard(signature_1.author_info_coauthors, signature_2.author_info_coauthors),
+            counter_jaccard(
+                paper_1.author_info_coauthor_affiliations_n_grams,
+                paper_2.author_info_coauthor_affiliations_n_grams,
+            ),
+            counter_jaccard(
+                paper_1.author_info_coauthor_email_prefix_n_grams,
+                paper_2.author_info_coauthor_email_prefix_n_grams,
+            ),
+            counter_jaccard(
+                paper_1.author_info_coauthor_email_suffix_n_grams,
+                paper_2.author_info_coauthor_email_suffix_n_grams,
+            )
         ]
     )
 
-    features.append(counter_jaccard(paper_1.venue_ngrams, paper_2.venue_ngrams))
+    # venue features
+    features.extend(
+        [
+            counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams),
+            counter_jaccard(paper_1.venue_ngrams, paper_2.venue_ngrams)
+        ]
+    )
 
+    # year feature
     features.append(
         np.minimum(
             diff(
@@ -419,6 +277,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         )
     )  # magic number!
 
+    # title features
     features.extend(
         [
             counter_jaccard(paper_1.title_ngrams_words, paper_2.title_ngrams_words),
@@ -426,52 +285,12 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         ]
     )
     
+    # abstract features
     features.extend(
         [
-            np.minimum(
-                diff(
-                    signature_1.author_info_position,
-                    signature_2.author_info_position,
-                ),
-                50,
-            ),
             int(paper_1.has_abstract) + int(paper_2.has_abstract),
+            counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),
         ]
-    )
-
-    features.extend(
-        name_counts(
-            signature_1.author_info_name_counts,
-            signature_2.author_info_name_counts,
-        )
-    )
-
-    specter_1 = None
-    specter_2 = None
-    if english_or_unknown_count == 2 and global_dataset.specter_embeddings is not None:  # type: ignore
-        if str(paper_id_1) in global_dataset.specter_embeddings:  # type: ignore
-            specter_1 = global_dataset.specter_embeddings[str(paper_id_1)]  # type: ignore
-            if np.all(specter_1 == 0):
-                specter_1 = None
-        if str(paper_id_2) in global_dataset.specter_embeddings:  # type: ignore
-            specter_2 = global_dataset.specter_embeddings[str(paper_id_2)]  # type: ignore
-            if np.all(specter_2 == 0):
-                specter_2 = None
-
-    if specter_1 is not None and specter_2 is not None:
-        specter_sim = cosine_sim(specter_1, specter_2) + 1
-    else:
-        specter_sim = NUMPY_NAN
-
-    features.append(specter_sim)  
-
-    features.append(counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams))
-
-    features.extend(
-        name_text_features(
-            signature_1.author_info_first_normalized_without_apostrophe,
-            signature_2.author_info_first_normalized_without_apostrophe,
-        )
     )
 
     # unifying feature type in features array

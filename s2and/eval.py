@@ -1,14 +1,12 @@
 from typing import Dict, Optional, Any, List, Tuple, TYPE_CHECKING, Union
 
 import logging
-import pickle
-import json
-import warnings
 from collections import Counter
 
 if TYPE_CHECKING:  # need this for circular import issues
     from s2and.model import Clusterer
     from s2and.data import PDData
+    from s2and.consts import ORPHAN_CLUSTER_KEY
 
 import os
 from os.path import join
@@ -26,9 +24,7 @@ from sklearn.metrics import average_precision_score
 from sklearn.metrics import precision_recall_curve
 from sklearn.calibration import CalibratedClassifierCV
 import copy
-from tqdm import tqdm
 
-from s2and.featurizer import many_pairs_featurize
 
 logger = logging.getLogger("s2and")
 
@@ -85,12 +81,7 @@ def cluster_eval(
         true_bigger_ratios,
     ) = b3_precision_recall_fscore(cluster_to_signatures, pred_clusters)
     metrics: Dict[str, Tuple] = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
-    metrics["Cluster (P, R F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, pred_clusters, block_dict, "clusters"
-    )
-    metrics["Cluster Macro (P, R, F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, pred_clusters, block_dict, "cmacro"
-    )
+
     metrics["Pred bigger ratio (mean, count)"] = (
         np.round(np.mean(pred_bigger_ratios), 2),
         len(pred_bigger_ratios),
@@ -143,12 +134,10 @@ def incremental_cluster_eval(
     if split == "test":
         for block_key, _ in test_block_dict.items():
             eval_block_dict_full[block_key] = block_dict[block_key]
-        cluster_to_signatures = dataset.construct_cluster_to_papers(test_block_dict)
         for _, signatures in val_block_dict.items():
             for signature in signatures:
                 observed_signatures.add(signature)
     elif split == "val":
-        cluster_to_signatures = dataset.construct_cluster_to_papers(val_block_dict)
         eval_block_dict_full = copy.deepcopy(val_block_dict)
         for block_key, signatures in train_block_dict.items():
             if block_key in eval_block_dict_full:
@@ -183,12 +172,7 @@ def incremental_cluster_eval(
         full_cluster_to_signatures, pred_clusters, skip_signatures=observed_signatures
     )
     metrics = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
-    metrics["Cluster (P, R F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, eval_only_pred_clusters, test_block_dict, "clusters"
-    )
-    metrics["Cluster Macro (P, R, F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, eval_only_pred_clusters, test_block_dict, "cmacro"
-    )
+
 
     return metrics, b3_metrics_per_signature
 
@@ -586,6 +570,12 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     if skip_signatures is not None:
         tcset = tcset.difference(skip_signatures)
 
+    # anything from the orphan cluster will also be skipped
+    # but note that other positives will be penalized for joining to any orphans
+    if ORPHAN_CLUSTER_KEY in true_clusters:
+        to_skip = true_clusters[ORPHAN_CLUSTER_KEY]
+        tcset = tcset.difference(to_skip)
+
     for cluster_id, cluster in true_clusters.items():
         true_clusters[cluster_id] = frozenset(cluster)
     for cluster_id, cluster in pred_clusters.items():
@@ -594,24 +584,23 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     precision = 0.0
     recall = 0.0
 
-    rev_true_clusters = {}
+    reverse_true_clusters = {}
     for k, v in true_clusters.items():
         for vi in v:
-            rev_true_clusters[vi] = k
+            reverse_true_clusters[vi] = k
 
-    rev_pred_clusters = {}
+    reverse_pred_clusters = {}
     for k, v in pred_clusters.items():
         for vi in v:
-            rev_pred_clusters[vi] = k
+            reverse_pred_clusters[vi] = k
 
     intersections = {}
     per_signature_metrics = {}
-    n_samples = len(tcset)
-
+    
     true_bigger_ratios, pred_bigger_ratios = [], []
     for item in list(tcset):
-        pred_cluster_i = pred_clusters[rev_pred_clusters[item]]
-        true_cluster_i = true_clusters[rev_true_clusters[item]]
+        pred_cluster_i = pred_clusters[reverse_pred_clusters[item]]
+        true_cluster_i = true_clusters[reverse_true_clusters[item]]
 
         if len(pred_cluster_i) >= len(true_cluster_i):
             pred_bigger_ratios.append(len(pred_cluster_i) / len(true_cluster_i))
@@ -633,6 +622,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
             f1_score(_precision, _recall),
         )
 
+    n_samples = len(tcset)
     precision /= n_samples
     recall /= n_samples
 
@@ -647,154 +637,6 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
         true_bigger_ratios,
     )
 
-
-def cluster_precision_recall_fscore(
-    true_clus: Dict[str, List[str]], pred_clus: Dict[str, List[str]]
-) -> Tuple[float, float, float]:
-    """
-    Compute cluster-wise pair-wise precision, recall and F-score.
-
-    The function also contains the fix proposed in
-    https://arxiv.org/pdf/1808.04216.pdf to handle singleton clusters.
-
-    Parameters
-    ----------
-    true_clus: Dict
-        dictionary with cluster id as keys and 1d array
-        containing the ground-truth signature id assignments as values.
-    pred_clus: Dict
-        dictionary with cluster id as keys and 1d array
-        containing the predicted signature id assignments as values.
-
-    Returns
-    -------
-    float: calculated precision
-    float: calculated recall
-    float: calculated F1
-
-    Reference
-    ---------
-    Levin, Michael, et al. "Citation-based bootstrapping for
-    large-scale author disambiguation." Journal of the American Society for Information
-    Science and Technology (2012): 1030-1047.
-    """
-
-    goldpairs = set()
-    syspairs = set()
-
-    for _, signatures in true_clus.items():
-        if len(signatures) == 1:
-            goldpairs.add((signatures[0], signatures[0]))
-            continue
-
-        sort_sign = sorted(signatures)
-
-        for i in range(len(sort_sign) - 1):
-            for j in range(i + 1, len(sort_sign)):
-                goldpairs.add((sort_sign[i], sort_sign[j]))
-
-    for _, signatures in pred_clus.items():
-
-        if len(signatures) == 1:
-            syspairs.add((signatures[0], signatures[0]))
-            continue
-
-        sort_sign = sorted(signatures)
-
-        for i in range(len(sort_sign) - 1):
-            for j in range(i + 1, len(sort_sign)):
-                syspairs.add((sort_sign[i], sort_sign[j]))
-
-    precision: float = len(goldpairs.intersection(syspairs)) / len(syspairs)
-    recall: float = len(goldpairs.intersection(syspairs)) / len(goldpairs)
-
-    return precision, recall, f1_score(precision, recall)
-
-
-def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy="cmacro"):
-    """
-    Compute the Pairwise precision, recall and F-score.
-
-    Parameters
-    ----------
-    true_clusters: Dict
-        dictionary with cluster id as keys and
-        1d array containing the ground-truth signature id assignments as values.
-    pred_clusters: Dict
-        dictionary with cluster id as keys and
-        1d array containing the predicted signature id assignments as values.
-    test_block: Dict
-        dictionary with block id as keys and 1d array
-        containing signature ids as values (block assignment).
-    strategy: string
-        'clusters' is cluster-wise pairwise precision, recall
-        and f1 scores. It is computed over all possible pairs in true and predicted
-        clusters. 'cmacro' is computed over each block, and averaged finally.
-
-    Returns
-    -------
-    float: calculated precision
-    float: calculated recall
-    float: calculated F1
-    """
-
-    true_clusters = true_clus.copy()
-    pred_clusters = pred_clus.copy()
-
-    tcset = set(reduce(lambda x, y: x + y, true_clusters.values()))
-    pcset = set(reduce(lambda x, y: x + y, pred_clusters.values()))
-
-    if tcset != pcset:
-        raise ValueError("predictions do not cover all the signatures.")
-
-    rev_true_clusters = {}
-    for k, v in true_clusters.items():
-        for vi in v:
-            rev_true_clusters[vi] = k
-
-    rev_pred_clusters = {}
-    for k, v in pred_clusters.items():
-        for vi in v:
-            rev_pred_clusters[vi] = k
-
-    if strategy == "clusters":
-
-        precision, recall, f1 = cluster_precision_recall_fscore(true_clus, pred_clus)
-        return np.round(precision, 3), np.round(recall, 3), np.round(f1, 3)
-
-    elif strategy == "cmacro":
-
-        mprecision = 0
-        mrecall = 0
-        mf1 = 0
-
-        for _, signatures in test_block.items():
-
-            gtruth_block = {}
-            prediction_block = {}
-
-            for sign in signatures:
-                tclus = rev_true_clusters[sign]
-                pclus = rev_pred_clusters[sign]
-                if tclus not in gtruth_block:
-                    gtruth_block[tclus] = list()
-                gtruth_block[tclus].append(sign)
-                if pclus not in prediction_block:
-                    prediction_block[pclus] = list()
-                prediction_block[pclus].append(sign)
-
-            _mprecision, _mrecall, _mf1 = cluster_precision_recall_fscore(gtruth_block, prediction_block)
-
-            mprecision += _mprecision
-            mrecall += _mrecall
-            mf1 += _mf1
-
-        mprecision = mprecision / len(test_block)
-        mrecall = mrecall / len(test_block)
-        mf1 = mf1 / len(test_block)
-
-        return np.round(mprecision, 3), np.round(mrecall, 3), np.round(mf1, 3)
-    
 
 def min_pair_edit(preds):
     """Find minimum number of cluster changes

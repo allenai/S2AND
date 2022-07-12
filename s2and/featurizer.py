@@ -319,7 +319,7 @@ def parallel_helper(piece_of_work: Tuple, worker_func: Callable):
 
 
 def many_pairs_featurize(
-    signature_pairs: List[Tuple[str, str, Union[int, float]]],
+    paper_pairs: List[Tuple[str, str, Union[int, float]]],
     dataset: PDData,
     featurizer_info: FeaturizationInfo,
     n_jobs: int,
@@ -383,11 +383,11 @@ def many_pairs_featurize(
             cached_features["features"] = {}
             cached_features["features_to_use"] = featurizer_info.features_to_use
 
-    features = np.ones((len(signature_pairs), NUM_FEATURES)) * (-LARGE_INTEGER)
-    labels = np.zeros(len(signature_pairs))
+    features = np.ones((len(paper_pairs), NUM_FEATURES)) * (-LARGE_INTEGER)
+    labels = np.zeros(len(paper_pairs))
     pieces_of_work = []
-    logger.info(f"Creating {len(signature_pairs)} pieces of work")
-    for i, pair in tqdm(enumerate(signature_pairs), desc="Creating work", disable=len(signature_pairs) <= 100000):
+    logger.info(f"Creating {len(paper_pairs)} pieces of work")
+    for i, pair in tqdm(enumerate(paper_pairs), desc="Creating work", disable=len(paper_pairs) <= 100000):
         labels[i] = pair[2]
 
         # negative labels are an indication of partial supervision
@@ -436,7 +436,7 @@ def many_pairs_featurize(
                         # Write to in memory cache if we're not skipping
                         if use_cache:
                             cached_features["features"][
-                                featurizer_info.feature_cache_key(signature_pairs[index])
+                                featurizer_info.feature_cache_key(paper_pairs[index])
                             ] = feature_output
                         features[index, :] = feature_output
                         pbar.update()
@@ -446,7 +446,7 @@ def many_pairs_featurize(
             for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
                 result = partial_func(piece)
                 if use_cache:
-                    cached_features["features"][featurizer_info.feature_cache_key(signature_pairs[result[1]])] = result[
+                    cached_features["features"][featurizer_info.feature_cache_key(paper_pairs[result[1]])] = result[
                         0
                     ]
                 features[result[1], :] = result[0]
@@ -545,26 +545,20 @@ def featurize(
         return all_features
     else:
         if dataset.train_pairs is None:
-            if dataset.train_blocks is not None:
+            if dataset.train_papers is not None:
                 (
-                    train_signatures,
-                    val_signatures,
-                    test_signatures,
-                ) = dataset.split_cluster_papers_fixed()
-            elif dataset.train_papers is not None:
-                (
-                    train_signatures,
-                    val_signatures,
-                    test_signatures,
+                    train_papers_dict,
+                    val_papers_dict,
+                    test_papers_dict,
                 ) = dataset.split_data_papers_fixed()
             else:
                 (
-                    train_signatures,
-                    val_signatures,
-                    test_signatures,
+                    train_papers_dict,
+                    val_papers_dict,
+                    test_papers_dict,
                 ) = dataset.split_cluster_papers()  # type: ignore
 
-            train_pairs, val_pairs, test_pairs = dataset.split_pairs(train_signatures, val_signatures, test_signatures)
+            train_pairs, val_pairs, test_pairs = dataset.split_pairs(train_papers_dict, val_papers_dict, test_papers_dict)
 
         else:
             train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()

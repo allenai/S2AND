@@ -21,6 +21,7 @@ from s2and.consts import (
     NAME_COUNTS_PATH,
     LARGE_DISTANCE,
     CLUSTER_SEEDS_LOOKUP,
+    ORPHAN_CLUSTER_KEY
 )
 from s2and.file_cache import cached_path
 from s2and.text import (
@@ -81,6 +82,7 @@ class Paper(NamedTuple):
     year: Optional[int]
     paper_id: int
     block: Optional[str]
+    # TODO: some key that represents how the papers are currently clustered so we can compare against it
 
 
 class PDData:
@@ -92,6 +94,10 @@ class PDData:
         name: name of the dataset, used for caching computed features
         mode: 'train' or 'inference'; if 'inference', everything related to splitting will be ignored
         clusters: path to the clusters json file (or the json object)
+            - a cluster may span multiple blocks, but we will only consider in-block clusters
+            - there will be individual papers that definitely do not belong to any of the known clusters
+              but which may or may not cluster with each other.
+              papers in these clusters will all appear in clusters.json under the key ORPHAN_CLUSTER_KEY
         specter_embeddings: path to the specter embeddings pickle (or the dictionary object)
         cluster_seeds: path to the cluster seed json file (or the json object)
         altered_cluster_papers: path to the paper ids \n-separated txt file (or a list or set object)
@@ -99,9 +105,6 @@ class PDData:
         train_pairs: path to predefined train pairs csv (or the dataframe object)
         val_pairs: path to predefined val pairs csv (or the dataframe object)
         test_pairs: path to predefined test pairs csv (or the dataframe object)
-        train_blocks: path to predefined train blocks (or the json object)
-        val_blocks: path to predefined val blocks (or the json object)
-        test_blocks: path to predefined test blocks (or the json object)
         train_papers: path to predefined train papers (or the json object)
         val_papers: path to predefined val papers (or the json object)
         test_papers: path to predefined test papers (or the json object)
@@ -134,9 +137,6 @@ class PDData:
         train_pairs: Optional[Union[str, List]] = None,
         val_pairs: Optional[Union[str, List]] = None,
         test_pairs: Optional[Union[str, List]] = None,
-        train_blocks: Optional[Union[str, List]] = None,
-        val_blocks: Optional[Union[str, List]] = None,
-        test_blocks: Optional[Union[str, List]] = None,
         train_papers: Optional[Union[str, List]] = None,
         val_papers: Optional[Union[str, List]] = None,
         test_papers: Optional[Union[str, List]] = None,
@@ -153,17 +153,6 @@ class PDData:
         load_name_counts: Union[bool, Dict] = True,
         n_jobs: int = 1,
     ):
-        if mode == "train":
-            if (clusters is not None and train_pairs is not None) or (
-                clusters is None and train_pairs is None and train_blocks is None
-            ):
-                raise Exception("Set exactly one of clusters and train_pairs")
-
-            if train_blocks is not None and train_pairs is not None:
-                raise Exception("Can't pass in both train_blocks and train_pairs")
-
-            if train_blocks is not None and clusters is None:
-                raise Exception("Train blocks still needs clusters")
 
         logger.info("loading papers")
         self.papers = self.maybe_load_json(papers)
@@ -245,9 +234,6 @@ class PDData:
         self.train_pairs = self.maybe_load_dataframe(train_pairs)
         self.val_pairs = self.maybe_load_dataframe(val_pairs)
         self.test_pairs = self.maybe_load_dataframe(test_pairs)
-        self.train_blocks = self.maybe_load_json(train_blocks)
-        self.val_blocks = self.maybe_load_json(val_blocks)
-        self.test_blocks = self.maybe_load_json(test_blocks)
         self.train_papers = self.maybe_load_json(train_papers)
         self.val_papers = self.maybe_load_json(val_papers)
         self.test_papers = self.maybe_load_json(test_papers)
@@ -256,6 +242,7 @@ class PDData:
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
+        assert self.train_ratio + self.val_ratio + self.test_ratio == 1, "train/val/test ratio should add to 1"
         self.train_pairs_size = train_pairs_size
         self.val_pairs_size = val_pairs_size
         self.test_pairs_size = test_pairs_size
@@ -428,23 +415,6 @@ class PDData:
         else:
             return path_or_pickle
 
-    def get_blocks(self) -> Dict[str, List[str]]:
-        """
-        Gets the block dict based on the blocks provided by Semantic Scholar data
-
-        Returns
-        -------
-        Dict: mapping from block id to list of papers in the block
-        """
-        block: Dict[str, List[str]] = {}
-        for paper_id, paper in self.papers.items():
-            block_id = paper.block
-            if block_id not in block:
-                block[block_id] = [paper_id]
-            else:
-                block[block_id].append(paper_id)
-        return block
-
     def get_constraint(
         self,
         paper_id_1: str,
@@ -503,9 +473,28 @@ class PDData:
         else:
             return None
 
+    def get_blocks(self) -> Dict[str, List[str]]:
+        """
+        Gets the block dict based on the blocks provided
+
+        Returns
+        -------
+        Dict: mapping from block id to list of papers in the block
+        """
+        block: Dict[str, List[str]] = {}
+        for paper_id, paper in self.papers.items():
+            block_id = paper.block
+            if block_id not in block:
+                block[block_id] = [paper_id]
+            else:
+                block[block_id].append(paper_id)
+        return block
+
     def get_papers_to_block(self) -> Dict[str, str]:
         """
         Creates a dictionary mapping paper id to block key
+
+        Each paper can only belong to a single block
 
         Returns
         -------
@@ -515,6 +504,10 @@ class PDData:
         block_dict = self.get_blocks()
         for block_key, papers in block_dict.items():
             for paper_id in papers:
+                if paper_id in paper_to_block:
+                    raise ValueError(
+                        f"Paper {paper_id} is in multiple blocks: {paper_to_block[paper_id]} and {block_key}"
+                    )
                 paper_to_block[paper_id] = block_key
         return paper_to_block
 
@@ -522,7 +515,8 @@ class PDData:
         self, blocks_dict: Dict[str, List[str]]
     ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
-        Splits the block dict into train/val/test blocks
+        Splits the block dict into train/val/test blocks, while trying to preserve
+        the distribution of block sizes between the splits.
 
         Parameters
         ----------
@@ -567,7 +561,7 @@ class PDData:
 
     def group_paper_helper(self, paper_list: List[str]) -> Dict[str, List[str]]:
         """
-        creates a block dict containing a specific input paper list
+        Creates a block dict containing a specific input paper list
 
         Parameters
         ----------
@@ -599,7 +593,7 @@ class PDData:
         train/val/test block dictionaries
         """
         blocks = self.get_blocks()
-        assert self.train_ratio + self.val_ratio + self.test_ratio == 1, "train/val/test ratio should add to 1"
+        
 
         if self.unit_of_data_split == "papers":
             paper_keys = list(self.papers.keys())
@@ -651,64 +645,6 @@ class PDData:
 
         else:
             raise Exception(f"Unknown unit_of_data_split: {self.unit_of_data_split}")
-
-    def split_cluster_papers_fixed(
-        self,
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
-        """
-        Splits the block dict into train/val/test blocks based on a fixed block
-        based split
-
-        Returns
-        -------
-        train/val/test block dictionaries
-        """
-        # for now original blocks are required as it's what AMiner uses for fixed splits
-        # AMiner is the only dataset that comes with its own split
-        blocks = self.get_original_blocks()
-
-        train_block_dict: Dict[str, List[str]] = {}
-        val_block_dict: Dict[str, List[str]] = {}
-        test_block_dict: Dict[str, List[str]] = {}
-
-        logger.info("split_cluster_papers_fixed")
-        if self.val_blocks is None:
-            logger.info("Val blocks are None")
-            train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
-            logger.info(f"train_prob {train_prob, self.train_ratio, self.val_ratio}")
-            np.random.seed(self.random_seed)
-            split_prob = np.random.rand(len(self.train_blocks))
-            for block_id, paper_ids in blocks.items():
-                if block_id in self.train_blocks:
-                    lookup = self.train_blocks.index(block_id)
-                    if split_prob[lookup] < train_prob:
-                        train_block_dict[block_id] = paper_ids
-                    else:
-                        val_block_dict[block_id] = paper_ids
-                elif block_id in self.test_blocks:
-                    test_block_dict[block_id] = paper_ids
-        else:
-            for block_id, paper_ids in blocks.items():
-                if block_id in self.train_blocks:
-                    train_block_dict[block_id] = paper_ids
-                elif block_id in self.val_blocks:
-                    val_block_dict[block_id] = paper_ids
-                elif block_id in self.test_blocks:
-                    test_block_dict[block_id] = paper_ids
-
-        logger.info(f"shuffled train/val/test {len(train_block_dict), len(val_block_dict), len(test_block_dict)}")
-
-        train_set = set(reduce(lambda x, y: x + y, train_block_dict.values()))  # type: ignore
-        val_set = set(reduce(lambda x, y: x + y, val_block_dict.values()))  # type: ignore
-        test_set = set(reduce(lambda x, y: x + y, test_block_dict.values()))  # type: ignore
-        intersection_1 = train_set.intersection(test_set)
-        intersection_2 = train_set.intersection(val_set)
-        intersection_3 = val_set.intersection(test_set)
-        intersection = intersection_1.union(intersection_2).union(intersection_3)
-
-        assert len(intersection) == 0, f"Intersection between train/val/test is {intersection}"
-
-        return train_block_dict, val_block_dict, test_block_dict
 
     def split_data_papers_fixed(
         self,
@@ -883,6 +819,9 @@ class PDData:
     ) -> List[Tuple[str, str, Union[int, float]]]:
         """
         Enumerates all pairs exhaustively, and samples pairs according to the four different strategies.
+        
+        Note: we don't know the label when both of papers have the cluster ORPHAN_CLUSTER_KEY. 
+        But ("orphan", any other cluster) is allowed and is always a negative by definition
 
         Parameters
         ----------
@@ -911,7 +850,8 @@ class PDData:
                         s1_cluster = self.paper_to_cluster_id[s1]
                         s2_cluster = self.paper_to_cluster_id[s2]
                         if s1_cluster == s2_cluster:
-                            possible.append((s1, s2, 1))
+                            if s1_cluster != ORPHAN_CLUSTER_KEY:
+                                possible.append((s1, s2, 1))
                         else:
                             possible.append((s1, s2, 0))
                     else:
@@ -1080,12 +1020,12 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
     if n_jobs > 1:
         with multiprocessing.Pool(processes=n_jobs) as p:
             _max = len(papers_dict)
-            with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
+            with tqdm(total=_max, desc="Preprocessing papers") as pbar:
                 for key, value in p.imap(preprocess_paper_1, papers_dict.items(), 1000):
                     output[key] = value
                     pbar.update()
     else:
-        for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers 1/2"):
+        for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers"):
             result = preprocess_paper_1(item)
             output[result[0]] = result[1]
 

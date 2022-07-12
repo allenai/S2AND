@@ -164,27 +164,27 @@ class Clusterer:
 
         Returns
         -------
-        yields pairs of ((sig id 1, sig id 2, label), index pair into the distance matrix, block key)
+        yields pairs of ((paper id 1, paper id 2, label), index pair into the distance matrix, block key)
         """
-        for block_key, signatures in block_dict.items():
-            for i, j in zip(*np.triu_indices(len(signatures), k=1)):
+        for block_key, papers in block_dict.items():
+            for i, j in zip(*np.triu_indices(len(papers), k=1)):
                 # subtracting LARGE_INTEGER so many_pairs_featurize knows not to make features
                 label = np.nan
-                if (signatures[i], signatures[j]) in partial_supervision:
-                    label = partial_supervision[(signatures[i], signatures[j])] - LARGE_INTEGER
-                elif (signatures[j], signatures[i]) in partial_supervision:
-                    label = partial_supervision[(signatures[j], signatures[i])] - LARGE_INTEGER
+                if (papers[i], papers[j]) in partial_supervision:
+                    label = partial_supervision[(papers[i], papers[j])] - LARGE_INTEGER
+                elif (papers[j], papers[i]) in partial_supervision:
+                    label = partial_supervision[(papers[j], papers[i])] - LARGE_INTEGER
                 elif self.use_default_constraints_as_supervision:
                     value = dataset.get_constraint(
-                        signatures[i],
-                        signatures[j],
+                        papers[i],
+                        papers[j],
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER
 
-                yield ((signatures[i], signatures[j], label), (i, j), block_key)
+                yield ((papers[i], papers[j], label), (i, j), block_key)
 
     def make_distance_matrices(
         self,
@@ -298,8 +298,8 @@ class Clusterer:
                 batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
             logger.info("Starting to make matrices")
-            for within_batch_index, (prediction, signature_pair) in tqdm(
-                enumerate(zip(batch_predictions, pairs)),
+            for within_batch_index, prediction in tqdm(
+                enumerate(batch_predictions),
                 total=len(batch_predictions),
                 desc="Writing matrices",
                 disable=disable_tqdm,
@@ -359,7 +359,7 @@ class Clusterer:
         if isinstance(datasets, PDData):
             datasets = [datasets]
         val_block_dict_list = []
-        val_cluster_to_signatures_list = []
+        val_cluster_to_papers_list = []
         val_dists_list = []
         weights = []
         for dataset in datasets:
@@ -367,7 +367,7 @@ class Clusterer:
             train_block_dict, val_block_dict, _ = dataset.split_cluster_papers()
             # incremental setting uses all the signatures in train and val
             # block-wise split uses only validation set for building the clustering model
-            if dataset.unit_of_data_split == "time" or dataset.unit_of_data_split == "signatures":
+            if dataset.unit_of_data_split == "time" or dataset.unit_of_data_split == "papers":
                 for block_key, signatures in train_block_dict.items():
                     if block_key in val_block_dict:
                         val_block_dict[block_key].extend(signatures)
@@ -376,9 +376,9 @@ class Clusterer:
             val_block_dict = self.filter_blocks(val_block_dict, self.val_blocks_size)
             val_block_dict_list.append(val_block_dict)
 
-            # block ground truth labels: cluster_to_signatures
-            val_cluster_to_signatures = dataset.construct_cluster_to_papers(val_block_dict)
-            val_cluster_to_signatures_list.append(val_cluster_to_signatures)
+            # block ground truth labels: cluster_to_papers
+            val_cluster_to_papers = dataset.construct_cluster_to_papers(val_block_dict)
+            val_cluster_to_papers_list.append(val_cluster_to_papers)
 
             # distance matrix
             if val_dists_precomputed is None:
@@ -394,8 +394,8 @@ class Clusterer:
             self.set_params(params)
             f1s = []
             ratios = []
-            for val_block_dict, val_cluster_to_signatures, val_dists in zip(
-                val_block_dict_list, val_cluster_to_signatures_list, val_dists_list
+            for val_block_dict, val_cluster_to_papers, val_dists in zip(
+                val_block_dict_list, val_cluster_to_papers_list, val_dists_list
             ):
                 pred_clusters, _ = self.predict(val_block_dict, dataset=None, dists=val_dists)
                 (
@@ -405,7 +405,7 @@ class Clusterer:
                     _,
                     pred_bigger_ratios,
                     true_bigger_ratios,
-                ) = b3_precision_recall_fscore(val_cluster_to_signatures, pred_clusters)
+                ) = b3_precision_recall_fscore(val_cluster_to_papers, pred_clusters)
                 ratios.append(np.mean(pred_bigger_ratios + true_bigger_ratios))
                 f1s.append(f1)
             if metric_for_hyperopt == "ratio":
@@ -492,10 +492,11 @@ class Clusterer:
         pred_clusters = defaultdict(list)
 
         if use_s2_clusters:
-            for _, signature_list in block_dict.items():
-                for _signature in signature_list:
-                    s2_cluster_key = dataset.papers[_signature].author_id
-                    pred_clusters[s2_cluster_key].append(_signature)
+            for _, papers_list in block_dict.items():
+                for _paper in papers_list:
+                    # TODO: change `author_id` to whatever we end up passing in to represent the original S2 clusters
+                    s2_cluster_key = dataset.papers[_paper].author_id
+                    pred_clusters[s2_cluster_key].append(_paper)
 
             return dict(pred_clusters), dists
 
@@ -531,7 +532,7 @@ class Clusterer:
         return dict(pred_clusters), dists
 
     def predict_incremental(
-        self, block_signatures: List[str], dataset: PDData, prevent_new_incompatibilities: bool = True
+        self, block_papers: List[str], dataset: PDData
     ):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
@@ -539,7 +540,7 @@ class Clusterer:
         unassigned signature to the closest cluster if distance is less than eps, and then separately cluster all
         the unassigned signatures that are not within eps of any existing cluster.
 
-        Corrected, claimed profiles should be noted via the altered_cluster_signatures parameter (in PDData).
+        Corrected, claimed profiles should be noted via the altered_cluster_papers parameter (in PDData).
         Then predict_incremental performs a pre-clustering step on each altered cluster to determine how
         S2AND would divide it into clusters. Mentions are incrementally added to these new subclusters,
         then reassembled to restore the complete claimed profile when S2AND returns results.
@@ -552,16 +553,10 @@ class Clusterer:
 
         Parameters
         ----------
-        block_signatures: List[str]
+        block_papers: List[str]
             the signatures in the block to predict from
         dataset: PDData
             the dataset
-        prevent_new_incompatibilities: bool
-            if True, prevents the addition to a cluster of new first names that are not prefix match,
-            or in the name pairs list, for at least one existing name in the cluster. This can happen
-            if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
-            and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
-            final cluster would have D Jones, David Jones, and Donald Jones.
 
         Returns
         -------
@@ -571,17 +566,17 @@ class Clusterer:
         cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
         if dataset.altered_cluster_papers is not None:
             altered_cluster_nums = set(
-                dataset.cluster_seeds_require[altered_signature_id]
-                for altered_signature_id in dataset.altered_cluster_papers
+                dataset.cluster_seeds_require[altered_paper_id]
+                for altered_paper_id in dataset.altered_cluster_papers
             )
             if len(altered_cluster_nums) > 0:
                 cluster_seeds_require_inverse: Dict[int, list] = {}
-                for signature_id, cluster_num in dataset.cluster_seeds_require.items():
+                for papers_id, cluster_num in dataset.cluster_seeds_require.items():
                     if cluster_num not in cluster_seeds_require_inverse:
                         cluster_seeds_require_inverse[cluster_num] = []
-                    cluster_seeds_require_inverse[cluster_num].append(signature_id)
+                    cluster_seeds_require_inverse[cluster_num].append(papers_id)
                 for altered_cluster_num in altered_cluster_nums:
-                    signature_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
+                    papers_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
 
                     # Note: incremental_dont_use_cluster_seeds is set to True, because at this stage
                     # of incremental clustering we are splitting up the claimed profiles that we received
@@ -589,31 +584,31 @@ class Clusterer:
                     # don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
                     # s2and's predictions
                     reclustered_output, _ = self.predict(
-                        {"block": signature_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True
+                        {"block": papers_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True
                     )
                     if len(reclustered_output) > 1:
-                        for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):
+                        for i, new_cluster_of_papers in enumerate(reclustered_output.values()):
                             new_cluster_num = str(altered_cluster_num) + f"_{i}"
                             recluster_map[new_cluster_num] = altered_cluster_num
-                            for reclustered_signature_id in new_cluster_of_signatures:
-                                cluster_seeds_require[reclustered_signature_id] = new_cluster_num  # type: ignore
+                            for reclustered_papers_id in new_cluster_of_papers:
+                                cluster_seeds_require[reclustered_papers_id] = new_cluster_num  # type: ignore
 
         all_pairs = []
-        for possibly_unassigned_signature in block_signatures:
-            if possibly_unassigned_signature in cluster_seeds_require:
+        for possibly_unassigned_paper in block_papers:
+            if possibly_unassigned_paper in cluster_seeds_require:
                 continue
-            unassigned_signature = possibly_unassigned_signature
+            unassigned_paper = possibly_unassigned_paper
             for signature in cluster_seeds_require.keys():
                 label = np.nan
                 if self.use_default_constraints_as_supervision:
                     value = dataset.get_constraint(
-                        unassigned_signature,
+                        unassigned_paper,
                         signature,
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER
-                all_pairs.append((unassigned_signature, signature, label))
+                all_pairs.append((unassigned_paper, signature, label))
 
         batch_features, _, batch_nameless_features = many_pairs_featurize(
             all_pairs,
@@ -649,26 +644,26 @@ class Clusterer:
             batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
         logger.info("Computing average distances for unassigned signatures")
-        signature_to_cluster_to_average_dist: Dict[str, Dict[int, Tuple[float, int]]] = defaultdict(
+        papers_to_cluster_to_average_dist: Dict[str, Dict[int, Tuple[float, int]]] = defaultdict(
             lambda: defaultdict(lambda: (0, 0))
         )
-        for signature_pair, dist in zip(all_pairs, batch_predictions):
-            unassigned_signature, assigned_signature, _ = signature_pair
-            if assigned_signature not in cluster_seeds_require:
+        for papers_pair, dist in zip(all_pairs, batch_predictions):
+            unassigned_paper, assigned_paper, _ = papers_pair
+            if assigned_paper not in cluster_seeds_require:
                 continue
-            cluster_id = cluster_seeds_require[assigned_signature]
-            previous_average, previous_count = signature_to_cluster_to_average_dist[unassigned_signature][cluster_id]
-            signature_to_cluster_to_average_dist[unassigned_signature][cluster_id] = (
+            cluster_id = cluster_seeds_require[assigned_paper]
+            previous_average, previous_count = papers_to_cluster_to_average_dist[unassigned_paper][cluster_id]
+            papers_to_cluster_to_average_dist[unassigned_paper][cluster_id] = (
                 (previous_average * previous_count + dist) / (previous_count + 1),
                 previous_count + 1,
             )
 
         logger.info("Assigning unassigned signatures")
         pred_clusters = defaultdict(list)
-        singleton_signatures = []
-        for signature_id, cluster_id in dataset.cluster_seeds_require.items():
-            pred_clusters[f"{cluster_id}"].append(signature_id)
-        for unassigned_signature, cluster_dists in signature_to_cluster_to_average_dist.items():
+        singleton_papers = []
+        for papers_id, cluster_id in dataset.cluster_seeds_require.items():
+            pred_clusters[f"{cluster_id}"].append(papers_id)
+        for unassigned_paper, cluster_dists in papers_to_cluster_to_average_dist.items():
             best_cluster_id = None
             best_dist = float("inf")
             for cluster_id, (average_dist, _) in cluster_dists.items():
@@ -680,58 +675,14 @@ class Clusterer:
                 new_name_disallowed = False
                 if best_cluster_id in recluster_map:
                     best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
-
-                    if prevent_new_incompatibilities:
-                        # restrict reclusterings that would add a new name incompatibility to the main cluster
-                        main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
-                        all_firsts = set(
-                            [
-                                dataset.papers[signature_id].author_info_first_normalized_without_apostrophe
-                                for signature_id in main_cluster_signatures
-                            ]
-                        )
-                        all_firsts = {first for first in all_firsts if len(first) > 1}
-
-                        # if all the existing first names in the cluster are single characters,
-                        # there is nothing else to check
-                        if len(all_firsts) > 0:
-                            first_unassigned = dataset.papers[
-                                unassigned_signature
-                            ].author_info_first_normalized_without_apostrophe
-                            match_found = False
-                            for first_assigned in all_firsts:
-                                prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
-                                    first_assigned
-                                )
-                                known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
-
-                                if prefix or known_alias:
-                                    match_found = True
-                                    break
-                            # if the candidate name is a prefix or a name alias for any of the existing names,
-                            # we will allow it to cluster. If it is not, then it has been clustered with a single
-                            # character name, and we don't want to allow it
-                            if not match_found:
-                                signature = dataset.papers[unassigned_signature]
-                                first = signature.author_info_first
-                                last = signature.author_info_last
-                                paper_id = signature.paper_id
-                                logger.info(
-                                    (
-                                        "Incremental clustering prevented a name compatibility issue from being "
-                                        f"added while clustering {first} {last} on {paper_id}"
-                                    )
-                                )
-                                new_name_disallowed = True
-
                 if new_name_disallowed:
-                    singleton_signatures.append(unassigned_signature)
+                    singleton_papers.append(unassigned_paper)
                 else:
-                    pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
+                    pred_clusters[f"{best_cluster_id}"].append(unassigned_paper)
             else:
-                singleton_signatures.append(unassigned_signature)
+                singleton_papers.append(unassigned_paper)
 
-        reclustered_output, _ = self.predict({"block": singleton_signatures}, dataset)
+        reclustered_output, _ = self.predict({"block": singleton_papers}, dataset)
         new_cluster_id = dataset.max_seed_cluster_id or 0
         for new_cluster in reclustered_output.values():
             pred_clusters[str(new_cluster_id)] = new_cluster

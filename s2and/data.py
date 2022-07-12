@@ -9,7 +9,6 @@ import pickle
 import multiprocessing
 from tqdm import tqdm
 
-from functools import reduce
 from collections import defaultdict, Counter
 
 from sklearn.cluster import KMeans

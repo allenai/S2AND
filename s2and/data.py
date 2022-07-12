@@ -489,6 +489,23 @@ class PDData:
             else:
                 block[block_id].append(paper_id)
         return block
+    
+    def get_s2_blocks(self) -> Dict[str, List[str]]:
+        """
+        Gets the block dict based on the blocks provided by Semantic Scholar data
+        Returns
+        -------
+        Dict: mapping from block id to list of signatures in the block
+        """
+        block: Dict[str, List[str]] = {}
+        for paper_id, paper_ID in self.papers.items():
+            # TODO: replace with the name that we'll use for original S2 block
+            block_id = paper_ID.author_info_block
+            if block_id not in block:
+                block[block_id] = [paper_id]
+            else:
+                block[block_id].append(paper_id)
+        return block
 
     def get_papers_to_block(self) -> Dict[str, str]:
         """

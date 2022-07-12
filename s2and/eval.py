@@ -1,12 +1,12 @@
 from typing import Dict, Optional, Any, List, Tuple, TYPE_CHECKING, Union
 
 import logging
-from collections import Counter
 
 if TYPE_CHECKING:  # need this for circular import issues
     from s2and.model import Clusterer
     from s2and.data import PDData
-    from s2and.consts import ORPHAN_CLUSTER_KEY
+    
+from s2and.consts import ORPHAN_CLUSTER_KEY
 
 import os
 from os.path import join
@@ -49,11 +49,13 @@ def cluster_eval(
         Clusterer object that will do predicting.
     split: string
         Which split in the dataset are we evaluating?
+    use_s2_clusters: bool
+        Whether to use the original S2 clusters
 
     Returns
     -------
     Dict: Dictionary of clusterwise metrics.
-    Dict: Same as above but broken down by signature.
+    Dict: Same as above but broken down by paper.
     """
     train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
     if split == "test":
@@ -65,8 +67,8 @@ def cluster_eval(
     else:
         raise Exception("Split must be one of: {train, val, test}!")
 
-    # block ground truth labels: cluster_to_signatures
-    cluster_to_signatures = dataset.construct_cluster_to_papers(block_dict)
+    # block ground truth labels: cluster_to_papers
+    cluster_to_papers = dataset.construct_cluster_to_papers(block_dict)
 
     # predict
     pred_clusters, _ = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters)
@@ -76,10 +78,10 @@ def cluster_eval(
         b3_p,
         b3_r,
         b3_f1,
-        b3_metrics_per_signature,
+        b3_metrics_per_paper,
         pred_bigger_ratios,
         true_bigger_ratios,
-    ) = b3_precision_recall_fscore(cluster_to_signatures, pred_clusters)
+    ) = b3_precision_recall_fscore(cluster_to_papers, pred_clusters)
     metrics: Dict[str, Tuple] = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
 
     metrics["Pred bigger ratio (mean, count)"] = (
@@ -91,7 +93,7 @@ def cluster_eval(
         len(true_bigger_ratios),
     )
 
-    return metrics, b3_metrics_per_signature
+    return metrics, b3_metrics_per_paper
 
 
 def incremental_cluster_eval(
@@ -99,7 +101,7 @@ def incremental_cluster_eval(
 ) -> Tuple[Dict[str, Tuple[float, float, float]], Dict[str, Tuple[float, float, float]]]:
     """
     Performs clusterwise evaluation for the incremental clustering setting.
-    This includes both time-split and random split of signatures.
+    This includes both time-split and random split of papers.
     Returns B3, Cluster F1, and Cluster Macro F1.
 
     Parameters
@@ -114,7 +116,7 @@ def incremental_cluster_eval(
     Returns
     -------
     Dict: Dictionary of clusterwise metrics.
-    Dict: Same as above but broken down by signature.
+    Dict: Same as above but broken down by paper.
     """
     block_dict = dataset.get_blocks()
     (
@@ -122,70 +124,67 @@ def incremental_cluster_eval(
         val_block_dict,
         test_block_dict,
     ) = dataset.split_cluster_papers()
-    # evaluation must happen only on test-signatures in blocks, so remove train/val signatures
-    observed_signatures = set()
-    for _, signatures in train_block_dict.items():
-        for signature in signatures:
-            observed_signatures.add(signature)
+    # evaluation must happen only on test-papers in blocks, so remove train/val papers
+    observed_papers = set()
+    for _, papers in train_block_dict.items():
+        for paper in papers:
+            observed_papers.add(paper)
 
-    # use entire block of signatures for predictions
-    # NOTE: train/val/test block dicts can have overlapping signatures in the incremental case
+    # use entire block of papers for predictions
+    # NOTE: train/val/test block dicts can have overlapping papers in the incremental case
     eval_block_dict_full = {}
     if split == "test":
         for block_key, _ in test_block_dict.items():
             eval_block_dict_full[block_key] = block_dict[block_key]
-        for _, signatures in val_block_dict.items():
-            for signature in signatures:
-                observed_signatures.add(signature)
+        for _, papers in val_block_dict.items():
+            for paper in papers:
+                observed_papers.add(paper)
     elif split == "val":
         eval_block_dict_full = copy.deepcopy(val_block_dict)
-        for block_key, signatures in train_block_dict.items():
+        for block_key, papers in train_block_dict.items():
             if block_key in eval_block_dict_full:
-                eval_block_dict_full[block_key].extend(signatures)
+                eval_block_dict_full[block_key].extend(papers)
     else:
         raise Exception("Evaluation split must be one of: {val, test}!")
 
     partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {}
-    list_obs_signatures = list(observed_signatures)
+    list_obs_papers = list(observed_papers)
     # considers the supervision as distances
-    for i, signature_i in enumerate(list_obs_signatures):
-        for signature_j in list_obs_signatures[i + 1 : len(list_obs_signatures)]:
-            if dataset.paper_to_cluster_id[signature_i] == dataset.paper_to_cluster_id[signature_j]:
-                partial_supervision[(signature_i, signature_j)] = 0
+    for i, paper_i in enumerate(list_obs_papers):
+        for paper_j in list_obs_papers[i + 1 : len(list_obs_papers)]:
+            if dataset.paper_to_cluster_id[paper_i] == dataset.paper_to_cluster_id[paper_j]:
+                if dataset.paper_to_cluster_id[paper_i] != ORPHAN_CLUSTER_KEY:
+                    partial_supervision[(paper_i, paper_j)] = 0
             else:
-                partial_supervision[(signature_i, signature_j)] = 1
+                partial_supervision[(paper_i, paper_j)] = 1
 
     # predict on test-blocks
     pred_clusters, _ = clusterer.predict(eval_block_dict_full, dataset, partial_supervision=partial_supervision)
-    # to avoid sparsity in b3 computation, we use all the signatures' ground-truth
-    full_cluster_to_signatures = dataset.construct_cluster_to_papers(pred_clusters)
+    # to avoid sparsity in b3 computation, we use all the papers' ground-truth
+    full_cluster_to_papers = dataset.construct_cluster_to_papers(pred_clusters)
 
     eval_only_pred_clusters = {}
-    for cluster_key, signatures in pred_clusters.items():
-        test_signatures = list(set(signatures).difference(observed_signatures))
-        assert len(set(test_signatures).intersection(observed_signatures)) == 0
-        if len(test_signatures) > 0:
-            eval_only_pred_clusters[cluster_key] = test_signatures
+    for cluster_key, papers in pred_clusters.items():
+        test_papers = list(set(papers).difference(observed_papers))
+        assert len(set(test_papers).intersection(observed_papers)) == 0
+        if len(test_papers) > 0:
+            eval_only_pred_clusters[cluster_key] = test_papers
 
     # get metrics
-    b3_p, b3_r, b3_f1, b3_metrics_per_signature, _, _ = b3_precision_recall_fscore(
-        full_cluster_to_signatures, pred_clusters, skip_signatures=observed_signatures
+    b3_p, b3_r, b3_f1, b3_metrics_per_paper, _, _ = b3_precision_recall_fscore(
+        full_cluster_to_papers, pred_clusters, skip_papers=observed_papers
     )
     metrics = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
 
 
-    return metrics, b3_metrics_per_signature
+    return metrics, b3_metrics_per_paper
 
 
 def facet_eval(
     dataset: "PDData",
-    metrics_per_signature: Dict[str, Tuple[float, float, float]],
+    metrics_per_paper: Dict[str, Tuple[float, float, float]],
     block_type: str = "original",
 ) -> Tuple[
-    Dict[str, List],
-    Dict[str, List],
-    Dict[int, List],
-    Dict[int, List],
     Dict[int, List],
     Dict[int, List],
     Dict[int, List],
@@ -198,13 +197,13 @@ def facet_eval(
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
     homonymity_f1 variable are floating points between 0 and 1 indicating the amount
-    of homonymity. The values are the per-signature B3s that have this amount of homonymity.
+    of homonymity. The values are the per-paper B3s that have this amount of homonymity.
 
     Parameters
     ----------
     dataset: PDData Input dataset
-    metrics_per_signature: Dict
-        B3 P/R/F1 per signature.
+    metrics_per_paper: Dict
+        B3 P/R/F1 per paper.
         Second output of cluster_eval function.
     block_type: string
         Whether to use Semantic Scholar ("s2") or "original" blocks
@@ -215,10 +214,7 @@ def facet_eval(
     Dict: B3 F1 broken down by year.
     Dict: B3 F1 broken down by block size.
     Dict: B3 F1 broken down by true cluster size.
-    Dict: B3 F1 broken down by within-block homonymity fraction.
-          Definition (per signature): Fraction of same names but within different clusters.
-    Dict: B3 F1 broken down by within-block synonymity fraction.
-          Definition (per signature): Fraction of different names but within same clusters.
+    Dict: B3 F1 broken down by whether there is an abstract
     """
     block_len_dict = {}
     if block_type == "original":
@@ -235,107 +231,63 @@ def facet_eval(
     assert dataset.clusters is not None
     cluster_len_dict = {}
     for cluster_id, cluster_dict in dataset.clusters.items():
-        cluster_len_dict[cluster_id] = len(cluster_dict["paper_ids"])
+        if cluster_id != ORPHAN_CLUSTER_KEY:
+            cluster_len_dict[cluster_id] = len(cluster_dict["paper_ids"])
 
     # Keep track of facet specific f-score performance
     author_num_f1 = defaultdict(list)
     year_f1 = defaultdict(list)
     block_len_f1 = defaultdict(list)
     cluster_len_f1 = defaultdict(list)
-    # keep track feature availability facet specific f-score
-    firstname_f1 = defaultdict(list)
-    affiliation_f1 = defaultdict(list)
-    email_f1 = defaultdict(list)
     abstract_f1 = defaultdict(list)
-    venue_f1 = defaultdict(list)
-    coauthors_f1 = defaultdict(list)
 
-    signature_lookup = list()
+    paper_lookup = list()
 
-    for signature_key, (p, r, f1) in metrics_per_signature.items():
+    for paper_id, (p, r, f1) in metrics_per_paper.items():
 
-        _signature_dict = dict()
+        _paper_dict = dict()
 
-        cluster_id = dataset.paper_to_cluster_id[signature_key]
-        signature = dataset.papers[signature_key]
-        paper = dataset.papers[str(signature.paper_id)]
+        cluster_id = dataset.paper_to_cluster_id[paper_id]
+        if cluster_id != ORPHAN_CLUSTER_KEY:
+            paper = dataset.papers[str(paper_id)]
 
-        author_num_f1[len(paper.authors)].append(f1)
-        year_f1[paper.year].append(f1)
-        cluster_len_f1[cluster_len_dict[cluster_id]].append(f1)
+            author_num_f1[len(paper.authors)].append(f1)
+            year_f1[paper.year].append(f1)
+            cluster_len_f1[cluster_len_dict[cluster_id]].append(f1)
 
-        # full first-name
-        if signature.author_info_first is not None and len(signature.author_info_first.replace(".", "")) >= 2:
-            firstname_f1[1].append(f1)
-            _signature_dict["first name"] = 1
-        else:
-            firstname_f1[0].append(f1)
-            _signature_dict["first name"] = 0
+            # full first-name
+            if paper.has_abstract:
+                abstract_f1[1].append(f1)
+                _paper_dict["abstract"] = 1
+            else:
+                abstract_f1[0].append(f1)
+                _paper_dict["abstract"] = 0
 
-        if len(signature.author_info_affiliations) > 0:
-            affiliation_f1[1].append(f1)
-            _signature_dict["affiliation"] = 1
-        else:
-            affiliation_f1[0].append(f1)
-            _signature_dict["affiliation"] = 0
+            if block_type == "original":
+                block_len_f1[block_len_dict[paper.block]].append(f1)
+                _paper_dict["block size"] = block_len_dict[paper.author_info_given_block]
+            elif block_type == "s2":
+                # TODO: update author_info_block to whatever we use for original block
+                block_len_f1[block_len_dict[paper.author_info_block]].append(f1)
+                _paper_dict["block size"] = block_len_dict[paper.author_info_block]
 
-        if signature.author_info_email not in {"", None}:
-            email_f1[1].append(f1)
-            _signature_dict["email"] = 1
-        else:
-            email_f1[0].append(f1)
-            _signature_dict["email"] = 0
+            _paper_dict["paper_id"] = paper_id
+            _paper_dict["precision"] = p
+            _paper_dict["recall"] = r
+            _paper_dict["f1"] = f1
+            _paper_dict["#authors"] = len(paper.authors)
+            _paper_dict["year"] = paper.year
+            _paper_dict["cluster size"] = cluster_len_dict[cluster_id]
 
-        if paper.has_abstract:
-            abstract_f1[1].append(f1)
-            _signature_dict["abstract"] = 1
-        else:
-            abstract_f1[0].append(f1)
-            _signature_dict["abstract"] = 0
-
-        if paper.venue not in {"", None} or paper.journal_name not in {"", None}:
-            venue_f1[1].append(f1)
-            _signature_dict["venue"] = 1
-        else:
-            venue_f1[0].append(f1)
-            _signature_dict["venue"] = 0
-            
-        if len(signature.author_info_coauthors) > 0:
-            coauthors_f1[1].append(f1)
-            _signature_dict["multiple_authors"] = 1
-        else:
-            coauthors_f1[0].append(f1)
-            _signature_dict["multiple_authors"] = 0
-
-        if block_type == "original":
-            block_len_f1[block_len_dict[signature.author_info_given_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[signature.author_info_given_block]
-        elif block_type == "s2":
-            block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[signature.author_info_block]
-
-        _signature_dict["paper_id"] = signature_key
-        _signature_dict["precision"] = p
-        _signature_dict["recall"] = r
-        _signature_dict["f1"] = f1
-        _signature_dict["#authors"] = len(paper.authors)
-        _signature_dict["year"] = paper.year
-        _signature_dict["cluster size"] = cluster_len_dict[cluster_id]
-
-        signature_lookup.append(_signature_dict)
+            paper_lookup.append(_paper_dict)
 
     return (
         author_num_f1,
         year_f1,
         block_len_f1,
         cluster_len_f1,
-        firstname_f1,
-        affiliation_f1,
-        email_f1,
         abstract_f1,
-        venue_f1,
-        coauthors_f1,
-        signature_lookup,
+        paper_lookup,
     )
 
 
@@ -525,7 +477,7 @@ def f1_score(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
+def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     """
     Compute the B^3 variant of precision, recall and F-score.
     Modified from: https://github.com/glouppe/beard/blob/master/beard/metrics/clustering.py
@@ -534,11 +486,11 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     ----------
     true_clus: Dict
         dictionary with cluster id as keys and 1d array containing
-        the ground-truth signature id assignments as values.
+        the ground-truth paper id assignments as values.
     pred_clus: Dict
         dictionary with cluster id as keys and 1d array containing
-        the predicted signature id assignments as values.
-    skip_signatures: List[string]
+        the predicted paper id assignments as values.
+    skip_papers: List[string]
         in the incremental setting blocks can be partially supervised,
         hence those instances are not used for evaluation.
 
@@ -547,7 +499,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     float: calculated precision
     float: calculated recall
     float: calculated F1
-    Dict: P/R/F1 per signature
+    Dict: P/R/F1 per paper
 
     Reference
     ---------
@@ -563,12 +515,12 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     pcset = set(reduce(lambda x, y: x + y, pred_clusters.values()))
 
     if tcset != pcset:
-        raise ValueError("Predictions do not cover all the signatures!")
+        raise ValueError("Predictions do not cover all the papers!")
 
-    # incremental evaluation contains partially observed signatures
-    # skip_signatures are observed signatures, which we skip for b3 calc.
-    if skip_signatures is not None:
-        tcset = tcset.difference(skip_signatures)
+    # incremental evaluation contains partially observed papers
+    # skip_papers are observed papers, which we skip for b3 calc.
+    if skip_papers is not None:
+        tcset = tcset.difference(skip_papers)
 
     # anything from the orphan cluster will also be skipped
     # but note that other positives will be penalized for joining to any orphans
@@ -595,7 +547,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
             reverse_pred_clusters[vi] = k
 
     intersections = {}
-    per_signature_metrics = {}
+    per_paper_metrics = {}
     
     true_bigger_ratios, pred_bigger_ratios = [], []
     for item in list(tcset):
@@ -616,7 +568,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
         _recall = len(intersection) / len(true_cluster_i)
         precision += _precision
         recall += _recall
-        per_signature_metrics[item] = (
+        per_paper_metrics[item] = (
             _precision,
             _recall,
             f1_score(_precision, _recall),
@@ -632,106 +584,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
         np.round(precision, 3),
         np.round(recall, 3),
         np.round(f_score, 3),
-        per_signature_metrics,
+        per_paper_metrics,
         pred_bigger_ratios,
         true_bigger_ratios,
     )
-
-
-def min_pair_edit(preds):
-    """Find minimum number of cluster changes
-    to fully correct a block with errors.
-
-    Args:
-        preds: Dictionary that has cluster assignments and claim pairs.
-
-    Returns:
-        min_edit_score: Minimum edit distance score from 0 to 1
-        min_edit_count: Unnormalized count version of score above.
-        number_of_mistaken_ids: Total number of signature ids that were part of wrong pairs
-    """
-    wrong = preds["sig_pairs_wrong"]
-    right = preds["sig_pairs_right"]
-
-    if len(wrong) == 0:
-        return 0, 0, 0
-
-    signature_to_cluster = dict()
-    for key, value in preds.items():
-        if not key.startswith("sig_pairs"):
-            for v in value:
-                signature_to_cluster[v[1]] = key
-
-    all_clusters = set(list(signature_to_cluster.values()))
-    all_clusters.update(["dummy"])
-
-    tp_sigs = set()
-    tn_sigs = set()
-    for sig_id_1, sig_id_2, title_1, title_2, pred_same, gold_same in wrong + right:
-        if gold_same:
-            tp_sigs.add((sig_id_1, sig_id_2))
-        else:
-            tn_sigs.add((sig_id_1, sig_id_2))
-
-    def eval_current_cluster(signature_to_cluster):
-        tp, fp, tn, fn = 0, 0, 0, 0
-        for s_id_1, s_id_2 in tp_sigs:
-            same_cluster_pred = signature_to_cluster[s_id_1] == signature_to_cluster[s_id_2]
-            if same_cluster_pred:
-                tp += 1
-            else:
-                fn += 1
-
-        for s_id_1, s_id_2 in tn_sigs:
-            same_cluster_pred = signature_to_cluster[s_id_1] == signature_to_cluster[s_id_2]
-            if same_cluster_pred:
-                fp += 1
-            else:
-                tn += 1
-
-        return -fp + -fn
-
-    wrong_counts = Counter()
-    for sig_id_1, sig_id_2, title_1, title_2, pred_same, gold_same in wrong:
-        wrong_counts.update([sig_id_1, sig_id_2])
-
-    worst_ids = [i[0] for i in wrong_counts.most_common(10000000)]
-
-    steps = 0
-    for worst_id in worst_ids:
-        original_cluster_label = signature_to_cluster[worst_id]
-        best_f1 = eval_current_cluster(signature_to_cluster)
-        flip_tos = [i for i in all_clusters if i != original_cluster_label]
-        best_flip_to = None
-        for flip_to in flip_tos:
-            signature_to_cluster[worst_id] = flip_to
-            current_f1 = eval_current_cluster(signature_to_cluster)
-            if current_f1 > best_f1:
-                best_f1 = current_f1
-                best_flip_to = flip_to
-
-        if best_flip_to is not None:
-            signature_to_cluster[worst_id] = best_flip_to
-
-            # remake wrong and right
-            wrong_new, right_new = [], []
-            for sig_id_1, sig_id_2, title_1, title_2, _, gold_same in wrong + right:
-                pred_same = signature_to_cluster[sig_id_1] == signature_to_cluster[sig_id_2]
-                if pred_same == gold_same:
-                    right_new.append([sig_id_1, sig_id_2, title_1, title_2, pred_same, gold_same])
-                else:
-                    wrong_new.append([sig_id_1, sig_id_2, title_1, title_2, pred_same, gold_same])
-
-            wrong = wrong_new
-            right = right_new
-            steps += 1
-        else:
-            signature_to_cluster[worst_id] = original_cluster_label
-
-        if len(wrong) == 0:
-            break
-
-    if len(wrong) != 0:
-        print("something went wrong")
-
-    return steps / (len(worst_ids) - 1), steps, len(worst_ids)

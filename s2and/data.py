@@ -54,6 +54,7 @@ class Author(NamedTuple):
     author_info_first_normalized: Optional[str]
     author_info_middle_normalized: Optional[str]
     author_info_full_name: Optional[str]
+    author_info_first_letters: Optional[set]
     author_info_affiliations: List[str]
     author_info_affiliations_joined: Optional[Counter]
     author_info_email: Optional[str]
@@ -179,6 +180,7 @@ class PDData:
                         author_info_middle_normalized=None,
                         author_info_full_name=None,
                         author_info_affiliations=author["affiliations"],
+                        author_info_first_letters=None,
                         author_info_affiliations_joined=None,
                         author_info_email=author["email"],
                         author_info_email_prefix=None,
@@ -932,7 +934,7 @@ def preprocess_authors(author):
     ).split(" ")
     if first_middle_normalized_split_without_apostrophe[0] in NAME_PREFIXES:
         first_middle_normalized_split_without_apostrophe = first_middle_normalized_split_without_apostrophe[1:]
-
+    author_info_last_normalized = normalize_text(author.author_info_last or "")
 
     author = author._replace(
         author_info_first_normalized=first_middle_normalized_split[0],
@@ -941,9 +943,15 @@ def preprocess_authors(author):
         author_info_middle_normalized_without_apostrophe=" ".join(
             first_middle_normalized_split_without_apostrophe[1:]
         ),
-        author_info_last_normalized=normalize_text(author.author_info_last),
+        author_info_last_normalized=author_info_last_normalized,
         author_info_suffix_normalized=normalize_text(author.author_info_suffix or ""),
     )
+
+    author_info_first_letters = set()
+    if len(first_normalized_without_apostrophe) > 0:
+        author_info_first_letters.add(first_normalized_without_apostrophe[0])
+    if len(author_info_last_normalized) > 0:
+        author_info_first_letters.add(author_info_last_normalized[0])
 
     affiliations = [normalize_text(affiliation) for affiliation in author.author_info_affiliations]
     affiliations_joined = " ".join(affiliations)
@@ -960,6 +968,7 @@ def preprocess_authors(author):
     author = author._replace(
         author_info_full_name=get_full_name_for_features(author).strip(),
         author_info_affiliations=affiliations,
+        author_info_first_letters=author_info_first_letters,
         author_info_affiliations_joined=affiliations_joined,
         author_info_email_prefix=author_info_email_prefix,
         author_info_email_suffix=author_info_email_suffix,

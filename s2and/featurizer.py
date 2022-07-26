@@ -57,18 +57,18 @@ class FeaturizationInfo:
         self.features_to_use = features_to_use
 
         self.feature_group_to_index = {
-            "author_similarity": [0, 1, 2, 3],
-            "venue_similarity": [4, 5],
-            "year_diff": [6],
-            "title_similarity": [7, 8],
-            "abstract_similarity": [9, 10],
+            "author_similarity": [0, 1, 2, 3, 4],
+            "venue_similarity": [5, 6],
+            "year_diff": [7],
+            "title_similarity": [8, 9],
+            "abstract_similarity": [10, 11],
 
         }
 
         self.number_of_features = max(functools.reduce(max, self.feature_group_to_index.values())) + 1  # type: ignore
 
         lightgbm_monotone_constraints = {
-            "author_similarity": ["1", "1", "1", "1"],
+            "author_similarity": ["1", "1", "1", "1", "1"],
             "venue_similarity": ["1", "1"],
             "year_diff": ["-1"],
             "title_similarity": ["1", "1"],
@@ -112,6 +112,7 @@ class FeaturizationInfo:
                     "author_affiliations_similarity",
                     "author_email_prefix_similarity",
                     "author_email_suffix_similarity",
+                    "author_first_letter_compatibility",
                 ]
             )
 
@@ -205,6 +206,47 @@ class FeaturizationInfo:
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
 
+
+def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_order=True):
+    """Checks if two author lists are compatible based on (a) num of authors (optionally),
+    (b) whether the first letters of their names are the same (but possibly in the wrong order)
+    and (c) whether the authors are in the right order (optionally)
+
+    Args:
+        auth_1 (list of Authors): list of authors
+            must have keys "author_info_first_normalized_without_apostrophe" (str) and
+            "author_info_last_normalized" (str). 
+            assuming the author list is already sorted in order of position and normalized and lower-cased
+        auth_2 (list of Authors): ditto
+        check_same_len (bool, optional): whether to check if the two author lists have the same len
+        strict_order (bool, optional): whether the authors have to be in the same order or not.
+            If False, tries to find a match anywhere in the author list as opposed to the corresponding position.
+            Defaults to True.
+    """
+    # check if the two author lists have the same len
+    if check_same_len and (len(auth_1) != len(auth_2)):
+        return False
+    
+    # extract first letters
+    first_letters_1 = [auth.author_info_first_letters for auth in auth_1]
+    first_letters_2 = [auth.author_info_first_letters for auth in auth_2]
+        
+    # check if the first letters are the same
+    if strict_order:
+        for i in range(len(first_letters_1)):
+            if first_letters_1[i] != first_letters_2[i]:
+                return False
+        return True
+    else:
+        # since we don't care about order, we do an all-pairs comparison
+        found_match = [False] * len(first_letters_1)
+        for i in range(len(first_letters_1)):
+            for j in range(len(first_letters_2)):
+                if first_letters_1[i] == first_letters_2[j]:
+                    found_match[i] = True
+                    break  # from inner loop only
+        return all(found_match)
+    
 
 def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tuple[List[Union[int, float]], int]:
     """

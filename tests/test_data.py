@@ -13,13 +13,6 @@ class TestData(unittest.TestCase):
             name="test_dataset",
             load_name_counts=False
         )
-        self.dummy_dataset = PDData(
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy",
-            load_name_counts=False,
-            preprocess=False,
-        )
 
     def test_split_pairs_within_blocks(self):
         # Test random sampling within blocks
@@ -40,7 +33,7 @@ class TestData(unittest.TestCase):
         assert (
             train_pairs[0] == ('1409183546974670848', '1401326657880461312', 0)
             and val_pairs[0] == ('35668499', '212140021', 1)
-            and test_pairs[0] == ('7355243', '51939837', 0)
+            and test_pairs[0] == ('65517728', '1458733052', 0)
         )
 
         # Test adding the all test pairs flag to the test above
@@ -51,125 +44,16 @@ class TestData(unittest.TestCase):
         assert len(train_pairs) == 100, len(val_pairs) == 50 and len(test_pairs) == 72
 
 
-    def test_blocks(self):
-        original_blocks = self.dummy_dataset.get_original_blocks()
-        s2_blocks = self.dummy_dataset.get_s2_blocks()
-
-        expected_original_blocks = {
-            "a sattar": ["0", "1", "2"],
-            "a konovalov": ["3", "4", "5", "6", "7", "8"],
-        }
-        expected_s2_blocks = {
-            "a sattary": ["0", "1", "2"],
-            "a konovalov": ["3", "4", "5", "6", "7", "8"],
-        }
-
-        self.dummy_dataset.block_type = "s2"
-        s2_blocks_2 = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "original"
-        original_blocks_2 = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "dummy"
-        with pytest.raises(Exception):
-            blocks = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "s2"
-
-        assert original_blocks == expected_original_blocks
-        assert original_blocks_2 == expected_original_blocks
-        assert s2_blocks == expected_s2_blocks
-        assert s2_blocks_2 == expected_s2_blocks
-
     def test_initialization(self):
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={},
-                papers={},
-                clusters={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                block_type="s2",
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={},
-                papers={},
-                clusters={},
-                name="",
-                mode="train",
-                unit_of_data_split="blocks",
-                pair_sampling_block=False,
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={},
-                papers={},
-                name="",
-                mode="train",
-                clusters={},
-                train_pairs=[],
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={},
-                papers={},
-                name="",
-                mode="train",
-                clusters=None,
-                train_pairs=None,
-                train_blocks=None,
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={},
-                papers={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                train_pairs=[],
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={},
-                papers={},
-                name="",
-                mode="train",
-                train_blocks=[],
-                clusters=None,
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        dataset = ANDData(authors={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
+        dataset = PDData(papers={}, name="", mode="inference", load_name_counts=False)
         assert dataset.paper_to_cluster_id is None
-
-        dataset = ANDData(authors={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
-        assert dataset.pair_sampling_block
-        assert not dataset.pair_sampling_balanced_classes
-        assert not dataset.pair_sampling_balanced_homonym_synonym
         assert dataset.all_test_pairs_flag
-        assert dataset.block_type == "s2"
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                authors={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
-            )
 
     def test_construct_cluster_to_signatures(self):
-        cluster_to_signatures = self.dummy_dataset.construct_cluster_to_papers({"a": ["0", "1"], "b": ["3", "4"]})
-        expected_cluster_to_signatures = {"1": ["0", "1"], "3": ["3", "4"]}
+        cluster_to_signatures = self.dataset.construct_cluster_to_papers({"a": ["20797514", "51804247"], "b": ["7355243", "65911307"]})
+        expected_cluster_to_signatures = {'PM_51910': ['20797514'],
+            'PM_114482': ['51804247'],
+            'PM_221928': ['7355243'],
+            'PM_146905': ['65911307']
+        }
         assert cluster_to_signatures == expected_cluster_to_signatures

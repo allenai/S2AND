@@ -18,7 +18,6 @@ WORKDIR /work
 COPY requirements.in .
 
 # copy over the data file
-COPY data/s2and_name_tuples.txt ./data/
 COPY data/path_config.json ./data/
 
 # add the code as the final step so that when we modify the code
@@ -34,7 +33,6 @@ RUN pip install -r requirements.in
 COPY setup.py .
 RUN python setup.py develop
 
-RUN aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/lid.176.bin data/
 RUN aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/name_counts.pickle data/
 
 CMD [ "/bin/bash" ]

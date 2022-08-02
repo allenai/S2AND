@@ -183,7 +183,7 @@ def facet_eval(
     dataset: "PDData",
     metrics_per_paper: Dict[str, Tuple[float, float, float]],
     block_type: str = "original",
-) -> Tuple[Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], List[dict],]:
+) -> Tuple[Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], List[dict]]:
     """
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the

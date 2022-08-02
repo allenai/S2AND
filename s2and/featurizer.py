@@ -408,7 +408,7 @@ def many_pairs_featurize(
     np.ndarray: the nameless features for all the pairs
     """
     global global_dataset
-    global_dataset = global_dataset.papers  # type: ignore
+    global_dataset = dataset.papers  # type: ignore
 
     cached_features: Dict[str, Any] = {"features": {}}
     cache_changed = False

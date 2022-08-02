@@ -117,7 +117,6 @@ class PDData:
         train_pairs_size: number of training pairs for learning the linkage function
         val_pairs_size: number of validation pairs for fine-tuning the linkage function parameters
         test_pairs_size: number of test pairs for evaluating the linkage function
-        pair_sampling_balanced_classes: sample a balanced number of positive and negative pairs?,
         all_test_pairs_flag: With blocking, for the linkage function evaluation task, should the test
             contain all possible pairs from test blocks, or the given number of pairs (test_pairs_size)
         random_seed: random seed
@@ -530,7 +529,7 @@ class PDData:
         return paper_to_block
 
     def split_blocks_helper(
-        self, blocks_dict: Dict[str, List[str]]
+        self, blocks: Dict[str, List[str]]
     ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
         Splits the block dict into train/val/test blocks, while trying to preserve
@@ -538,7 +537,7 @@ class PDData:
 
         Parameters
         ----------
-        blocks_dict: Dict
+        blocks: Dict
             the full block dictionary
 
         Returns
@@ -547,7 +546,7 @@ class PDData:
         """
         x = []
         y = []
-        for block_id, papers in blocks_dict.items():
+        for block_id, papers in blocks.items():
             x.append(block_id)
             y.append(len(papers))
 
@@ -571,9 +570,9 @@ class PDData:
             random_state=self.random_seed,
         )
 
-        train_block_dict = {k: blocks_dict[k] for k in train_blocks}
-        val_block_dict = {k: blocks_dict[k] for k in val_blocks}
-        test_block_dict = {k: blocks_dict[k] for k in test_blocks}
+        train_block_dict = {k: blocks[k] for k in train_blocks}
+        val_block_dict = {k: blocks[k] for k in val_blocks}
+        test_block_dict = {k: blocks[k] for k in test_blocks}
 
         return train_block_dict, val_block_dict, test_block_dict
 

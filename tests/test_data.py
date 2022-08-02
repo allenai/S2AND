@@ -1,25 +1,20 @@
 import unittest
 import pytest
 
-from s2and.data import ANDData
+from s2and.data import PDData
 
 
 class TestData(unittest.TestCase):
     def setUp(self):
         super().setUp()
-        self.qian_dataset = ANDData(
-            "tests/qian/signatures.json",
-            # "tests/qian/papers.json",
-            {},
-            clusters="tests/qian/clusters.json",
-            name="qian",
-            load_name_counts=False,
-            preprocess=False,
+        self.dataset = PDData(
+            "tests/test_dataset/papers.json",
+            clusters="tests/test_dataset/clusters.json",
+            name="test_dataset",
+            load_name_counts=False
         )
-        self.dummy_dataset = ANDData(
-            "tests/dummy/signatures.json",
-            # "tests/dummy/papers.json",
-            {},
+        self.dummy_dataset = PDData(
+            "tests/dummy/papers.json",
             clusters="tests/dummy/clusters.json",
             name="dummy",
             load_name_counts=False,
@@ -28,65 +23,33 @@ class TestData(unittest.TestCase):
 
     def test_split_pairs_within_blocks(self):
         # Test random sampling within blocks
-        self.qian_dataset.pair_sampling_block = True
-        self.qian_dataset.pair_sampling_balanced_classes = False
-        self.qian_dataset.pair_sampling_balanced_homonym_synonym = False
-        self.qian_dataset.train_pairs_size = 1000
-        self.qian_dataset.val_pairs_size = 500
-        self.qian_dataset.test_pairs_size = 500
-        self.qian_dataset.random_seed = 1111
+        self.dataset.train_pairs_size = 100
+        self.dataset.val_pairs_size = 50
+        self.dataset.test_pairs_size = 50
+        self.dataset.random_seed = 1111
         (
             train_block_dict,
             val_block_dict,
             test_block_dict,
-        ) = self.qian_dataset.split_cluster_papers()
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
+        ) = self.dataset.split_cluster_papers()
+        train_pairs, val_pairs, test_pairs = self.dataset.split_pairs(
             train_block_dict, val_block_dict, test_block_dict
         )
 
-        assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
+        assert len(train_pairs) == 100 and len(val_pairs) == 50 and len(test_pairs) == 50
         assert (
-            train_pairs[0] == ("5259", "5270", 1)
-            and val_pairs[0] == ("3830", "3847", 1)
-            and test_pairs[0] == ("1050", "1063", 1)
-        )
-
-        # Test balanced pos/neg sampling within blocks
-        self.qian_dataset.pair_sampling_block = True
-        self.qian_dataset.pair_sampling_balanced_classes = True
-        self.qian_dataset.pair_sampling_balanced_homonym_synonym = False
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
-        )
-        assert sum([int(pair[2]) for pair in train_pairs]) == 500
-        assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
-        assert (
-            train_pairs[0] == ("5694", "5702", 1)
-            and val_pairs[0] == ("781", "787", 1)
-            and test_pairs[0] == ("2428", "2581", 0)
-        )
-
-        # Test balanced pos/neg and homonym/synonym sampling within blocks
-        self.qian_dataset.pair_sampling_block = True
-        self.qian_dataset.pair_sampling_balanced_classes = True
-        self.qian_dataset.pair_sampling_balanced_homonym_synonym = True
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
-            train_block_dict, val_block_dict, test_block_dict
-        )
-        assert sum([int(pair[2]) for pair in train_pairs]) == 500
-        assert len(train_pairs) == 1000 and len(val_pairs) == 429 and len(test_pairs) == 376
-        assert (
-            train_pairs[0] == ("4389", "4493", 0)
-            and val_pairs[0] == ("621", "636", 0)
-            and test_pairs[0] == ("2550", "2622", 0)
+            train_pairs[0] == ('1409183546974670848', '1401326657880461312', 0)
+            and val_pairs[0] == ('35668499', '212140021', 1)
+            and test_pairs[0] == ('7355243', '51939837', 0)
         )
 
         # Test adding the all test pairs flag to the test above
-        self.qian_dataset.all_test_pairs_flag = True
-        train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
+        self.dataset.all_test_pairs_flag = True
+        train_pairs, val_pairs, test_pairs = self.dataset.split_pairs(
             train_block_dict, val_block_dict, test_block_dict
         )
-        assert len(train_pairs) == 1000, len(val_pairs) == 429 and len(test_pairs) == 7244
+        assert len(train_pairs) == 100, len(val_pairs) == 50 and len(test_pairs) == 72
+
 
     def test_blocks(self):
         original_blocks = self.dummy_dataset.get_original_blocks()

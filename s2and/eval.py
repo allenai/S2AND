@@ -5,7 +5,7 @@ import logging
 if TYPE_CHECKING:  # need this for circular import issues
     from s2and.model import Clusterer
     from s2and.data import PDData
-    
+
 from s2and.consts import ORPHAN_CLUSTER_KEY
 
 import os
@@ -175,7 +175,6 @@ def incremental_cluster_eval(
         full_cluster_to_papers, pred_clusters, skip_papers=observed_papers
     )
     metrics = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
-
 
     return metrics, b3_metrics_per_paper
 
@@ -548,7 +547,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
 
     intersections = {}
     per_paper_metrics = {}
-    
+
     true_bigger_ratios, pred_bigger_ratios = [], []
     for item in list(tcset):
         pred_cluster_i = pred_clusters[reverse_pred_clusters[item]]

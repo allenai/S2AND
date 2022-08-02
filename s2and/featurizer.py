@@ -62,7 +62,6 @@ class FeaturizationInfo:
             "year_diff": [7],
             "title_similarity": [8, 9],
             "abstract_similarity": [10, 11],
-
         }
 
         self.number_of_features = max(functools.reduce(max, self.feature_group_to_index.values())) + 1  # type: ignore
@@ -123,13 +122,12 @@ class FeaturizationInfo:
         # year features
         if "year_diff" in self.features_to_use:
             feature_names.append("year_diff")
-            
+
         if "title_similarity" in self.features_to_use:
             feature_names.extend(["title_word_similarity", "title_character_similarity"])
-            
+
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
-
 
         return feature_names
 
@@ -215,7 +213,7 @@ def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_ord
     Args:
         auth_1 (list of Authors): list of authors
             must have keys "author_info_first_normalized_without_apostrophe" (str) and
-            "author_info_last_normalized" (str). 
+            "author_info_last_normalized" (str).
             assuming the author list is already sorted in order of position and normalized and lower-cased
         auth_2 (list of Authors): ditto
         check_same_len (bool, optional): whether to check if the two author lists have the same len
@@ -226,11 +224,11 @@ def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_ord
     # check if the two author lists have the same len
     if check_same_len and (len(auth_1) != len(auth_2)):
         return False
-    
+
     # extract first letters
     first_letters_1 = [auth.author_info_first_letters for auth in auth_1]
     first_letters_2 = [auth.author_info_first_letters for auth in auth_2]
-        
+
     # check if the first letters are the same
     if strict_order:
         for i in range(len(first_letters_1)):
@@ -246,7 +244,7 @@ def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_ord
                     found_match[i] = True
                     break  # from inner loop only
         return all(found_match)
-    
+
 
 def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tuple[List[Union[int, float]], int]:
     """
@@ -273,7 +271,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
 
     paper_id_1 = work_input[0]
     paper_id_2 = work_input[1]
-    
+
     paper_1 = global_dataset[str(paper_id_1)]  # type: ignore
     paper_2 = global_dataset[str(paper_id_2)]  # type: ignore
 
@@ -299,7 +297,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             ),
             compare_author_first_letters(
                 [i.author_info_first_letters for i in paper_1.authors],
-                [i.author_info_first_letters for i in paper_2.authors]
+                [i.author_info_first_letters for i in paper_2.authors],
             ),
         ]
     )
@@ -308,7 +306,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     features.extend(
         [
             counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams),
-            counter_jaccard(paper_1.venue_ngrams, paper_2.venue_ngrams)
+            counter_jaccard(paper_1.venue_ngrams, paper_2.venue_ngrams),
         ]
     )
 
@@ -330,7 +328,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
         ]
     )
-    
+
     # abstract features
     features.extend(
         [
@@ -492,9 +490,7 @@ def many_pairs_featurize(
             for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
                 result = partial_func(piece)
                 if use_cache:
-                    cached_features["features"][featurizer_info.feature_cache_key(paper_pairs[result[1]])] = result[
-                        0
-                    ]
+                    cached_features["features"][featurizer_info.feature_cache_key(paper_pairs[result[1]])] = result[0]
                 features[result[1], :] = result[0]
         logger.info("Work completed")
 
@@ -604,7 +600,9 @@ def featurize(
                     test_papers_dict,
                 ) = dataset.split_cluster_papers()  # type: ignore
 
-            train_pairs, val_pairs, test_pairs = dataset.split_pairs(train_papers_dict, val_papers_dict, test_papers_dict)
+            train_pairs, val_pairs, test_pairs = dataset.split_pairs(
+                train_papers_dict, val_papers_dict, test_papers_dict
+            )
 
         else:
             train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()

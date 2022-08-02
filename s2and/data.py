@@ -15,13 +15,7 @@ from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 
 
-from s2and.consts import (
-    NUMPY_NAN,
-    NAME_COUNTS_PATH,
-    LARGE_DISTANCE,
-    CLUSTER_SEEDS_LOOKUP,
-    ORPHAN_CLUSTER_KEY
-)
+from s2and.consts import NUMPY_NAN, NAME_COUNTS_PATH, LARGE_DISTANCE, CLUSTER_SEEDS_LOOKUP, ORPHAN_CLUSTER_KEY
 from s2and.file_cache import cached_path
 from s2and.text import (
     normalize_text,
@@ -62,6 +56,7 @@ class Author(NamedTuple):
     author_info_email_suffix: Optional[str]
     author_info_name_counts: Optional[NameCounts]
     author_info_position: int
+
 
 class Paper(NamedTuple):
     title: str
@@ -155,12 +150,12 @@ class PDData:
 
         logger.info("loading papers")
         self.papers = self.maybe_load_json(papers)
-        
+
         # convert dictionary to namedtuples for memory reduction
         for paper_id, paper in self.papers.items():
             paper_id = str(paper_id)
             self.papers[paper_id] = Paper(
-                title=paper.get("title", ''),
+                title=paper.get("title", ""),
                 abstract=paper.get("abstract", None),
                 has_abstract=paper.get("abstract", None) not in {"", None},
                 title_ngrams_words=None,
@@ -169,7 +164,7 @@ class PDData:
                     Author(
                         author_info_first=author["first"],
                         author_info_first_normalized_without_apostrophe=None,
-                        author_info_middle=' '.join(author["middle"]),
+                        author_info_middle=" ".join(author["middle"]),
                         author_info_middle_normalized_without_apostrophe=None,
                         author_info_last_normalized=None,
                         author_info_last=author["last"],
@@ -190,7 +185,7 @@ class PDData:
                     for author in paper["authors"]
                 ],
                 venue=paper.get("venue", None),
-                journal_name=paper.get('journal_name', None),
+                journal_name=paper.get("journal_name", None),
                 title_ngrams_chars=None,
                 venue_ngrams=None,
                 journal_ngrams=None,
@@ -297,9 +292,7 @@ class PDData:
         # has to happen after papers + authors are preprocessed
         for paper_id in self.papers.keys():
             paper = self.papers[paper_id]
-            authors = [
-                self.lookup_name_counts(author, load_name_counts) for author in paper.authors
-            ]
+            authors = [self.lookup_name_counts(author, load_name_counts) for author in paper.authors]
             self.papers[paper_id] = paper._replace(authors=authors)
 
     def lookup_name_counts(self, author, load_name_counts):
@@ -307,11 +300,7 @@ class PDData:
             first_last_for_count = (
                 author.author_info_first_normalized + " " + author.author_info_last_normalized
             ).strip()
-            first_initial = (
-                author.author_info_first_normalized
-                if len(author.author_info_first_normalized) > 0
-                else ""
-            )
+            first_initial = author.author_info_first_normalized if len(author.author_info_first_normalized) > 0 else ""
             last_first_initial_for_count = (author.author_info_last_normalized + " " + first_initial).strip()
             counts = NameCounts(
                 first=self.first_dict.get(author.author_info_first_normalized, 1)
@@ -325,7 +314,7 @@ class PDData:
             )
         else:
             counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
-            
+
         author = author._replace(
             author_info_name_counts=counts,
         )
@@ -460,9 +449,9 @@ class PDData:
             paper_id_1,
         ) in self.cluster_seeds_disallow:
             return CLUSTER_SEEDS_LOOKUP["disallow"]
-        elif (
-            self.cluster_seeds_require.get(paper_id_1, -1) == self.cluster_seeds_require.get(paper_id_2, -2)
-        ) and (not incremental_dont_use_cluster_seeds):
+        elif (self.cluster_seeds_require.get(paper_id_1, -1) == self.cluster_seeds_require.get(paper_id_2, -2)) and (
+            not incremental_dont_use_cluster_seeds
+        ):
             return CLUSTER_SEEDS_LOOKUP["require"]
         elif (
             dont_merge_cluster_seeds
@@ -489,7 +478,7 @@ class PDData:
             else:
                 block[block_id].append(paper_id)
         return block
-    
+
     def get_s2_blocks(self) -> Dict[str, List[str]]:
         """
         Gets the block dict based on the blocks provided by Semantic Scholar data
@@ -610,7 +599,6 @@ class PDData:
         train/val/test block dictionaries
         """
         blocks = self.get_blocks()
-        
 
         if self.unit_of_data_split == "papers":
             paper_keys = list(self.papers.keys())
@@ -836,8 +824,8 @@ class PDData:
     ) -> List[Tuple[str, str, Union[int, float]]]:
         """
         Enumerates all pairs exhaustively, and samples pairs according to the four different strategies.
-        
-        Note: we don't know the label when both of papers have the cluster ORPHAN_CLUSTER_KEY. 
+
+        Note: we don't know the label when both of papers have the cluster ORPHAN_CLUSTER_KEY.
         But ("orphan", any other cluster) is allowed and is always a negative by definition
 
         Parameters
@@ -920,9 +908,7 @@ def preprocess_authors(author):
     # our normalization scheme is to normalize first and middle separately,
     # join them, then take the first token of the combined join
     first_normalized = normalize_text(author.author_info_first or "")
-    first_normalized_without_apostrophe = normalize_text(
-        author.author_info_first or "", special_case_apostrophes=True
-    )
+    first_normalized_without_apostrophe = normalize_text(author.author_info_first or "", special_case_apostrophes=True)
 
     middle_normalized = normalize_text(author.author_info_middle or "")
     first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
@@ -939,9 +925,7 @@ def preprocess_authors(author):
         author_info_first_normalized=first_middle_normalized_split[0],
         author_info_first_normalized_without_apostrophe=first_middle_normalized_split_without_apostrophe[0],
         author_info_middle_normalized=" ".join(first_middle_normalized_split[1:]),
-        author_info_middle_normalized_without_apostrophe=" ".join(
-            first_middle_normalized_split_without_apostrophe[1:]
-        ),
+        author_info_middle_normalized_without_apostrophe=" ".join(first_middle_normalized_split_without_apostrophe[1:]),
         author_info_last_normalized=author_info_last_normalized,
         author_info_suffix_normalized=normalize_text(author.author_info_suffix or ""),
     )
@@ -961,8 +945,8 @@ def preprocess_authors(author):
         author_info_email_prefix = "".join(split_email[:-1])
         author_info_email_suffix = split_email[-1]
     else:
-        author_info_email_prefix = ''
-        author_info_email_suffix = ''
+        author_info_email_prefix = ""
+        author_info_email_suffix = ""
 
     author = author._replace(
         author_info_full_name=get_full_name_for_features(author).strip(),
@@ -972,7 +956,7 @@ def preprocess_authors(author):
         author_info_email_prefix=author_info_email_prefix,
         author_info_email_suffix=author_info_email_suffix,
     )
-    
+
     return author
 
 
@@ -996,21 +980,29 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     abstract = normalize_text(paper.abstract)
     title_ngrams_words = get_text_ngrams_words(title)
     abstract_ngrams_words = get_text_ngrams_words(abstract)
-    authors = [
-        preprocess_authors(author) for author in paper.authors
-    ]
-    paper = paper._replace(title=title, title_ngrams_words=title_ngrams_words, abstract_ngrams_words=abstract_ngrams_words, authors=authors)
+    authors = [preprocess_authors(author) for author in paper.authors]
+    paper = paper._replace(
+        title=title, title_ngrams_words=title_ngrams_words, abstract_ngrams_words=abstract_ngrams_words, authors=authors
+    )
     venue = normalize_text(paper.venue)
     journal_name = normalize_text(paper.journal_name)
     paper = paper._replace(venue=venue, journal_name=journal_name)
     title_ngrams_chars = get_text_ngrams(paper.title, use_bigrams=True)
     venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
     journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
-    author_info_coauthor_n_grams = get_text_ngrams(" ".join([i.author_info_full_name for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True)
-    author_info_coauthor_email_prefix_n_grams = get_text_ngrams(" ".join([i.author_info_email_prefix for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True)
-    author_info_coauthor_email_suffix_n_grams = get_text_ngrams(" ".join([i.author_info_email_suffix for i in authors]), stopwords=None, use_bigrams=True)
+    author_info_coauthor_n_grams = get_text_ngrams(
+        " ".join([i.author_info_full_name for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True
+    )
+    author_info_coauthor_email_prefix_n_grams = get_text_ngrams(
+        " ".join([i.author_info_email_prefix for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True
+    )
+    author_info_coauthor_email_suffix_n_grams = get_text_ngrams(
+        " ".join([i.author_info_email_suffix for i in authors]), stopwords=None, use_bigrams=True
+    )
     affils = [i.author_info_affiliations_joined for i in authors]
-    author_info_coauthor_affiliations_n_grams = get_text_ngrams(" ".join(affils), stopwords=AFFILIATIONS_STOP_WORDS, use_bigrams=True)
+    author_info_coauthor_affiliations_n_grams = get_text_ngrams(
+        " ".join(affils), stopwords=AFFILIATIONS_STOP_WORDS, use_bigrams=True
+    )
     paper = paper._replace(
         title_ngrams_chars=title_ngrams_chars,
         venue_ngrams=venue_ngrams,
@@ -1057,4 +1049,4 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
 
 
 if __name__ == "__main__":
-    pddata = PDData(papers='data/test/test_papers.json', clusters='data/test/test_clusters.json', name='test')
+    pddata = PDData(papers="data/test/test_papers.json", clusters="data/test/test_clusters.json", name="test")

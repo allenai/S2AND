@@ -12,14 +12,12 @@ from tqdm import tqdm
 from s2and.data import PDData
 from s2and.consts import (
     CACHE_ROOT,
-    NUMPY_NAN,
     FEATURIZER_VERSION,
     LARGE_INTEGER,
     DEFAULT_CHUNK_SIZE,
 )
 from s2and.text import (
     diff,
-    TEXT_FUNCTIONS,
     counter_jaccard,
 )
 

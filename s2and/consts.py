@@ -37,4 +37,6 @@ DEFAULT_CHUNK_SIZE = 100
 LARGE_DISTANCE = 1e4
 LARGE_INTEGER = 10 * LARGE_DISTANCE
 CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
-ORPHAN_CLUSTER_KEY = "orphan"  # this is the key for the orphan cluster, which are papers that do not belong to any known cluster but may or may not cluster with each other
+# this is the key for the orphan cluster, which are papers that do not
+# belong to any known cluster but may or may not cluster with each other
+ORPHAN_CLUSTER_KEY = "orphan"

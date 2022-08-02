@@ -440,8 +440,8 @@ class PDData:
         """
 
         # TODO: do we need rules of any kind here?
-        paper_1 = self.papers[str(self.papers[paper_id_1].paper_id)]
-        paper_2 = self.papers[str(self.papers[paper_id_2].paper_id)]
+        # paper_1 = self.papers[str(self.papers[paper_id_1].paper_id)]
+        # paper_2 = self.papers[str(self.papers[paper_id_2].paper_id)]
 
         # cluster seeds have precedence
         if (paper_id_1, paper_id_2) in self.cluster_seeds_disallow or (

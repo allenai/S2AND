@@ -1,36 +1,34 @@
 import unittest
 import pytest
 import numpy as np
-import pickle
 
-from s2and.data import ANDData
+from s2and.data import PDData
 from s2and.model import Clusterer
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from s2and.consts import LARGE_DISTANCE
+from s2and.featurizer import FeaturizationInfo
 import lightgbm as lgb
 
 
 class TestClusterer(unittest.TestCase):
     def setUp(self):
         super().setUp()
-        self.dummy_dataset = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            cluster_seeds={"6": {"7": "require"}, "3": {"4": "require"}},
-            name="dummy",
-            load_name_counts=True,
+        self.dataset = PDData(
+            "tests/test_dataset/papers.json",
+            clusters="tests/test_dataset/clusters.json",
+            cluster_seeds={"84177344": {"49188235": "require"}, "214237506": {"217917498": "require"}},
+            name="test_dataset",
+            load_name_counts=True
         )
 
         features_to_use = [
             "year_diff",
-            "misc_features",
+            "title_similarity",
         ]
+        
         featurizer_info = FeaturizationInfo(features_to_use=features_to_use)
         np.random.seed(1)
-        X_random = np.random.random((10, 6))
-        y_random = np.random.randint(0, 6, 10)
-        self.dummy_clusterer = Clusterer(
+        X_random = np.random.random((10, 3))
+        y_random = np.random.randint(0, 3, 10)
+        self.clusterer = Clusterer(
             featurizer_info=featurizer_info,
             classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
                 X_random, y_random
@@ -41,22 +39,12 @@ class TestClusterer(unittest.TestCase):
         )
 
     def test_predict_incremental(self):
-        # base clustering of the random model would be
-        # {'0': ['0', '1', '2'], '1': ['3', '4', '5', '8'], '2': ['6', '7']}
-
-        block = ["3", "4", "5", "6", "7", "8"]
-        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
-        expected_output = {"0": ["6", "7", "5"], "1": ["3", "4", "8"]}
+        block_papers = ["49188235", "84177344", "214237506", "217917498", "210102606", "1400649365030178816"]
+        output = self.clusterer.predict_incremental(block_papers, self.dataset)
+        expected_output = {'0': ['84177344', '49188235', '210102606', '1400649365030178816'], '1': ['214237506', '217917498']}
         assert output == expected_output
 
-        self.dummy_dataset.cluster_seeds_disallow = {("5", "7"), ("8", "4"), ("5", "4"), ("8", "7")}
-        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
-        expected_output = {"0": ["6", "7"], "1": ["3", "4"], "2": ["5", "8"]}
-        assert output == expected_output
-
-        self.dummy_dataset.altered_cluster_papers = ["1", "5"]
-        self.dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
-        block = ["3", "4", "8"]
-        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset)
-        expected_output = {"0": ["1", "2", "5", "3", "8"], "1": ["6", "7", "4"]}
+        self.dataset.cluster_seeds_disallow = {("84177344", "210102606"), ("49188235", "1400649365030178816")}
+        output = self.clusterer.predict_incremental(block_papers, self.dataset)
+        expected_output = {'0': ['84177344', '49188235'], '1': ['214237506', '217917498', '210102606', '1400649365030178816']}
         assert output == expected_output

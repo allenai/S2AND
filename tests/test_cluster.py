@@ -55,7 +55,7 @@ class TestClusterer(unittest.TestCase):
         distance_matrix = distance_matrices["reviewerlistfor"]
         self.assertEqual(distance_matrix[0], np.float16(1.1))
         self.assertEqual(distance_matrix[1], np.float16(0.3))
-        self.assertEqual(distance_matrix[2], np.float16(1e-6))
+        self.assertEqual(distance_matrix[4], np.float16(1e-6))
 
         distance_matrices = self.clusterer.make_distance_matrices(
             block_dict=block,
@@ -65,4 +65,4 @@ class TestClusterer(unittest.TestCase):
         distance_matrix = distance_matrices["reviewerlistfor"]
         self.assertEqual(distance_matrix[0], np.float16(0.3))
         self.assertEqual(distance_matrix[1], np.float16(0.3))
-        self.assertEqual(distance_matrix[2], np.float16(0.3))
+        self.assertEqual(distance_matrix[4], np.float16(0.3))

@@ -5,7 +5,7 @@ from collections import Counter
 
 from sklearn.metrics.pairwise import cosine_similarity
 
-from s2and.text import normalize_text, name_text_features, cosine_sim, get_text_ngrams, get_text_ngrams_words, equal, equal_middle, equal_initial, counter_jaccard, jaccard, compute_block, diff, name_counts, detect_language
+from s2and.text import normalize_text, name_text_features, cosine_sim, get_text_ngrams, get_text_ngrams_words, equal, equal_middle, equal_initial, counter_jaccard, jaccard, diff, name_counts
 from s2and.consts import NUMPY_NAN
 from s2and.data import NameCounts
 
@@ -85,11 +85,6 @@ class TestClusterer(unittest.TestCase):
         self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5}, {1,2,3,4,6}))
         self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5,5}, {1,2,3,4,6}))
 
-    def test_compute_block(self):
-        assert "" == compute_block("")
-        assert "text" == compute_block("text")
-        assert "t text" == compute_block("tony text")
-
     def test_diff(self):
         assert np.isnan(diff(None, None))
         assert 5 == diff(10, 5)
@@ -99,9 +94,3 @@ class TestClusterer(unittest.TestCase):
         nc1 = NameCounts(first=5, first_last=100, last=10, last_first_initial=200)
         nc2 = NameCounts(first=4, first_last=99, last=11, last_first_initial=201)
         assert [4, 99, 10, 200, 5, 100] == name_counts(nc1, nc2)
-
-    def test_detect_language(self):
-        is_reliable, is_english, predicted_language = detect_language("Genetic behavior of resistance to the beet cyst as a way to enchant")
-        assert is_reliable is True
-        assert is_english is True
-        assert predicted_language == 'en'

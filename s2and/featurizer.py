@@ -274,8 +274,8 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     paper_id_1 = work_input[0]
     paper_id_2 = work_input[1]
     
-    paper_1 = global_dataset.papers[str(paper_id_1)]  # type: ignore
-    paper_2 = global_dataset.papers[str(paper_id_2)]  # type: ignore
+    paper_1 = global_dataset[str(paper_id_1)]  # type: ignore
+    paper_2 = global_dataset[str(paper_id_2)]  # type: ignore
 
     # author-related features
     features.extend(
@@ -296,7 +296,11 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             counter_jaccard(
                 paper_1.author_info_coauthor_email_suffix_n_grams,
                 paper_2.author_info_coauthor_email_suffix_n_grams,
-            )
+            ),
+            compare_author_first_letters(
+                [i.author_info_first_letters for i in paper_1.authors],
+                [i.author_info_first_letters for i in paper_2.authors]
+            ),
         ]
     )
 
@@ -404,7 +408,7 @@ def many_pairs_featurize(
     np.ndarray: the nameless features for all the pairs
     """
     global global_dataset
-    global_dataset = dataset  # type: ignore
+    global_dataset = global_dataset.papers  # type: ignore
 
     cached_features: Dict[str, Any] = {"features": {}}
     cache_changed = False

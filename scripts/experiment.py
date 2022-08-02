@@ -18,7 +18,6 @@ import argparse
 import logging
 import pickle
 from typing import Dict, Any, Optional, List
-from collections import defaultdict
 
 from tqdm import tqdm
 import numpy as np
@@ -34,10 +33,9 @@ from sklearn.pipeline import make_pipeline
 from s2and.data import PDData
 from s2and.featurizer import featurize, FeaturizationInfo
 from s2and.model import PairwiseModeler, Clusterer, FastCluster
-from s2and.eval import pairwise_eval, cluster_eval, facet_eval
+from s2and.eval import pairwise_eval, cluster_eval
 from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE, NAME_COUNTS_PATH
 from s2and.file_cache import cached_path
-from s2and.plotting_utils import plot_facets
 from hyperopt import hp
 
 logger = logging.getLogger("s2and")
@@ -60,11 +58,9 @@ def transfer_helper(
     featurizer_info,
     nameless_featurizer_info,
     skip_shap=False,
-
 ):
     source_name = source_dataset["name"]
     target_name = target_dataset["name"]
-
 
     pairwise_metrics = pairwise_eval(
         target_dataset["X_test"],
@@ -84,7 +80,6 @@ def transfer_helper(
         source_dataset["clusterer"],
         split="test",
     )
-
 
     metrics = {"pairwise": pairwise_metrics, "cluster": cluster_metrics}
     logger.info(f"{source_name}_to_{target_name}: {metrics}")
@@ -148,20 +143,12 @@ def main(
         )
     )
 
-    FEATURES_TO_USE = [
-        "author_similarity",
-        "venue_similarity",
-        "year_diff",
-        "title_similarity",
-        "abstract_similarity"
-    ]
+    FEATURES_TO_USE = ["author_similarity", "venue_similarity", "year_diff", "title_similarity", "abstract_similarity"]
     for feature_group in feature_groups_to_skip:
         FEATURES_TO_USE.remove(feature_group)
 
     NAMELESS_FEATURES_TO_USE = [
-        feature_name
-        for feature_name in FEATURES_TO_USE
-        if feature_name not in {"author_similarity"}
+        feature_name for feature_name in FEATURES_TO_USE if feature_name not in {"author_similarity"}
     ]
 
     FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
@@ -169,13 +156,9 @@ def main(
         features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
     )
 
-    SOURCE_DATASET_NAMES = [
-        "s2_papers"
-    ]
+    SOURCE_DATASET_NAMES = ["s2_papers"]
 
-    TARGET_DATASET_NAMES = [
-        "s2_papers"
-    ]
+    TARGET_DATASET_NAMES = ["s2_papers"]
 
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
@@ -209,7 +192,6 @@ def main(
             ),
         )
         pairwise_search_space = {}
-
 
     DATASETS_TO_TRAIN = set(SOURCE_DATASET_NAMES).union(set(TARGET_DATASET_NAMES))
 
@@ -343,13 +325,9 @@ def main(
         dataset["name"] = pddata.name
         datasets[dataset_name] = dataset
 
-
     logger.info("")
     logger.info("making evaluation grids")
-    b3_f1_grid = [
-        ["" for j in range(len(TARGET_DATASET_NAMES) + 1)]
-        for i in range(len(SOURCE_DATASET_NAMES) + 1)
-    ]
+    b3_f1_grid = [["" for j in range(len(TARGET_DATASET_NAMES) + 1)] for i in range(len(SOURCE_DATASET_NAMES) + 1)]
 
     for i in range(max(len(TARGET_DATASET_NAMES), len(SOURCE_DATASET_NAMES))):
         if i < len(TARGET_DATASET_NAMES):
@@ -357,11 +335,9 @@ def main(
         if i < len(SOURCE_DATASET_NAMES):
             b3_f1_grid[i + 1][0] = SOURCE_DATASET_NAMES[i]
 
-
     pairwise_auroc_grid = copy.deepcopy(b3_f1_grid)  # makes a copy of the grid
     true_bigger_ratios_and_counts_grid = copy.deepcopy(b3_f1_grid)
     pred_bigger_ratios_and_counts_grid = copy.deepcopy(b3_f1_grid)
-
 
     logger.info("starting individual model evaluation")
     for _, source_dataset in tqdm(datasets.items(), desc="Evaluating individual models"):
@@ -397,7 +373,6 @@ def main(
             ] = cluster_metrics["Pred bigger ratio (mean, count)"]
             logger.info(f"finished evaluating source {source_dataset['name']} target {target_dataset['name']}")
     logger.info("finished individual model evaluation")
-
 
     logger.info("")
     logger.info("writing results to disk")

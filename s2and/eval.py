@@ -183,15 +183,7 @@ def facet_eval(
     dataset: "PDData",
     metrics_per_paper: Dict[str, Tuple[float, float, float]],
     block_type: str = "original",
-) -> Tuple[
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    List[dict],
-]:
+) -> Tuple[Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], List[dict],]:
     """
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
@@ -217,7 +209,7 @@ def facet_eval(
     """
     block_len_dict = {}
     if block_type == "original":
-        blocks = dataset.get_original_blocks()
+        blocks = dataset.get_blocks()
     elif block_type == "s2":
         blocks = dataset.get_s2_blocks()
     else:
@@ -270,10 +262,10 @@ def facet_eval(
                 block_len_f1[block_len_dict[paper.author_info_block]].append(f1)
                 _paper_dict["block size"] = block_len_dict[paper.author_info_block]
 
-            _paper_dict["paper_id"] = paper_id
-            _paper_dict["precision"] = p
-            _paper_dict["recall"] = r
-            _paper_dict["f1"] = f1
+            _paper_dict["paper_id"] = paper_id  # type: ignore
+            _paper_dict["precision"] = p  # type: ignore
+            _paper_dict["recall"] = r  # type: ignore
+            _paper_dict["f1"] = f1  # type: ignore
             _paper_dict["#authors"] = len(paper.authors)
             _paper_dict["year"] = paper.year
             _paper_dict["cluster size"] = cluster_len_dict[cluster_id]
@@ -281,11 +273,11 @@ def facet_eval(
             paper_lookup.append(_paper_dict)
 
     return (
-        author_num_f1,
-        year_f1,
-        block_len_f1,
-        cluster_len_f1,
-        abstract_f1,
+        dict(author_num_f1),
+        dict(year_f1),
+        dict(block_len_f1),
+        dict(cluster_len_f1),
+        dict(abstract_f1),
         paper_lookup,
     )
 

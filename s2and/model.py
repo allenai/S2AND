@@ -531,9 +531,7 @@ class Clusterer:
 
         return dict(pred_clusters), dists
 
-    def predict_incremental(
-        self, block_papers: List[str], dataset: PDData
-    ):
+    def predict_incremental(self, block_papers: List[str], dataset: PDData):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
         in using the cluster_seeds parameter of the dataset class, and skips work by simply assigning each
@@ -566,8 +564,7 @@ class Clusterer:
         cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
         if dataset.altered_cluster_papers is not None:
             altered_cluster_nums = set(
-                dataset.cluster_seeds_require[altered_paper_id]
-                for altered_paper_id in dataset.altered_cluster_papers
+                dataset.cluster_seeds_require[altered_paper_id] for altered_paper_id in dataset.altered_cluster_papers
             )
             if len(altered_cluster_nums) > 0:
                 cluster_seeds_require_inverse: Dict[int, list] = {}

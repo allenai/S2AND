@@ -18,7 +18,7 @@ from strsimpy.metric_lcs import MetricLCS
 from s2and.consts import NUMPY_NAN
 
 
-RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
+RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z0-9\s]+")
 
 DROPPED_AFFIXES = {
     "ab",

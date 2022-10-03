@@ -153,7 +153,7 @@ def incremental_cluster_eval(
     for i, paper_i in enumerate(list_obs_papers):
         for paper_j in list_obs_papers[i + 1 : len(list_obs_papers)]:
             if dataset.paper_to_cluster_id[paper_i] == dataset.paper_to_cluster_id[paper_j]:
-                if dataset.paper_to_cluster_id[paper_i] != ORPHAN_CLUSTER_KEY:
+                if not dataset.paper_to_cluster_id[paper_i].endswith(ORPHAN_CLUSTER_KEY):
                     partial_supervision[(paper_i, paper_j)] = 0
             else:
                 partial_supervision[(paper_i, paper_j)] = 1
@@ -222,7 +222,7 @@ def facet_eval(
     assert dataset.clusters is not None
     cluster_len_dict = {}
     for cluster_id, cluster_dict in dataset.clusters.items():
-        if cluster_id != ORPHAN_CLUSTER_KEY:
+        if not cluster_id.endswith(ORPHAN_CLUSTER_KEY):
             cluster_len_dict[cluster_id] = len(cluster_dict["paper_ids"])
 
     # Keep track of facet specific f-score performance
@@ -239,7 +239,7 @@ def facet_eval(
         _paper_dict = dict()
 
         cluster_id = dataset.paper_to_cluster_id[paper_id]
-        if cluster_id != ORPHAN_CLUSTER_KEY:
+        if not cluster_id.endswith(ORPHAN_CLUSTER_KEY):
             paper = dataset.papers[str(paper_id)]
 
             author_num_f1[len(paper.authors)].append(f1)
@@ -513,11 +513,12 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     if skip_papers is not None:
         tcset = tcset.difference(skip_papers)
 
-    # anything from the orphan cluster will also be skipped
+    # anything from orphan clusters will also be skipped
     # but note that other positives will be penalized for joining to any orphans
-    if ORPHAN_CLUSTER_KEY in true_clusters:
-        to_skip = true_clusters[ORPHAN_CLUSTER_KEY]
-        tcset = tcset.difference(to_skip)
+    # find orphan clusters, which are clusters that endwith ORPHAN_CLUSTER_KEY
+    orphan_clusters_names = [k for k in true_clusters.keys() if k.endswith(ORPHAN_CLUSTER_KEY)]
+    for to_skip in orphan_clusters_names:
+        tcset = tcset.difference(true_clusters[to_skip])
 
     for cluster_id, cluster in true_clusters.items():
         true_clusters[cluster_id] = frozenset(cluster)

@@ -92,7 +92,7 @@ class PDData:
             - a cluster may span multiple blocks, but we will only consider in-block clusters
             - there will be individual papers that definitely do not belong to any of the known clusters
               but which may or may not cluster with each other.
-              papers in these clusters will all appear in clusters.json under the key ORPHAN_CLUSTER_KEY
+              papers in these clusters will all appear in clusters.json under the key clusterid_ORPHAN_CLUSTER_KEY
         specter_embeddings: path to the specter embeddings pickle (or the dictionary object)
         cluster_seeds: path to the cluster seed json file (or the json object)
         altered_cluster_papers: path to the paper ids \n-separated txt file (or a list or set object)
@@ -825,7 +825,7 @@ class PDData:
         """
         Enumerates all pairs exhaustively, and samples pairs according to the four different strategies.
 
-        Note: we don't know the label when both of papers have the cluster ORPHAN_CLUSTER_KEY.
+        Note: we don't know the label when both of papers have the cluster clusterid_ORPHAN_CLUSTER_KEY.
         But ("orphan", any other cluster) is allowed and is always a negative by definition
 
         Parameters
@@ -855,7 +855,7 @@ class PDData:
                         s1_cluster = self.paper_to_cluster_id[s1]
                         s2_cluster = self.paper_to_cluster_id[s2]
                         if s1_cluster == s2_cluster:
-                            if s1_cluster != ORPHAN_CLUSTER_KEY:
+                            if not s1_cluster.endswith(ORPHAN_CLUSTER_KEY):
                                 possible.append((s1, s2, 1))
                         else:
                             possible.append((s1, s2, 0))

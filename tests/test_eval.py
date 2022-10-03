@@ -39,14 +39,14 @@ class TestClusterer(unittest.TestCase):
         self.assertAlmostEqual(size_v_quantity_2[2], 0.934)
         
         size_v_quantity_3 = b3_precision_recall_fscore(
-            {"dark": [1, 2, 3, 4, 5], "light": [6, 7], "line1": [8, 9], "line2": [10, 11], "line3": [12, 13], ORPHAN_CLUSTER_KEY: [14]},
+            {"dark": [1, 2, 3, 4, 5], "light": [6, 7], "line1": [8, 9], "line2": [10, 11], "line3": [12, 13], 'x_' + ORPHAN_CLUSTER_KEY: [14]},
             {"1": [1, 2, 3, 4], "2": [5], "3": [6, 7], "4": [8, 9], "5": [10, 11], "6": [12, 13], "7": [14]},
         )
         # nothing changes in the output since the orphan goes to its own cluster
         self.assertEqual(size_v_quantity_3, size_v_quantity_2)
         
         size_v_quantity_4 = b3_precision_recall_fscore(
-            {"dark": [1, 2, 3, 4, 5], "light": [6, 7], "line1": [8, 9], "line2": [10, 11], "line3": [12, 13], ORPHAN_CLUSTER_KEY: [14]},
+            {"dark": [1, 2, 3, 4, 5], "light": [6, 7], "line1": [8, 9], "line2": [10, 11], "line3": [12, 13], 'x_' + ORPHAN_CLUSTER_KEY: [14]},
             {"1": [1, 2, 3, 4], "2": [5], "3": [6, 7], "4": [8, 9], "5": [10, 11], "6": [12, 13, 14]},
         )
         # the 12th one has reduced precision compared to before due to the new orphan that got added in

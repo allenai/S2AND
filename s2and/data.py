@@ -15,7 +15,13 @@ from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 
 
-from s2and.consts import NUMPY_NAN, NAME_COUNTS_PATH, LARGE_DISTANCE, CLUSTER_SEEDS_LOOKUP, ORPHAN_CLUSTER_KEY
+from s2and.consts import (
+    NUMPY_NAN,
+    NAME_COUNTS_PATH,
+    LARGE_DISTANCE,
+    CLUSTER_SEEDS_LOOKUP,
+    ORPHAN_CLUSTER_KEY,
+)
 from s2and.file_cache import cached_path
 from s2and.text import (
     normalize_text,
@@ -735,20 +741,25 @@ class PDData:
             self.train_pairs_size,
             train_papers_dict,
             all_pairs=False,
-            balanced_pair_sample=self.balanced_pair_sample
+            balanced_pair_sample=self.balanced_pair_sample,
         )
         val_pairs = (
             self.pair_sampling(
                 self.val_pairs_size,
                 val_papers_dict,
                 all_pairs=False,
-                balanced_pair_sample=self.balanced_pair_sample
+                balanced_pair_sample=self.balanced_pair_sample,
             )
             if len(val_papers_dict) > 0
             else []
         )
 
-        test_pairs = self.pair_sampling(self.test_pairs_size, test_papers_dict, self.all_test_pairs_flag, balanced_pair_sample=False)
+        test_pairs = self.pair_sampling(
+            self.test_pairs_size,
+            test_papers_dict,
+            self.all_test_pairs_flag,
+            balanced_pair_sample=False,
+        )
 
         return train_pairs, val_pairs, test_pairs
 
@@ -834,7 +845,7 @@ class PDData:
         sample_size: int,
         blocks: Dict[str, List[str]],
         all_pairs: bool = False,
-        balanced_pair_sample: bool = True
+        balanced_pair_sample: bool = True,
     ) -> List[Tuple[str, str, Union[int, float]]]:
         """
         Enumerates all pairs exhaustively, and samples pairs from each class.
@@ -878,7 +889,7 @@ class PDData:
                                 possible.append((s1, s2, 0))
                         else:  # will be removed later if not all_pairs
                             possible.append((s1, s2, NUMPY_NAN))
-                    else: # we don't have labels so we are just going to make everything 
+                    else:  # we don't have labels so we are just going to make everything
                         possible.append((s1, s2, NUMPY_NAN))
 
         if all_pairs:
@@ -1010,7 +1021,10 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     abstract_ngrams_words = get_text_ngrams_words(abstract)
     authors = [preprocess_authors(author) for author in paper.authors]
     paper = paper._replace(
-        title=title, title_ngrams_words=title_ngrams_words, abstract_ngrams_words=abstract_ngrams_words, authors=authors
+        title=title,
+        title_ngrams_words=title_ngrams_words,
+        abstract_ngrams_words=abstract_ngrams_words,
+        authors=authors,
     )
     venue = normalize_text(paper.venue)
     journal_name = normalize_text(paper.journal_name)
@@ -1019,13 +1033,21 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
     journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
     author_info_coauthor_n_grams = get_text_ngrams(
-        " ".join([i.author_info_full_name for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True
+        " ".join([i.author_info_full_name for i in authors]),
+        stopwords=None,
+        use_unigrams=True,
+        use_bigrams=True,
     )
     author_info_coauthor_email_prefix_n_grams = get_text_ngrams(
-        " ".join([i.author_info_email_prefix for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True
+        " ".join([i.author_info_email_prefix for i in authors]),
+        stopwords=None,
+        use_unigrams=True,
+        use_bigrams=True,
     )
     author_info_coauthor_email_suffix_n_grams = get_text_ngrams(
-        " ".join([i.author_info_email_suffix for i in authors]), stopwords=None, use_bigrams=True
+        " ".join([i.author_info_email_suffix for i in authors]),
+        stopwords=None,
+        use_bigrams=True,
     )
     affils = [i.author_info_affiliations_joined for i in authors]
     author_info_coauthor_affiliations_n_grams = get_text_ngrams(
@@ -1077,4 +1099,8 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
 
 
 if __name__ == "__main__":
-    pddata = PDData(papers="data/test/test_papers.json", clusters="data/test/test_clusters.json", name="test")
+    pddata = PDData(
+        papers="data/test/test_papers.json",
+        clusters="data/test/test_clusters.json",
+        name="test",
+    )

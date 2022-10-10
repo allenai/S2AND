@@ -6,14 +6,25 @@ import json
 import pandas as pd
 import os
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
-EXP_DIR = os.path.join(CONFIG["internal_data_dir"], "experiments/paper_experiments_baseline_save_facets_w_gen_eth/")
+EXP_DIR = os.path.join(
+    CONFIG["internal_data_dir"],
+    "experiments/paper_experiments_baseline_save_facets_w_gen_eth/",
+)
 
 
-def plot_box(s2and_performance: dict, s2_performance: dict, figs_path: str, title: str, total_bins: int = 5):
+def plot_box(
+    s2and_performance: dict,
+    s2_performance: dict,
+    figs_path: str,
+    title: str,
+    total_bins: int = 5,
+):
 
     b3 = []
     keylist = []
@@ -70,10 +81,23 @@ def plot_box(s2and_performance: dict, s2_performance: dict, figs_path: str, titl
         )
     elif title == "block size":
         bins = pd.IntervalIndex.from_tuples(
-            [(0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 100), (100, 200), (200, 400), (400, 800), (800, 3000)]
+            [
+                (0, 5),
+                (5, 10),
+                (10, 20),
+                (20, 40),
+                (40, 60),
+                (60, 100),
+                (100, 200),
+                (200, 400),
+                (400, 800),
+                (800, 3000),
+            ]
         )
     elif title == "cluster size":
-        bins = pd.IntervalIndex.from_tuples([(0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 100), (100, 800)])
+        bins = pd.IntervalIndex.from_tuples(
+            [(0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 100), (100, 800)]
+        )
     elif total_bins > 0:
         bins = np.linspace(
             min(keylist), max(keylist), total_bins + 1
@@ -92,7 +116,11 @@ def plot_box(s2and_performance: dict, s2_performance: dict, figs_path: str, titl
         hue="Model",
         data=df,
         showmeans=True,
-        meanprops={"marker": "s", "markerfacecolor": "white", "markeredgecolor": "blue"},
+        meanprops={
+            "marker": "s",
+            "markerfacecolor": "white",
+            "markeredgecolor": "blue",
+        },
     )
 
     plt.xlabel(title, fontsize=15)
@@ -145,7 +173,9 @@ def plot_facets(
         8,
         8,
     ]
-    for pred_facet, s2_facet, plot_name, bin_size in zip(pred_facets, s2_facets, plot_names, num_bins):
+    for pred_facet, s2_facet, plot_name, bin_size in zip(
+        pred_facets, s2_facets, plot_names, num_bins
+    ):
 
         if save_results:
             with open(figs_path + plot_name + "_dict_pred.json", "w") as fp:

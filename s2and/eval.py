@@ -57,7 +57,9 @@ def cluster_eval(
     Dict: Dictionary of clusterwise metrics.
     Dict: Same as above but broken down by paper.
     """
-    train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(dataset.get_blocks())
+    train_block_dict, val_block_dict, test_block_dict = dataset.split_blocks_helper(
+        dataset.get_blocks()
+    )
     if split == "test":
         block_dict = test_block_dict
     elif split == "val":
@@ -71,7 +73,9 @@ def cluster_eval(
     cluster_to_papers = dataset.construct_cluster_to_papers(block_dict)
 
     # predict
-    pred_clusters, _ = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters)
+    pred_clusters, _ = clusterer.predict(
+        block_dict, dataset, use_s2_clusters=use_s2_clusters
+    )
 
     # get metrics
     (
@@ -98,7 +102,9 @@ def cluster_eval(
 
 def incremental_cluster_eval(
     dataset: "PDData", clusterer: "Clusterer", split: str = "test"
-) -> Tuple[Dict[str, Tuple[float, float, float]], Dict[str, Tuple[float, float, float]]]:
+) -> Tuple[
+    Dict[str, Tuple[float, float, float]], Dict[str, Tuple[float, float, float]]
+]:
     """
     Performs clusterwise evaluation for the incremental clustering setting.
     This includes both time-split and random split of papers.
@@ -152,14 +158,21 @@ def incremental_cluster_eval(
     # considers the supervision as distances
     for i, paper_i in enumerate(list_obs_papers):
         for paper_j in list_obs_papers[i + 1 : len(list_obs_papers)]:
-            if dataset.paper_to_cluster_id[paper_i] == dataset.paper_to_cluster_id[paper_j]:
-                if not dataset.paper_to_cluster_id[paper_i].endswith(ORPHAN_CLUSTER_KEY):
+            if (
+                dataset.paper_to_cluster_id[paper_i]
+                == dataset.paper_to_cluster_id[paper_j]
+            ):
+                if not dataset.paper_to_cluster_id[paper_i].endswith(
+                    ORPHAN_CLUSTER_KEY
+                ):
                     partial_supervision[(paper_i, paper_j)] = 0
             else:
                 partial_supervision[(paper_i, paper_j)] = 1
 
     # predict on test-blocks
-    pred_clusters, _ = clusterer.predict(eval_block_dict_full, dataset, partial_supervision=partial_supervision)
+    pred_clusters, _ = clusterer.predict(
+        eval_block_dict_full, dataset, partial_supervision=partial_supervision
+    )
     # to avoid sparsity in b3 computation, we use all the papers' ground-truth
     full_cluster_to_papers = dataset.construct_cluster_to_papers(pred_clusters)
 
@@ -183,7 +196,14 @@ def facet_eval(
     dataset: "PDData",
     metrics_per_paper: Dict[str, Tuple[float, float, float]],
     block_type: str = "original",
-) -> Tuple[Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], List[dict]]:
+) -> Tuple[
+    Dict[int, List],
+    Dict[int, List],
+    Dict[int, List],
+    Dict[int, List],
+    Dict[int, List],
+    List[dict],
+]:
     """
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
@@ -256,7 +276,9 @@ def facet_eval(
 
             if block_type == "original":
                 block_len_f1[block_len_dict[paper.block]].append(f1)
-                _paper_dict["block size"] = block_len_dict[paper.author_info_given_block]
+                _paper_dict["block size"] = block_len_dict[
+                    paper.author_info_given_block
+                ]
             elif block_type == "s2":
                 # TODO: update author_info_block to whatever we use for original block
                 block_len_f1[block_len_dict[paper.author_info_block]].append(f1)
@@ -344,7 +366,10 @@ def pairwise_eval(
         nameless_classifier = nameless_classifier.classifier
 
     if nameless_classifier is not None:
-        y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
+        y_prob = (
+            classifier.predict_proba(X)[:, 1]
+            + nameless_classifier.predict_proba(nameless_X)[:, 1]
+        ) / 2
     else:
         y_prob = classifier.predict_proba(X)[:, 1]
 
@@ -394,7 +419,9 @@ def pairwise_eval(
             shap_values_all = []
             for c in classifier.estimators:
                 if isinstance(c, CalibratedClassifierCV):
-                    shap_values_all.append(shap.TreeExplainer(c.base_estimator).shap_values(X)[1])
+                    shap_values_all.append(
+                        shap.TreeExplainer(c.base_estimator).shap_values(X)[1]
+                    )
                 else:
                     shap_values_all.append(shap.TreeExplainer(c).shap_values(X)[1])
             shap_values = [np.mean(shap_values_all, axis=0)]
@@ -402,11 +429,15 @@ def pairwise_eval(
             shap_values = []
             for c, d in [(classifier, X), (nameless_classifier, nameless_X)]:
                 if isinstance(classifier, CalibratedClassifierCV):
-                    shap_values.append(shap.TreeExplainer(c.base_estimator).shap_values(d)[1])
+                    shap_values.append(
+                        shap.TreeExplainer(c.base_estimator).shap_values(d)[1]
+                    )
                 else:
                     shap_values.append(shap.TreeExplainer(c).shap_values(d)[1])
         elif isinstance(classifier, CalibratedClassifierCV):
-            shap_values = shap.TreeExplainer(classifier.base_estimator).shap_values(X)[1]
+            shap_values = shap.TreeExplainer(classifier.base_estimator).shap_values(X)[
+                1
+            ]
         else:
             shap_values = shap.TreeExplainer(classifier).shap_values(X)[1]
 
@@ -418,7 +449,9 @@ def pairwise_eval(
                     [X, nameless_X],
                 )
             ):
-                assert feature_names is not None, "neither feature_names should be None here"
+                assert (
+                    feature_names is not None
+                ), "neither feature_names should be None here"
                 plt.figure(2 + i)
                 shap.summary_plot(
                     shap_value,
@@ -450,7 +483,9 @@ def pairwise_eval(
             plt.close()
 
     # collect metrics and return
-    pr, rc, f1, _ = precision_recall_fscore_support(y, y_prob > thresh_for_f1, beta=1.0, average="macro")
+    pr, rc, f1, _ = precision_recall_fscore_support(
+        y, y_prob > thresh_for_f1, beta=1.0, average="macro"
+    )
     metrics = {
         "AUROC": np.round(roc_auc, 3),
         "Average Precision": np.round(avg_precision, 3),
@@ -516,7 +551,9 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     # anything from orphan clusters will also be skipped
     # but note that other positives will be penalized for joining to any orphans
     # find orphan clusters, which are clusters that endwith ORPHAN_CLUSTER_KEY
-    orphan_clusters_names = [k for k in true_clusters.keys() if k.endswith(ORPHAN_CLUSTER_KEY)]
+    orphan_clusters_names = [
+        k for k in true_clusters.keys() if k.endswith(ORPHAN_CLUSTER_KEY)
+    ]
     for to_skip in orphan_clusters_names:
         tcset = tcset.difference(true_clusters[to_skip])
 

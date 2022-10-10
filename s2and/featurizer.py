@@ -84,7 +84,8 @@ class FeaturizationInfo:
                 ",".join(constraints)
                 for feature_category, constraints in lightgbm_monotone_constraints.items()
                 if feature_category in features_to_use
-                and feature_category not in {"advanced_name_similarity", "name_similarity", "name_counts"}
+                and feature_category
+                not in {"advanced_name_similarity", "name_similarity", "name_counts"}
             ]
         )
 
@@ -122,7 +123,9 @@ class FeaturizationInfo:
             feature_names.append("year_diff")
 
         if "title_similarity" in self.features_to_use:
-            feature_names.extend(["title_word_similarity", "title_character_similarity"])
+            feature_names.extend(
+                ["title_word_similarity", "title_character_similarity"]
+            )
 
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
@@ -203,7 +206,9 @@ class FeaturizationInfo:
 NUM_FEATURES = FeaturizationInfo().number_of_features
 
 
-def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_order=True):
+def compare_author_first_letters(
+    auth_1, auth_2, check_same_len=True, strict_order=True
+):
     """Checks if two author lists are compatible based on (a) num of authors (optionally),
     (b) whether the first letters of their names are the same (but possibly in the wrong order)
     and (c) whether the authors are in the right order (optionally)
@@ -244,7 +249,9 @@ def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_ord
         return all(found_match)
 
 
-def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tuple[List[Union[int, float]], int]:
+def _single_pair_featurize(
+    work_input: Tuple[str, str], index: int = -1
+) -> Tuple[List[Union[int, float]], int]:
     """
     Creates the features array for a single paper pair
     NOTE: This function uses a global variable to support faster multiprocessing. That means that this function
@@ -331,12 +338,17 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     features.extend(
         [
             int(paper_1.has_abstract) + int(paper_2.has_abstract),
-            counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),
+            counter_jaccard(
+                paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words
+            ),
         ]
     )
 
     # unifying feature type in features array
-    features = [float(val) if type(val) in [np.float32, np.float64, float] else int(val) for val in features]
+    features = [
+        float(val) if type(val) in [np.float32, np.float64, float] else int(val)
+        for val in features
+    ]
 
     return features, index
 
@@ -414,11 +426,15 @@ def many_pairs_featurize(
             os.makedirs(featurizer_info.cache_directory(dataset.name))
         if os.path.exists(featurizer_info.cache_file_path(dataset.name)):
             if featurizer_info.cache_file_path(dataset.name) in CACHED_FEATURES:
-                cached_features = CACHED_FEATURES[featurizer_info.cache_file_path(dataset.name)]
+                cached_features = CACHED_FEATURES[
+                    featurizer_info.cache_file_path(dataset.name)
+                ]
             else:
                 with open(featurizer_info.cache_file_path(dataset.name)) as _json_file:
                     cached_features = json.load(_json_file)
-                logger.info(f"Cache loaded with {len(cached_features['features'])} keys")
+                logger.info(
+                    f"Cache loaded with {len(cached_features['features'])} keys"
+                )
         else:
             logger.info("Cache initiated.")
             cached_features = {}
@@ -429,7 +445,9 @@ def many_pairs_featurize(
     labels = np.zeros(len(paper_pairs))
     pieces_of_work = []
     logger.info(f"Creating {len(paper_pairs)} pieces of work")
-    for i, pair in tqdm(enumerate(paper_pairs), desc="Creating work", disable=len(paper_pairs) <= 100000):
+    for i, pair in tqdm(
+        enumerate(paper_pairs), desc="Creating work", disable=len(paper_pairs) <= 100000
+    ):
         labels[i] = pair[2]
 
         # negative labels are an indication of partial supervision
@@ -461,17 +479,23 @@ def many_pairs_featurize(
     if nameless_featurizer_info:
         nameless_indices_to_use = set()
         for feature_name in nameless_featurizer_info.features_to_use:
-            nameless_indices_to_use.update(nameless_featurizer_info.feature_group_to_index[feature_name])
+            nameless_indices_to_use.update(
+                nameless_featurizer_info.feature_group_to_index[feature_name]
+            )
         nameless_indices_to_use: List[int] = sorted(list(nameless_indices_to_use))  # type: ignore
 
     if cache_changed:
         if n_jobs > 1:
             logger.info(f"Cached changed, doing {len(pieces_of_work)} work in parallel")
-            with multiprocessing.Pool(processes=n_jobs if len(pieces_of_work) > 1000 else 1) as p:
+            with multiprocessing.Pool(
+                processes=n_jobs if len(pieces_of_work) > 1000 else 1
+            ) as p:
                 _max = len(pieces_of_work)
                 with tqdm(total=_max, desc="Doing work", disable=_max <= 10000) as pbar:
                     for (feature_output, index) in p.imap(
-                        functools.partial(parallel_helper, worker_func=_single_pair_featurize),
+                        functools.partial(
+                            parallel_helper, worker_func=_single_pair_featurize
+                        ),
                         pieces_of_work,
                         min(chunk_size, max(1, int((_max / n_jobs) / 2))),
                     ):
@@ -484,11 +508,17 @@ def many_pairs_featurize(
                         pbar.update()
         else:
             logger.info(f"Cached changed, doing {len(pieces_of_work)} work in serial")
-            partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
-            for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
+            partial_func = functools.partial(
+                parallel_helper, worker_func=_single_pair_featurize
+            )
+            for piece in tqdm(
+                pieces_of_work, total=len(pieces_of_work), desc="Doing work"
+            ):
                 result = partial_func(piece)
                 if use_cache:
-                    cached_features["features"][featurizer_info.feature_cache_key(paper_pairs[result[1]])] = result[0]
+                    cached_features["features"][
+                        featurizer_info.feature_cache_key(paper_pairs[result[1]])
+                    ] = result[0]
                 features[result[1], :] = result[0]
         logger.info("Work completed")
 
@@ -505,13 +535,20 @@ def many_pairs_featurize(
     if delete_training_data:
         logger.info("Deleting some training rows")
         negative_label_indices = labels == 0
-        high_coauthor_sim_indices = features[:, featurizer_info.get_feature_names().index("coauthor_similarity")] > 0.95
+        high_coauthor_sim_indices = (
+            features[
+                :, featurizer_info.get_feature_names().index("coauthor_similarity")
+            ]
+            > 0.95
+        )
         indices_to_remove = negative_label_indices & high_coauthor_sim_indices
         logger.info(f"Intending to remove {sum(indices_to_remove)} rows")
         original_size = len(labels)
         features = features[~indices_to_remove, :]
         labels = labels[~indices_to_remove]
-        logger.info(f"Removed {original_size - features.shape[0]} rows and {original_size - len(labels)} labels")
+        logger.info(
+            f"Removed {original_size - features.shape[0]} rows and {original_size - len(labels)} labels"
+        )
 
     logger.info("Making numpy arrays for features and labels")
     # have to do this before subselecting features

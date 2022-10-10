@@ -16,7 +16,8 @@ class TestClusterer(unittest.TestCase):
             clusters="tests/test_dataset/clusters.json",
             cluster_seeds={"84177344": {"49188235": "require"}, "214237506": {"217917498": "require"}},
             name="test_dataset",
-            load_name_counts=True
+            load_name_counts=False,
+            balanced_pair_sample=False,
         )
 
         features_to_use = [

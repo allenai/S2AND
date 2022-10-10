@@ -11,7 +11,7 @@ class TestData(unittest.TestCase):
             "tests/test_dataset/papers.json",
             clusters="tests/test_dataset/clusters.json",
             name="test_dataset",
-            load_name_counts=False
+            balanced_pair_sample=False
         )
 
     def test_split_pairs_within_blocks(self):

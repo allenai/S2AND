@@ -115,6 +115,7 @@ class PDData:
         train_pairs_size: number of training pairs for learning the linkage function
         val_pairs_size: number of validation pairs for fine-tuning the linkage function parameters
         test_pairs_size: number of test pairs for evaluating the linkage function
+        balanced_pair_sample: whether to sample pairs in a class-balanced way
         all_test_pairs_flag: With blocking, for the linkage function evaluation task, should the test
             contain all possible pairs from test blocks, or the given number of pairs (test_pairs_size)
         random_seed: random seed
@@ -145,6 +146,7 @@ class PDData:
         train_pairs_size: int = 30000,
         val_pairs_size: int = 5000,
         test_pairs_size: int = 5000,
+        balanced_pair_sample: bool = True,
         all_test_pairs_flag: bool = False,
         random_seed: int = 1111,
         load_name_counts: Union[bool, Dict] = False,
@@ -247,6 +249,7 @@ class PDData:
         self.train_pairs_size = train_pairs_size
         self.val_pairs_size = val_pairs_size
         self.test_pairs_size = test_pairs_size
+        self.balanced_pair_sample = balanced_pair_sample
         self.all_test_pairs_flag = all_test_pairs_flag
         self.random_seed = random_seed
 
@@ -731,17 +734,21 @@ class PDData:
         train_pairs = self.pair_sampling(
             self.train_pairs_size,
             train_papers_dict,
+            all_pairs=False,
+            balanced_pair_sample=self.balanced_pair_sample
         )
         val_pairs = (
             self.pair_sampling(
                 self.val_pairs_size,
                 val_papers_dict,
+                all_pairs=False,
+                balanced_pair_sample=self.balanced_pair_sample
             )
             if len(val_papers_dict) > 0
             else []
         )
 
-        test_pairs = self.pair_sampling(self.test_pairs_size, test_papers_dict, self.all_test_pairs_flag)
+        test_pairs = self.pair_sampling(self.test_pairs_size, test_papers_dict, self.all_test_pairs_flag, balanced_pair_sample=False)
 
         return train_pairs, val_pairs, test_pairs
 
@@ -827,7 +834,7 @@ class PDData:
         sample_size: int,
         blocks: Dict[str, List[str]],
         all_pairs: bool = False,
-        balanced_sample: bool = True
+        balanced_pair_sample: bool = True
     ) -> List[Tuple[str, str, Union[int, float]]]:
         """
         Enumerates all pairs exhaustively, and samples pairs from each class.
@@ -847,6 +854,8 @@ class PDData:
             Must be provided when blocking is used
         all_pairs: bool
             Whether or not to return all pairs
+        balanced_pair_sample: bool
+            Whether to sample class-balanced pairs or not
 
         Returns
         -------
@@ -876,7 +885,7 @@ class PDData:
             pairs = possible
         else:
             random.seed(self.random_seed)
-            if balanced_sample:
+            if balanced_pair_sample:
                 # make a balanced dataset by sampling from each class
                 pairs_1 = [i for i in possible if i[2] == 1]
                 pairs_0 = [i for i in possible if i[2] == 0]

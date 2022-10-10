@@ -15,7 +15,8 @@ class TestClusterer(unittest.TestCase):
             "tests/test_dataset/papers.json",
             clusters="tests/test_dataset/clusters.json",
             name="test_dataset",
-            load_name_counts=True
+            load_name_counts=False,
+            balanced_pair_sample=False,
         )
 
         features_to_use = [

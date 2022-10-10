@@ -96,9 +96,7 @@ class Clusterer:
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.use_cache = use_cache
-        self.use_default_constraints_as_supervision = (
-            use_default_constraints_as_supervision
-        )
+        self.use_default_constraints_as_supervision = use_default_constraints_as_supervision
         self.dont_merge_cluster_seeds = dont_merge_cluster_seeds
         if cluster_model is None:
             self.cluster_model = FastCluster(linkage="average")
@@ -115,9 +113,7 @@ class Clusterer:
         self.batch_size = batch_size
 
     @staticmethod
-    def filter_blocks(
-        block_dict: Dict[str, List[str]], num_to_keep: Optional[int] = None
-    ) -> Dict[str, List[str]]:
+    def filter_blocks(block_dict: Dict[str, List[str]], num_to_keep: Optional[int] = None) -> Dict[str, List[str]]:
         """
         Filter out blocks of size 1, as they are not useful or train/val
 
@@ -230,9 +226,7 @@ class Clusterer:
             num_pairs += int(block_size * (block_size - 1) / 2)
             if isinstance(self.cluster_model, FastCluster):
                 # flattened pdist style
-                pairwise_proba = np.zeros(
-                    int(block_size * (block_size - 1) / 2), dtype=np.float16
-                )
+                pairwise_proba = np.zeros(int(block_size * (block_size - 1) / 2), dtype=np.float16)
             else:
                 pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
             pairwise_probas[block_key] = pairwise_proba
@@ -291,21 +285,17 @@ class Clusterer:
             if np.any(predict_flag):
                 if self.nameless_classifier is not None:
                     batch_predictions[predict_flag] = (
-                        self.classifier.predict_proba(batch_features[predict_flag, :])[
-                            :, 0
-                        ]
+                        self.classifier.predict_proba(batch_features[predict_flag, :])[:, 0]
                         + self.nameless_classifier.predict_proba(
                             batch_nameless_features[predict_flag, :]  # type: ignore
                         )[:, 0]
                     ) / 2
                 else:
-                    batch_predictions[predict_flag] = self.classifier.predict_proba(
-                        batch_features[predict_flag, :]
-                    )[:, 0]
+                    batch_predictions[predict_flag] = self.classifier.predict_proba(batch_features[predict_flag, :])[
+                        :, 0
+                    ]
             if np.any(not_predict_flag):
-                batch_predictions[not_predict_flag] = (
-                    batch_labels[not_predict_flag] + LARGE_INTEGER
-                )
+                batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
             logger.info("Starting to make matrices")
             for within_batch_index, prediction in tqdm(
@@ -316,15 +306,11 @@ class Clusterer:
             ):
                 block_key = blocks[within_batch_index]
                 if block_key != prev_block_key:
-                    block_key_start_index = blocks.index(block_key) + (
-                        batch_num * self.batch_size
-                    )
+                    block_key_start_index = blocks.index(block_key) + (batch_num * self.batch_size)
                     pairwise_proba = pairwise_probas[block_key]
 
                 if isinstance(self.cluster_model, FastCluster):
-                    index = (
-                        batch_num * self.batch_size + within_batch_index
-                    ) - block_key_start_index
+                    index = (batch_num * self.batch_size + within_batch_index) - block_key_start_index
 
                     pairwise_proba[index] = prediction
                 else:
@@ -381,10 +367,7 @@ class Clusterer:
             train_block_dict, val_block_dict, _ = dataset.split_cluster_papers()
             # incremental setting uses all the signatures in train and val
             # block-wise split uses only validation set for building the clustering model
-            if (
-                dataset.unit_of_data_split == "time"
-                or dataset.unit_of_data_split == "papers"
-            ):
+            if dataset.unit_of_data_split == "time" or dataset.unit_of_data_split == "papers":
                 for block_key, signatures in train_block_dict.items():
                     if block_key in val_block_dict:
                         val_block_dict[block_key].extend(signatures)
@@ -414,9 +397,7 @@ class Clusterer:
             for val_block_dict, val_cluster_to_papers, val_dists in zip(
                 val_block_dict_list, val_cluster_to_papers_list, val_dists_list
             ):
-                pred_clusters, _ = self.predict(
-                    val_block_dict, dataset=None, dists=val_dists
-                )
+                pred_clusters, _ = self.predict(val_block_dict, dataset=None, dists=val_dists)
                 (
                     _,
                     _,
@@ -583,8 +564,7 @@ class Clusterer:
         cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
         if dataset.altered_cluster_papers is not None:
             altered_cluster_nums = set(
-                dataset.cluster_seeds_require[altered_paper_id]
-                for altered_paper_id in dataset.altered_cluster_papers
+                dataset.cluster_seeds_require[altered_paper_id] for altered_paper_id in dataset.altered_cluster_papers
             )
             if len(altered_cluster_nums) > 0:
                 cluster_seeds_require_inverse: Dict[int, list] = {}
@@ -593,9 +573,7 @@ class Clusterer:
                         cluster_seeds_require_inverse[cluster_num] = []
                     cluster_seeds_require_inverse[cluster_num].append(papers_id)
                 for altered_cluster_num in altered_cluster_nums:
-                    papers_ids_for_cluster_num = cluster_seeds_require_inverse[
-                        altered_cluster_num
-                    ]
+                    papers_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
 
                     # Note: incremental_dont_use_cluster_seeds is set to True, because at this stage
                     # of incremental clustering we are splitting up the claimed profiles that we received
@@ -608,9 +586,7 @@ class Clusterer:
                         incremental_dont_use_cluster_seeds=True,
                     )
                     if len(reclustered_output) > 1:
-                        for i, new_cluster_of_papers in enumerate(
-                            reclustered_output.values()
-                        ):
+                        for i, new_cluster_of_papers in enumerate(reclustered_output.values()):
                             new_cluster_num = str(altered_cluster_num) + f"_{i}"
                             recluster_map[new_cluster_num] = altered_cluster_num
                             for reclustered_papers_id in new_cluster_of_papers:
@@ -662,26 +638,20 @@ class Clusterer:
                     ]
                 ) / 2
             else:
-                batch_predictions[predict_flag] = self.classifier.predict_proba(
-                    batch_features[predict_flag, :]
-                )[:, 0]
+                batch_predictions[predict_flag] = self.classifier.predict_proba(batch_features[predict_flag, :])[:, 0]
         if np.any(not_predict_flag):
-            batch_predictions[not_predict_flag] = (
-                batch_labels[not_predict_flag] + LARGE_INTEGER
-            )
+            batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
         logger.info("Computing average distances for unassigned signatures")
-        papers_to_cluster_to_average_dist: Dict[
-            str, Dict[int, Tuple[float, int]]
-        ] = defaultdict(lambda: defaultdict(lambda: (0, 0)))
+        papers_to_cluster_to_average_dist: Dict[str, Dict[int, Tuple[float, int]]] = defaultdict(
+            lambda: defaultdict(lambda: (0, 0))
+        )
         for papers_pair, dist in zip(all_pairs, batch_predictions):
             unassigned_paper, assigned_paper, _ = papers_pair
             if assigned_paper not in cluster_seeds_require:
                 continue
             cluster_id = cluster_seeds_require[assigned_paper]
-            previous_average, previous_count = papers_to_cluster_to_average_dist[
-                unassigned_paper
-            ][cluster_id]
+            previous_average, previous_count = papers_to_cluster_to_average_dist[unassigned_paper][cluster_id]
             papers_to_cluster_to_average_dist[unassigned_paper][cluster_id] = (
                 (previous_average * previous_count + dist) / (previous_count + 1),
                 previous_count + 1,
@@ -775,9 +745,7 @@ class PairwiseModeler:
                 "num_leaves": scope.int(hp.qloguniform("num_leaves", 2, 7, 1)),
                 "colsample_bytree": hp.uniform("colsample_bytree", 0.5, 1),
                 "subsample": hp.uniform("subsample", 0.5, 1),
-                "min_child_samples": scope.int(
-                    hp.qloguniform("min_child_samples", 3, 9, 1)
-                ),
+                "min_child_samples": scope.int(hp.qloguniform("min_child_samples", 3, 9, 1)),
                 "min_child_weight": hp.loguniform("min_child_weight", -16, 5),
                 "reg_alpha": hp.loguniform("reg_alpha", -16, 2),
                 "reg_lambda": hp.loguniform("reg_lambda", -16, 2),
@@ -789,9 +757,7 @@ class PairwiseModeler:
             self.search_space = search_space
 
         self.monotone_constraints = monotone_constraints
-        if self.monotone_constraints is not None and isinstance(
-            self.estimator, lgb.LGBMClassifier
-        ):
+        if self.monotone_constraints is not None and isinstance(self.estimator, lgb.LGBMClassifier):
             self.estimator.set_params(monotone_constraints=self.monotone_constraints)
             self.estimator.set_params(monotone_constraints_method="advanced")
             self.search_space["monotone_penalty"] = hp.uniform("monotone_penalty", 0, 5)
@@ -846,9 +812,7 @@ class PairwiseModeler:
                 trials=self.hyperopt_trials_store,
                 rstate=np.random.RandomState(self.random_state),
             )
-            best_params = space_eval(
-                self.search_space, self.hyperopt_trials_store.argmin
-            )
+            best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
             self.best_params = {k: intify(v) for k, v in best_params.items()}
             self.estimator.set_params(**self.best_params)
         else:
@@ -937,9 +901,7 @@ class VotingClassifier:
             Weighted average probability for each class per sample.
         """
         if self.voting == "hard":
-            raise AttributeError(
-                "predict_proba is not available when" " voting=%r" % self.voting
-            )
+            raise AttributeError("predict_proba is not available when" " voting=%r" % self.voting)
         avg = np.average(self._collect_probas(X), axis=0, weights=self.weights)
         return avg
 
@@ -1060,9 +1022,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
                 "If you intended to pass in a distance matrix, it must be flattened (1-D)."
             )
         elif len(X.shape) > 2:
-            raise Exception(
-                "The input to fit can only be one-dimensional or two-dimensional."
-            )
+            raise Exception("The input to fit can only be one-dimensional or two-dimensional.")
         Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
         self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
         return self
@@ -1085,6 +1045,4 @@ class FastCluster(TransformerMixin, BaseEstimator):
         return self.labels_
 
     def transform(self, X: np.array):
-        raise Exception(
-            "FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead."
-        )
+        raise Exception("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")

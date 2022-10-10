@@ -40,9 +40,7 @@ def cached_path(url_or_filename: Union[str, Path], cache_dir: str = None) -> str
         raise FileNotFoundError("file {} not found".format(url_or_filename))
     else:
         # Something unknown
-        raise ValueError(
-            "unable to parse {} as a URL or as a local path".format(url_or_filename)
-        )
+        raise ValueError("unable to parse {} as a URL or as a local path".format(url_or_filename))
 
 
 def url_to_filename(url: str, etag: str = None) -> str:
@@ -109,11 +107,7 @@ def get_from_cache(url: str, cache_dir: str = None) -> str:
 
     response = requests.head(url, allow_redirects=True)
     if response.status_code != 200:
-        raise IOError(
-            "HEAD request failed for url {} with status code {}".format(
-                url, response.status_code
-            )
-        )
+        raise IOError("HEAD request failed for url {} with status code {}".format(url, response.status_code))
     etag = response.headers.get("ETag")
 
     filename = url_to_filename(url, etag)
@@ -135,9 +129,7 @@ def get_from_cache(url: str, cache_dir: str = None) -> str:
             # shutil.copyfileobj() starts at the current position, so go to the start
             temp_file.seek(0)
 
-            print(
-                f"Finished download, copying {temp_file.name} to cache at {cache_path}"
-            )
+            print(f"Finished download, copying {temp_file.name} to cache at {cache_path}")
             with open(cache_path, "wb") as cache_file:
                 shutil.copyfileobj(temp_file, cache_file)
 

@@ -294,8 +294,8 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
                 paper_2.author_info_coauthor_email_suffix_n_grams,
             ),
             compare_author_first_letters(
-                [i.author_info_first_letters for i in paper_1.authors],
-                [i.author_info_first_letters for i in paper_2.authors],
+                paper_1.authors,
+                paper_2.authors,
             ),
         ]
     )

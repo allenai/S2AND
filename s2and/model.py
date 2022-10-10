@@ -21,7 +21,7 @@ from hyperopt.pyll import scope
 from fastcluster import linkage
 
 import lightgbm as lgb
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.base import clone
 from sklearn.base import TransformerMixin, BaseEstimator
 from sklearn.exceptions import EfficiencyWarning
@@ -796,7 +796,7 @@ class PairwiseModeler:
                 self.estimator.set_params(**params)
                 self.estimator.fit(X_train, y_train)
                 y_pred_proba = self.estimator.predict_proba(X_val)[:, 1]
-                return -roc_auc_score(y_val, y_pred_proba)
+                return -average_precision_score(y_val, y_pred_proba)
 
             self.hyperopt_trials_store = Trials()
             _ = fmin(

@@ -76,6 +76,9 @@ class Paper(NamedTuple):
     author_info_coauthor_affiliations_n_grams: Optional[Counter]
     year: Optional[int]
     paper_id: int
+    doi: Optional[str]
+    source: Optional[str]
+    openaccesslocation: Optional[bool]
     block: Optional[str]
     # TODO: some key that represents how the papers are currently clustered so we can compare against it
 
@@ -144,7 +147,7 @@ class PDData:
         test_pairs_size: int = 5000,
         all_test_pairs_flag: bool = False,
         random_seed: int = 1111,
-        load_name_counts: Union[bool, Dict] = True,
+        load_name_counts: Union[bool, Dict] = False,
         n_jobs: int = 1,
     ):
 
@@ -195,6 +198,9 @@ class PDData:
                 author_info_coauthor_affiliations_n_grams=None,
                 year=paper.get("year", None),
                 paper_id=paper_id,
+                doi=paper.get("doi", None),
+                source=paper.get("source", None),
+                openaccesslocation=paper.get("openaccesslocation", None),
                 block=paper.get("block", None),
             )
         logger.info("loaded papers")
@@ -821,9 +827,10 @@ class PDData:
         sample_size: int,
         blocks: Dict[str, List[str]],
         all_pairs: bool = False,
+        balanced_sample: bool = True
     ) -> List[Tuple[str, str, Union[int, float]]]:
         """
-        Enumerates all pairs exhaustively, and samples pairs according to the four different strategies.
+        Enumerates all pairs exhaustively, and samples pairs from each class.
 
         Note: we don't know the label when both of papers have the cluster clusterid_ORPHAN_CLUSTER_KEY.
         But ("orphan", any other cluster) is allowed and is always a negative by definition
@@ -851,22 +858,34 @@ class PDData:
         for _, papers in blocks.items():
             for i, s1 in enumerate(papers):
                 for s2 in papers[i + 1 :]:
-                    if self.paper_to_cluster_id is not None:
+                    if self.paper_to_cluster_id is not None:  # we have ground truth
                         s1_cluster = self.paper_to_cluster_id[s1]
                         s2_cluster = self.paper_to_cluster_id[s2]
-                        if s1_cluster == s2_cluster:
-                            if not s1_cluster.endswith(ORPHAN_CLUSTER_KEY):
+                        # we have to exclude orphans entirely from the labeled data set
+                        if not (s1_cluster.endswith(ORPHAN_CLUSTER_KEY) or s2_cluster.endswith(ORPHAN_CLUSTER_KEY)):
+                            if s1_cluster == s2_cluster:
                                 possible.append((s1, s2, 1))
-                        else:
-                            possible.append((s1, s2, 0))
-                    else:
+                            else:
+                                possible.append((s1, s2, 0))
+                        else:  # will be removed later if not all_pairs
+                            possible.append((s1, s2, NUMPY_NAN))
+                    else: # we don't have labels so we are just going to make everything 
                         possible.append((s1, s2, NUMPY_NAN))
 
         if all_pairs:
             pairs = possible
         else:
             random.seed(self.random_seed)
-            pairs = random.sample(possible, min(len(possible), sample_size))
+            if balanced_sample:
+                # make a balanced dataset by sampling from each class
+                pairs_1 = [i for i in possible if i[2] == 1]
+                pairs_0 = [i for i in possible if i[2] == 0]
+                pairs_1 = random.sample(pairs_1, min(len(pairs_1), sample_size // 2))
+                pairs_0 = random.sample(pairs_0, min(len(pairs_0), sample_size // 2))
+                pairs = pairs_1 + pairs_0
+            else:
+                possible = [i for i in possible if not np.isnan(i[2])]
+                pairs = random.sample(possible, min(len(possible), sample_size))
         return pairs
 
 

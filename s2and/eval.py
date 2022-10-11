@@ -517,17 +517,19 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     # but note that other positives will be penalized for joining to any orphans
     # find orphan clusters, which are clusters that endwith ORPHAN_CLUSTER_KEY
     orphan_clusters_names = [k for k in true_clusters.keys() if k.endswith(ORPHAN_CLUSTER_KEY)]
+    orphan_paper_ids = set()
     for to_skip in orphan_clusters_names:
+        orphan_paper_ids.update(true_clusters[to_skip])
         tcset = tcset.difference(true_clusters[to_skip])
 
+    # need to remove orphans from true_clusters and pred_clusters
     for cluster_id, cluster in true_clusters.items():
-        true_clusters[cluster_id] = frozenset(cluster)
+        true_clusters[cluster_id] = frozenset(set(cluster).difference(orphan_paper_ids))
+
     for cluster_id, cluster in pred_clusters.items():
-        pred_clusters[cluster_id] = frozenset(cluster)
+        pred_clusters[cluster_id] = frozenset(set(cluster).difference(orphan_paper_ids))
 
-    precision = 0.0
-    recall = 0.0
-
+    # invert lookups
     reverse_true_clusters = {}
     for k, v in true_clusters.items():
         for vi in v:
@@ -540,7 +542,8 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
 
     intersections = {}
     per_paper_metrics = {}
-
+    precision = 0.0
+    recall = 0.0
     true_bigger_ratios, pred_bigger_ratios = [], []
     for item in list(tcset):
         pred_cluster_i = pred_clusters[reverse_pred_clusters[item]]

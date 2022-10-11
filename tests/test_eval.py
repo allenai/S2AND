@@ -49,6 +49,6 @@ class TestClusterer(unittest.TestCase):
             {"dark": [1, 2, 3, 4, 5], "light": [6, 7], "line1": [8, 9], "line2": [10, 11], "line3": [12, 13], 'x_' + ORPHAN_CLUSTER_KEY: [14]},
             {"1": [1, 2, 3, 4], "2": [5], "3": [6, 7], "4": [8, 9], "5": [10, 11], "6": [12, 13, 14]},
         )
-        # the 12th one has reduced precision compared to before due to the new orphan that got added in
-        self.assertAlmostEqual(size_v_quantity_4[3][12][0], 2 / 3)
+        # doesn't matter where the orphan goes, we ignore it during B3 construction
+        self.assertAlmostEqual(size_v_quantity_4, size_v_quantity_3)
     

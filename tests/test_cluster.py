@@ -25,8 +25,8 @@ class TestClusterer(unittest.TestCase):
         ]
         featurizer_info = FeaturizationInfo(features_to_use=features_to_use)
         np.random.seed(1)
-        X_random = np.random.random((10, 3))
-        y_random = np.random.randint(0, 3, 10)
+        X_random = np.random.random((10, 4))
+        y_random = np.random.randint(0, 4, 10)
         self.clusterer = Clusterer(
             featurizer_info=featurizer_info,
             classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
@@ -38,15 +38,7 @@ class TestClusterer(unittest.TestCase):
         )
 
     def test_make_distance_matrix_fastcluster(self):
-        block = {
-            'reviewerlistfor': [
-                '84177344',
-                '49188235',
-                '214237506',
-                '217917498', 
-                '1473469382'
-            ]
-        }
+        block = {"reviewerlistfor": ["84177344", "49188235", "214237506", "217917498", "1473469382"]}
         partial_supervision = {("84177344", "49188235"): 1.1, ("49188235", "214237506"): 1e-6}
         distance_matrices = self.clusterer.make_distance_matrices(
             block_dict=block,
@@ -55,7 +47,7 @@ class TestClusterer(unittest.TestCase):
         )
         distance_matrix = distance_matrices["reviewerlistfor"]
         self.assertEqual(distance_matrix[0], np.float16(1.1))
-        self.assertEqual(distance_matrix[1], np.float16(0.3))
+        self.assertEqual(distance_matrix[1], np.float16(0.2))
         self.assertEqual(distance_matrix[4], np.float16(1e-6))
 
         distance_matrices = self.clusterer.make_distance_matrices(
@@ -64,6 +56,6 @@ class TestClusterer(unittest.TestCase):
             partial_supervision={},
         )
         distance_matrix = distance_matrices["reviewerlistfor"]
-        self.assertEqual(distance_matrix[0], np.float16(0.3))
-        self.assertEqual(distance_matrix[1], np.float16(0.3))
-        self.assertEqual(distance_matrix[4], np.float16(0.3))
+        self.assertEqual(distance_matrix[0], np.float16(0.2))
+        self.assertEqual(distance_matrix[1], np.float16(0.2))
+        self.assertEqual(distance_matrix[4], np.float16(0.2))

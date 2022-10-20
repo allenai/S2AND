@@ -258,9 +258,8 @@ def facet_eval(
                 block_len_f1[block_len_dict[paper.block]].append(f1)
                 _paper_dict["block size"] = block_len_dict[paper.author_info_given_block]
             elif block_type == "s2":
-                # TODO: update author_info_block to whatever we use for original block
-                block_len_f1[block_len_dict[paper.author_info_block]].append(f1)
-                _paper_dict["block size"] = block_len_dict[paper.author_info_block]
+                block_len_f1[block_len_dict[paper.corpus_paper_id]].append(f1)
+                _paper_dict["block size"] = block_len_dict[paper.corpus_paper_id]
 
             _paper_dict["paper_id"] = paper_id  # type: ignore
             _paper_dict["precision"] = p  # type: ignore

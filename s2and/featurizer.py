@@ -54,23 +54,21 @@ class FeaturizationInfo:
     ):
         self.features_to_use = features_to_use
 
-        self.feature_group_to_index = {
-            "author_similarity": [0, 1, 2, 3, 4],
-            "venue_similarity": [5, 6],
-            "year_diff": [7],
-            "title_similarity": [8, 9],
-            "abstract_similarity": [10, 11],
-        }
-
-        self.number_of_features = max(functools.reduce(max, self.feature_group_to_index.values())) + 1  # type: ignore
-
         lightgbm_monotone_constraints = {
-            "author_similarity": ["1", "1", "1", "1", "1"],
+            "author_similarity": ["1", "1", "1"],
             "venue_similarity": ["1", "1"],
             "year_diff": ["-1"],
-            "title_similarity": ["1", "1"],
+            "title_similarity": ["1", "1", "1"],
             "abstract_similarity": ["1", "1"],
         }
+
+        self.feature_group_to_index = {}
+        start_count = 0
+        for feature_group, constraints in lightgbm_monotone_constraints.items():
+            self.feature_group_to_index[feature_group] = list(range(start_count, start_count + len(constraints)))
+            start_count += len(constraints)
+
+        self.number_of_features = start_count  # type: ignore
 
         self.lightgbm_monotone_constraints = ",".join(
             [
@@ -79,6 +77,7 @@ class FeaturizationInfo:
                 if feature_category in features_to_use
             ]
         )
+
         self.nameless_lightgbm_monotone_constraints = ",".join(
             [
                 ",".join(constraints)
@@ -107,8 +106,8 @@ class FeaturizationInfo:
                 [
                     "author_names_similarity",
                     "author_affiliations_similarity",
-                    "author_email_prefix_similarity",
-                    "author_email_suffix_similarity",
+                    # "author_email_prefix_similarity",
+                    # "author_email_suffix_similarity",
                     "author_first_letter_compatibility",
                 ]
             )
@@ -122,7 +121,7 @@ class FeaturizationInfo:
             feature_names.append("year_diff")
 
         if "title_similarity" in self.features_to_use:
-            feature_names.extend(["title_word_similarity", "title_character_similarity"])
+            feature_names.extend(["title_word_similarity", "title_character_similarity", "title_prefix"])
 
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
@@ -219,6 +218,10 @@ def compare_author_first_letters(auth_1, auth_2, check_same_len=True, strict_ord
             If False, tries to find a match anywhere in the author list as opposed to the corresponding position.
             Defaults to True.
     """
+    # if either one doesn't have any authors, then this feature should be nan
+    if len(auth_1) == 0 or len(auth_2) == 0:
+        return np.nan
+
     # check if the two author lists have the same len
     if check_same_len and (len(auth_1) != len(auth_2)):
         return False
@@ -285,14 +288,14 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
                 paper_1.author_info_coauthor_affiliations_n_grams,
                 paper_2.author_info_coauthor_affiliations_n_grams,
             ),
-            counter_jaccard(
-                paper_1.author_info_coauthor_email_prefix_n_grams,
-                paper_2.author_info_coauthor_email_prefix_n_grams,
-            ),
-            counter_jaccard(
-                paper_1.author_info_coauthor_email_suffix_n_grams,
-                paper_2.author_info_coauthor_email_suffix_n_grams,
-            ),
+            # counter_jaccard(
+            #     paper_1.author_info_coauthor_email_prefix_n_grams,
+            #     paper_2.author_info_coauthor_email_prefix_n_grams,
+            # ),
+            # counter_jaccard(
+            #     paper_1.author_info_coauthor_email_suffix_n_grams,
+            #     paper_2.author_info_coauthor_email_suffix_n_grams,
+            # ),
             compare_author_first_letters(
                 paper_1.authors,
                 paper_2.authors,
@@ -324,6 +327,9 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         [
             counter_jaccard(paper_1.title_ngrams_words, paper_2.title_ngrams_words),
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
+            # check if the title of paper_1 is a prefix of the title of paper_2
+            paper_1.title.replace(" ", "").startswith(paper_2.title.replace(" ", ""))
+            or paper_2.title.replace(" ", "").startswith(paper_1.title.replace(" ", "")),
         ]
     )
 

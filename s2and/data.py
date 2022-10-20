@@ -82,11 +82,11 @@ class Paper(NamedTuple):
     author_info_coauthor_affiliations_n_grams: Optional[Counter]
     year: Optional[int]
     paper_id: int
+    corpus_paper_id: Optional[int]  # this is the id of the paper's current mapping in the corpus
     doi: Optional[str]
     source: Optional[str]
     openaccesslocation: Optional[bool]
     block: Optional[str]
-    # TODO: some key that represents how the papers are currently clustered so we can compare against it
 
 
 class PDData:
@@ -169,6 +169,7 @@ class PDData:
                 title=paper.get("title", ""),
                 abstract=paper.get("abstract", None),
                 has_abstract=paper.get("abstract", None) not in {"", None},
+                title_ngrams_chars=None,
                 title_ngrams_words=None,
                 abstract_ngrams_words=None,
                 authors=[
@@ -197,7 +198,6 @@ class PDData:
                 ],
                 venue=paper.get("venue", None),
                 journal_name=paper.get("journal_name", None),
-                title_ngrams_chars=None,
                 venue_ngrams=None,
                 journal_ngrams=None,
                 author_info_coauthor_n_grams=None,
@@ -210,6 +210,7 @@ class PDData:
                 source=paper.get("source", None),
                 openaccesslocation=paper.get("openaccesslocation", None),
                 block=paper.get("block", None),
+                corpus_paper_id=paper.get("corpus_paper_id", None),
             )
         logger.info("loaded papers")
 
@@ -305,10 +306,10 @@ class PDData:
 
         # name counts for each author
         # has to happen after papers + authors are preprocessed
-        for paper_id in self.papers.keys():
-            paper = self.papers[paper_id]
-            authors = [self.lookup_name_counts(author, load_name_counts) for author in paper.authors]
-            self.papers[paper_id] = paper._replace(authors=authors)
+        # for paper_id in self.papers.keys():
+        #     paper = self.papers[paper_id]
+        #     authors = [self.lookup_name_counts(author, load_name_counts) for author in paper.authors]
+        #     self.papers[paper_id] = paper._replace(authors=authors)
 
     def lookup_name_counts(self, author, load_name_counts):
         if load_name_counts:
@@ -455,6 +456,8 @@ class PDData:
         """
 
         # TODO: do we need rules of any kind here?
+        # maybe check author name compatability instead of using it as a constraint?
+        # or years?
         # paper_1 = self.papers[str(self.papers[paper_id_1].paper_id)]
         # paper_2 = self.papers[str(self.papers[paper_id_2].paper_id)]
 
@@ -503,8 +506,7 @@ class PDData:
         """
         block: Dict[str, List[str]] = {}
         for paper_id, paper_ID in self.papers.items():
-            # TODO: replace with the name that we'll use for original S2 block
-            block_id = paper_ID.author_info_block
+            block_id = paper_ID.corpus_paper_id
             if block_id not in block:
                 block[block_id] = [paper_id]
             else:
@@ -850,8 +852,7 @@ class PDData:
         """
         Enumerates all pairs exhaustively, and samples pairs from each class.
 
-        Note: we don't know the label when both of papers have the cluster clusterid_ORPHAN_CLUSTER_KEY.
-        But ("orphan", any other cluster) is allowed and is always a negative by definition
+        Note: we don't know the label when either of the papers have the cluster clusterid_ORPHAN_CLUSTER_KEY.
 
         Parameters
         ----------
@@ -1017,8 +1018,8 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
 
     title = normalize_text(paper.title)
     abstract = normalize_text(paper.abstract)
-    title_ngrams_words = get_text_ngrams_words(title)
-    abstract_ngrams_words = get_text_ngrams_words(abstract)
+    title_ngrams_words = get_text_ngrams_words(title, stopwords=None)
+    abstract_ngrams_words = get_text_ngrams_words(abstract, stopwords=None)
     authors = [preprocess_authors(author) for author in paper.authors]
     paper = paper._replace(
         title=title,
@@ -1029,7 +1030,7 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     venue = normalize_text(paper.venue)
     journal_name = normalize_text(paper.journal_name)
     paper = paper._replace(venue=venue, journal_name=journal_name)
-    title_ngrams_chars = get_text_ngrams(paper.title, use_bigrams=True)
+    title_ngrams_chars = get_text_ngrams(paper.title.replace(" ", ""), stopwords=None, use_bigrams=False)
     venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
     journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
     author_info_coauthor_n_grams = get_text_ngrams(

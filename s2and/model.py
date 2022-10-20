@@ -494,8 +494,7 @@ class Clusterer:
         if use_s2_clusters:
             for _, papers_list in block_dict.items():
                 for _paper in papers_list:
-                    # TODO: change `author_id` to whatever we end up passing in to represent the original S2 clusters
-                    s2_cluster_key = dataset.papers[_paper].author_id
+                    s2_cluster_key = dataset.papers[_paper].corpus_paper_id
                     pred_clusters[s2_cluster_key].append(_paper)
 
             return dict(pred_clusters), dists

@@ -72,7 +72,7 @@ DROPPED_AFFIXES = {
 }
 
 
-# Stop-words list must be updated for citations title/abstract related information
+# TODO: stop-words list must be updated for citations title/abstract related information
 STOPWORDS = set(
     [
         "i",
@@ -410,7 +410,7 @@ def get_text_ngrams(
     return ngrams
 
 
-def get_text_ngrams_words(text: Optional[str], stopwords: Set[str] = STOPWORDS) -> Counter:
+def get_text_ngrams_words(text: Optional[str], stopwords: Optional[Set[str]] = STOPWORDS) -> Counter:
     """
     Get word unigrams, bigrams, and trigrams for a piece of text.
 
@@ -427,7 +427,10 @@ def get_text_ngrams_words(text: Optional[str], stopwords: Set[str] = STOPWORDS) 
     """
     if text is None or len(text) == 0:
         return Counter()
-    text_split = [word for word in text.split() if word not in stopwords and len(word) > 1]
+    if stopwords is not None:
+        text_split = [word for word in text.split() if word not in stopwords]
+    else:
+        text_split = text.split()
     unigrams = Counter(text_split)
     bigrams = map(
         lambda x: " ".join(x),

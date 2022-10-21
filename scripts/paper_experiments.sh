@@ -19,3 +19,4 @@ python scripts/paper_experiments.py --n_jobs 25 --random_seed 1 2 3 4 5 --experi
 python scripts/paper_experiments.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name ablations/no_year --feature_groups_to_skip year_diff --use_cache
 python scripts/paper_experiments.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name ablations/no_title --feature_groups_to_skip title_similarity --use_cache
 python scripts/paper_experiments.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name ablations/no_abstract --feature_groups_to_skip abstract_similarity --use_cache
+python scripts/paper_experiments.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name ablations/no_paper_quality --feature_groups_to_skip paper_quality --use_cache

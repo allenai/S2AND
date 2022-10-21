@@ -129,7 +129,7 @@ class FeaturizationInfo:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
 
         if "paper_quality" in self.features_to_use:
-            feature_names.append(["either_paper_from_pdf", "min_of_paper_field_count", "max_of_paper_field_count"])
+            feature_names.extend(["either_paper_from_pdf", "min_of_paper_field_count", "max_of_paper_field_count"])
 
         return feature_names
 

@@ -49,6 +49,7 @@ class FeaturizationInfo:
             "year_diff",
             "title_similarity",
             "abstract_similarity",
+            "paper_quality",
         ],
         featurizer_version: int = FEATURIZER_VERSION,
     ):
@@ -60,6 +61,7 @@ class FeaturizationInfo:
             "year_diff": ["-1"],
             "title_similarity": ["1", "1", "1"],
             "abstract_similarity": ["1", "1"],
+            "paper_quality": ["0", "0", "0"],
         }
 
         self.feature_group_to_index = {}
@@ -125,6 +127,9 @@ class FeaturizationInfo:
 
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
+
+        if "paper_quality" in self.features_to_use:
+            feature_names.append(["either_paper_from_pdf", "min_of_paper_field_count", "max_of_paper_field_count"])
 
         return feature_names
 
@@ -338,6 +343,31 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         [
             int(paper_1.has_abstract) + int(paper_2.has_abstract),
             counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),
+        ]
+    )
+
+    # paper quality features
+    paper_1_num_present_fields = (
+        int(len(paper_1.title) > 0)
+        + int(paper_1.abstract is not None and len(paper_1.abstract) > 0)
+        + int(len(paper_1.authors) > 0)
+        + int(paper_1.venue is not None or paper_1.journal_name is not None)
+        + int(paper_1.year is not None)
+    )
+
+    paper_2_num_present_fields = (
+        int(len(paper_2.title) > 0)
+        + int(paper_2.abstract is not None and len(paper_2.abstract) > 0)
+        + int(len(paper_2.authors) > 0)
+        + int(paper_2.venue is not None or paper_2.journal_name is not None)
+        + int(paper_2.year is not None)
+    )
+
+    features.extend(
+        [
+            int(paper_1.source == "MergedPDFExtraction") + int(paper_2.source == "MergedPDFExtraction"),
+            min(paper_1_num_present_fields, paper_2_num_present_fields),
+            max(paper_1_num_present_fields, paper_2_num_present_fields),
         ]
     )
 

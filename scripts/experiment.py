@@ -143,7 +143,14 @@ def main(
         )
     )
 
-    FEATURES_TO_USE = ["author_similarity", "venue_similarity", "year_diff", "title_similarity", "abstract_similarity"]
+    FEATURES_TO_USE = [
+        "author_similarity",
+        "venue_similarity",
+        "year_diff",
+        "title_similarity",
+        "abstract_similarity",
+        "paper_quality",
+    ]
     for feature_group in feature_groups_to_skip:
         FEATURES_TO_USE.remove(feature_group)
 

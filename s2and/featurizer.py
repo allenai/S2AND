@@ -15,6 +15,7 @@ from s2and.consts import (
     FEATURIZER_VERSION,
     LARGE_INTEGER,
     DEFAULT_CHUNK_SIZE,
+    NUMPY_NAN,
 )
 from s2and.text import diff, counter_jaccard, prefix_dist
 
@@ -56,9 +57,9 @@ class FeaturizationInfo:
             "author_similarity": ["1", "1", "1"],
             "venue_similarity": ["1", "1"],
             "year_diff": ["-1"],
-            "title_similarity": ["1", "1", "1"],
+            "title_similarity": ["1", "1", "0"],
             "abstract_similarity": ["1", "1"],
-            "paper_quality": ["0", "0", "0", "0", "0"],
+            "paper_quality": ["0", "0", "0", "0"],
         }
 
         self.feature_group_to_index = {}
@@ -120,7 +121,14 @@ class FeaturizationInfo:
             feature_names.append("year_diff")
 
         if "title_similarity" in self.features_to_use:
-            feature_names.extend(["title_word_similarity", "title_character_similarity", "title_prefix"])
+            feature_names.extend(
+                [
+                    # "title_word_similarity",
+                    "title_character_similarity",
+                    "title_prefix",
+                    "last_words_are_different",  # trying to catch when we have stuff like "part i vs part ii"
+                ]
+            )
 
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
@@ -132,7 +140,7 @@ class FeaturizationInfo:
                     "min_of_paper_field_count",
                     "max_of_paper_field_count",
                     "sources_are_same",
-                    "doi_prefix_dist",
+                    # "doi_prefix_dist",
                 ]
             )
 
@@ -335,11 +343,14 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     # title features
     features.extend(
         [
-            counter_jaccard(paper_1.title_ngrams_words, paper_2.title_ngrams_words),
+            # counter_jaccard(paper_1.title_ngrams_words, paper_2.title_ngrams_words),  # not sure we need this...
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
             # check if the title of paper_1 is a prefix of the title of paper_2
-            paper_1.title.replace(" ", "").startswith(paper_2.title.replace(" ", ""))
-            or paper_2.title.replace(" ", "").startswith(paper_1.title.replace(" ", "")),
+            prefix_dist(paper_1.title.replace(" ", ""), paper_2.title.replace(" ", "")),
+            # check if the last words are the same or not
+            NUMPY_NAN
+            if len(paper_1.title) == 0 or len(paper_2.title) == 0
+            else paper_1.title.split()[-1] == paper_2.title.split()[-1],
         ]
     )
 
@@ -374,7 +385,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             min(paper_1_num_present_fields, paper_2_num_present_fields),
             max(paper_1_num_present_fields, paper_2_num_present_fields),
             paper_1.source == paper_2.source,
-            prefix_dist(paper_1.doi, paper_2.doi),
+            # prefix_dist(paper_1.doi, paper_2.doi),  # maybe overfitting to the silver training data labels?
         ]
     )
 

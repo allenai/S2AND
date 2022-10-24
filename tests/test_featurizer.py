@@ -24,6 +24,7 @@ class TestData(unittest.TestCase):
             "year_diff",
             "title_similarity",
             "abstract_similarity",
+            "paper_quality",
         ]
         self.featurizer = FeaturizationInfo(features_to_use=features_to_use)
 
@@ -62,9 +63,25 @@ class TestData(unittest.TestCase):
         # TODO: fix the multithreading global issue...
         features, _, _ = many_pairs_featurize(test_pairs, self.dataset, self.featurizer, 2, False, 1, nan_value=-1)
 
-        expected_features_1 = [-1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0]
-        expected_features_2 = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0]
-        expected_features_3 = [0.06319702602230483, -1.0, 0.0, -1.0, -1.0, 0.0, 1.0, 1.0, 1.0, 0.0, -1.0]
+        expected_features_1 = [-1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 3.0, 4.0, 1.0]
+        expected_features_2 = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 3.0, 4.0, 1.0]
+        expected_features_3 = [
+            0.06319702602230483,
+            -1.0,
+            0.0,
+            -1.0,
+            -1.0,
+            0.0,
+            1.0,
+            0,
+            1.0,
+            0.0,
+            -1.0,
+            0.0,
+            4.0,
+            4.0,
+            1.0,
+        ]
         self.check_features_array_equal(list(features[0, :]), expected_features_1)
         self.check_features_array_equal(list(features[1, :]), expected_features_2)
         self.check_features_array_equal(list(features[2, :]), expected_features_3)

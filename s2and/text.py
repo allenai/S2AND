@@ -6,6 +6,7 @@ if TYPE_CHECKING:
 import re
 import warnings
 import numpy as np
+import pandas as pd
 from numpy import inner
 from numpy.linalg import norm
 from collections import Counter
@@ -13,7 +14,6 @@ from collections import Counter
 from text_unidecode import unidecode
 import jellyfish
 from strsimpy.metric_lcs import MetricLCS
-
 
 from s2and.consts import NUMPY_NAN
 
@@ -253,6 +253,8 @@ NAME_PREFIXES = {
 
 
 def prefix_dist(string_1: str, string_2: str) -> float:
+    if string_1 is None or pd.isnull(string_1) or string_2 is None or pd.isnull(string_2):
+        return NUMPY_NAN
     if string_1 == string_2:
         return 0.0
     min_word, max_word = (string_1, string_2) if len(string_1) < len(string_2) else (string_2, string_1)

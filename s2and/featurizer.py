@@ -16,10 +16,7 @@ from s2and.consts import (
     LARGE_INTEGER,
     DEFAULT_CHUNK_SIZE,
 )
-from s2and.text import (
-    diff,
-    counter_jaccard,
-)
+from s2and.text import diff, counter_jaccard, prefix_dist
 
 logger = logging.getLogger("s2and")
 
@@ -61,7 +58,7 @@ class FeaturizationInfo:
             "year_diff": ["-1"],
             "title_similarity": ["1", "1", "1"],
             "abstract_similarity": ["1", "1"],
-            "paper_quality": ["0", "0", "0"],
+            "paper_quality": ["0", "0", "0", "0", "0"],
         }
 
         self.feature_group_to_index = {}
@@ -129,7 +126,9 @@ class FeaturizationInfo:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
 
         if "paper_quality" in self.features_to_use:
-            feature_names.extend(["either_paper_from_pdf", "min_of_paper_field_count", "max_of_paper_field_count"])
+            feature_names.extend(
+                ["either_paper_from_pdf", "min_of_paper_field_count", "max_of_paper_field_count", "sources_are_same", "doi_prefix_dist"]
+            )
 
         return feature_names
 
@@ -368,6 +367,8 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             int(paper_1.source == "MergedPDFExtraction") + int(paper_2.source == "MergedPDFExtraction"),
             min(paper_1_num_present_fields, paper_2_num_present_fields),
             max(paper_1_num_present_fields, paper_2_num_present_fields),
+            paper_1.source == paper_2.source,
+            prefix_dist(paper_1.doi, paper_2.doi),
         ]
     )
 

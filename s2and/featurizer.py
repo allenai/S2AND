@@ -127,7 +127,13 @@ class FeaturizationInfo:
 
         if "paper_quality" in self.features_to_use:
             feature_names.extend(
-                ["either_paper_from_pdf", "min_of_paper_field_count", "max_of_paper_field_count", "sources_are_same", "doi_prefix_dist"]
+                [
+                    "either_paper_from_pdf",
+                    "min_of_paper_field_count",
+                    "max_of_paper_field_count",
+                    "sources_are_same",
+                    "doi_prefix_dist",
+                ]
             )
 
         return feature_names

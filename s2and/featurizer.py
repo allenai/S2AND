@@ -126,7 +126,7 @@ class FeaturizationInfo:
                     # "title_word_similarity",
                     "title_character_similarity",
                     "title_prefix",
-                    "last_words_are_different",  # trying to catch when we have stuff like "part i vs part ii"
+                    "last_words_are_same",  # trying to catch when we have stuff like "part i vs part ii"
                 ]
             )
 

@@ -28,7 +28,6 @@ from s2and.text import (
     get_text_ngrams,
     get_text_ngrams_words,
     normalize_venue_name,
-    AFFILIATIONS_STOP_WORDS,
     NAME_PREFIXES,
 )
 

@@ -54,8 +54,8 @@ class FeaturizationInfo:
         self.features_to_use = features_to_use
 
         lightgbm_monotone_constraints = {
-            "author_similarity": ["1", "1", "1"],
-            "venue_similarity": ["1", "1"],
+            "author_similarity": ["1", "1"],
+            "venue_similarity": ["1"],
             "year_diff": ["-1"],
             "title_similarity": ["1", "1", "0"],
             "abstract_similarity": ["1", "1"],
@@ -105,7 +105,7 @@ class FeaturizationInfo:
             feature_names.extend(
                 [
                     "author_names_similarity",
-                    "author_affiliations_similarity",
+                    # "author_affiliations_similarity",
                     # "author_email_prefix_similarity",
                     # "author_email_suffix_similarity",
                     "author_first_letter_compatibility",
@@ -114,7 +114,7 @@ class FeaturizationInfo:
 
         # email features
         if "venue_similarity" in self.features_to_use:
-            feature_names.extend(["journal_similarity", "venue_similarity"])
+            feature_names.extend(["venue_similarity"])
 
         # year features
         if "year_diff" in self.features_to_use:
@@ -302,10 +302,10 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
                 paper_2.author_info_coauthor_n_grams,
                 denominator_max=5000,
             ),
-            counter_jaccard(
-                paper_1.author_info_coauthor_affiliations_n_grams,
-                paper_2.author_info_coauthor_affiliations_n_grams,
-            ),
+            # counter_jaccard(
+            #     paper_1.author_info_coauthor_affiliations_n_grams,
+            #     paper_2.author_info_coauthor_affiliations_n_grams,
+            # ),
             # counter_jaccard(
             #     paper_1.author_info_coauthor_email_prefix_n_grams,
             #     paper_2.author_info_coauthor_email_prefix_n_grams,
@@ -324,7 +324,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     # venue features
     features.extend(
         [
-            counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams),
+            # counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams),
             counter_jaccard(paper_1.venue_ngrams, paper_2.venue_ngrams),
         ]
     )

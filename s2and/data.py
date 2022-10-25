@@ -27,8 +27,8 @@ from s2and.text import (
     normalize_text,
     get_text_ngrams,
     get_text_ngrams_words,
+    normalize_venue_name,
     AFFILIATIONS_STOP_WORDS,
-    VENUE_STOP_WORDS,
     NAME_PREFIXES,
 )
 
@@ -85,7 +85,6 @@ class Paper(NamedTuple):
     corpus_paper_id: Optional[int]  # this is the id of the paper's current mapping in the corpus
     doi: Optional[str]
     source: Optional[str]
-    openaccesslocation: Optional[bool]
     block: Optional[str]
 
 
@@ -208,7 +207,6 @@ class PDData:
                 paper_id=paper_id,
                 doi=paper.get("doi", None),
                 source=paper.get("source", None),
-                openaccesslocation=paper.get("openaccesslocation", None),
                 block=paper.get("block", None),
                 corpus_paper_id=paper.get("corpus_paper_id", None),
             )
@@ -429,10 +427,7 @@ class PDData:
         dont_merge_cluster_seeds: bool = True,
         incremental_dont_use_cluster_seeds: bool = False,
     ) -> Optional[float]:
-        """Applies cluster_seeds and generates the default
-        constraints which are:
-
-        We apply the passed-in cluster_seeds
+        """Applies the passed-in cluster_seeds
 
         Parameters
         ----------
@@ -1018,50 +1013,47 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
 
     title = normalize_text(paper.title)
     abstract = normalize_text(paper.abstract)
-    title_ngrams_words = get_text_ngrams_words(title, stopwords=None)
-    abstract_ngrams_words = get_text_ngrams_words(abstract, stopwords=None)
-    authors = [preprocess_authors(author) for author in paper.authors]
     paper = paper._replace(
         title=title,
-        title_ngrams_words=title_ngrams_words,
-        abstract_ngrams_words=abstract_ngrams_words,
-        authors=authors,
+        # title_ngrams_words=title_ngrams_words = get_text_ngrams_words(title, stopwords=None),
+        title_ngrams_chars=get_text_ngrams(paper.title.replace(" ", ""), stopwords=None, use_bigrams=False),
+        abstract_ngrams_words=get_text_ngrams_words(abstract, stopwords=None),
     )
-    venue = normalize_text(paper.venue)
-    journal_name = normalize_text(paper.journal_name)
-    paper = paper._replace(venue=venue, journal_name=journal_name)
-    title_ngrams_chars = get_text_ngrams(paper.title.replace(" ", ""), stopwords=None, use_bigrams=False)
-    venue_ngrams = get_text_ngrams(paper.venue, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
-    journal_ngrams = get_text_ngrams(paper.journal_name, stopwords=VENUE_STOP_WORDS, use_bigrams=True)
+
+    venue = normalize_venue_name(paper.venue)
+    journal_name = normalize_venue_name(paper.journal_name)
+    combined_venue = (journal_name + " " + venue).strip()
+    venue_ngrams = get_text_ngrams(combined_venue, stopwords=None, use_bigrams=True)
+    paper = paper._replace(venue=venue, journal_name=journal_name, venue_ngrams=venue_ngrams)
+
+    authors = [preprocess_authors(author) for author in paper.authors]
     author_info_coauthor_n_grams = get_text_ngrams(
         " ".join([i.author_info_full_name for i in authors]),
         stopwords=None,
         use_unigrams=True,
         use_bigrams=True,
     )
-    author_info_coauthor_email_prefix_n_grams = get_text_ngrams(
-        " ".join([i.author_info_email_prefix for i in authors]),
-        stopwords=None,
-        use_unigrams=True,
-        use_bigrams=True,
-    )
-    author_info_coauthor_email_suffix_n_grams = get_text_ngrams(
-        " ".join([i.author_info_email_suffix for i in authors]),
-        stopwords=None,
-        use_bigrams=True,
-    )
-    affils = [i.author_info_affiliations_joined for i in authors]
-    author_info_coauthor_affiliations_n_grams = get_text_ngrams(
-        " ".join(affils), stopwords=AFFILIATIONS_STOP_WORDS, use_bigrams=True
-    )
+    # author_info_coauthor_email_prefix_n_grams = get_text_ngrams(
+    #     " ".join([i.author_info_email_prefix for i in authors]),
+    #     stopwords=None,
+    #     use_unigrams=True,
+    #     use_bigrams=True,
+    # )
+    # author_info_coauthor_email_suffix_n_grams = get_text_ngrams(
+    #     " ".join([i.author_info_email_suffix for i in authors]),
+    #     stopwords=None,
+    #     use_bigrams=True,
+    # )
+    # affils = [i.author_info_affiliations_joined for i in authors]
+    # author_info_coauthor_affiliations_n_grams = get_text_ngrams(
+    #     " ".join(affils), stopwords=AFFILIATIONS_STOP_WORDS, use_bigrams=True
+    # )
     paper = paper._replace(
-        title_ngrams_chars=title_ngrams_chars,
-        venue_ngrams=venue_ngrams,
-        journal_ngrams=journal_ngrams,
+        authors=authors,
         author_info_coauthor_n_grams=author_info_coauthor_n_grams,
-        author_info_coauthor_email_prefix_n_grams=author_info_coauthor_email_prefix_n_grams,
-        author_info_coauthor_email_suffix_n_grams=author_info_coauthor_email_suffix_n_grams,
-        author_info_coauthor_affiliations_n_grams=author_info_coauthor_affiliations_n_grams,
+        # author_info_coauthor_email_prefix_n_grams=author_info_coauthor_email_prefix_n_grams,
+        # author_info_coauthor_email_suffix_n_grams=author_info_coauthor_email_suffix_n_grams,
+        # author_info_coauthor_affiliations_n_grams=author_info_coauthor_affiliations_n_grams,
     )
 
     return (key, paper)

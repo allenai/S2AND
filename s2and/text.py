@@ -4,6 +4,8 @@ if TYPE_CHECKING:
     from s2and.data import NameCounts
 
 import re
+import string
+
 import warnings
 import numpy as np
 import pandas as pd
@@ -17,6 +19,20 @@ from strsimpy.metric_lcs import MetricLCS
 
 from s2and.consts import NUMPY_NAN
 
+
+RE_DASHES = re.compile(
+    r"[\u002D\u058A\u05BE\u1400\u1806\u2010-\u2015\u2E17\u2E1A\u2E3A\u2E3B\u2E40\u301C\u3030\u30A0\uFE31\uFE32\uFE58\uFE63\uFF0D]"
+)
+RE_APOSTRAPHE_S = re.compile(r"(\w+)'s")
+REMOVE_PUNC = str.maketrans(string.punctuation.replace("&", ""), " " * (len(string.punctuation) - 1))
+RE_SPACES = re.compile(r"\s+")
+
+WORD_REPLACEMENTS = {
+    "the": "",
+    "a": "",
+    "of": "",
+    "&": "and",
+}
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z0-9\s]+")
 
@@ -298,9 +314,28 @@ def normalize_text(text: Optional[str], special_case_apostrophes: bool = False) 
         norm_text = norm_text.replace("'", "")
 
     norm_text = RE_NORMALIZE_WHOLE_NAME.sub(" ", norm_text)
-    norm_text = re.sub(r"\s+", " ", norm_text).strip()
+    norm_text = RE_SPACES.sub(" ", norm_text).strip()
 
     return norm_text
+
+
+def normalize_venue_name(s: str) -> str:
+    if pd.isnull(s) or len(s) == 0:
+        return ""
+
+    s = unidecode(s)  # Remove diacritics
+    s = s.lower()
+    s = RE_DASHES.sub("-", s)  # Normalize dashes
+    s = RE_APOSTRAPHE_S.sub(r"\1s", s)
+    s = s.translate(REMOVE_PUNC)  # Remove punctuation
+    s = RE_SPACES.sub(" ", s).strip()  # Collapse whitespace
+    words = s.split(" ")
+    s = " ".join(
+        WORD_REPLACEMENTS.get(word, word) for word in words
+    )  # Replace terms with equivalents, remove stop-words
+    s = RE_SPACES.sub(" ", s).strip()  # Collapse whitespace again
+
+    return s
 
 
 def name_text_features(

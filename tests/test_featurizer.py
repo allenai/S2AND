@@ -63,17 +63,15 @@ class TestData(unittest.TestCase):
         # TODO: fix the multithreading global issue...
         features, _, _ = many_pairs_featurize(test_pairs, self.dataset, self.featurizer, 2, False, 1, nan_value=-1)
 
-        expected_features_1 = [-1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 3.0, 4.0, 1.0]
-        expected_features_2 = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 3.0, 4.0, 1.0]
+        expected_features_1 = [-1.0, -1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.0, 3.0, 4.0, 1.0]
+        expected_features_2 = [-1.0, -1.0, 1.0, 1.0, 0.6363636363636364, 0.0, 1.0, 0.0, -1.0, 0.0, 3.0, 4.0, 1.0]
         expected_features_3 = [
             0.06319702602230483,
-            -1.0,
             0.0,
             -1.0,
-            -1.0,
             0.0,
-            1.0,
-            0,
+            0.6363636363636364,
+            0.0,
             1.0,
             0.0,
             -1.0,

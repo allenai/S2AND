@@ -19,10 +19,31 @@ from strsimpy.metric_lcs import MetricLCS
 
 from s2and.consts import NUMPY_NAN
 
+dashes = [
+    "\\u002D",
+    "\\u058A",
+    "\\u05BE",
+    "\\u1400",
+    "\\u1806",
+    "\\u2010",
+    "-",
+    "\\u2015",
+    "\\u2E17",
+    "\\u2E1A",
+    "\\u2E3A",
+    "\\u2E3B",
+    "\\u2E40",
+    "\\u301C",
+    "\\u3030",
+    "\\u30A0",
+    "\\uFE31",
+    "\\uFE32",
+    "\\uFE58",
+    "\\uFE63",
+    "\\uFF0D",
+]
 
-RE_DASHES = re.compile(
-    r"[\u002D\u058A\u05BE\u1400\u1806\u2010-\u2015\u2E17\u2E1A\u2E3A\u2E3B\u2E40\u301C\u3030\u30A0\uFE31\uFE32\uFE58\uFE63\uFF0D]"
-)
+RE_DASHES = re.compile(rf"[{''.join(dashes)}]")
 
 RE_APOSTRAPHE_S = re.compile(r"(\w+)'s")
 REMOVE_PUNC = str.maketrans(string.punctuation.replace("&", ""), " " * (len(string.punctuation) - 1))

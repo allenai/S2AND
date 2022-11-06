@@ -155,7 +155,9 @@ def main(
         FEATURES_TO_USE.remove(feature_group)
 
     NAMELESS_FEATURES_TO_USE = [
-        feature_name for feature_name in FEATURES_TO_USE if feature_name not in {"author_similarity"}
+        feature_name
+        for feature_name in FEATURES_TO_USE
+        if feature_name not in {"title_similarity", "abstract_similarity"}
     ]
 
     FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)

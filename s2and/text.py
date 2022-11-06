@@ -5,7 +5,7 @@ if TYPE_CHECKING:
 
 import re
 import string
-
+from itertools import zip_longest
 import warnings
 import numpy as np
 import pandas as pd
@@ -288,6 +288,105 @@ NAME_PREFIXES = {
     "md",
     "doctor",
 }
+
+NUMERALS = {
+    "i",
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "vi",
+    "vii",
+    "viii",
+    "ix",
+    "x",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "PAD",  # for padding
+}
+
+NUMERAL_PRECEDING_WORDS = {
+    "vol",
+    "volume",
+    "part",
+    "issue",
+    "number",
+    "no",
+    "chapter",
+    "chap",
+    "iss",
+    "version",
+    "edition",
+    "ed",
+}
+
+
+def numeral_similarity(s1, s2):
+    """
+    This feature finds a;l instances of a location in both strings
+    where the content is a numeral (1 to 10 and i through x).
+    If it exists, the feature is whether the two
+    numerals match. If it does not exist, the feature is NaN.
+
+    This feature is tough because numerals appear for many different reasons.
+    """
+    s1_split = s1.split()
+    s1_len = len(s1_split)
+    s2_split = s2.split()
+    s2_len = len(s2_split)
+    both_numerals = [
+        (i, a, b)
+        for i, (a, b) in enumerate(zip_longest(s1_split, s2_split, fillvalue="PAD"))
+        if a in NUMERALS and b in NUMERALS and i > 0
+    ]
+    # check two conditions:
+    # 1. both numerals is preceeded by NUMERAL_PRECEDING_WORDS
+    # or 2. a numeral is the last word in the string for one of the two strings
+    both_numerals_filtered = [
+        a == b
+        for i, a, b in both_numerals
+        if (
+            a != "PAD"
+            and b != "PAD"
+            and s1_split[i - 1] in NUMERAL_PRECEDING_WORDS
+            and s2_split[i - 1] in NUMERAL_PRECEDING_WORDS
+        )
+        or (i == s1_len - 1 or i == s2_len - 1)
+    ]
+    if len(both_numerals_filtered) == 0:
+        return NUMPY_NAN  # no location with a numeral in both strings at the same position
+    else:
+        return all(both_numerals_filtered)  #  whether all locations where both strings have numerals is a match
+
+
+SPECIAL_PUBLICATION_WORDS = {
+    "comment",
+    "response",
+    "letter",
+    "editorial",
+    "republished",
+    "reply",
+    "re",
+}
+
+
+def special_publication_word_similarity(s1, s2):
+    s1_set = set(s1.split())
+    s2_set = set(s2.split())
+    s1_special_overlap = s1_set.intersection(SPECIAL_PUBLICATION_WORDS)
+    s2_special_overlap = s2_set.intersection(SPECIAL_PUBLICATION_WORDS)
+    if len(s1_special_overlap) == 0 and len(s2_special_overlap) == 0:
+        return NUMPY_NAN
+    else:
+        return s1_special_overlap == s2_special_overlap
 
 
 def prefix_dist(string_1: str, string_2: str) -> float:

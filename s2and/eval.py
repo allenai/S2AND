@@ -182,7 +182,6 @@ def incremental_cluster_eval(
 def facet_eval(
     dataset: "PDData",
     metrics_per_paper: Dict[str, Tuple[float, float, float]],
-    block_type: str = "original",
 ) -> Tuple[Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], Dict[int, List], List[dict]]:
     """
     Extracts B3 per facets.
@@ -196,8 +195,6 @@ def facet_eval(
     metrics_per_paper: Dict
         B3 P/R/F1 per paper.
         Second output of cluster_eval function.
-    block_type: string
-        Whether to use Semantic Scholar ("s2") or "original" blocks
 
     Returns
     -------
@@ -208,12 +205,7 @@ def facet_eval(
     Dict: B3 F1 broken down by whether there is an abstract
     """
     block_len_dict = {}
-    if block_type == "original":
-        blocks = dataset.get_blocks()
-    elif block_type == "s2":
-        blocks = dataset.get_s2_blocks()
-    else:
-        raise Exception("block_type must one of: {'original', 's2'}!")
+    blocks = dataset.get_blocks()
 
     for block_key, paper_ids in blocks.items():
         block_len_dict[block_key] = len(paper_ids)
@@ -254,13 +246,9 @@ def facet_eval(
                 abstract_f1[0].append(f1)
                 _paper_dict["abstract"] = 0
 
-            if block_type == "original":
-                block_len_f1[block_len_dict[paper.block]].append(f1)
-                _paper_dict["block size"] = block_len_dict[paper.author_info_given_block]
-            elif block_type == "s2":
-                block_len_f1[block_len_dict[paper.corpus_paper_id]].append(f1)
-                _paper_dict["block size"] = block_len_dict[paper.corpus_paper_id]
+            block_len_f1[block_len_dict[paper.block]].append(f1)
 
+            _paper_dict["block size"] = block_len_dict[paper.block]
             _paper_dict["paper_id"] = paper_id  # type: ignore
             _paper_dict["precision"] = p  # type: ignore
             _paper_dict["recall"] = r  # type: ignore
@@ -501,8 +489,12 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     true_clusters = true_clus.copy()
     pred_clusters = pred_clus.copy()
 
-    tcset = set(reduce(lambda x, y: x + y, true_clusters.values()))
-    pcset = set(reduce(lambda x, y: x + y, pred_clusters.values()))
+    tcset = set()
+    for v in true_clusters.values():
+        tcset.update(v)
+    pcset = set()
+    for v in pred_clusters.values():
+        pcset.update(v)
 
     if tcset != pcset:
         raise ValueError("Predictions do not cover all the papers!")
@@ -513,13 +505,11 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
         tcset = tcset.difference(skip_papers)
 
     # anything from orphan clusters will also be skipped
-    # but note that other positives will be penalized for joining to any orphans
     # find orphan clusters, which are clusters that endwith ORPHAN_CLUSTER_KEY
     orphan_clusters_names = [k for k in true_clusters.keys() if k.endswith(ORPHAN_CLUSTER_KEY)]
     orphan_paper_ids = set()
     for to_skip in orphan_clusters_names:
         orphan_paper_ids.update(true_clusters[to_skip])
-        tcset = tcset.difference(true_clusters[to_skip])
 
     # need to remove orphans from true_clusters and pred_clusters
     for cluster_id, cluster in true_clusters.items():
@@ -543,8 +533,11 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     per_paper_metrics = {}
     precision = 0.0
     recall = 0.0
+    n_samples = 0
     true_bigger_ratios, pred_bigger_ratios = [], []
-    for item in list(tcset):
+    for item in sorted(tcset):
+        if item in orphan_paper_ids:
+            continue  # skipping orphans
         pred_cluster_i = pred_clusters[reverse_pred_clusters[item]]
         true_cluster_i = true_clusters[reverse_true_clusters[item]]
 
@@ -567,8 +560,8 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
             _recall,
             f1_score(_precision, _recall),
         )
+        n_samples += 1
 
-    n_samples = len(tcset)
     precision /= n_samples
     recall /= n_samples
 

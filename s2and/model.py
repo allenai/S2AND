@@ -495,6 +495,8 @@ class Clusterer:
             for _, papers_list in block_dict.items():
                 for _paper in papers_list:
                     s2_cluster_key = dataset.papers[_paper].corpus_paper_id
+                    if s2_cluster_key is None:
+                        s2_cluster_key = _paper  # this means S2 didn't cluster it with anything, so it's by itself
                     pred_clusters[s2_cluster_key].append(_paper)
 
             return dict(pred_clusters), dists

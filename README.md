@@ -53,7 +53,6 @@ dataset = ANDData(
     papers=join(parent_dir, f"{dataset_name}_papers.json"),
     mode="train",
     clusters=join(parent_dir, f"{dataset_name}_clusters.json"),
-    block_type="s2",
     train_pairs_size=100000,
     val_pairs_size=10000,
     test_pairs_size=10000,
@@ -145,7 +144,6 @@ anddata = ANDData(
     specter_embeddings=paper_embeddings,
     name="your_name_here",
     mode="inference",
-    block_type="s2",
 )
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
 ```

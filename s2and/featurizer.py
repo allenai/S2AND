@@ -15,9 +15,16 @@ from s2and.consts import (
     FEATURIZER_VERSION,
     LARGE_INTEGER,
     DEFAULT_CHUNK_SIZE,
-    NUMPY_NAN,
 )
-from s2and.text import diff, counter_jaccard, prefix_dist
+from s2and.text import (
+    diff,
+    counter_jaccard,
+    prefix_dist,
+    numeral_similarity,
+    special_publication_word_similarity,
+    TEXT_FUNCTIONS,
+    name_text_features,
+)
 
 logger = logging.getLogger("s2and")
 
@@ -57,7 +64,7 @@ class FeaturizationInfo:
             "author_similarity": ["1", "1"],
             "venue_similarity": ["1"],
             "year_diff": ["-1"],
-            "title_similarity": ["1", "1", "0"],
+            "title_similarity": ["1", "1", "1"] + ["1"] * len(TEXT_FUNCTIONS),
             "abstract_similarity": ["1", "1"],
             "paper_quality": ["0", "0", "0", "0"],
         }
@@ -83,7 +90,7 @@ class FeaturizationInfo:
                 ",".join(constraints)
                 for feature_category, constraints in lightgbm_monotone_constraints.items()
                 if feature_category in features_to_use
-                and feature_category not in {"advanced_name_similarity", "name_similarity", "name_counts"}
+                and feature_category not in {"title_similarity", "abstract_similarity"}
             ]
         )
 
@@ -123,12 +130,12 @@ class FeaturizationInfo:
         if "title_similarity" in self.features_to_use:
             feature_names.extend(
                 [
-                    # "title_word_similarity",
                     "title_character_similarity",
-                    "title_prefix",
-                    "last_words_are_same",  # trying to catch when we have stuff like "part i vs part ii"
+                    "numeral_similarity",  # trying to catch when we have stuff like "part i vs part ii"
+                    "special_publication_word_similarity",  # containing commentary, response, letter, editorial, etc
                 ]
             )
+            feature_names.extend(['title_' + func[1] for func in TEXT_FUNCTIONS])
 
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
@@ -343,15 +350,16 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     # title features
     features.extend(
         [
-            # counter_jaccard(paper_1.title_ngrams_words, paper_2.title_ngrams_words),  # not sure we need this...
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
-            # check if the title of paper_1 is a prefix of the title of paper_2
-            prefix_dist(paper_1.title.replace(" ", ""), paper_2.title.replace(" ", "")),
-            # check if the last words are the same or not
-            NUMPY_NAN
-            if len(paper_1.title) == 0 or len(paper_2.title) == 0
-            else paper_1.title.split()[-1] == paper_2.title.split()[-1],
+            numeral_similarity(paper_1.title, paper_2.title),
+            special_publication_word_similarity(paper_1.title, paper_2.title),
         ]
+    )
+    features.extend(
+        name_text_features(
+            paper_1.title.replace(" ", ""),
+            paper_2.title.replace(" ", ""),
+        )
     )
 
     # abstract features
@@ -444,7 +452,7 @@ def many_pairs_featurize(
     chunk_size: int
         the chunk size for multiprocessing
     nameless_featurizer_info: FeaturizationInfo
-        the FeaturizationInfo for creating the features that do not use any name features,
+        the FeaturizationInfo for creating the features that do not use any title features,
         these will not be computed if this is None
     nan_value: float
         the value to replace nans with

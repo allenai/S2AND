@@ -19,7 +19,6 @@ from s2and.consts import (
 from s2and.text import (
     diff,
     counter_jaccard,
-    prefix_dist,
     numeral_similarity,
     special_publication_word_similarity,
     TEXT_FUNCTIONS,
@@ -135,7 +134,7 @@ class FeaturizationInfo:
                     "special_publication_word_similarity",  # containing commentary, response, letter, editorial, etc
                 ]
             )
-            feature_names.extend(['title_' + func[1] for func in TEXT_FUNCTIONS])
+            feature_names.extend(["title_" + func[1] for func in TEXT_FUNCTIONS])
 
         if "abstract_similarity" in self.features_to_use:
             feature_names.extend(["has_abstract_count", "abstract_word_similarity"])

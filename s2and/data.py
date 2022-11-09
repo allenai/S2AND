@@ -21,7 +21,7 @@ from s2and.consts import (
     LARGE_DISTANCE,
     CLUSTER_SEEDS_LOOKUP,
     ORPHAN_CLUSTER_KEY,
-    DEFAULT_CHUNK_SIZE
+    DEFAULT_CHUNK_SIZE,
 )
 from s2and.file_cache import cached_path
 from s2and.text import (

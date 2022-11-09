@@ -10,7 +10,6 @@ from s2and.consts import ORPHAN_CLUSTER_KEY
 
 import os
 from os.path import join
-from functools import reduce
 from collections import defaultdict
 
 import numpy as np

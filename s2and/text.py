@@ -364,7 +364,7 @@ def numeral_similarity(s1, s2):
     if len(both_numerals_filtered) == 0:
         return NUMPY_NAN  # no location with a numeral in both strings at the same position
     else:
-        return all(both_numerals_filtered)  #  whether all locations where both strings have numerals is a match
+        return all(both_numerals_filtered)  # whether all locations where both strings have numerals is a match
 
 
 SPECIAL_PUBLICATION_WORDS = {

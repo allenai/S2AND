@@ -731,7 +731,7 @@ class PairwiseModeler:
         if estimator is None:
             self.estimator = lgb.LGBMClassifier(
                 objective="binary",
-                metric="auc",  # lightgbm doesn't do F1 directly
+                metric="average_precision",  # lightgbm doesn't do F1 directly
                 n_jobs=n_jobs,
                 verbose=-1,
                 tree_learner="data",
@@ -951,7 +951,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
             Agglomerative linkage method. Defaults to "average".
             Must be one of "'complete', 'average', 'single,
             'weighted', 'ward', 'centroid', 'median'."
-        eps: float (default = 0.7)
+        eps: float (default = 0.6)
             Cutoff used to determine number of clusters.
         preserve_input: bool (default=True)
             Whether to preserve the X input or modify in place.
@@ -972,7 +972,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
     def __init__(
         self,
         linkage: str = "average",
-        eps: float = 0.7,
+        eps: float = 0.6,
         preserve_input: bool = True,
         input_as_observation_matrix: bool = False,
     ):

@@ -21,6 +21,7 @@ from s2and.consts import (
     LARGE_DISTANCE,
     CLUSTER_SEEDS_LOOKUP,
     ORPHAN_CLUSTER_KEY,
+    DEFAULT_CHUNK_SIZE
 )
 from s2and.file_cache import cached_path
 from s2and.text import (
@@ -1063,7 +1064,7 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
         with multiprocessing.Pool(processes=n_jobs) as p:
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers") as pbar:
-                for key, value in p.imap(preprocess_paper_1, papers_dict.items(), 1000):
+                for key, value in p.imap(preprocess_paper_1, papers_dict.items(), DEFAULT_CHUNK_SIZE):
                     output[key] = value
                     pbar.update()
     else:

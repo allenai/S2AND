@@ -71,7 +71,7 @@ def cluster_eval(
     cluster_to_papers = dataset.construct_cluster_to_papers(block_dict)
 
     # predict
-    pred_clusters, _ = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters)
+    pred_clusters, dists = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters, dists=None)
 
     # get metrics
     (

@@ -300,6 +300,16 @@ NUMERALS = {
     "viii",
     "ix",
     "x",
+    "xi",
+    "xii",
+    "xiii",
+    "xiv",
+    "xv",
+    "xvi",
+    "xvii",
+    "xviii",
+    "xix",
+    "xx",
     "1",
     "2",
     "3",
@@ -310,6 +320,16 @@ NUMERALS = {
     "8",
     "9",
     "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
     "PAD",  # for padding
 }
 
@@ -328,11 +348,46 @@ NUMERAL_PRECEDING_WORDS = {
     "ed",
 }
 
+SPECIAL_PUBLICATION_WORDS = {
+    "comment",
+    "response",
+    "letter",
+    "editorial",
+    "republished",
+    "reply",
+    "re",
+    "erratum",
+    "withdrawn",
+    "note",
+    "correction",
+    "review",
+    "reviews",
+    "notes",
+}
+
+# regex to check if a string is a year
+# that starts with 19 or 2 and has 4 digits
+YEAR = re.compile(r"19\d\d|20\d\d|20\d\d")
+
+
+def year_similarity(s1, s2):
+    """
+    This feature finds all years in both strings
+    and checks if they are the same.
+    If neither string has years, then it's nan.
+    """
+    s1_years = YEAR.findall(s1)
+    s2_years = YEAR.findall(s2)
+    if not s1_years and not s2_years:
+        return np.nan
+    else:
+        return int(s1_years == s2_years)
+
 
 def numeral_similarity(s1, s2):
     """
-    This feature finds a;l instances of a location in both strings
-    where the content is a numeral (1 to 10 and i through x).
+    This feature finds all instances of a location in both strings
+    where the content is a numeral (1 to 10 and i through x, or years)
     If it exists, the feature is whether the two
     numerals match. If it does not exist, the feature is NaN.
 
@@ -365,17 +420,6 @@ def numeral_similarity(s1, s2):
         return NUMPY_NAN  # no location with a numeral in both strings at the same position
     else:
         return all(both_numerals_filtered)  # whether all locations where both strings have numerals is a match
-
-
-SPECIAL_PUBLICATION_WORDS = {
-    "comment",
-    "response",
-    "letter",
-    "editorial",
-    "republished",
-    "reply",
-    "re",
-}
 
 
 def special_publication_word_similarity(s1, s2):

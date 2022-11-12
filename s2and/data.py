@@ -1000,7 +1000,7 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     paper = paper._replace(
         title=title,
         # title_ngrams_words=title_ngrams_words = get_text_ngrams_words(title, stopwords=None),
-        title_ngrams_chars=get_text_ngrams(paper.title.replace(" ", ""), stopwords=None, use_bigrams=False),
+        title_ngrams_chars=get_text_ngrams(paper.title.lower().replace(" ", ""), stopwords=None, use_bigrams=False),
         abstract_ngrams_words=get_text_ngrams_words(abstract, stopwords=None),
     )
 

@@ -23,6 +23,7 @@ from s2and.text import (
     special_publication_word_similarity,
     TEXT_FUNCTIONS,
     name_text_features,
+    year_similarity,
 )
 
 logger = logging.getLogger("s2and")
@@ -30,6 +31,45 @@ logger = logging.getLogger("s2and")
 TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 
 CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
+
+SEPARATE_SOURCES = {
+    "Unpaywall",
+    "MergedPDFExtraction",
+    "Crossref",
+}
+
+PUBLISHER_SOURCES = {
+    "ACL",
+    "ACM",
+    "ACP",
+    "ASMUSA",
+    "BioOne",
+    "BMJ",
+    "Cambridge",
+    "DeGruyter",
+    "Elsevier",
+    "ElsevierCorona",
+    "Frontier",
+    "Highwire",
+    "IEEE",
+    "IOP",
+    "JhuPress",
+    "Karger",
+    "MIT",
+    "Nature",
+    "RoyalSociety",
+    "Sage",
+    "Science",
+    "ScientificNet",
+    "SPIE",
+    "Springer",
+    "SpringerNature",
+    "TaylorAndFrancis",
+    "Thieme",
+    "Uchicago",
+    "Wiley",
+    "WoltersKluwer",
+}
 
 
 class FeaturizationInfo:
@@ -63,9 +103,9 @@ class FeaturizationInfo:
             "author_similarity": ["1", "1"],
             "venue_similarity": ["1"],
             "year_diff": ["-1"],
-            "title_similarity": ["1", "1", "1"] + ["1"] * len(TEXT_FUNCTIONS),
-            "abstract_similarity": ["1", "1"],
-            "paper_quality": ["0", "0", "0", "0"],
+            "title_similarity": ["1"] * (len(TEXT_FUNCTIONS) + 4),
+            "abstract_similarity": ["1"],
+            "paper_quality": ["0"] * (len(SEPARATE_SOURCES) + 6),
         }
 
         self.feature_group_to_index = {}
@@ -130,25 +170,26 @@ class FeaturizationInfo:
             feature_names.extend(
                 [
                     "title_character_similarity",
-                    "numeral_similarity",  # trying to catch when we have stuff like "part i vs part ii"
-                    "special_publication_word_similarity",  # containing commentary, response, letter, editorial, etc
+                    "title_numeral_similarity",  # trying to catch when we have stuff like "part i vs part ii"
+                    "title_special_publication_word_similarity",  # containing commentary, response, letter, editorial, etc
+                    "title_year_similarity",  # whether years mentioned are the same
                 ]
             )
             feature_names.extend(["title_" + func[1] for func in TEXT_FUNCTIONS])
 
         if "abstract_similarity" in self.features_to_use:
-            feature_names.extend(["has_abstract_count", "abstract_word_similarity"])
+            feature_names.append("abstract_word_similarity")
 
         if "paper_quality" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "either_paper_from_pdf",
-                    "min_of_paper_field_count",
-                    "max_of_paper_field_count",
-                    "sources_are_same",
-                    # "doi_prefix_dist",
-                ]
-            )
+            # feature_names.extend(
+            #     [
+            #         "min_of_paper_field_count",
+            #         "max_of_paper_field_count",
+            #     ]
+            # )
+            feature_names.extend([f"paper_field_count_{i}" for i in ["abstract", "authors", "venue", "year"]])
+            feature_names.extend(["source_count_" + i for i in SEPARATE_SOURCES])
+            feature_names.extend(["source_count_publisher", "sources_are_same"])
 
         return feature_names
 
@@ -352,6 +393,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
             numeral_similarity(paper_1.title, paper_2.title),
             special_publication_word_similarity(paper_1.title, paper_2.title),
+            year_similarity(paper_1.title, paper_2.title),
         ]
     )
     features.extend(
@@ -362,42 +404,49 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     )
 
     # abstract features
-    features.extend(
-        [
-            int(paper_1.has_abstract) + int(paper_2.has_abstract),
-            counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),
-        ]
+    features.append(
+        counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),
     )
 
     # paper quality features
-    paper_1_num_present_fields = (
-        int(len(paper_1.title) > 0)
-        + int(paper_1.abstract is not None and len(paper_1.abstract) > 0)
-        + int(len(paper_1.authors) > 0)
-        + int(paper_1.venue is not None or paper_1.journal_name is not None)
-        + int(paper_1.year is not None)
-    )
+    # paper_1_num_present_fields = (
+    #     int(paper_1.abstract is not None and len(paper_1.abstract) > 0)
+    #     + int(len(paper_1.authors) > 0)
+    #     # + int(paper_1.venue is not None or paper_1.journal_name is not None)
+    #     + int(paper_1.year is not None)
+    # )
 
-    paper_2_num_present_fields = (
-        int(len(paper_2.title) > 0)
-        + int(paper_2.abstract is not None and len(paper_2.abstract) > 0)
-        + int(len(paper_2.authors) > 0)
-        + int(paper_2.venue is not None or paper_2.journal_name is not None)
-        + int(paper_2.year is not None)
-    )
+    # paper_2_num_present_fields = (
+    #     int(paper_2.abstract is not None and len(paper_2.abstract) > 0)
+    #     + int(len(paper_2.authors) > 0)
+    #     # + int(paper_2.venue is not None or paper_2.journal_name is not None)
+    #     + int(paper_2.year is not None)
+    # )
+    # features.extend(
+    #     [
+    #         min(paper_1_num_present_fields, paper_2_num_present_fields),
+    #         max(paper_1_num_present_fields, paper_2_num_present_fields),
+    #     ]
+    # )
 
     features.extend(
         [
-            int(paper_1.source == "MergedPDFExtraction") + int(paper_2.source == "MergedPDFExtraction"),
-            min(paper_1_num_present_fields, paper_2_num_present_fields),
-            max(paper_1_num_present_fields, paper_2_num_present_fields),
-            paper_1.source == paper_2.source,
-            # prefix_dist(paper_1.doi, paper_2.doi),  # maybe overfitting to the silver training data labels?
+            int(paper_1.abstract is not None and len(paper_1.abstract) > 0)
+            + int(paper_2.abstract is not None and len(paper_2.abstract) > 0),
+            int(len(paper_1.authors) > 0) + int(len(paper_2.authors) > 0),
+            int(len(paper_1.venue) > 0) + int(len(paper_2.venue) > 0),
+            int(paper_1.year is not None) + int(paper_2.year is not None),
         ]
     )
 
+    source_counts = [int(paper_1.source == i) + int(paper_2.source == i) for i in SEPARATE_SOURCES]
+    features.extend(
+        source_counts + [int(paper_1.source in PUBLISHER_SOURCES) + int(paper_2.source in PUBLISHER_SOURCES)]
+    )
+    features.append(int(paper_1.source == paper_2.source) if sum(source_counts) == 0 else np.nan)
+
     # unifying feature type in features array
-    features = [float(val) if type(val) in [np.float32, np.float64, float] else int(val) for val in features]
+    features = [np.float32(val) if type(val) in [np.float32, np.float64, float] else int(val) for val in features]
 
     return features, index
 

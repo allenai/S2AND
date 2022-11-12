@@ -27,8 +27,8 @@ class TestClusterer(unittest.TestCase):
 
         featurizer_info = FeaturizationInfo(features_to_use=features_to_use)
         np.random.seed(1)
-        X_random = np.random.random((10, 8))
-        y_random = np.random.randint(0, 8, 10)
+        X_random = np.random.random((10, 9))
+        y_random = np.random.randint(0, 9, 10)
         self.clusterer = Clusterer(
             featurizer_info=featurizer_info,
             classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(

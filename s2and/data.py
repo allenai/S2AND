@@ -1026,10 +1026,8 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
         title_ngrams_chars=get_text_ngrams(paper.title.lower().replace(" ", ""), stopwords=None, use_bigrams=False),
         abstract_ngrams_words=get_text_ngrams_words(abstract, stopwords=None),
     )
-    if paper.venue is not None:
-        venue = normalize_venue_name(paper.venue)
-    if paper.journal_name is not None:
-        journal_name = normalize_venue_name(paper.journal_name)
+    venue = normalize_venue_name(paper.venue)
+    journal_name = normalize_venue_name(paper.journal_name)
     if venue != journal_name:
         combined_venue = (journal_name + " " + venue).strip()
     else:

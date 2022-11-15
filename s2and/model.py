@@ -104,7 +104,7 @@ class Clusterer:
             self.cluster_model = copy.deepcopy(cluster_model)
 
         if search_space is None:
-            self.search_space = {"eps": hp.uniform("eps", 0, 1)}
+            self.search_space = {"eps": hp.uniform("eps", 0.2, 0.8)}
         else:
             self.search_space = search_space
 
@@ -951,7 +951,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
             Agglomerative linkage method. Defaults to "average".
             Must be one of "'complete', 'average', 'single,
             'weighted', 'ward', 'centroid', 'median'."
-        eps: float (default = 0.6)
+        eps: float (default = 0.65)
             Cutoff used to determine number of clusters.
         preserve_input: bool (default=True)
             Whether to preserve the X input or modify in place.
@@ -972,7 +972,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
     def __init__(
         self,
         linkage: str = "average",
-        eps: float = 0.6,
+        eps: float = 0.65,
         preserve_input: bool = True,
         input_as_observation_matrix: bool = False,
     ):

@@ -4,8 +4,8 @@ import random
 import json
 import numpy as np
 import pandas as pd
-import logging
 import pickle
+import logging
 import multiprocessing
 from tqdm import tqdm
 
@@ -30,6 +30,8 @@ from s2and.text import (
     get_text_ngrams_words,
     normalize_venue_name,
     NAME_PREFIXES,
+    A_THROUGH_Z,
+    PUBLISHER_SOURCES,
 )
 
 logger = logging.getLogger("s2and")
@@ -84,6 +86,9 @@ class Paper(NamedTuple):
     paper_id: int
     corpus_paper_id: Optional[int]  # this is the id of the paper's current mapping in the corpus
     doi: Optional[str]
+    pmid: Optional[str]
+    source_id: Optional[str]
+    pdf_hash: Optional[str]
     source: Optional[str]
     block: Optional[str]
 
@@ -206,7 +211,10 @@ class PDData:
                 year=paper.get("year", None),
                 paper_id=paper_id,
                 doi=paper.get("doi", None),
+                pmid=paper.get("pmid", None),
                 source=paper.get("source", None),
+                source_id=paper.get("source_id", None),
+                pdf_hash=paper.get("pdf_hash", None),
                 block=paper.get("block", None),
                 corpus_paper_id=paper.get("corpus_paper_id", None),
             )
@@ -450,11 +458,8 @@ class PDData:
         float: the constraint value
         """
 
-        # TODO: do we need rules of any kind here?
-        # maybe check author name compatability instead of using it as a constraint?
-        # or years?
-        # paper_1 = self.papers[str(self.papers[paper_id_1].paper_id)]
-        # paper_2 = self.papers[str(self.papers[paper_id_2].paper_id)]
+        paper_1 = self.papers[str(paper_id_1)]
+        paper_2 = self.papers[str(paper_id_2)]
 
         # cluster seeds have precedence
         if (paper_id_1, paper_id_2) in self.cluster_seeds_disallow or (
@@ -471,6 +476,24 @@ class PDData:
             and (paper_id_1 in self.cluster_seeds_require and paper_id_2 in self.cluster_seeds_require)
             and (self.cluster_seeds_require[paper_id_1] != self.cluster_seeds_require[paper_id_2])
         ):
+            return CLUSTER_SEEDS_LOOKUP["disallow"]
+        elif paper_1.doi is not None and paper_2.doi is not None and paper_1.doi == paper_2.doi:
+            # if dois is the same - same paper
+            return CLUSTER_SEEDS_LOOKUP["require"]
+        elif paper_1.pmid is not None and paper_2.pmid is not None and paper_1.pmid == paper_2.pmid:
+            # if pmid is the same - same paper
+            return CLUSTER_SEEDS_LOOKUP["require"]
+        elif paper_1.pdf_hash is not None and paper_2.pdf_hash is not None and paper_1.pdf_hash == paper_2.pdf_hash:
+            # same pdf hash - same paper
+            return CLUSTER_SEEDS_LOOKUP["require"]
+        elif (
+            paper_1.source_id is not None
+            and paper_2.source_id is not None
+            and paper_1.source == paper_2.source
+            and paper_1.source in PUBLISHER_SOURCES
+            and paper_1.source_id != paper_2.source_id
+        ):
+            # same source but different ids: can't be the same paper
             return CLUSTER_SEEDS_LOOKUP["disallow"]
         else:
             return None
@@ -1003,10 +1026,17 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
         title_ngrams_chars=get_text_ngrams(paper.title.lower().replace(" ", ""), stopwords=None, use_bigrams=False),
         abstract_ngrams_words=get_text_ngrams_words(abstract, stopwords=None),
     )
-
-    venue = normalize_venue_name(paper.venue)
-    journal_name = normalize_venue_name(paper.journal_name)
-    combined_venue = (journal_name + " " + venue).strip()
+    if paper.venue is not None:
+        venue = normalize_venue_name(paper.venue)
+    if paper.journal_name is not None:
+        journal_name = normalize_venue_name(paper.journal_name)
+    if venue != journal_name:
+        combined_venue = (journal_name + " " + venue).strip()
+    else:
+        combined_venue = venue
+    # sometimes venues have no letters a-z, in which case it's just page numbers
+    if A_THROUGH_Z.search(combined_venue) is None:
+        combined_venue = ""
     venue_ngrams = get_text_ngrams(combined_venue, stopwords=None, use_bigrams=True)
     paper = paper._replace(venue=venue, journal_name=journal_name, venue_ngrams=venue_ngrams)
 
@@ -1077,7 +1107,7 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
 
 if __name__ == "__main__":
     pddata = PDData(
-        papers="data/test/test_papers.json",
-        clusters="data/test/test_clusters.json",
+        papers="tests/test_dataset/papers.json",
+        clusters="tests/test_dataset/clusters.json",
         name="test",
     )

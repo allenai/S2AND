@@ -24,6 +24,7 @@ from s2and.text import (
     TEXT_FUNCTIONS,
     name_text_features,
     year_similarity,
+    PUBLISHER_SOURCES,
 )
 
 logger = logging.getLogger("s2and")
@@ -33,42 +34,9 @@ TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
 
 SEPARATE_SOURCES = {
-    "Unpaywall",
+    # "Unpaywall",
     "MergedPDFExtraction",
-    "Crossref",
-}
-
-PUBLISHER_SOURCES = {
-    "ACL",
-    "ACM",
-    "ACP",
-    "ASMUSA",
-    "BioOne",
-    "BMJ",
-    "Cambridge",
-    "DeGruyter",
-    "Elsevier",
-    "ElsevierCorona",
-    "Frontier",
-    "Highwire",
-    "IEEE",
-    "IOP",
-    "JhuPress",
-    "Karger",
-    "MIT",
-    "Nature",
-    "RoyalSociety",
-    "Sage",
-    "Science",
-    "ScientificNet",
-    "SPIE",
-    "Springer",
-    "SpringerNature",
-    "TaylorAndFrancis",
-    "Thieme",
-    "Uchicago",
-    "Wiley",
-    "WoltersKluwer",
+    # "Crossref",
 }
 
 
@@ -95,44 +63,12 @@ class FeaturizationInfo:
             "abstract_similarity",
             "paper_quality",
         ],
+        features_excluded_for_nameless: List[str] = ["title_similarity", "abstract_similarity"],
         featurizer_version: int = FEATURIZER_VERSION,
     ):
         self.features_to_use = features_to_use
-
-        lightgbm_monotone_constraints = {
-            "author_similarity": ["1", "1"],
-            "venue_similarity": ["1"],
-            "year_diff": ["-1"],
-            "title_similarity": ["1"] * (len(TEXT_FUNCTIONS) + 4),
-            "abstract_similarity": ["1"],
-            "paper_quality": ["0"] * (len(SEPARATE_SOURCES) + 6),
-        }
-
-        self.feature_group_to_index = {}
-        start_count = 0
-        for feature_group, constraints in lightgbm_monotone_constraints.items():
-            self.feature_group_to_index[feature_group] = list(range(start_count, start_count + len(constraints)))
-            start_count += len(constraints)
-
-        self.number_of_features = start_count  # type: ignore
-
-        self.lightgbm_monotone_constraints = ",".join(
-            [
-                ",".join(constraints)
-                for feature_category, constraints in lightgbm_monotone_constraints.items()
-                if feature_category in features_to_use
-            ]
-        )
-
-        self.nameless_lightgbm_monotone_constraints = ",".join(
-            [
-                ",".join(constraints)
-                for feature_category, constraints in lightgbm_monotone_constraints.items()
-                if feature_category in features_to_use
-                and feature_category not in {"title_similarity", "abstract_similarity"}
-            ]
-        )
-
+        self.features_excluded_for_nameless = set(features_excluded_for_nameless)
+        self.feature_names = self.get_feature_names()
         # NOTE: Increment this anytime a change is made to the featurization logic
         self.featurizer_version = featurizer_version
 
@@ -145,51 +81,90 @@ class FeaturizationInfo:
         List[string]: List of all the features names
         """
         feature_names = []
-
+        lightgbm_monotone_constraints = []
+        nameless_lightgbm_monotone_constraints = []
+        self.indices_to_use = []
+        self.nameless_indices_to_use = []
+        start_count = 0
         # affiliation features
         if "author_similarity" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "author_names_similarity",
-                    # "author_affiliations_similarity",
-                    # "author_email_prefix_similarity",
-                    # "author_email_suffix_similarity",
-                    "author_first_letter_compatibility",
-                ]
-            )
+            these_features = [
+                "author_names_similarity",
+                "author_first_letter_compatibility",
+                # "author_affiliations_similarity",
+                # "author_email_prefix_similarity",
+                # "author_email_suffix_similarity",
+            ]
+            feature_names.extend(these_features)
+            lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+            self.indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            if "author_similarity" not in self.features_excluded_for_nameless:
+                nameless_lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+                self.nameless_indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            start_count += len(these_features)
 
         # email features
         if "venue_similarity" in self.features_to_use:
-            feature_names.extend(["venue_similarity"])
+            these_features = ["venue_similarity"]
+            feature_names.extend(these_features)
+            lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+            self.indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            if "venue_similarity" not in self.features_excluded_for_nameless:
+                nameless_lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+            start_count += len(these_features)
 
         # year features
         if "year_diff" in self.features_to_use:
-            feature_names.append("year_diff")
+            these_features = ["year_diff"]
+            feature_names.extend(these_features)
+            lightgbm_monotone_constraints.extend(["-1"])
+            self.indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            if "year_diff" not in self.features_excluded_for_nameless:
+                nameless_lightgbm_monotone_constraints.extend(["-1"])
+                self.nameless_indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            start_count += len(these_features)
 
         if "title_similarity" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "title_character_similarity",
-                    "title_numeral_similarity",  # trying to catch when we have stuff like "part i vs part ii"
-                    "title_special_publication_word_similarity",  # containing commentary, response, letter, editorial, etc
-                    "title_year_similarity",  # whether years mentioned are the same
-                ]
-            )
-            feature_names.extend(["title_" + func[1] for func in TEXT_FUNCTIONS])
+            these_features = [
+                "title_character_similarity",
+                "title_numeral_similarity",  # trying to catch when we have stuff like "part i vs part ii"
+                "title_special_publication_word_similarity",  # containing commentary, response, letter, editorial, etc
+                "title_year_similarity",  # whether years mentioned are the same
+            ]
+            these_features.extend(["title_" + func[1] for func in TEXT_FUNCTIONS])
+            feature_names.extend(these_features)
+            self.indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+            if "title_similarity" not in self.features_excluded_for_nameless:
+                nameless_lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+                self.nameless_indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            start_count += len(these_features)
 
         if "abstract_similarity" in self.features_to_use:
-            feature_names.append("abstract_word_similarity")
+            these_features = ["abstract_word_similarity"]
+            feature_names.extend(these_features)
+            lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+            self.indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            if "abstract_similarity" not in self.features_excluded_for_nameless:
+                nameless_lightgbm_monotone_constraints.extend(["1"] * len(these_features))
+                self.nameless_indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            start_count += len(these_features)
 
         if "paper_quality" in self.features_to_use:
-            # feature_names.extend(
-            #     [
-            #         "min_of_paper_field_count",
-            #         "max_of_paper_field_count",
-            #     ]
-            # )
-            feature_names.extend([f"paper_field_count_{i}" for i in ["abstract", "authors", "venue", "year"]])
-            feature_names.extend(["source_count_" + i for i in SEPARATE_SOURCES])
-            feature_names.extend(["source_count_publisher", "sources_are_same"])
+            these_features = [f"paper_field_count_{i}" for i in ["abstract", "authors", "venue"]]  # 'year'
+            these_features.extend(["source_count_" + i for i in SEPARATE_SOURCES])
+            these_features.extend(["source_count_publisher", "sources_are_same"])
+            feature_names.extend(these_features)
+            lightgbm_monotone_constraints.extend(["0"] * len(these_features))
+            self.indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            if "paper_quality" not in self.features_excluded_for_nameless:
+                nameless_lightgbm_monotone_constraints.extend(["0"] * len(these_features))
+                self.nameless_indices_to_use.extend(list(range(start_count, start_count + len(these_features))))
+            start_count += len(these_features)
+
+        self.lightgbm_monotone_constraints = ",".join(lightgbm_monotone_constraints)
+        self.nameless_lightgbm_monotone_constraints = ",".join(nameless_lightgbm_monotone_constraints)
+        self.number_of_features = start_count
 
         return feature_names
 
@@ -380,12 +355,12 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     features.append(
         np.minimum(
             diff(
-                paper_1.year if paper_1.year is not None and paper_1.year > 0 else None,
-                paper_2.year if paper_2.year is not None and paper_2.year > 0 else None,
+                paper_1.year if paper_1.year is not None and paper_1.year > 1700 else None,
+                paper_2.year if paper_2.year is not None and paper_2.year > 1700 else None,
             ),
-            50,
+            5,
         )
-    )  # magic number!
+    )
 
     # title features
     features.extend(
@@ -396,10 +371,12 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             year_similarity(paper_1.title, paper_2.title),
         ]
     )
+    # these features concat titles (no spaces) and authors
+    # to account for cases where pdf extraction left authors in the title
     features.extend(
         name_text_features(
-            paper_1.title.replace(" ", ""),
-            paper_2.title.replace(" ", ""),
+            paper_1.title.replace(" ", ""),  # + " ".join([i.author_info_full_name for i in paper_1.authors]),
+            paper_2.title.replace(" ", ""),  # + " ".join([i.author_info_full_name for i in paper_2.authors]),
         )
     )
 
@@ -435,7 +412,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             + int(paper_2.abstract is not None and len(paper_2.abstract) > 0),
             int(len(paper_1.authors) > 0) + int(len(paper_2.authors) > 0),
             int(len(paper_1.venue) > 0) + int(len(paper_2.venue) > 0),
-            int(paper_1.year is not None) + int(paper_2.year is not None),
+            # int(paper_1.year is not None and paper_1.year > 0) + int(paper_2.year is not None and paper_2.year > 0),
         ]
     )
 
@@ -563,17 +540,6 @@ def many_pairs_featurize(
 
     logger.info("Created pieces of work")
 
-    indices_to_use = set()
-    for feature_name in featurizer_info.features_to_use:
-        indices_to_use.update(featurizer_info.feature_group_to_index[feature_name])
-    indices_to_use: List[int] = sorted(list(indices_to_use))  # type: ignore
-
-    if nameless_featurizer_info:
-        nameless_indices_to_use = set()
-        for feature_name in nameless_featurizer_info.features_to_use:
-            nameless_indices_to_use.update(nameless_featurizer_info.feature_group_to_index[feature_name])
-        nameless_indices_to_use: List[int] = sorted(list(nameless_indices_to_use))  # type: ignore
-
     if cache_changed:
         if n_jobs > 1:
             logger.info(f"Cached changed, doing {len(pieces_of_work)} work in parallel")
@@ -626,12 +592,12 @@ def many_pairs_featurize(
     logger.info("Making numpy arrays for features and labels")
     # have to do this before subselecting features
     if nameless_featurizer_info is not None:
-        nameless_features = features[:, nameless_indices_to_use]
+        nameless_features = features[:, featurizer_info.nameless_indices_to_use]
         nameless_features[np.isnan(nameless_features)] = nan_value
     else:
         nameless_features = None
 
-    features = features[:, indices_to_use]
+    features = features[:, featurizer_info.indices_to_use]
     features[np.isnan(features)] = nan_value
 
     logger.info("Numpy arrays made")

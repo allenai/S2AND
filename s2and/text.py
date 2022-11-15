@@ -44,10 +44,47 @@ dashes = [
 ]
 
 RE_DASHES = re.compile(rf"[{''.join(dashes)}]")
-
+A_THROUGH_Z = re.compile(r"[a-z]")
 RE_APOSTRAPHE_S = re.compile(r"(\w+)'s")
 REMOVE_PUNC = str.maketrans(string.punctuation.replace("&", ""), " " * (len(string.punctuation) - 1))
 RE_SPACES = re.compile(r"\s+")
+
+
+PUBLISHER_SOURCES = {
+    "ACL",
+    "ACM",
+    "ACP",
+    "ASMUSA",
+    "BioOne",
+    "BMJ",
+    "Cambridge",
+    "DeGruyter",
+    "Elsevier",
+    "ElsevierCorona",
+    "Frontier",
+    "Highwire",
+    "IEEE",
+    "IOP",
+    "JhuPress",
+    "Karger",
+    "Medline" "MIT",
+    "Nature",
+    "PubMedCentral",
+    "PubMed",
+    "PMCManuscript",
+    "RoyalSociety",
+    "Sage",
+    "Science",
+    "ScientificNet",
+    "SPIE",
+    "Springer",
+    "SpringerNature",
+    "TaylorAndFrancis",
+    "Thieme",
+    "Uchicago",
+    "Wiley",
+    #  "WoltersKluwer", # untrustworthy or something?
+}
 
 WORD_REPLACEMENTS = {
     "the": "",
@@ -358,12 +395,17 @@ SPECIAL_PUBLICATION_WORDS = {
     "re",
     "erratum",
     "withdrawn",
+    "withdrawal",
     "note",
+    "notes",
     "correction",
     "review",
     "reviews",
-    "notes",
+    "author",
+    "commentary",
+    "retracted",
 }
+
 
 # regex to check if a string is a year
 # that starts with 19 or 2 and has 4 digits
@@ -450,7 +492,7 @@ metric_lcs = MetricLCS()
 TEXT_FUNCTIONS = [
     (jellyfish.levenshtein_distance, "levenshtein"),
     (prefix_dist, "prefix"),
-    (metric_lcs.distance, "lcs"),
+    # (metric_lcs.distance, "lcs"),
     (jellyfish.jaro_winkler_similarity, "jaro"),
 ]
 

@@ -25,8 +25,8 @@ class TestClusterer(unittest.TestCase):
         ]
         featurizer_info = FeaturizationInfo(features_to_use=features_to_use)
         np.random.seed(1)
-        X_random = np.random.random((10, 9))
-        y_random = np.random.randint(0, 9, 10)
+        X_random = np.random.random((10, 8))
+        y_random = np.random.randint(0, 8, 10)
         self.clusterer = Clusterer(
             featurizer_info=featurizer_info,
             classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
@@ -47,7 +47,7 @@ class TestClusterer(unittest.TestCase):
         )
         distance_matrix = distance_matrices["reviewerlistfor"]
         self.assertEqual(distance_matrix[0], np.float16(1.1))
-        self.assertEqual(distance_matrix[1], np.float16(0.1))
+        self.assertEqual(distance_matrix[1], np.float16(0.2))
         self.assertEqual(distance_matrix[4], np.float16(1e-6))
 
         distance_matrices = self.clusterer.make_distance_matrices(
@@ -56,6 +56,6 @@ class TestClusterer(unittest.TestCase):
             partial_supervision={},
         )
         distance_matrix = distance_matrices["reviewerlistfor"]
-        self.assertEqual(distance_matrix[0], np.float16(0.1))
-        self.assertEqual(distance_matrix[1], np.float16(0.1))
-        self.assertEqual(distance_matrix[4], np.float16(0.1))
+        self.assertEqual(distance_matrix[0], np.float16(0.2))
+        self.assertEqual(distance_matrix[1], np.float16(0.2))
+        self.assertEqual(distance_matrix[4], np.float16(0.2))

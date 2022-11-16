@@ -212,10 +212,7 @@ class FeaturizationInfo:
         -------
         string: the full file path for the features cache file
         """
-        return os.path.join(
-            self.cache_directory(dataset_name),
-            "all_features.json",
-        )
+        return os.path.join(self.cache_directory(dataset_name), "all_features.json",)
 
     def write_cache(self, cached_features: Dict, dataset_name: str):
         """
@@ -232,10 +229,7 @@ class FeaturizationInfo:
         -------
         nothing, writes the cache file
         """
-        with open(
-            self.cache_file_path(dataset_name),
-            "w",
-        ) as _json_file:
+        with open(self.cache_file_path(dataset_name), "w",) as _json_file:
             json.dump(cached_features, _json_file)
 
 
@@ -320,9 +314,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     features.extend(
         [
             counter_jaccard(
-                paper_1.author_info_coauthor_n_grams,
-                paper_2.author_info_coauthor_n_grams,
-                denominator_max=5000,
+                paper_1.author_info_coauthor_n_grams, paper_2.author_info_coauthor_n_grams, denominator_max=5000,
             ),
             # counter_jaccard(
             #     paper_1.author_info_coauthor_affiliations_n_grams,
@@ -336,10 +328,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
             #     paper_1.author_info_coauthor_email_suffix_n_grams,
             #     paper_2.author_info_coauthor_email_suffix_n_grams,
             # ),
-            compare_author_first_letters(
-                paper_1.authors,
-                paper_2.authors,
-            ),
+            compare_author_first_letters(paper_1.authors, paper_2.authors,),
         ]
     )
 
@@ -381,9 +370,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     )
 
     # abstract features
-    features.append(
-        counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),
-    )
+    features.append(counter_jaccard(paper_1.abstract_ngrams_words, paper_2.abstract_ngrams_words),)
 
     # paper quality features
     # paper_1_num_present_fields = (
@@ -423,7 +410,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     features.append(int(paper_1.source == paper_2.source) if sum(source_counts) == 0 else np.nan)
 
     # unifying feature type in features array
-    features = [np.float32(val) if type(val) in [np.float32, np.float64, float] else int(val) for val in features]
+    features = [float(val) if type(val) in [np.float32, np.float64, float] else int(val) for val in features]
 
     return features, index
 
@@ -662,17 +649,9 @@ def featurize(
     else:
         if dataset.train_pairs is None:
             if dataset.train_papers is not None:
-                (
-                    train_papers_dict,
-                    val_papers_dict,
-                    test_papers_dict,
-                ) = dataset.split_data_papers_fixed()
+                (train_papers_dict, val_papers_dict, test_papers_dict,) = dataset.split_data_papers_fixed()
             else:
-                (
-                    train_papers_dict,
-                    val_papers_dict,
-                    test_papers_dict,
-                ) = dataset.split_cluster_papers()  # type: ignore
+                (train_papers_dict, val_papers_dict, test_papers_dict,) = dataset.split_cluster_papers()  # type: ignore
 
             train_pairs, val_pairs, test_pairs = dataset.split_pairs(
                 train_papers_dict, val_papers_dict, test_papers_dict

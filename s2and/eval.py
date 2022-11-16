@@ -567,9 +567,9 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_papers=None):
     f_score = f1_score(precision, recall)
 
     return (
-        np.round(precision, 3),
-        np.round(recall, 3),
-        np.round(f_score, 3),
+        np.round(precision, 5),
+        np.round(recall, 5),
+        np.round(f_score, 5),
         per_paper_metrics,
         pred_bigger_ratios,
         true_bigger_ratios,

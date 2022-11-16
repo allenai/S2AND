@@ -15,7 +15,6 @@ from collections import Counter
 
 from text_unidecode import unidecode
 import jellyfish
-from strsimpy.metric_lcs import MetricLCS
 
 from s2and.consts import NUMPY_NAN
 
@@ -488,11 +487,9 @@ def prefix_dist(string_1: str, string_2: str) -> float:
     return 1.0
 
 
-metric_lcs = MetricLCS()
 TEXT_FUNCTIONS = [
     (jellyfish.levenshtein_distance, "levenshtein"),
     (prefix_dist, "prefix"),
-    # (metric_lcs.distance, "lcs"),
     (jellyfish.jaro_winkler_similarity, "jaro"),
 ]
 
@@ -545,11 +542,7 @@ def normalize_venue_name(s: str) -> str:
     return s
 
 
-def name_text_features(
-    name_1: str,
-    name_2: str,
-    default_val: float = NUMPY_NAN,
-) -> List[float]:
+def name_text_features(name_1: str, name_2: str, default_val: float = NUMPY_NAN,) -> List[float]:
     """
     Computes various text similarity features for two names
 
@@ -637,19 +630,12 @@ def get_text_ngrams(
     bigrams = []  # type: ignore
     if use_bigrams:
         bigrams = map(  # type: ignore
-            lambda x: "".join(x),
-            filter(lambda x: " " not in x, zip(text, text[1:])),
+            lambda x: "".join(x), filter(lambda x: " " not in x, zip(text, text[1:])),
         )
 
-    trigrams = map(
-        lambda x: "".join(x),
-        filter(lambda x: " " not in x, zip(text, text[1:], text[2:])),
-    )
+    trigrams = map(lambda x: "".join(x), filter(lambda x: " " not in x, zip(text, text[1:], text[2:])),)
 
-    quadgrams = map(
-        lambda x: "".join(x),
-        filter(lambda x: " " not in x, zip(text, text[1:], text[2:], text[3:])),
-    )
+    quadgrams = map(lambda x: "".join(x), filter(lambda x: " " not in x, zip(text, text[1:], text[2:], text[3:])),)
     ngrams = Counter(unigrams) | Counter(bigrams) | Counter(trigrams) | Counter(quadgrams)
     return ngrams
 
@@ -676,23 +662,13 @@ def get_text_ngrams_words(text: Optional[str], stopwords: Optional[Set[str]] = S
     else:
         text_split = text.split()
     unigrams = Counter(text_split)
-    bigrams = map(
-        lambda x: " ".join(x),
-        zip(text_split, text_split[1:]),
-    )
-    trigrams = map(
-        lambda x: " ".join(x),
-        zip(text_split, text_split[1:], text_split[2:]),
-    )
+    bigrams = map(lambda x: " ".join(x), zip(text_split, text_split[1:]),)
+    trigrams = map(lambda x: " ".join(x), zip(text_split, text_split[1:], text_split[2:]),)
     ngrams = unigrams | Counter(bigrams) | Counter(trigrams)
     return ngrams
 
 
-def equal(
-    name_1: Optional[str],
-    name_2: Optional[str],
-    default_val: float = NUMPY_NAN,
-) -> Union[int, float]:
+def equal(name_1: Optional[str], name_2: Optional[str], default_val: float = NUMPY_NAN,) -> Union[int, float]:
     """
     Check if two names are exactly equal after lowercasing
 
@@ -721,11 +697,7 @@ def equal(
         return 0
 
 
-def equal_middle(
-    name_1: Optional[str],
-    name_2: Optional[str],
-    default_val: float = NUMPY_NAN,
-) -> Union[int, float]:
+def equal_middle(name_1: Optional[str], name_2: Optional[str], default_val: float = NUMPY_NAN,) -> Union[int, float]:
     """
     Checks if two middle names are equal. If either middle name is just an initial,
     just check euqality of initials
@@ -756,11 +728,7 @@ def equal_middle(
     return 0
 
 
-def equal_initial(
-    name_1: Optional[str],
-    name_2: Optional[str],
-    default_val: float = NUMPY_NAN,
-) -> Union[int, float]:
+def equal_initial(name_1: Optional[str], name_2: Optional[str], default_val: float = NUMPY_NAN,) -> Union[int, float]:
     """
     Checks if two initials are qual
 
@@ -787,10 +755,7 @@ def equal_initial(
 
 
 def counter_jaccard(
-    counter_1: Counter,
-    counter_2: Counter,
-    default_val: float = NUMPY_NAN,
-    denominator_max: float = np.inf,
+    counter_1: Counter, counter_2: Counter, default_val: float = NUMPY_NAN, denominator_max: float = np.inf,
 ) -> float:
     """
     Computes jaccard overlap between two Counters
@@ -817,11 +782,7 @@ def counter_jaccard(
     return min(score, 1)
 
 
-def jaccard(
-    set_1: Set,
-    set_2: Set,
-    default_val: float = NUMPY_NAN,
-) -> float:
+def jaccard(set_1: Set, set_2: Set, default_val: float = NUMPY_NAN,) -> float:
     """
     Computes jaccard overlap between two sets
 
@@ -868,10 +829,7 @@ def diff(value_1: Optional[float], value_2: Optional[float], default_val: float 
     return abs(float(value_1) - float(value_2))
 
 
-def name_counts(
-    counts_1: "NameCounts",
-    counts_2: "NameCounts",
-) -> List[Union[int, float]]:
+def name_counts(counts_1: "NameCounts", counts_2: "NameCounts",) -> List[Union[int, float]]:
     """
     Gets name counts for first, last, and first_last names.
     These counts were computed from the entire S2 corpus.
@@ -889,20 +847,10 @@ def name_counts(
     """
     counts = []
     counts.append(
-        [
-            counts_1.first,  # can be nan
-            counts_1.first_last,  # can be nan
-            counts_1.last,
-            counts_1.last_first_initial,
-        ]
+        [counts_1.first, counts_1.first_last, counts_1.last, counts_1.last_first_initial,]  # can be nan  # can be nan
     )
     counts.append(
-        [
-            counts_2.first,  # can be nan
-            counts_2.first_last,  # can be nan
-            counts_2.last,
-            counts_2.last_first_initial,
-        ]
+        [counts_2.first, counts_2.first_last, counts_2.last, counts_2.last_first_initial,]  # can be nan  # can be nan
     )
     # using nanmin so as to catch the min of counts, but regular max to propagate the nan
     with warnings.catch_warnings():

@@ -9,7 +9,7 @@ To install this package, run the following:
 ```bash
 git clone https://github.com/allenai/S2AND.git
 cd S2AND
-conda create -y --name s2and python==3.7
+conda create -y --name s2and python==3.8
 conda activate s2and
 pip install -r requirements.in
 pip install -e .
@@ -21,10 +21,10 @@ CFLAGS='-stdlib=libc++' pip install -r requirements.in
 ```
 
 ## Data 
-To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  
-```[Expected download size is: 50.4 GiB]```
+To obtain the paper clustering dataset, run the following command after the package is installed (from inside the `S2AND` directory):  
+```[Expected download size is: 3.1 GiB]```
 
-`aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
+`aws s3 sync --no-sign-request s3://ai2-s2-research-public/paper_clustering data/`
 
 Note that this software package comes with tools specifically designed to access and model the dataset.
 
@@ -33,11 +33,9 @@ Modify the config file at `data/path_config.json`. This file should look like th
 ```
 {
     "main_data_dir": "absolute path to wherever you downloaded the data to",
-    "internal_data_dir": "ignore this one unless you work at AI2"
 }
 ```
-As the dummy file says, `main_data_dir` should be set to the location of wherever you downloaded the data to, and
-`internal_data_dir` can be ignored, as it is used for some scripts that rely on unreleased data, internal to Semantic Scholar.
+As the dummy file says, `main_data_dir` should be set to the location of wherever you downloaded the data to.
 
 ## How to use S2AND for loading data and training a model
 Once you have downloaded the datasets, you can go ahead and load up one of them:

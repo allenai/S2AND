@@ -291,12 +291,7 @@ class PDData:
         elif load_name_counts:
             logger.info("loading name counts")
             with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-                (
-                    first_dict,
-                    last_dict,
-                    first_last_dict,
-                    last_first_initial_dict,
-                ) = pickle.load(f)
+                (first_dict, last_dict, first_last_dict, last_first_initial_dict,) = pickle.load(f)
             self.first_dict = first_dict
             self.last_dict = last_dict
             self.first_last_dict = first_last_dict
@@ -337,9 +332,7 @@ class PDData:
         else:
             counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
 
-        author = author._replace(
-            author_info_name_counts=counts,
-        )
+        author = author._replace(author_info_name_counts=counts,)
         return author
 
     @staticmethod
@@ -558,18 +551,13 @@ class PDData:
             x.append(block_id)
             y.append(len(papers))
 
-        clustering_model = KMeans(
-            n_clusters=self.num_clusters_for_block_size,
-            random_state=self.random_seed,
-        ).fit(np.array(y).reshape(-1, 1))
+        clustering_model = KMeans(n_clusters=self.num_clusters_for_block_size, random_state=self.random_seed,).fit(
+            np.array(y).reshape(-1, 1)
+        )
         y_group = clustering_model.labels_
 
         train_blocks, val_test_blocks, _, val_test_length = train_test_split(
-            x,
-            y_group,
-            test_size=self.val_ratio + self.test_ratio,
-            stratify=y_group,
-            random_state=self.random_seed,
+            x, y_group, test_size=self.val_ratio + self.test_ratio, stratify=y_group, random_state=self.random_seed,
         )
         val_blocks, test_blocks = train_test_split(
             val_test_blocks,
@@ -606,9 +594,7 @@ class PDData:
                 block_to_papers[self.paper_to_block[s]].append(s)
         return block_to_papers
 
-    def split_cluster_papers(
-        self,
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    def split_cluster_papers(self,) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
         Splits the block dict into train/val/test blocks based on split type requested.
         Options for splitting are `papers`, `blocks`, and `time`
@@ -622,9 +608,7 @@ class PDData:
         if self.unit_of_data_split == "papers":
             paper_keys = list(self.papers.keys())
             train_papers, val_test_papers = train_test_split(
-                paper_keys,
-                test_size=self.val_ratio + self.test_ratio,
-                random_state=self.random_seed,
+                paper_keys, test_size=self.val_ratio + self.test_ratio, random_state=self.random_seed,
             )
             val_papers, test_papers = train_test_split(
                 val_test_papers,
@@ -637,11 +621,7 @@ class PDData:
             return train_block_dict, val_block_dict, test_block_dict
 
         elif self.unit_of_data_split == "blocks":
-            (
-                train_block_dict,
-                val_block_dict,
-                test_block_dict,
-            ) = self.split_blocks_helper(blocks)
+            (train_block_dict, val_block_dict, test_block_dict,) = self.split_blocks_helper(blocks)
             return train_block_dict, val_block_dict, test_block_dict
 
         elif self.unit_of_data_split == "time":
@@ -670,9 +650,7 @@ class PDData:
         else:
             raise Exception(f"Unknown unit_of_data_split: {self.unit_of_data_split}")
 
-    def split_data_papers_fixed(
-        self,
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    def split_data_papers_fixed(self,) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """
         Splits the block dict into train/val/test blocks based on a fixed paper
         based split
@@ -742,35 +720,23 @@ class PDData:
             and isinstance(test_papers_dict, dict)
         )
         train_pairs = self.pair_sampling(
-            self.train_pairs_size,
-            train_papers_dict,
-            all_pairs=False,
-            balanced_pair_sample=self.balanced_pair_sample,
+            self.train_pairs_size, train_papers_dict, all_pairs=False, balanced_pair_sample=self.balanced_pair_sample,
         )
         val_pairs = (
             self.pair_sampling(
-                self.val_pairs_size,
-                val_papers_dict,
-                all_pairs=False,
-                balanced_pair_sample=self.balanced_pair_sample,
+                self.val_pairs_size, val_papers_dict, all_pairs=False, balanced_pair_sample=self.balanced_pair_sample,
             )
             if len(val_papers_dict) > 0
             else []
         )
 
         test_pairs = self.pair_sampling(
-            self.test_pairs_size,
-            test_papers_dict,
-            self.all_test_pairs_flag,
-            balanced_pair_sample=False,
+            self.test_pairs_size, test_papers_dict, self.all_test_pairs_flag, balanced_pair_sample=False,
         )
 
         return train_pairs, val_pairs, test_pairs
 
-    def construct_cluster_to_papers(
-        self,
-        block_dict: Dict[str, List[str]],
-    ) -> Dict[str, List[str]]:
+    def construct_cluster_to_papers(self, block_dict: Dict[str, List[str]],) -> Dict[str, List[str]]:
         """
         creates a dictionary mapping cluster to papers
 
@@ -838,9 +804,7 @@ class PDData:
         all pairs, where each pair is (paper_id_1, paper_id_2, label)
         """
         all_pairs_output = self.pair_sampling(
-            0,  # ignored when all_test_pairs_flag is True
-            self.get_blocks(),
-            self.all_test_pairs_flag,
+            0, self.get_blocks(), self.all_test_pairs_flag,  # ignored when all_test_pairs_flag is True
         )
         return all_pairs_output
 
@@ -944,7 +908,7 @@ def get_full_name_for_features(author: Author, include_last: bool = True, includ
 
 def preprocess_authors(author):
     """
-    Preprocess the authors, doing lots of normalization and feature creation
+    Preprocess the authors, doing lots of normalization and feature creation 
     """
 
     # our normalization scheme is to normalize first and middle separately,
@@ -978,25 +942,25 @@ def preprocess_authors(author):
     if len(author_info_last_normalized) > 0:
         author_info_first_letters.add(author_info_last_normalized[0])
 
-    affiliations = [normalize_text(affiliation) for affiliation in author.author_info_affiliations]
-    affiliations_joined = " ".join(affiliations)
+    # affiliations = [normalize_text(affiliation) for affiliation in author.author_info_affiliations]
+    # affiliations_joined = " ".join(affiliations)
 
-    if author.author_info_email is not None and len(author.author_info_email) > 0:
-        email = author.author_info_email if "@" in author.author_info_email else author.author_info_email + "@MISSING"
-        split_email = email.split("@")
-        author_info_email_prefix = "".join(split_email[:-1])
-        author_info_email_suffix = split_email[-1]
-    else:
-        author_info_email_prefix = ""
-        author_info_email_suffix = ""
+    # if author.author_info_email is not None and len(author.author_info_email) > 0:
+    #     email = author.author_info_email if "@" in author.author_info_email else author.author_info_email + "@MISSING"
+    #     split_email = email.split("@")
+    #     author_info_email_prefix = "".join(split_email[:-1])
+    #     author_info_email_suffix = split_email[-1]
+    # else:
+    #     author_info_email_prefix = ""
+    #     author_info_email_suffix = ""
 
     author = author._replace(
         author_info_full_name=get_full_name_for_features(author).strip(),
-        author_info_affiliations=affiliations,
+        # author_info_affiliations=affiliations,
         author_info_first_letters=author_info_first_letters,
-        author_info_affiliations_joined=affiliations_joined,
-        author_info_email_prefix=author_info_email_prefix,
-        author_info_email_suffix=author_info_email_suffix,
+        # author_info_affiliations_joined=affiliations_joined,
+        # author_info_email_prefix=author_info_email_prefix,
+        # author_info_email_suffix=author_info_email_suffix,
     )
 
     return author
@@ -1040,10 +1004,7 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
 
     authors = [preprocess_authors(author) for author in paper.authors]
     author_info_coauthor_n_grams = get_text_ngrams(
-        " ".join([i.author_info_full_name for i in authors]),
-        stopwords=None,
-        use_unigrams=True,
-        use_bigrams=True,
+        " ".join([i.author_info_full_name for i in authors]), stopwords=None, use_unigrams=True, use_bigrams=True,
     )
     # author_info_coauthor_email_prefix_n_grams = get_text_ngrams(
     #     " ".join([i.author_info_email_prefix for i in authors]),
@@ -1104,8 +1065,5 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int) -> Dict:
 
 
 if __name__ == "__main__":
-    pddata = PDData(
-        papers="tests/test_dataset/papers.json",
-        clusters="tests/test_dataset/clusters.json",
-        name="test",
-    )
+    pddata = PDData(papers="tests/test_dataset/papers.json", clusters="tests/test_dataset/clusters.json", name="test",)
+

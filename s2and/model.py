@@ -398,14 +398,9 @@ class Clusterer:
                 val_block_dict_list, val_cluster_to_papers_list, val_dists_list
             ):
                 pred_clusters, _ = self.predict(val_block_dict, dataset=None, dists=val_dists)
-                (
-                    _,
-                    _,
-                    f1,
-                    _,
-                    pred_bigger_ratios,
-                    true_bigger_ratios,
-                ) = b3_precision_recall_fscore(val_cluster_to_papers, pred_clusters)
+                (_, _, f1, _, pred_bigger_ratios, true_bigger_ratios,) = b3_precision_recall_fscore(
+                    val_cluster_to_papers, pred_clusters
+                )
                 ratios.append(np.mean(pred_bigger_ratios + true_bigger_ratios))
                 f1s.append(f1)
             if metric_for_hyperopt == "ratio":
@@ -582,9 +577,7 @@ class Clusterer:
                     # don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
                     # s2and's predictions
                     reclustered_output, _ = self.predict(
-                        {"block": papers_ids_for_cluster_num},
-                        dataset,
-                        incremental_dont_use_cluster_seeds=True,
+                        {"block": papers_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True,
                     )
                     if len(reclustered_output) > 1:
                         for i, new_cluster_of_papers in enumerate(reclustered_output.values()):
@@ -602,9 +595,7 @@ class Clusterer:
                 label = np.nan
                 if self.use_default_constraints_as_supervision:
                     value = dataset.get_constraint(
-                        unassigned_paper,
-                        signature,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                        unassigned_paper, signature, dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER
@@ -663,10 +654,7 @@ class Clusterer:
         singleton_papers = []
         for papers_id, cluster_id in dataset.cluster_seeds_require.items():
             pred_clusters[f"{cluster_id}"].append(papers_id)
-        for (
-            unassigned_paper,
-            cluster_dists,
-        ) in papers_to_cluster_to_average_dist.items():
+        for (unassigned_paper, cluster_dists,) in papers_to_cluster_to_average_dist.items():
             best_cluster_id = None
             best_dist = float("inf")
             for cluster_id, (average_dist, _) in cluster_dists.items():
@@ -770,13 +758,7 @@ class PairwiseModeler:
         self.hyperopt_trials_store: Optional[Trials] = None
         self.classifier: Optional[Any] = None
 
-    def fit(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
-    ) -> Trials:
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray,) -> Trials:
         """
         Fits the classifier
 
@@ -811,7 +793,7 @@ class PairwiseModeler:
                 algo=tpe.suggest,
                 max_evals=self.n_iter,
                 trials=self.hyperopt_trials_store,
-                rstate=np.random.RandomState(self.random_state),
+                rstate=np.random.default_rng(self.random_state),
             )
             best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
             self.best_params = {k: intify(v) for k, v in best_params.items()}
@@ -874,9 +856,7 @@ class VotingClassifier:
             predictions = np.argmax(self.predict_proba(X), axis=1)
         elif self.voting == "hard":
             predictions = np.apply_along_axis(
-                lambda x: np.argmax(np.bincount(x, weights=self.weights)),
-                axis=1,
-                arr=self._predict(X).astype("int"),
+                lambda x: np.argmax(np.bincount(x, weights=self.weights)), axis=1, arr=self._predict(X).astype("int"),
             )
         else:
             raise Exception("Voting type must be one of 'soft' or 'hard'")

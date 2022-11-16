@@ -3,10 +3,10 @@ from os.path import join
 import numpy as np
 from s2and.consts import CONFIG
 from s2and.data import PDData
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize, featurize
+from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import PairwiseModeler, Clusterer
 from s2and.eval import pairwise_eval
-from s2and.consts import DEFAULT_CHUNK_SIZE, PROJECT_ROOT_PATH
+from s2and.consts import PROJECT_ROOT_PATH
 
 
 N_JOBS = 16
@@ -71,9 +71,9 @@ print(metrics)
 """
 get the clusterer together
 note that eps is set to a number we know is good from previous experiments
-and a number that trades off precision with recall 
+and a number that trades off precision with recall
 
-Previous experiment results (P, R, B3 F1): 
+Previous experiment results (P, R, B3 F1):
 S2:  (0.99951, 0.99476, 0.99713)
 us (per EPS):
 0.10 (0.99993, 0.95101, 0.97486)
@@ -105,5 +105,8 @@ cluster.set_params({"eps": EPS})
 models = {}
 models["clusterer"] = cluster
 
-with open(join(CONFIG["main_data_dir"], "prod_model.pickle"), "wb",) as f:
+with open(
+    join(CONFIG["main_data_dir"], "prod_model.pickle"),
+    "wb",
+) as f:
     pickle.dump(models, f)

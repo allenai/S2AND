@@ -10,11 +10,18 @@ CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
-EXP_DIR = os.path.join(CONFIG["internal_data_dir"], "experiments/paper_experiments_baseline_save_facets_w_gen_eth/",)
+EXP_DIR = os.path.join(
+    CONFIG["internal_data_dir"],
+    "experiments/paper_experiments_baseline_save_facets_w_gen_eth/",
+)
 
 
 def plot_box(
-    s2and_performance: dict, s2_performance: dict, figs_path: str, title: str, total_bins: int = 5,
+    s2and_performance: dict,
+    s2_performance: dict,
+    figs_path: str,
+    title: str,
+    total_bins: int = 5,
 ):
 
     b3 = []
@@ -58,11 +65,11 @@ def plot_box(
         )
     elif title == "number of authors":
         bins = pd.IntervalIndex.from_tuples(
-            [(0, 1), (1, 2), (2, 5), (5, 10), (10, 15), (15, 25), (25, 50), (50, 100), (100, 1000),]
+            [(0, 1), (1, 2), (2, 5), (5, 10), (10, 15), (15, 25), (25, 50), (50, 100), (100, 1000)]
         )
     elif title == "block size":
         bins = pd.IntervalIndex.from_tuples(
-            [(0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 100), (100, 200), (200, 400), (400, 800), (800, 3000),]
+            [(0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 100), (100, 200), (200, 400), (400, 800), (800, 3000)]
         )
     elif title == "cluster size":
         bins = pd.IntervalIndex.from_tuples([(0, 5), (5, 10), (10, 20), (20, 40), (40, 60), (60, 100), (100, 800)])
@@ -84,7 +91,7 @@ def plot_box(
         hue="Model",
         data=df,
         showmeans=True,
-        meanprops={"marker": "s", "markerfacecolor": "white", "markeredgecolor": "blue",},
+        meanprops={"marker": "s", "markerfacecolor": "white", "markeredgecolor": "blue"},
     )
 
     plt.xlabel(title, fontsize=15)

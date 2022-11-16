@@ -20,5 +20,4 @@ jobs:
         docker run --rm s2and flake8 scripts/*.py
         docker run --rm s2and black s2and --check --line-length 120
         docker run --rm s2and black scripts/*.py --check --line-length 120
-        docker run --rm s2and bash scripts/mypy.sh
         docker run --rm s2and pytest tests/ --cov s2and --cov-fail-under=40

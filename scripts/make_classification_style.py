@@ -26,7 +26,11 @@ DATASETS = [
 
 def make_dataset_pairwise_classification_style(args, dataset):
     block_splits = dict()
-    block_splits["train"], block_splits["dev"], block_splits["test"] = dataset.split_cluster_signatures()
+    (
+        block_splits["train"],
+        block_splits["dev"],
+        block_splits["test"],
+    ) = dataset.split_cluster_signatures()
 
     examples = dict()
     for split_name, split_blocks in block_splits.items():
@@ -37,7 +41,9 @@ def make_dataset_pairwise_classification_style(args, dataset):
                 sig1 = dataset.signatures[sig_id1]
                 sig2 = dataset.signatures[sig_id2]
 
-                label = 1 if (dataset.signature_to_cluster_id[sig_id1] == dataset.signature_to_cluster_id[sig_id2]) else 0
+                label = (
+                    1 if (dataset.signature_to_cluster_id[sig_id1] == dataset.signature_to_cluster_id[sig_id2]) else 0
+                )
                 if label == 0:
                     # If coauthors overlap, the papers might actually share an
                     # author, so we can't set label=0.  We just throw these
@@ -45,12 +51,14 @@ def make_dataset_pairwise_classification_style(args, dataset):
                     if len(set(sig1.author_info_coauthors).intersection(set(sig2.author_info_coauthors))) != 0:
                         continue
 
-                examples[split_name].append({
-                    'corpus_id_1': str(sig1.paper_id),
-                    'corpus_id_2': str(sig2.paper_id),
-                    'block_name': block_name,
-                    'label': label,
-                })
+                examples[split_name].append(
+                    {
+                        "corpus_id_1": str(sig1.paper_id),
+                        "corpus_id_2": str(sig2.paper_id),
+                        "block_name": block_name,
+                        "label": label,
+                    }
+                )
 
     return examples
 
@@ -130,10 +138,10 @@ def main():
                         json.dumps(
                             {
                                 "dataset": dataset_name,
-                                "paper1": paper_id_to_full(row['corpus_id_1'], dataset.raw_papers),
-                                "paper2": paper_id_to_full(row['corpus_id_2'], dataset.raw_papers),
-                                "block_id": row['block_name'],
-                                "label": row['label'],
+                                "paper1": paper_id_to_full(row["corpus_id_1"], dataset.raw_papers),
+                                "paper2": paper_id_to_full(row["corpus_id_2"], dataset.raw_papers),
+                                "block_id": row["block_name"],
+                                "label": row["label"],
                             }
                         )
                         + "\n"

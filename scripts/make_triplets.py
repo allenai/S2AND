@@ -29,19 +29,12 @@ DATASETS = [
 
 class NgramJaccardRanker:
     def __init__(self, papers):
-        self.paper_ngrams = {
-            k: self._unigrams(v["title"]) + self._unigrams(v["abstract"])
-            for k, v in papers.items()
-        }
+        self.paper_ngrams = {k: self._unigrams(v["title"]) + self._unigrams(v["abstract"]) for k, v in papers.items()}
 
     def _unigrams(self, text):
         if text is None or len(text) == 0:
             return collections.Counter()
-        text_split = [
-            word
-            for word in text.lower().split()
-            if word not in STOPWORDS and len(word) > 1
-        ]
+        text_split = [word for word in text.lower().split() if word not in STOPWORDS and len(word) > 1]
         unigrams = collections.Counter(text_split)
         return unigrams
 
@@ -79,11 +72,7 @@ def generate_block_triplets(
     for query_sig_id in block_sigs[:num_queries]:
         query_sig = dataset.signatures[query_sig_id]
 
-        cluster_sigs = set(
-            dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]][
-                "signature_ids"
-            ]
-        )
+        cluster_sigs = set(dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]]["signature_ids"])
 
         positives = [dataset.signatures[x] for x in cluster_sigs if x != query_sig_id]
         rng.shuffle(positives)
@@ -92,17 +81,11 @@ def generate_block_triplets(
             dataset.signatures[x]
             for x in block_sigs
             if x not in cluster_sigs
-            and len(
-                set(query_sig.author_info_coauthors).intersection(
-                    set(dataset.signatures[x].author_info_coauthors)
-                )
-            )
+            and len(set(query_sig.author_info_coauthors).intersection(set(dataset.signatures[x].author_info_coauthors)))
             == 0
         ]
         if negative_ranker_fn:
-            negatives.sort(
-                reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg)
-            )
+            negatives.sort(reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg))
         else:
             rng.shuffle(negatives)
 
@@ -147,9 +130,7 @@ def make_dataset_triplets(args, dataset):
             pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
         if len(triplets[split_name]) > args.max_triplets_per_dataset_split:
             rng.shuffle(triplets[split_name])
-            triplets[split_name] = triplets[split_name][
-                : args.max_triplets_per_dataset_split
-            ]
+            triplets[split_name] = triplets[split_name][: args.max_triplets_per_dataset_split]
 
     return triplets
 
@@ -175,18 +156,14 @@ def generate_block_rankformat(
     if num_hard_negatives != 0 and negative_ranker_fn is None:
         raise ValueError("Asked for hard negatives but no negative_ranker_fn was given")
 
-    for query_sig_id in [
-        x
-        for x in block_sigs
-        if dataset.signatures[x].paper_id not in blacklisted_papers
-    ][:num_queries]:
+    for query_sig_id in [x for x in block_sigs if dataset.signatures[x].paper_id not in blacklisted_papers][
+        :num_queries
+    ]:
         query_sig = dataset.signatures[query_sig_id]
 
         cluster_sigs = set(
             x
-            for x in dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]][
-                "signature_ids"
-            ]
+            for x in dataset.clusters[dataset.signature_to_cluster_id[query_sig_id]]["signature_ids"]
             if dataset.signatures[x].paper_id not in blacklisted_papers
         )
 
@@ -195,8 +172,7 @@ def generate_block_rankformat(
             for x in cluster_sigs
             if x != query_sig_id
             and dataset.signatures[x].paper_id not in blacklisted_papers
-            and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id]))
-            not in used_pairs
+            and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id])) not in used_pairs
         ]
 
         negatives = [
@@ -204,13 +180,8 @@ def generate_block_rankformat(
             for x in block_sigs
             if x not in cluster_sigs
             and dataset.signatures[x].paper_id not in blacklisted_papers
-            and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id]))
-            not in used_pairs
-            and len(
-                set(query_sig.author_info_coauthors).intersection(
-                    set(dataset.signatures[x].author_info_coauthors)
-                )
-            )
+            and tuple(sorted([query_sig.paper_id, dataset.signatures[x].paper_id])) not in used_pairs
+            and len(set(query_sig.author_info_coauthors).intersection(set(dataset.signatures[x].author_info_coauthors)))
             == 0
         ]
 
@@ -245,9 +216,7 @@ def generate_block_rankformat(
 
         hard_negatives = []
         if num_hard_negatives != 0:
-            negatives.sort(
-                reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg)
-            )
+            negatives.sort(reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg))
             hard_negatives = negatives[:num_hard_negatives]
             negatives = negatives[num_hard_negatives:]
 
@@ -289,9 +258,7 @@ def make_dataset_rankformat(args, dataset, used_pairs=None, test_papers=None):
         block_splits["test"],
     ) = dataset.split_cluster_signatures()
 
-    with open(
-        os.path.join(args.output, "block_sigs_{}.json".format(dataset.name)), "x"
-    ) as f:
+    with open(os.path.join(args.output, "block_sigs_{}.json".format(dataset.name)), "x") as f:
         json.dump(block_splits, f)
 
     triplets = dict()
@@ -316,9 +283,7 @@ def make_dataset_rankformat(args, dataset, used_pairs=None, test_papers=None):
             pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
         if len(triplets[split_name]) > args.max_triplets_per_dataset_split:
             rng.shuffle(triplets[split_name])
-            triplets[split_name] = triplets[split_name][
-                : args.max_triplets_per_dataset_split
-            ]
+            triplets[split_name] = triplets[split_name][: args.max_triplets_per_dataset_split]
 
     return triplets
 
@@ -385,16 +350,10 @@ def main():
         raise ValueError("Invalid compression {}".format(args.compression))
 
     os.makedirs(args.output, exist_ok=True)
-    with open_fn(
-        os.path.join(args.output, "train.jsonl" + extension), "wt"
-    ) as train_f, open_fn(
+    with open_fn(os.path.join(args.output, "train.jsonl" + extension), "wt") as train_f, open_fn(
         os.path.join(args.output, "dev.jsonl" + extension), "wt"
-    ) as dev_f, open_fn(
-        os.path.join(args.output, "test.jsonl" + extension), "wt"
-    ) as test_f:
-        file_objs = collections.OrderedDict(
-            [("test", test_f), ("dev", dev_f), ("train", train_f)]
-        )
+    ) as dev_f, open_fn(os.path.join(args.output, "test.jsonl" + extension), "wt") as test_f:
+        file_objs = collections.OrderedDict([("test", test_f), ("dev", dev_f), ("train", train_f)])
         # file_objs = collections.OrderedDict([("train", train_f), ("dev", dev_f), ("test", test_f)])
 
         used_query_ids = set()
@@ -418,9 +377,7 @@ def main():
 
                 test_papers |= {
                     dataset.signatures[x].paper_id
-                    for x in dataset.clusters[dataset.signature_to_cluster_id[sig]][
-                        "signature_ids"
-                    ]
+                    for x in dataset.clusters[dataset.signature_to_cluster_id[sig]]["signature_ids"]
                 }
 
         logger.info("Reserved {} test papers".format(len(test_papers)))
@@ -429,13 +386,9 @@ def main():
             logger.info("loading {}".format(dataset_name))
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
-            triplets = make_dataset_rankformat(
-                args, dataset, used_pairs=used_id_pairs, test_papers=test_papers
-            )
+            triplets = make_dataset_rankformat(args, dataset, used_pairs=used_id_pairs, test_papers=test_papers)
             logger.info(
-                "made {} examples for {}. Saving...".format(
-                    sum(len(x) for x in triplets.values()), dataset_name
-                )
+                "made {} examples for {}. Saving...".format(sum(len(x) for x in triplets.values()), dataset_name)
             )
             for split_name, file_obj in file_objs.items():
                 for row in triplets[split_name]:
@@ -447,17 +400,11 @@ def main():
                         continue
                     used_query_ids.add(query_record["corpus_id"])
 
-                    pos_candidates = [
-                        paper_id_to_full(x, dataset.raw_papers)
-                        for x in row["positives"]
-                    ]
+                    pos_candidates = [paper_id_to_full(x, dataset.raw_papers) for x in row["positives"]]
                     for x in pos_candidates:
                         x["score"] = 1
 
-                    neg_candidates = [
-                        paper_id_to_full(x, dataset.raw_papers)
-                        for x in row["negatives"]
-                    ]
+                    neg_candidates = [paper_id_to_full(x, dataset.raw_papers) for x in row["negatives"]]
                     for x in neg_candidates:
                         x["score"] = 0
 

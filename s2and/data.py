@@ -195,11 +195,8 @@ class ANDData:
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
-                logger.warning("If you are passing in training/val/test blocks, then you probably want original blocks.")
-                #raise Exception(
-                #    "If you are passing in training/val/test blocks, then you probably want original blocks."
-                #)
-
+                logger.warning("If you are passing in training/val/test blocks, then you may want original blocks.")
+                
             if unit_of_data_split == "blocks" and not pair_sampling_block:
                 raise Exception("Block-based cluster splits are not compatible with sampling stratgies 0 and 1.")
 
@@ -941,9 +938,6 @@ class ANDData:
         -------
         train/val/test block dictionaries
         """
-        # for now original blocks are required as it's what AMiner uses for fixed splits
-        # AMiner is the only dataset that comes with its own split
-        #blocks = self.get_original_blocks()
         blocks = self.get_blocks()
 
         train_block_dict: Dict[str, List[str]] = {}

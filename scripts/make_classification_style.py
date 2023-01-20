@@ -1,6 +1,7 @@
 import argparse
 import collections
 import gzip
+import itertools
 import json
 import logging
 import os
@@ -25,11 +26,7 @@ DATASETS = [
     "zbmath",
 ]
 
-
-cluster_label_map = dict()
-def make_dataset_classification_style(args, dataset):
-    global cluster_label_map
-
+def make_dataset_pairwise_classification_style(args, dataset):
     block_splits = dict()
     block_splits["train"], block_splits["dev"], block_splits["test"] = dataset.split_cluster_signatures()
 
@@ -38,17 +35,23 @@ def make_dataset_classification_style(args, dataset):
         examples[split_name] = []
         pbar = tqdm.tqdm(split_blocks.items(), total=len(split_blocks))
         for block_name, block_sigs in pbar:
-            for sig_id in block_sigs:
-                sig = dataset.signatures[sig_id]
+            for sig_id1, sig_id2 in itertools.combinations(block_sigs, 2):
+                sig1 = dataset.signatures[sig_id1]
+                sig2 = dataset.signatures[sig_id2]
 
-                cluster_id = dataset.signature_to_cluster_id[sig_id]
-                if cluster_id not in cluster_label_map:
-                    cluster_label_map[cluster_id] = len(cluster_label_map)
+                label = 1 if (dataset.signature_to_cluster_id[sig_id1] == dataset.signature_to_cluster_id[sig_id2]) else 0
+                if label == 0:
+                    # If coauthors overlap, the papers might actually share an
+                    # author, so we can't set label=0.  We just throw these
+                    # examples away.
+                    if len(set(sig1.author_info_coauthors).intersection(set(sig2.author_info_coauthors))) != 0:
+                        continue
 
                 examples[split_name].append({
-                    'corpus_id': str(sig.paper_id),
+                    'corpus_id_1': str(sig1.paper_id),
+                    'corpus_id_2': str(sig2.paper_id),
                     'block_name': block_name,
-                    'cluster_label': cluster_label_map[cluster_id],
+                    'label': label,
                 })
 
     return examples
@@ -119,7 +122,7 @@ def main():
             logger.info("loading {}".format(dataset_name))
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
-            examples = make_dataset_classification_style(args, dataset)
+            examples = make_dataset_pairwise_classification_style(args, dataset)
             logger.info(
                 "made {} examples for {}. Saving...".format(sum(len(x) for x in examples.values()), dataset_name)
             )
@@ -129,9 +132,10 @@ def main():
                         json.dumps(
                             {
                                 "dataset": dataset_name,
-                                "paper": paper_id_to_full(row['corpus_id'], dataset.raw_papers),
+                                "paper1": paper_id_to_full(row['corpus_id_1'], dataset.raw_papers),
+                                "paper2": paper_id_to_full(row['corpus_id_2'], dataset.raw_papers),
                                 "block_id": row['block_name'],
-                                "cluster_label": row['cluster_label'],
+                                "label": row['label'],
                             }
                         )
                         + "\n"

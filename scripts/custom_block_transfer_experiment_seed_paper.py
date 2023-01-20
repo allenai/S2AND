@@ -450,8 +450,8 @@ def main(
         features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
     )
 
+    # Note: aminer is excluded from these experiments
     SOURCE_DATASET_NAMES = [
-        #"aminer",
         "arnetminer",
         "inspire",
         "kisti",
@@ -461,7 +461,6 @@ def main(
     ]
 
     TARGET_DATASET_NAMES = [
-        #"aminer",
         "arnetminer",
         "inspire",
         "kisti",
@@ -471,7 +470,6 @@ def main(
     ]
 
     DATASETS_FOR_UNION: List[str] = [
-        #"aminer",
         "arnetminer",
         "inspire",
         "kisti",
@@ -1439,4 +1437,3 @@ if __name__ == "__main__":
         os.path.join(DATA_DIR, "experiments", args.experiment_name, "average_pairwise.csv"),
         index=False,
     )
-

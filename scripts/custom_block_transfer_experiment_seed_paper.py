@@ -562,7 +562,7 @@ def main(
                 val_pairs_path = None
             test_pairs_path = os.path.join(DATA_DIR, dataset_name, "test_pairs.csv")
 
-        with open(os.path.join(custom_block_path, 'block_sigs_{}.json'.format(dataset_name))) as f:
+        with open(os.path.join(custom_block_path, "block_sigs_{}.json".format(dataset_name))) as f:
             block_splits = json.load(f)
 
         logger.info(f"loading dataset {dataset_name}")
@@ -573,9 +573,9 @@ def main(
             mode="train",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
             clusters=clusters_path,
-            train_blocks=block_splits['train'],
-            val_blocks=block_splits['dev'],
-            test_blocks=block_splits['test'],
+            train_blocks=block_splits["train"],
+            val_blocks=block_splits["dev"],
+            test_blocks=block_splits["test"],
             block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
             val_pairs=val_pairs_path,
@@ -1343,15 +1343,26 @@ if __name__ == "__main__":
     )
     parser.add_argument("--random_seed", nargs="+", default=[1], type=int)
     parser.add_argument(
-        "--skip_individual_models", action="store_true", help="Whether to skip training/evaluating individual models"
+        "--skip_individual_models",
+        action="store_true",
+        help="Whether to skip training/evaluating individual models",
     )
     parser.add_argument(
-        "--skip_union_models", action="store_true", help="Whether to skip training/evaluating union models"
+        "--skip_union_models",
+        action="store_true",
+        help="Whether to skip training/evaluating union models",
     )
-    parser.add_argument("--n_train_pairs_size", type=int, default=100000, help="How many training pairs per dataset")
+    parser.add_argument(
+        "--n_train_pairs_size",
+        type=int,
+        default=100000,
+        help="How many training pairs per dataset",
+    )
     parser.add_argument("--feature_groups_to_skip", nargs="+", default=[], type=str)
     parser.add_argument(
-        "--use_linear_pairwise_model", action="store_true", help="Whether to use a LogisticRegression pairwise model"
+        "--use_linear_pairwise_model",
+        action="store_true",
+        help="Whether to use a LogisticRegression pairwise model",
     )
     parser.add_argument(
         "--gender_ethnicity_available",

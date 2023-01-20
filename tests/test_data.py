@@ -123,19 +123,6 @@ class TestData(unittest.TestCase):
                 clusters={},
                 name="",
                 mode="train",
-                train_blocks=[],
-                block_type="s2",
-                load_name_counts=False,
-                preprocess=False,
-            )
-
-        with pytest.raises(Exception):
-            dataset = ANDData(
-                signatures={},
-                papers={},
-                clusters={},
-                name="",
-                mode="train",
                 unit_of_data_split="blocks",
                 pair_sampling_block=False,
                 load_name_counts=False,

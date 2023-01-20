@@ -1,5 +1,4 @@
 import argparse
-import collections
 import gzip
 import itertools
 import json
@@ -7,12 +6,10 @@ import logging
 import os
 
 import tqdm
-import numpy as np
 
 import s2and
 from s2and.data import ANDData
 from s2and.consts import CONFIG
-from s2and.text import counter_jaccard, cosine_sim, STOPWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +22,7 @@ DATASETS = [
     "qian",
     "zbmath",
 ]
+
 
 def make_dataset_pairwise_classification_style(args, dataset):
     block_splits = dict()
@@ -154,4 +152,3 @@ if __name__ == "__main__":
     s2and.logger.handlers = []
 
     main()
-

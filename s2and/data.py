@@ -196,7 +196,7 @@ class ANDData:
         if mode == "train":
             if train_blocks is not None and block_type != "original":
                 logger.warning("If you are passing in training/val/test blocks, then you may want original blocks.")
-                
+
             if unit_of_data_split == "blocks" and not pair_sampling_block:
                 raise Exception("Block-based cluster splits are not compatible with sampling stratgies 0 and 1.")
 

@@ -17,7 +17,7 @@ import copy
 import argparse
 import logging
 import pickle
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union, TextIO, BinaryIO
 from collections import defaultdict
 
 from tqdm import tqdm
@@ -530,6 +530,10 @@ def main(
         UNION_DATASETS_TO_TRAIN = {tuple(DATASETS_FOR_UNION)}
 
     logger.info("starting transfer experiment main, loading name counts")
+
+    # Define f or else mypy complains if you ever open files with different types
+    f: Union[TextIO, BinaryIO]
+
     with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
         (
             first_dict,

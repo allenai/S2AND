@@ -382,7 +382,7 @@ def main(
     gender_ethnicity_available: bool,
     use_cache: bool,
     custom_block_path: str,
-    embedding_suffix: str = "_specter.pickle"
+    embedding_suffix: str = "_specter.pickle",
 ):
     if not os.path.exists(os.path.join(DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "metrics")):
         os.makedirs(
@@ -1407,7 +1407,7 @@ if __name__ == "__main__":
             args.gender_ethnicity_available,
             args.use_cache,
             args.custom_block_path,
-            args.emb_suffix
+            args.emb_suffix,
         )
         multi_b3_grid.append(b3_f1_grid)
         multi_pairwise_auroc_grid.append(pairwise_auroc_grid)

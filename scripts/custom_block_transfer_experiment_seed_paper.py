@@ -382,6 +382,7 @@ def main(
     gender_ethnicity_available: bool,
     use_cache: bool,
     custom_block_path: str,
+    embedding_suffix: str = "_specter.pickle"
 ):
     if not os.path.exists(os.path.join(DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "metrics")):
         os.makedirs(
@@ -1378,6 +1379,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Use this flag to enable the cache; cache makes things faster but uses a *lot* of ram",
     )
+    parser.add_argument(
+        "--emb_suffix",
+        default="_specter.pickle",
+        help="embedding files suffix",
+    )
 
     args = parser.parse_args()
     logger.info(args)
@@ -1405,6 +1411,7 @@ if __name__ == "__main__":
             args.gender_ethnicity_available,
             args.use_cache,
             args.custom_block_path,
+            args.emb_suffix
         )
         multi_b3_grid.append(b3_f1_grid)
         multi_pairwise_auroc_grid.append(pairwise_auroc_grid)

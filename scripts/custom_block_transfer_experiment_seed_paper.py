@@ -1379,7 +1379,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Use this flag to enable the cache; cache makes things faster but uses a *lot* of ram",
     )
-    parser.add_argument( "--emb_suffix", default="_specter.pickle", help="embedding files suffix")
+    parser.add_argument("--emb_suffix", default="_specter.pickle", help="embedding files suffix")
 
     args = parser.parse_args()
     logger.info(args)

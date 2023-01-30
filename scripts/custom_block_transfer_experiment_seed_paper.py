@@ -576,7 +576,7 @@ def main(
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="train",
-            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
+            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + embedding_suffix),
             clusters=clusters_path,
             train_blocks=block_splits["train"],
             val_blocks=block_splits["dev"],

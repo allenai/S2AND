@@ -1,9 +1,7 @@
 import os
 import json
 
-CONFIG_LOCATION = os.path.abspath(
-    os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json")
-)
+CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
@@ -82,9 +80,7 @@ def transfer_helper(
             target_dataset["X_test"],
             target_dataset["y_test"],
             source_dataset["pairwise_modeler"],
-            os.path.join(
-                DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "figs"
-            ),
+            os.path.join(DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "figs"),
             f"{source_name}_to_{target_name}",
             featurizer_info.get_feature_names(),
             nameless_classifier=source_dataset["nameless_pairwise_modeler"],
@@ -93,10 +89,7 @@ def transfer_helper(
             skip_shap=skip_shap,
         )
 
-    if (
-        target_name not in PAIRWISE_ONLY_DATASETS
-        and source_name not in PAIRWISE_ONLY_DATASETS
-    ):
+    if target_name not in PAIRWISE_ONLY_DATASETS and source_name not in PAIRWISE_ONLY_DATASETS:
         cluster_metrics, b3_metrics_per_signature = cluster_eval(
             target_dataset["anddata"],
             source_dataset["clusterer"],
@@ -190,37 +183,23 @@ def summary_features_analysis(
         )
 
     s2and_feature_facet_scores = {
-        "first_name_diff": np.round(feature_summary[0][0], 3)
-        - np.round(feature_summary[0][1], 3),
-        "affilition_diff": np.round(feature_summary[1][0], 3)
-        - np.round(feature_summary[1][1], 3),
-        "email_diff": np.round(feature_summary[2][0], 3)
-        - np.round(feature_summary[2][1], 3),
-        "abstract_diff": np.round(feature_summary[3][0], 3)
-        - np.round(feature_summary[3][1], 3),
-        "venue_diff": np.round(feature_summary[4][0], 3)
-        - np.round(feature_summary[4][1], 3),
-        "references_diff": np.round(feature_summary[5][0], 3)
-        - np.round(feature_summary[5][1], 3),
-        "coauthors_diff": np.round(feature_summary[6][0], 3)
-        - np.round(feature_summary[6][1], 3),
+        "first_name_diff": np.round(feature_summary[0][0], 3) - np.round(feature_summary[0][1], 3),
+        "affilition_diff": np.round(feature_summary[1][0], 3) - np.round(feature_summary[1][1], 3),
+        "email_diff": np.round(feature_summary[2][0], 3) - np.round(feature_summary[2][1], 3),
+        "abstract_diff": np.round(feature_summary[3][0], 3) - np.round(feature_summary[3][1], 3),
+        "venue_diff": np.round(feature_summary[4][0], 3) - np.round(feature_summary[4][1], 3),
+        "references_diff": np.round(feature_summary[5][0], 3) - np.round(feature_summary[5][1], 3),
+        "coauthors_diff": np.round(feature_summary[6][0], 3) - np.round(feature_summary[6][1], 3),
     }
 
     s2_feature_facet_scores = {
-        "first_name_diff": np.round(feature_summary[0][2], 3)
-        - np.round(feature_summary[0][3], 3),
-        "affilition_diff": np.round(feature_summary[1][2], 3)
-        - np.round(feature_summary[1][3], 3),
-        "email_diff": np.round(feature_summary[2][2], 3)
-        - np.round(feature_summary[2][3], 3),
-        "abstract_diff": np.round(feature_summary[3][2], 3)
-        - np.round(feature_summary[3][3], 3),
-        "venue_diff": np.round(feature_summary[4][2], 3)
-        - np.round(feature_summary[4][3], 3),
-        "references_diff": np.round(feature_summary[5][2], 3)
-        - np.round(feature_summary[5][3], 3),
-        "coauthors_diff": np.round(feature_summary[6][2], 3)
-        - np.round(feature_summary[6][3], 3),
+        "first_name_diff": np.round(feature_summary[0][2], 3) - np.round(feature_summary[0][3], 3),
+        "affilition_diff": np.round(feature_summary[1][2], 3) - np.round(feature_summary[1][3], 3),
+        "email_diff": np.round(feature_summary[2][2], 3) - np.round(feature_summary[2][3], 3),
+        "abstract_diff": np.round(feature_summary[3][2], 3) - np.round(feature_summary[3][3], 3),
+        "venue_diff": np.round(feature_summary[4][2], 3) - np.round(feature_summary[4][3], 3),
+        "references_diff": np.round(feature_summary[5][2], 3) - np.round(feature_summary[5][3], 3),
+        "coauthors_diff": np.round(feature_summary[6][2], 3) - np.round(feature_summary[6][3], 3),
     }
 
     return s2and_feature_facet_scores, s2_feature_facet_scores
@@ -246,9 +225,7 @@ def disparity_analysis(
         # skipping "-" which is present in gender
         if facet == "-":
             continue
-        s2and_average = sum(comb_s2and_facet_f1[facet]) / len(
-            comb_s2and_facet_f1[facet]
-        )
+        s2and_average = sum(comb_s2and_facet_f1[facet]) / len(comb_s2and_facet_f1[facet])
         s2_average = sum(comb_s2_facet_f1[facet]) / len(comb_s2_facet_f1[facet])
         keylist.append(facet[0:3])
         s2and_f1.append(s2and_average)
@@ -405,13 +382,9 @@ def main(
     gender_ethnicity_available: bool,
     use_cache: bool,
     custom_block_path: str,
-    embedding_suffix: str = "_specter.pickle",
+    embedding_suffix: str = "_specter.pickle"
 ):
-    if not os.path.exists(
-        os.path.join(
-            DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "metrics"
-        )
-    ):
+    if not os.path.exists(os.path.join(DATA_DIR, "experiments", experiment_name, f"seed_{random_seed}", "metrics")):
         os.makedirs(
             os.path.join(
                 DATA_DIR,
@@ -470,13 +443,10 @@ def main(
     NAMELESS_FEATURES_TO_USE = [
         feature_name
         for feature_name in FEATURES_TO_USE
-        if feature_name
-        not in {"name_similarity", "advanced_name_similarity", "name_counts"}
+        if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
     ]
 
-    FEATURIZER_INFO = FeaturizationInfo(
-        features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
-    )
+    FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
     NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
         features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
     )
@@ -515,9 +485,7 @@ def main(
         DATASETS_FOR_UNION.append("medline")
 
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
-    NAMELESS_MONOTONE_CONSTRAINTS = (
-        NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
-    )
+    NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
     NAN_VALUE = np.nan
 
     cluster_search_space: Dict[str, Any] = {
@@ -550,11 +518,7 @@ def main(
         pairwise_search_space = {}
 
     if UNION_MODELS:
-        DATASETS_TO_TRAIN = (
-            set(SOURCE_DATASET_NAMES)
-            .union(set(TARGET_DATASET_NAMES))
-            .union(set(DATASETS_FOR_UNION))
-        )
+        DATASETS_TO_TRAIN = set(SOURCE_DATASET_NAMES).union(set(TARGET_DATASET_NAMES)).union(set(DATASETS_FOR_UNION))
     else:
         DATASETS_TO_TRAIN = set(SOURCE_DATASET_NAMES).union(set(TARGET_DATASET_NAMES))
 
@@ -587,16 +551,12 @@ def main(
     logger.info("loaded name counts")
 
     datasets: Dict[str, Any] = {}
-    for dataset_name in tqdm(
-        DATASETS_TO_TRAIN, desc="Processing datasets and fitting base models"
-    ):
+    for dataset_name in tqdm(DATASETS_TO_TRAIN, desc="Processing datasets and fitting base models"):
         logger.info("")
         logger.info(f"processing dataset {dataset_name}")
         clusters_path: Optional[str] = None
         if dataset_name not in PAIRWISE_ONLY_DATASETS:
-            clusters_path = os.path.join(
-                DATA_DIR, dataset_name, dataset_name + "_clusters.json"
-            )
+            clusters_path = os.path.join(DATA_DIR, dataset_name, dataset_name + "_clusters.json")
             train_pairs_path = None
             val_pairs_path = None
             test_pairs_path = None
@@ -607,22 +567,16 @@ def main(
                 val_pairs_path = None
             test_pairs_path = os.path.join(DATA_DIR, dataset_name, "test_pairs.csv")
 
-        with open(
-            os.path.join(custom_block_path, "block_sigs_{}.json".format(dataset_name))
-        ) as f:
+        with open(os.path.join(custom_block_path, "block_sigs_{}.json".format(dataset_name))) as f:
             block_splits = json.load(f)
 
         logger.info(f"loading dataset {dataset_name}")
         anddata = ANDData(
-            signatures=os.path.join(
-                DATA_DIR, dataset_name, dataset_name + "_signatures.json"
-            ),
+            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="train",
-            specter_embeddings=os.path.join(
-                DATA_DIR, dataset_name, dataset_name + embedding_suffix
-            ),
+            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + embedding_suffix),
             clusters=clusters_path,
             train_blocks=block_splits["train"],
             val_blocks=block_splits["dev"],
@@ -647,9 +601,7 @@ def main(
         # if we sampled more training pairs than required, then we downsample
         if len(y_train) > N_TRAIN_PAIRS_SIZE:
             np.random.seed(random_seed)
-            subset_indices = np.random.choice(
-                len(y_train), size=N_TRAIN_PAIRS_SIZE, replace=False
-            )
+            subset_indices = np.random.choice(len(y_train), size=N_TRAIN_PAIRS_SIZE, replace=False)
             X_train = X_train[subset_indices, :]
             if nameless_X_train is not None:
                 nameless_X_train = nameless_X_train[subset_indices, :]
@@ -668,9 +620,7 @@ def main(
                 n_iter=N_ITER,
                 estimator=estimator,
                 search_space=pairwise_search_space,
-                monotone_constraints=MONOTONE_CONSTRAINTS
-                if USE_MONOTONE_CONSTRAINTS
-                else None,
+                monotone_constraints=MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                 random_state=random_seed,
             )
             pairwise_modeler.fit(X_train, y_train, X_val, y_val)
@@ -682,22 +632,14 @@ def main(
                     n_iter=N_ITER,
                     estimator=estimator,
                     search_space=pairwise_search_space,
-                    monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS
-                    if USE_MONOTONE_CONSTRAINTS
-                    else None,
+                    monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                     random_state=random_seed,
                 )
-                nameless_pairwise_modeler.fit(
-                    nameless_X_train, y_train, nameless_X_val, y_val
-                )
+                nameless_pairwise_modeler.fit(nameless_X_train, y_train, nameless_X_val, y_val)
                 logger.info(f"nameless pairwise fit for {dataset_name}")
 
-            distances_for_sparsity = [
-                1 - pred[1] for pred in pairwise_modeler.predict_proba(X_train)
-            ]
-            threshold = np.percentile(
-                distances_for_sparsity, [10, 20, 30, 40, 50, 60, 70, 80, 90]
-            )
+            distances_for_sparsity = [1 - pred[1] for pred in pairwise_modeler.predict_proba(X_train)]
+            threshold = np.percentile(distances_for_sparsity, [10, 20, 30, 40, 50, 60, 70, 80, 90])
             logger.info(f"Thresholds {threshold}")
 
             if dataset_name not in PAIRWISE_ONLY_DATASETS:
@@ -720,10 +662,7 @@ def main(
                 )
                 cluster.fit(anddata)
                 logger.info(f"clusterer fit for {dataset_name}")
-                logger.info(
-                    f"{dataset_name} best clustering parameters: "
-                    + str(cluster.best_params)
-                )
+                logger.info(f"{dataset_name} best clustering parameters: " + str(cluster.best_params))
 
         dataset: Dict[str, Any] = {}
         dataset["anddata"] = anddata
@@ -744,9 +683,7 @@ def main(
 
     if UNION_MODELS:
         unions = {}
-        for dataset_name_tuple in tqdm(
-            UNION_DATASETS_TO_TRAIN, desc="Fitting union models..."
-        ):
+        for dataset_name_tuple in tqdm(UNION_DATASETS_TO_TRAIN, desc="Fitting union models..."):
             logger.info("")
             logger.info("loading dataset for " + str(dataset_name_tuple))
             anddatas = [
@@ -755,36 +692,16 @@ def main(
                 if dataset_name not in PAIRWISE_ONLY_DATASETS
             ]
 
-            X_train = np.vstack(
-                [
-                    datasets[dataset_name]["X_train"]
-                    for dataset_name in dataset_name_tuple
-                ]
-            )
-            y_train = np.hstack(
-                [
-                    datasets[dataset_name]["y_train"]
-                    for dataset_name in dataset_name_tuple
-                ]
-            )
-            X_val = np.vstack(
-                [datasets[dataset_name]["X_val"] for dataset_name in dataset_name_tuple]
-            )
-            y_val = np.hstack(
-                [datasets[dataset_name]["y_val"] for dataset_name in dataset_name_tuple]
-            )
+            X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in dataset_name_tuple])
+            y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in dataset_name_tuple])
+            X_val = np.vstack([datasets[dataset_name]["X_val"] for dataset_name in dataset_name_tuple])
+            y_val = np.hstack([datasets[dataset_name]["y_val"] for dataset_name in dataset_name_tuple])
 
             nameless_X_train = np.vstack(
-                [
-                    datasets[dataset_name]["nameless_X_train"]
-                    for dataset_name in dataset_name_tuple
-                ]
+                [datasets[dataset_name]["nameless_X_train"] for dataset_name in dataset_name_tuple]
             )
             nameless_X_val = np.vstack(
-                [
-                    datasets[dataset_name]["nameless_X_val"]
-                    for dataset_name in dataset_name_tuple
-                ]
+                [datasets[dataset_name]["nameless_X_val"] for dataset_name in dataset_name_tuple]
             )
             logger.info("dataset loaded for " + str(dataset_name_tuple))
 
@@ -793,9 +710,7 @@ def main(
                 n_iter=N_ITER,
                 estimator=estimator,
                 search_space=pairwise_search_space,
-                monotone_constraints=MONOTONE_CONSTRAINTS
-                if USE_MONOTONE_CONSTRAINTS
-                else None,
+                monotone_constraints=MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                 random_state=random_seed,
             )
             union_classifier.fit(X_train, y_train, X_val, y_val)
@@ -808,24 +723,16 @@ def main(
                     n_iter=N_ITER,
                     estimator=estimator,
                     search_space=pairwise_search_space,
-                    monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS
-                    if USE_MONOTONE_CONSTRAINTS
-                    else None,
+                    monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                     random_state=random_seed,
                 )
-                nameless_union_classifier.fit(
-                    nameless_X_train, y_train, nameless_X_val, y_val
-                )
+                nameless_union_classifier.fit(nameless_X_train, y_train, nameless_X_val, y_val)
                 logger.info("nameless pairwise fit for " + str(dataset_name_tuple))
 
             union_clusterer: Optional[Clusterer] = None
             if len(anddatas) > 0:
-                distances_for_sparsity = [
-                    1 - pred[1] for pred in union_classifier.predict_proba(X_train)
-                ]
-                threshold = np.percentile(
-                    distances_for_sparsity, [10, 20, 30, 40, 50, 60, 70, 80, 90]
-                )
+                distances_for_sparsity = [1 - pred[1] for pred in union_classifier.predict_proba(X_train)]
+                threshold = np.percentile(distances_for_sparsity, [10, 20, 30, 40, 50, 60, 70, 80, 90])
                 logger.info(f"Thresholds {threshold}")
 
                 logger.info("fitting clusterer for " + str(dataset_name_tuple))
@@ -860,10 +767,7 @@ def main(
 
                 union_clusterer.fit(anddatas)
                 logger.info("clusterer fit for " + str(dataset_name_tuple))
-                logger.info(
-                    f"{dataset_name_tuple} best clustering parameters: "
-                    + str(union_clusterer.best_params)
-                )
+                logger.info(f"{dataset_name_tuple} best clustering parameters: " + str(union_clusterer.best_params))
 
             models: Dict[str, Any] = {}
             models["pairwise_modeler"] = union_classifier
@@ -896,9 +800,7 @@ def main(
     # transfer of individual models
     if INDIVIDUAL_MODELS:
         logger.info("starting individual model evaluation")
-        for _, source_dataset in tqdm(
-            datasets.items(), desc="Evaluating individual models"
-        ):
+        for _, source_dataset in tqdm(datasets.items(), desc="Evaluating individual models"):
             for _, target_dataset in datasets.items():
                 if not (source_dataset["name"] in SOURCE_DATASET_NAMES) or (
                     not target_dataset["name"] in TARGET_DATASET_NAMES
@@ -906,9 +808,7 @@ def main(
                     continue
 
                 logger.info("")
-                logger.info(
-                    f"evaluating source {source_dataset['name']} target {target_dataset['name']}"
-                )
+                logger.info(f"evaluating source {source_dataset['name']} target {target_dataset['name']}")
                 pairwise_metrics, cluster_metrics, _ = transfer_helper(
                     source_dataset,
                     target_dataset,
@@ -922,30 +822,16 @@ def main(
                 b3_f1_grid[SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1][
                     TARGET_DATASET_NAMES.index(target_dataset["name"]) + 1
                 ] = cluster_metrics["B3 (P, R, F1)"][2]
-                pairwise_auroc_grid[
-                    SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1
-                ][
+                pairwise_auroc_grid[SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1][
                     TARGET_DATASET_NAMES.index(target_dataset["name"]) + 1
-                ] = pairwise_metrics[
-                    "AUROC"
-                ]
-                true_bigger_ratios_and_counts_grid[
-                    SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1
-                ][
+                ] = pairwise_metrics["AUROC"]
+                true_bigger_ratios_and_counts_grid[SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1][
                     TARGET_DATASET_NAMES.index(target_dataset["name"]) + 1
-                ] = cluster_metrics[
-                    "True bigger ratio (mean, count)"
-                ]
-                pred_bigger_ratios_and_counts_grid[
-                    SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1
-                ][
+                ] = cluster_metrics["True bigger ratio (mean, count)"]
+                pred_bigger_ratios_and_counts_grid[SOURCE_DATASET_NAMES.index(source_dataset["name"]) + 1][
                     TARGET_DATASET_NAMES.index(target_dataset["name"]) + 1
-                ] = cluster_metrics[
-                    "Pred bigger ratio (mean, count)"
-                ]
-                logger.info(
-                    f"finished evaluating source {source_dataset['name']} target {target_dataset['name']}"
-                )
+                ] = cluster_metrics["Pred bigger ratio (mean, count)"]
+                logger.info(f"finished evaluating source {source_dataset['name']} target {target_dataset['name']}")
         logger.info("finished individual model evaluation")
 
     # union
@@ -1006,11 +892,7 @@ def main(
 
             source_dataset = unions[dataset_name_tuple]
 
-            (
-                pairwise_metrics,
-                cluster_metrics,
-                b3_metrics_per_signature,
-            ) = transfer_helper(
+            (pairwise_metrics, cluster_metrics, b3_metrics_per_signature,) = transfer_helper(
                 source_dataset,
                 target_dataset,
                 experiment_name,
@@ -1020,11 +902,7 @@ def main(
                 skip_shap=use_linear_pairwise_model,  # skip SHAP if not using default model
             )
 
-            (
-                s2_pairwise_metrics,
-                s2_cluster_metrics,
-                s2_b3_metrics_per_signature,
-            ) = transfer_helper(
+            (s2_pairwise_metrics, s2_cluster_metrics, s2_b3_metrics_per_signature,) = transfer_helper(
                 source_dataset,
                 target_dataset,
                 experiment_name,
@@ -1053,9 +931,7 @@ def main(
                     references_f1,
                     coauthors_f1,
                     signature_wise_facets,
-                ) = facet_eval(
-                    target_dataset["anddata"], b3_metrics_per_signature, BLOCK_TYPE
-                )
+                ) = facet_eval(target_dataset["anddata"], b3_metrics_per_signature, BLOCK_TYPE)
                 union_signature_wise_facets[target_name] = signature_wise_facets
 
                 (
@@ -1125,9 +1001,7 @@ def main(
                     s2_references_f1,
                     s2_coauthors_f1,
                     s2_signature_wise_facets,
-                ) = facet_eval(
-                    target_dataset["anddata"], s2_b3_metrics_per_signature, BLOCK_TYPE
-                )
+                ) = facet_eval(target_dataset["anddata"], s2_b3_metrics_per_signature, BLOCK_TYPE)
                 union_s2_signature_wise_facets[target_name] = s2_signature_wise_facets
 
                 (
@@ -1179,9 +1053,9 @@ def main(
                     union_s2_coauthors_f1,
                 )
 
-            b3_f1_grid[len(SOURCE_DATASET_NAMES) + 1][
-                TARGET_DATASET_NAMES.index(target_name) + 1
-            ] = cluster_metrics["B3 (P, R, F1)"][2]
+            b3_f1_grid[len(SOURCE_DATASET_NAMES) + 1][TARGET_DATASET_NAMES.index(target_name) + 1] = cluster_metrics[
+                "B3 (P, R, F1)"
+            ][2]
             pairwise_auroc_grid[len(SOURCE_DATASET_NAMES) + 1][
                 TARGET_DATASET_NAMES.index(target_name) + 1
             ] = pairwise_metrics["AUROC"]
@@ -1189,9 +1063,9 @@ def main(
                 TARGET_DATASET_NAMES.index(target_name) + 1
             ] = cluster_metrics["True bigger ratio (mean, count)"]
 
-            b3_f1_grid[len(SOURCE_DATASET_NAMES) + 2][
-                TARGET_DATASET_NAMES.index(target_name) + 1
-            ] = s2_cluster_metrics["B3 (P, R, F1)"][2]
+            b3_f1_grid[len(SOURCE_DATASET_NAMES) + 2][TARGET_DATASET_NAMES.index(target_name) + 1] = s2_cluster_metrics[
+                "B3 (P, R, F1)"
+            ][2]
             pairwise_auroc_grid[len(SOURCE_DATASET_NAMES) + 2][
                 TARGET_DATASET_NAMES.index(target_name) + 1
             ] = s2_pairwise_metrics["AUROC"]
@@ -1206,12 +1080,8 @@ def main(
             logger.info(f"finished evaluating union for {target_name}")
         logger.info("finished evaluating unions")
 
-        if not os.path.exists(
-            os.path.join(DATA_DIR, "experiments", experiment_name, "facets")
-        ):
-            os.makedirs(
-                os.path.join(DATA_DIR, "experiments", experiment_name, "facets")
-            )
+        if not os.path.exists(os.path.join(DATA_DIR, "experiments", experiment_name, "facets")):
+            os.makedirs(os.path.join(DATA_DIR, "experiments", experiment_name, "facets"))
 
         s2and_feature_summary, s2_feature_summary = summary_features_analysis(
             union_firstname_f1,
@@ -1254,9 +1124,7 @@ def main(
 
         if gender_ethnicity_available:
             gender_disparity = disparity_analysis(union_gender_f1, union_s2_gender_f1)
-            ethnicity_disparity = disparity_analysis(
-                union_ethnicity_f1, union_s2_ethnicity_f1
-            )
+            ethnicity_disparity = disparity_analysis(union_ethnicity_f1, union_s2_ethnicity_f1)
 
             logger.info("")
             logger.info("disparity analysis")
@@ -1320,9 +1188,7 @@ def main(
             index=False,
         )
 
-        facet_fig_path = os.path.join(
-            DATA_DIR, "experiments", experiment_name, "facets"
-        )
+        facet_fig_path = os.path.join(DATA_DIR, "experiments", experiment_name, "facets")
 
         plot_facets(
             union_gender_f1,
@@ -1469,9 +1335,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to exclude medline in experiments",
     )
-    parser.add_argument(
-        "--linkage", type=str, default="average", help="What linkage function to use"
-    )
+    parser.add_argument("--linkage", type=str, default="average", help="What linkage function to use")
     parser.add_argument(
         "--use_dbscan",
         action="store_true",
@@ -1547,7 +1411,7 @@ if __name__ == "__main__":
             args.gender_ethnicity_available,
             args.use_cache,
             args.custom_block_path,
-            args.emb_suffix,
+            args.emb_suffix
         )
         multi_b3_grid.append(b3_f1_grid)
         multi_pairwise_auroc_grid.append(pairwise_auroc_grid)
@@ -1571,13 +1435,8 @@ if __name__ == "__main__":
         for j in range(1, len(average_b3_f1_grid[0])):
             if average_b3_f1_grid[i][j] is not None and average_b3_f1_grid[i][j] != "":
                 average_b3_f1_grid[i][j] = average_b3_f1_grid[i][j] / len(multi_b3_grid)
-            if (
-                average_pairwise_auroc_grid[i][j] is not None
-                and average_pairwise_auroc_grid[i][j] != ""
-            ):
-                average_pairwise_auroc_grid[i][j] = average_pairwise_auroc_grid[i][
-                    j
-                ] / len(multi_pairwise_auroc_grid)
+            if average_pairwise_auroc_grid[i][j] is not None and average_pairwise_auroc_grid[i][j] != "":
+                average_pairwise_auroc_grid[i][j] = average_pairwise_auroc_grid[i][j] / len(multi_pairwise_auroc_grid)
 
     print("Average B3 F1:")
     b3_df = pd.DataFrame(average_b3_f1_grid)
@@ -1587,22 +1446,16 @@ if __name__ == "__main__":
     pairwise_df = pd.DataFrame(average_pairwise_auroc_grid)
     print(pairwise_df)
     with open(
-        os.path.join(
-            DATA_DIR, "experiments", args.experiment_name, "average_full_grid.json"
-        ),
+        os.path.join(DATA_DIR, "experiments", args.experiment_name, "average_full_grid.json"),
         "w",
     ) as _json_file:
-        json.dump(
-            {"b3": average_b3_f1_grid, "auroc": average_pairwise_auroc_grid}, _json_file
-        )
+        json.dump({"b3": average_b3_f1_grid, "auroc": average_pairwise_auroc_grid}, _json_file)
 
     b3_df.to_csv(
         os.path.join(DATA_DIR, "experiments", args.experiment_name, "average_b3.csv"),
         index=False,
     )
     pairwise_df.to_csv(
-        os.path.join(
-            DATA_DIR, "experiments", args.experiment_name, "average_pairwise.csv"
-        ),
+        os.path.join(DATA_DIR, "experiments", args.experiment_name, "average_pairwise.csv"),
         index=False,
     )

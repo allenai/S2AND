@@ -535,7 +535,7 @@ class Clusterer:
     ):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
-        in using the cluster_seeds parameter of the dataset class, and skips work by simply assigning each
+        in using the cluster_seeds_require parameter of the dataset class, and skips work by simply assigning each
         unassigned signature to the closest cluster if distance is less than eps, and then separately cluster all
         the unassigned signatures that are not within eps of any existing cluster.
 
@@ -553,7 +553,7 @@ class Clusterer:
         Parameters
         ----------
         block_signatures: List[str]
-            the signatures in the block to predict from
+            the signature ids in the block to predict from
         dataset: ANDData
             the dataset
         prevent_new_incompatibilities: bool

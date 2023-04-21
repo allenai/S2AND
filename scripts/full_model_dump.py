@@ -7,13 +7,12 @@ CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
-os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "8"
 
 import numpy as np
 import logging
 import pickle
 
-# create logger with 'spam_application'
 logger = logging.getLogger("s2and")
 
 from tqdm import tqdm
@@ -25,6 +24,11 @@ from s2and.featurizer import featurize, FeaturizationInfo
 from s2and.model import PairwiseModeler, Clusterer, FastCluster
 from s2and.consts import FEATURIZER_VERSION
 from hyperopt import hp
+
+SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][1]
+SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]
+
+USE_CACHE = True
 
 search_space = {
     "eps": hp.uniform("choice", 0, 1),
@@ -108,11 +112,11 @@ def main():
 
         logger.info(f"loading dataset {dataset_name}")
         anddata = ANDData(
-            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
+            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + SIGNATURES_SUFFIX),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="train",
-            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
+            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + SPECTER_SUFFIX),
             clusters=clusters_path,
             block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
@@ -129,7 +133,7 @@ def main():
             anddata,
             FEATURIZER_INFO,
             n_jobs=N_JOBS,
-            use_cache=True,
+            use_cache=USE_CACHE,
             chunk_size=100,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=NAN_VALUE,
@@ -197,7 +201,7 @@ def main():
         cluster_model=FastCluster(),
         search_space=search_space,
         n_jobs=N_JOBS,
-        use_cache=True,
+        use_cache=USE_CACHE,
         nameless_classifier=nameless_union_classifier.classifier if nameless_union_classifier is not None else None,
         nameless_featurizer_info=NAMELESS_FEATURIZER_INFO if nameless_union_classifier is not None else None,
     )

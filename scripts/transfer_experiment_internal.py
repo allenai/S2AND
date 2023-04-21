@@ -1,6 +1,10 @@
 import os
 import json
 
+# this is from when we updated S2AND with SPECTER2 and also with S2AFF outputs
+SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][1]
+SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]
+
 CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
@@ -50,7 +54,7 @@ pd.set_option("display.max_colwidth", None)
 PAIRWISE_ONLY_DATASETS = {"medline", "augmented"}
 BLOCK_TYPE = "s2"
 N_VAL_TEST_SIZE = 10000
-N_ITER = 25
+N_ITER = 50
 PREPROCESS = True
 
 
@@ -424,7 +428,7 @@ def main(
         "venue_similarity",
         "year_diff",
         "title_similarity",
-        "reference_features",
+        # "reference_features",
         "misc_features",
         "name_counts",
         "embedding_similarity",
@@ -567,11 +571,11 @@ def main(
 
         logger.info(f"loading dataset {dataset_name}")
         anddata = ANDData(
-            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + "_signatures.json"),
+            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + SIGNATURES_SUFFIX),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
             name=dataset_name,
             mode="train",
-            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
+            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + SPECTER_SUFFIX),
             clusters=clusters_path,
             block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
@@ -1285,7 +1289,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use the nameless model",
     )
-    parser.add_argument("--n_jobs", type=int, default=1, help="How many cpus to use")
+    parser.add_argument("--n_jobs", type=int, default=8, help="How many cpus to use")
     parser.add_argument(
         "--dont_use_monotone_constraints",
         action="store_true",

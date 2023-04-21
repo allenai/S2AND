@@ -1,8 +1,8 @@
 """
-In this script we try to answer the question: if we deploy S2AFF, will S2AND care?
+In this script we try to answer the question: if we deploy SPECTER2, will S2AND care?
 
 That is, if we use official linked ROR affiliation names instead of raw affiliations, will the S2AND
-output change? Will we have to retrain? 
+output change? Will we have to retrain?
 
 Performance with original data, per dataset (B3): [0.979, 0.978, 0.959, 0.984, 0.969, 0.961] 0.9716666666666667
 Performance with SPECTER2-replaced data, per dataset (B3): [0.979, 0.978, 0.959, 0.984, 0.969, 0.961] 0.9716666666666667
@@ -178,7 +178,6 @@ import pickle
 import numpy as np
 from s2and.data import ANDData
 from s2and.eval import cluster_eval
-import matplotlib.pyplot as plt
 import seaborn as sns
 import json
 
@@ -194,19 +193,15 @@ import pickle
 
 logger = logging.getLogger("s2and")
 
-from tqdm import tqdm
-
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 from random import shuffle
 from s2and.data import ANDData
 from s2and.featurizer import featurize, FeaturizationInfo
-from s2and.model import PairwiseModeler, Clusterer, FastCluster
+from s2and.model import PairwiseModeler, Clusterer
 from s2and.eval import b3_precision_recall_fscore
 from s2and.consts import FEATURIZER_VERSION
 
 sns.set(context="talk")
-
-import itertools
 
 SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"]
 SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]

@@ -33,7 +33,12 @@ if not os.path.exists(FASTTEXT_PATH):
 
 # feature caching related consts
 CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and")))
-FEATURIZER_VERSION = 1
+"""
+Incrementation history
+1 - initial version
+2 - changed to SPECTERv2
+"""
+FEATURIZER_VERSION = 2
 
 # important constant values
 NUMPY_NAN = np.nan

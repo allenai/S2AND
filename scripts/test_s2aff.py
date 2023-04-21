@@ -2,7 +2,7 @@
 In this script we try to answer the question: if we deploy S2AFF, will S2AND care?
 
 That is, if we use official linked ROR affiliation names instead of raw affiliations, will the S2AND
-output change? Will we have to retrain? 
+output change? Will we have to retrain?
 
 Performance with original data, per dataset (B3): [0.979, 0.978, 0.959, 0.984, 0.969, 0.961] 0.9716666666666667
 Performance with S2AFF-replaced data, per dataset (B3): [0.979, 0.978, 0.959, 0.984, 0.969, 0.961] 0.9716666666666667
@@ -38,23 +38,25 @@ datasets = [
 with open("data/model_dump.pickle", "rb") as f:
     clusterer = pickle.load(f)["clusterer"]
     clusterer.use_cache = False
-    
+
 with open("data/model_dump_specter2.pickle", "rb") as f:
     clusterer2 = pickle.load(f)["clusterer"]
     clusterer2.use_cache = False
+
 
 def extract_a_nice_trials_object(clusterer):
     trials = clusterer.hyperopt_trials_store.trials
     eps = []
     losses = []
     for trial in trials:
-        eps.append(trial['misc']['vals']['choice'][0])
-        losses.append(-trial['result']['loss'])
+        eps.append(trial["misc"]["vals"]["choice"][0])
+        losses.append(-trial["result"]["loss"])
     # sort both by eps
     sort_indices = np.argsort(eps)
     eps = np.array(eps)[sort_indices]
     losses = np.array(losses)[sort_indices]
     return {i: j for i, j in zip(eps, losses)}
+
 
 trials1 = extract_a_nice_trials_object(clusterer)
 trials2 = extract_a_nice_trials_object(clusterer2)
@@ -111,25 +113,13 @@ for i in range(len(datasets)):
     print(f"Performance with original data, on {datasets[i]} (B3): {result_og[i]['B3 (P, R, F1)']}")
     print(f"Performance with S2AFF-replaced data, on {datasets[i]} dataset (B3): {result_s2aff[i]['B3 (P, R, F1)']}")
     print()
-    
-    
-
-
-
-
-
-
-
-
-
 
 
 # dive in
-import numpy as np
 from s2and.featurizer import featurize
 from s2and.consts import DEFAULT_CHUNK_SIZE
 
-dataset_name = 'pubmed'
+dataset_name = "pubmed"
 
 DATA_DIR = "/net/nfs2.s2-research/phantasm/S2AND/s2and_mini/"
 anddata1 = ANDData(
@@ -174,7 +164,6 @@ anddata2 = ANDData(
 )
 
 
-
 cluster_metrics1, b3_metrics_per_signature1 = cluster_eval(
     anddata1,
     clusterer,
@@ -192,12 +181,20 @@ cluster_metrics2, b3_metrics_per_signature2 = cluster_eval(
 # find keys where b3_metrics_per_signature1 != b3_metrics_per_signature2
 for key in b3_metrics_per_signature1.keys():
     if b3_metrics_per_signature1[key] != b3_metrics_per_signature2[key]:
-        print('-----------')
-        print('B3 (p, r, f1) for original aff:'  , b3_metrics_per_signature1[key])
-        print('B3 (p, r, f1) for s2aff:', b3_metrics_per_signature2[key])
+        print("-----------")
+        print("B3 (p, r, f1) for original aff:", b3_metrics_per_signature1[key])
+        print("B3 (p, r, f1) for s2aff:", b3_metrics_per_signature2[key])
         # print the actual signatures from both anddata1 and anddata2
-        print('Original aff:', anddata1.signatures[key].author_info_affiliations, anddata1.signatures[key].author_info_full_name)
-        print('S2AFF map:', anddata2.signatures[key].author_info_affiliations, anddata2.signatures[key].author_info_full_name)
+        print(
+            "Original aff:",
+            anddata1.signatures[key].author_info_affiliations,
+            anddata1.signatures[key].author_info_full_name,
+        )
+        print(
+            "S2AFF map:",
+            anddata2.signatures[key].author_info_affiliations,
+            anddata2.signatures[key].author_info_full_name,
+        )
 
 
 featurization_info = clusterer.featurizer_info
@@ -209,7 +206,7 @@ X_test1, y_test1, nameless_X_test1 = test1
 _, _, test2 = featurize(anddata2, featurization_info, n_jobs=4, use_cache=False, chunk_size=DEFAULT_CHUNK_SIZE, nameless_featurizer_info=nameless_featurization_info, nan_value=np.nan)  # type: ignore
 X_test2, y_test2, nameless_X_test2 = test2
 
-aff_ind = featurization_info.get_feature_names().index('affiliation_overlap')
+aff_ind = featurization_info.get_feature_names().index("affiliation_overlap")
 diff = X_test2[:, aff_ind] - X_test1[:, aff_ind]
 diff = diff[~np.isnan(diff)]
 np.mean(diff != 0) * 100

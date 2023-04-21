@@ -262,7 +262,7 @@ for dataset_name in ["aminer", "arnetminer", "kisti", "qian", "zbmath", "inspire
 
     """
     the way that clusterer.predict_incremental works is that we have to populate anddata.cluster_seeds
-    so here is what we do: 
+    so here is what we do:
 
     (0) pick a random block
     (1) split up the block signatures above into train and test 0.9 and 0.1

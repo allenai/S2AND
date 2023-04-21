@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """
 In this script we try to answer the question: if we deploy SPECTER2, will S2AND care?
 

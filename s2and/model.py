@@ -466,7 +466,7 @@ class Clusterer:
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         use_s2_clusters: bool = False,
         incremental_dont_use_cluster_seeds: bool = False,
-        use_predict_incremental_on_single_letter_first_names: Optional[bool] = None,
+        use_predict_incremental_on_single_letter_first_names: Optional[bool] = False,
     ) -> Tuple[Dict[str, List[str]], Optional[Dict[str, np.ndarray]]]:
         """
         Predicts clusters
@@ -492,7 +492,7 @@ class Clusterer:
             and then running predict incremental on the single letter first names. To do this, we have to run one block
             at a time, so it's a good idea to not do this for the S2AND data and only do it for production data where
             we pass in one block at a time.
-            Default is None, which will be True when block_dict has a single block and it's big (above 6000) and False otherwise
+            Default is False
         Returns
         -------
         Dict: the predicted clusters

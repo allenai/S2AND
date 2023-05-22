@@ -394,10 +394,10 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         email_2 = email_2 if "@" in email_2 else email_2 + "@MISSING"
         split_email_1 = email_1.split("@")
         split_email_2 = email_2.split("@")
-        email_prefix_1 = "".join(split_email_1[:-1])
-        email_prefix_2 = "".join(split_email_2[:-1])
-        email_suffix_1 = split_email_1[-1]
-        email_suffix_2 = split_email_2[-1]
+        email_prefix_1 = "".join(split_email_1[:-1]).strip(".")
+        email_prefix_2 = "".join(split_email_2[:-1]).strip(".")
+        email_suffix_1 = split_email_1[-1].strip(".")
+        email_suffix_2 = split_email_2[-1].strip(".")
 
     features.extend(
         [
@@ -640,11 +640,11 @@ def many_pairs_featurize(
 
     if cache_changed:
         if n_jobs > 1:
-            logger.info(f"Cached changed, doing {len(pieces_of_work)} work in parallel")
+            logger.info(f"Cached changed, making {len(pieces_of_work)} feature vectors in parallel")
             with multiprocessing.Pool(processes=n_jobs if len(pieces_of_work) > 1000 else 1) as p:
                 _max = len(pieces_of_work)
                 with tqdm(total=_max, desc="Doing work", disable=_max <= 10000) as pbar:
-                    for (feature_output, index) in p.imap(
+                    for feature_output, index in p.imap(
                         functools.partial(parallel_helper, worker_func=_single_pair_featurize),
                         pieces_of_work,
                         min(chunk_size, max(1, int((_max / n_jobs) / 2))),
@@ -657,7 +657,7 @@ def many_pairs_featurize(
                         features[index, :] = feature_output
                         pbar.update()
         else:
-            logger.info(f"Cached changed, doing {len(pieces_of_work)} work in serial")
+            logger.info(f"Cached changed, making {len(pieces_of_work)} feature vectors in serial")
             partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
             for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
                 result = partial_func(piece)
@@ -669,6 +669,7 @@ def many_pairs_featurize(
         logger.info("Work completed")
 
     if use_cache and cache_changed:
+        # TODO: figure out how not to write to cache so often because it takes forever with giant data
         logger.info("Writing to on disk cache")
         featurizer_info.write_cache(cached_features, dataset.name)
         logger.info(f"Cache written with {len(cached_features['features'])} keys.")
@@ -695,7 +696,7 @@ def many_pairs_featurize(
         nameless_features = features[:, nameless_indices_to_use]
         nameless_features[np.isnan(nameless_features)] = nan_value
     else:
-        nameless_features = None
+        nameless_features = None  # type: ignore
 
     features = features[:, indices_to_use]
     features[np.isnan(features)] = nan_value

@@ -193,7 +193,7 @@ class Clusterer:
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         disable_tqdm: bool = False,
         incremental_dont_use_cluster_seeds: bool = False,
-    ) -> Dict[str, np.array]:
+    ) -> Dict[str, np.ndarray]:
         """
         Creates the distance matrices for the input blocks.
         Note: This function is much more complicated than it needs to be in an
@@ -231,7 +231,7 @@ class Clusterer:
                 pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
             pairwise_probas[block_key] = pairwise_proba
 
-        logger.info("Pairwise probas initialized, starting making all pairs")
+        logger.info(f"Pairwise probas initialized with {num_pairs} elements, starting making all pairs")
 
         # featurize and predict in batches
         helper_output = self.distance_matrix_helper(
@@ -250,7 +250,6 @@ class Clusterer:
             pairs = []
             indices = []
             blocks = []
-            logger.info("Getting constraints")
             # iterate over a batch_size number of pairs
             for item in helper_output:
                 pairs.append(item[0])
@@ -275,13 +274,13 @@ class Clusterer:
             # get predictions where there isn't partial supervision
             # and fill the rest with partial supervision
             # undoing the offset by LARGE_INTEGER from above
-            logger.info("Making predict flags")
+            logger.info("Making predict flags to separate partial supervision from prediction")
             batch_labels = np.array([i[2] for i in pairs])
             predict_flag = np.isnan(batch_labels)
             not_predict_flag = ~predict_flag
             batch_predictions = np.zeros(len(batch_features))
             # index 0 is p(not the same)
-            logger.info("Pairwise classification")
+            logger.info("Doing pairwise classification")
             if np.any(predict_flag):
                 if self.nameless_classifier is not None:
                     batch_predictions[predict_flag] = (
@@ -297,7 +296,7 @@ class Clusterer:
             if np.any(not_predict_flag):
                 batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
-            logger.info("Starting to make matrices")
+            logger.info("Constructing distance matrices")
             for within_batch_index, (prediction, signature_pair) in tqdm(
                 enumerate(zip(batch_predictions, pairs)),
                 total=len(batch_predictions),
@@ -335,7 +334,7 @@ class Clusterer:
     def fit(
         self,
         datasets: Union[ANDData, List[ANDData]],
-        val_dists_precomputed: Dict[str, Dict[str, np.array]] = None,
+        val_dists_precomputed: Dict[str, Dict[str, np.ndarray]] = None,
         metric_for_hyperopt: str = "b3",
     ) -> Clusterer:
         """
@@ -361,7 +360,7 @@ class Clusterer:
         val_block_dict_list = []
         val_cluster_to_signatures_list = []
         val_dists_list = []
-        weights = []
+        weights: List[float] = []
         for dataset in datasets:
             # blocks
             train_block_dict, val_block_dict, _ = dataset.split_cluster_signatures()
@@ -397,7 +396,12 @@ class Clusterer:
             for val_block_dict, val_cluster_to_signatures, val_dists in zip(
                 val_block_dict_list, val_cluster_to_signatures_list, val_dists_list
             ):
-                pred_clusters, _ = self.predict(val_block_dict, dataset=None, dists=val_dists)
+                pred_clusters, _ = self.predict(
+                    val_block_dict,
+                    dataset=None,
+                    dists=val_dists,
+                    use_predict_incremental_on_single_letter_first_names=False,
+                )
                 (
                     _,
                     _,
@@ -457,7 +461,138 @@ class Clusterer:
         self,
         block_dict: Dict[str, List[str]],
         dataset: ANDData,
-        dists: Optional[Dict[str, np.array]] = None,
+        dists: Optional[Dict[str, np.ndarray]] = None,
+        cluster_model_params: Optional[Dict[str, Any]] = None,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
+        use_s2_clusters: bool = False,
+        incremental_dont_use_cluster_seeds: bool = False,
+        use_predict_incremental_on_single_letter_first_names: Optional[bool] = None,
+    ) -> Tuple[Dict[str, List[str]], Optional[Dict[str, np.ndarray]]]:
+        """
+        Predicts clusters
+
+        Parameters
+        ----------
+        block_dict: Dict
+            the block dict to predict clusters from
+        dataset: ANDData
+            the dataset
+        dists: Dict
+            (optional) precomputed distance matrices
+        cluster_model_params: Dict
+            params to set on the cluster model
+        partial_supervision: Dict
+            the dictionary of partial supervision provided with this dataset/these blocks
+        use_s2_clusters: bool
+            whether to "predict" using the clusters from Semantic Scholar's old system
+        incremental_dont_use_cluster_seeds: bool
+            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
+        use_predict_incremental_on_single_letter_first_names: bool
+            Whether to remove all single letter first names from the block signatures, running full-block clustering
+            and then running predict incremental on the single letter first names. To do this, we have to run one block
+            at a time, so it's a good idea to not do this for the S2AND data and only do it for production data where
+            we pass in one block at a time.
+            Default is None, which will be True when block_dict has a single block and it's big (above 6000) and False otherwise
+        Returns
+        -------
+        Dict: the predicted clusters
+        Dict: the predicted distance matrices
+        """
+        if use_predict_incremental_on_single_letter_first_names is True and len(block_dict) > 1:
+            raise ValueError("use_predict_incremental_on_single_letter_first_names can be True if len(block_dict) == 1")
+
+        if use_predict_incremental_on_single_letter_first_names is None:
+            # a single block and it's big enough
+            use_predict_incremental_on_single_letter_first_names = (
+                len(block_dict) == 1 and len(block_dict[list(block_dict.keys())[0]]) > 6000
+            )
+            if use_predict_incremental_on_single_letter_first_names:
+                logger.info(
+                    "Block has more than 6000 signatures: setting use_predict_incremental_on_single_letter_first_names to True"
+                )
+
+        if use_predict_incremental_on_single_letter_first_names:
+            block_dict_no_single_letter_first_names = {
+                list(block_dict.keys())[0]: [
+                    i
+                    for i in block_dict[list(block_dict.keys())[0]]
+                    if len(dataset.signatures[i].author_info_first_normalized_without_apostrophe) > 1
+                ]
+            }
+
+            signatures_with_single_letter_first_names = [
+                i
+                for i in block_dict[list(block_dict.keys())[0]]
+                if len(dataset.signatures[i].author_info_first_normalized_without_apostrophe) <= 1
+            ]
+
+            # do normal predict on this modified block dict
+            logger.info("Running predict on block dict with single letter first names removed")
+            pred_clusters_intermediate, dists = self.predict_helper(
+                block_dict_no_single_letter_first_names,
+                dataset,
+                dists,
+                cluster_model_params,
+                partial_supervision,
+                use_s2_clusters,
+                incremental_dont_use_cluster_seeds,
+            )
+
+            # now we have to update dataset.cluster_seeds_require with what's in pred_clusters_intermediate
+            # remembering to undo the damage later
+            # why? because predict_incremental is all about assigning unassigned signatures to extant
+            # CLUSTERS which are in pred_clusters_intermediate
+            # but should be in cluster_seeds_require instead
+            cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
+
+            # it's possible that some of the signatures in pred_clusters_intermediate is ALREADY in cluster_seeds_require.
+            # for each cluster in pred_clusters_intermediate, we can see if any of them are already in cluster_seeds_require:
+            # if all of the ones that are have the same cluster assignment, then we can assign that cluster_id to all of the signatures in that cluster.
+            # it would be strange if there were multiple cluster_ids instead. in that case, we have to move the entire cluster into signatures_with_single_letter_first_names
+            for cluster_id, signatures in list(pred_clusters_intermediate.items()):
+                cluster_seeds_require_mappings = list(
+                    set([dataset.cluster_seeds_require[i] for i in signatures if i in dataset.cluster_seeds_require])
+                )
+                # none are in cluster_seeds_require -> assign all of them to existing cluster_id
+                if len(cluster_seeds_require_mappings) == 0:
+                    for i in signatures:
+                        dataset.cluster_seeds_require[i] = cluster_id  # type: ignore
+                # exactly one unique id is in cluster_seeds_require -> assign all of them to the cluster_seed_require id
+                elif len(cluster_seeds_require_mappings) == 1:
+                    for i in signatures:
+                        dataset.cluster_seeds_require[i] = cluster_seeds_require_mappings[0]
+                else:
+                    # we have to move this cluster into signatures_with_single_letter_first_names to be assigned as needed
+                    signatures_with_single_letter_first_names.extend(signatures)
+                    # and remove the cluster_id from pred_clusters_intermediate (although we won't use this variable again)
+                    del pred_clusters_intermediate[cluster_id]
+
+            logger.info("Running predict_incremental on single letter first names")
+            pred_clusters = self.predict_incremental(
+                signatures_with_single_letter_first_names, dataset, partial_supervision=partial_supervision
+            )
+            # undoing the damage
+            dataset.cluster_seeds_require = cluster_seeds_require_original
+
+        else:
+            # normal mode - everything goes through full block clustering
+            pred_clusters, dists = self.predict_helper(
+                block_dict,
+                dataset,
+                dists,
+                cluster_model_params,
+                partial_supervision,
+                use_s2_clusters,
+                incremental_dont_use_cluster_seeds,
+            )
+
+        return dict(pred_clusters), dists
+
+    def predict_helper(
+        self,
+        block_dict: Dict[str, List[str]],
+        dataset: ANDData,
+        dists: Optional[Dict[str, np.ndarray]] = None,
         cluster_model_params: Optional[Dict[str, Any]] = None,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         use_s2_clusters: bool = False,
@@ -531,7 +666,12 @@ class Clusterer:
         return dict(pred_clusters), dists
 
     def predict_incremental(
-        self, block_signatures: List[str], dataset: ANDData, prevent_new_incompatibilities: bool = True
+        self,
+        block_signatures: List[str],
+        dataset: ANDData,
+        prevent_new_incompatibilities: bool = True,
+        cutoff_for_full_block_clustering_of_unassigned: int = 2500,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
     ):
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
@@ -550,6 +690,8 @@ class Clusterer:
 
         Note: this function was designed to work on a single block at a time.
 
+        # TODO: what if the input size is too big? add an option to do this in batches to prevent memory issues
+
         Parameters
         ----------
         block_signatures: List[str]
@@ -557,19 +699,29 @@ class Clusterer:
         dataset: ANDData
             the dataset
         prevent_new_incompatibilities: bool
-            if True, prevents the addition to a cluster of new first names that are not prefix match,
+            if True, prevents the addition to a cluster of new first names that are not prefix match
             or in the name pairs list, for at least one existing name in the cluster. This can happen
             if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
             and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
             final cluster would have D Jones, David Jones, and Donald Jones.
-
+        cutoff_for_full_block_clustering_of_unassigned: int
+            if the number of unassigned signatures is less than this number, we will do a full block clustering
+            on the unassigned signatures first. this improves the quality of the incremental clustering by ensuring
+            that very similar unassigned signatures get clustered together. defaults to 2500
+        partial_supervision: Dict
+            the dictionary of partial supervision provided with this dataset/these blocks
         Returns
         -------
         Dict: the predicted clusters
         """
         recluster_map = {}
         cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
-        if dataset.altered_cluster_signatures is not None:
+        # splitting up the claimed profiles that we received from prod
+        # because the claimed profiles may be "unnatural" -> users joined papers that S2AND rules
+        # would never have allowed. when we are going to try to add new signatures to these claimed
+        # clusters, they should be "natural" looking to avoid impossible additions
+        # that would be prevented by the rules
+        if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
             altered_cluster_nums = set(
                 dataset.cluster_seeds_require[altered_signature_id]
                 for altered_signature_id in dataset.altered_cluster_signatures
@@ -588,8 +740,11 @@ class Clusterer:
                     # from production so that they align with s2and's predictions. When doing this, we
                     # don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
                     # s2and's predictions
-                    reclustered_output, _ = self.predict(
-                        {"block": signature_ids_for_cluster_num}, dataset, incremental_dont_use_cluster_seeds=True
+                    reclustered_output, _ = self.predict_helper(
+                        {"block": signature_ids_for_cluster_num},
+                        dataset,
+                        incremental_dont_use_cluster_seeds=True,
+                        partial_supervision=partial_supervision,
                     )
                     if len(reclustered_output) > 1:
                         for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):
@@ -599,13 +754,19 @@ class Clusterer:
                                 cluster_seeds_require[reclustered_signature_id] = new_cluster_num  # type: ignore
 
         all_pairs = []
+        unassigned_signatures = []
         for possibly_unassigned_signature in block_signatures:
             if possibly_unassigned_signature in cluster_seeds_require:
                 continue
             unassigned_signature = possibly_unassigned_signature
+            unassigned_signatures.append(unassigned_signature)
             for signature in cluster_seeds_require.keys():
                 label = np.nan
-                if self.use_default_constraints_as_supervision:
+                if (unassigned_signature, signature) in partial_supervision:
+                    label = partial_supervision[(unassigned_signature, signature)] - LARGE_INTEGER
+                elif (signature, unassigned_signature) in partial_supervision:
+                    label = partial_supervision[(signature, unassigned_signature)] - LARGE_INTEGER
+                elif self.use_default_constraints_as_supervision:
                     value = dataset.get_constraint(
                         unassigned_signature,
                         signature,
@@ -615,6 +776,7 @@ class Clusterer:
                         label = value - LARGE_INTEGER
                 all_pairs.append((unassigned_signature, signature, label))
 
+        logger.info("Featurizing pairs for incremental clustering")
         batch_features, _, batch_nameless_features = many_pairs_featurize(
             all_pairs,
             dataset,
@@ -628,13 +790,13 @@ class Clusterer:
         # get predictions where there isn't partial supervision
         # and fill the rest with partial supervision
         # undoing the offset by LARGE_INTEGER from above
-        logger.info("Making predict flags")
-        batch_labels = np.array([i[2] for i in all_pairs])
+        logger.info("Making predict flags for incremental clustering")
+        batch_labels = np.array([i[2] for i in all_pairs])  # type: ignore
         predict_flag = np.isnan(batch_labels)
         not_predict_flag = ~predict_flag
         batch_predictions = np.zeros(len(batch_features))
         # index 0 is p(not the same)
-        logger.info("Pairwise classification")
+        logger.info("Pairwise classification for incremental clustering")
         if np.any(predict_flag):
             if self.nameless_classifier is not None:
                 batch_predictions[predict_flag] = (
@@ -648,7 +810,7 @@ class Clusterer:
         if np.any(not_predict_flag):
             batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
-        logger.info("Computing average distances for unassigned signatures")
+        logger.info("Computing average distances for unassigned signatures for incremental clustering")
         signature_to_cluster_to_average_dist: Dict[str, Dict[int, Tuple[float, int]]] = defaultdict(
             lambda: defaultdict(lambda: (0, 0))
         )
@@ -663,7 +825,76 @@ class Clusterer:
                 previous_count + 1,
             )
 
-        logger.info("Assigning unassigned signatures")
+        # NEW!
+        # first cluster the unassigned signatures and then check which resulting
+        # unassigned CLUSTERS to merge with extant ones (instead of which individual signatures to merge)
+
+        if len(unassigned_signatures) <= cutoff_for_full_block_clustering_of_unassigned:
+            logger.info("Batch clustering the unassigned signatures")
+            # no point in using use_predict_incremental_on_single_letter_first_names because that's what predict_incremental is used for anyway
+            incremental_only_clusters, _ = self.predict_helper(
+                {"incremental_unassigned": unassigned_signatures},
+                dataset,
+                partial_supervision=partial_supervision,
+            )
+        else:  # if there are too many incrementaly signatures, we first make subblocks out of them based on middle names
+            logger.info("Clustering the unassigned signatures by middle names only")
+            incremental_only_subblocks = {}
+            own_cluster_ind = 0
+            for signature in unassigned_signatures:
+                # make clusters out of middle names
+                # anything with no middle name gets its own cluster
+                key = dataset.signatures[signature].author_info_middle_normalized_without_apostrophe
+                if len(key) == 0:
+                    incremental_only_subblocks[str(own_cluster_ind)] = [signature]
+                    own_cluster_ind += 1
+                elif key not in incremental_only_subblocks:
+                    incremental_only_subblocks[key] = [signature]
+                else:
+                    incremental_only_subblocks[key].append(signature)
+            # in case some of the sub-blocks from middle names are STILL too big - just explode them into their own clusters
+            incremental_only_subblocks_to_cluster = {}
+            incremental_only_subblocks_keep_separate = {}
+            i = 0
+            for key, subblock in incremental_only_subblocks.items():
+                if len(subblock) > cutoff_for_full_block_clustering_of_unassigned:
+                    for signature in subblock:
+                        incremental_only_subblocks_to_cluster[str(i)] = [signature]
+                        i += 1
+                elif len(subblock) == 1:
+                    incremental_only_subblocks_keep_separate[str(i)] = subblock
+                    i += 1
+                else:
+                    incremental_only_subblocks_to_cluster[key] = subblock
+            incremental_only_clusters, _ = self.predict_helper(
+                incremental_only_subblocks_to_cluster,
+                dataset,
+                partial_supervision=partial_supervision,
+            )
+            incremental_only_clusters.update(incremental_only_subblocks_keep_separate)
+        logger.info(
+            f"Made {len(incremental_only_clusters)} clusters out of {len(unassigned_signatures)} unassigned signatures"
+        )
+
+        # now that we have the average dist from each unassigned_signature and each signatures per cluster_id
+        # we can average these averages to get the distance between the unassigned CLUSTERS and assigned CLUSTERS
+        cluster_ids = list(set(list(cluster_seeds_require.values())))
+        for _, unassigned_signatures in incremental_only_clusters.items():
+            # we have to average each of signature_to_cluster_to_average_dist[i][cluster_id] across i per cluster_id
+            # and then replace the value in signature_to_cluster_to_average_dist with this average
+            # this is equivalent to computing the average distance between the unassigned cluster and the assigned cluster
+            for cluster_id in cluster_ids:
+                dists = [
+                    signature_to_cluster_to_average_dist[signature][cluster_id][0]
+                    for signature in unassigned_signatures
+                ]
+                out = (np.mean(dists), len(dists))
+                for signature in unassigned_signatures:
+                    signature_to_cluster_to_average_dist[signature][cluster_id] = out  # type: ignore
+
+        # end NEW!
+
+        logger.info("Assigning unassigned signatures for incremental clustering")
         pred_clusters = defaultdict(list)
         singleton_signatures = []
         for signature_id, cluster_id in dataset.cluster_seeds_require.items():
@@ -731,12 +962,14 @@ class Clusterer:
             else:
                 singleton_signatures.append(unassigned_signature)
 
-        reclustered_output, _ = self.predict({"block": singleton_signatures}, dataset)
+        # all the singletons go through the clustering process again
+        reclustered_output, _ = self.predict_helper(
+            {"block": singleton_signatures}, dataset, partial_supervision=partial_supervision
+        )
         new_cluster_id = dataset.max_seed_cluster_id or 0
         for new_cluster in reclustered_output.values():
             pred_clusters[str(new_cluster_id)] = new_cluster
             new_cluster_id += 1
-
         logger.info("Returning incrementally predicted clusters")
         return dict(pred_clusters)
 
@@ -818,10 +1051,10 @@ class PairwiseModeler:
 
     def fit(
         self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
+        X_train: Union[np.ndarray[Any, Any], None, Any],
+        y_train: Union[np.ndarray[Any, Any], None, Any],
+        X_val: Union[np.ndarray[Any, Any], None, Any],
+        y_val: Union[np.ndarray[Any, Any], None, Any],
     ) -> Trials:
         """
         Fits the classifier
@@ -929,7 +1162,7 @@ class VotingClassifier:
         return predictions
 
     def _collect_probas(self, X):
-        """Collect results from clf.predict calls. """
+        """Collect results from clf.predict calls."""
         return np.asarray([clf.predict_proba(X) for clf in self.estimators])
 
     def predict_proba(self, X):
@@ -977,7 +1210,7 @@ class VotingClassifier:
             return self._predict(X)
 
     def _predict(self, X):
-        """Collect results from clf.predict calls. """
+        """Collect results from clf.predict calls."""
         return np.asarray([clf.predict(X) for clf in self.estimators]).T
 
 
@@ -1042,7 +1275,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.input_as_observation_matrix = input_as_observation_matrix
         self.labels_ = None
 
-    def fit(self, X: np.array) -> np.array:
+    def fit(self, X: np.ndarray) -> np.ndarray:
         """
         Fit the estimator on input data. The results are stored in self.labels_.
         Parameters
@@ -1074,7 +1307,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
         return self
 
-    def fit_transform(self, X: np.array) -> np.array:
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
         """
         Fit the estimator on input data, and returns results.
         Parameters
@@ -1089,7 +1322,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
         np.array: A N-length array of clustering labels.
         """
         self.fit(X)
-        return self.labels_
+        return self.labels_  # type: ignore
 
-    def transform(self, X: np.array):
+    def transform(self, X: np.ndarray):
         raise Exception("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")

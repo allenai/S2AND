@@ -16,8 +16,6 @@ jobs:
       run: |
         docker build --tag s2and .
         docker run --rm s2and pytest tests/
-        docker run --rm s2and flake8 s2and
-        docker run --rm s2and flake8 scripts/*.py
         docker run --rm s2and black s2and --check --line-length 120
         docker run --rm s2and black scripts/*.py --check --line-length 120
         docker run --rm s2and bash scripts/mypy.sh

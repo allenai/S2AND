@@ -9,7 +9,7 @@ To install this package, run the following:
 ```bash
 git clone https://github.com/allenai/S2AND.git
 cd S2AND
-conda create -y --name s2and python==3.7
+conda create -y --name s2and python==3.8.15
 conda activate s2and
 pip install -r requirements.in
 pip install -e .

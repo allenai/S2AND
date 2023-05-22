@@ -153,6 +153,7 @@ class ANDData:
         n_jobs: number of cpus to use
         preprocess: whether to preprocess the data (normalization, etc)
         name_tuples: optionally pass in the already created set of name tuples, to avoid recomputation
+            can be None or "filtered" or a set of name tuples
     """
 
     def __init__(
@@ -191,7 +192,7 @@ class ANDData:
         load_name_counts: Union[bool, Dict] = True,
         n_jobs: int = 1,
         preprocess: bool = True,
-        name_tuples: Set[Tuple[str, str]] = None,
+        name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -288,7 +289,7 @@ class ANDData:
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
         self.cluster_seeds_disallow = set()
-        self.cluster_seeds_require = {}
+        self.cluster_seeds_require = {}  # type: ignore
         self.max_seed_cluster_id = None
         if cluster_seeds_dict is not None:
             cluster_num = 0
@@ -380,14 +381,20 @@ class ANDData:
             self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
         self.preprocess = preprocess
 
-        if name_tuples is None:
+        if name_tuples == "filtered":
+            self.name_tuples = set()
+            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt"), "r") as f2:  # type: ignore
+                for line in f2:
+                    line_split = line.strip().split(",")  # type: ignore
+                    self.name_tuples.add((line_split[0], line_split[1]))
+        elif name_tuples is None:
             self.name_tuples = set()
             with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt"), "r") as f2:  # type: ignore
                 for line in f2:
                     line_split = line.strip().split(",")  # type: ignore
                     self.name_tuples.add((line_split[0], line_split[1]))
         else:
-            self.name_tuples = name_tuples
+            self.name_tuples = name_tuples  # type: ignore
 
         logger.info("preprocessing papers")
         self.papers = preprocess_papers_parallel(self.papers, self.n_jobs, self.preprocess)
@@ -443,6 +450,8 @@ class ANDData:
         for signature_id, signature in tqdm(self.signatures.items(), desc="Preprocessing signatures"):
             # our normalization scheme is to normalize first and middle separately,
             # join them, then take the first token of the combined join
+            # TODO: a lot of chinese names are not normalized correctly. they are names like Yue-Hua and Ying-Ying.
+            # we need some fix for these
             first_normalized = normalize_text(signature.author_info_first or "")
             first_normalized_without_apostrophe = normalize_text(
                 signature.author_info_first or "", special_case_apostrophes=True
@@ -504,11 +513,11 @@ class ANDData:
                     )
                     last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
                     counts = NameCounts(
-                        first=self.first_dict.get(signature.author_info_first_normalized, 1)
+                        first=self.first_dict.get(signature.author_info_first_normalized, 1)  # type: ignore
                         if len(signature.author_info_first_normalized) > 1
                         else np.nan,
                         last=self.last_dict.get(signature.author_info_last_normalized, 1),
-                        first_last=self.first_last_dict.get(first_last_for_count, 1)
+                        first_last=self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
                         if len(signature.author_info_first_normalized) > 1
                         else np.nan,
                         last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
@@ -745,10 +754,10 @@ class ANDData:
         # and then name based constraints
         else:
             signature_2 = self.signatures[signature_id_2]
-            prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
+            # either a known alias or a prefix of the other
+            # if neither, then we'll say it's impossible to be the same person
             known_alias = (first_1, first_2) in self.name_tuples
-            # dont cluster together if the two first names are not prefixes of each other, and the pair
-            # is not present in a provided list of known name pairs
+            prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
             if not prefix and not known_alias:
                 return high_value
             # dont cluster together if there is no intersection between the sets of middle initials

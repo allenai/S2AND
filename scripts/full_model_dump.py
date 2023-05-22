@@ -87,7 +87,7 @@ if NEGATIVE_ONE_FOR_NAN:
 else:
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
-    NAN_VALUE = np.nan
+    NAN_VALUE = np.nan  # type: ignore
 
 
 def main():

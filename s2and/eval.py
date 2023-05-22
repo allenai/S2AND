@@ -309,7 +309,6 @@ def facet_eval(
     signature_lookup = list()
 
     for signature_key, (p, r, f1) in metrics_per_signature.items():
-
         _signature_dict = dict()
 
         cluster_id = dataset.signature_to_cluster_id[signature_key]
@@ -428,8 +427,8 @@ def facet_eval(
 
 
 def pairwise_eval(
-    X: np.array,
-    y: np.array,
+    X: np.ndarray,
+    y: np.ndarray,
     classifier: Any,
     figs_path: str,
     title: str,
@@ -437,7 +436,7 @@ def pairwise_eval(
     thresh_for_f1: float = 0.5,
     shap_plot_type: Optional[str] = "dot",
     nameless_classifier: Optional[Any] = None,
-    nameless_X: Optional[np.array] = None,
+    nameless_X: Optional[np.ndarray] = None,
     nameless_feature_names: Optional[List[str]] = None,
     skip_shap: bool = False,
 ) -> Dict[str, float]:
@@ -766,7 +765,6 @@ def cluster_precision_recall_fscore(
                 goldpairs.add((sort_sign[i], sort_sign[j]))
 
     for _, signatures in pred_clus.items():
-
         if len(signatures) == 1:
             syspairs.add((signatures[0], signatures[0]))
             continue
@@ -830,18 +828,15 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
             rev_pred_clusters[vi] = k
 
     if strategy == "clusters":
-
         precision, recall, f1 = cluster_precision_recall_fscore(true_clus, pred_clus)
         return np.round(precision, 3), np.round(recall, 3), np.round(f1, 3)
 
     elif strategy == "cmacro":
-
         mprecision = 0
         mrecall = 0
         mf1 = 0
 
         for _, signatures in test_block.items():
-
             gtruth_block = {}
             prediction_block = {}
 

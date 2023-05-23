@@ -23,7 +23,7 @@ from s2and.model import PairwiseModeler, Clusterer
 
 data_original = "/net/nfs2.s2-research/phantasm/S2AND/s2and_mini/"
 
-specter_suffixes = ["_specter2.pkl", "_specter.pickle"]
+specter_suffixes = ["_specter2.pkl"]  # , "_specter.pickle"]
 
 random_seed = 42
 n_jobs = 4
@@ -102,6 +102,8 @@ for specter_suffix in specter_suffixes:
             load_name_counts=True,
             preprocess=True,
             random_seed=random_seed,
+            name_tuples="filtered",
+            use_prefix_for_rules=False,
         )
         train_block_dict, val_block_dict, test_block_dict = anddata.split_blocks_helper(anddata.get_blocks())
         num_test_blocks[dataset_name] = len(test_block_dict)

@@ -19,6 +19,7 @@ COPY requirements.in .
 
 # copy over the data file
 COPY data/s2and_name_tuples.txt ./data/
+COPY data/s2and_name_tuples_filtered.txt ./data/
 COPY data/path_config.json ./data/
 
 # add the code as the final step so that when we modify the code

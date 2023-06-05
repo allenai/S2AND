@@ -21,7 +21,7 @@ COPY requirements.in .
 COPY data/s2and_name_tuples.txt ./data/
 COPY data/s2and_name_tuples_filtered.txt ./data/
 COPY data/path_config.json ./data/
-copy data/first_k_letter_counts_from_orcid.json ./data/
+COPY data/first_k_letter_counts_from_orcid.json ./data/
 
 # add the code as the final step so that when we modify the code
 # we don't bust the cached layers holding the dependencies and
@@ -29,7 +29,6 @@ copy data/first_k_letter_counts_from_orcid.json ./data/
 COPY s2and/ s2and/
 COPY scripts/ scripts/
 COPY tests/ tests/
-COPY .flake8 .flake8
 
 RUN pip install -r requirements.in
 

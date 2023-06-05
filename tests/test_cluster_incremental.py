@@ -45,16 +45,12 @@ class TestClusterer(unittest.TestCase):
         # {'0': ['0', '1', '2'], '1': ['3', '4', '5', '8'], '2': ['6', '7']}
 
         block = ["3", "4", "5", "6", "7", "8"]
-        output = self.dummy_clusterer.predict_incremental(
-            block, self.dummy_dataset, cutoff_for_full_block_clustering_of_unassigned=0
-        )
+        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=3)
         expected_output = {"0": ["6", "7", "5"], "1": ["3", "4", "8"]}
         assert output == expected_output
 
         block = ["3", "4", "5", "6", "7", "8"]
-        output = self.dummy_clusterer.predict_incremental(
-            block, self.dummy_dataset, cutoff_for_full_block_clustering_of_unassigned=100
-        )
+        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=None)
         expected_output = {"0": ["6", "7"], "1": ["3", "4", "5", "8"]}
         assert output == expected_output
 
@@ -66,8 +62,6 @@ class TestClusterer(unittest.TestCase):
         self.dummy_dataset.altered_cluster_signatures = ["1", "5"]
         self.dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
         block = ["3", "4", "8"]
-        output = self.dummy_clusterer.predict_incremental(
-            block, self.dummy_dataset, cutoff_for_full_block_clustering_of_unassigned=0
-        )
-        expected_output = {"0": ["1", "2", "5", "3", "8"], "1": ["6", "7", "4"]}
+        output = self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=None)
+        expected_output = {"0": ["1", "2", "5", "8"], "1": ["6", "7", "3", "4"]}
         assert output == expected_output

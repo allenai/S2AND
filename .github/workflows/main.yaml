@@ -15,7 +15,7 @@ jobs:
     - name: Build and test with Docker
       run: |
         docker build --tag s2and .
-        docker run --rm s2and pytest tests/
+        docker run --rm s2and pytest tests/ --verbose
         docker run --rm s2and black s2and --check --line-length 120
         docker run --rm s2and black scripts/*.py --check --line-length 120
         docker run --rm s2and bash scripts/mypy.sh

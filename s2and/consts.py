@@ -36,7 +36,7 @@ CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and")))
 """
 Incrementation history
 1 - initial version
-2 - changed to SPECTERv2
+2 - changed to SPECTERv2, subblocking etc
 """
 FEATURIZER_VERSION = 2
 
@@ -46,3 +46,4 @@ DEFAULT_CHUNK_SIZE = 100
 LARGE_DISTANCE = 1e4
 LARGE_INTEGER = 10 * LARGE_DISTANCE
 CLUSTER_SEEDS_LOOKUP = {"require": 0, "disallow": LARGE_DISTANCE}
+SPECTER_DIM = 768

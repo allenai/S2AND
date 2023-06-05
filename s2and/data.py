@@ -285,6 +285,9 @@ class ANDData:
         self.clusters: Optional[Dict] = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
         self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
+        # prevents errors during testing where we have no specter embeddings
+        if self.specter_embeddings is None:
+            self.specter_embeddings = {}  # type: ignore
         logger.info("loaded specter, loading cluster seeds")
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)

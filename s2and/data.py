@@ -56,7 +56,6 @@ class Signature(NamedTuple):
     author_info_suffix_normalized: Optional[str]
     author_info_suffix: Optional[str]
     author_info_first_normalized: Optional[str]
-    author_info_middle_normalized: Optional[str]
     author_info_coauthors: Optional[List[str]]
     author_info_coauthor_blocks: Optional[List[str]]
     author_info_full_name: Optional[str]
@@ -218,7 +217,7 @@ class ANDData:
         for paper_id, paper in self.papers.items():
             self.papers[paper_id] = Paper(
                 title=paper["title"],
-                has_abstract=paper["abstract"] not in {"", None},  # todo: change how we do this given new metadata
+                has_abstract=paper["abstract"] not in {"", None},
                 in_signatures=None,
                 is_english=None,
                 is_reliable=None,
@@ -257,7 +256,6 @@ class ANDData:
                 author_info_suffix_normalized=None,
                 author_info_suffix=signature["author_info"]["suffix"],
                 author_info_first_normalized=None,
-                author_info_middle_normalized=None,
                 author_info_coauthors=None,
                 author_info_coauthor_blocks=None,
                 author_info_full_name=None,
@@ -478,9 +476,10 @@ class ANDData:
                 ]
 
             signature = signature._replace(
+                # need this for name counts
                 author_info_first_normalized=first_middle_normalized_split[0],
+                # need this for featurization
                 author_info_first_normalized_without_apostrophe=first_middle_normalized_split_without_apostrophe[0],
-                author_info_middle_normalized=" ".join(first_middle_normalized_split[1:]),
                 author_info_middle_normalized_without_apostrophe=" ".join(
                     first_middle_normalized_split_without_apostrophe[1:]
                 ),

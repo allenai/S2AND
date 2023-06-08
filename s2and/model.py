@@ -493,6 +493,9 @@ class Clusterer:
             This means that the single-letter first names will be sent through via predict_incremental.
             Defaults to None, which means no batching occurs
 
+        Note: batching_threshold is a hack to get around OOM issues. We will assume that it implies
+        that we don't want to ever take up more memory than (batching_threshold ** 2)
+
         Returns
         -------
         Dict: the predicted clusters
@@ -532,6 +535,14 @@ class Clusterer:
                 if block_key not in block_dict_subblocked_single_letter_first_names
             }
 
+            # edge case: where there are no block_dict_subblocked_multiple_letter_first_names
+            # so then it makes no sense to (1) run predict on multiple letters and (2) incremental on single.
+            # the only thing we can do is run predict on the multi.
+            if len(block_dict_subblocked_multiple_letter_first_names) == 0:
+                # not really true, but it makes the code much easier below
+                block_dict_subblocked_multiple_letter_first_names = block_dict_subblocked_single_letter_first_names
+                block_dict_subblocked_single_letter_first_names = {}
+
             pred_clusters = {}
             # ideally we would batch the subblocks for predictions
             # but it's hard to know how to batch since this can be called
@@ -565,11 +576,23 @@ class Clusterer:
                         dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
 
                 for block_key, block_signatures in block_dict_subblocked_single_letter_first_names.items():
-                    pred_clusters_intermediate, _ = self.predict_incremental_helper(
+                    # we have to be super careful here and adjust the batching threshold take into account
+                    # the implied requirement of passing batching_threshold into batch predict:
+                    # it essentially assumes that max memory is batching_threshold ** 2,
+                    # but it could be MUCH bigger here since predict incremental memory use is up to
+                    # (batching_threshold * (total_block_size - batching_threshold))
+                    # so we need a special batching_threshold just for this operation
+                    desired_memory_use = batching_threshold**2
+                    N = len(dataset.cluster_seeds_require)
+                    loop_batching_threshold = int(desired_memory_use / (N - batching_threshold))
+                    logger.info(
+                        f"Working on block {block_key} with computed batching threshold {loop_batching_threshold}"
+                    )
+                    pred_clusters_intermediate = self.predict_incremental(
                         block_signatures,
                         dataset,
                         prevent_new_incompatibilities=True,
-                        cutoff_for_full_block_clustering_of_unassigned=None,  # everything should be under the limit
+                        batching_threshold=loop_batching_threshold,
                         partial_supervision=partial_supervision,
                     )
                     # again, make cluster seeds require
@@ -713,13 +736,8 @@ class Clusterer:
             and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
             final cluster would have D Jones, David Jones, and Donald Jones.
         batching_threshold: int
-            Used in two ways:
-            (1) If there are more unassigned signatures than this number,
+            If there are more unassigned signatures than this number,
             they will be predicted in batches of this size. This is to prevent OOM errors.
-            (2) If the number of unassigned signatures in a batch is less than this number,
-            we will do a full block clustering on the unassigned signatures first.
-            This improves the quality of the incremental clustering by ensuring
-            that very similar unassigned signatures get clustered together.
             Defaults to None, which means no batching occurs
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
@@ -737,13 +755,17 @@ class Clusterer:
             # and keep updating the cluster_seeds_require as we go
             for _, subblock_signatures in subblocks.items():
                 # since the size of each subblock is <= batching_threshold
+                # and generally the number of signatures to do incrementally << number of signatures
+                # in cluster_seed_require
                 # the helper should be able to do a full block clustering on the unassigned signatures
+                # without violating the implied maximum # of pairs constrained by batching_threshold.
+                # to be clear: the biggest block in memory should be
+                # max(batching_threshold * (total_block_size - batching_threshold), batching_threshold ** 2)
                 pred_clusters_intermediate = self.predict_incremental_helper(
                     subblock_signatures,
                     dataset,
                     prevent_new_incompatibilities=prevent_new_incompatibilities,
                     partial_supervision=partial_supervision,
-                    cutoff_for_full_block_clustering_of_unassigned=batching_threshold,
                 )
                 # now we have to update dataset.cluster_seeds_require with what's in pred_clusters_intermediate
                 # remembering to undo the changes later
@@ -766,7 +788,6 @@ class Clusterer:
                 dataset,
                 prevent_new_incompatibilities=prevent_new_incompatibilities,
                 partial_supervision=partial_supervision,
-                cutoff_for_full_block_clustering_of_unassigned=batching_threshold,
             )
 
     def predict_incremental_helper(
@@ -774,7 +795,6 @@ class Clusterer:
         block_signatures: List[str],
         dataset: ANDData,
         prevent_new_incompatibilities: bool = True,
-        cutoff_for_full_block_clustering_of_unassigned: Optional[int] = None,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
     ):
         """
@@ -792,9 +812,10 @@ class Clusterer:
         to cluster a small number of new signatures into (block size * number of new signatures should be less
         than the normal batch size).
 
-        Note: this function was designed to work on a single block at a time.
-
-        Warning: this function should not be called directly. Use predict_incremental instead.
+        Notes:
+        -This function was designed to work on a single block at a time.
+        -This function should not be called directly. Use predict_incremental instead.
+        -This function doesnt do any batching. It only calls predict_helper internally.
 
         Parameters
         ----------
@@ -808,10 +829,6 @@ class Clusterer:
             if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
             and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
             final cluster would have D Jones, David Jones, and Donald Jones.
-        cutoff_for_full_block_clustering_of_unassigned: int
-            if the number of unassigned signatures is less than this number, we will do a full block clustering
-            on the unassigned signatures first. this improves the quality of the incremental clustering by ensuring
-            that very similar unassigned signatures get clustered together. defaults to 2500
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
         Returns
@@ -827,6 +844,7 @@ class Clusterer:
         # that would be prevented by the rules
         if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
             altered_cluster_nums = set(
+                # TODO: what if the altered signature is not in cluster_seeds_require?
                 dataset.cluster_seeds_require[altered_signature_id]
                 for altered_signature_id in dataset.altered_cluster_signatures
             )
@@ -844,12 +862,11 @@ class Clusterer:
                     # from production so that they align with s2and's predictions. When doing this, we
                     # don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
                     # s2and's predictions
-                    reclustered_output, _ = self.predict(
+                    reclustered_output, _ = self.predict_helper(
                         {"block": signature_ids_for_cluster_num},
                         dataset,
                         incremental_dont_use_cluster_seeds=True,
                         partial_supervision=partial_supervision,
-                        batching_threshold=cutoff_for_full_block_clustering_of_unassigned,
                     )
                     if len(reclustered_output) > 1:
                         for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):
@@ -935,11 +952,10 @@ class Clusterer:
         # unassigned CLUSTERS to merge with extant ones (instead of which individual signatures to merge)
 
         logger.info("Batch clustering the unassigned signatures")
-        incremental_only_clusters, _ = self.predict(
+        incremental_only_clusters, _ = self.predict_helper(
             {"incremental_unassigned": unassigned_signatures},
             dataset,
             partial_supervision=partial_supervision,
-            batching_threshold=cutoff_for_full_block_clustering_of_unassigned,
         )
 
         logger.info(
@@ -1035,11 +1051,10 @@ class Clusterer:
         # all the singletons go through the clustering process again
         if len(singleton_signatures) > 0:
             logger.info("Clustering together the still unassigned signatures")
-            reclustered_output, _ = self.predict(
+            reclustered_output, _ = self.predict_helper(
                 {"block": singleton_signatures},
                 dataset,
                 partial_supervision=partial_supervision,
-                batching_threshold=cutoff_for_full_block_clustering_of_unassigned,
             )
             new_cluster_id = dataset.max_seed_cluster_id or 0
             for new_cluster in reclustered_output.values():

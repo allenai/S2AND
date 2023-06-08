@@ -575,6 +575,9 @@ class Clusterer:
                     for signature in signatures:
                         dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
 
+                # this is the number of signatures already assigned
+                #
+                N = len(dataset.cluster_seeds_require)
                 for block_key, block_signatures in block_dict_subblocked_single_letter_first_names.items():
                     # we have to be super careful here and adjust the batching threshold take into account
                     # the implied requirement of passing batching_threshold into batch predict:
@@ -583,8 +586,17 @@ class Clusterer:
                     # (batching_threshold * (total_block_size - batching_threshold))
                     # so we need a special batching_threshold just for this operation
                     desired_memory_use = batching_threshold**2
-                    N = len(dataset.cluster_seeds_require)
-                    loop_batching_threshold = int(desired_memory_use / (N - batching_threshold))
+                    actual_memory_usage = len(block_signatures) * N
+                    print(
+                        f"N = {N}, desired_memory_use: {desired_memory_use}, actual_memory_usage: {actual_memory_usage}"
+                    )
+                    if actual_memory_usage > desired_memory_use:
+                        # we need to have a loop_batching_threshold such that
+                        # loop_batching_threshold * N = desired_memory_use
+                        loop_batching_threshold = int(desired_memory_use / N)
+                    else:
+                        # already within memory limits using no batching
+                        loop_batching_threshold = None
                     logger.info(
                         f"Working on block {block_key} with computed batching threshold {loop_batching_threshold}"
                     )

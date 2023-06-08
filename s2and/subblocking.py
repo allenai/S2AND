@@ -138,7 +138,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
             flag = names_up_to_k == name
             output[name] = signature_ids[flag]
         # take the rest and subdivide further
-        bad_names = set(counts_up_to_k[counts_up_to_k >= maximum_size].index)
+        bad_names = set(counts_up_to_k[counts_up_to_k > maximum_size].index)
         bad_size_flag = np.array([i[0:k] in bad_names for i in names])
         names = names[bad_size_flag]
         signature_ids = signature_ids[bad_size_flag]
@@ -205,7 +205,9 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         middle_names_loop = np.array(
             [anddata.signatures[i].author_info_middle_normalized_without_apostrophe for i in sig_ids_loop]
         )
-        output_loop, output_cant_subdivide_loop = subdivide_helper(middle_names_loop, sig_ids_loop, maximum_size)
+        output_loop, output_cant_subdivide_loop = subdivide_helper(
+            middle_names_loop, sig_ids_loop, maximum_size, starting_k=1
+        )
         # the key in output loop should be pre-pended by the loop key
         for key_loop in list(output_loop.keys()):
             output_loop[key + "|middle=" + str(key_loop)] = output_loop.pop(key_loop)

@@ -856,9 +856,13 @@ class Clusterer:
         # that would be prevented by the rules
         if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
             altered_cluster_nums = set(
-                # TODO: what if the altered signature is not in cluster_seeds_require?
+                # it's possible that the altered signature is not in cluster_seeds_require
+                # because we are passing a custom cluster_seeds_require here from
+                # predict, but we checked that the altered signature is in the full
+                # cluster_seeds_require during init
                 dataset.cluster_seeds_require[altered_signature_id]
                 for altered_signature_id in dataset.altered_cluster_signatures
+                if altered_signature_id in dataset.cluster_seeds_require
             )
             if len(altered_cluster_nums) > 0:
                 cluster_seeds_require_inverse: Dict[int, list] = {}

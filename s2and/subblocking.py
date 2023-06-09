@@ -187,7 +187,11 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     single_letter_first_names_flag = np.array([len(first_name) <= 1 for first_name in first_names])
 
     # first letter is
-    first_letter = first_names[~single_letter_first_names_flag][0][0]
+    first_letter = "?"  # could happen if all the first names are missing
+    for name in first_names:
+        if len(name) > 0:
+            first_letter = name[0]
+            break
 
     # first pass through the more-than-one-letter first names
     logger.info("First pass through the more-than-one-letter first names")
@@ -217,7 +221,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         output.update(output_loop)
         output_for_specter.update(output_cant_subdivide_loop)
 
-    # deal with the single letter first names
+    # deal with the single (or zero) letter first names
     if len(first_names[single_letter_first_names_flag]) < maximum_size:
         if np.mean(single_letter_first_names_flag) > 0:
             output[first_letter] = signature_ids[single_letter_first_names_flag]

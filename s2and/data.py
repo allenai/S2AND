@@ -311,7 +311,7 @@ class ANDData:
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
                 if signature_id not in self.cluster_seeds_require:
-                    raise Exception(f"Altered cluster signature {signature_id} not in cluster seeds require")
+                    raise Exception(f"Altered cluster signature {signature_id} not in cluster_seeds_require")
         self.train_pairs = self.maybe_load_dataframe(train_pairs)
         self.val_pairs = self.maybe_load_dataframe(val_pairs)
         self.test_pairs = self.maybe_load_dataframe(test_pairs)

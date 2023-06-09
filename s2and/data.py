@@ -307,6 +307,11 @@ class ANDData:
                 cluster_num += 1
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
+        # check that all of the altered_clustere_signatures are in the cluster_seeds_require
+        if self.altered_cluster_signatures is not None:
+            for signature_id in self.altered_cluster_signatures:
+                if signature_id not in self.cluster_seeds_require:
+                    raise Exception(f"Altered cluster signature {signature_id} not in cluster seeds require")
         self.train_pairs = self.maybe_load_dataframe(train_pairs)
         self.val_pairs = self.maybe_load_dataframe(val_pairs)
         self.test_pairs = self.maybe_load_dataframe(test_pairs)

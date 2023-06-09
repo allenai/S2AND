@@ -34,7 +34,7 @@ where pae.source in ('Crossref')
 
 df_all = _evaluate_redshift_query(query)
 
-cache = {}
+cache = {}  # type: ignore
 
 
 def normalize_names(row):
@@ -87,7 +87,7 @@ and combine them
 
 # orcid data
 k_values = (2, 3, 4, 5)  # only care up to first 5 letters
-orcid_first_k_letter_counts = Counter()
+orcid_first_k_letter_counts = Counter()  # type: ignore
 
 
 # in each group, take all pairs of unique names and then count the number of times each first k letter combination occurs
@@ -110,7 +110,7 @@ groups = orcids.groupby("orcid")
 groups.apply(group_update)
 
 # name tuples data
-name_tuples_first_k_letter_counts = Counter()
+name_tuples_first_k_letter_counts = Counter()  # type: ignore
 for name1, name2 in name_tuples:
     if name1[0] == name2[0] and (name1, name2):
         pairs = set()
@@ -134,26 +134,26 @@ for (name1, name2), count in orcid_first_k_letter_counts.items():
 # can't save a json where the keys are tuples so make a nested dict:
 # outer key: tuple[0], inner key: tuple[1], value: count
 # remove everything with count < 10 as it is too noisy
-first_k_letter_counts_sorted = {}
+merged_first_k_letter_counts_sorted = {}  # type: ignore
 for name_tuple, count in orcid_first_k_letter_counts_filtered.items():
-    if name_tuple[0] not in first_k_letter_counts_sorted:
-        first_k_letter_counts_sorted[name_tuple[0]] = {}
-    first_k_letter_counts_sorted[name_tuple[0]][name_tuple[1]] = count
+    if name_tuple[0] not in merged_first_k_letter_counts_sorted:
+        merged_first_k_letter_counts_sorted[name_tuple[0]] = {}
+    merged_first_k_letter_counts_sorted[name_tuple[0]][name_tuple[1]] = count
 
-print(len(first_k_letter_counts_sorted))
+print(len(merged_first_k_letter_counts_sorted))
 
 # now add from the name_tuples but the count has to change a bit
 # as these are just not as high numbers as the orcid ones
 already_in = 0
 for name_tuple, count in name_tuples_first_k_letter_counts.items():
     if count >= 2:
-        if name_tuple[0] not in first_k_letter_counts_sorted:
-            first_k_letter_counts_sorted[name_tuple[0]] = {}
-        if name_tuple[1] not in first_k_letter_counts_sorted[name_tuple[0]]:
-            first_k_letter_counts_sorted[name_tuple[0]][name_tuple[1]] = count
+        if name_tuple[0] not in merged_first_k_letter_counts_sorted:
+            merged_first_k_letter_counts_sorted[name_tuple[0]] = {}
+        if name_tuple[1] not in merged_first_k_letter_counts_sorted[name_tuple[0]]:
+            merged_first_k_letter_counts_sorted[name_tuple[0]][name_tuple[1]] = count
         else:
             already_in += 1
 
 # save it
 with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json"), "w") as f:
-    json.dump(first_k_letter_counts_sorted, f)
+    json.dump(merged_first_k_letter_counts_sorted, f)

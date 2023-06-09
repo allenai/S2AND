@@ -585,7 +585,7 @@ class Clusterer:
                     # but it could be MUCH bigger here since predict incremental memory use is up to
                     # (batching_threshold * (total_block_size - batching_threshold))
                     # so we need a special batching_threshold just for this operation
-                    desired_memory_use = batching_threshold ** 2
+                    desired_memory_use = batching_threshold**2
                     actual_memory_usage = len(block_signatures) * N
                     print(
                         f"N = {N}, desired_memory_use: {desired_memory_use}, actual_memory_usage: {actual_memory_usage}"
@@ -596,7 +596,7 @@ class Clusterer:
                         loop_batching_threshold = int(desired_memory_use / N)
                     else:
                         # already within memory limits using no batching
-                        loop_batching_threshold = None
+                        loop_batching_threshold = None  # type: ignore
                     logger.info(
                         f"Working on block {block_key} with computed batching threshold {loop_batching_threshold}"
                     )

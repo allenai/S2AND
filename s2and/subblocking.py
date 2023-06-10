@@ -34,6 +34,11 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
     Returns:
         clusters: dict with keys as cluster_ids and values as list of signature_ids.
     """
+    if len(signature_ids) == 0:
+        return {}
+    elif len(signature_ids) < target_subblock_size:
+        return {"0": signature_ids}
+
     # extract all the specter stuff in order of the signatures
     X_specter = np.array(
         [
@@ -112,6 +117,8 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
     """
     # start with 2 letters only, then subdivide further to 3 letters, etc until the maximum_size is reached
     n_signature_ids = len(signature_ids)
+    if n_signature_ids == 0:
+        return {}, {}
     output = {}
     output_cant_subdivide = {}
     k = starting_k

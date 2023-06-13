@@ -9,6 +9,7 @@ from s2and.subblocking import make_subblocks
 from typing import Dict, Optional, Any, Union, List, Tuple
 from collections import defaultdict
 import warnings
+import time
 from functools import partial
 from tqdm import tqdm
 import logging
@@ -549,8 +550,11 @@ class Clusterer:
             # from inside of predict_incremental, which has different OOM behavior.
             # so just doing it one at a time here
             if len(block_dict_subblocked_multiple_letter_first_names) > 0:
-                logger.info("Running predict on block dict with multiple letter first names")
+                logger.info("Running predict on subblocks with multiple letter first names")
+                predict_times = {}
                 for block_key, block_signatures in block_dict_subblocked_multiple_letter_first_names.items():
+                    logger.info(f"Working on subblock {block_key}")
+                    start = time.time()
                     pred_clusters_intermediate, _ = self.predict_helper(
                         {block_key: block_signatures},
                         dataset,
@@ -560,15 +564,20 @@ class Clusterer:
                         use_s2_clusters,
                         incremental_dont_use_cluster_seeds,
                     )
+                    end = time.time()
+                    total_predict_time = end - start
+                    predict_times[block_key] = total_predict_time
                     pred_clusters.update(pred_clusters_intermediate)
-
+                logger.info(
+                    f"Finished predict on subblocks with multiple letter first names, her'es how long each took: {predict_times}"
+                )
             # now we run predict_incremental on the single-letter first name blocks, one block at a time
             # and we will be using the pred_clusters as cluster_seeds_require because
-            # that's how predict_incremental works: cluster_seeds_require is what exists
-            # and the input to predict_incremental will be assigned into those seeds
+            # that's how predict_incremental works: cluster_seeds_require is what is already clustered
+            # and the input to predict_incremental will be assigned into those seed clusters
             # note: storing the original cluster_seeds_require so we can restore it later
             if len(block_dict_subblocked_single_letter_first_names) > 0:
-                logger.info("Running predict on block dict with single letter first names")
+                logger.info("Running predict incremental on subblocks with single letter first names")
                 cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
                 dataset.cluster_seeds_require = {}
                 for cluster_id, signatures in pred_clusters.items():
@@ -576,6 +585,7 @@ class Clusterer:
                         dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
 
                 desired_memory_use = batching_threshold * batching_threshold
+                predict_times = {}
                 for block_key, block_signatures in block_dict_subblocked_single_letter_first_names.items():
                     # we have to be super careful here and adjust the batching threshold take into account
                     # the implied requirement of passing batching_threshold into batch predict:
@@ -588,7 +598,10 @@ class Clusterer:
                     N = len(dataset.cluster_seeds_require)
                     actual_memory_usage = len(block_signatures) * N
                     print(
-                        f"N = {N}, desired_memory_use: {desired_memory_use}, actual_memory_usage: {actual_memory_usage}"
+                        f"N_seeds = {N}",
+                        f"N_signatures = {len(block_signatures)}",
+                        f"desired_memory_use: {desired_memory_use}",
+                        f"actual_memory_usage: {actual_memory_usage}",
                     )
                     if actual_memory_usage > desired_memory_use:
                         # we need to have a loop_batching_threshold such that
@@ -598,8 +611,9 @@ class Clusterer:
                         # already within memory limits using no batching
                         loop_batching_threshold = None  # type: ignore
                     logger.info(
-                        f"Working on block {block_key} with computed batching threshold {loop_batching_threshold} as opposed to {batching_threshold}"
+                        f"Working on subblock {block_key} with computed batching threshold {loop_batching_threshold}"
                     )
+                    start_predict_time = time.time()
                     pred_clusters_intermediate = self.predict_incremental(
                         block_signatures,
                         dataset,
@@ -607,6 +621,9 @@ class Clusterer:
                         batching_threshold=loop_batching_threshold,
                         partial_supervision=partial_supervision,
                     )
+                    end_predict_time = time.time()
+                    total_predict_time = end_predict_time - start_predict_time
+                    predict_times[block_key] = total_predict_time
                     # again, make cluster seeds require
                     dataset.cluster_seeds_require = {}
                     for cluster_id, signatures in pred_clusters_intermediate.items():
@@ -614,6 +631,9 @@ class Clusterer:
                             dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
 
                 # undoing the damage
+                logger.info(
+                    f"Finished subblocked predict incremental. Here's how long each subblock took:", predict_times
+                )
                 dataset.cluster_seeds_require = cluster_seeds_require_original
                 # the output of predict_incremental_helper has the ENTIRE clustering, not just the new stuff
                 pred_clusters = pred_clusters_intermediate
@@ -621,6 +641,8 @@ class Clusterer:
 
         else:
             # normal mode - everything goes through full block clustering
+            logger.info("Running predict on full blocks - no subblocking")
+            start = time.time()
             pred_clusters, dists = self.predict_helper(
                 block_dict,
                 dataset,
@@ -630,6 +652,9 @@ class Clusterer:
                 use_s2_clusters,
                 incremental_dont_use_cluster_seeds,
             )
+            end = time.time()
+            total_predict_time = end - start
+            logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
 
         return dict(pred_clusters), dists
 
@@ -760,12 +785,17 @@ class Clusterer:
         if batching_threshold is not None and len(block_signatures) > batching_threshold:
             assert batching_threshold > 0, "Batching threshold must be positive"
             # STEP 1: Make subblocks
+            logger.info(f"Too many signatures to do all at once for predict_incremental. Subblocking...")
             subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
             cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
 
             # STEP 2: do predict_incremental on each subblock
             # and keep updating the cluster_seeds_require as we go
-            for _, subblock_signatures in subblocks.items():
+            predict_times = {}
+            for subblock_key, subblock_signatures in subblocks.items():
+                logger.info(
+                    f"Beginning incremental clustering for {len(subblock_signatures)} signatures for subblock {subblock_key}..."
+                )
                 # since the size of each subblock is <= batching_threshold
                 # and generally the number of signatures to do incrementally << number of signatures
                 # in cluster_seed_require
@@ -773,12 +803,16 @@ class Clusterer:
                 # without violating the implied maximum # of pairs constrained by batching_threshold.
                 # to be clear: the biggest block in memory should be
                 # max(batching_threshold * (total_block_size - batching_threshold), batching_threshold ** 2)
+                start_predict_time = time.time()
                 pred_clusters_intermediate = self.predict_incremental_helper(
                     subblock_signatures,
                     dataset,
                     prevent_new_incompatibilities=prevent_new_incompatibilities,
                     partial_supervision=partial_supervision,
                 )
+                end_predict_time = time.time()
+                total_predict_time = end_predict_time - start_predict_time
+                predict_times[subblock_key] = total_predict_time
                 # now we have to update dataset.cluster_seeds_require with what's in pred_clusters_intermediate
                 # remembering to undo the changes later
                 # note that cluster_seeds_require is in this format:
@@ -791,6 +825,7 @@ class Clusterer:
                         dataset.cluster_seeds_require[signature] = cluster_id
 
             # STEP 3: undo the damage to cluster_seeds_require the damage
+            logger.info(f"Finished subblocked predict_incremental. Here's how long each subblock took:", predict_times)
             dataset.cluster_seeds_require = cluster_seeds_require_original
             return pred_clusters_intermediate
         else:
@@ -847,6 +882,7 @@ class Clusterer:
         -------
         Dict: the predicted clusters
         """
+        logger.info(f"Beginning incremental clustering for {len(block_signatures)} signatures...")
         recluster_map = {}
         cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
         # splitting up the claimed profiles that we received from prod
@@ -855,6 +891,7 @@ class Clusterer:
         # clusters, they should be "natural" looking to avoid impossible additions
         # that would be prevented by the rules
         if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
+            logger.info("Dealing with altered cluster signatures")
             altered_cluster_nums = set(
                 # it's possible that the altered signature is not in cluster_seeds_require
                 # because we are passing a custom cluster_seeds_require here from
@@ -891,6 +928,7 @@ class Clusterer:
                             for reclustered_signature_id in new_cluster_of_signatures:
                                 cluster_seeds_require[reclustered_signature_id] = new_cluster_num  # type: ignore
 
+        logger.info("Getting name constraints")
         all_pairs = []
         unassigned_signatures = []
         for possibly_unassigned_signature in block_signatures:
@@ -914,7 +952,7 @@ class Clusterer:
                         label = value - LARGE_INTEGER
                 all_pairs.append((unassigned_signature, signature, label))
 
-        logger.info("Featurizing pairs for incremental clustering")
+        logger.info("Featurizing pairs")
         batch_features, _, batch_nameless_features = many_pairs_featurize(
             all_pairs,
             dataset,
@@ -928,13 +966,12 @@ class Clusterer:
         # get predictions where there isn't partial supervision
         # and fill the rest with partial supervision
         # undoing the offset by LARGE_INTEGER from above
-        logger.info("Making predict flags for incremental clustering")
+        logger.info("Performing pairwise classification")
         batch_labels = np.array([i[2] for i in all_pairs])  # type: ignore
         predict_flag = np.isnan(batch_labels)
         not_predict_flag = ~predict_flag
         batch_predictions = np.zeros(len(batch_features))
         # index 0 is p(not the same)
-        logger.info("Pairwise classification for incremental clustering")
         if np.any(predict_flag):
             if self.nameless_classifier is not None:
                 batch_predictions[predict_flag] = (
@@ -948,7 +985,7 @@ class Clusterer:
         if np.any(not_predict_flag):
             batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
 
-        logger.info("Computing average distances for unassigned signatures for incremental clustering")
+        logger.info("Computing average distances for unassigned signatures")
         signature_to_cluster_to_average_dist: Dict[str, Dict[int, Tuple[float, int]]] = defaultdict(
             lambda: defaultdict(lambda: (0, 0))
         )
@@ -966,7 +1003,9 @@ class Clusterer:
         # NEW!
         # first cluster the unassigned signatures and then check which resulting
         # unassigned CLUSTERS to merge with extant ones (instead of which individual signatures to merge)
-
+        # WARNING: this assumes that the number of unassigned signatures is less than the number
+        # of assigned signatures.
+        # if this is not the case, we may get OOM errors and need custom batching logic here
         logger.info("Batch clustering the unassigned signatures")
         incremental_only_clusters, _ = self.predict_helper(
             {"incremental_unassigned": unassigned_signatures},
@@ -1076,7 +1115,7 @@ class Clusterer:
             for new_cluster in reclustered_output.values():
                 pred_clusters[str(new_cluster_id)] = new_cluster
                 new_cluster_id += 1
-        logger.info("Returning incrementally predicted clusters")
+        logger.info("Done. Returning incrementally predicted clusters")
         return dict(pred_clusters)
 
 

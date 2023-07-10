@@ -712,6 +712,13 @@ class Clusterer:
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             )
 
+        # we may need this set later for post-hoc merging
+        if self.use_default_constraints_as_supervision:
+            all_disallow_signature_ids = set()
+            for sig_id_a, sig_id_b in dataset.cluster_seeds_disallow:
+                all_disallow_signature_ids.add(sig_id_a)
+                all_disallow_signature_ids.add(sig_id_b)
+
         for block_key in block_dict.keys():
             if block_key in dists and len(block_dict[block_key]) > 1:
                 cluster_model = self.set_params(cluster_model_params, clone_flag=True)
@@ -727,6 +734,35 @@ class Clusterer:
                 negative_one_label_locations = np.where(labels == -1)[0]
                 for i, loc in enumerate(negative_one_label_locations):
                     labels[loc] = max_label + 1 + i
+
+                if self.use_default_constraints_as_supervision:
+                    # at this point it is possible that clusters that should be merged
+                    # are STILL not joined together
+                    # due to the 0 enforced distance not being enough to outweigh
+                    # a lot of large distances. so we manually go through the clusters
+                    # find which ones overlap according to cluster_seeds_require
+                    # note: if the signature id appears in cluster_seeds_disallow
+                    # then we won't try to merge it as there may be conflicts
+                    # that there is no clear way to resolve
+                    inverse_id_map = defaultdict(set)
+                    for signature_id, label in zip(block_dict[block_key], labels):
+                        if (
+                            signature_id in dataset.cluster_seeds_require
+                            and signature_id not in all_disallow_signature_ids
+                        ):
+                            inverse_id_map[dataset.cluster_seeds_require[signature_id]].add(label)
+
+                    # now join any clusters that have overlapping ids
+                    # this is a tad tricky because as we merge clusters, we need to
+                    # keep track of where they are going
+                    to_join_sets = [sorted(val) for val in inverse_id_map.values() if len(val) > 1]
+                    mapped_labels = {label: label for label in labels}
+                    labels = np.array(labels)
+                    for join_set in to_join_sets:
+                        for other_label in join_set[1:]:
+                            labels[labels == mapped_labels[other_label]] = mapped_labels[join_set[0]]
+                            mapped_labels[other_label] = mapped_labels[join_set[0]]
+                    labels = list(labels)
             else:
                 labels = [0]
 

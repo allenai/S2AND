@@ -739,7 +739,13 @@ class Clusterer:
                     # at this point it is possible that clusters that should be merged
                     # are STILL not joined together
                     # due to the 0 enforced distance not being enough to outweigh
-                    # a lot of large distances. so we manually go through the clusters
+                    # a lot of large distances. the 0 enforced distance is between pairs
+                    # of signatures that are passed in via cluster_seeds_require.
+                    # this is a way to tell S2AND that we want these two to be in the same
+                    # cluster. but the way that clusters are joined is that we compute
+                    # *average* distance between all pairs, so the 0s may not be enough
+                    # to drag the average below the threshold eps.
+                    # so we manually go through the clusters
                     # find which ones overlap according to cluster_seeds_require
                     # note: if the signature id appears in cluster_seeds_disallow
                     # then we won't try to merge it as there may be conflicts
@@ -755,7 +761,7 @@ class Clusterer:
                     # now join any clusters that have overlapping ids
                     # this is a tad tricky because as we merge clusters, we need to
                     # keep track of where they are going
-                    to_join_sets = [sorted(val) for val in inverse_id_map.values() if len(val) > 1]
+                    to_join_sets = [sorted(join_set) for join_set in inverse_id_map.values() if len(join_set) > 1]
                     mapped_labels = {label: label for label in labels}
                     labels = np.array(labels)
                     for join_set in to_join_sets:

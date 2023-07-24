@@ -468,6 +468,7 @@ class Clusterer:
         use_s2_clusters: bool = False,
         incremental_dont_use_cluster_seeds: bool = False,
         batching_threshold: Optional[int] = None,
+        desired_memory_use: Optional[int] = None,
     ) -> Tuple[Dict[str, List[str]], Optional[Dict[str, np.ndarray]]]:
         """
         Predicts clusters
@@ -493,6 +494,11 @@ class Clusterer:
             If the number of signatures in a block is above this number, we will use subblocking on the block.
             This means that the single-letter first names will be sent through via predict_incremental.
             Defaults to None, which means no batching occurs
+        desired_memory_use: int
+            If batching_threshold is not None, then this is the desired memory use for predict_incremental.
+            The units of this are the same as the units of batching_threshold -> number of signatures.
+            If None, then using batching_threshold * batching_threshold as the desired memory use.
+
 
         Note: batching_threshold is a hack to get around OOM issues. We will assume that it implies
         that we don't want to ever take up more memory than (batching_threshold ** 2)
@@ -509,6 +515,10 @@ class Clusterer:
         if batching_threshold is not None:
             assert batching_threshold > 0, "Batching threshold must be positive"
             assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
+
+            if desired_memory_use is None:
+                desired_memory_use = batching_threshold * batching_threshold
+
             # run subblocking on each block in the block_dict
             block_dict_subblocked = {}
             for block_key, block_signatures in block_dict.items():
@@ -541,8 +551,11 @@ class Clusterer:
             # the only thing we can do is run predict on the multi.
             if len(block_dict_subblocked_multiple_letter_first_names) == 0:
                 # not really true, but it makes the code much easier below
+                alert_flag = True
                 block_dict_subblocked_multiple_letter_first_names = block_dict_subblocked_single_letter_first_names
                 block_dict_subblocked_single_letter_first_names = {}
+            else:
+                alert_flag = False
 
             pred_clusters = {}
             # ideally we would batch the subblocks for predictions
@@ -550,7 +563,11 @@ class Clusterer:
             # from inside of predict_incremental, which has different OOM behavior.
             # so just doing it one at a time here
             if len(block_dict_subblocked_multiple_letter_first_names) > 0:
-                logger.info("Running predict on subblocks with multiple letter first names")
+                if alert_flag:
+                    logger.info("Note! There are no subblocks with multiple letter first names")
+                    logger.info("Running predict on subblocks with single letter first names")
+                else:
+                    logger.info("Running predict on subblocks with multiple letter first names")
                 predict_times = {}
                 for block_key, block_signatures in block_dict_subblocked_multiple_letter_first_names.items():
                     logger.info(f"Working on subblock {block_key}")
@@ -568,9 +585,7 @@ class Clusterer:
                     total_predict_time = end - start
                     predict_times[block_key] = total_predict_time
                     pred_clusters.update(pred_clusters_intermediate)
-                logger.info(
-                    f"Finished predict on subblocks with multiple letter first names, her'es how long each took: {predict_times}"
-                )
+                logger.info(f"Finished, here's how long each took: {predict_times}")
             # now we run predict_incremental on the single-letter first name blocks, one block at a time
             # and we will be using the pred_clusters as cluster_seeds_require because
             # that's how predict_incremental works: cluster_seeds_require is what is already clustered
@@ -584,7 +599,6 @@ class Clusterer:
                     for signature in signatures:
                         dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
 
-                desired_memory_use = batching_threshold * batching_threshold
                 predict_times = {}
                 for block_key, block_signatures in block_dict_subblocked_single_letter_first_names.items():
                     # we have to be super careful here and adjust the batching threshold take into account

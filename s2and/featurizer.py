@@ -394,10 +394,10 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         email_2 = email_2 if "@" in email_2 else email_2 + "@MISSING"
         split_email_1 = email_1.split("@")
         split_email_2 = email_2.split("@")
-        email_prefix_1 = "".join(split_email_1[:-1]).strip(".")
-        email_prefix_2 = "".join(split_email_2[:-1]).strip(".")
-        email_suffix_1 = split_email_1[-1].strip(".")
-        email_suffix_2 = split_email_2[-1].strip(".")
+        email_prefix_1 = "".join(split_email_1[:-1]).strip(".").lower()
+        email_prefix_2 = "".join(split_email_2[:-1]).strip(".").lower()
+        email_suffix_1 = split_email_1[-1].strip(".").lower()
+        email_suffix_2 = split_email_2[-1].strip(".").lower()
 
     features.extend(
         [

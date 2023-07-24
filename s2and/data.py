@@ -63,7 +63,6 @@ class Signature(NamedTuple):
     author_info_affiliations_n_grams: Optional[Counter]
     author_info_coauthor_n_grams: Optional[Counter]
     author_info_email: Optional[str]
-    author_info_email_prefix_ngrams: Optional[Counter]
     author_info_name_counts: Optional[NameCounts]
     author_info_position: int
     author_info_block: str
@@ -263,7 +262,6 @@ class ANDData:
                 author_info_affiliations_n_grams=None,
                 author_info_coauthor_n_grams=None,
                 author_info_email=signature["author_info"]["email"],
-                author_info_email_prefix_ngrams=None,
                 author_info_name_counts=None,
                 author_info_position=signature["author_info"]["position"],
                 author_info_block=signature["author_info"]["block"],
@@ -539,7 +537,6 @@ class ANDData:
                     author_info_coauthor_n_grams=get_text_ngrams(" ".join(coauthors), stopwords=None, use_bigrams=True)
                     if coauthors is not None
                     else Counter(),
-                    author_info_email_prefix_ngrams=get_text_ngrams(email_prefix, stopwords=None, use_bigrams=True),
                     author_info_name_counts=counts,
                 )
             self.signatures[signature_id] = signature

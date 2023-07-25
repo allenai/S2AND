@@ -1,9 +1,20 @@
+"""
+Results (s2aff is missing but it made things worse)
+-------
+                   aminer  arnetminer  inspire kisti   orcid  pubmed   qian   zbmath
+specterV1           0.703       0.881    0.934  0.951  0.965   0.936  0.924   0.905
+specterV2           0.743       0.897    0.931  0.961  0.966   0.920  0.948   0.905
++ filtered          0.747       0.897    0.934  0.959  0.964   0.920  0.949   0.908  
++ no extra prefix   0.414       0.366    0.545  0.321  0.678   0.380  0.288   0.500
+"""
+
 import os
 import json
 
 # this is from when we updated S2AND with SPECTER2 and also with S2AFF outputs
 SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][1]
 SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]
+NAME_TUPLES_VARIANT = ["original", "filtered"][1]
 
 CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
 with open(CONFIG_LOCATION) as _json_file:
@@ -352,7 +363,6 @@ def update_facets(
             comb_coauthors_f1,
         ],
     ):
-
         for key, f1 in individual_facet.items():
             combined_facet[key].extend(f1)
 
@@ -570,6 +580,7 @@ def main(
             test_pairs_path = os.path.join(DATA_DIR, dataset_name, "test_pairs.csv")
 
         logger.info(f"loading dataset {dataset_name}")
+
         anddata = ANDData(
             signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + SIGNATURES_SUFFIX),
             papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
@@ -588,6 +599,7 @@ def main(
             load_name_counts=name_counts,
             preprocess=PREPROCESS,
             random_seed=random_seed,
+            name_tuples=NAME_TUPLES_VARIANT,
         )
         logger.info(f"dataset {dataset_name} loaded")
 

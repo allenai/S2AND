@@ -80,7 +80,6 @@ PREPROCESS = True
 
 
 def sota_helper(dataset, experiment_name, random_seed, use_s2_clusters=False):
-
     dataset_name = dataset["name"]
 
     pairwise_metrics = pairwise_eval(
@@ -192,7 +191,7 @@ def main(
     else:
         MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
         NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
-        NAN_VALUE = np.nan
+        NAN_VALUE = np.nan  # type: ignore
 
     with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
         (

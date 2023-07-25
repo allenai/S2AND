@@ -56,7 +56,6 @@ class Signature(NamedTuple):
     author_info_suffix_normalized: Optional[str]
     author_info_suffix: Optional[str]
     author_info_first_normalized: Optional[str]
-    author_info_middle_normalized: Optional[str]
     author_info_coauthors: Optional[List[str]]
     author_info_coauthor_blocks: Optional[List[str]]
     author_info_full_name: Optional[str]
@@ -64,7 +63,6 @@ class Signature(NamedTuple):
     author_info_affiliations_n_grams: Optional[Counter]
     author_info_coauthor_n_grams: Optional[Counter]
     author_info_email: Optional[str]
-    author_info_email_prefix_ngrams: Optional[Counter]
     author_info_name_counts: Optional[NameCounts]
     author_info_position: int
     author_info_block: str
@@ -153,6 +151,7 @@ class ANDData:
         n_jobs: number of cpus to use
         preprocess: whether to preprocess the data (normalization, etc)
         name_tuples: optionally pass in the already created set of name tuples, to avoid recomputation
+            can be None or "filtered" or a set of name tuples
     """
 
     def __init__(
@@ -191,7 +190,7 @@ class ANDData:
         load_name_counts: Union[bool, Dict] = True,
         n_jobs: int = 1,
         preprocess: bool = True,
-        name_tuples: Set[Tuple[str, str]] = None,
+        name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -217,7 +216,7 @@ class ANDData:
         for paper_id, paper in self.papers.items():
             self.papers[paper_id] = Paper(
                 title=paper["title"],
-                has_abstract=paper["abstract"] not in {"", None},  # todo: change how we do this given new metadata
+                has_abstract=paper["abstract"] not in {"", None},
                 in_signatures=None,
                 is_english=None,
                 is_reliable=None,
@@ -256,7 +255,6 @@ class ANDData:
                 author_info_suffix_normalized=None,
                 author_info_suffix=signature["author_info"]["suffix"],
                 author_info_first_normalized=None,
-                author_info_middle_normalized=None,
                 author_info_coauthors=None,
                 author_info_coauthor_blocks=None,
                 author_info_full_name=None,
@@ -264,7 +262,6 @@ class ANDData:
                 author_info_affiliations_n_grams=None,
                 author_info_coauthor_n_grams=None,
                 author_info_email=signature["author_info"]["email"],
-                author_info_email_prefix_ngrams=None,
                 author_info_name_counts=None,
                 author_info_position=signature["author_info"]["position"],
                 author_info_block=signature["author_info"]["block"],
@@ -284,11 +281,14 @@ class ANDData:
         self.clusters: Optional[Dict] = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
         self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
+        # prevents errors during testing where we have no specter embeddings
+        if self.specter_embeddings is None:
+            self.specter_embeddings = {}  # type: ignore
         logger.info("loaded specter, loading cluster seeds")
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
         self.cluster_seeds_disallow = set()
-        self.cluster_seeds_require = {}
+        self.cluster_seeds_require = {}  # type: ignore
         self.max_seed_cluster_id = None
         if cluster_seeds_dict is not None:
             cluster_num = 0
@@ -305,6 +305,11 @@ class ANDData:
                 cluster_num += 1
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
+        # check that all of the altered_clustere_signatures are in the cluster_seeds_require
+        if self.altered_cluster_signatures is not None:
+            for signature_id in self.altered_cluster_signatures:
+                if signature_id not in self.cluster_seeds_require:
+                    raise Exception(f"Altered cluster signature {signature_id} not in cluster_seeds_require")
         self.train_pairs = self.maybe_load_dataframe(train_pairs)
         self.val_pairs = self.maybe_load_dataframe(val_pairs)
         self.test_pairs = self.maybe_load_dataframe(test_pairs)
@@ -380,14 +385,20 @@ class ANDData:
             self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
         self.preprocess = preprocess
 
-        if name_tuples is None:
+        if name_tuples == "filtered":
+            self.name_tuples = set()
+            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt"), "r") as f2:  # type: ignore
+                for line in f2:
+                    line_split = line.strip().split(",")  # type: ignore
+                    self.name_tuples.add((line_split[0], line_split[1]))
+        elif name_tuples is None:
             self.name_tuples = set()
             with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt"), "r") as f2:  # type: ignore
                 for line in f2:
                     line_split = line.strip().split(",")  # type: ignore
                     self.name_tuples.add((line_split[0], line_split[1]))
         else:
-            self.name_tuples = name_tuples
+            self.name_tuples = name_tuples  # type: ignore
 
         logger.info("preprocessing papers")
         self.papers = preprocess_papers_parallel(self.papers, self.n_jobs, self.preprocess)
@@ -443,6 +454,8 @@ class ANDData:
         for signature_id, signature in tqdm(self.signatures.items(), desc="Preprocessing signatures"):
             # our normalization scheme is to normalize first and middle separately,
             # join them, then take the first token of the combined join
+            # TODO: a lot of chinese names are not normalized correctly. they are names like Yue-Hua and Ying-Ying.
+            # we need some fix for these
             first_normalized = normalize_text(signature.author_info_first or "")
             first_normalized_without_apostrophe = normalize_text(
                 signature.author_info_first or "", special_case_apostrophes=True
@@ -466,9 +479,10 @@ class ANDData:
                 ]
 
             signature = signature._replace(
+                # need this for name counts
                 author_info_first_normalized=first_middle_normalized_split[0],
+                # need this for featurization
                 author_info_first_normalized_without_apostrophe=first_middle_normalized_split_without_apostrophe[0],
-                author_info_middle_normalized=" ".join(first_middle_normalized_split[1:]),
                 author_info_middle_normalized_without_apostrophe=" ".join(
                     first_middle_normalized_split_without_apostrophe[1:]
                 ),
@@ -504,11 +518,11 @@ class ANDData:
                     )
                     last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
                     counts = NameCounts(
-                        first=self.first_dict.get(signature.author_info_first_normalized, 1)
+                        first=self.first_dict.get(signature.author_info_first_normalized, 1)  # type: ignore
                         if len(signature.author_info_first_normalized) > 1
                         else np.nan,
                         last=self.last_dict.get(signature.author_info_last_normalized, 1),
-                        first_last=self.first_last_dict.get(first_last_for_count, 1)
+                        first_last=self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
                         if len(signature.author_info_first_normalized) > 1
                         else np.nan,
                         last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
@@ -523,7 +537,6 @@ class ANDData:
                     author_info_coauthor_n_grams=get_text_ngrams(" ".join(coauthors), stopwords=None, use_bigrams=True)
                     if coauthors is not None
                     else Counter(),
-                    author_info_email_prefix_ngrams=get_text_ngrams(email_prefix, stopwords=None, use_bigrams=True),
                     author_info_name_counts=counts,
                 )
             self.signatures[signature_id] = signature
@@ -745,10 +758,10 @@ class ANDData:
         # and then name based constraints
         else:
             signature_2 = self.signatures[signature_id_2]
-            prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
+            # either a known alias or a prefix of the other
+            # if neither, then we'll say it's impossible to be the same person
             known_alias = (first_1, first_2) in self.name_tuples
-            # dont cluster together if the two first names are not prefixes of each other, and the pair
-            # is not present in a provided list of known name pairs
+            prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
             if not prefix and not known_alias:
                 return high_value
             # dont cluster together if there is no intersection between the sets of middle initials

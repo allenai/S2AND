@@ -1,6 +1,9 @@
 """
 Note: This script won't run because it relies on an internal Semantic Scholar package
 called pys2, and is here for documentation of how the name count features were built.
+
+TODO: rerun this when we change (a) how first names are normalized, and
+(b) when we flip the first and last names to fix bugs
 """
 import pickle
 from pys2 import _evaluate_redshift_query

@@ -231,7 +231,6 @@ def main(
             signature_id=new_signature_id,
             author_info_first_normalized=None,
             author_info_first_normalized_without_apostrophe=None,
-            author_info_middle_normalized=None,
             author_info_middle_normalized_without_apostrophe=None,
             author_info_last_normalized=None,
             author_info_suffix_normalized=None,

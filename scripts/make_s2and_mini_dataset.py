@@ -114,7 +114,7 @@ for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers
     p_filtered = {k: v for k, v in p.items() if int(k) in paper_ids or int(k) in ref_paper_ids}
 
     # filter down the specters to those in papers only since we don't use specters for references
-    keys_filtered_flag = np.array([i in paper_ids for i in k.astype(int)])
+    keys_filtered_flag = np.array([i in paper_ids for i in k.astype(int)])  # type: ignore
     k_filtered = k[keys_filtered_flag]
     X_filtered = X[keys_filtered_flag, :]
 

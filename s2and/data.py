@@ -549,7 +549,7 @@ class ANDData:
                 if signature.author_info_orcid is not None:
                     orcid = re.findall(ORCID_PATTERN, signature.author_info_orcid)
                     if len(orcid) > 0:
-                        signature = signature._replace(author_info_orcid=orcid[0].upper())
+                        signature = signature._replace(author_info_orcid=orcid[0].upper().replace("-", ""))
                     else:
                         signature = signature._replace(author_info_orcid=None)
 

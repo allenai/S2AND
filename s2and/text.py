@@ -24,7 +24,7 @@ FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
 
-ORCID_PATTERN = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[0-9X]")
+ORCID_PATTERN = re.compile(r"\d{4}-?\d{4}-?\d{4}-?\d{3}[0-9X]")
 
 DROPPED_AFFIXES = {
     "ab",

@@ -63,6 +63,7 @@ class Signature(NamedTuple):
     author_info_affiliations_n_grams: Optional[Counter]
     author_info_coauthor_n_grams: Optional[Counter]
     author_info_email: Optional[str]
+    author_info_orcid: Optional[str]
     author_info_name_counts: Optional[NameCounts]
     author_info_position: int
     author_info_block: str
@@ -262,6 +263,10 @@ class ANDData:
                 author_info_affiliations_n_grams=None,
                 author_info_coauthor_n_grams=None,
                 author_info_email=signature["author_info"]["email"],
+                author_info_orcid=signature["author_info"]["source_ids"][0]
+                if "source_id_source" in signature["author_info"]
+                and signature["author_info"]["source_id_source"] == "ORCID"
+                else None,
                 author_info_name_counts=None,
                 author_info_position=signature["author_info"]["position"],
                 author_info_block=signature["author_info"]["block"],
@@ -501,12 +506,6 @@ class ANDData:
                     AFFILIATIONS_STOP_WORDS,
                 )
 
-                email_prefix = (
-                    signature.author_info_email.split("@")[0]
-                    if signature.author_info_email is not None and len(signature.author_info_email) > 0
-                    else None
-                )
-
                 if load_name_counts:
                     first_last_for_count = (
                         signature.author_info_first_normalized + " " + signature.author_info_last_normalized
@@ -539,6 +538,14 @@ class ANDData:
                     else Counter(),
                     author_info_name_counts=counts,
                 )
+
+                # orcid can sometimes start with http://orcid.org/0000-0002-4986-2387
+                # we need to remove the http://orcid.org/ part and then uppercase the rest
+                if signature.author_info_orcid is not None:
+                    signature = signature._replace(
+                        author_info_orcid=signature.author_info_orcid.upper().replace("HTTP://ORCID.ORG/", "")
+                    )
+
             self.signatures[signature_id] = signature
 
     @staticmethod
@@ -725,6 +732,9 @@ class ANDData:
         paper_1 = self.papers[str(self.signatures[signature_id_1].paper_id)]
         paper_2 = self.papers[str(self.signatures[signature_id_2].paper_id)]
 
+        orcid_1 = self.signatures[signature_id_1].author_info_orcid
+        orcid_2 = self.signatures[signature_id_2].author_info_orcid
+
         # cluster seeds have precedence
         if (signature_id_1, signature_id_2) in self.cluster_seeds_disallow or (
             signature_id_2,
@@ -741,6 +751,10 @@ class ANDData:
             and (self.cluster_seeds_require[signature_id_1] != self.cluster_seeds_require[signature_id_2])
         ):
             return CLUSTER_SEEDS_LOOKUP["disallow"]
+        # orcid is a very reliable indicator: if 2 orcids are present and equal, then they are the same person
+        # but if they are not equal, we can't say much
+        elif orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
+            return low_value
         # just-in-case last name constraint: if last names are different, then disallow
         elif (
             self.signatures[signature_id_1].author_info_last_normalized

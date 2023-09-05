@@ -1,6 +1,7 @@
 from typing import Optional, Union, Dict, List, Any, Tuple, Set, NamedTuple
 
 import os
+import re
 import json
 import numpy as np
 import pandas as pd
@@ -34,6 +35,7 @@ from s2and.text import (
     VENUE_STOP_WORDS,
     NAME_PREFIXES,
     DROPPED_AFFIXES,
+    ORCID_PATTERN,
 )
 
 logger = logging.getLogger("s2and")
@@ -153,6 +155,8 @@ class ANDData:
         preprocess: whether to preprocess the data (normalization, etc)
         name_tuples: optionally pass in the already created set of name tuples, to avoid recomputation
             can be None or "filtered" or a set of name tuples
+        use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
+            (b) subblocking so that any sigs with the same orcid are in the same subblock
     """
 
     def __init__(
@@ -192,6 +196,7 @@ class ANDData:
         n_jobs: int = 1,
         preprocess: bool = True,
         name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
+        use_orcid_id: bool = True,
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -264,7 +269,8 @@ class ANDData:
                 author_info_coauthor_n_grams=None,
                 author_info_email=signature["author_info"]["email"],
                 author_info_orcid=signature["author_info"]["source_ids"][0]
-                if "source_id_source" in signature["author_info"]
+                if use_orcid_id
+                and "source_id_source" in signature["author_info"]
                 and signature["author_info"]["source_id_source"] == "ORCID"
                 else None,
                 author_info_name_counts=None,
@@ -539,12 +545,13 @@ class ANDData:
                     author_info_name_counts=counts,
                 )
 
-                # orcid can sometimes start with http://orcid.org/0000-0002-4986-2387
-                # we need to remove the http://orcid.org/ part and then uppercase the rest
+                # we need a regex to extract the 16 digits, keeping in mind the last digit could be X
                 if signature.author_info_orcid is not None:
-                    signature = signature._replace(
-                        author_info_orcid=signature.author_info_orcid.upper().replace("HTTP://ORCID.ORG/", "")
-                    )
+                    orcid = re.findall(ORCID_PATTERN, signature.author_info_orcid)
+                    if len(orcid) > 0:
+                        signature = signature._replace(author_info_orcid=orcid[0].upper().replace("-", ""))
+                    else:
+                        signature = signature._replace(author_info_orcid=None)
 
             self.signatures[signature_id] = signature
 

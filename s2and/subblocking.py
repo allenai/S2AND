@@ -434,6 +434,10 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         for k in keys_to_merge:
             del output[k]
 
+    # values in output should be lists
+    for k in list(output.keys()):
+        output[k] = list(output[k])
+
     # final step: we need to make sure that sets of signature_ids with the same ORCID are in the same subblock
     # approach: find all the signature_ids with ORCIDs that appear more than once
     # AND are in different subblocks

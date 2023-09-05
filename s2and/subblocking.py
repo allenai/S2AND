@@ -170,6 +170,9 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     maximum_size using middle names and the SPECTER clustering algorithm. Finally, it merges any subblocks
     smaller than maximum_size that share name attributes.
 
+    There is a special case for ORCIDs: we make sure that signatures with the same ORCID end up
+    in the same subblock
+
     Args:
         signature_ids (list[str/int]): List of signature IDs.
         anddata (s2and.data.ANDData): Contains name attribute data for the signatures.
@@ -274,7 +277,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
 
     """
     Merging too small subblocks back up to maximum_size
-    If we found that the subblock Jame* was too big, afterwards all the subblocks
+    If we found that the subblock Jame* was too big, afterwards some of the subblocks
     like James*, Jamen*, Jamek* etc may be too small and could be joined again while
     still being below the maximum size.
     
@@ -430,6 +433,46 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         # delete what was merged
         for k in keys_to_merge:
             del output[k]
+
+    # final step: we need to make sure that sets of signature_ids with the same ORCID are in the same subblock
+    # approach: find all the signature_ids with ORCIDs that appear more than once
+    # AND are in different subblocks
+    # then move around the individual signatures so that they are in the same subblock
+    # 1: get a mapping from orcid -> (signature_id, subblock_id)
+    orcid_to_sig_id_subblock_id = defaultdict(list)
+    for subblock_id, sig_ids in output.items():
+        for sig_id in sig_ids:
+            orcid = anddata.signatures[sig_id].author_info_orcid
+            if orcid is not None:
+                orcid_to_sig_id_subblock_id[orcid].append((sig_id, subblock_id))
+    # 2: for each orcid, if there is more than one unique subblock_id, then we need to move signature_ids around
+    for orcid, sig_id_subblock_id in orcid_to_sig_id_subblock_id.items():
+        unique_subblock_ids = list(set([i[1] for i in sig_id_subblock_id]))
+        if len(unique_subblock_ids) > 1:
+            # 3: pick a subblock that isn't already maximum size
+            # if they are all maximum size, then pick the first one
+            subblock_sizes = [len(output[k]) for k in unique_subblock_ids]
+            # try to move into subblocks that
+            # (a) are not SPECTER subblocks
+            # (b) have more than 1 letter
+            unique_subblock_ids = sorted(
+                unique_subblock_ids,
+                key=lambda x: x.count("specter") * 10 + x.count("|"),
+            )
+            if all([i == maximum_size for i in subblock_sizes]):
+                subblock_id_to_move_to = unique_subblock_ids[0]
+            else:
+                subblock_id_to_move_to = [k for k in unique_subblock_ids if len(output[k]) < maximum_size][0]
+            # 4: move the signature_ids around so that they are all in the same subblock
+            # we take ONLY the signature ids that are not in the chosen subblock_id
+            # and move them there, removing from their original subblock
+            for sig_id, original_subblock_id in sig_id_subblock_id:
+                if original_subblock_id != subblock_id_to_move_to:
+                    output[subblock_id_to_move_to].append(sig_id)
+                    output[original_subblock_id].remove(sig_id)
+                    # unlikely, but if we emptied out the original subblock, then delete it
+                    if len(output[original_subblock_id]) == 0:
+                        del output[original_subblock_id]
 
     # let's assert that we have done a complete partition
     assert set(np.hstack([output[k] for k in output])) == set(signature_ids)

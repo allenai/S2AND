@@ -151,13 +151,22 @@ anddata = ANDData(
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
 ```
 
-Our released models are in the `s3` folder referenced above, and are called `production_model.pickle` and `full_union_seed_*.pickle`. They can be loaded the same way, except that the pickled object is a dictionary, with a `clusterer` key.
-
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.
 
 ## Reproducibility
-The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`. You can install these packages exactly by running `pip install pip==21.0.0` and then `pip install -r paper_experiments_env.txt --use-feature=fast-deps --use-deprecated=legacy-resolver`. Rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will udpate here if this becomes not true). 
+The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`, in the branch `s2and_paper`. 
+
+To install, run:
+```bash
+git checkout s2and_paper
+pip install pip==21.0.0
+pip install -r paper_experiments_env.txt --use-feature=fast-deps --use-deprecated=legacy-resolver
+``` 
+
+Then, Rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will udpate here if this becomes not true). 
+
+Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (very close to what is running on the Semantic Scholar website, except the production model doesn't compute the reference features) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "How to use S2AND for predicting with a saved model", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
 
 Note that by default we are using the `--use_cache` flag, which will cache all the features so future reruns are faster. There are two things to be aware of: (a) the cache is stored in RAM and can be huge (100gb+) and (b) if you intend to change the features and rerun, you'll have to turn off the cache or the new features won't be used.
 

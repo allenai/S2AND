@@ -13,7 +13,7 @@ import urllib.request
 # source here: https://github.com/Christopher-Thornton/hmni/blob/master/dev/name_pairs.txt
 url = "https://raw.githubusercontent.com/Christopher-Thornton/hmni/master/dev/name_pairs.txt"
 with urllib.request.urlopen(url) as response:
-    content = response.read().decode('utf-8')
+    content = response.read().decode("utf-8")
     lines = content.splitlines()
 
 pairs = set()
@@ -28,6 +28,6 @@ for line in lines:
         pairs.add((b, a))
 
 # write to disk
-with open(os.path.join(CONFIG["main_data_dir"], "s2and_name_tuples.txt") , "w") as f:
+with open(os.path.join(CONFIG["main_data_dir"], "s2and_name_tuples.txt"), "w") as f:
     for name1, name2 in pairs:
         f.write(f"{name1},{name2}\n")

@@ -20,6 +20,17 @@ If you run into cryptic errors about GCC on macOS while installing the requirmen
 CFLAGS='-stdlib=libc++' pip install -r requirements.in
 ```
 
+Or use uv with a more recent Python version (3.11+):
+```bash
+uv venv s2anduv --python 3.11
+source s2anduv\Scripts\activate   # macOS/Linux
+# s2anduv\Scripts\activate     # Windows
+uv pip install fasttext-wheel pycld2
+uv pip install -r requirements_py_311.in
+uv pip install -e . --no-deps
+```
+
+
 ## Data 
 To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  
 ```[Expected download size is: 50.4 GiB]```

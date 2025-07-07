@@ -184,3 +184,131 @@ class TestData(unittest.TestCase):
         assert middle_constraint == 100
         no_constraint = self.dummy_dataset.get_constraint("0", "1")
         assert no_constraint is None
+
+    def test_multiprocessing_featurization_consistency(self):
+        """Test that multiprocessing featurization produces identical results to single-threaded"""
+        test_pairs = [
+            ("3", "0", 0),
+            ("3", "1", 0),
+            ("3", "2", 0),
+            ("0", "1", 1),
+        ]
+
+        # Test single-threaded
+        features_single, labels_single, _ = many_pairs_featurize(
+            test_pairs, self.dummy_dataset, self.dummy_featurizer, n_jobs=1, use_cache=False, chunk_size=1, nan_value=-1
+        )
+
+        # Test multi-threaded
+        features_multi, labels_multi, _ = many_pairs_featurize(
+            test_pairs, self.dummy_dataset, self.dummy_featurizer, n_jobs=2, use_cache=False, chunk_size=1, nan_value=-1
+        )
+
+        # Verify identical results
+        assert features_single.shape == features_multi.shape, "Feature array shapes don't match"
+        assert labels_single.shape == labels_multi.shape, "Label array shapes don't match"
+
+        # Check that all features are identical
+        for i in range(features_single.shape[0]):
+            for j in range(features_single.shape[1]):
+                val_single = features_single[i, j]
+                val_multi = features_multi[i, j]
+
+                # Handle NaN comparisons
+                both_nan = np.isnan(val_single) and np.isnan(val_multi)
+                if not both_nan:
+                    self.assertAlmostEqual(
+                        val_single,
+                        val_multi,
+                        places=10,
+                        msg=f"Feature mismatch at position ({i}, {j}): {val_single} vs {val_multi}",
+                    )
+
+        # Check labels are identical
+        np.testing.assert_array_equal(
+            labels_single, labels_multi, "Labels don't match between single and multi-threaded"
+        )
+
+    def test_global_dataset_initialization_in_workers(self):
+        """Test that global_dataset is properly initialized in worker processes"""
+        test_pairs = [
+            ("3", "0", 0),
+            ("3", "1", 0),
+        ]
+
+        # This test verifies that worker processes can access the global dataset
+        # If _init_pool wasn't working, this would fail with AttributeError
+        try:
+            features, labels, _ = many_pairs_featurize(
+                test_pairs,
+                self.dummy_dataset,
+                self.dummy_featurizer,
+                n_jobs=2,
+                use_cache=False,
+                chunk_size=1,
+                nan_value=-1,
+            )
+            # If we get here, global dataset was properly initialized
+            assert features.shape[0] == len(test_pairs)
+        except (AttributeError, NameError) as e:
+            self.fail(f"Global dataset not properly initialized in worker processes: {e}")
+
+    def test_multiprocessing_with_different_chunk_sizes(self):
+        """Test that different chunk sizes don't affect results with multiprocessing"""
+        test_pairs = [
+            ("3", "0", 0),
+            ("3", "1", 0),
+            ("3", "2", 0),
+            ("0", "1", 1),
+            ("0", "2", 0),
+            ("1", "2", 1),
+        ]
+
+        # Test with chunk_size=1
+        features_chunk1, labels_chunk1, _ = many_pairs_featurize(
+            test_pairs, self.dummy_dataset, self.dummy_featurizer, n_jobs=2, use_cache=False, chunk_size=1, nan_value=-1
+        )
+
+        # Test with chunk_size=3
+        features_chunk3, labels_chunk3, _ = many_pairs_featurize(
+            test_pairs, self.dummy_dataset, self.dummy_featurizer, n_jobs=2, use_cache=False, chunk_size=3, nan_value=-1
+        )
+
+        # Results should be identical regardless of chunk size
+        assert features_chunk1.shape == features_chunk3.shape
+        np.testing.assert_array_almost_equal(features_chunk1, features_chunk3, decimal=10)
+        np.testing.assert_array_equal(labels_chunk1, labels_chunk3)
+
+    def test_multiprocessing_fallback_to_single_thread(self):
+        """Test that multiprocessing gracefully falls back when work is too small"""
+        test_pairs = [("3", "0", 0)]  # Very small work load
+
+        # Should work even with n_jobs > 1 for small datasets
+        features, labels, _ = many_pairs_featurize(
+            test_pairs, self.dummy_dataset, self.dummy_featurizer, n_jobs=4, use_cache=False, chunk_size=1, nan_value=-1
+        )
+
+        assert features.shape[0] == 1
+        assert labels.shape[0] == 1
+
+    def test_spawn_context_compatibility(self):
+        """Test that the spawn multiprocessing context works correctly"""
+        test_pairs = [
+            ("3", "0", 0),
+            ("3", "1", 0),
+            ("0", "1", 1),
+        ]
+
+        # This specifically tests that our spawn context implementation works
+        # The spawn context should work consistently across platforms
+        features, labels, _ = many_pairs_featurize(
+            test_pairs, self.dummy_dataset, self.dummy_featurizer, n_jobs=2, use_cache=False, chunk_size=1, nan_value=-1
+        )
+
+        # Verify we got valid results
+        assert features.shape[0] == len(test_pairs)
+        assert not np.all(features == -LARGE_INTEGER), "Features were not computed (global dataset issue)"
+
+        # Verify feature values are reasonable (not all zeros or errors)
+        non_missing_features = features[features != -LARGE_INTEGER]
+        assert len(non_missing_features) > 0, "No valid features computed"

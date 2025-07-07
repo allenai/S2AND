@@ -268,11 +268,13 @@ class ANDData:
                 author_info_affiliations_n_grams=None,
                 author_info_coauthor_n_grams=None,
                 author_info_email=signature["author_info"]["email"],
-                author_info_orcid=signature["author_info"]["source_ids"][0]
-                if use_orcid_id
-                and "source_id_source" in signature["author_info"]
-                and signature["author_info"]["source_id_source"] == "ORCID"
-                else None,
+                author_info_orcid=(
+                    signature["author_info"]["source_ids"][0]
+                    if use_orcid_id
+                    and "source_id_source" in signature["author_info"]
+                    and signature["author_info"]["source_id_source"] == "ORCID"
+                    else None
+                ),
                 author_info_name_counts=None,
                 author_info_position=signature["author_info"]["position"],
                 author_info_block=signature["author_info"]["block"],
@@ -500,9 +502,9 @@ class ANDData:
                 author_info_last_normalized=normalize_text(signature.author_info_last),
                 author_info_suffix_normalized=normalize_text(signature.author_info_suffix or ""),
                 author_info_coauthors=set(coauthors) if coauthors is not None else None,
-                author_info_coauthor_blocks=set([compute_block(author) for author in coauthors])
-                if coauthors is not None
-                else None,
+                author_info_coauthor_blocks=(
+                    set([compute_block(author) for author in coauthors]) if coauthors is not None else None
+                ),
             )
 
             if self.preprocess:
@@ -523,13 +525,17 @@ class ANDData:
                     )
                     last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
                     counts = NameCounts(
-                        first=self.first_dict.get(signature.author_info_first_normalized, 1)  # type: ignore
-                        if len(signature.author_info_first_normalized) > 1
-                        else np.nan,
+                        first=(
+                            self.first_dict.get(signature.author_info_first_normalized, 1)  # type: ignore
+                            if len(signature.author_info_first_normalized) > 1
+                            else np.nan
+                        ),
                         last=self.last_dict.get(signature.author_info_last_normalized, 1),
-                        first_last=self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
-                        if len(signature.author_info_first_normalized) > 1
-                        else np.nan,
+                        first_last=(
+                            self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
+                            if len(signature.author_info_first_normalized) > 1
+                            else np.nan
+                        ),
                         last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
                     )
                 else:
@@ -539,9 +545,11 @@ class ANDData:
                     author_info_full_name=ANDData.get_full_name_for_features(signature).strip(),
                     author_info_affiliations=affiliations,
                     author_info_affiliations_n_grams=affiliations_n_grams,
-                    author_info_coauthor_n_grams=get_text_ngrams(" ".join(coauthors), stopwords=None, use_bigrams=True)
-                    if coauthors is not None
-                    else Counter(),
+                    author_info_coauthor_n_grams=(
+                        get_text_ngrams(" ".join(coauthors), stopwords=None, use_bigrams=True)
+                        if coauthors is not None
+                        else Counter()
+                    ),
                     author_info_name_counts=counts,
                 )
 
@@ -1427,6 +1435,11 @@ def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, P
     return (key, paper)
 
 
+def _init_pool(flag: bool):
+    global global_preprocess
+    global_preprocess = flag
+
+
 def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool) -> Dict:
     """
     helper function to preprocess papers
@@ -1444,12 +1457,19 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
     -------
     Dict: the preprocessed papers dictionary
     """
-    global global_preprocess  # type: ignore
-    global_preprocess = preprocess  # type: ignore
+    # we still want it set in the parent for the single-CPU path
+    global global_preprocess
+    global_preprocess = preprocess
 
-    output = {}
+    output: Dict = {}
     if n_jobs > 1:
-        with multiprocessing.Pool(processes=n_jobs) as p:
+        # use spawn everywhere; on Unix this makes behaviour identical
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(
+            processes=n_jobs,
+            initializer=_init_pool,
+            initargs=(preprocess,),  # give the flag to every worker
+        ) as p:
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
                 for key, value in p.imap(preprocess_paper_1, papers_dict.items(), 1000):
@@ -1457,9 +1477,10 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
                     pbar.update()
     else:
         for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers 1/2"):
-            result = preprocess_paper_1(item)
-            output[result[0]] = result[1]
+            k, v = preprocess_paper_1(item)
+            output[k] = v
 
+    # -------- second stage is identical: reuse the same pool setup -------
     if preprocess:
         input_2 = [
             (
@@ -1467,25 +1488,23 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
                 value,
                 [
                     MiniPaper(
-                        title=paper.title,
-                        venue=paper.venue,
-                        journal_name=paper.journal_name,
-                        authors=[author.author_name for author in paper.authors],
+                        title=p.title,
+                        venue=p.venue,
+                        journal_name=p.journal_name,
+                        authors=[a.author_name for a in p.authors],
                     )
-                    for paper in list(
-                        filter(
-                            None,
-                            [output.get(str(ref_id), None) for ref_id in value.references],
-                        )
-                    )
-                ]
-                if value.references is not None
-                else [],
+                    for p in filter(None, [output.get(str(rid)) for rid in (value.references or [])])
+                ],
             )
             for key, value in output.items()
         ]
         if n_jobs > 1:
-            with multiprocessing.Pool(processes=n_jobs) as p:
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(
+                processes=n_jobs,
+                initializer=_init_pool,
+                initargs=(preprocess,),
+            ) as p:
                 _max = len(input_2)
                 with tqdm(total=_max, desc="Preprocessing papers 2/2") as pbar:
                     for key, value in p.imap(preprocess_paper_2, input_2, 100):
@@ -1493,7 +1512,7 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
                         pbar.update()
         else:
             for item in tqdm(input_2, total=len(input_2), desc="Preprocessing papers 2/2"):
-                result = preprocess_paper_2(item)
-                output[result[0]] = result[1]
+                k, v = preprocess_paper_2(item)
+                output[k] = v
 
     return output

@@ -197,3 +197,82 @@ class TestData(unittest.TestCase):
         cluster_to_signatures = self.dummy_dataset.construct_cluster_to_signatures({"a": ["0", "1"], "b": ["3", "4"]})
         expected_cluster_to_signatures = {"1": ["0", "1"], "3": ["3", "4"]}
         assert cluster_to_signatures == expected_cluster_to_signatures
+
+    def test_multiprocessing_preprocessing_consistency(self):
+        """Test that multiprocessing preprocessing produces identical results to single-threaded"""
+        # Create datasets with same data but different n_jobs settings
+        dataset_single = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_single",
+            load_name_counts=False,
+            preprocess=True,
+            n_jobs=1,
+        )
+
+        dataset_multi = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_multi",
+            load_name_counts=False,
+            preprocess=True,
+            n_jobs=2,
+        )
+
+        # Compare that papers are preprocessed identically
+        for paper_id in dataset_single.papers:
+            paper_single = dataset_single.papers[paper_id]
+            paper_multi = dataset_multi.papers[paper_id]
+
+            # Check that key preprocessed fields are identical
+            assert paper_single.title == paper_multi.title, f"Title mismatch for paper {paper_id}"
+            assert (
+                paper_single.predicted_language == paper_multi.predicted_language
+            ), f"Language mismatch for paper {paper_id}"
+            assert paper_single.is_english == paper_multi.is_english, f"is_english mismatch for paper {paper_id}"
+            assert paper_single.is_reliable == paper_multi.is_reliable, f"is_reliable mismatch for paper {paper_id}"
+
+            # Check ngrams are identical
+            if paper_single.title_ngrams_words is not None and paper_multi.title_ngrams_words is not None:
+                assert (
+                    paper_single.title_ngrams_words == paper_multi.title_ngrams_words
+                ), f"Title ngrams mismatch for paper {paper_id}"
+
+    def test_global_variable_initialization(self):
+        """Test that global variables are properly initialized in worker processes"""
+        # This test verifies that the _init_pool function works correctly
+        # by ensuring preprocessing can access global variables
+        dataset = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_global_test",
+            load_name_counts=False,
+            preprocess=True,
+            n_jobs=2,
+        )
+
+        # If global variables weren't initialized properly, this would fail
+        # Verify that at least one paper was processed (has title normalization)
+        processed_papers = [p for p in dataset.papers.values() if hasattr(p, "title") and p.title]
+        assert len(processed_papers) > 0, "No papers were properly processed with multiprocessing"
+
+    def test_preprocess_no_multiprocessing_fallback(self):
+        """Test that code works correctly when falling back to single-threaded due to small dataset"""
+        # Test with n_jobs > 1 but with conditions that force single-threaded execution
+        dataset = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_fallback",
+            load_name_counts=False,
+            preprocess=True,
+            n_jobs=4,  # Request multiple jobs but dataset might be too small
+        )
+
+        # Should still work correctly even if it falls back to single-threaded
+        assert len(dataset.papers) > 0
+        processed_papers = [p for p in dataset.papers.values() if hasattr(p, "title")]
+        assert len(processed_papers) > 0

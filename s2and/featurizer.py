@@ -401,12 +401,16 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
 
     features.extend(
         [
-            email_prefix_1 == email_prefix_2
-            if email_prefix_1 is not None and email_prefix_2 is not None
-            else NUMPY_NAN,
-            email_suffix_1 == email_suffix_2
-            if email_suffix_1 is not None and email_suffix_2 is not None
-            else NUMPY_NAN,
+            (
+                email_prefix_1 == email_prefix_2
+                if email_prefix_1 is not None and email_prefix_2 is not None
+                else NUMPY_NAN
+            ),
+            (
+                email_suffix_1 == email_suffix_2
+                if email_suffix_1 is not None and email_suffix_2 is not None
+                else NUMPY_NAN
+            ),
         ]
     )
 
@@ -513,6 +517,12 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     features = [float(val) if type(val) in [np.float32, np.float64, float] else int(val) for val in features]
 
     return features, index
+
+
+def _init_pool(dataset: ANDData):
+    """Initialize the global dataset variable in worker processes"""
+    global global_dataset
+    global_dataset = dataset
 
 
 def parallel_helper(piece_of_work: Tuple, worker_func: Callable):
@@ -641,7 +651,13 @@ def many_pairs_featurize(
     if cache_changed:
         if n_jobs > 1:
             logger.info(f"Cached changed, making {len(pieces_of_work)} feature vectors in parallel")
-            with multiprocessing.Pool(processes=n_jobs if len(pieces_of_work) > 1000 else 1) as p:
+            # use spawn everywhere; on Unix this makes behaviour identical
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(
+                processes=n_jobs if len(pieces_of_work) > 1000 else 1,
+                initializer=_init_pool,
+                initargs=(dataset,),  # give the dataset to every worker
+            ) as p:
                 _max = len(pieces_of_work)
                 with tqdm(total=_max, desc="Doing work", disable=_max <= 10000) as pbar:
                     for feature_output, index in p.imap(

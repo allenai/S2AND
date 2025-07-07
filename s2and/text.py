@@ -477,6 +477,21 @@ def get_text_ngrams_words(text: Optional[str], stopwords: Set[str] = STOPWORDS) 
     return ngrams
 
 
+def same_prefix_tokens(a: str, b: str) -> bool:
+    """
+    Symmetric multi-token “startswith”.
+    Assumes that the inputs are already fully normalized, lower-cased and depunctuated.
+    Also assumes that multi-tokens are SPACE separated, not anything else (like dashes).
+    True ⇔ for every aligned pair of tokens (up to the shorter list),
+           one token is a prefix of the other.
+    """
+    ta, tb = a.split(), b.split()
+    for x, y in zip(ta, tb):
+        if not (x.startswith(y) or y.startswith(x)):
+            return False
+    return True
+
+
 def equal(
     name_1: Optional[str],
     name_2: Optional[str],

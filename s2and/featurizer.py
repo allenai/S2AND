@@ -37,10 +37,7 @@ logger = logging.getLogger("s2and")
 
 TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 
-# global file-path → in-RAM cache
-# WeakValueDictionary lets entries vanish automatically once no other
-# references exist, preventing memory bloat when many datasets are processed
-CACHED_FEATURES: "weakref.WeakValueDictionary[str, Dict[str, Any]]" = weakref.WeakValueDictionary()
+CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
 
 # ── constants for batched cache writes ───────────────────────────
 BATCH_FLUSH_N = 10_000  # write to disk every 10k new vectors

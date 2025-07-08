@@ -1,12 +1,49 @@
 # mypy: ignore-errors
 """
 In this script we try to answer the question: if we deploy SPECTER2, will S2AND care?
+Both with retraining and without retraining.
 
-That is, if we use official linked ROR affiliation names instead of raw affiliations, will the S2AND
-output change? Will we have to retrain?
+This is done with s2and-mini. Ai2 employee, find it at s3://ai2-s2-research/s2and/s2and-mini/
 
-Performance with original data, per dataset (B3): [0.979, 0.978, 0.959, 0.984, 0.969, 0.961] 0.9716666666666667
-Performance with SPECTER2-replaced data, per dataset (B3): [0.979, 0.978, 0.959, 0.984, 0.969, 0.961] 0.9716666666666667
+With retraining:
+Performance with SPECTERv1 data, on arnetminer (B3): (0.922, 0.985, 0.952)
+Performance with SPECTERv2 data, on arnetminer (B3): (0.93, 0.988, 0.958)
+
+Performance with SPECTERv1 data, on inspire (B3): (0.958, 0.974, 0.966)
+Performance with SPECTERv2 data, on inspire (B3): (0.995, 0.959, 0.977)
+
+Performance with SPECTERv1 data, on kisti (B3): (0.951, 0.971, 0.961)
+Performance with SPECTERv2 data, on kisti (B3): (0.946, 0.98, 0.963)
+
+Performance with SPECTERv1 data, on pubmed (B3): (0.849, 0.988, 0.913)
+Performance with SPECTERv2 data, on pubmed (B3): (0.86, 0.988, 0.92)
+
+Performance with SPECTERv1 data, on qian (B3): (0.936, 0.943, 0.94)
+Performance with SPECTERv2 data, on qian (B3): (0.95, 0.964, 0.957)
+
+Performance with SPECTERv1 data, on zbmath (B3): (0.966, 0.984, 0.975)
+Performance with SPECTERv2 data, on zbmath (B3): (0.975, 0.991, 0.983)
+
+
+Without retraining, just using the original model, we have substantial performance drop:
+
+Performance with SPECTERv1 data, on arnetminer (B3): (0.977, 0.982, 0.979)
+Performance with SPECTERv2 data, on arnetminer (B3): (0.602, 0.991, 0.749)
+
+Performance with SPECTERv1 data, on inspire (B3): (0.993, 0.964, 0.978)
+Performance with SPECTERv2 data, on inspire (B3): (0.959, 0.938, 0.948)
+
+Performance with SPECTERv1 data, on kisti (B3): (0.96, 0.957, 0.959)
+Performance with SPECTERv2 data, on kisti (B3): (0.875, 0.982, 0.925)
+
+Performance with SPECTERv1 data, on pubmed (B3): (1.0, 0.968, 0.984)
+Performance with SPECTERv2 data, on pubmed (B3): (0.947, 0.988, 0.967)
+
+Performance with SPECTERv1 data, on qian (B3): (0.985, 0.955, 0.969)
+Performance with SPECTERv2 data, on qian (B3): (0.635, 0.99, 0.774)
+
+Performance with SPECTERv1 data, on zbmath (B3): (0.967, 0.955, 0.961)
+Performance with SPECTERv2 data, on zbmath (B3): (0.944, 0.934, 0.939)
 """
 
 import os
@@ -16,19 +53,19 @@ os.environ["OMP_NUM_THREADS"] = "4"
 import pickle
 from s2and.data import ANDData
 from s2and.eval import cluster_eval
-from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE
+from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE, PROJECT_ROOT_PATH
 from s2and.featurizer import FeaturizationInfo, featurize
 import numpy as np
 from s2and.model import PairwiseModeler, Clusterer
 
-data_original = "/net/nfs2.s2-research/phantasm/S2AND/s2and_mini/"
+data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
 
-specter_suffixes = ["_specter2.pkl"]  # , "_specter.pickle"]
+specter_suffixes = ["_specter.pickle", "_specter2.pkl"]
 
 random_seed = 42
 n_jobs = 4
 
-TRAIN_FLAG = True
+TRAIN_FLAG = False
 
 # aminer has too much variance
 # medline is pairwise only
@@ -73,11 +110,10 @@ nameless_featurization_info = FeaturizationInfo(
     features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
 )
 
-
-# this is the prod 1.1 model
-with open("data/model_dump.pickle", "rb") as f:
+# this is the prod 1.1 model, which we may or may not retrain
+with open(os.path.join(PROJECT_ROOT_PATH, "data", "model_dump.pickle"), "rb") as f:
     clusterer = pickle.load(f)["clusterer"]
-    clusterer.use_cache = False  # very important
+    clusterer.use_cache = False  # very important for this experiment!!!
 
 results = {}
 num_test_blocks = {}
@@ -103,7 +139,6 @@ for specter_suffix in specter_suffixes:
             preprocess=True,
             random_seed=random_seed,
             name_tuples="filtered",
-            use_prefix_for_rules=False,
         )
         train_block_dict, val_block_dict, test_block_dict = anddata.split_blocks_helper(anddata.get_blocks())
         num_test_blocks[dataset_name] = len(test_block_dict)
@@ -161,8 +196,8 @@ for specter_suffix in specter_suffixes:
     b3s = [i["B3 (P, R, F1)"][-1] for i in cluster_metrics_all]
     print(b3s, sum(b3s) / len(b3s))
 
-result_specter1 = results[specter_suffixes[1]]
-result_specter2 = results[specter_suffixes[0]]
+result_specter1 = results["_specter.pickle"]
+result_specter2 = results["_specter2.pkl"]
 
 for i in range(len(datasets)):
     print(f"Performance with SPECTERv1 data, on {datasets[i]} (B3): {result_specter1[i]['B3 (P, R, F1)']}")
@@ -357,5 +392,5 @@ for dataset_name in ["aminer", "arnetminer", "kisti", "qian", "zbmath", "inspire
 
 
 # save results to pickle
-with (open("specter_version_iterative_experiment_results.pickle", "wb")) as f:
+with open("specter_version_iterative_experiment_results.pickle", "wb") as f:
     pickle.dump(results, f)

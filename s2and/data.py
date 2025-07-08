@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import logging
 import pickle
-import multiprocessing
 from tqdm import tqdm
 
 from functools import reduce
@@ -16,6 +15,7 @@ from collections import defaultdict, Counter
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 
+from s2and.mp import UniversalPool
 from s2and.sampling import sampling, random_sampling
 from s2and.consts import (
     NUMPY_NAN,
@@ -1435,11 +1435,6 @@ def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, P
     return (key, paper)
 
 
-def _init_pool(flag: bool):
-    global global_preprocess
-    global_preprocess = flag
-
-
 def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool) -> Dict:
     """
     helper function to preprocess papers
@@ -1463,13 +1458,8 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
 
     output: Dict = {}
     if n_jobs > 1:
-        # use spawn everywhere; on Unix this makes behaviour identical
-        ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(
-            processes=n_jobs,
-            initializer=_init_pool,
-            initargs=(preprocess,),  # give the flag to every worker
-        ) as p:
+        # Use UniversalPool to replicate the original p.imap() streaming behavior
+        with UniversalPool(processes=n_jobs) as p:
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
                 for key, value in p.imap(preprocess_paper_1, papers_dict.items(), 1000):
@@ -1499,12 +1489,8 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
             for key, value in output.items()
         ]
         if n_jobs > 1:
-            ctx = multiprocessing.get_context("spawn")
-            with ctx.Pool(
-                processes=n_jobs,
-                initializer=_init_pool,
-                initargs=(preprocess,),
-            ) as p:
+            # Use UniversalPool to replicate the original p.imap() streaming behavior
+            with UniversalPool(processes=n_jobs) as p:
                 _max = len(input_2)
                 with tqdm(total=_max, desc="Preprocessing papers 2/2") as pbar:
                     for key, value in p.imap(preprocess_paper_2, input_2, 100):

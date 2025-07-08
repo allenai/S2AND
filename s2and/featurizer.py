@@ -2,13 +2,15 @@ from typing import Tuple, List, Union, Dict, Callable, Any, Optional
 
 import os
 import json
-import weakref
 import tempfile
 import orjson
 import numpy as np
 import functools
 import logging
 from collections import Counter
+import threading
+import queue
+import time
 
 from tqdm import tqdm
 
@@ -39,9 +41,61 @@ TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 
 CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
 
-# ── constants for batched cache writes ───────────────────────────
-BATCH_FLUSH_N = 10_000  # write to disk every 10k new vectors
-SKIP_WRITE_THRESHOLD = 0.01  # if < 1% new, skip disk flush entirely
+# ── constants for cache writes ───────────────────────────
+INCREMENTAL_WRITE_THRESHOLD = 1000  # only write incrementally if we have at least this many new features
+BACKGROUND_WRITE_INTERVAL = 30  # seconds between background writes
+
+
+class BackgroundCacheWriter:
+    """Async background writer to reduce cache write bottleneck"""
+
+    def __init__(self):
+        self.write_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker_thread = None
+
+    def start(self):
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            self.stop_event.clear()
+            self.worker_thread = threading.Thread(target=self._writer_worker, daemon=True)
+            self.worker_thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5)
+
+    def queue_write(self, featurizer_info, cached_features, dataset_name):
+        """Queue a cache write operation"""
+        self.write_queue.put((featurizer_info, cached_features.copy(), dataset_name))
+
+    def _writer_worker(self):
+        """Background worker that processes write queue"""
+        while not self.stop_event.is_set():
+            try:
+                # Process all queued writes
+                writes_processed = 0
+                while not self.write_queue.empty() and writes_processed < 10:  # Batch limit
+                    try:
+                        featurizer_info, cached_features, dataset_name = self.write_queue.get_nowait()
+                        if len(cached_features.get("__new_features__", {})) > 0:
+                            featurizer_info.write_cache(cached_features, dataset_name, incremental=True)
+                        writes_processed += 1
+                    except queue.Empty:
+                        break
+                    except Exception as e:
+                        logger.warning(f"Background cache write failed: {e}")
+
+                # Sleep before next batch
+                time.sleep(BACKGROUND_WRITE_INTERVAL)
+
+            except Exception as e:
+                logger.error(f"Background writer error: {e}")
+                time.sleep(5)
+
+
+# Global background writer
+_background_writer = BackgroundCacheWriter()
 
 
 class FeaturizationInfo:
@@ -318,14 +372,25 @@ class FeaturizationInfo:
         else:
             features_to_write = cached_features
 
-        # ---- atomic write using temp file ----
-        json_bytes = orjson.dumps(features_to_write, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_INDENT_2)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=os.path.dirname(path)) as tmp:
-            tmp.write(json_bytes.decode("utf-8"))
-            tmp_path = tmp.name
+        # ---- atomic write using temp file with retry logic ----
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                json_bytes = orjson.dumps(features_to_write, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_INDENT_2)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=os.path.dirname(path)) as tmp:
+                    tmp.write(json_bytes.decode("utf-8"))
+                    tmp_path = tmp.name
 
-        # atomic; old cache either stays or is replaced in a single syscall
-        os.replace(tmp_path, path)
+                # atomic; old cache either stays or is replaced in a single syscall
+                os.replace(tmp_path, path)
+                break  # Success, exit retry loop
+            except (OSError, IOError) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Cache write attempt {attempt + 1} failed: {e}, retrying...")
+                    time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                else:
+                    logger.error(f"Cache write failed after {max_retries} attempts: {e}")
+                    raise
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
@@ -646,8 +711,9 @@ def many_pairs_featurize(
             cached_features["features"] = {}
             cached_features["features_to_use"] = featurizer_info.features_to_use
 
-        # Initialize buffer for new features
-        cached_features["__new_features__"] = {}
+        # Initialize buffer for new features if not already present
+        if "__new_features__" not in cached_features:
+            cached_features["__new_features__"] = {}
 
     features = np.ones((len(signature_pairs), NUM_FEATURES)) * (-LARGE_INTEGER)
     labels = np.zeros(len(signature_pairs))
@@ -710,11 +776,6 @@ def many_pairs_featurize(
                             cached_features["__new_features__"][cache_key] = feature_output
                             new_features_count += 1
 
-                            # Periodic flush to disk
-                            if new_features_count % BATCH_FLUSH_N == 0:
-                                featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
-                                logger.info(f"Flushed {BATCH_FLUSH_N} features to cache")
-
                         features[index, :] = feature_output
                         pbar.update()
         else:
@@ -731,35 +792,32 @@ def many_pairs_featurize(
                     cached_features["__new_features__"][cache_key] = result[0]
                     new_features_count += 1
 
-                    # Periodic flush to disk
-                    if new_features_count % BATCH_FLUSH_N == 0:
-                        featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
-                        logger.info(f"Flushed {BATCH_FLUSH_N} features to cache")
-
                 features[result[1], :] = result[0]
         logger.info("Work completed")
 
     if use_cache and cache_changed:
-        # Check if we have enough new features to warrant a disk write
-        total_features = len(cached_features["features"])
+        # Only do incremental writes if we have enough new features to justify the overhead
         new_features_in_buffer = len(cached_features.get("__new_features__", {}))
 
-        if new_features_in_buffer > 0:
-            new_ratio = new_features_in_buffer / max(total_features, 1)
-            if new_ratio >= SKIP_WRITE_THRESHOLD:
-                logger.info(f"Writing {new_features_in_buffer} new features to cache ({new_ratio:.1%} new)")
-                featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
-                logger.info(f"Cache written with {len(cached_features['features'])} total keys.")
-            else:
-                logger.info(f"Only {new_ratio:.2%} new features - skipping disk write")
+        if new_features_in_buffer >= INCREMENTAL_WRITE_THRESHOLD:
+            logger.info(f"Queueing {new_features_in_buffer} new features for background write")
+            _background_writer.start()
+            _background_writer.queue_write(featurizer_info, cached_features, dataset.name)
         else:
-            logger.info("No new features to write to cache")
+            logger.info(f"Only {new_features_in_buffer} new features - will write at end")
+
+    # Always write any remaining new features at the end
+    if use_cache and cache_changed and len(cached_features.get("__new_features__", {})) > 0:
+        new_features_in_buffer = len(cached_features["__new_features__"])
+        logger.info(f"Writing final {new_features_in_buffer} new features to cache")
+        featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
+        logger.info(f"Cache written with {len(cached_features['features'])} total keys.")
 
     if use_cache:
         logger.info("Writing to in memory cache")
         # use the variable from above, to be sure we are using the same path
         cache_path = featurizer_info.cache_file_path(dataset.name)
-        CACHED_FEATURES[cache_path] = cached_features  # weak-ref cache
+        CACHED_FEATURES[cache_path] = cached_features
         logger.info("In memory cache written")
 
     if delete_training_data:

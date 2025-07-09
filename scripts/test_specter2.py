@@ -6,6 +6,7 @@ Both with retraining and without retraining.
 This is done with s2and-mini. Ai2 employee, find it at s3://ai2-s2-research/s2and/s2and-mini/
 
 With retraining:
+
 Performance with SPECTERv1 data, on arnetminer (B3): (0.922, 0.985, 0.952)
 Performance with SPECTERv2 data, on arnetminer (B3): (0.93, 0.988, 0.958)
 
@@ -24,8 +25,10 @@ Performance with SPECTERv2 data, on qian (B3): (0.95, 0.964, 0.957)
 Performance with SPECTERv1 data, on zbmath (B3): (0.966, 0.984, 0.975)
 Performance with SPECTERv2 data, on zbmath (B3): (0.975, 0.991, 0.983)
 
+---
 
-Without retraining, just using the original model, we have substantial performance drop:
+Without retraining, just using the original SPECTER1 model with SPECTER1/SPECTER2 features,
+we have substantial performance drop for SPECTER2:
 
 Performance with SPECTERv1 data, on arnetminer (B3): (0.977, 0.982, 0.979)
 Performance with SPECTERv2 data, on arnetminer (B3): (0.602, 0.991, 0.749)
@@ -44,6 +47,7 @@ Performance with SPECTERv2 data, on qian (B3): (0.635, 0.99, 0.774)
 
 Performance with SPECTERv1 data, on zbmath (B3): (0.967, 0.955, 0.961)
 Performance with SPECTERv2 data, on zbmath (B3): (0.944, 0.934, 0.939)
+
 """
 
 import os
@@ -65,7 +69,7 @@ specter_suffixes = ["_specter.pickle", "_specter2.pkl"]
 random_seed = 42
 n_jobs = 4
 
-TRAIN_FLAG = False
+TRAIN_FLAG = True
 
 # aminer has too much variance
 # medline is pairwise only

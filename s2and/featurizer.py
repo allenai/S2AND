@@ -362,6 +362,9 @@ class FeaturizationInfo:
                     logger.warning(f"Could not load existing cache at {path}, creating new cache")
                     existing_cache = {"features": {}}
 
+            # CONCURRENCY RISK: Another process could write between load and write
+            # This could cause loss of features computed by other processes
+
             # Merge new features
             existing_cache["features"].update(cached_features["__new_features__"])
             existing_cache["features_to_use"] = cached_features.get("features_to_use", [])

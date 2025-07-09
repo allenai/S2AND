@@ -1,16 +1,21 @@
 from typing import Tuple, List, Union, Dict, Callable, Any, Optional
 
 import os
-import multiprocessing
 import json
+import tempfile
+import orjson
 import numpy as np
 import functools
 import logging
 from collections import Counter
+import threading
+import queue
+import time
 
 from tqdm import tqdm
 
 from s2and.data import ANDData
+from s2and.mp import UniversalPool
 from s2and.consts import (
     CACHE_ROOT,
     NUMPY_NAN,
@@ -35,6 +40,62 @@ logger = logging.getLogger("s2and")
 TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 
 CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
+
+# ── constants for cache writes ───────────────────────────
+INCREMENTAL_WRITE_THRESHOLD = 1000  # only write incrementally if we have at least this many new features
+BACKGROUND_WRITE_INTERVAL = 30  # seconds between background writes
+
+
+class BackgroundCacheWriter:
+    """Async background writer to reduce cache write bottleneck"""
+
+    def __init__(self):
+        self.write_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker_thread = None
+
+    def start(self):
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            self.stop_event.clear()
+            self.worker_thread = threading.Thread(target=self._writer_worker, daemon=True)
+            self.worker_thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5)
+
+    def queue_write(self, featurizer_info, cached_features, dataset_name):
+        """Queue a cache write operation"""
+        self.write_queue.put((featurizer_info, cached_features.copy(), dataset_name))
+
+    def _writer_worker(self):
+        """Background worker that processes write queue"""
+        while not self.stop_event.is_set():
+            try:
+                # Process all queued writes
+                writes_processed = 0
+                while not self.write_queue.empty() and writes_processed < 10:  # Batch limit
+                    try:
+                        featurizer_info, cached_features, dataset_name = self.write_queue.get_nowait()
+                        if len(cached_features.get("__new_features__", {})) > 0:
+                            featurizer_info.write_cache(cached_features, dataset_name, incremental=True)
+                        writes_processed += 1
+                    except queue.Empty:
+                        break
+                    except Exception as e:
+                        logger.warning(f"Background cache write failed: {e}")
+
+                # Sleep before next batch
+                time.sleep(BACKGROUND_WRITE_INTERVAL)
+
+            except Exception as e:
+                logger.error(f"Background writer error: {e}")
+                time.sleep(5)
+
+
+# Global background writer
+_background_writer = BackgroundCacheWriter()
 
 
 class FeaturizationInfo:
@@ -271,7 +332,7 @@ class FeaturizationInfo:
             "all_features.json",
         )
 
-    def write_cache(self, cached_features: Dict, dataset_name: str):
+    def write_cache(self, cached_features: Dict, dataset_name: str, incremental: bool = False):
         """
         Writes the cached features to the features cache file
 
@@ -281,16 +342,58 @@ class FeaturizationInfo:
             the features, keyed by signature pair
         dataset_name: str
             the name of the dataset
+        incremental: bool
+            if True, only write new features from __new_features__ key
 
         Returns
         -------
         nothing, writes the cache file
         """
-        with open(
-            self.cache_file_path(dataset_name),
-            "w",
-        ) as _json_file:
-            json.dump(cached_features, _json_file)
+        path = self.cache_file_path(dataset_name)
+
+        if incremental and "__new_features__" in cached_features:
+            # Load existing cache and merge with new features
+            existing_cache = {"features": {}}
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as fh:
+                        existing_cache = orjson.loads(fh.read())
+                except (ValueError, orjson.JSONDecodeError):
+                    logger.warning(f"Could not load existing cache at {path}, creating new cache")
+                    existing_cache = {"features": {}}
+
+            # CONCURRENCY RISK: Another process could write between load and write
+            # This could cause loss of features computed by other processes
+
+            # Merge new features
+            existing_cache["features"].update(cached_features["__new_features__"])
+            existing_cache["features_to_use"] = cached_features.get("features_to_use", [])
+            features_to_write = existing_cache
+
+            # Clear the new features buffer
+            cached_features["__new_features__"] = {}
+        else:
+            features_to_write = cached_features
+
+        # ---- atomic write using temp file with retry logic ----
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                json_bytes = orjson.dumps(features_to_write, option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_INDENT_2)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=os.path.dirname(path)) as tmp:
+                    tmp.write(json_bytes.decode("utf-8"))
+                    tmp_path = tmp.name
+
+                # atomic; old cache either stays or is replaced in a single syscall
+                os.replace(tmp_path, path)
+                break  # Success, exit retry loop
+            except (OSError, IOError) as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Cache write attempt {attempt + 1} failed: {e}, retrying...")
+                    time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                else:
+                    logger.error(f"Cache write failed after {max_retries} attempts: {e}")
+                    raise
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
@@ -519,12 +622,6 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     return features, index
 
 
-def _init_pool(dataset: ANDData):
-    """Initialize the global dataset variable in worker processes"""
-    global global_dataset
-    global_dataset = dataset
-
-
 def parallel_helper(piece_of_work: Tuple, worker_func: Callable):
     """
     Helper function to explode tuple arguments
@@ -592,22 +689,34 @@ def many_pairs_featurize(
 
     cached_features: Dict[str, Any] = {"features": {}}
     cache_changed = False
+    new_features_count = 0
+
     if use_cache:
         logger.info("Loading cache...")
         if not os.path.exists(featurizer_info.cache_directory(dataset.name)):
             os.makedirs(featurizer_info.cache_directory(dataset.name))
-        if os.path.exists(featurizer_info.cache_file_path(dataset.name)):
-            if featurizer_info.cache_file_path(dataset.name) in CACHED_FEATURES:
-                cached_features = CACHED_FEATURES[featurizer_info.cache_file_path(dataset.name)]
+        cache_path = featurizer_info.cache_file_path(dataset.name)
+        if os.path.exists(cache_path):
+            if cache_path in CACHED_FEATURES:
+                cached_features = CACHED_FEATURES[cache_path]
             else:
-                with open(featurizer_info.cache_file_path(dataset.name)) as _json_file:
-                    cached_features = json.load(_json_file)
+                # fast path: orjson, fallback: stdlib json (handles legacy NaN)
+                try:
+                    with open(cache_path, "rb") as fh:
+                        cached_features = orjson.loads(fh.read())
+                except ValueError:
+                    with open(cache_path, "r", encoding="utf-8") as fh:
+                        cached_features = json.load(fh)
                 logger.info(f"Cache loaded with {len(cached_features['features'])} keys")
         else:
             logger.info("Cache initiated.")
             cached_features = {}
             cached_features["features"] = {}
             cached_features["features_to_use"] = featurizer_info.features_to_use
+
+        # Initialize buffer for new features if not already present
+        if "__new_features__" not in cached_features:
+            cached_features["__new_features__"] = {}
 
     features = np.ones((len(signature_pairs), NUM_FEATURES)) * (-LARGE_INTEGER)
     labels = np.zeros(len(signature_pairs))
@@ -650,14 +759,12 @@ def many_pairs_featurize(
 
     if cache_changed:
         if n_jobs > 1:
-            logger.info(f"Cached changed, making {len(pieces_of_work)} feature vectors in parallel")
-            # use spawn everywhere; on Unix this makes behaviour identical
-            ctx = multiprocessing.get_context("spawn")
-            with ctx.Pool(
-                processes=n_jobs if len(pieces_of_work) > 1000 else 1,
-                initializer=_init_pool,
-                initargs=(dataset,),  # give the dataset to every worker
-            ) as p:
+            if use_cache:
+                logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in parallel")
+            else:
+                logger.info(f"Making {len(pieces_of_work)} feature vectors in parallel")
+
+            with UniversalPool(processes=n_jobs if len(pieces_of_work) > 1000 else 1) as p:
                 _max = len(pieces_of_work)
                 with tqdm(total=_max, desc="Doing work", disable=_max <= 10000) as pbar:
                     for feature_output, index in p.imap(
@@ -667,32 +774,53 @@ def many_pairs_featurize(
                     ):
                         # Write to in memory cache if we're not skipping
                         if use_cache:
-                            cached_features["features"][
-                                featurizer_info.feature_cache_key(signature_pairs[index])
-                            ] = feature_output
+                            cache_key = featurizer_info.feature_cache_key(signature_pairs[index])
+                            cached_features["features"][cache_key] = feature_output
+                            cached_features["__new_features__"][cache_key] = feature_output
+                            new_features_count += 1
+
                         features[index, :] = feature_output
                         pbar.update()
         else:
-            logger.info(f"Cached changed, making {len(pieces_of_work)} feature vectors in serial")
+            if use_cache:
+                logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in serial")
+            else:
+                logger.info(f"Making {len(pieces_of_work)} feature vectors in serial")
             partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
             for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
                 result = partial_func(piece)
                 if use_cache:
-                    cached_features["features"][featurizer_info.feature_cache_key(signature_pairs[result[1]])] = result[
-                        0
-                    ]
+                    cache_key = featurizer_info.feature_cache_key(signature_pairs[result[1]])
+                    cached_features["features"][cache_key] = result[0]
+                    cached_features["__new_features__"][cache_key] = result[0]
+                    new_features_count += 1
+
                 features[result[1], :] = result[0]
         logger.info("Work completed")
 
     if use_cache and cache_changed:
-        # TODO: figure out how not to write to cache so often because it takes forever with giant data
-        logger.info("Writing to on disk cache")
-        featurizer_info.write_cache(cached_features, dataset.name)
-        logger.info(f"Cache written with {len(cached_features['features'])} keys.")
+        # Only do incremental writes if we have enough new features to justify the overhead
+        new_features_in_buffer = len(cached_features.get("__new_features__", {}))
+
+        if new_features_in_buffer >= INCREMENTAL_WRITE_THRESHOLD:
+            logger.info(f"Queueing {new_features_in_buffer} new features for background write")
+            _background_writer.start()
+            _background_writer.queue_write(featurizer_info, cached_features, dataset.name)
+        else:
+            logger.info(f"Only {new_features_in_buffer} new features - will write at end")
+
+    # Always write any remaining new features at the end
+    if use_cache and cache_changed and len(cached_features.get("__new_features__", {})) > 0:
+        new_features_in_buffer = len(cached_features["__new_features__"])
+        logger.info(f"Writing final {new_features_in_buffer} new features to cache")
+        featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
+        logger.info(f"Cache written with {len(cached_features['features'])} total keys.")
 
     if use_cache:
         logger.info("Writing to in memory cache")
-        CACHED_FEATURES[featurizer_info.cache_file_path(dataset.name)] = cached_features
+        # use the variable from above, to be sure we are using the same path
+        cache_path = featurizer_info.cache_file_path(dataset.name)
+        CACHED_FEATURES[cache_path] = cached_features
         logger.info("In memory cache written")
 
     if delete_training_data:

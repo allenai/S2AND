@@ -15,6 +15,7 @@ seaborn==0.12.2
 tqdm==4.49.0
 strsimpy==0.2.0
 jellyfish==0.8.2
+orjson
 
 # For CI and testing
 pytest==6.0.2

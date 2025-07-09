@@ -1,3 +1,9 @@
+"""
+This is the file to use to retrain a full prod model on all datasets.
+
+Ai2 employee, the complete data (with augmented dataset and specter2 pickles) is: s3://ai2-s2-research/s2and/s2and_release_12_23_20/
+"""
+
 from typing import Optional
 
 import os

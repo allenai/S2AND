@@ -353,7 +353,7 @@ class FeaturizationInfo:
 
         if incremental and "__new_features__" in cached_features:
             # Load existing cache and merge with new features
-            existing_cache = {"features": {}}
+            existing_cache: Dict[str, Any] = {"features": {}}
             if os.path.exists(path):
                 try:
                     with open(path, "rb") as fh:
@@ -746,16 +746,16 @@ def many_pairs_featurize(
 
     logger.info("Created pieces of work")
 
-    indices_to_use = set()
+    indices_to_use_set = set()
     for feature_name in featurizer_info.features_to_use:
-        indices_to_use.update(featurizer_info.feature_group_to_index[feature_name])
-    indices_to_use: List[int] = sorted(list(indices_to_use))  # type: ignore
+        indices_to_use_set.update(featurizer_info.feature_group_to_index[feature_name])
+    indices_to_use: List[int] = sorted(list(indices_to_use_set))
 
     if nameless_featurizer_info:
-        nameless_indices_to_use = set()
+        nameless_indices_to_use_set = set()
         for feature_name in nameless_featurizer_info.features_to_use:
-            nameless_indices_to_use.update(nameless_featurizer_info.feature_group_to_index[feature_name])
-        nameless_indices_to_use: List[int] = sorted(list(nameless_indices_to_use))  # type: ignore
+            nameless_indices_to_use_set.update(nameless_featurizer_info.feature_group_to_index[feature_name])
+        nameless_indices_to_use: List[int] = sorted(list(nameless_indices_to_use_set))
 
     if cache_changed:
         if n_jobs > 1:

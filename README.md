@@ -182,7 +182,7 @@ Our trained, released models are in the `s3` folder referenced above, and are ca
 Note that by default we are using the `--use_cache` flag, which will cache all the features so future reruns are faster. There are two things to be aware of: (a) the cache is stored in RAM and can be huge (100gb+) and (b) if you intend to change the features and rerun, you'll have to turn off the cache or the new features won't be used.
 
 ## Licensing
-The code in this repo is released under the Apache 2.0 license (license included in the repo. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).
+The code in this repo is released under the Apache 2.0 license. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).
 
 ## Citation
 

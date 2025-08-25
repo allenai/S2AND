@@ -1,6 +1,7 @@
 import os
 import platform
 import multiprocessing as mp
+from multiprocessing.context import BaseContext
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from itertools import islice
 from typing import Callable, Iterable, Iterator, Any, Dict, List, Tuple, Optional
@@ -38,6 +39,10 @@ class UniversalPool:
         self.processes = processes or os.cpu_count()
         self._use_threads = use_threads
         self._is_native_pool = False
+        # _pool can be a multiprocessing.Pool or an Executor depending on platform/settings
+        self._pool: Any
+        # reusable context that may be None on platforms without get_context
+        ctx: Optional[BaseContext] = None
 
         if use_threads:
             self._pool = ThreadPoolExecutor(max_workers=self.processes)

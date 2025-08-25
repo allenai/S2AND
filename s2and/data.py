@@ -40,6 +40,9 @@ from s2and.text import (
 
 logger = logging.getLogger("s2and")
 
+# Global variable for multiprocessing
+global_preprocess: bool
+
 
 class NameCounts(NamedTuple):
     first: Optional[int]
@@ -856,9 +859,11 @@ class ANDData:
             x.append(block_id)
             y.append(len(signature))
 
+        # Explicitly set n_init to silence upcoming sklearn default-change warning
         clustering_model = KMeans(
             n_clusters=self.num_clusters_for_block_size,
             random_state=self.random_seed,
+            n_init=10,
         ).fit(np.array(y).reshape(-1, 1))
         y_group = clustering_model.labels_
 

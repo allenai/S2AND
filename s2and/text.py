@@ -442,7 +442,11 @@ def get_text_ngrams(
         lambda x: "".join(x),
         filter(lambda x: " " not in x, zip(text, text[1:], text[2:], text[3:])),
     )
-    ngrams = Counter(unigrams) | Counter(bigrams) | Counter(trigrams) | Counter(quadgrams)
+    ngrams: Counter = Counter()
+    ngrams.update(Counter(unigrams))
+    ngrams.update(Counter(bigrams))
+    ngrams.update(Counter(trigrams))
+    ngrams.update(Counter(quadgrams))
     return ngrams
 
 
@@ -473,7 +477,10 @@ def get_text_ngrams_words(text: Optional[str], stopwords: Set[str] = STOPWORDS) 
         lambda x: " ".join(x),
         zip(text_split, text_split[1:], text_split[2:]),
     )
-    ngrams = unigrams | Counter(bigrams) | Counter(trigrams)
+    ngrams: Counter = Counter()
+    ngrams.update(unigrams)
+    ngrams.update(Counter(bigrams))
+    ngrams.update(Counter(trigrams))
     return ngrams
 
 
@@ -733,6 +740,7 @@ def name_counts(
     with warnings.catch_warnings():
         # np.max of 2 nans causes annoying warnings
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        counts_min_max = list(np.nanmin(counts, axis=0)) + list(np.max([counts[0][:2], counts[1][:2]], axis=0))
+        counts_array = np.array(counts, dtype=float)
+        counts_min_max = list(np.nanmin(counts_array, axis=0)) + list(np.max(counts_array[:, :2], axis=0))
 
     return counts_min_max

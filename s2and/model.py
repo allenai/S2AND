@@ -6,7 +6,7 @@ from s2and.data import ANDData
 from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
 from s2and.subblocking import make_subblocks
 
-from typing import Dict, Optional, Any, Union, List, Tuple
+from typing import Dict, Optional, Any, Union, List, Tuple, cast
 from collections import defaultdict
 import warnings
 import time
@@ -336,7 +336,7 @@ class Clusterer:
     def fit(
         self,
         datasets: Union[ANDData, List[ANDData]],
-        val_dists_precomputed: Dict[str, Dict[str, np.ndarray]] = None,
+        val_dists_precomputed: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
         metric_for_hyperopt: str = "b3",
     ) -> Clusterer:
         """
@@ -429,7 +429,9 @@ class Clusterer:
             rstate=np.random.RandomState(self.random_state),
         )
         # hyperopt has some problems with hp.choice so we need to do this:
-        best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
+        assert self.hyperopt_trials_store is not None
+        trials_store = cast(Trials, self.hyperopt_trials_store)
+        best_params = space_eval(self.search_space, trials_store.argmin)
         self.best_params = {k: intify(v) for k, v in best_params.items()}
         self.set_params(self.best_params)
 
@@ -1293,7 +1295,9 @@ class PairwiseModeler:
                 trials=self.hyperopt_trials_store,
                 rstate=np.random.RandomState(self.random_state),
             )
-            best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
+            assert self.hyperopt_trials_store is not None
+            trials_store = cast(Trials, self.hyperopt_trials_store)
+            best_params = space_eval(self.search_space, trials_store.argmin)
             self.best_params = {k: intify(v) for k, v in best_params.items()}
             self.estimator.set_params(**self.best_params)
         else:

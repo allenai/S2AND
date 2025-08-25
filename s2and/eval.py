@@ -13,10 +13,10 @@ if TYPE_CHECKING:  # need this for circular import issues
 import os
 from os.path import join
 from functools import reduce
+import itertools
 from collections import defaultdict
 
 import numpy as np
-import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -24,7 +24,6 @@ from sklearn.metrics import roc_curve, auc
 from sklearn.metrics import precision_recall_fscore_support
 from sklearn.metrics import average_precision_score
 from sklearn.metrics import precision_recall_curve
-from sklearn.calibration import CalibratedClassifierCV
 import copy
 from tqdm import tqdm
 
@@ -91,14 +90,14 @@ def cluster_eval(
     metrics["Cluster Macro (P, R, F1)"] = pairwise_precision_recall_fscore(
         cluster_to_signatures, pred_clusters, block_dict, "cmacro"
     )
-    metrics["Pred bigger ratio (mean, count)"] = (
-        np.round(np.mean(pred_bigger_ratios), 2),
-        len(pred_bigger_ratios),
-    )
-    metrics["True bigger ratio (mean, count)"] = (
-        np.round(np.mean(true_bigger_ratios), 2),
-        len(true_bigger_ratios),
-    )
+
+    def _mean_or_nan(xs):
+        if len(xs) == 0:
+            return float("nan")
+        return float(np.round(np.mean(xs), 2))
+
+    metrics["Pred bigger ratio (mean, count)"] = (_mean_or_nan(pred_bigger_ratios), len(pred_bigger_ratios))
+    metrics["True bigger ratio (mean, count)"] = (_mean_or_nan(true_bigger_ratios), len(true_bigger_ratios))
 
     return metrics, b3_metrics_per_signature
 
@@ -513,88 +512,44 @@ def pairwise_eval(
     avg_precision = average_precision_score(y, y_prob)
 
     plt.figure(1, figsize=(15, 15))
+    # Standard: recall on x-axis, precision on y-axis
     plt.plot(
-        precision,
         recall,
+        precision,
         lw=2,
-        label="PR curve (average precision = %0.2f)" % avg_precision,
+        label=f"PR curve (AP = {avg_precision:.2f})",
     )
-    plt.xlabel("Precision")
-    plt.ylabel("Recall")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
     plt.title(f"PR Curve for {title}")
     plt.legend(loc="lower left")
     plt.savefig(join(figs_path, base_name + "_pr.png"))
     plt.clf()
     plt.close()
 
-    # plot SHAP
-    # note that SHAP doesn't support model stacking directly
-    # so we have to approximate by getting SHAP values for each
-    # of the models inside the stack
-    if not skip_shap:
-        from s2and.model import VotingClassifier  # avoid circular import
+    # plot SHAP -- delegate to central helper that normalizes across SHAP/NumPy versions
+    if not skip_shap and shap_plot_type is not None:
+        from s2and.shap_utils import compute_shap_summary_plots
 
-        if isinstance(classifier, VotingClassifier):
-            shap_values_all = []
-            for c in classifier.estimators:
-                if isinstance(c, CalibratedClassifierCV):
-                    shap_values_all.append(shap.TreeExplainer(c.base_estimator).shap_values(X)[1])
-                else:
-                    shap_values_all.append(shap.TreeExplainer(c).shap_values(X)[1])
-            shap_values = [np.mean(shap_values_all, axis=0)]
-        elif nameless_classifier is not None:
-            shap_values = []
-            for c, d in [(classifier, X), (nameless_classifier, nameless_X)]:
-                if isinstance(classifier, CalibratedClassifierCV):
-                    shap_values.append(shap.TreeExplainer(c.base_estimator).shap_values(d)[1])
-                else:
-                    shap_values.append(shap.TreeExplainer(c).shap_values(d)[1])
-        elif isinstance(classifier, CalibratedClassifierCV):
-            shap_values = shap.TreeExplainer(classifier.base_estimator).shap_values(X)[1]
-        else:
-            shap_values = shap.TreeExplainer(classifier).shap_values(X)[1]
-
-        if isinstance(shap_values, list):
-            for i, (shap_value, feature_names, d) in enumerate(
-                zip(
-                    shap_values,
-                    [shap_feature_names, nameless_feature_names],
-                    [X, nameless_X],
-                )
-            ):
-                assert feature_names is not None, "neither feature_names should be None here"
-                plt.figure(2 + i)
-                shap.summary_plot(
-                    shap_value,
-                    d,
-                    plot_type=shap_plot_type,
-                    feature_names=feature_names,
-                    show=False,
-                    max_display=len(feature_names),
-                )
-                # plt.title(f"{i}: SHAP Values for {title}")
-                plt.tight_layout()
-                plt.savefig(join(figs_path, base_name + f"_shap_{i}.png"))
-                plt.clf()
-                plt.close()
-        else:
-            plt.figure(2)
-            shap.summary_plot(
-                shap_values,
-                X,
-                plot_type=shap_plot_type,
-                feature_names=shap_feature_names,
-                show=False,
-                max_display=len(shap_feature_names),
-            )
-            # plt.title(f"SHAP Values for {title}")
-            plt.tight_layout()
-            plt.savefig(join(figs_path, base_name + "_shap.png"))
-            plt.clf()
-            plt.close()
+        # compute_shap_summary_plots will write the same PNGs that the old inline
+        # code produced (names and behavior preserved) and is defensive against
+        # SHAP API changes and NumPy alias removals.
+        compute_shap_summary_plots(
+            classifier=classifier,
+            X=X,
+            shap_feature_names=shap_feature_names,
+            shap_plot_type=shap_plot_type,
+            base_name=base_name,
+            figs_path=figs_path,
+            nameless_classifier=nameless_classifier,
+            nameless_X=nameless_X,
+            nameless_feature_names=nameless_feature_names,
+        )
 
     # collect metrics and return
-    pr, rc, f1, _ = precision_recall_fscore_support(y, y_prob > thresh_for_f1, beta=1.0, average="macro")
+    pr, rc, f1, _ = precision_recall_fscore_support(
+        y, y_prob > thresh_for_f1, beta=1.0, average="macro", zero_division=0
+    )
     metrics = {
         "AUROC": np.round(roc_auc, 3),
         "Average Precision": np.round(avg_precision, 3),
@@ -646,8 +601,8 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     true_clusters = true_clus.copy()
     pred_clusters = pred_clus.copy()
 
-    tcset = set(reduce(lambda x, y: x + y, true_clusters.values()))
-    pcset = set(reduce(lambda x, y: x + y, pred_clusters.values()))
+    tcset = set(itertools.chain.from_iterable(true_clusters.values()))
+    pcset = set(itertools.chain.from_iterable(pred_clusters.values()))
 
     if tcset != pcset:
         raise ValueError("Predictions do not cover all the signatures!")
@@ -811,8 +766,8 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
     true_clusters = true_clus.copy()
     pred_clusters = pred_clus.copy()
 
-    tcset = set(reduce(lambda x, y: x + y, true_clusters.values()))
-    pcset = set(reduce(lambda x, y: x + y, pred_clusters.values()))
+    tcset = set(itertools.chain.from_iterable(true_clusters.values()))
+    pcset = set(itertools.chain.from_iterable(pred_clusters.values()))
 
     if tcset != pcset:
         raise ValueError("predictions do not cover all the signatures.")
@@ -861,6 +816,8 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
         mf1 = mf1 / len(test_block)
 
         return np.round(mprecision, 3), np.round(mrecall, 3), np.round(mf1, 3)
+    else:
+        raise ValueError(f"Unknown strategy: {strategy!r}")
 
 
 def claims_eval(
@@ -950,7 +907,8 @@ def claims_eval(
 
     output_to_write["sig_pairs_wrong"] = []
     output_to_write["sig_pairs_right"] = []
-    for id1, id2, pred_same, gold_same in tqdm(sig_pairs):
+    # keep tqdm off for programmatic runs; enable by setting env var if desired
+    for id1, id2, pred_same, gold_same in tqdm(sig_pairs, disable=True):
         paper_id1, _ = id1.split("___")
         paper1 = dataset.papers[paper_id1]
         title1 = paper1.title
@@ -959,11 +917,15 @@ def claims_eval(
         paper2 = dataset.papers[paper_id2]
         title2 = paper2.title
 
-        logger.handlers[0].level = logging.ERROR
-
-        output_to_write["sig_pairs_right" if pred_same == gold_same else "sig_pairs_wrong"].append(
-            (id1, id2, title1, title2, pred_same, gold_same)
-        )
+        # temporarily silence noisy handlers
+        _prev_level = logger.level
+        logger.setLevel(logging.ERROR)
+        try:
+            output_to_write["sig_pairs_right" if pred_same == gold_same else "sig_pairs_wrong"].append(
+                (id1, id2, title1, title2, pred_same, gold_same)
+            )
+        finally:
+            logger.setLevel(_prev_level)
 
         if output_shap and directory_for_caching is not None:
             features, _, nameless_features = many_pairs_featurize(
@@ -978,45 +940,50 @@ def claims_eval(
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                clusterer.classifier.booster_.params["objective"] = "binary"
-                shap_output = shap.TreeExplainer(clusterer.classifier).shap_values(features)[1]
-                clusterer.nameless_classifier.booster_.params["objective"] = "binary"  # type: ignore
-                shap_output_nameless = shap.TreeExplainer(clusterer.nameless_classifier).shap_values(nameless_features)[
-                    1
-                ]
+                # Use helpers from s2and.shap_utils so we stay compatible across
+                # SHAP/NumPy versions while preserving identical filenames + titles.
+                import s2and.shap_utils as shap_utils
+
+                # Avoid mutating fitted objects in-place. If the booster params
+                # need temporary changes, copy and restore. Many SHAP versions
+                # work without this, so we only touch params defensively.
+                def _safe_get_shap_vals(clf, X):
+                    base = shap_utils._base_estimator(clf)
+                    # copy params if LightGBM-like
+                    booster = getattr(clf, "booster_", None)
+                    orig_params = None
+                    if booster is not None and hasattr(booster, "params"):
+                        orig_params = dict(booster.params)
+                    try:
+                        return shap_utils._shap_values_for_tree_model(base, X, class_index=1)
+                    finally:
+                        if orig_params is not None:
+                            booster.params.clear()
+                            booster.params.update(orig_params)
+
+                shap_output = _safe_get_shap_vals(clusterer.classifier, features)
+                shap_output_nameless = _safe_get_shap_vals(clusterer.nameless_classifier, nameless_features)
 
                 title = f"{id1}-{id2}"
-                plt.figure(1)
-                shap.summary_plot(
+                # Named
+                shap_utils._safe_summary_plot(
                     shap_output,
                     features,
-                    plot_type="dot",
-                    feature_names=clusterer.featurizer_info.get_feature_names(),
-                    show=False,
-                    max_display=len(clusterer.featurizer_info.get_feature_names()),
+                    clusterer.featurizer_info.get_feature_names(),
+                    "dot",
+                    join(directory_for_caching, f"{title}_shap.png"),
+                    fig_num=1,
                 )
-                plt.title(f"SHAP Values for {title}")
-                plt.tight_layout()
-                plt.savefig(join(directory_for_caching, f"{title}_shap.png"))
-                plt.clf()
-                plt.close()
-
-                plt.figure(1)
-                shap.summary_plot(
+                # Nameless
+                shap_utils._safe_summary_plot(
                     shap_output_nameless,
                     nameless_features,
-                    plot_type="dot",
-                    feature_names=clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
-                    show=False,
-                    max_display=len(clusterer.nameless_featurizer_info.get_feature_names()),  # type: ignore
+                    clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
+                    "dot",
+                    join(directory_for_caching, f"{title}_shap_nameless.png"),
+                    fig_num=2,
                 )
-                plt.title(f"SHAP Values for {title}")
-                plt.tight_layout()
-                plt.savefig(join(directory_for_caching, f"{title}_shap_nameless.png"))
-                plt.clf()
-                plt.close()
 
-    logger.handlers[0].level = logging.INFO
     if directory_for_caching is not None:
         logger.info("Writing predictions to disk")
         suffix: Union[int, str]
@@ -1152,4 +1119,5 @@ def min_pair_edit(preds):
     if len(wrong) != 0:
         print("something went wrong")
 
-    return steps / (len(worst_ids) - 1), steps, len(worst_ids)
+    denom = max(len(worst_ids) - 1, 1)
+    return steps / denom, steps, len(worst_ids)

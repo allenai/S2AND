@@ -128,7 +128,8 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         # note: any time we take something like XYZ and make it into XYZA, XYZB, ...
         # we will have some leftover ones that are just XYZ. those will end up in their own subblock
         names_up_to_k = np.array([name[0:k] for name in names])
-        counts_up_to_k = pd.value_counts(names_up_to_k)
+        # use Series.value_counts to avoid the deprecated pd.value_counts API
+        counts_up_to_k = pd.Series(names_up_to_k).value_counts()
         # find the ones that are a good size, and then take the rest and subdivide further
         good_size_flag = counts_up_to_k < maximum_size
         counts_up_to_k_good_size = counts_up_to_k[good_size_flag]

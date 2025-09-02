@@ -6,7 +6,7 @@ import pickle
 import s2and.featurizer
 from s2and.data import ANDData
 from s2and.model import Clusterer
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from s2and.featurizer import FeaturizationInfo
 from s2and.consts import LARGE_DISTANCE
 import lightgbm as lgb
 

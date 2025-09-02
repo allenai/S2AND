@@ -1464,7 +1464,7 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
     output: Dict = {}
     if n_jobs > 1:
         # Use UniversalPool to replicate the original p.imap() streaming behavior
-        with UniversalPool(processes=n_jobs) as p:
+        with UniversalPool(processes=n_jobs) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
                 for key, value in p.imap(preprocess_paper_1, papers_dict.items(), 1000):
@@ -1488,7 +1488,8 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
                         journal_name=p.journal_name,
                         authors=[a.author_name for a in p.authors],
                     )
-                    for p in filter(None, [output.get(str(rid)) for rid in (value.references or [])])
+                    for p in [output.get(str(rid)) for rid in (value.references or [])]
+                    if p is not None
                 ],
             )
             for key, value in output.items()

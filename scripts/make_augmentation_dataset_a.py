@@ -6,7 +6,9 @@ with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
 import pickle
-import requests
+import urllib.request
+import urllib.parse
+import json as json_module
 import pandas as pd
 from s2and.data import ANDData
 from typing import Dict, List
@@ -28,12 +30,19 @@ def embed(papers, embeddings_by_paper_id: Dict[str, List[float]] = {}):
     papers_to_embed = [p for p in papers if p["paper_id"] not in embeddings_by_paper_id]
     unembedded_papers = []
     for chunk in chunks(papers_to_embed):
-        response = requests.post(SPECTER_URL, json=chunk)
+        # Prepare the request
+        data = json_module.dumps(chunk).encode("utf-8")
+        req = urllib.request.Request(SPECTER_URL, data=data, headers={"Content-Type": "application/json"})
 
-        if response.status_code == 200:
-            for paper in response.json()["preds"]:
-                embeddings_by_paper_id[paper["paper_id"]] = paper["embedding"]
-        else:
+        try:
+            with urllib.request.urlopen(req) as response:
+                if response.status == 200:
+                    response_data = json_module.loads(response.read().decode("utf-8"))
+                    for paper in response_data["preds"]:
+                        embeddings_by_paper_id[paper["paper_id"]] = paper["embedding"]
+                else:
+                    unembedded_papers.extend(chunk)
+        except urllib.error.URLError:
             unembedded_papers.extend(chunk)
 
     return embeddings_by_paper_id, unembedded_papers

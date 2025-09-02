@@ -11,7 +11,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "<fill me in>"
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
-import six
 import numpy as np
 import pandas as pd
 import argparse
@@ -34,7 +33,7 @@ translate_client = translate_v2.Client()
 
 def translate(text):
     coin_flip = random.uniform(0, 1)
-    if isinstance(text, six.binary_type):
+    if isinstance(text, bytes):
         text = text.decode("utf-8")
     if coin_flip < 0.25:
         return translate_client.translate(text, target_language="fr")["translatedText"]
@@ -124,9 +123,7 @@ def main(
         max_value = (
             max_train_positives_per_dataset
             if split == "train"
-            else max_val_positives_per_dataset
-            if split == "val"
-            else max_test_positives_per_dataset
+            else max_val_positives_per_dataset if split == "val" else max_test_positives_per_dataset
         ) * (negatives_multiplier if label == 0 else 1.0)
         if count_value >= max_value or dataset_name not in SOURCE_DATASET_NAMES:
             continue

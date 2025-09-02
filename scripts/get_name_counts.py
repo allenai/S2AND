@@ -5,6 +5,7 @@ called pys2, and is here for documentation of how the name count features were b
 TODO: rerun this when we change (a) how first names are normalized, and
 (b) when we flip the first and last names to fix bugs
 """
+
 import pickle
 from pys2 import _evaluate_redshift_query
 from s2and.text import normalize_text

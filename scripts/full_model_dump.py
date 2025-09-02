@@ -96,137 +96,132 @@ else:
     NAN_VALUE = np.nan  # type: ignore
 
 
-def main():
-    """
-    This script is used to train and dump a model trained on all the datasets
-    """
-    datasets = {}
-    for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fitting base models"):
-        logger.info(f"processing dataset {dataset_name}")
-        clusters_path: Optional[str] = None
-        if dataset_name not in PAIRWISE_ONLY_DATASETS:
-            clusters_path = os.path.join(DATA_DIR, dataset_name, dataset_name + "_clusters.json")
-            train_pairs_path = None
+"""
+This script is used to train and dump a model trained on all the datasets
+"""
+datasets = {}
+for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fitting base models"):
+    logger.info(f"processing dataset {dataset_name}")
+    clusters_path: Optional[str] = None
+    if dataset_name not in PAIRWISE_ONLY_DATASETS:
+        clusters_path = os.path.join(DATA_DIR, dataset_name, dataset_name + "_clusters.json")
+        train_pairs_path = None
+        val_pairs_path = None
+        test_pairs_path = None
+    else:
+        train_pairs_path = os.path.join(DATA_DIR, dataset_name, "train_pairs.csv")
+        val_pairs_path = os.path.join(DATA_DIR, dataset_name, "val_pairs.csv")
+        if not os.path.exists(val_pairs_path):
             val_pairs_path = None
-            test_pairs_path = None
-        else:
-            train_pairs_path = os.path.join(DATA_DIR, dataset_name, "train_pairs.csv")
-            val_pairs_path = os.path.join(DATA_DIR, dataset_name, "val_pairs.csv")
-            if not os.path.exists(val_pairs_path):
-                val_pairs_path = None
-            test_pairs_path = os.path.join(DATA_DIR, dataset_name, "test_pairs.csv")
+        test_pairs_path = os.path.join(DATA_DIR, dataset_name, "test_pairs.csv")
 
-        logger.info(f"loading dataset {dataset_name}")
-        anddata = ANDData(
-            signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + SIGNATURES_SUFFIX),
-            papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
-            name=dataset_name,
-            mode="train",
-            specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + SPECTER_SUFFIX),
-            clusters=clusters_path,
-            block_type=BLOCK_TYPE,
-            train_pairs=train_pairs_path,
-            val_pairs=val_pairs_path,
-            test_pairs=test_pairs_path,
-            train_pairs_size=N_TRAIN_PAIRS_SIZE,
-            val_pairs_size=N_VAL_TEST_SIZE,
-            test_pairs_size=N_VAL_TEST_SIZE,
-            preprocess=True,
-        )
-
-        logger.info(f"featurizing {dataset_name}")
-        train, val, test = featurize(
-            anddata,
-            FEATURIZER_INFO,
-            n_jobs=N_JOBS,
-            use_cache=USE_CACHE,
-            chunk_size=100,
-            nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
-            nan_value=NAN_VALUE,
-        )
-        X_train, y_train, nameless_X_train = train
-        X_val, y_val, nameless_X_val = val
-        X_test, y_test, nameless_X_test = test
-
-        dataset = {}
-        dataset["anddata"] = anddata
-        dataset["X_train"] = X_train
-        dataset["y_train"] = y_train
-        dataset["X_val"] = X_val
-        dataset["y_val"] = y_val
-        dataset["X_test"] = X_test
-        dataset["y_test"] = y_test
-        dataset["nameless_X_train"] = nameless_X_train
-        dataset["nameless_X_val"] = nameless_X_val
-        dataset["nameless_X_test"] = nameless_X_test
-        dataset["name"] = anddata.name
-        datasets[dataset_name] = dataset
-
-    anddatas = [
-        datasets[dataset_name]["anddata"]
-        for dataset_name in SOURCE_DATASET_NAMES
-        if dataset_name not in PAIRWISE_ONLY_DATASETS
-    ]
-
-    X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in SOURCE_DATASET_NAMES])
-    y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in SOURCE_DATASET_NAMES])
-    X_val = np.vstack(
-        [datasets[dataset_name]["X_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
-    )
-    y_val = np.hstack(
-        [datasets[dataset_name]["y_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
+    logger.info(f"loading dataset {dataset_name}")
+    anddata = ANDData(
+        signatures=os.path.join(DATA_DIR, dataset_name, dataset_name + SIGNATURES_SUFFIX),
+        papers=os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json"),
+        name=dataset_name,
+        mode="train",
+        specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + SPECTER_SUFFIX),
+        clusters=clusters_path,
+        block_type=BLOCK_TYPE,
+        train_pairs=train_pairs_path,
+        val_pairs=val_pairs_path,
+        test_pairs=test_pairs_path,
+        train_pairs_size=N_TRAIN_PAIRS_SIZE,
+        val_pairs_size=N_VAL_TEST_SIZE,
+        test_pairs_size=N_VAL_TEST_SIZE,
+        preprocess=True,
     )
 
-    nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in SOURCE_DATASET_NAMES])
-    nameless_X_val = np.vstack(
-        [
-            datasets[dataset_name]["nameless_X_val"]
-            for dataset_name in SOURCE_DATASET_NAMES
-            if dataset_name not in {"augmented"}
-        ]
-    )
-
-    logger.info("fitting pairwise")
-    union_classifier = PairwiseModeler(n_iter=N_ITER, monotone_constraints=MONOTONE_CONSTRAINTS)
-    union_classifier.fit(X_train, y_train, X_val, y_val)
-
-    nameless_union_classifier = None
-    if USE_NAMELESS_MODEL:
-        logger.info("nameless fitting pairwise for " + str(SOURCE_DATASET_NAMES))
-        nameless_union_classifier = PairwiseModeler(
-            n_iter=N_ITER,
-            monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS,
-        )
-        nameless_union_classifier.fit(nameless_X_train, y_train, nameless_X_val, y_val)
-        logger.info("nameless pairwise fit for " + str(SOURCE_DATASET_NAMES))
-
-    logger.info("fitting clusterer for")
-    union_clusterer = Clusterer(
+    logger.info(f"featurizing {dataset_name}")
+    train, val, test = featurize(
+        anddata,
         FEATURIZER_INFO,
-        union_classifier.classifier,
-        cluster_model=FastCluster(),
-        search_space=search_space,
         n_jobs=N_JOBS,
         use_cache=USE_CACHE,
-        nameless_classifier=nameless_union_classifier.classifier if nameless_union_classifier is not None else None,
-        nameless_featurizer_info=NAMELESS_FEATURIZER_INFO if nameless_union_classifier is not None else None,
+        chunk_size=100,
+        nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
+        nan_value=NAN_VALUE,
     )
-    union_clusterer.fit(anddatas)
-    print(
-        "best clustering parameters:",
-        union_clusterer.best_params,
+    X_train, y_train, nameless_X_train = train
+    X_val, y_val, nameless_X_val = val
+    X_test, y_test, nameless_X_test = test
+
+    dataset = {}
+    dataset["anddata"] = anddata
+    dataset["X_train"] = X_train
+    dataset["y_train"] = y_train
+    dataset["X_val"] = X_val
+    dataset["y_val"] = y_val
+    dataset["X_test"] = X_test
+    dataset["y_test"] = y_test
+    dataset["nameless_X_train"] = nameless_X_train
+    dataset["nameless_X_val"] = nameless_X_val
+    dataset["nameless_X_test"] = nameless_X_test
+    dataset["name"] = anddata.name
+    datasets[dataset_name] = dataset
+
+anddatas = [
+    datasets[dataset_name]["anddata"]
+    for dataset_name in SOURCE_DATASET_NAMES
+    if dataset_name not in PAIRWISE_ONLY_DATASETS
+]
+
+X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in SOURCE_DATASET_NAMES])
+y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in SOURCE_DATASET_NAMES])
+X_val = np.vstack(
+    [datasets[dataset_name]["X_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
+)
+y_val = np.hstack(
+    [datasets[dataset_name]["y_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
+)
+
+nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in SOURCE_DATASET_NAMES])
+nameless_X_val = np.vstack(
+    [
+        datasets[dataset_name]["nameless_X_val"]
+        for dataset_name in SOURCE_DATASET_NAMES
+        if dataset_name not in {"augmented"}
+    ]
+)
+
+logger.info("fitting pairwise")
+union_classifier = PairwiseModeler(n_iter=N_ITER, monotone_constraints=MONOTONE_CONSTRAINTS)
+union_classifier.fit(X_train, y_train, X_val, y_val)
+
+nameless_union_classifier = None
+if USE_NAMELESS_MODEL:
+    logger.info("nameless fitting pairwise for " + str(SOURCE_DATASET_NAMES))
+    nameless_union_classifier = PairwiseModeler(
+        n_iter=N_ITER,
+        monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS,
     )
+    nameless_union_classifier.fit(nameless_X_train, y_train, nameless_X_val, y_val)
+    logger.info("nameless pairwise fit for " + str(SOURCE_DATASET_NAMES))
 
-    models = {}
-    models["clusterer"] = union_clusterer
+logger.info("fitting clusterer for")
+union_clusterer = Clusterer(
+    FEATURIZER_INFO,
+    union_classifier.classifier,
+    cluster_model=FastCluster(),
+    search_space=search_space,
+    n_jobs=N_JOBS,
+    use_cache=USE_CACHE,
+    nameless_classifier=nameless_union_classifier.classifier if nameless_union_classifier is not None else None,
+    nameless_featurizer_info=NAMELESS_FEATURIZER_INFO if nameless_union_classifier is not None else None,
+)
+union_clusterer.fit(anddatas)
+print(
+    "best clustering parameters:",
+    union_clusterer.best_params,
+)
 
-    with open(
-        f"full_union_model_script_dump_average_no_refs_{FEATURIZER_VERSION}.pickle",
-        "wb",
-    ) as _pickle_file:
-        pickle.dump(models, _pickle_file)
-    logger.info("Done.")
+models = {}
+models["clusterer"] = union_clusterer
 
-
-if __name__ == "__main__":
-    main()
+with open(
+    f"full_union_model_script_dump_average_no_refs_{FEATURIZER_VERSION}.pickle",
+    "wb",
+) as _pickle_file:
+    pickle.dump(models, _pickle_file)
+logger.info("Done.")

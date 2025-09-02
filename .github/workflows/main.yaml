@@ -2,21 +2,90 @@ name: CI
 
 on:
   pull_request:
-    branches:
-    - main
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-
+  lint:
     runs-on: ubuntu-latest
-    
     steps:
-    - uses: actions/checkout@v1
-    - name: Build and test with Docker
-      run: |
-        docker build --tag s2and .
-        docker run --rm s2and pytest tests/ --verbose
-        docker run --rm s2and black s2and --check --line-length 120
-        docker run --rm s2and black scripts/*.py --check --line-length 120
-        docker run --rm s2and bash scripts/mypy.sh
-        docker run --rm s2and pytest tests/ --cov s2and --cov-fail-under=40
+      - uses: actions/checkout@v4
+
+      # Install uv (fast Python + package manager) and enable caching
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      # Cache uv tool + resolver cache (speeds up uvx + resolves)
+      - name: Cache uv caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+
+      # Style checks via uvx (no env creation needed, blazing fast)
+      - name: black (s2and/)
+        run: uvx --from black==24.8.0 black s2and --check --line-length 120
+      - name: black (scripts/*.py)
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(scripts/*.py)
+          if (( ${#files[@]} )); then
+            uvx --from black==24.8.0 black "${files[@]}" --check --line-length 120
+          fi
+
+  typecheck-and-test:
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      # Optional: ensure a specific Python (uv can also manage this on its own)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Cache uv resolver + wheels + project venv
+      - name: Cache uv + venv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: uv-venv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            uv-venv-${{ runner.os }}-py311-
+            uv-venv-
+
+      # Sync environment from lock if present (fast; no network if cached)
+      - name: Sync deps (locked if available)
+        shell: bash
+        run: |
+          if [[ -f uv.lock ]]; then
+            uv sync --all-extras --dev --frozen
+          else
+            # No lock present; resolve once, then install
+            uv sync --all-extras --dev
+          fi
+
+      # Type checking (uses your repo script so your config is respected)
+      - name: mypy
+        run: uv run bash scripts/mypy.sh
+
+      # Single pytest run with coverage (replaces the two docker pytest calls)
+      - name: pytest (coverage)
+        env:
+          # keep startup lean; avoid user-level plugins on hosted runners
+          PYTHONPATH: .
+        run: |
+          uv run pytest tests/ \
+            --cov=s2and --cov-report=term-missing --cov-fail-under=40
+

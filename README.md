@@ -7,29 +7,13 @@ The reference model is live on semanticscholar.org, and the trained model is ava
 To install this package, run the following:
 
 ```bash
-git clone https://github.com/allenai/S2AND.git
-cd S2AND
-conda create -y --name s2and python==3.8.15
-conda activate s2and
-pip install -r requirements.in
-pip install -e .
-```
-
-If you run into cryptic errors about GCC on macOS while installing the requirments, try this instead:
-```bash
-CFLAGS='-stdlib=libc++' pip install -r requirements.in
-```
-
-Or use uv with a more recent Python version (3.11+):
-```bash
 uv venv s2anduv --python 3.11
 source s2anduv\Scripts\activate   # macOS/Linux
 # s2anduv\Scripts\activate     # Windows
 uv pip install fasttext-wheel pycld2
-uv pip install -r requirements_py_311.in
+uv pip install -r requirements.in
 uv pip install -e . --no-deps
 ```
-
 
 ## Data 
 To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  

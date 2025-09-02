@@ -38,24 +38,11 @@ source .venv/bin/activate
 .venv\Scripts\activate.bat
 ```
 
-3. Inside the activated venv, ensure build tools and pip are current (optional, but may help avoid errors):
-
-```bash
-uv pip install --upgrade pip setuptools wheel build
-```
-
-4. Install project dependencies (dev extras) into the **active venv**:
+3. Install project dependencies (dev extras):
 
 ```bash
 # prefer uv --active so uv uses your activated environment
 uv sync --active --all-extras --dev
-```
-
-5. Install the package in editable mode into that active venv (Optional, for development):
-
-```bash
-# uses pip in the active venv
-uv pip install -e . --no-deps
 ```
 
 ## Running Tests

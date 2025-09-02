@@ -4,7 +4,7 @@ This is the file to use to retrain a full prod model on all datasets.
 Ai2 employee, the complete data (with augmented dataset and specter2 pickles) is: s3://ai2-s2-research/s2and/s2and_release_12_23_20/
 """
 
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
 
 import os
 import json
@@ -99,7 +99,7 @@ else:
 """
 This script is used to train and dump a model trained on all the datasets
 """
-datasets = {}
+datasets: Dict[str, Dict[str, Any]] = {}
 for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fitting base models"):
     logger.info(f"processing dataset {dataset_name}")
     clusters_path: Optional[str] = None
@@ -143,11 +143,16 @@ for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fit
         nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
         nan_value=NAN_VALUE,
     )
+    # Assert these are not None to help mypy with type checking
+    assert train is not None
+    assert val is not None
+    assert test is not None
+
     X_train, y_train, nameless_X_train = train
     X_val, y_val, nameless_X_val = val
     X_test, y_test, nameless_X_test = test
 
-    dataset = {}
+    dataset: Dict[str, Any] = {}
     dataset["anddata"] = anddata
     dataset["X_train"] = X_train
     dataset["y_train"] = y_train
@@ -167,17 +172,18 @@ anddatas = [
     if dataset_name not in PAIRWISE_ONLY_DATASETS
 ]
 
-X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in SOURCE_DATASET_NAMES])
-y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in SOURCE_DATASET_NAMES])
-X_val = np.vstack(
+# Type: ignore to help mypy understand these are numpy arrays, not ANDData objects
+X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in SOURCE_DATASET_NAMES])  # type: ignore
+y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in SOURCE_DATASET_NAMES])  # type: ignore
+X_val = np.vstack(  # type: ignore
     [datasets[dataset_name]["X_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
 )
-y_val = np.hstack(
+y_val = np.hstack(  # type: ignore
     [datasets[dataset_name]["y_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
 )
 
-nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in SOURCE_DATASET_NAMES])
-nameless_X_val = np.vstack(
+nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in SOURCE_DATASET_NAMES])  # type: ignore
+nameless_X_val = np.vstack(  # type: ignore
     [
         datasets[dataset_name]["nameless_X_val"]
         for dataset_name in SOURCE_DATASET_NAMES

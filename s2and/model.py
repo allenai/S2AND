@@ -15,6 +15,7 @@ from tqdm import tqdm
 import logging
 import copy
 import math
+import inspect
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster
@@ -1479,6 +1480,45 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.preserve_input = preserve_input
         self.input_as_observation_matrix = input_as_observation_matrix
         self.labels_ = None
+
+    # ---- new: robust get_params ----
+    def get_params(self, deep=True):
+        """
+        Return params but gracefully handle the case where an instance
+        (e.g., loaded from an old pickle) is missing attributes.
+        """
+        params = {}
+        sig = inspect.signature(self.__class__.__init__)
+        for name, param in sig.parameters.items():
+            if name == "self":
+                continue
+            # prefer the runtime attribute if present, otherwise the __init__ default
+            if hasattr(self, name):
+                params[name] = getattr(self, name)
+            else:
+                params[name] = param.default if param.default is not inspect._empty else None
+
+        if deep:
+            # sklearn convention: include nested estimator params with __ separator
+            for key, val in list(params.items()):
+                if hasattr(val, "get_params"):
+                    for subk, subv in val.get_params(deep=True).items():
+                        params[f"{key}__{subk}"] = subv
+        return params
+
+    # ---- new: ensure defaults after unpickling ----
+    def __setstate__(self, state):
+        """
+        Called on unpickle. Populate any missing ctor attrs with their defaults.
+        """
+        self.__dict__.update(state)
+        sig = inspect.signature(self.__class__.__init__)
+        for name, param in sig.parameters.items():
+            if name == "self":
+                continue
+            if not hasattr(self, name):
+                default = param.default if param.default is not inspect._empty else None
+                setattr(self, name, default)
 
     def fit(self, X: np.ndarray) -> np.ndarray:
         """

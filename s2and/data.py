@@ -1477,7 +1477,6 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
 
     # -------- second stage is identical: reuse the same pool setup -------
     if preprocess:
-        filtered_rids: Any = filter(None, [output.get(str(rid)) for rid in (value.references or [])])
         input_2 = [
             (
                 key,
@@ -1489,7 +1488,8 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
                         journal_name=p.journal_name,
                         authors=[a.author_name for a in p.authors],
                     )
-                    for p in filtered_rids
+                    for p in [output.get(str(rid)) for rid in (value.references or [])]
+                    if p is not None
                 ],
             )
             for key, value in output.items()

@@ -119,9 +119,11 @@ def main():
         raise ValueError("Invalid compression {}".format(args.compression))
 
     os.makedirs(args.output, exist_ok=True)
-    with open_fn(os.path.join(args.output, "train.jsonl" + extension), "wt") as train_f, open_fn(
-        os.path.join(args.output, "dev.jsonl" + extension), "wt"
-    ) as dev_f, open_fn(os.path.join(args.output, "test.jsonl" + extension), "wt") as test_f:
+    with (
+        open_fn(os.path.join(args.output, "train.jsonl" + extension), "wt") as train_f,
+        open_fn(os.path.join(args.output, "dev.jsonl" + extension), "wt") as dev_f,
+        open_fn(os.path.join(args.output, "test.jsonl" + extension), "wt") as test_f,
+    ):
         file_objs = {"train": train_f, "dev": dev_f, "test": test_f}
 
         for dataset_name in DATASETS:

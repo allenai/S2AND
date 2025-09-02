@@ -124,9 +124,7 @@ def main(
         max_value = (
             max_train_positives_per_dataset
             if split == "train"
-            else max_val_positives_per_dataset
-            if split == "val"
-            else max_test_positives_per_dataset
+            else max_val_positives_per_dataset if split == "val" else max_test_positives_per_dataset
         ) * (negatives_multiplier if label == 0 else 1.0)
         if count_value >= max_value or dataset_name not in SOURCE_DATASET_NAMES:
             continue

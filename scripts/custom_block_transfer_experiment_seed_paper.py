@@ -647,15 +647,15 @@ def main(
                 cluster = Clusterer(
                     FEATURIZER_INFO,
                     pairwise_modeler.classifier,
-                    cluster_model=FastCluster(linkage=linkage)
-                    if not use_dbscan
-                    else DBSCAN(min_samples=1, metric="precomputed"),
+                    cluster_model=(
+                        FastCluster(linkage=linkage) if not use_dbscan else DBSCAN(min_samples=1, metric="precomputed")
+                    ),
                     search_space=cluster_search_space,
                     n_jobs=N_JOBS,
                     use_cache=USE_CACHE,
-                    nameless_classifier=nameless_pairwise_modeler.classifier
-                    if nameless_pairwise_modeler is not None
-                    else None,
+                    nameless_classifier=(
+                        nameless_pairwise_modeler.classifier if nameless_pairwise_modeler is not None else None
+                    ),
                     nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
                     random_state=random_seed,
                     use_default_constraints_as_supervision=False,
@@ -739,15 +739,15 @@ def main(
                 union_clusterer = Clusterer(
                     FEATURIZER_INFO,
                     union_classifier.classifier,
-                    cluster_model=FastCluster(linkage=linkage)
-                    if not use_dbscan
-                    else DBSCAN(min_samples=1, metric="precomputed"),
+                    cluster_model=(
+                        FastCluster(linkage=linkage) if not use_dbscan else DBSCAN(min_samples=1, metric="precomputed")
+                    ),
                     search_space=cluster_search_space,
                     n_jobs=N_JOBS,
                     use_cache=USE_CACHE,
-                    nameless_classifier=nameless_union_classifier.classifier
-                    if nameless_union_classifier is not None
-                    else None,
+                    nameless_classifier=(
+                        nameless_union_classifier.classifier if nameless_union_classifier is not None else None
+                    ),
                     nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
                     random_state=random_seed,
                     use_default_constraints_as_supervision=False,
@@ -892,7 +892,11 @@ def main(
 
             source_dataset = unions[dataset_name_tuple]
 
-            (pairwise_metrics, cluster_metrics, b3_metrics_per_signature,) = transfer_helper(
+            (
+                pairwise_metrics,
+                cluster_metrics,
+                b3_metrics_per_signature,
+            ) = transfer_helper(
                 source_dataset,
                 target_dataset,
                 experiment_name,
@@ -902,7 +906,11 @@ def main(
                 skip_shap=use_linear_pairwise_model,  # skip SHAP if not using default model
             )
 
-            (s2_pairwise_metrics, s2_cluster_metrics, s2_b3_metrics_per_signature,) = transfer_helper(
+            (
+                s2_pairwise_metrics,
+                s2_cluster_metrics,
+                s2_b3_metrics_per_signature,
+            ) = transfer_helper(
                 source_dataset,
                 target_dataset,
                 experiment_name,
@@ -1056,9 +1064,9 @@ def main(
             b3_f1_grid[len(SOURCE_DATASET_NAMES) + 1][TARGET_DATASET_NAMES.index(target_name) + 1] = cluster_metrics[
                 "B3 (P, R, F1)"
             ][2]
-            pairwise_auroc_grid[len(SOURCE_DATASET_NAMES) + 1][
-                TARGET_DATASET_NAMES.index(target_name) + 1
-            ] = pairwise_metrics["AUROC"]
+            pairwise_auroc_grid[len(SOURCE_DATASET_NAMES) + 1][TARGET_DATASET_NAMES.index(target_name) + 1] = (
+                pairwise_metrics["AUROC"]
+            )
             true_bigger_ratios_and_counts_grid[len(SOURCE_DATASET_NAMES) + 1][
                 TARGET_DATASET_NAMES.index(target_name) + 1
             ] = cluster_metrics["True bigger ratio (mean, count)"]
@@ -1066,9 +1074,9 @@ def main(
             b3_f1_grid[len(SOURCE_DATASET_NAMES) + 2][TARGET_DATASET_NAMES.index(target_name) + 1] = s2_cluster_metrics[
                 "B3 (P, R, F1)"
             ][2]
-            pairwise_auroc_grid[len(SOURCE_DATASET_NAMES) + 2][
-                TARGET_DATASET_NAMES.index(target_name) + 1
-            ] = s2_pairwise_metrics["AUROC"]
+            pairwise_auroc_grid[len(SOURCE_DATASET_NAMES) + 2][TARGET_DATASET_NAMES.index(target_name) + 1] = (
+                s2_pairwise_metrics["AUROC"]
+            )
 
             true_bigger_ratios_and_counts_grid[len(SOURCE_DATASET_NAMES) + 1][
                 TARGET_DATASET_NAMES.index(target_name) + 1

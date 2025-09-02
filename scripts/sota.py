@@ -351,15 +351,15 @@ def main(
             cluster = Clusterer(
                 FEATURIZER_INFO,
                 pairwise_modeler.classifier,
-                cluster_model=FastCluster(linkage=linkage)
-                if not use_dbscan
-                else DBSCAN(min_samples=1, metric="precomputed"),
+                cluster_model=(
+                    FastCluster(linkage=linkage) if not use_dbscan else DBSCAN(min_samples=1, metric="precomputed")
+                ),
                 search_space=search_space,
                 n_jobs=N_JOBS,
                 use_cache=USE_CACHE,
-                nameless_classifier=nameless_pairwise_modeler.classifier
-                if nameless_pairwise_modeler is not None
-                else None,
+                nameless_classifier=(
+                    nameless_pairwise_modeler.classifier if nameless_pairwise_modeler is not None else None
+                ),
                 nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
                 random_state=random_seed,
                 use_default_constraints_as_supervision=False,
@@ -407,9 +407,9 @@ def main(
         logger.info("")
         logger.info(f"evaluating source {source_dataset['name']} target {source_dataset['name']}")
         pairwise_metrics, cluster_metrics, _ = sota_helper(source_dataset, experiment_name, random_seed)
-        b3_f1_grid[DATASET_NAMES.index(source_dataset["name"]) + 1][
-            DATASET_NAMES.index(source_dataset["name"]) + 1
-        ] = cluster_metrics["B3 (P, R, F1)"][2]
+        b3_f1_grid[DATASET_NAMES.index(source_dataset["name"]) + 1][DATASET_NAMES.index(source_dataset["name"]) + 1] = (
+            cluster_metrics["B3 (P, R, F1)"][2]
+        )
         pairwise_macro_f1_grid[DATASET_NAMES.index(source_dataset["name"]) + 1][
             DATASET_NAMES.index(source_dataset["name"]) + 1
         ] = cluster_metrics["Cluster Macro (P, R, F1)"][2]

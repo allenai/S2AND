@@ -69,7 +69,7 @@ specter_suffixes = ["_specter.pickle", "_specter2.pkl"]
 random_seed = 42
 n_jobs = 4
 
-TRAIN_FLAG = True
+TRAIN_FLAG = False
 
 # aminer has too much variance
 # medline is pairwise only
@@ -115,7 +115,7 @@ nameless_featurization_info = FeaturizationInfo(
 )
 
 # this is the prod 1.1 model, which we may or may not retrain
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "model_dump.pickle"), "rb") as f:
+with open(os.path.join(PROJECT_ROOT_PATH, "data", "production_model.pickle"), "rb") as f:
     clusterer = pickle.load(f)["clusterer"]
     clusterer.use_cache = False  # very important for this experiment!!!
 

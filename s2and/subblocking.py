@@ -250,9 +250,9 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 key
             )
         for key in list(output_cant_subdivide_single_letter_first_name.keys()):
-            output_cant_subdivide_single_letter_first_name[
-                f"{first_letter}|middle=" + str(key)
-            ] = output_cant_subdivide_single_letter_first_name.pop(key)
+            output_cant_subdivide_single_letter_first_name[f"{first_letter}|middle=" + str(key)] = (
+                output_cant_subdivide_single_letter_first_name.pop(key)
+            )
         output.update(output_single_letter_first_name)
         output_for_specter.update(
             output_cant_subdivide_single_letter_first_name

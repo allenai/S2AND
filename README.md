@@ -3,17 +3,68 @@ This repository provides access to the S2AND dataset and S2AND reference model d
 
 The reference model is live on semanticscholar.org, and the trained model is available now as part of the data download (see below).
 
-## Installation
-To install this package, run the following:
+# Installation
+
+
+## Developer setup
 
 ```bash
-uv venv s2anduv --python 3.11
-source s2anduv\Scripts\activate   # macOS/Linux
-# s2anduv\Scripts\activate     # Windows
-uv pip install fasttext-wheel pycld2
-uv pip install -r requirements.in
-uv pip install -e . --no-deps
+# From the repo root
+
+# 1) Create a virtual env (uv will default to .venv if no name is given)
+uv venv --python 3.11
+
+# 2) Install project deps from pyproject.toml
+#    - runtime only:
+uv sync
+#    - or include dev tools (tests, linters, type checker):
+uv sync --extra dev
+
+# 3) (Optional) Install the project in editable mode
+uv run pip install -e . --no-deps
 ```
+
+You can run everything **without activating** the venv:
+
+```bash
+uv run pytest
+uv run python -c "import s2and; print(s2and.__version__)"
+```
+
+If you prefer to **activate**:
+
+* macOS/Linux (bash/zsh):
+  `source .venv/bin/activate`
+* Windows PowerShell:
+  `.venv\Scripts\Activate.ps1`
+* Windows CMD:
+  `.venv\Scripts\activate.bat`
+
+## Installation (library users)
+
+If you just want the package (no dev tools):
+
+```bash
+# with uv
+uv pip install .
+
+# or with pip
+pip install .
+```
+
+## Running Tests
+
+To run the tests, use the following command:
+
+```bash
+uv run pytest tests/
+```
+
+To run the entire CI suite mimicking the GH Actions, use the following command:
+```bash
+python scripts\run_ci_locally.py
+```
+
 
 ## Data 
 To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  

@@ -76,9 +76,11 @@ jobs:
             uv sync --all-extras --dev
           fi
 
-      # Type checking (uses your repo script so your config is respected)
-      - name: mypy
-        run: uv run bash scripts/mypy.sh
+      # Type checking (run mypy commands directly)
+      - name: mypy (s2and)
+        run: uv run mypy s2and --ignore-missing-imports
+      - name: mypy (scripts)
+        run: uv run mypy scripts/*.py --ignore-missing-imports
 
       # Single pytest run with coverage (replaces the two docker pytest calls)
       - name: pytest (coverage)

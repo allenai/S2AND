@@ -1,104 +1,118 @@
 #!/usr/bin/env python3
 """
-Cross-platform CI runner that uses `uv`.
+Run CI steps locally using the ACTIVE virtual environment.
 
-Usage:
-  python run_ci_locally.py
+Order (matches your CI):
+  1) uv sync --all-extras --dev [--frozen if uv.lock exists]  (ACTIVE venv)
+  2) black checks via uvx --from black==24.8.0 ...
+  3) mypy via scripts/mypy.sh when bash is available; otherwise `uv run mypy`
+  4) pytest tests/ with coverage and PYTHONPATH=.
 
-Requirements:
-  - `uv` must be installed and on PATH (or importable as a module).
-  - Dev dependencies should contain black, pytest, pytest-xdist (optional), coverage.
+Key fix: resolve repo root (pyproject.toml) and run all commands from there.
 """
+
+import os
 import sys
 import shutil
 import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+
+def which(cmd: str) -> str | None:
+    return shutil.which(cmd)
 
 
-def which_uv():
-    p = shutil.which("uv")
-    if p:
-        return ["uv"]
-    # fallback to `python -m uv` if uv is installed as a package
+def uv_exe() -> list[str]:
+    uv_path = which("uv")
+    if uv_path:
+        return [uv_path]
     try:
-        import uv  # type: ignore
+        import uv  # noqa: F401
+    except Exception:
+        print("ERROR: 'uv' not found. Install uv first.", file=sys.stderr)
+        sys.exit(2)
+    return [sys.executable, "-m", "uv"]
 
-        return [sys.executable, "-m", "uv"]
+
+def uvx_exe() -> list[str] | None:
+    uvx_path = which("uvx")
+    if uvx_path:
+        return [uvx_path]
+    try:
+        import uvx  # noqa: F401
+
+        return [sys.executable, "-m", "uvx"]
     except Exception:
         return None
 
 
-def run(cmd, **kwargs):
+def repo_root() -> Path:
+    here = Path(__file__).resolve().parent
+    for d in [here] + list(here.parents):
+        if (d / "pyproject.toml").exists():
+            return d
+    return here  # fallback
+
+
+REPO = repo_root()
+
+
+def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
     print(">>>", " ".join(cmd))
-    subprocess.run(cmd, check=True, **kwargs)
+    subprocess.run(cmd, check=True, cwd=str(REPO), env=env)
 
 
-def uv_cmd(args):
-    uv = which_uv()
-    if not uv:
-        print("ERROR: 'uv' not found. Install it with: pip install --upgrade uv", file=sys.stderr)
-        sys.exit(2)
-    return uv + args
-
-
-def main():
-    # Ensure we run from repo root
+def run_black_on(paths: list[str]) -> None:
+    uvx = uvx_exe()
+    if uvx:
+        run(uvx + ["--from", "black==24.8.0", "black", *paths, "--check", "--line-length", "120"])
+        return
+    # Fallbacks if uvx missing
     try:
-        (ROOT / "pyproject.toml").exists() or (ROOT / "setup.py").exists()
-    except Exception:
-        pass
-
-    # Sync deps (use frozen if lock exists)
-    lock = ROOT / "uv.lock"
-    sync_args = ["sync", "--dev"]
-    if lock.exists():
-        sync_args.append("--frozen")
-    run(uv_cmd(sync_args))
-
-    # -------------------------
-    # Black checks (via uvx so it uses the cached resolver)
-    # -------------------------
-    # s2and
-    run(uv_cmd(["x", "--from", "black==24.8.0", "black", "s2and", "--check", "--line-length", "120"]))
-
-    # scripts/*.py (guard against no-match)
-    script_files = list((ROOT / "scripts").glob("*.py"))
-    if script_files:
-        # pass as individual args (uvx forwards them)
-        run(
-            uv_cmd(
-                ["x", "--from", "black==24.8.0", "black"]
-                + [str(p) for p in script_files]
-                + ["--check", "--line-length", "120"]
-            )
-        )
-
-    # -------------------------
-    # Tests: use xdist if available (parallel), otherwise single-run.
-    # -------------------------
-    # Check whether pytest-xdist is installed in the uv environment by trying to import it via `uv run python -c`
-    try:
-        run(
-            uv_cmd(
-                [
-                    "run",
-                    "python",
-                    "-c",
-                    "import importlib; import sys; sys.exit(0 if importlib.util.find_spec('xdist') else 1)",
-                ]
-            )
-        )
-        has_xdist = True
+        run(uv_exe() + ["run", "--active", "black", *paths, "--check", "--line-length", "120"])
+        return
     except subprocess.CalledProcessError:
-        has_xdist = False
+        pass
+    run([sys.executable, "-m", "black", *paths, "--check", "--line-length", "120"])
 
-    pytest_base = ["run", "pytest", "tests/", "--cov=s2and", "--cov-report=term-missing", "--cov-fail-under=40"]
-    if has_xdist:
-        pytest_base.insert(2, "-n")
-        pytest_base.insert(3, "auto")  # places `-n auto` into args: ["run", "pytest", "-n", "auto", "tests/", ...]
-    run(uv_cmd(pytest_base))
+
+def main() -> None:
+    # 1) Sync deps into ACTIVE venv
+    lock_present = (REPO / "uv.lock").exists()
+    sync_args = ["sync", "--active", "--all-extras", "--dev"]
+    if lock_present:
+        sync_args.append("--frozen")
+    run(uv_exe() + sync_args)
+
+    # 2) Black checks (same targets/flags as CI)
+    run_black_on(["s2and"])
+    script_files = sorted((REPO / "scripts").glob("*.py"))
+    if script_files:
+        run_black_on([str(p.relative_to(REPO)) for p in script_files])
+
+    # 3) mypy — run type checking commands directly
+    run(uv_exe() + ["run", "--active", "mypy", "s2and", "--ignore-missing-imports"])
+    script_files = sorted((REPO / "scripts").glob("*.py"))
+    if script_files:
+        script_paths = [str(p.relative_to(REPO)) for p in script_files]
+        run(uv_exe() + ["run", "--active", "mypy"] + script_paths + ["--ignore-missing-imports"])
+
+    # 4) pytest — coverage flags, PYTHONPATH=.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO)
+    run(
+        uv_exe()
+        + [
+            "run",
+            "--active",
+            "pytest",
+            "tests/",
+            "--cov=s2and",
+            "--cov-report=term-missing",
+            "--cov-fail-under=40",
+        ],
+        env=env,
+    )
 
     print("\nALL CHECKS PASSED")
 

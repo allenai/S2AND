@@ -3,53 +3,59 @@ This repository provides access to the S2AND dataset and S2AND reference model d
 
 The reference model is live on semanticscholar.org, and the trained model is available now as part of the data download (see below).
 
-# Installation
+## Installation Prereqs (one-time)
+Clone the repo. 
 
-
-## Developer setup
+If `uv` is not installed yet, install it:
 
 ```bash
-# From the repo root
+# (any OS) install uv into the Python you use to bootstrap environments
+python -m pip install --user --upgrade uv
+# Alternatively (if you use pipx): pipx install uv
+```
 
-# 1) Create a virtual env (uv will default to .venv if no name is given)
+---
+
+## Installation
+
+1. From repo root:
+
+```bash
+# create the project venv (uv defaults to .venv if you don't give a name)
 uv venv --python 3.11
-
-# 2) Install project deps from pyproject.toml
-#    - runtime only:
-uv sync
-#    - or include dev tools (tests, linters, type checker):
-uv sync --extra dev
-
-# 3) (Optional) Install the project in editable mode
-uv run pip install -e . --no-deps
 ```
 
-You can run everything **without activating** the venv:
+2. Activate the venv (choose one):
 
 ```bash
-uv run pytest
-uv run python -c "import s2and; print(s2and.__version__)"
+# macOS / Linux (bash / zsh)
+source .venv/bin/activate
+
+# Windows PowerShell
+. .venv\Scripts\Activate.ps1
+
+# Windows CMD
+.venv\Scripts\activate.bat
 ```
 
-If you prefer to **activate**:
-
-* macOS/Linux (bash/zsh):
-  `source .venv/bin/activate`
-* Windows PowerShell:
-  `.venv\Scripts\Activate.ps1`
-* Windows CMD:
-  `.venv\Scripts\activate.bat`
-
-## Installation (library users)
-
-If you just want the package (no dev tools):
+3. Inside the activated venv, ensure build tools and pip are current (optional, but may help avoid errors):
 
 ```bash
-# with uv
-uv pip install .
+uv pip install --upgrade pip setuptools wheel build
+```
 
-# or with pip
-pip install .
+4. Install project dependencies (dev extras) into the **active venv**:
+
+```bash
+# prefer uv --active so uv uses your activated environment
+uv sync --active --all-extras --dev
+```
+
+5. Install the package in editable mode into that active venv (Optional, for development):
+
+```bash
+# uses pip in the active venv
+uv pip install -e . --no-deps
 ```
 
 ## Running Tests
@@ -64,7 +70,6 @@ To run the entire CI suite mimicking the GH Actions, use the following command:
 ```bash
 python scripts\run_ci_locally.py
 ```
-
 
 ## Data 
 To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  

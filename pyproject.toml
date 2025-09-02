@@ -9,7 +9,7 @@ description = "S2AND"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "AllenAI / S2AND maintainers" }]
+authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
 # --- Runtime dependencies (loosened, conservative) ---
 dependencies = [
@@ -20,7 +20,7 @@ dependencies = [
   "requests>=2.28,<3",
   "hyperopt>=0.2.4,<0.3",
   "pandas>=1.5,<2.2",
-  "lightgbm==3.0.0",
+  "lightgbm==3.2.1",
   "fastcluster>=1.2.6,<2",
   "genieclust>=1.1.4,<2",
   "matplotlib>=3.7,<3.9",

@@ -31,6 +31,7 @@ from s2and.text import (
     compute_block,
     get_text_ngrams_words,
     detect_language,
+    same_prefix_tokens,
     AFFILIATIONS_STOP_WORDS,
     VENUE_STOP_WORDS,
     NAME_PREFIXES,
@@ -42,6 +43,9 @@ logger = logging.getLogger("s2and")
 
 # Global variable for multiprocessing
 global_preprocess: bool
+# Lazy-initialized global for Sinonym detector within worker processes
+_SINONYM_DETECTOR = None  # type: ignore
+CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 
 
 class NameCounts(NamedTuple):
@@ -160,6 +164,8 @@ class ANDData:
             can be None or "filtered" or a set of name tuples
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
+        use_sinonym_overwrite: if True, run a pre-step that batch-detects Chinese names per paper via
+            Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output
     """
 
     def __init__(
@@ -200,6 +206,7 @@ class ANDData:
         preprocess: bool = True,
         name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
         use_orcid_id: bool = True,
+        use_sinonym_overwrite: bool = False,
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -291,6 +298,16 @@ class ANDData:
                 signature_id=signature["signature_id"],
             )
         logger.info("loaded signatures")
+
+        # Optional Sinonym pre-step: normalize Chinese names from papers and overwrite signatures
+        # This runs before other preprocessing so downstream steps use updated names
+        if use_sinonym_overwrite:
+            try:
+                sinonym_results = sinonym_preprocess_papers_parallel(self.papers, n_jobs)
+                overwrite_count = apply_sinonym_overwrites(self.signatures, sinonym_results)
+                logger.info(f"Sinonym overwrote {overwrite_count} signature name(s)")
+            except Exception as e:
+                logger.warning(f"Sinonym preprocessing skipped due to error: {e}")
         self.name = name
         self.mode = mode
         logger.info("loading clusters")
@@ -470,22 +487,24 @@ class ANDData:
         for signature_id, signature in tqdm(self.signatures.items(), desc="Preprocessing signatures"):
             # our normalization scheme is to normalize first and middle separately,
             # join them, then take the first token of the combined join
-            # TODO: a lot of chinese names are not normalized correctly. they are names like Yue-Hua and Ying-Ying.
-            # we need some fix for these
-            first_normalized = normalize_text(signature.author_info_first or "")
-            first_normalized_without_apostrophe = normalize_text(
-                signature.author_info_first or "", special_case_apostrophes=True
-            )
+            # TODO: we now have good normalization for chinese names with dashes in the first and surname
+            # BUT we currently DO NOT do anything with those dashes.
+            first_raw = signature.author_info_first or ""
+            middle_raw = signature.author_info_middle or ""
 
-            middle_normalized = normalize_text(signature.author_info_middle or "")
+            # Default normalization (keeps legacy behavior for counts/lookups)
+            first_normalized = normalize_text(first_raw)
+            middle_normalized = normalize_text(middle_raw)
             first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
-            if first_middle_normalized_split[0] in NAME_PREFIXES:
+            if first_middle_normalized_split and first_middle_normalized_split[0] in NAME_PREFIXES:
                 first_middle_normalized_split = first_middle_normalized_split[1:]
-            first_middle_normalized_split_without_apostrophe = (
-                first_normalized_without_apostrophe + " " + middle_normalized
-            ).split(" ")
-            if first_middle_normalized_split_without_apostrophe[0] in NAME_PREFIXES:
-                first_middle_normalized_split_without_apostrophe = first_middle_normalized_split_without_apostrophe[1:]
+
+            # Hyphen-preserving split for the "without_apostrophe" canonical fields
+            # Centralize in s2and.text for reuse by other scripts
+            from s2and.text import split_first_middle_hyphen_aware
+            first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(
+                first_raw, middle_raw
+            )
 
             coauthors: Optional[List[str]] = None
             if len(self.papers) != 0:
@@ -495,13 +514,11 @@ class ANDData:
                 ]
 
             signature = signature._replace(
-                # need this for name counts
-                author_info_first_normalized=first_middle_normalized_split[0],
-                # need this for featurization
-                author_info_first_normalized_without_apostrophe=first_middle_normalized_split_without_apostrophe[0],
-                author_info_middle_normalized_without_apostrophe=" ".join(
-                    first_middle_normalized_split_without_apostrophe[1:]
-                ),
+                # need this for name counts (legacy single-token behavior)
+                author_info_first_normalized=first_middle_normalized_split[0] if first_middle_normalized_split else "",
+                # canonical fields used across featurization, prediction, etc.
+                author_info_first_normalized_without_apostrophe=first_without_apostrophe,
+                author_info_middle_normalized_without_apostrophe=middle_without_apostrophe,
                 author_info_last_normalized=normalize_text(signature.author_info_last),
                 author_info_suffix_normalized=normalize_text(signature.author_info_suffix or ""),
                 author_info_coauthors=set(coauthors) if coauthors is not None else None,
@@ -793,7 +810,7 @@ class ANDData:
             # either a known alias or a prefix of the other
             # if neither, then we'll say it's impossible to be the same person
             known_alias = (first_1, first_2) in self.name_tuples
-            prefix = first_1.startswith(first_2) or first_2.startswith(first_1)
+            prefix = same_prefix_tokens(first_1, first_2)
             if not prefix and not known_alias:
                 return high_value
             # dont cluster together if there is no intersection between the sets of middle initials
@@ -1351,6 +1368,208 @@ class ANDData:
             return pairs
 
 
+# ------------------------ Sinonym integration helpers ------------------------
+
+
+def _ensure_sinonym_detector():
+    """Lazily import and initialize a process-level default detector."""
+    global _SINONYM_DETECTOR  # type: ignore
+    if _SINONYM_DETECTOR is None:
+        try:
+            from sinonym.detector import ChineseNameDetector  # type: ignore
+        except Exception as e:  # pragma: no cover - optional dependency
+            raise ImportError(
+                "Sinonym is not installed or failed to import. Install 'sinonym' to enable this feature."
+            ) from e
+        _SINONYM_DETECTOR = ChineseNameDetector()
+    return _SINONYM_DETECTOR
+
+
+def _parse_sinonym_name(name_or_struct: Any) -> Tuple[str, str, str]:
+    """Extract (first, middle, last) from Sinonym output using ParsedName only.
+
+    Expected input is a structure derived from ParseResult.parsed, either:
+      - a ParsedName-like object with attributes: surname_tokens, given_tokens
+      - or a dict with keys: 'surname_tokens', 'given_tokens', and optional 'original_compound_surname'
+
+    Returns (first, middle, last), where 'first' is the joined given-name tokens,
+    and 'last' uses the original compound surname formatting if provided, otherwise
+    joins surname tokens with spaces. 'middle' is empty by design.
+    """
+    # Handle ParsedName-like object
+    if hasattr(name_or_struct, "given_tokens") and hasattr(name_or_struct, "surname_tokens"):
+        given_tokens = getattr(name_or_struct, "given_tokens", [])
+        surname_tokens = getattr(name_or_struct, "surname_tokens", [])
+        original_compound = getattr(name_or_struct, "original_compound_surname", None)
+        first = " ".join([t for t in given_tokens if isinstance(t, str) and t])
+        if isinstance(original_compound, str) and original_compound.strip():
+            last = original_compound.strip()
+        else:
+            last = " ".join([t for t in surname_tokens if isinstance(t, str) and t])
+        return first, "", last
+
+    # Handle dict form
+    if isinstance(name_or_struct, dict):
+        given_tokens = name_or_struct.get("given_tokens")
+        surname_tokens = name_or_struct.get("surname_tokens")
+        original_compound = name_or_struct.get("original_compound_surname")
+        if isinstance(given_tokens, list) and isinstance(surname_tokens, list):
+            first = "-".join([t for t in given_tokens if isinstance(t, str) and t])
+            if isinstance(original_compound, str) and original_compound.strip():
+                last = original_compound.strip()
+            else:
+                last = "-".join([t for t in surname_tokens if isinstance(t, str) and t])
+            return first, "", last
+
+    # If we got here, we don't have a parsed structure we recognize
+    return "", "", ""
+
+
+def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: int) -> Dict[str, Dict[int, Any]]:
+    """Parallel wrapper for running Sinonym preprocessing across papers.
+
+    Returns a mapping: paper_id -> { position -> structured result }, where each
+    structured result is:
+      - { 'surname_tokens': [...], 'given_tokens': [...], 'original_compound_surname': Optional[str] }
+    """
+    output: Dict[str, Dict[int, Any]] = {}
+    if n_jobs > 1:
+        # Use processes for CPU-bound, GIL-holding Sinonym work
+        with UniversalPool(processes=n_jobs, use_threads=False) as p:  # type: ignore
+            _max = len(papers_dict)
+            with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
+                # Build a lightweight iterable to minimize serialization overhead
+                light_iter = (
+                    (
+                        key,
+                        [(a.position, a.author_name) for a in paper.authors if a.author_name is not None],
+                    )
+                    for key, paper in papers_dict.items()
+                )
+                for key, value in p.imap(_sinonym_preprocess_paper_light, light_iter, CHUNK_SIZE):
+                    output[key] = value
+                    pbar.update()
+    else:
+        # Serial path uses the same lightweight items
+        light_iter = (
+            (
+                key,
+                [(a.position, a.author_name) for a in paper.authors if a.author_name is not None],
+            )
+            for key, paper in papers_dict.items()
+        )
+        for item in tqdm(light_iter, total=len(papers_dict), desc="Sinonym: analyzing author batches"):
+            k, v = _sinonym_preprocess_paper_light(item)
+            output[k] = v
+    return output
+
+
+def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> Tuple[str, Dict[int, Any]]:
+    """Lightweight variant: input is (paper_id, [(position, author_name), ...]).
+
+    Reduces data passed to workers, which helps when using process-based pools
+    and keeps overhead low even with threads.
+    """
+    key, pos_names = item
+    # Filter any None names defensively, though constructor already removed them
+    positions: List[int] = []
+    names: List[str] = []
+    for pos, name in pos_names:
+        if name is not None:
+            positions.append(pos)
+            names.append(name)
+
+    if not names:
+        return key, {}
+
+    detector = _ensure_sinonym_detector()
+    results = None
+    try:
+        if len(names) >= 2:
+            batch_result = detector.analyze_name_batch(names)  # type: ignore[attr-defined]
+            results = getattr(batch_result, "results", None) or []
+        else:
+            results = [detector.is_chinese_name(names[0])]  # type: ignore[attr-defined]
+    except Exception:
+        # Fallback to simpler batch processing if available
+        try:
+            results = detector.process_name_batch(names)  # type: ignore[attr-defined]
+        except Exception:
+            return key, {}
+
+    pos_to_norm: Dict[int, Any] = {}
+    for idx, res in enumerate(results or []):
+        try:
+            success = getattr(res, "success", False)
+            parsed = getattr(res, "parsed", None)
+            original_compound = getattr(res, "original_compound_surname", None)
+        except Exception:
+            success = False
+            parsed = None
+            original_compound = None
+        if not success:
+            continue
+        # Use only the structured ParsedName fields
+        if parsed is not None and hasattr(parsed, "surname_tokens") and hasattr(parsed, "given_tokens"):
+            surname_tokens = getattr(parsed, "surname_tokens", [])
+            given_tokens = getattr(parsed, "given_tokens", [])
+            pos_to_norm[positions[idx]] = {
+                "surname_tokens": surname_tokens,
+                "given_tokens": given_tokens,
+                "original_compound_surname": original_compound,
+            }
+    return key, pos_to_norm
+
+
+def apply_sinonym_overwrites(signatures: Dict[str, Signature], per_paper_results: Dict[str, Dict[int, Any]]) -> int:
+    """Overwrite signature name parts with Sinonym-normalized names where applicable.
+
+    Returns number of signatures updated.
+    """
+    overwrite_count = 0
+    for sig_id, sig in list(signatures.items()):
+        paper_id_str = str(sig.paper_id)
+        by_pos = per_paper_results.get(paper_id_str)
+        if not by_pos:
+            continue
+        norm_struct = by_pos.get(sig.author_info_position)
+        if not norm_struct:
+            continue
+        first, middle, last = _parse_sinonym_name(norm_struct)
+        if first or last:
+            # Build the new block only when BOTH first and last are present.
+            # Otherwise, do not change the existing block value.
+            new_block = None
+            try:
+                if first and last:
+                    new_block = f"{first[:1].lower()} {last.lower()}".strip()
+            except Exception as e:
+                # Log any unexpected formatting issues; keep prior block on error
+                logger.exception(
+                    "Error computing new block for signature_id=%s (paper_id=%s, position=%s)",
+                    sig_id,
+                    sig.paper_id,
+                    sig.author_info_position,
+                )
+                new_block = None
+
+            if new_block is not None:
+                signatures[sig_id] = sig._replace(
+                    author_info_first=first,
+                    author_info_middle=middle,
+                    author_info_last=last,
+                    author_info_block=new_block,
+                )
+            else:
+                signatures[sig_id] = sig._replace(
+                    author_info_first=first,
+                    author_info_middle=middle,
+                    author_info_last=last,
+                )
+            overwrite_count += 1
+    return overwrite_count
+
+
 def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     """
     helper function to perform most of the preprocessing of a paper
@@ -1467,7 +1686,7 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
         with UniversalPool(processes=n_jobs) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
-                for key, value in p.imap(preprocess_paper_1, papers_dict.items(), 1000):
+                for key, value in p.imap(preprocess_paper_1, papers_dict.items(), CHUNK_SIZE):
                     output[key] = value
                     pbar.update()
     else:

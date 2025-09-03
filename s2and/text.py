@@ -1,4 +1,4 @@
-from typing import List, Union, Optional, Set, TYPE_CHECKING
+from typing import List, Union, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from s2and.data import NameCounts
@@ -338,6 +338,37 @@ def normalize_text(text: Optional[str], special_case_apostrophes: bool = False) 
     norm_text = re.sub(r"\s+", " ", norm_text).strip()
 
     return norm_text
+
+
+def split_first_middle_hyphen_aware(first_raw: Optional[str], middle_raw: Optional[str]) -> Tuple[str, str]:
+    """Normalize and split first/middle with hyphen awareness for canonical fields.
+
+    Rules:
+    - Apostrophes in first are removed (no spaces introduced).
+    - If a hyphen exists in the raw first name, keep all first tokens together (no spill into middle).
+    - Otherwise, first token stays in first; remaining first tokens spill into middle.
+    - A single leading prefix from NAME_PREFIXES is dropped if present.
+
+    Returns (first_without_apostrophe, middle_without_apostrophe), both already normalized.
+    """
+    first_raw = first_raw or ""
+    middle_raw = middle_raw or ""
+
+    has_dash_in_first = "-" in first_raw
+    first_noapos = normalize_text(first_raw, special_case_apostrophes=True)
+    middle_norm = normalize_text(middle_raw)
+
+    f_parts = first_noapos.split()
+    m_parts = middle_norm.split()
+    if f_parts and f_parts[0] in NAME_PREFIXES:
+        f_parts = f_parts[1:]
+
+    if not f_parts:
+        return "", " ".join(m_parts)
+    if has_dash_in_first:
+        return " ".join(f_parts), " ".join(m_parts)
+    # Legacy spill behavior
+    return f_parts[0], " ".join(f_parts[1:] + m_parts)
 
 
 def name_text_features(

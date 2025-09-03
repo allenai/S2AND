@@ -11,6 +11,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 import genieclust
 from s2and.consts import SPECTER_DIM, PROJECT_ROOT_PATH
+from s2and.text import same_prefix_tokens
 
 
 logger = logging.getLogger("s2and")
@@ -348,18 +349,25 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 else:
                     score = 0
                 small_enough_pairs_counts.append((pair, 1e10 + score))
-            # the name tuples allow the situation where a.startswith(b) or b.startswith(b)
-            elif name_for_splits_1.startswith(name_for_splits_2) or name_for_splits_2.startswith(name_for_splits_1):
+            # the name tuples allow the situation where prefixes match in either direction
+            elif same_prefix_tokens(name_for_splits_1, name_for_splits_2):
                 score = min(len(name_for_splits_1), len(name_for_splits_2))
                 small_enough_pairs_counts.append((pair, 1e5 + score))
             # the other option is that the names are different but we have counts
-            elif (
-                name_for_splits_1 in first_k_letter_counts_sorted
-                and name_for_splits_2 in first_k_letter_counts_sorted[name_for_splits_1]
-            ):
-                small_enough_pairs_counts.append(
-                    (pair, first_k_letter_counts_sorted[name_for_splits_1][name_for_splits_2])
-                )
+            else:
+                # TODO(s2and): Temporary compatibility tweak for hyphen-preserving first names.
+                # The ORCID-derived first_k_letter_counts were generated with legacy normalization.
+                # To preserve utility without regenerating, probe counts using token before first space.
+                # Consider removing this once counts are regenerated with new logic.
+                lookup_1 = name_for_splits_1.split(" ")[0]
+                lookup_2 = name_for_splits_2.split(" ")[0]
+                if (
+                    lookup_1 in first_k_letter_counts_sorted
+                    and lookup_2 in first_k_letter_counts_sorted[lookup_1]
+                ):
+                    small_enough_pairs_counts.append(
+                        (pair, first_k_letter_counts_sorted[lookup_1][lookup_2])
+                    )
 
     small_enough_pairs_sorted = sorted(small_enough_pairs_counts, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
     # now we go down the list and merge until we reach merged subblocks not above maximum size

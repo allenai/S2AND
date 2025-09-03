@@ -2,6 +2,20 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.claude/
+data/aminer/
+data/arnetminer/
+data/inspire/
+data/kisti/
+data/medline/
+data/pubmed/
+data/qian/
+data/temp/
+data/s2and-mini/
+data/test/
+data/zbmath/
+data/lid.176.bin
+data/LICENSE.txt
 
 # C extensions
 *.so

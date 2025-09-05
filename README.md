@@ -188,6 +188,8 @@ anddata = ANDData(
 )
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
 ```
+## How to use the released production model
+We provide a trained production model (the one that is used in the Semantic Scholar website and API) in the S3 bucket along with the datasets, in the file `production_model_v1.1.pickle`. To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data. The older "v1.0" model is also available, but it's worse.
 
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.

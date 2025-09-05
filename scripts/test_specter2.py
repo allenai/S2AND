@@ -115,7 +115,7 @@ nameless_featurization_info = FeaturizationInfo(
 )
 
 # this is the prod 1.1 model, which we may or may not retrain
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "production_model.pickle"), "rb") as f:
+with open(os.path.join(PROJECT_ROOT_PATH, "data", "production_model_v1.1.pickle"), "rb") as f:
     clusterer = pickle.load(f)["clusterer"]
     clusterer.use_cache = False  # very important for this experiment!!!
 
@@ -258,7 +258,7 @@ n_jobs = 8
 
 
 # this is the prod 1.1 model
-with open("data/model_dump.pickle", "rb") as f:
+with open("data/production_model_v1.1.pickle", "rb") as f:
     clusterer1 = pickle.load(f)["clusterer"]
     clusterer1.use_cache = False
 

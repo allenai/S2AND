@@ -502,9 +502,8 @@ class ANDData:
             # Hyphen-preserving split for the "without_apostrophe" canonical fields
             # Centralize in s2and.text for reuse by other scripts
             from s2and.text import split_first_middle_hyphen_aware
-            first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(
-                first_raw, middle_raw
-            )
+
+            first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(first_raw, middle_raw)
 
             coauthors: Optional[List[str]] = None
             if len(self.papers) != 0:

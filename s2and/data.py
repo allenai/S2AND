@@ -3,6 +3,7 @@ from typing import Optional, Union, Dict, List, Any, Tuple, Set, NamedTuple
 import os
 import re
 import json
+import platform
 import numpy as np
 import pandas as pd
 import logging
@@ -206,7 +207,7 @@ class ANDData:
         preprocess: bool = True,
         name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
         use_orcid_id: bool = True,
-        use_sinonym_overwrite: bool = False,
+        use_sinonym_overwrite: bool = True,
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -1433,7 +1434,9 @@ def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: in
     """
     output: Dict[str, Dict[int, Any]] = {}
     if n_jobs > 1:
-        # Use processes for CPU-bound, GIL-holding Sinonym work
+        # On Windows, prefer threads to avoid spawn/import guard issues in child processes.
+        # On Unix, use processes for CPU-bound work.
+        use_threads = platform.system() == "Windows"  # not using at the moment because threads doesn't parallelize well
         with UniversalPool(processes=n_jobs, use_threads=False) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
@@ -1553,11 +1556,13 @@ def apply_sinonym_overwrites(signatures: Dict[str, Signature], per_paper_results
                 new_block = None
 
             if new_block is not None:
+                # TODO: overwriting blocks increases the minimum error rate in real s2and datasets...
+                # need to figure out what to do here
                 signatures[sig_id] = sig._replace(
                     author_info_first=first,
                     author_info_middle=middle,
                     author_info_last=last,
-                    author_info_block=new_block,
+                    # author_info_block=new_block,
                 )
             else:
                 signatures[sig_id] = sig._replace(

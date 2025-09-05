@@ -36,7 +36,7 @@ datasets = [
 ]
 
 # this is the prod 1.1 model
-with open("data/model_dump.pickle", "rb") as f:
+with open("data/production_model_v1.1.pickle", "rb") as f:
     clusterer = pickle.load(f)["clusterer"]
     clusterer.use_cache = False
 

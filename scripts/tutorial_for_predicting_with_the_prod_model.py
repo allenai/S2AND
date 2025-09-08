@@ -7,12 +7,10 @@ We will use the test sets of arnnetminer and pubmed datasets as examples.
 
 import os
 import pickle
-import numpy as np
 from s2and.data import ANDData
 from s2and.eval import cluster_eval
-from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE, PROJECT_ROOT_PATH
-from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.model import PairwiseModeler, Clusterer
+from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
+from s2and.featurizer import FeaturizationInfo
 
 
 def main() -> None:
@@ -22,13 +20,17 @@ def main() -> None:
     # Limit BLAS threads to keep things responsive
     os.environ["OMP_NUM_THREADS"] = f"{n_jobs}"
 
-    data_original = os.path.join(PROJECT_ROOT_PATH, "data")
+    data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
 
     random_seed = 42
 
     datasets = [
         "arnetminer",
+        "inspire",
+        "kisti",
         "pubmed",
+        "qian",
+        "zbmath",
     ]
 
     features_to_use = [
@@ -90,6 +92,8 @@ def main() -> None:
             preprocess=True,
             random_seed=random_seed,
             name_tuples="filtered",
+            use_orcid_id=True,
+            use_sinonym_overwrite=True,
         )
         train_block_dict, val_block_dict, test_block_dict = anddata.split_blocks_helper(anddata.get_blocks())
         num_test_blocks[dataset_name] = len(test_block_dict)
@@ -102,6 +106,15 @@ def main() -> None:
         )
         print(cluster_metrics)
         cluster_metrics_all.append(cluster_metrics)
+
+        # cluster_to_signatures = anddata.construct_cluster_to_signatures(test_block_dict)
+
+        # # now we need to print out the unique tuples of anddata(get_full_name_for_features(signature)) for the signatures that were clustered together
+        # for cluster_id, signatures in cluster_to_signatures.items():
+        #     full_names = [anddata.get_full_name_for_features(anddata.signatures[sig]) for sig in signatures]
+        #     # also get the BLOCK author_info_block
+        #     blocks = [anddata.signatures[sig].author_info_block for sig in signatures]
+        #     print(f"Cluster {cluster_id}: {set(list(zip(full_names, blocks)))}")
 
     b3s = [i["B3 (P, R, F1)"][-1] for i in cluster_metrics_all]
     print(b3s, sum(b3s) / len(b3s))

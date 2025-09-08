@@ -207,7 +207,7 @@ class ANDData:
         preprocess: bool = True,
         name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
         use_orcid_id: bool = True,
-        use_sinonym_overwrite: bool = True,
+        use_sinonym_overwrite: bool = False,
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -303,12 +303,15 @@ class ANDData:
         # Optional Sinonym pre-step: normalize Chinese names from papers and overwrite signatures
         # This runs before other preprocessing so downstream steps use updated names
         if use_sinonym_overwrite:
-            try:
-                sinonym_results = sinonym_preprocess_papers_parallel(self.papers, n_jobs)
-                overwrite_count = apply_sinonym_overwrites(self.signatures, sinonym_results)
-                logger.info(f"Sinonym overwrote {overwrite_count} signature name(s)")
-            except Exception as e:
-                logger.warning(f"Sinonym preprocessing skipped due to error: {e}")
+            sinonym_results = sinonym_preprocess_papers_parallel(self.papers, n_jobs)
+            # Only allow block overwrites during inference to keep train/val/test splits reproducible
+            overwrite_count = apply_sinonym_overwrites(
+                self.signatures,
+                sinonym_results,
+                overwrite_blocks=(mode == "inference"),
+            )
+            logger.info(f"Sinonym overwrote {overwrite_count} signature name(s)")
+
         self.name = name
         self.mode = mode
         logger.info("loading clusters")
@@ -1401,25 +1404,51 @@ def _parse_sinonym_name(name_or_struct: Any) -> Tuple[str, str, str]:
         given_tokens = getattr(name_or_struct, "given_tokens", [])
         surname_tokens = getattr(name_or_struct, "surname_tokens", [])
         original_compound = getattr(name_or_struct, "original_compound_surname", None)
+        # Middle can be provided as tokens or as a pre-joined string
+        middle_tokens = getattr(name_or_struct, "middle_tokens", None)
+        middle_name = getattr(name_or_struct, "middle_name", None)
+
         first = " ".join([t for t in given_tokens if isinstance(t, str) and t])
+
+        # Prefer explicit middle_name string if present; otherwise join tokens
+        middle = ""
+        if isinstance(middle_name, str) and middle_name.strip():
+            middle = middle_name.strip()
+        elif isinstance(middle_tokens, list):
+            mt = [t for t in middle_tokens if isinstance(t, str) and t]
+            if mt:
+                middle = " ".join(mt)
+
         if isinstance(original_compound, str) and original_compound.strip():
             last = original_compound.strip()
         else:
             last = " ".join([t for t in surname_tokens if isinstance(t, str) and t])
-        return first, "", last
+        return first, middle, last
 
     # Handle dict form
     if isinstance(name_or_struct, dict):
         given_tokens = name_or_struct.get("given_tokens")
         surname_tokens = name_or_struct.get("surname_tokens")
         original_compound = name_or_struct.get("original_compound_surname")
+        middle_tokens = name_or_struct.get("middle_tokens")
+        middle_name = name_or_struct.get("middle_name")
         if isinstance(given_tokens, list) and isinstance(surname_tokens, list):
             first = "-".join([t for t in given_tokens if isinstance(t, str) and t])
+
+            # Build middle string if available
+            middle = ""
+            if isinstance(middle_name, str) and middle_name.strip():
+                middle = middle_name.strip()
+            elif isinstance(middle_tokens, list):
+                mt = [t for t in middle_tokens if isinstance(t, str) and t]
+                if mt:
+                    middle = " ".join(mt)
+
             if isinstance(original_compound, str) and original_compound.strip():
                 last = original_compound.strip()
             else:
                 last = "-".join([t for t in surname_tokens if isinstance(t, str) and t])
-            return first, "", last
+            return first, middle, last
 
     # If we got here, we don't have a parsed structure we recognize
     return "", "", ""
@@ -1468,12 +1497,17 @@ def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: in
 
 def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> Tuple[str, Dict[int, Any]]:
     """Lightweight variant: input is (paper_id, [(position, author_name), ...]).
-
-    Reduces data passed to workers, which helps when using process-based pools
-    and keeps overhead low even with threads.
+    Returns a mapping: paper_id -> { position -> structured result }, where each structured result is:
+    {
+        'surname_tokens': [...],
+        'given_tokens': [...],
+        'original_compound_surname': Optional[str],
+        'middle_tokens': Optional[list[str]]  # may be present if available
+    }
     """
     key, pos_names = item
-    # Filter any None names defensively, though constructor already removed them
+
+    # Collect positions and names, skipping None defensively
     positions: List[int] = []
     names: List[str] = []
     for pos, name in pos_names:
@@ -1485,48 +1519,61 @@ def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> 
         return key, {}
 
     detector = _ensure_sinonym_detector()
-    results = None
-    try:
-        if len(names) >= 2:
-            batch_result = detector.analyze_name_batch(names)  # type: ignore[attr-defined]
-            results = getattr(batch_result, "results", None) or []
-        else:
-            results = [detector.is_chinese_name(names[0])]  # type: ignore[attr-defined]
-    except Exception:
-        # Fallback to simpler batch processing if available
-        try:
-            results = detector.process_name_batch(names)  # type: ignore[attr-defined]
-        except Exception:
-            return key, {}
+    results = detector.process_name_batch(names)  # type: ignore[attr-defined]
+    # # Single unified batch call; always returns one result per input name
+    # try:
+    #     results = detector.process_name_batch(names)  # type: ignore[attr-defined]
+    # except Exception:
+    #     # print(f"Sinonym failed on paper_id={key} with names={names}")
+    #     return key, {}
 
     pos_to_norm: Dict[int, Any] = {}
-    for idx, res in enumerate(results or []):
-        try:
-            success = getattr(res, "success", False)
-            parsed = getattr(res, "parsed", None)
-            original_compound = getattr(res, "original_compound_surname", None)
-        except Exception:
-            success = False
-            parsed = None
-            original_compound = None
+
+    # Keep only successful (Chinese) parses; align safely via zip
+    for pos, res in zip(positions, (results or [])):
+        success = getattr(res, "success", False)
         if not success:
             continue
-        # Use only the structured ParsedName fields
+
+        parsed = getattr(res, "parsed", None)
+        original_compound = getattr(res, "original_compound_surname", None)
+
         if parsed is not None and hasattr(parsed, "surname_tokens") and hasattr(parsed, "given_tokens"):
             surname_tokens = getattr(parsed, "surname_tokens", [])
             given_tokens = getattr(parsed, "given_tokens", [])
-            pos_to_norm[positions[idx]] = {
+            middle_tokens = None
+            if hasattr(parsed, "middle_tokens"):
+                middle_tokens = getattr(parsed, "middle_tokens", None)
+
+            entry = {
                 "surname_tokens": surname_tokens,
                 "given_tokens": given_tokens,
                 "original_compound_surname": original_compound,
             }
+            if middle_tokens:
+                entry["middle_tokens"] = middle_tokens
+            pos_to_norm[pos] = entry
+
     return key, pos_to_norm
 
 
-def apply_sinonym_overwrites(signatures: Dict[str, Signature], per_paper_results: Dict[str, Dict[int, Any]]) -> int:
+def apply_sinonym_overwrites(
+    signatures: Dict[str, Signature],
+    per_paper_results: Dict[str, Dict[int, Any]],
+    *,
+    overwrite_blocks: bool = False,
+) -> int:
     """Overwrite signature name parts with Sinonym-normalized names where applicable.
 
-    Returns number of signatures updated.
+    Args:
+        signatures: signature_id -> Signature
+        per_paper_results: paper_id(str) -> { position -> parsed_struct }
+        overwrite_blocks: if True, also overwrite author_info_block with the new
+            block derived from normalized first/last. Use only in inference to
+            avoid changing dataset splits.
+
+    Returns:
+        Number of signatures updated.
     """
     overwrite_count = 0
     for sig_id, sig in list(signatures.items()):
@@ -1555,21 +1602,16 @@ def apply_sinonym_overwrites(signatures: Dict[str, Signature], per_paper_results
                 )
                 new_block = None
 
-            if new_block is not None:
-                # TODO: overwriting blocks increases the minimum error rate in real s2and datasets...
-                # need to figure out what to do here
-                signatures[sig_id] = sig._replace(
-                    author_info_first=first,
-                    author_info_middle=middle,
-                    author_info_last=last,
-                    # author_info_block=new_block,
-                )
-            else:
-                signatures[sig_id] = sig._replace(
-                    author_info_first=first,
-                    author_info_middle=middle,
-                    author_info_last=last,
-                )
+            # Always update first/middle/last; conditionally update block in inference
+            new_sig = sig._replace(
+                author_info_first=first,
+                author_info_middle=middle,
+                author_info_last=last,
+            )
+            if overwrite_blocks and new_block is not None:
+                # Note: changing blocks will affect clustering; only do this in inference
+                new_sig = new_sig._replace(author_info_block=new_block)
+            signatures[sig_id] = new_sig
             overwrite_count += 1
     return overwrite_count
 

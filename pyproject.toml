@@ -32,7 +32,7 @@ dependencies = [
   "numpy>=1.24,<2",
   "orjson>=3.9,<4",
   "shap",
-  "sinonym>=0.1.7",
+  "sinonym>=0.2.0",
   # Backport only for older Pythons; not needed on 3.11+
   'importlib-metadata>=4.13; python_version < "3.10"',
 ]
@@ -50,6 +50,7 @@ dev = [
   "ruff>=0.4,<0.7",
   # CLI helpers used in some repos
   "click>=8,<9",
+  "ipykernel",
 ]
 
 [tool.setuptools.packages.find]

@@ -8,11 +8,13 @@ import os
 from typing import Dict, Tuple, List
 
 from s2and.consts import PROJECT_ROOT_PATH, DEFAULT_CHUNK_SIZE
-from s2and.data import ANDData, Signature
+from s2and.data import ANDData, Signature, sinonym_preprocess_papers_parallel
 from s2and.featurizer import many_pairs_featurize
 from s2and.eval import cluster_eval
 import numpy as np
 import pickle
+
+N_JOBS = 4
 
 
 def collect_normalized_first_middle(signatures: Dict[str, Signature]) -> Dict[str, Tuple[str, str]]:
@@ -53,7 +55,7 @@ def build_anddata(dataset_name: str, use_sinonym_overwrite: bool, n_jobs: int = 
 
 
 def main() -> None:
-    os.environ["OMP_NUM_THREADS"] = "4"
+    os.environ["OMP_NUM_THREADS"] = str(N_JOBS)
 
     datasets = [
         # "arnetminer",
@@ -63,26 +65,74 @@ def main() -> None:
     for dataset_name in datasets:
         print(f"\n=== Dataset: {dataset_name} ===")
 
-        # Without Sinonym overwrites
-        anddata_no = build_anddata(dataset_name, use_sinonym_overwrite=False, n_jobs=4)
-        fm_no = collect_normalized_first_middle(anddata_no.signatures)
-
         # With Sinonym overwrites
-        anddata_yes = build_anddata(dataset_name, use_sinonym_overwrite=True, n_jobs=4)
+        anddata_yes = build_anddata(dataset_name, use_sinonym_overwrite=True, n_jobs=N_JOBS)
         fm_yes = collect_normalized_first_middle(anddata_yes.signatures)
 
+        # Without Sinonym overwrites
+        anddata_no = build_anddata(dataset_name, use_sinonym_overwrite=False, n_jobs=N_JOBS)
+        fm_no = collect_normalized_first_middle(anddata_no.signatures)
+
         # Compute differences on intersection of signature ids
+        def only_space_change(a: str, b: str) -> bool:
+            """True if a != b but equal after removing spaces."""
+            if a is None or b is None:
+                return False
+            return a != b and a.replace(" ", "") == b.replace(" ", "")
+
         changed = []
         for sig_id in sorted(set(fm_no.keys()) & set(fm_yes.keys())):
             first_no, middle_no = fm_no[sig_id]
             first_yes, middle_yes = fm_yes[sig_id]
             if first_no != first_yes or middle_no != middle_yes:
+                # Exclude trivial diffs where only first changed by adding/removing spaces
+                if only_space_change(first_no or "", first_yes or "") and (middle_no == middle_yes):
+                    continue
                 changed.append((sig_id, first_no, middle_no, first_yes, middle_yes))
 
         print(f"Total signatures compared: {len(set(fm_no) & set(fm_yes))}")
         print(f"Changed normalized first/middle: {len(changed)}")
         for sig_id, first_no, middle_no, first_yes, middle_yes in changed:
             print(f"sig={sig_id} | first: '{first_no}' -> '{first_yes}' | middle: '{middle_no}' -> '{middle_yes}'")
+            # Provide extra context: paper, authors, and Sinonym parsed tokens for this signature
+            try:
+                sig_obj_no = anddata_no.signatures[sig_id]
+                paper_id = str(sig_obj_no.paper_id)
+                paper_no = anddata_no.papers[paper_id]
+                paper_yes = anddata_yes.papers[paper_id]
+                print(f"  paper_id={paper_id} | title={paper_no.title!r}")
+                print(
+                    "  authors no:",
+                    [f"{a.position}:{a.author_name}" for a in paper_no.authors],
+                )
+                print(
+                    "  authors yes:",
+                    [f"{a.position}:{a.author_name}" for a in paper_yes.authors],
+                )
+                # Run Sinonym preprocessing directly to show parsed tokens
+                parsed = sinonym_preprocess_papers_parallel({paper_id: paper_no}, n_jobs=1).get(paper_id, {})
+                if parsed:
+                    print("  sinonym parsed per position (given_tokens | surname_tokens | middle_tokens?):")
+                    for pos, obj in sorted(parsed.items()):
+                        try:
+                            gt = obj.get("given_tokens") if isinstance(obj, dict) else getattr(obj, "given_tokens", [])
+                            st = (
+                                obj.get("surname_tokens")
+                                if isinstance(obj, dict)
+                                else getattr(obj, "surname_tokens", [])
+                            )
+                            mt = None
+                            if isinstance(obj, dict):
+                                mt = obj.get("middle_tokens")
+                            elif hasattr(obj, "middle_tokens"):
+                                mt = getattr(obj, "middle_tokens")
+                            print(f"    pos={pos}: {gt} | {st} | {mt}")
+                        except Exception as e:
+                            print(f"    pos={pos}: <failed to display parsed tokens: {e}>")
+                else:
+                    print("  sinonym parsed: <none>")
+            except Exception as e:
+                print(f"  <failed to print extra context for {sig_id}: {e}>")
 
         # -------- Feature comparison on test split --------
         # Load production clusterer to reuse its featurizer settings
@@ -90,7 +140,7 @@ def main() -> None:
             prod = pickle.load(fh)
         clusterer = prod["clusterer"]
         clusterer.use_cache = False
-        clusterer.n_jobs = 4
+        clusterer.n_jobs = N_JOBS
 
         # Use identical test blocks from the build WITHOUT overwrites (blocks are stable in train mode)
         _, _, test_blocks = anddata_no.split_blocks_helper(anddata_no.get_blocks())

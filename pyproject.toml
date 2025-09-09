@@ -35,6 +35,7 @@ dependencies = [
   "sinonym>=0.2.0",
   # Backport only for older Pythons; not needed on 3.11+
   'importlib-metadata>=4.13; python_version < "3.10"',
+  "awscli",
 ]
 
 [project.optional-dependencies]

@@ -169,6 +169,10 @@ class ANDData:
             Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output.
             Also applies Sinonym-normalized names to the per-paper author list so co-author features
             (coauthor sets/blocks and n-grams) are derived from the normalized names as well.
+        sinonym_overwrite_min_ratio: optional gating threshold; if provided, only overwrite names
+            (and paper author strings used for co-authors) whose Sinonym-detected first/last swap occurs
+            at least this many times more often than not within the dataset (with the special case that
+            any name with >=1 flips and 0 non-flips always qualifies). This mitigates noisy reordering.
         compute_reference_features: whether to compute reference-based features during preprocessing
             (building reference_details Counters). Defaults to False. When False, reference_details
             are initialized to empty Counters to maintain featurization compatibility while
@@ -214,6 +218,7 @@ class ANDData:
         name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
         use_orcid_id: bool = True,
         use_sinonym_overwrite: bool = False,
+        sinonym_overwrite_min_ratio: Optional[float] = 3.0,
         compute_reference_features: bool = False,
     ):
         if mode == "train":
@@ -317,15 +322,28 @@ class ANDData:
         # This runs before other preprocessing so downstream steps use updated names
         if use_sinonym_overwrite:
             sinonym_results = sinonym_preprocess_papers_parallel(self.papers, n_jobs)
+            allow_overwrite_pos = None
+            # Optional gating: only overwrite names that are flipped >= min_ratio * not_flipped
+            if sinonym_overwrite_min_ratio is not None:
+                try:
+                    allow_overwrite_pos = compute_sinonym_overwrite_allowlist(
+                        self.signatures, sinonym_results, min_ratio=sinonym_overwrite_min_ratio
+                    )
+                except Exception as e:
+                    logger.warning(f"Sinonym overwrite gating failed, proceeding without gating: {e}")
+                    allow_overwrite_pos = None
             # Only allow block overwrites during inference to keep train/val/test splits reproducible
             overwrite_count = apply_sinonym_overwrites(
                 self.signatures,
                 sinonym_results,
                 overwrite_blocks=(mode == "inference"),
+                allow_overwrite_pos=allow_overwrite_pos,
             )
             logger.info(f"Sinonym overwrote {overwrite_count} signature name(s)")
             # Update paper-level author strings so co-author features use Sinonym-normalized names
-            paper_overwrite_count = apply_sinonym_overwrites_to_papers(self.papers, sinonym_results)
+            paper_overwrite_count = apply_sinonym_overwrites_to_papers(
+                self.papers, sinonym_results, allow_overwrite_pos=allow_overwrite_pos
+            )
             logger.info(f"Sinonym overwrote {paper_overwrite_count} paper author name(s)")
 
         self.name = name
@@ -1495,6 +1513,85 @@ def _parse_sinonym_name(name_or_struct: Any) -> Tuple[str, str, str]:
     return "", "", ""
 
 
+def _normalized_first_last_from_signature(sig: Signature) -> Tuple[str, str]:
+    """Construct normalized (first, last) similar to preprocess_signatures().
+
+    Uses hyphen-aware first/middle split and normalize_text for last.
+    """
+    from s2and.text import split_first_middle_hyphen_aware  # local import to avoid cycles
+
+    first_raw = sig.author_info_first or ""
+    middle_raw = sig.author_info_middle or ""
+    first_noapos, _ = split_first_middle_hyphen_aware(first_raw, middle_raw)
+    last_norm = normalize_text(sig.author_info_last)
+    return first_noapos, last_norm
+
+
+def compute_sinonym_overwrite_allowlist(
+    signatures: Dict[str, Signature],
+    per_paper_results: Dict[str, Dict[int, Any]],
+    min_ratio: float = 3.0,
+) -> Dict[str, Set[int]]:
+    """Compute which (paper_id, position) pairs to overwrite based on flip prevalence.
+
+    A name (normalized "first last") is eligible if flipped_count >= min_ratio * not_flipped_count,
+    with the special case that flipped>=1 and not_flipped==0 always qualifies.
+
+    Returns mapping: paper_id (str) -> set of positions to overwrite.
+    """
+    from collections import defaultdict
+    import re
+
+    def _canon(s: str) -> str:
+        # Lower and drop non-letters to align spaces/hyphens variants
+        return re.sub(r"[^a-z]", "", (s or "").lower())
+
+    # First pass: aggregate flip/not-flip counts per name
+    name_counts: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # name -> [flipped, not_flipped]
+    for sig in signatures.values():
+        paper_id_str = str(sig.paper_id)
+        by_pos = per_paper_results.get(paper_id_str)
+        if not by_pos:
+            continue
+        norm_struct = by_pos.get(sig.author_info_position)
+        if not norm_struct:
+            continue
+        s_first, _, s_last = _parse_sinonym_name(norm_struct)
+        if not (s_first and s_last):
+            continue
+        o_first, o_last = _normalized_first_last_from_signature(sig)
+        name_key = (o_first + " " + o_last).strip()
+        flipped = _canon(s_first) == _canon(o_last) and _canon(s_last) == _canon(o_first)
+        if flipped:
+            name_counts[name_key][0] += 1
+        else:
+            name_counts[name_key][1] += 1
+
+    # Determine qualifying names
+    qualified_names = set()
+    for name, (flp, nf) in name_counts.items():
+        if flp > 0 and nf == 0:
+            qualified_names.add(name)
+        elif flp > 0 and flp >= min_ratio * nf:
+            qualified_names.add(name)
+
+    # Build allowlist by (paper, position)
+    allow: Dict[str, Set[int]] = {}
+    for sig in signatures.values():
+        paper_id_str = str(sig.paper_id)
+        by_pos = per_paper_results.get(paper_id_str)
+        if not by_pos:
+            continue
+        if sig.author_info_position not in by_pos:
+            continue
+        o_first, o_last = _normalized_first_last_from_signature(sig)
+        name_key = (o_first + " " + o_last).strip()
+        if name_key in qualified_names:
+            allow.setdefault(paper_id_str, set()).add(sig.author_info_position)
+
+    return allow
+
+
 def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: int) -> Dict[str, Dict[int, Any]]:
     """Parallel wrapper for running Sinonym preprocessing across papers.
 
@@ -1603,6 +1700,7 @@ def apply_sinonym_overwrites(
     per_paper_results: Dict[str, Dict[int, Any]],
     *,
     overwrite_blocks: bool = False,
+    allow_overwrite_pos: Optional[Dict[str, Set[int]]] = None,
 ) -> int:
     """Overwrite signature name parts with Sinonym-normalized names where applicable.
 
@@ -1627,6 +1725,11 @@ def apply_sinonym_overwrites(
             continue
         first, middle, last = _parse_sinonym_name(norm_struct)
         if first or last:
+            # Gate overwrites if allowlist provided
+            if allow_overwrite_pos is not None:
+                allowed = allow_overwrite_pos.get(paper_id_str, set())
+                if sig.author_info_position not in allowed:
+                    continue
             # Build the new block only when BOTH first and last are present.
             # Otherwise, do not change the existing block value.
             new_block = None
@@ -1660,6 +1763,7 @@ def apply_sinonym_overwrites(
 def apply_sinonym_overwrites_to_papers(
     papers: Dict[str, Paper],
     per_paper_results: Dict[str, Dict[int, Any]],
+    allow_overwrite_pos: Optional[Dict[str, Set[int]]] = None,
 ) -> int:
     """Apply Sinonym-normalized names to Paper.authors for co-author features.
 
@@ -1679,6 +1783,12 @@ def apply_sinonym_overwrites_to_papers(
         for a in paper.authors:
             repl = by_pos.get(a.position) if isinstance(by_pos, dict) else None
             if repl:
+                # Gate overwrites by position
+                if allow_overwrite_pos is not None:
+                    allowed = allow_overwrite_pos.get(str(key), set())
+                    if a.position not in allowed:
+                        new_authors.append(a)
+                        continue
                 first, middle, last = _parse_sinonym_name(repl)
                 if first or middle or last:
                     parts = [p for p in [first, middle, last] if isinstance(p, str) and p]

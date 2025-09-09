@@ -94,7 +94,7 @@ def main() -> None:
             random_seed=random_seed,
             name_tuples="filtered",
             use_orcid_id=True,
-            use_sinonym_overwrite=False,
+            use_sinonym_overwrite=True,
         )
         train_block_dict, val_block_dict, test_block_dict = anddata.split_blocks_helper(anddata.get_blocks())
         num_test_blocks[dataset_name] = len(test_block_dict)

@@ -690,6 +690,14 @@ def many_pairs_featurize(
     np.ndarray: the labels for all the pairs
     np.ndarray: the nameless features for all the pairs
     """
+    # Strict guard: don't allow reference_features when dataset disabled them
+    if "reference_features" in featurizer_info.features_to_use and not getattr(
+        dataset, "compute_reference_features", False
+    ):
+        raise ValueError(
+            "'reference_features' requested in features_to_use but dataset.compute_reference_features is False."
+        )
+
     global global_dataset
     global_dataset = dataset  # type: ignore
 
@@ -894,6 +902,14 @@ def featurize(
     train/val/test features and labels if mode is 'train',
     features and labels for all pairs if mode is 'inference'
     """
+    # Strict guard: don't allow reference_features when dataset disabled them
+    if "reference_features" in featurizer_info.features_to_use and not getattr(
+        dataset, "compute_reference_features", False
+    ):
+        raise ValueError(
+            "'reference_features' requested in features_to_use but dataset.compute_reference_features is False."
+        )
+
     if dataset.mode == "inference":
         logger.info("featurizing all pairs")
         all_pairs = dataset.all_pairs()

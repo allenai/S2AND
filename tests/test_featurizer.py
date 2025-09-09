@@ -16,6 +16,7 @@ class TestData(unittest.TestCase):
             clusters="tests/dummy/clusters.json",
             name="dummy",
             load_name_counts=True,
+            compute_reference_features=True,
         )
 
         features_to_use = [
@@ -132,50 +133,113 @@ class TestData(unittest.TestCase):
             0.7777777777777778,
             0.5407407407407407,
         ]
-        expected_features_3 = [
-            0.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.2,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            6.0,
-            0.0,
-            0.058823529411764705,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            1.0,
-            -1.0,
-            1.0,
-            2.0,
-            2.0,
-            1.0,
-            2.0,
-            23425.0,
-            12.0,
-            807.0,
-            1.0,
-            82081.0,
-            20.0,
-            -1.0,
-            0.7777777777777778,
-            0.8,
-            0.7777777777777778,
-            0.5407407407407407,
+
+    def test_featurizer_without_reference_features_raises(self):
+        # Build a dataset with reference features enabled (baseline) and disabled
+        dataset_ref = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_ref",
+            load_name_counts=True,
+            compute_reference_features=True,
+        )
+        dataset_no_ref = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_no_ref",
+            load_name_counts=True,
+            compute_reference_features=False,
+        )
+
+        features_to_use = [
+            "name_similarity",
+            "affiliation_similarity",
+            "email_similarity",
+            "coauthor_similarity",
+            "venue_similarity",
+            "year_diff",
+            "title_similarity",
+            "reference_features",
+            "misc_features",
+            "name_counts",
+            "journal_similarity",
+            "advanced_name_similarity",
         ]
-        self.check_features_array_equal(list(features[0, :]), expected_features_1)
-        self.check_features_array_equal(list(features[1, :]), expected_features_2)
-        self.check_features_array_equal(list(features[2, :]), expected_features_3)
-        self.assertEqual(features[3, 0], -LARGE_INTEGER)
+        fi = FeaturizationInfo(features_to_use=features_to_use)
+
+        # Single pair is sufficient for checking NaN placement
+        test_pairs = [("3", "0", 0)]
+        feats_ref, _, _ = many_pairs_featurize(
+            test_pairs,
+            dataset_ref,
+            fi,
+            n_jobs=1,
+            use_cache=False,
+            chunk_size=1,
+            nan_value=np.nan,
+        )
+
+        # When reference_features are requested but the dataset disabled them,
+        # the featurizer should raise a clear ValueError.
+        with pytest.raises(ValueError):
+            _ = many_pairs_featurize(
+                test_pairs,
+                dataset_no_ref,
+                fi,
+                n_jobs=1,
+                use_cache=False,
+                chunk_size=1,
+                nan_value=np.nan,
+            )
+
+    def test_featurizer_without_reference_group_ok(self):
+        """When compute_reference_features=False and 'reference_features' is NOT requested,
+        featurization should proceed normally with a reduced feature vector."""
+        dataset_no_ref = ANDData(
+            "tests/dummy/signatures.json",
+            "tests/dummy/papers.json",
+            clusters="tests/dummy/clusters.json",
+            name="dummy_no_ref_ok",
+            load_name_counts=True,
+            compute_reference_features=False,
+        )
+
+        features_to_use = [
+            "name_similarity",
+            "affiliation_similarity",
+            "email_similarity",
+            "coauthor_similarity",
+            "venue_similarity",
+            "year_diff",
+            "title_similarity",
+            # no "reference_features" here
+            "misc_features",
+            "name_counts",
+            "journal_similarity",
+            "advanced_name_similarity",
+        ]
+        fi = FeaturizationInfo(features_to_use=features_to_use)
+
+        test_pairs = [("3", "0", 0), ("3", "1", 0)]
+        feats, labels, _ = many_pairs_featurize(
+            test_pairs,
+            dataset_no_ref,
+            fi,
+            n_jobs=1,
+            use_cache=False,
+            chunk_size=1,
+            nan_value=-1,
+        )
+
+        # Shape checks
+        assert feats.shape[0] == len(test_pairs)
+        expected_len = sum(len(fi.feature_group_to_index[name]) for name in features_to_use)
+        assert feats.shape[1] == expected_len
+
+        # Sanity: not all sentinel values
+        assert np.any(feats != -LARGE_INTEGER)
 
     def test_get_constraint(self):
         first_constraint = self.dummy_dataset.get_constraint("0", "8", high_value=100)

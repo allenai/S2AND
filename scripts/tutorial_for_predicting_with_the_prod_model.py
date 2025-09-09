@@ -58,6 +58,7 @@ def main() -> None:
     ]
 
     # we store all the information about the features in this convenient wrapper
+    # note: we don't need these objects in this script, but they are useful for documentation purposes
     featurization_info = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
     nameless_featurization_info = FeaturizationInfo(
         features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION

@@ -166,7 +166,9 @@ class ANDData:
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
         use_sinonym_overwrite: if True, run a pre-step that batch-detects Chinese names per paper via
-            Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output
+            Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output.
+            Also applies Sinonym-normalized names to the per-paper author list so co-author features
+            (coauthor sets/blocks and n-grams) are derived from the normalized names as well.
     """
 
     def __init__(
@@ -311,6 +313,9 @@ class ANDData:
                 overwrite_blocks=(mode == "inference"),
             )
             logger.info(f"Sinonym overwrote {overwrite_count} signature name(s)")
+            # Update paper-level author strings so co-author features use Sinonym-normalized names
+            paper_overwrite_count = apply_sinonym_overwrites_to_papers(self.papers, sinonym_results)
+            logger.info(f"Sinonym overwrote {paper_overwrite_count} paper author name(s)")
 
         self.name = name
         self.mode = mode
@@ -552,9 +557,7 @@ class ANDData:
                         if joined:
                             first_for_counts = joined
 
-                    first_last_for_count = (
-                        first_for_counts + " " + signature.author_info_last_normalized
-                    ).strip()
+                    first_last_for_count = (first_for_counts + " " + signature.author_info_last_normalized).strip()
                     first_initial = first_for_counts if len(first_for_counts) > 0 else ""
                     last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
 
@@ -1633,6 +1636,42 @@ def apply_sinonym_overwrites(
             signatures[sig_id] = new_sig
             overwrite_count += 1
     return overwrite_count
+
+
+def apply_sinonym_overwrites_to_papers(
+    papers: Dict[str, Paper],
+    per_paper_results: Dict[str, Dict[int, Any]],
+) -> int:
+    """Apply Sinonym-normalized names to Paper.authors for co-author features.
+
+    For each paper and author position recognized by Sinonym, replace the
+    Author.author_name with a reconstructed full name built from Sinonym
+    (first, middle, last). Per-paper preprocessing will later normalize
+    casing/spacing consistently.
+
+    Returns number of author entries updated.
+    """
+    updates = 0
+    for key, paper in papers.items():
+        by_pos = per_paper_results.get(str(key))
+        if not by_pos:
+            continue
+        new_authors = []
+        for a in paper.authors:
+            repl = by_pos.get(a.position) if isinstance(by_pos, dict) else None
+            if repl:
+                first, middle, last = _parse_sinonym_name(repl)
+                if first or middle or last:
+                    parts = [p for p in [first, middle, last] if isinstance(p, str) and p]
+                    new_name = " ".join(parts).strip()
+                    if new_name and new_name != a.author_name:
+                        new_authors.append(Author(author_name=new_name, position=a.position))
+                        updates += 1
+                        continue
+            new_authors.append(a)
+        if new_authors and new_authors != list(paper.authors):
+            papers[key] = paper._replace(authors=new_authors)
+    return updates
 
 
 def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:

@@ -538,25 +538,32 @@ class ANDData:
                 )
 
                 if load_name_counts:
+                    # Backward-compatibility for name count keys:
+                    # - Historically, counts used the legacy single-token `author_info_first_normalized`.
+                    # - With Sinonym, `author_info_first_normalized_without_apostrophe` can contain multiple tokens
+                    #   for hyphenated Chinese given names (e.g., "qi xin"). For counts only, we heuristically
+                    #   join internal spaces to form a single token ("qixin") IF the raw first contained a hyphen.
+                    # - This preserves old behavior for most names while improving lookups for hyphenated cases.
+                    # TODO: revisit once we re-extract name_counts using Sinonym-aware canonicalization.
+                    first_for_counts = signature.author_info_first_normalized or ""
+                    raw_first = signature.author_info_first or ""
+                    if "-" in raw_first:
+                        joined = (signature.author_info_first_normalized_without_apostrophe or "").replace(" ", "")
+                        if joined:
+                            first_for_counts = joined
+
                     first_last_for_count = (
-                        signature.author_info_first_normalized + " " + signature.author_info_last_normalized
+                        first_for_counts + " " + signature.author_info_last_normalized
                     ).strip()
-                    first_initial = (
-                        signature.author_info_first_normalized
-                        if len(signature.author_info_first_normalized) > 0
-                        else ""
-                    )
+                    first_initial = first_for_counts if len(first_for_counts) > 0 else ""
                     last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
+
                     counts = NameCounts(
-                        first=(
-                            self.first_dict.get(signature.author_info_first_normalized, 1)  # type: ignore
-                            if len(signature.author_info_first_normalized) > 1
-                            else np.nan
-                        ),
+                        first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),  # type: ignore
                         last=self.last_dict.get(signature.author_info_last_normalized, 1),
                         first_last=(
                             self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
-                            if len(signature.author_info_first_normalized) > 1
+                            if len(first_for_counts) > 1
                             else np.nan
                         ),
                         last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
@@ -812,7 +819,19 @@ class ANDData:
             signature_2 = self.signatures[signature_id_2]
             # either a known alias or a prefix of the other
             # if neither, then we'll say it's impossible to be the same person
-            known_alias = (first_1, first_2) in self.name_tuples
+            # Backward-compatibility: `first_1`/`first_2` can now be multi-token (Sinonym output).
+            # Legacy name_tuples were curated over single-token first names. To remain compatible,
+            # try multiple forms for alias membership: exact, joined-without-spaces, and first-token only.
+            # TODO: revisit once we re-extract name_tuples aligned with Sinonym canonicalization.
+            f1_join = "".join(first_1.split()) if isinstance(first_1, str) else first_1
+            f2_join = "".join(first_2.split()) if isinstance(first_2, str) else first_2
+            f1_tok = first_1.split()[0] if isinstance(first_1, str) and len(first_1.split()) > 0 else first_1
+            f2_tok = first_2.split()[0] if isinstance(first_2, str) and len(first_2.split()) > 0 else first_2
+            known_alias = (
+                (first_1, first_2) in self.name_tuples
+                or (f1_join, f2_join) in self.name_tuples
+                or (f1_tok, f2_tok) in self.name_tuples
+            )
             prefix = same_prefix_tokens(first_1, first_2)
             if not prefix and not known_alias:
                 return high_value

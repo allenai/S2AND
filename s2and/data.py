@@ -169,6 +169,10 @@ class ANDData:
             Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output.
             Also applies Sinonym-normalized names to the per-paper author list so co-author features
             (coauthor sets/blocks and n-grams) are derived from the normalized names as well.
+        compute_reference_features: whether to compute reference-based features during preprocessing
+            (building reference_details Counters). Defaults to False. When False, reference_details
+            are initialized to empty Counters to maintain featurization compatibility while
+            avoiding the expensive reference graph materialization.
     """
 
     def __init__(
@@ -210,6 +214,7 @@ class ANDData:
         name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
         use_orcid_id: bool = True,
         use_sinonym_overwrite: bool = False,
+        compute_reference_features: bool = False,
     ):
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -229,37 +234,7 @@ class ANDData:
             if train_blocks is not None and clusters is None:
                 raise Exception("Train blocks still needs clusters")
 
-        logger.info("loading papers")
-        self.papers = self.maybe_load_json(papers)
-        # convert dictionary to namedtuples for memory reduction
-        for paper_id, paper in self.papers.items():
-            self.papers[paper_id] = Paper(
-                title=paper["title"],
-                has_abstract=paper["abstract"] not in {"", None},
-                in_signatures=None,
-                is_english=None,
-                is_reliable=None,
-                predicted_language=None,
-                title_ngrams_words=None,
-                authors=[
-                    Author(
-                        author_name=author["author_name"],
-                        position=author["position"],
-                    )
-                    for author in paper["authors"]
-                ],
-                venue=paper["venue"],
-                journal_name=paper["journal_name"],
-                title_ngrams_chars=None,
-                venue_ngrams=None,
-                journal_ngrams=None,
-                reference_details=None,
-                year=paper["year"],
-                references=paper.get("references", []),
-                paper_id=paper["paper_id"],
-            )
-        logger.info("loaded papers")
-
+        # Load signatures first so we can restrict papers/specter to relevant subset
         logger.info("loading signatures")
         self.signatures = self.maybe_load_json(signatures)
         # convert dictionary to namedtuples for memory reduction
@@ -302,6 +277,42 @@ class ANDData:
             )
         logger.info("loaded signatures")
 
+        # Determine the set of papers referenced by signatures
+        needed_paper_ids: Set[str] = set(str(sig.paper_id) for sig in self.signatures.values())
+
+        logger.info("loading papers (subset referenced by signatures)")
+        raw_papers = self.maybe_load_json(papers)
+        filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
+        self.papers = {}
+        # convert dictionary to namedtuples for memory reduction
+        for paper_id, paper in filtered_papers.items():
+            self.papers[paper_id] = Paper(
+                title=paper["title"],
+                has_abstract=paper["abstract"] not in {"", None},
+                in_signatures=None,
+                is_english=None,
+                is_reliable=None,
+                predicted_language=None,
+                title_ngrams_words=None,
+                authors=[
+                    Author(
+                        author_name=author["author_name"],
+                        position=author["position"],
+                    )
+                    for author in paper["authors"]
+                ],
+                venue=paper["venue"],
+                journal_name=paper["journal_name"],
+                title_ngrams_chars=None,
+                venue_ngrams=None,
+                journal_ngrams=None,
+                reference_details=None,
+                year=paper["year"],
+                references=paper.get("references", []),
+                paper_id=paper["paper_id"],
+            )
+        logger.info(f"loaded papers subset: {len(self.papers)}/{len(raw_papers)} relevant")
+
         # Optional Sinonym pre-step: normalize Chinese names from papers and overwrite signatures
         # This runs before other preprocessing so downstream steps use updated names
         if use_sinonym_overwrite:
@@ -326,6 +337,10 @@ class ANDData:
         # prevents errors during testing where we have no specter embeddings
         if self.specter_embeddings is None:
             self.specter_embeddings = {}  # type: ignore
+        else:
+            # Only keep embeddings for papers we retained
+            needed_keys = set(self.papers.keys())
+            self.specter_embeddings = {k: v for k, v in self.specter_embeddings.items() if str(k) in needed_keys}  # type: ignore
         logger.info("loaded specter, loading cluster seeds")
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
@@ -421,6 +436,7 @@ class ANDData:
             logger.info("loaded name counts")
 
         self.n_jobs = n_jobs
+        self.compute_reference_features = compute_reference_features
         self.signature_to_block = self.get_signatures_to_block()
         papers_from_signatures = set([str(signature.paper_id) for signature in self.signatures.values()])
         for paper_id, paper in self.papers.items():
@@ -443,7 +459,9 @@ class ANDData:
             self.name_tuples = name_tuples  # type: ignore
 
         logger.info("preprocessing papers")
-        self.papers = preprocess_papers_parallel(self.papers, self.n_jobs, self.preprocess)
+        self.papers = preprocess_papers_parallel(
+            self.papers, self.n_jobs, self.preprocess, compute_reference_features=self.compute_reference_features
+        )
         logger.info("preprocessed papers")
 
         logger.info("preprocessing signatures")
@@ -991,14 +1009,15 @@ class ANDData:
             return train_block_dict, val_block_dict, test_block_dict
 
         elif self.unit_of_data_split == "time":
-            signature_to_year = {}
+            signature_to_year: Dict[str, int] = {}
             for signature_id, signature in self.signatures.items():
                 # paper_id should be kept as string, so it can be matched to papers.json
                 paper_id = str(signature.paper_id)
                 if self.papers[paper_id].year is None:
                     signature_to_year[signature_id] = 0
                 else:
-                    signature_to_year[signature_id] = self.papers[paper_id].year
+                    # mypy: year is Optional[int] on Paper; guarded above, so cast to int here
+                    signature_to_year[signature_id] = int(self.papers[paper_id].year)  # type: ignore[arg-type]
 
             train_size = int(len(signature_to_year) * self.train_ratio)
             val_size = int(len(signature_to_year) * self.val_ratio)
@@ -1763,7 +1782,13 @@ def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, P
     return (key, paper)
 
 
-def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool) -> Dict:
+def preprocess_papers_parallel(
+    papers_dict: Dict,
+    n_jobs: int,
+    preprocess: bool,
+    *,
+    compute_reference_features: bool = False,
+) -> Dict:
     """
     helper function to preprocess papers
 
@@ -1798,8 +1823,8 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
             k, v = preprocess_paper_1(item)
             output[k] = v
 
-    # -------- second stage is identical: reuse the same pool setup -------
-    if preprocess:
+    # -------- second stage (reference features) -------
+    if preprocess and compute_reference_features:
         input_2 = [
             (
                 key,
@@ -1829,5 +1854,16 @@ def preprocess_papers_parallel(papers_dict: Dict, n_jobs: int, preprocess: bool)
             for item in tqdm(input_2, total=len(input_2), desc="Preprocessing papers 2/2"):
                 k, v = preprocess_paper_2(item)
                 output[k] = v
+    elif preprocess and not compute_reference_features:
+        # Ensure reference_details exists as empty counters to keep downstream code safe
+        empty_tuple: Tuple[Counter, Counter, Counter, Counter] = (
+            Counter(),
+            Counter(),
+            Counter(),
+            Counter(),
+        )
+        for k, v in output.items():
+            if v.reference_details is None:
+                output[k] = v._replace(reference_details=empty_tuple)
 
     return output

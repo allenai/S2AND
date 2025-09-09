@@ -548,18 +548,24 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
         ]
     )
 
-    references_1 = set(paper_1.references)
-    references_2 = set(paper_2.references)
-    features.extend(
-        [
-            counter_jaccard(paper_1.reference_details[0], paper_2.reference_details[0], denominator_max=5000),
-            counter_jaccard(paper_1.reference_details[1], paper_2.reference_details[1]),
-            counter_jaccard(paper_1.reference_details[2], paper_2.reference_details[2]),
-            counter_jaccard(paper_1.reference_details[3], paper_2.reference_details[3]),
-            int(paper_id_2 in references_1 or paper_id_1 in references_2),
-            jaccard(references_1, references_2),
-        ]
-    )
+    # Reference-derived features: optionally disabled
+    references_1 = set(paper_1.references or [])
+    references_2 = set(paper_2.references or [])
+    compute_ref = bool(getattr(global_dataset, "compute_reference_features", False))  # type: ignore
+    if compute_ref and paper_1.reference_details is not None and paper_2.reference_details is not None:
+        features.extend(
+            [
+                counter_jaccard(paper_1.reference_details[0], paper_2.reference_details[0], denominator_max=5000),
+                counter_jaccard(paper_1.reference_details[1], paper_2.reference_details[1]),
+                counter_jaccard(paper_1.reference_details[2], paper_2.reference_details[2]),
+                counter_jaccard(paper_1.reference_details[3], paper_2.reference_details[3]),
+                int(paper_id_2 in references_1 or paper_id_1 in references_2),
+                jaccard(references_1, references_2),
+            ]
+        )
+    else:
+        # When reference features are not computed, fill with NaNs to preserve shape
+        features.extend([NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN])
 
     english_or_unknown_count = int(paper_1.predicted_language in {"en", "un"}) + int(
         paper_2.predicted_language in {"en", "un"}

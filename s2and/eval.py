@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Any, List, Tuple, TYPE_CHECKING, Union
+from typing import Dict, Optional, Any, List, Tuple, TYPE_CHECKING, Union, DefaultDict
 
 import logging
 import pickle
@@ -291,7 +291,7 @@ def facet_eval(
     gender_f1 = defaultdict(list)
     ethnicity_f1 = defaultdict(list)
     author_num_f1 = defaultdict(list)
-    year_f1 = defaultdict(list)
+    year_f1: DefaultDict[int, List[float]] = defaultdict(list)
     block_len_f1 = defaultdict(list)
     cluster_len_f1 = defaultdict(list)
     homonymity_f1 = defaultdict(list)
@@ -323,7 +323,8 @@ def facet_eval(
             _signature_dict["estimated_ethnicity"] = signature.author_info_estimated_ethnicity
 
         author_num_f1[len(paper.authors)].append(f1)
-        year_f1[paper.year].append(f1)
+        year_key: int = paper.year if paper.year is not None else 0
+        year_f1[year_key].append(f1)
         cluster_len_f1[cluster_len_dict[cluster_id]].append(f1)
 
         # full first-name
@@ -362,7 +363,7 @@ def facet_eval(
             venue_f1[0].append(f1)
             _signature_dict["venue"] = 0
 
-        if len(paper.references) > 0:
+        if paper.references and len(paper.references) > 0:
             references_f1[1].append(f1)
             _signature_dict["references"] = 1
         else:

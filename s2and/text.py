@@ -20,7 +20,32 @@ from strsimpy.metric_lcs import MetricLCS
 from s2and.consts import NUMPY_NAN, FASTTEXT_PATH
 from s2and.file_cache import cached_path
 
-FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
+# Lazily-loaded fastText model to avoid heavy import-time cost
+_FASTTEXT_MODEL = None
+
+
+def _get_fasttext_model():
+    """Return a cached fastText model instance, loading on first use.
+
+    Honors env var `S2AND_SKIP_FASTTEXT` to skip loading (tests can rely on CLD2 only).
+    """
+    import os
+
+    global _FASTTEXT_MODEL
+    if _FASTTEXT_MODEL is not None:
+        return _FASTTEXT_MODEL
+
+    if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
+        return None
+
+    # Load once and cache
+    try:
+        _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
+    except Exception:
+        # If loading fails, degrade gracefully to no fastText
+        _FASTTEXT_MODEL = None
+    return _FASTTEXT_MODEL
+
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
 
@@ -269,16 +294,20 @@ def detect_language(text: str):
     if len(text.split()) <= 1:
         return (False, False, "un")
 
-    # fasttext
+    # fasttext (optional if available)
     isuppers = [c.isupper() for c in text if c.isalpha()]
     if len(isuppers) == 0:
         return (False, False, "un")
-    elif sum(isuppers) / len(isuppers) > 0.9:
-        fasttext_pred = FASTTEXT_MODEL.predict(text.lower().replace("\n", " "))
-        predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+    ft_model = _get_fasttext_model()
+    if ft_model is not None:
+        if sum(isuppers) / len(isuppers) > 0.9:
+            fasttext_pred = ft_model.predict(text.lower().replace("\n", " "))
+            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+        else:
+            fasttext_pred = ft_model.predict(text.replace("\n", " "))
+            predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
     else:
-        fasttext_pred = FASTTEXT_MODEL.predict(text.replace("\n", " "))
-        predicted_language_ft = fasttext_pred[0][0].split("__")[-1]
+        predicted_language_ft = "un_ft"
 
     # cld2
     try:

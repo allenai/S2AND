@@ -48,6 +48,50 @@ global_preprocess: bool
 _SINONYM_DETECTOR = None  # type: ignore
 CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 
+# Cache for large, immutable resources loaded across instances
+_NAME_COUNTS_CACHE: Optional[Tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int]]] = None
+
+
+# ------------------------ Local helpers (backcompat shims) ------------------------
+
+
+def _lasts_equivalent_for_constraint(l1: str, l2: str) -> bool:
+    """Treat hyphen/space variants as equivalent for last-name constraint checks.
+
+    Examples: "ou yang" == "ouyang"; strictly unequal strings otherwise.
+
+    TODO(s2and): Remove when canonicalization is unified end-to-end and constraints
+    operate on canonical forms only.
+    """
+    if l1 == l2:
+        return True
+    return l1.replace(" ", "") == l2.replace(" ", "")
+
+
+def _canonicalize_last_for_counts(raw_last: Optional[str], normalized_last: str) -> str:
+    """Canonicalize last name for legacy count lookups.
+
+    Join internal spaces for hyphen/compound surnames so historical single-token
+    count keys still match (e.g., "ou yang" -> "ouyang").
+
+    TODO(s2and): Remove once name count tables are regenerated with hyphen-aware surnames.
+    """
+    if (raw_last is not None and "-" in raw_last) or (" " in normalized_last):
+        return (normalized_last or "").replace(" ", "")
+    return normalized_last or ""
+
+
+def _load_name_counts_cached() -> Tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int]]:
+    """Load name count dictionaries once per process and cache them.
+
+    Avoids repeatedly unpickling ~600MB file in tests/short runs.
+    """
+    global _NAME_COUNTS_CACHE
+    if _NAME_COUNTS_CACHE is None:
+        with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
+            _NAME_COUNTS_CACHE = pickle.load(f)
+    return _NAME_COUNTS_CACHE  # type: ignore[return-value]
+
 
 class NameCounts(NamedTuple):
     first: Optional[int]
@@ -439,14 +483,13 @@ class ANDData:
             self.last_first_initial_dict = load_name_counts["last_first_initial_dict"]
             name_counts_loaded = True
         elif load_name_counts:
-            logger.info("loading name counts")
-            with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-                (
-                    first_dict,
-                    last_dict,
-                    first_last_dict,
-                    last_first_initial_dict,
-                ) = pickle.load(f)
+            logger.info("loading name counts (cached)")
+            (
+                first_dict,
+                last_dict,
+                first_last_dict,
+                last_first_initial_dict,
+            ) = _load_name_counts_cached()
             self.first_dict = first_dict
             self.last_dict = last_dict
             self.first_last_dict = first_last_dict
@@ -533,8 +576,11 @@ class ANDData:
         for signature_id, signature in tqdm(self.signatures.items(), desc="Preprocessing signatures"):
             # our normalization scheme is to normalize first and middle separately,
             # join them, then take the first token of the combined join
-            # TODO: we now have good normalization for chinese names with dashes in the first and surname
-            # BUT we currently DO NOT do anything with those dashes.
+            # NOTE: Hyphen-aware handling
+            # - First/middle: handled via split_first_middle_hyphen_aware (keeps hyphenated Chinese given names together).
+            # - Surname: for downstream lookups/constraints we also treat hyphen/space variants equivalently.
+            # TODO(s2and): Once name_counts/name_tuples are regenerated with Sinonym-aware canonicalization,
+            #              remove the backward-compat shims added below for last-name counts/constraints.
             first_raw = signature.author_info_first or ""
             middle_raw = signature.author_info_middle or ""
 
@@ -593,14 +639,22 @@ class ANDData:
                         joined = (signature.author_info_first_normalized_without_apostrophe or "").replace(" ", "")
                         if joined:
                             first_for_counts = joined
+                    # Backward-compatibility for last name keys:
+                    # - Historically, last names were single tokens; normalization turns hyphens into spaces
+                    #   (e.g., "ou-yang" -> "ou yang"). For counts only, treat space/hyphen variants as the
+                    #   same token by joining internal spaces ("ouyang").
+                    # TODO(s2and): remove this once name_counts are regenerated with hyphen-aware surnames.
+                    last_norm = signature.author_info_last_normalized or ""
+                    raw_last = signature.author_info_last or ""
+                    last_for_counts = _canonicalize_last_for_counts(raw_last, last_norm)
 
-                    first_last_for_count = (first_for_counts + " " + signature.author_info_last_normalized).strip()
+                    first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
                     first_initial = first_for_counts if len(first_for_counts) > 0 else ""
-                    last_first_initial_for_count = (signature.author_info_last_normalized + " " + first_initial).strip()
+                    last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
 
                     counts = NameCounts(
                         first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),  # type: ignore
-                        last=self.last_dict.get(signature.author_info_last_normalized, 1),
+                        last=self.last_dict.get(last_for_counts, 1),
                         first_last=(
                             self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
                             if len(first_for_counts) > 1
@@ -840,10 +894,11 @@ class ANDData:
         # but if they are not equal, we can't say much
         elif orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
             return low_value
-        # just-in-case last name constraint: if last names are different, then disallow
-        elif (
-            self.signatures[signature_id_1].author_info_last_normalized
-            != self.signatures[signature_id_2].author_info_last_normalized
+        # just-in-case last name constraint: if last names are different (hyphen/space-insensitive), then disallow
+        # TODO(s2and): remove hyphen/space-insensitive shim once canonicalization is unified end-to-end
+        elif not _lasts_equivalent_for_constraint(
+            self.signatures[signature_id_1].author_info_last_normalized or "",
+            self.signatures[signature_id_2].author_info_last_normalized or "",
         ):
             return high_value
         # just-in-case first initial constraint: if first initials are different, then disallow
@@ -1745,7 +1800,10 @@ def apply_sinonym_overwrites(
             new_block = None
             try:
                 if first and last:
-                    new_block = f"{first[:1].lower()} {last.lower()}".strip()
+                    # TODO(s2and): When blocks are recomputed everywhere from Sinonym-aware
+                    # canonical forms, remove the hyphen/space-insensitive surname join here.
+                    surname_for_block = re.sub(r"[\s-]+", "", last.lower())
+                    new_block = f"{first[:1].lower()} {surname_for_block}".strip()
             except Exception as e:
                 # Log any unexpected formatting issues; keep prior block on error
                 logger.exception(

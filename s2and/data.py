@@ -169,11 +169,12 @@ class ANDData:
             Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output.
             Also applies Sinonym-normalized names to the per-paper author list so co-author features
             (coauthor sets/blocks and n-grams) are derived from the normalized names as well.
-        sinonym_overwrite_min_ratio: optional gating threshold; if provided, only overwrite names
-            (and paper author strings used for co-authors) whose Sinonym-detected first/last swap occurs
-            at least this many times more often than not within the dataset (with the special case that
-            any name with >=1 flips and 0 non-flips always qualifies). This mitigates noisy reordering.
-        compute_reference_features: whether to compute reference-based features during preprocessing
+        sinonym_overwrite_min_ratio: optional gating threshold; only counts multi-author papers.
+        sinonym_overwrite_min_ratio: gating threshold.
+            Let a,b be single-author flips/not-flips and x,y be multi-author flips/not-flips.
+            If (x + y) > 0: overwrite when x >= min_ratio * y; else (no multi-author evidence):
+            overwrite when a > 0 (otherwise do not overwrite).
+            it qualifies by default (equivalent to 1 vs 0: flip).
             (building reference_details Counters). Defaults to False. When False, reference_details
             are initialized to empty Counters to maintain featurization compatibility while
             avoiding the expensive reference graph materialization.
@@ -1532,13 +1533,7 @@ def compute_sinonym_overwrite_allowlist(
     per_paper_results: Dict[str, Dict[int, Any]],
     min_ratio: float = 3.0,
 ) -> Dict[str, Set[int]]:
-    """Compute which (paper_id, position) pairs to overwrite based on flip prevalence.
-
-    A name (normalized "first last") is eligible if flipped_count >= min_ratio * not_flipped_count,
-    with the special case that flipped>=1 and not_flipped==0 always qualifies.
-
-    Returns mapping: paper_id (str) -> set of positions to overwrite.
-    """
+    """Compute overwrite allowlist: use multi-author ratio (x>=min_ratio*y) when any multi-author evidence exists; otherwise, use single-author rule (flip if a>0)."""
     from collections import defaultdict
     import re
 
@@ -1546,8 +1541,16 @@ def compute_sinonym_overwrite_allowlist(
         # Lower and drop non-letters to align spaces/hyphens variants
         return re.sub(r"[^a-z]", "", (s or "").lower())
 
-    # First pass: aggregate flip/not-flip counts per name
-    name_counts: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # name -> [flipped, not_flipped]
+    # Detect multi-author papers via unique author positions present among signatures
+    paper_pos_sets: Dict[str, Set[int]] = defaultdict(set)
+    for sig in signatures.values():
+        paper_pos_sets[str(sig.paper_id)].add(sig.author_info_position)
+
+    # Counts per normalized name: [a, b, x, y]
+    # a,b from single-author papers; x,y from multi-author papers
+    name_counts: Dict[str, List[int]] = defaultdict(lambda: [0, 0, 0, 0])
+
+    # Aggregate counts
     for sig in signatures.values():
         paper_id_str = str(sig.paper_id)
         by_pos = per_paper_results.get(paper_id_str)
@@ -1561,33 +1564,38 @@ def compute_sinonym_overwrite_allowlist(
             continue
         o_first, o_last = _normalized_first_last_from_signature(sig)
         name_key = (o_first + " " + o_last).strip()
+
         flipped = _canon(s_first) == _canon(o_last) and _canon(s_last) == _canon(o_first)
-        if flipped:
-            name_counts[name_key][0] += 1
+        is_multi = len(paper_pos_sets.get(paper_id_str, set())) > 1
+        if is_multi:
+            if flipped:
+                name_counts[name_key][2] += 1  # x
+            else:
+                name_counts[name_key][3] += 1  # y
         else:
-            name_counts[name_key][1] += 1
+            if flipped:
+                name_counts[name_key][0] += 1  # a
+            else:
+                name_counts[name_key][1] += 1  # b
 
-    # Determine qualifying names
-    qualified_names = set()
-    for name, (flp, nf) in name_counts.items():
-        if flp > 0 and nf == 0:
-            qualified_names.add(name)
-        elif flp > 0 and flp >= min_ratio * nf:
-            qualified_names.add(name)
+    # Decide qualified names
+    qualified_names: Set[str] = set()
+    for name, counts in name_counts.items():
+        a, b, x, y = counts
+        if (x + y) > 0:
+            if x >= min_ratio * y:
+                qualified_names.add(name)
+        else:
+            if a > 0:
+                qualified_names.add(name)
 
-    # Build allowlist by (paper, position)
+    # Build allowlist for all occurrences of qualified names
     allow: Dict[str, Set[int]] = {}
     for sig in signatures.values():
-        paper_id_str = str(sig.paper_id)
-        by_pos = per_paper_results.get(paper_id_str)
-        if not by_pos:
-            continue
-        if sig.author_info_position not in by_pos:
-            continue
         o_first, o_last = _normalized_first_last_from_signature(sig)
         name_key = (o_first + " " + o_last).strip()
         if name_key in qualified_names:
-            allow.setdefault(paper_id_str, set()).add(sig.author_info_position)
+            allow.setdefault(str(sig.paper_id), set()).add(sig.author_info_position)
 
     return allow
 
@@ -1658,14 +1666,12 @@ def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> 
 
     detector = _ensure_sinonym_detector()
     results = detector.process_name_batch(names)  # type: ignore[attr-defined]
-    # # Single unified batch call; always returns one result per input name
-    # try:
-    #     results = detector.process_name_batch(names)  # type: ignore[attr-defined]
-    # except Exception:
-    #     # print(f"Sinonym failed on paper_id={key} with names={names}")
-    #     return key, {}
 
     pos_to_norm: Dict[int, Any] = {}
+
+    # If any author in the batch is non-Chinese (unsuccessful), then for the
+    # Chinese authors use parsed_original_order instead of parsed.
+    any_non_success = any(not getattr(res, "success", False) for res in (results or []))
 
     # Keep only successful (Chinese) parses; align safely via zip
     for pos, res in zip(positions, (results or [])):
@@ -1673,7 +1679,11 @@ def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> 
         if not success:
             continue
 
-        parsed = getattr(res, "parsed", None)
+        # Choose which parsed structure to use
+        if any_non_success:
+            parsed = getattr(res, "parsed_original_order", None)
+        else:
+            parsed = getattr(res, "parsed", None)
         original_compound = getattr(res, "original_compound_surname", None)
 
         if parsed is not None and hasattr(parsed, "surname_tokens") and hasattr(parsed, "given_tokens"):

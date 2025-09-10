@@ -108,15 +108,6 @@ def main() -> None:
         print(cluster_metrics)
         cluster_metrics_all.append(cluster_metrics)
 
-        # cluster_to_signatures = anddata.construct_cluster_to_signatures(test_block_dict)
-
-        # # now we need to print out the unique tuples of anddata(get_full_name_for_features(signature)) for the signatures that were clustered together
-        # for cluster_id, signatures in cluster_to_signatures.items():
-        #     full_names = [anddata.get_full_name_for_features(anddata.signatures[sig]) for sig in signatures]
-        #     # also get the BLOCK author_info_block
-        #     blocks = [anddata.signatures[sig].author_info_block for sig in signatures]
-        #     print(f"Cluster {cluster_id}: {set(list(zip(full_names, blocks)))}")
-
     b3s = [i["B3 (P, R, F1)"][-1] for i in cluster_metrics_all]
     print(b3s, sum(b3s) / len(b3s))
 

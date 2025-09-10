@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -1854,7 +1854,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = "==1.7.1" },
     { name = "seaborn", specifier = ">=0.12,<0.14" },
     { name = "shap" },
-    { name = "sinonym", specifier = ">=0.2.0" },
+    { name = "sinonym", specifier = ">=0.2.2" },
     { name = "strsimpy", specifier = ">=0.2,<0.3" },
     { name = "text-unidecode", specifier = "==1.3" },
     { name = "tqdm", specifier = ">=4.64,<5" },
@@ -2035,7 +2035,7 @@ wheels = [
 
 [[package]]
 name = "sinonym"
-version = "0.2.0"
+version = "0.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "joblib" },
@@ -2046,9 +2046,9 @@ dependencies = [
     { name = "scipy" },
     { name = "skops" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/54/72167a80d79867baaba0769523293a829853855d7025b9747d3088302630/sinonym-0.2.0.tar.gz", hash = "sha256:0f3ad3c9be5d18d9f493d5cc197a743848ec50eabf46793d877dad280ce4407a", size = 555811, upload-time = "2025-09-08T16:34:19.268Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/2f/87788a87f31582328e6a9579b0918034bf5debdff5a8cb194f1767095b4a/sinonym-0.2.2.tar.gz", hash = "sha256:1ca920a5a986a444ac5acc2b04832bb55cb3015505008115cff3472c3ed503c4", size = 552565, upload-time = "2025-09-10T04:44:29.132Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/9c/f326c80d2ae15982c323088c2a991f0dc0605ff20d7a20f78b40b4450162/sinonym-0.2.0-py3-none-any.whl", hash = "sha256:82f59c11ddc08f04d207454dd9560fe1fa58ba30d538359dbc2cc3065b7f322e", size = 549274, upload-time = "2025-09-08T16:34:17.546Z" },
+    { url = "https://files.pythonhosted.org/packages/76/a9/09f48c787fecd89abea8ab3330f555e8376b401cd9496d0adeb43d93bd35/sinonym-0.2.2-py3-none-any.whl", hash = "sha256:b4b59c625660335204910fa90369465e8f2a214dcc279e21e40a2e5b60bbc1dd", size = 551083, upload-time = "2025-09-10T04:44:27.763Z" },
 ]
 
 [[package]]

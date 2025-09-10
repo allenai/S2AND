@@ -7,12 +7,10 @@ We will use the test sets of arnnetminer and pubmed datasets as examples.
 
 import os
 import pickle
-import numpy as np
 from s2and.data import ANDData
 from s2and.eval import cluster_eval
-from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE, PROJECT_ROOT_PATH
-from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.model import PairwiseModeler, Clusterer
+from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
+from s2and.featurizer import FeaturizationInfo
 
 
 def main() -> None:
@@ -22,13 +20,17 @@ def main() -> None:
     # Limit BLAS threads to keep things responsive
     os.environ["OMP_NUM_THREADS"] = f"{n_jobs}"
 
-    data_original = os.path.join(PROJECT_ROOT_PATH, "data")
+    data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
 
     random_seed = 42
 
     datasets = [
         "arnetminer",
+        "inspire",
+        "kisti",
         "pubmed",
+        "qian",
+        "zbmath",
     ]
 
     features_to_use = [
@@ -56,6 +58,7 @@ def main() -> None:
     ]
 
     # we store all the information about the features in this convenient wrapper
+    # note: we don't need these objects in this script, but they are useful for documentation purposes
     featurization_info = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
     nameless_featurization_info = FeaturizationInfo(
         features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
@@ -90,6 +93,8 @@ def main() -> None:
             preprocess=True,
             random_seed=random_seed,
             name_tuples="filtered",
+            use_orcid_id=True,
+            use_sinonym_overwrite=True,
         )
         train_block_dict, val_block_dict, test_block_dict = anddata.split_blocks_helper(anddata.get_blocks())
         num_test_blocks[dataset_name] = len(test_block_dict)

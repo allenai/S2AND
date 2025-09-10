@@ -2,16 +2,21 @@
 Note: This script won't run because it relies on an internal Semantic Scholar package
 called pys2, and is here for documentation of how the prefix counts for subblocking were built.
 
-TODO: rerun this when we update how names are normalized
+TODO(s2and): This JSON was generated with legacy normalization (single-token first, apostrophes handled via
+             special_case_apostrophes=True for first). When we finalize the new unified normalization
+             (hyphen-aware, consistent apostrophe handling), rewrite this script to call
+             s2and.text.split_first_middle_hyphen_aware (or its eventual unified equivalent) and regenerate
+             data/first_k_letter_counts_from_orcid.json. Until then, runtime lookups use a first-token fallback
+             for compatibility.
 """
 
 import os
 import json
 from collections import Counter
 from itertools import combinations
-from pys2.pys2 import _evaluate_redshift_query
-from s2and.text import normalize_text, NAME_PREFIXES
+from s2and.text import normalize_text, NAME_PREFIXES, same_prefix_tokens
 from s2and.consts import PROJECT_ROOT_PATH
+from pys2.pys2 import _evaluate_redshift_query
 
 """
 Step 1: Get orcid name pairs from our internal databases
@@ -39,8 +44,10 @@ cache = {}  # type: ignore
 
 
 def normalize_names(row):
-    """This is basically the same as what's in row 456 and on in s2and/data.py
-    TODO: if that changes due to, say, how dashes are treated, we have to rerun this
+    """Legacy normalization used when building ORCID prefix counts.
+
+    TODO(s2and): Align with s2and.text.split_first_middle_hyphen_aware when regenerating counts.
+    Currently kept to document how the existing JSON was produced.
     """
     first = row["first_name"]
     middle = row["middle"]
@@ -118,7 +125,7 @@ for name1, name2 in name_tuples:
         for k in k_values:
             for j in k_values:
                 pair = (name1[:k], name2[:j])
-                if pair[0] != pair[1] and not (pair[0].startswith(pair[1]) or pair[1].startswith(pair[0])):
+                if pair[0] != pair[1] and not same_prefix_tokens(pair[0], pair[1]):
                     pairs.add(pair)
         name_tuples_first_k_letter_counts.update(list(pairs))
 
@@ -127,7 +134,7 @@ for name1, name2 in name_tuples:
 # to save space
 orcid_first_k_letter_counts_filtered = {}
 for (name1, name2), count in orcid_first_k_letter_counts.items():
-    if not (name1.startswith(name2) or name2.startswith(name1)):
+    if not same_prefix_tokens(name1, name2):
         # we also have a filter on this one where count has to be greater than 10
         if count >= 10:
             orcid_first_k_letter_counts_filtered[(name1, name2)] = count

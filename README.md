@@ -22,7 +22,8 @@ python -m pip install --user --upgrade uv
 
 ```bash
 # create the project venv (uv defaults to .venv if you don't give a name)
-uv venv --python 3.11
+# note that you can't go past 3.12 for now because of fasttext
+uv venv --python 3.11.9
 ```
 
 2. Activate the venv (choose one):

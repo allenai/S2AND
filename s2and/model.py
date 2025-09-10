@@ -5,6 +5,7 @@ from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.data import ANDData
 from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
 from s2and.subblocking import make_subblocks
+from s2and.text import same_prefix_tokens
 
 from typing import Dict, Optional, Any, Union, List, Tuple, cast
 from collections import defaultdict
@@ -1131,9 +1132,7 @@ class Clusterer:
                             ].author_info_first_normalized_without_apostrophe
                             match_found = False
                             for first_assigned in all_firsts:
-                                prefix = first_assigned.startswith(first_unassigned) or first_unassigned.startswith(
-                                    first_assigned
-                                )
+                                prefix = same_prefix_tokens(first_assigned, first_unassigned)
                                 known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
 
                                 if prefix or known_alias:

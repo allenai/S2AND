@@ -1,0 +1,177 @@
+name: build-and-publish
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  s2and-dist:
+    name: s2and sdist+wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build s2and distributions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build --sdist --wheel --outdir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-s2and
+          path: dist/*
+
+  wheels-windows:
+    name: wheels (windows, py${{ matrix.py }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        with:
+          maturin-version: v1.11.5
+          command: build
+          args: --release --locked --compatibility pypi --out dist
+          working-directory: s2and_rust
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-s2and-rust-windows-py${{ matrix.py }}
+          path: s2and_rust/dist/*
+
+  wheels-macos:
+    name: wheels (macos universal2, py${{ matrix.py }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+
+      - name: Build wheels (universal2)
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        with:
+          maturin-version: v1.11.5
+          command: build
+          args: --release --locked --compatibility pypi --out dist --universal2
+          working-directory: s2and_rust
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-s2and-rust-macos-universal2-py${{ matrix.py }}
+          path: s2and_rust/dist/*
+
+  wheels-linux:
+    name: wheels (linux ${{ matrix.platform.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: manylinux2014-x86_64
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_17"
+          # Optional: enable when you want aarch64 wheels.
+          - name: manylinux2014-aarch64
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_17"
+          - name: musllinux-x86_64
+            target: x86_64-unknown-linux-musl
+            manylinux: "musllinux_1_2"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels (manylinux/musllinux)
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        with:
+          maturin-version: v1.11.5
+          command: build
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: >
+            --release --locked --compatibility pypi --out dist
+            -i python3.10 -i python3.11 -i python3.12
+          working-directory: s2and_rust
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-s2and-rust-linux-${{ matrix.platform.name }}
+          path: s2and_rust/dist/*
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        with:
+          maturin-version: v1.11.5
+          command: sdist
+          args: --out dist
+          working-directory: s2and_rust
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-s2and-rust-sdist
+          path: s2and_rust/dist/*
+
+  publish:
+    name: publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [s2and-dist, wheels-windows, wheels-macos, wheels-linux, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download s2and dists
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-s2and
+          path: dist/s2and
+
+      - name: Download s2and-rust dists
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-s2and-rust-*
+          merge-multiple: true
+          path: dist/s2and-rust
+
+      - name: Publish s2and
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/s2and
+
+      - name: Publish s2and-rust
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/s2and-rust

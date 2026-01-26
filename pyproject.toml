@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "s2and"
-version = "0.1.0"
+version = "0.2.0"
 description = "S2AND"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -51,6 +51,9 @@ dev = [
   # CLI helpers used in some repos
   "click>=8,<9",
   "ipykernel",
+]
+rust = [
+  "s2and-rust>=0.2.0",
 ]
 
 [tool.setuptools.packages.find]

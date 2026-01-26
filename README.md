@@ -57,6 +57,8 @@ Notes:
 - This installs the native module into site-packages so imports use the compiled extension.
 - If you don't want an editable install, you can `uv pip install .` instead of `uv sync`, then run the
   `maturin develop` step above.
+- Once wheels are published, you can install the native extension via extras:
+  `uv pip install "s2and[rust]"`.
 
 ## Running Tests
 
@@ -89,6 +91,11 @@ S2AND_RUST_PROD_MODE=1 S2AND_USE_RUST_FEATURIZER=1 S2AND_USE_RUST_CONSTRAINT=1 \
 ## Rust featurizer (optional, enabled by default)
 S2AND can use a Rust-backed featurizer for faster pairwise feature generation. This is **enabled by default** and falls back
 to Python if the native extension is not available.
+
+Install the Rust extension from wheels (when available):
+```bash
+uv pip install "s2and[rust]"
+```
 
 Environment toggles:
 - `S2AND_USE_RUST_FEATURIZER=0` to force the Python path.

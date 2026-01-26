@@ -797,8 +797,7 @@ def many_pairs_featurize(
             logger.info(f"Making {len(pieces_of_work)} feature vectors in Rust batch mode")
             write_cache_flag = use_cache if use_cache else None
             rust_featurizer = feature_port._get_rust_featurizer(dataset, write_cache=write_cache_flag)
-            if n_jobs > 1:
-                os.environ["RAYON_NUM_THREADS"] = str(n_jobs)
+            os.environ["RAYON_NUM_THREADS"] = str(max(1, n_jobs))
             rust_pairs = [pair for pair, _ in pieces_of_work]
             rust_features = rust_featurizer.featurize_pairs(rust_pairs)
             for feature_output, (_, index) in zip(rust_features, pieces_of_work):

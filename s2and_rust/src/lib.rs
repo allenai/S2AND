@@ -1,6 +1,7 @@
-use numpy::PyArray1;
+use numpy::{PyArray1, PyArrayMethods};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyIterator};
+use pyo3::Bound;
+use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -92,7 +93,7 @@ struct RustFeaturizer {
     cluster_seed_disallow_value: f64,
 }
 
-fn extract_counter(obj: &PyAny) -> PyResult<Option<CounterData>> {
+fn extract_counter(obj: &Bound<'_, PyAny>) -> PyResult<Option<CounterData>> {
     if obj.is_none() {
         return Ok(None);
     }
@@ -111,12 +112,12 @@ fn extract_counter(obj: &PyAny) -> PyResult<Option<CounterData>> {
     Ok(Some(CounterData { map, sum }))
 }
 
-fn extract_set_str(obj: &PyAny) -> PyResult<Option<HashSet<String>>> {
+fn extract_set_str(obj: &Bound<'_, PyAny>) -> PyResult<Option<HashSet<String>>> {
     if obj.is_none() {
         return Ok(None);
     }
     let mut out = HashSet::new();
-    for item in PyIterator::from_object(obj)? {
+    for item in PyIterator::from_bound_object(obj)? {
         let v: String = item?.extract()?;
         out.insert(v);
     }
@@ -127,12 +128,12 @@ fn extract_set_str(obj: &PyAny) -> PyResult<Option<HashSet<String>>> {
     }
 }
 
-fn extract_pair_set(obj: &PyAny) -> PyResult<HashSet<(String, String)>> {
+fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)>> {
     if obj.is_none() {
         return Ok(HashSet::new());
     }
     let mut out = HashSet::new();
-    for item in PyIterator::from_object(obj)? {
+    for item in PyIterator::from_bound_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
         out.insert((a, b));
@@ -140,12 +141,12 @@ fn extract_pair_set(obj: &PyAny) -> PyResult<HashSet<(String, String)>> {
     Ok(out)
 }
 
-fn extract_name_tuples_map(obj: &PyAny) -> PyResult<HashMap<String, HashSet<String>>> {
+fn extract_name_tuples_map(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, HashSet<String>>> {
     if obj.is_none() {
         return Ok(HashMap::new());
     }
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for item in PyIterator::from_object(obj)? {
+    for item in PyIterator::from_bound_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
         out.entry(a).or_insert_with(HashSet::new).insert(b);
@@ -153,7 +154,7 @@ fn extract_name_tuples_map(obj: &PyAny) -> PyResult<HashMap<String, HashSet<Stri
     Ok(out)
 }
 
-fn extract_cluster_seeds_require(obj: &PyAny) -> PyResult<HashMap<String, ClusterId>> {
+fn extract_cluster_seeds_require(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, ClusterId>> {
     if obj.is_none() {
         return Ok(HashMap::new());
     }
@@ -175,19 +176,19 @@ fn extract_cluster_seeds_require(obj: &PyAny) -> PyResult<HashMap<String, Cluste
     Ok(out)
 }
 
-fn extract_set_i64(obj: &PyAny) -> PyResult<HashSet<i64>> {
+fn extract_set_i64(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<i64>> {
     if obj.is_none() {
         return Ok(HashSet::new());
     }
     let mut out = HashSet::new();
-    for item in PyIterator::from_object(obj)? {
+    for item in PyIterator::from_bound_object(obj)? {
         let v: i64 = item?.extract()?;
         out.insert(v);
     }
     Ok(out)
 }
 
-fn extract_string_opt(obj: &PyAny) -> PyResult<Option<String>> {
+fn extract_string_opt(obj: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     if obj.is_none() {
         Ok(None)
     } else {
@@ -195,7 +196,7 @@ fn extract_string_opt(obj: &PyAny) -> PyResult<Option<String>> {
     }
 }
 
-fn extract_name_counts_data(obj: &PyAny) -> PyResult<Option<NameCountsData>> {
+fn extract_name_counts_data(obj: &Bound<'_, PyAny>) -> PyResult<Option<NameCountsData>> {
     if obj.is_none() {
         return Ok(None);
     }
@@ -211,7 +212,7 @@ fn extract_name_counts_data(obj: &PyAny) -> PyResult<Option<NameCountsData>> {
     }))
 }
 
-fn extract_specter_vec(obj: &PyAny) -> PyResult<Option<Vec<f32>>> {
+fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
     if obj.is_none() {
         return Ok(None);
     }
@@ -286,7 +287,7 @@ fn name_tuple_contains(map: &HashMap<String, HashSet<String>>, a: &str, b: &str)
     map.get(a).map_or(false, |vals| vals.contains(b))
 }
 
-fn counter_jaccard(counter1: Option<&PyAny>, counter2: Option<&PyAny>, denom_max: f64) -> PyResult<f64> {
+fn counter_jaccard(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>, denom_max: f64) -> PyResult<f64> {
     if counter1.is_none() || counter2.is_none() {
         return Ok(f64::NAN);
     }
@@ -303,10 +304,11 @@ fn counter_jaccard(counter1: Option<&PyAny>, counter2: Option<&PyAny>, denom_max
     let mut intersection: f64 = 0.0;
 
     let items1 = c1.call_method0("items")?;
-    for item in PyIterator::from_object(items1)? {
+    for item in PyIterator::from_bound_object(&items1)? {
         let tuple = item?;
-        let (key, v1): (&PyAny, &PyAny) = tuple.extract()?;
-        let v1_f: f64 = v1.extract()?;
+        let key: String = tuple.get_item(0)?.extract()?;
+        let v1_any = tuple.get_item(1)?;
+        let v1_f: f64 = v1_any.extract()?;
         sum1 += v1_f;
         let v2 = c2.call_method1("get", (key, 0.0))?;
         let v2_f: f64 = v2.extract()?;
@@ -314,7 +316,7 @@ fn counter_jaccard(counter1: Option<&PyAny>, counter2: Option<&PyAny>, denom_max
     }
 
     let values2 = c2.call_method0("values")?;
-    for v in PyIterator::from_object(values2)? {
+    for v in PyIterator::from_bound_object(&values2)? {
         let v_any = v?;
         let v_f: f64 = v_any.extract()?;
         sum2 += v_f;
@@ -333,7 +335,7 @@ fn counter_jaccard(counter1: Option<&PyAny>, counter2: Option<&PyAny>, denom_max
     Ok(if score > 1.0 { 1.0 } else { score })
 }
 
-fn set_jaccard(set1: Option<&PyAny>, set2: Option<&PyAny>) -> PyResult<f64> {
+fn set_jaccard(set1: Option<&Bound<'_, PyAny>>, set2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     if set1.is_none() || set2.is_none() {
         return Ok(f64::NAN);
     }
@@ -345,7 +347,7 @@ fn set_jaccard(set1: Option<&PyAny>, set2: Option<&PyAny>) -> PyResult<f64> {
         return Ok(f64::NAN);
     }
     let mut intersection: i64 = 0;
-    for item in PyIterator::from_object(s1)? {
+    for item in PyIterator::from_bound_object(s1)? {
         let obj = item?;
         if s2.contains(obj)? {
             intersection += 1;
@@ -436,7 +438,7 @@ fn max_propagate_nan(a: f64, b: f64) -> f64 {
     }
 }
 
-fn extract_name_counts(counts: &PyAny) -> PyResult<[f64; 4]> {
+fn extract_name_counts(counts: &Bound<'_, PyAny>) -> PyResult<[f64; 4]> {
     let first: Option<f64> = counts.getattr("first")?.extract()?;
     let first_last: Option<f64> = counts.getattr("first_last")?.extract()?;
     let last: Option<f64> = counts.getattr("last")?.extract()?;
@@ -449,7 +451,7 @@ fn extract_name_counts(counts: &PyAny) -> PyResult<[f64; 4]> {
     ])
 }
 
-fn compute_name_counts(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<[f64; 6]> {
+fn compute_name_counts(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<[f64; 6]> {
     if counts1.is_none() || counts2.is_none() {
         return Ok([f64::NAN; 6]);
     }
@@ -603,7 +605,7 @@ fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64>
 }
 
 #[pyfunction]
-fn affiliation_overlap(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn affiliation_overlap(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
@@ -652,22 +654,22 @@ fn email_suffix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f6
 }
 
 #[pyfunction]
-fn coauthor_overlap(set1: Option<&PyAny>, set2: Option<&PyAny>) -> PyResult<f64> {
+fn coauthor_overlap(set1: Option<&Bound<'_, PyAny>>, set2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     set_jaccard(set1, set2)
 }
 
 #[pyfunction]
-fn coauthor_similarity(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn coauthor_similarity(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, 5000.0)
 }
 
 #[pyfunction]
-fn coauthor_match(set1: Option<&PyAny>, set2: Option<&PyAny>) -> PyResult<f64> {
+fn coauthor_match(set1: Option<&Bound<'_, PyAny>>, set2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     set_jaccard(set1, set2)
 }
 
 #[pyfunction]
-fn venue_overlap(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn venue_overlap(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
@@ -683,37 +685,37 @@ fn year_diff(year1: Option<i64>, year2: Option<i64>) -> PyResult<f64> {
 }
 
 #[pyfunction]
-fn title_overlap_words(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn title_overlap_words(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
 #[pyfunction]
-fn title_overlap_chars(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn title_overlap_chars(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
 #[pyfunction]
-fn references_authors_overlap(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn references_authors_overlap(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, 5000.0)
 }
 
 #[pyfunction]
-fn references_titles_overlap(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn references_titles_overlap(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
 #[pyfunction]
-fn references_venues_overlap(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn references_venues_overlap(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
 #[pyfunction]
-fn references_author_blocks_jaccard(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn references_author_blocks_jaccard(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
 #[pyfunction]
-fn references_self_citation(refs1: &PyAny, refs2: &PyAny, pid1: i64, pid2: i64) -> PyResult<f64> {
+fn references_self_citation(refs1: &Bound<'_, PyAny>, refs2: &Bound<'_, PyAny>, pid1: i64, pid2: i64) -> PyResult<f64> {
     let r1 = refs1;
     let r2 = refs2;
     let in1 = r1.contains(pid2)?;
@@ -722,7 +724,7 @@ fn references_self_citation(refs1: &PyAny, refs2: &PyAny, pid1: i64, pid2: i64) 
 }
 
 #[pyfunction]
-fn references_overlap(set1: Option<&PyAny>, set2: Option<&PyAny>) -> PyResult<f64> {
+fn references_overlap(set1: Option<&Bound<'_, PyAny>>, set2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     set_jaccard(set1, set2)
 }
 
@@ -770,36 +772,36 @@ fn language_reliability_count(reliable1: bool, reliable2: bool) -> PyResult<f64>
 }
 
 #[pyfunction]
-fn first_name_count_min(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<f64> {
+fn first_name_count_min(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     Ok(compute_name_counts(counts1, counts2)?[0])
 }
 
 #[pyfunction]
-fn last_first_name_count_min(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<f64> {
+fn last_first_name_count_min(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     Ok(compute_name_counts(counts1, counts2)?[1])
 }
 
 #[pyfunction]
-fn last_name_count_min(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<f64> {
+fn last_name_count_min(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     Ok(compute_name_counts(counts1, counts2)?[2])
 }
 
 #[pyfunction]
-fn last_first_initial_count_min(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<f64> {
+fn last_first_initial_count_min(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     Ok(compute_name_counts(counts1, counts2)?[3])
 }
 
 #[pyfunction]
-fn first_name_count_max(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<f64> {
+fn first_name_count_max(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     Ok(compute_name_counts(counts1, counts2)?[4])
 }
 
 #[pyfunction]
-fn last_first_name_count_max(counts1: Option<&PyAny>, counts2: Option<&PyAny>) -> PyResult<f64> {
+fn last_first_name_count_max(counts1: Option<&Bound<'_, PyAny>>, counts2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     Ok(compute_name_counts(counts1, counts2)?[5])
 }
 
-fn extract_vec_f64(obj: &PyAny) -> PyResult<Vec<f64>> {
+fn extract_vec_f64(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
     obj.extract::<Vec<f64>>()
 }
 
@@ -841,7 +843,7 @@ fn cosine_sim_vec_f32(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-fn cosine_sim_any(vec1: &PyAny, vec2: &PyAny) -> PyResult<(f64, bool)> {
+fn cosine_sim_any(vec1: &Bound<'_, PyAny>, vec2: &Bound<'_, PyAny>) -> PyResult<(f64, bool)> {
     if let Ok(a) = vec1.downcast::<PyArray1<f32>>() {
         if let Ok(b) = vec2.downcast::<PyArray1<f32>>() {
             let a_slice = unsafe { a.as_slice()? };
@@ -851,9 +853,9 @@ fn cosine_sim_any(vec1: &PyAny, vec2: &PyAny) -> PyResult<(f64, bool)> {
             if all_zero_a || all_zero_b {
                 return Ok((0.0, false));
             }
-            let mut dot = 0.0;
-            let mut norm_a = 0.0;
-            let mut norm_b = 0.0;
+            let mut dot: f64 = 0.0;
+            let mut norm_a: f64 = 0.0;
+            let mut norm_b: f64 = 0.0;
             let len = a_slice.len().min(b_slice.len());
             for i in 0..len {
                 let av = a_slice[i] as f64;
@@ -877,9 +879,9 @@ fn cosine_sim_any(vec1: &PyAny, vec2: &PyAny) -> PyResult<(f64, bool)> {
             if all_zero_a || all_zero_b {
                 return Ok((0.0, false));
             }
-            let mut dot = 0.0;
-            let mut norm_a = 0.0;
-            let mut norm_b = 0.0;
+            let mut dot: f64 = 0.0;
+            let mut norm_a: f64 = 0.0;
+            let mut norm_b: f64 = 0.0;
             let len = a_slice.len().min(b_slice.len());
             for i in 0..len {
                 let av = a_slice[i];
@@ -905,7 +907,7 @@ fn cosine_sim_any(vec1: &PyAny, vec2: &PyAny) -> PyResult<(f64, bool)> {
 }
 
 #[pyfunction]
-fn specter_cosine_sim(_py: Python<'_>, vec1: Option<&PyAny>, vec2: Option<&PyAny>) -> PyResult<f64> {
+fn specter_cosine_sim(_py: Python<'_>, vec1: Option<&Bound<'_, PyAny>>, vec2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     if vec1.is_none() || vec2.is_none() {
         return Ok(f64::NAN);
     }
@@ -917,7 +919,7 @@ fn specter_cosine_sim(_py: Python<'_>, vec1: Option<&PyAny>, vec2: Option<&PyAny
 }
 
 #[pyfunction]
-fn journal_overlap(counter1: Option<&PyAny>, counter2: Option<&PyAny>) -> PyResult<f64> {
+fn journal_overlap(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<'_, PyAny>>) -> PyResult<f64> {
     counter_jaccard(counter1, counter2, f64::INFINITY)
 }
 
@@ -1231,7 +1233,7 @@ impl RustFeaturizer {
     #[staticmethod]
     #[pyo3(signature = (dataset, cluster_seed_require_value = 0.0, cluster_seed_disallow_value = 10000.0))]
     fn from_dataset(
-        dataset: &PyAny,
+        dataset: &Bound<'_, PyAny>,
         cluster_seed_require_value: f64,
         cluster_seed_disallow_value: f64,
     ) -> PyResult<Self> {
@@ -1240,22 +1242,25 @@ impl RustFeaturizer {
             .and_then(|v| v.extract())
             .unwrap_or(false);
 
-        let signatures_dict = dataset.getattr("signatures")?.downcast::<PyDict>()?;
+        let signatures_obj = dataset.getattr("signatures")?;
+        let signatures_dict = signatures_obj.downcast::<PyDict>()?;
         let mut signatures = HashMap::with_capacity(signatures_dict.len());
         for (sig_id_obj, sig_obj) in signatures_dict.iter() {
             let sig_id: String = sig_id_obj.extract()?;
-            let first = extract_string_opt(sig_obj.getattr("author_info_first_normalized_without_apostrophe")?)?;
-            let middle = extract_string_opt(sig_obj.getattr("author_info_middle_normalized_without_apostrophe")?)?;
-            let last_normalized = extract_string_opt(sig_obj.getattr("author_info_last_normalized")?)?;
-            let orcid = extract_string_opt(sig_obj.getattr("author_info_orcid")?)?;
-            let email = extract_string_opt(sig_obj.getattr("author_info_email")?)?;
-            let affiliations = extract_counter(sig_obj.getattr("author_info_affiliations_n_grams")?)?;
-            let coauthor_blocks = extract_set_str(sig_obj.getattr("author_info_coauthor_blocks")?)?;
-            let coauthor_ngrams = extract_counter(sig_obj.getattr("author_info_coauthor_n_grams")?)?;
-            let coauthors = extract_set_str(sig_obj.getattr("author_info_coauthors")?)?;
+            let first =
+                extract_string_opt(&sig_obj.getattr("author_info_first_normalized_without_apostrophe")?)?;
+            let middle =
+                extract_string_opt(&sig_obj.getattr("author_info_middle_normalized_without_apostrophe")?)?;
+            let last_normalized = extract_string_opt(&sig_obj.getattr("author_info_last_normalized")?)?;
+            let orcid = extract_string_opt(&sig_obj.getattr("author_info_orcid")?)?;
+            let email = extract_string_opt(&sig_obj.getattr("author_info_email")?)?;
+            let affiliations = extract_counter(&sig_obj.getattr("author_info_affiliations_n_grams")?)?;
+            let coauthor_blocks = extract_set_str(&sig_obj.getattr("author_info_coauthor_blocks")?)?;
+            let coauthor_ngrams = extract_counter(&sig_obj.getattr("author_info_coauthor_n_grams")?)?;
+            let coauthors = extract_set_str(&sig_obj.getattr("author_info_coauthors")?)?;
             let position: i64 = sig_obj.getattr("author_info_position")?.extract()?;
             let paper_id: i64 = sig_obj.getattr("paper_id")?.extract()?;
-            let name_counts = extract_name_counts_data(sig_obj.getattr("author_info_name_counts")?)?;
+            let name_counts = extract_name_counts_data(&sig_obj.getattr("author_info_name_counts")?)?;
             let adv_name = first.clone();
             signatures.insert(
                 sig_id,
@@ -1277,19 +1282,20 @@ impl RustFeaturizer {
             );
         }
 
-        let papers_dict = dataset.getattr("papers")?.downcast::<PyDict>()?;
-        let specter_dict = dataset
-            .getattr("specter_embeddings")
-            .ok()
+        let papers_obj = dataset.getattr("papers")?;
+        let papers_dict = papers_obj.downcast::<PyDict>()?;
+        let specter_obj = dataset.getattr("specter_embeddings").ok();
+        let specter_dict = specter_obj
+            .as_ref()
             .and_then(|v| v.downcast::<PyDict>().ok());
 
         let mut papers = HashMap::with_capacity(papers_dict.len());
         for (_paper_id_obj, paper_obj) in papers_dict.iter() {
             let paper_id: i64 = paper_obj.getattr("paper_id")?.extract()?;
-            let venue_ngrams = extract_counter(paper_obj.getattr("venue_ngrams")?)?;
-            let title_words = extract_counter(paper_obj.getattr("title_ngrams_words")?)?;
-            let title_chars = extract_counter(paper_obj.getattr("title_ngrams_chars")?)?;
-            let journal_ngrams = extract_counter(paper_obj.getattr("journal_ngrams")?)?;
+            let venue_ngrams = extract_counter(&paper_obj.getattr("venue_ngrams")?)?;
+            let title_words = extract_counter(&paper_obj.getattr("title_ngrams_words")?)?;
+            let title_chars = extract_counter(&paper_obj.getattr("title_ngrams_chars")?)?;
+            let journal_ngrams = extract_counter(&paper_obj.getattr("journal_ngrams")?)?;
 
         let ref_details_obj = paper_obj.getattr("reference_details")?;
         let ref_details_present = !ref_details_obj.is_none();
@@ -1300,31 +1306,31 @@ impl RustFeaturizer {
         if !ref_details_obj.is_none() {
                 if let Ok(tuple) = ref_details_obj.extract::<(PyObject, PyObject, PyObject, PyObject)>() {
                     Python::with_gil(|py| {
-                        ref_authors = extract_counter(tuple.0.as_ref(py)).ok().flatten();
-                        ref_titles = extract_counter(tuple.1.as_ref(py)).ok().flatten();
-                        ref_venues = extract_counter(tuple.2.as_ref(py)).ok().flatten();
-                        ref_blocks = extract_counter(tuple.3.as_ref(py)).ok().flatten();
+                        ref_authors = extract_counter(&tuple.0.bind(py)).ok().flatten();
+                        ref_titles = extract_counter(&tuple.1.bind(py)).ok().flatten();
+                        ref_venues = extract_counter(&tuple.2.bind(py)).ok().flatten();
+                        ref_blocks = extract_counter(&tuple.3.bind(py)).ok().flatten();
                     });
                 }
             }
 
-            let references = extract_set_i64(paper_obj.getattr("references")?)?;
+            let references = extract_set_i64(&paper_obj.getattr("references")?)?;
             let year: Option<i64> = paper_obj.getattr("year")?.extract()?;
             let year = match year {
                 Some(v) if v > 0 => Some(v),
                 _ => None,
             };
             let has_abstract: bool = paper_obj.getattr("has_abstract")?.extract()?;
-            let predicted_language = extract_string_opt(paper_obj.getattr("predicted_language")?)?;
+            let predicted_language = extract_string_opt(&paper_obj.getattr("predicted_language")?)?;
             let is_reliable: Option<bool> = paper_obj.getattr("is_reliable")?.extract()?;
             let is_reliable = is_reliable.unwrap_or(false);
 
             let specter = if let Some(spec_dict) = &specter_dict {
                 let key_str = paper_id.to_string();
                 if let Ok(Some(val)) = spec_dict.get_item(key_str) {
-                    extract_specter_vec(val)?
+                    extract_specter_vec(&val)?
                 } else if let Ok(Some(val)) = spec_dict.get_item(paper_id) {
-                    extract_specter_vec(val)?
+                    extract_specter_vec(&val)?
                 } else {
                     None
                 }
@@ -1354,9 +1360,9 @@ impl RustFeaturizer {
             );
         }
 
-        let name_tuples = extract_name_tuples_map(dataset.getattr("name_tuples")?)?;
-        let cluster_seeds_disallow = extract_pair_set(dataset.getattr("cluster_seeds_disallow")?)?;
-        let cluster_seeds_require = extract_cluster_seeds_require(dataset.getattr("cluster_seeds_require")?)?;
+        let name_tuples = extract_name_tuples_map(&dataset.getattr("name_tuples")?)?;
+        let cluster_seeds_disallow = extract_pair_set(&dataset.getattr("cluster_seeds_disallow")?)?;
+        let cluster_seeds_require = extract_cluster_seeds_require(&dataset.getattr("cluster_seeds_require")?)?;
 
         Ok(RustFeaturizer {
             signatures,
@@ -1372,8 +1378,8 @@ impl RustFeaturizer {
 
     fn update_cluster_seeds(
         &mut self,
-        cluster_seeds_require: &PyAny,
-        cluster_seeds_disallow: &PyAny,
+        cluster_seeds_require: &Bound<'_, PyAny>,
+        cluster_seeds_disallow: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         self.cluster_seeds_require = extract_cluster_seeds_require(cluster_seeds_require)?;
         self.cluster_seeds_disallow = extract_pair_set(cluster_seeds_disallow)?;
@@ -1585,6 +1591,22 @@ impl RustFeaturizer {
     }
 
     fn featurize_pairs(&self, py: Python<'_>, pairs: Vec<(String, String)>) -> PyResult<Vec<Vec<f64>>> {
+        for (sig_id1, sig_id2) in pairs.iter() {
+            let s1 = self
+                .signatures
+                .get(sig_id1)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id1.to_string()))?;
+            let s2 = self
+                .signatures
+                .get(sig_id2)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id2.to_string()))?;
+            if self.papers.get(&s1.paper_id).is_none() {
+                return Err(pyo3::exceptions::PyKeyError::new_err(s1.paper_id.to_string()));
+            }
+            if self.papers.get(&s2.paper_id).is_none() {
+                return Err(pyo3::exceptions::PyKeyError::new_err(s2.paper_id.to_string()));
+            }
+        }
         let feats = py.allow_threads(|| {
             pairs
                 .par_iter()
@@ -1620,57 +1642,57 @@ impl RustFeaturizer {
 
 #[pyfunction]
 fn featurize_pair(
-    first1: &PyAny,
-    middle1: &PyAny,
-    first2: &PyAny,
-    middle2: &PyAny,
-    affiliation1: &PyAny,
-    affiliation2: &PyAny,
-    email1: &PyAny,
-    email2: &PyAny,
-    coauthor_blocks1: &PyAny,
-    coauthor_blocks2: &PyAny,
-    coauthor_ngrams1: &PyAny,
-    coauthor_ngrams2: &PyAny,
-    coauthors1: &PyAny,
-    coauthors2: &PyAny,
-    venue_ngrams1: &PyAny,
-    venue_ngrams2: &PyAny,
-    year1: &PyAny,
-    year2: &PyAny,
-    title_words1: &PyAny,
-    title_words2: &PyAny,
-    title_chars1: &PyAny,
-    title_chars2: &PyAny,
+    first1: &Bound<'_, PyAny>,
+    middle1: &Bound<'_, PyAny>,
+    first2: &Bound<'_, PyAny>,
+    middle2: &Bound<'_, PyAny>,
+    affiliation1: &Bound<'_, PyAny>,
+    affiliation2: &Bound<'_, PyAny>,
+    email1: &Bound<'_, PyAny>,
+    email2: &Bound<'_, PyAny>,
+    coauthor_blocks1: &Bound<'_, PyAny>,
+    coauthor_blocks2: &Bound<'_, PyAny>,
+    coauthor_ngrams1: &Bound<'_, PyAny>,
+    coauthor_ngrams2: &Bound<'_, PyAny>,
+    coauthors1: &Bound<'_, PyAny>,
+    coauthors2: &Bound<'_, PyAny>,
+    venue_ngrams1: &Bound<'_, PyAny>,
+    venue_ngrams2: &Bound<'_, PyAny>,
+    year1: &Bound<'_, PyAny>,
+    year2: &Bound<'_, PyAny>,
+    title_words1: &Bound<'_, PyAny>,
+    title_words2: &Bound<'_, PyAny>,
+    title_chars1: &Bound<'_, PyAny>,
+    title_chars2: &Bound<'_, PyAny>,
     compute_reference_features: bool,
-    ref_authors1: &PyAny,
-    ref_authors2: &PyAny,
-    ref_titles1: &PyAny,
-    ref_titles2: &PyAny,
-    ref_venues1: &PyAny,
-    ref_venues2: &PyAny,
-    ref_blocks1: &PyAny,
-    ref_blocks2: &PyAny,
-    references1: &PyAny,
-    references2: &PyAny,
-    paper_id1: &PyAny,
-    paper_id2: &PyAny,
+    ref_authors1: &Bound<'_, PyAny>,
+    ref_authors2: &Bound<'_, PyAny>,
+    ref_titles1: &Bound<'_, PyAny>,
+    ref_titles2: &Bound<'_, PyAny>,
+    ref_venues1: &Bound<'_, PyAny>,
+    ref_venues2: &Bound<'_, PyAny>,
+    ref_blocks1: &Bound<'_, PyAny>,
+    ref_blocks2: &Bound<'_, PyAny>,
+    references1: &Bound<'_, PyAny>,
+    references2: &Bound<'_, PyAny>,
+    paper_id1: &Bound<'_, PyAny>,
+    paper_id2: &Bound<'_, PyAny>,
     position1: i64,
     position2: i64,
     has_abstract1: bool,
     has_abstract2: bool,
-    lang1: &PyAny,
-    lang2: &PyAny,
+    lang1: &Bound<'_, PyAny>,
+    lang2: &Bound<'_, PyAny>,
     reliable1: bool,
     reliable2: bool,
-    name_counts1: &PyAny,
-    name_counts2: &PyAny,
-    specter1: &PyAny,
-    specter2: &PyAny,
-    journal1: &PyAny,
-    journal2: &PyAny,
-    adv_name1: &PyAny,
-    adv_name2: &PyAny,
+    name_counts1: &Bound<'_, PyAny>,
+    name_counts2: &Bound<'_, PyAny>,
+    specter1: &Bound<'_, PyAny>,
+    specter2: &Bound<'_, PyAny>,
+    journal1: &Bound<'_, PyAny>,
+    journal2: &Bound<'_, PyAny>,
+    adv_name1: &Bound<'_, PyAny>,
+    adv_name2: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<f64>> {
     let mut feats: Vec<f64> = Vec::with_capacity(39);
 
@@ -1816,7 +1838,7 @@ fn featurize_pair(
 }
 
 #[pymodule]
-fn s2and_rust(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(first_names_equal, m)?)?;
     m.add_function(wrap_pyfunction!(middle_initials_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(middle_names_equal, m)?)?;

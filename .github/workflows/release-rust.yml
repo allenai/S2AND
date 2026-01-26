@@ -191,6 +191,9 @@ jobs:
         with:
           python-version: ${{ matrix.py }}
 
+      - name: Install Rust targets (universal2)
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
       - name: Build wheels (universal2)
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         env:

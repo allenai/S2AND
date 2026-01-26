@@ -19,16 +19,36 @@ from s2and.feature_port import (
 )
 
 
-try:
-    import s2and_rust  # noqa: F401
+def _import_s2and_rust():
+    try:
+        import s2and_rust  # noqa: F401
 
-    HAS_RUST = True
-    _RUST_IMPORT_ERROR = None
-    print("s2and_rust import OK")
-except Exception as e:  # pragma: no cover - environment specific
-    HAS_RUST = False
-    _RUST_IMPORT_ERROR = e
-    print(f"s2and_rust import FAILED: {e}")
+        return True, None
+    except Exception as e:
+        # If local source shadowed the installed extension, retry from site-packages.
+        try:
+            import importlib
+            import importlib.util
+            from importlib.machinery import PathFinder
+
+            import sys
+
+            sys.modules.pop("s2and_rust", None)
+            sys.modules.pop("s2and_rust.s2and_rust", None)
+            site_paths = [p for p in sys.path if "site-packages" in p]
+            spec = PathFinder.find_spec("s2and_rust", site_paths)
+            if spec is None or spec.loader is None:
+                raise e
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["s2and_rust"] = module
+            spec.loader.exec_module(module)
+            return True, None
+        except Exception as e2:
+            return False, e2
+
+
+HAS_RUST, _RUST_IMPORT_ERROR = _import_s2and_rust()
+print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
 
 
 def _equalish(a, b, rel_tol=1e-6, abs_tol=1e-3):
@@ -99,25 +119,17 @@ def _temporary_cluster_seeds(dataset, require_map, disallow_set):
             update_rust_cluster_seeds(dataset)
 
 
-@pytest.fixture(scope="session")
-def dataset():
-    # Speed/safety: skip fastText (optional) to avoid large model loads in tests
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
-    # Force python reference featurizer for parity tests
-    os.environ["S2AND_USE_RUST_FEATURIZER"] = "0"
-    # Avoid disk-cached Rust featurizer snapshots in parity tests
-    os.environ.setdefault("S2AND_RUST_FEATURIZER_DISK_CACHE", "0")
-
-    data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
-    dataset_name = "zbmath"
-
+def _load_dataset_from_dir(data_dir, name, *, compute_reference_features=False):
+    cluster_seeds_path = os.path.join(data_dir, "cluster_seeds.json")
+    cluster_seeds = cluster_seeds_path if os.path.exists(cluster_seeds_path) else None
     ds = ANDData(
-        signatures=os.path.join(data_original, dataset_name, dataset_name + "_signatures.json"),
-        papers=os.path.join(data_original, dataset_name, dataset_name + "_papers.json"),
-        name=dataset_name,
+        signatures=os.path.join(data_dir, "signatures.json"),
+        papers=os.path.join(data_dir, "papers.json"),
+        name=name,
         mode="train",
-        specter_embeddings=os.path.join(data_original, dataset_name, dataset_name + "_specter.pickle"),
-        clusters=os.path.join(data_original, dataset_name, dataset_name + "_clusters.json"),
+        specter_embeddings=None,
+        clusters=os.path.join(data_dir, "clusters.json"),
+        cluster_seeds=cluster_seeds,
         block_type="s2",
         train_pairs=None,
         val_pairs=None,
@@ -132,7 +144,40 @@ def dataset():
         name_tuples="filtered",
         use_orcid_id=True,
         use_sinonym_overwrite=False,
+        compute_reference_features=compute_reference_features,
     )
+    return ds
+
+
+def _attach_fake_specter_embeddings(ds, max_papers=2, dim=8):
+    rng = np.random.RandomState(123)
+    if ds.specter_embeddings is None:
+        ds.specter_embeddings = {}
+    added = 0
+    for sig_id in ds.signatures.keys():
+        paper = _paper_for_sig(ds, sig_id)
+        if paper.predicted_language in {"en", "un"}:
+            paper_id = str(paper.paper_id)
+            if paper_id not in ds.specter_embeddings:
+                ds.specter_embeddings[paper_id] = rng.normal(size=(dim,)).astype(np.float32)
+                added += 1
+                if added >= max_papers:
+                    break
+    return ds
+
+
+@pytest.fixture(scope="session")
+def dataset():
+    # Speed/safety: skip fastText (optional) to avoid large model loads in tests
+    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
+    # Force python reference featurizer for parity tests
+    os.environ["S2AND_USE_RUST_FEATURIZER"] = "0"
+    # Avoid disk-cached Rust featurizer snapshots in parity tests
+    os.environ.setdefault("S2AND_RUST_FEATURIZER_DISK_CACHE", "0")
+
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+    ds = _load_dataset_from_dir(data_dir, "dummy")
+    ds = _attach_fake_specter_embeddings(ds)
     # set global for _single_pair_featurize
     featurizer_mod.global_dataset = ds  # type: ignore
     return ds
@@ -147,32 +192,8 @@ def dataset_with_refs():
     # Avoid disk-cached Rust featurizer snapshots in parity tests
     os.environ.setdefault("S2AND_RUST_FEATURIZER_DISK_CACHE", "0")
 
-    data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
-    dataset_name = "zbmath"
-
-    ds = ANDData(
-        signatures=os.path.join(data_original, dataset_name, dataset_name + "_signatures.json"),
-        papers=os.path.join(data_original, dataset_name, dataset_name + "_papers.json"),
-        name=dataset_name,
-        mode="train",
-        specter_embeddings=os.path.join(data_original, dataset_name, dataset_name + "_specter.pickle"),
-        clusters=os.path.join(data_original, dataset_name, dataset_name + "_clusters.json"),
-        block_type="s2",
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=100000,
-        val_pairs_size=10000,
-        test_pairs_size=10000,
-        n_jobs=1,
-        load_name_counts=True,
-        preprocess=True,
-        random_seed=42,
-        name_tuples="filtered",
-        use_orcid_id=True,
-        use_sinonym_overwrite=False,
-        compute_reference_features=True,
-    )
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "qian")
+    ds = _load_dataset_from_dir(data_dir, "qian", compute_reference_features=True)
     return ds
 
 

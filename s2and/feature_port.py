@@ -1,4 +1,5 @@
 from typing import Optional, Any
+from types import ModuleType
 import os
 import weakref
 import logging
@@ -15,7 +16,7 @@ def _ensure_repo_root_on_path() -> None:
         sys.path.insert(0, repo_root)
 
 
-def _load_s2and_rust_from_site_packages() -> Optional[Any]:
+def _load_s2and_rust_from_site_packages() -> Optional[ModuleType]:
     try:
         import importlib.util
         from importlib.machinery import PathFinder
@@ -32,7 +33,8 @@ def _load_s2and_rust_from_site_packages() -> Optional[Any]:
         return None
 
 
-def _load_s2and_rust(force_reload: bool = False) -> Optional[Any]:
+def _load_s2and_rust(force_reload: bool = False) -> Optional[ModuleType]:
+    module: Optional[ModuleType] = None
     if force_reload:
         sys.modules.pop("s2and_rust", None)
         sys.modules.pop("s2and_rust.s2and_rust", None)

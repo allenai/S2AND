@@ -69,6 +69,7 @@ struct PaperData {
     ref_titles: Option<CounterData>,
     ref_venues: Option<CounterData>,
     ref_blocks: Option<CounterData>,
+    ref_details_present: bool,
     references: HashSet<i64>,
     year: Option<i64>,
     has_abstract: bool,
@@ -1155,15 +1156,7 @@ impl RustFeaturizer {
         feats.push(counter_jaccard_data(&p1.title_words, &p2.title_words, f64::INFINITY));
         feats.push(counter_jaccard_data(&p1.title_chars, &p2.title_chars, f64::INFINITY));
 
-        if self.compute_reference_features
-            && p1.ref_authors.is_some()
-            && p2.ref_authors.is_some()
-            && p1.ref_titles.is_some()
-            && p2.ref_titles.is_some()
-            && p1.ref_venues.is_some()
-            && p2.ref_venues.is_some()
-            && p1.ref_blocks.is_some()
-            && p2.ref_blocks.is_some()
+        if self.compute_reference_features && p1.ref_details_present && p2.ref_details_present
         {
             feats.push(counter_jaccard_data(&p1.ref_authors, &p2.ref_authors, 5000.0));
             feats.push(counter_jaccard_data(&p1.ref_titles, &p2.ref_titles, f64::INFINITY));
@@ -1298,12 +1291,13 @@ impl RustFeaturizer {
             let title_chars = extract_counter(paper_obj.getattr("title_ngrams_chars")?)?;
             let journal_ngrams = extract_counter(paper_obj.getattr("journal_ngrams")?)?;
 
-            let ref_details_obj = paper_obj.getattr("reference_details")?;
-            let mut ref_authors = None;
-            let mut ref_titles = None;
-            let mut ref_venues = None;
-            let mut ref_blocks = None;
-            if !ref_details_obj.is_none() {
+        let ref_details_obj = paper_obj.getattr("reference_details")?;
+        let ref_details_present = !ref_details_obj.is_none();
+        let mut ref_authors = None;
+        let mut ref_titles = None;
+        let mut ref_venues = None;
+        let mut ref_blocks = None;
+        if !ref_details_obj.is_none() {
                 if let Ok(tuple) = ref_details_obj.extract::<(PyObject, PyObject, PyObject, PyObject)>() {
                     Python::with_gil(|py| {
                         ref_authors = extract_counter(tuple.0.as_ref(py)).ok().flatten();
@@ -1355,6 +1349,7 @@ impl RustFeaturizer {
                     is_reliable,
                     journal_ngrams,
                     specter,
+                    ref_details_present,
                 },
             );
         }

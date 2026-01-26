@@ -34,7 +34,7 @@ if s2and_rust is None:
 logger = logging.getLogger("s2and")
 
 _RUST_FEATURIZER_CACHE: "weakref.WeakKeyDictionary[ANDData, object]" = weakref.WeakKeyDictionary()
-RUST_FEATURIZER_CACHE_VERSION = 1
+RUST_FEATURIZER_CACHE_VERSION = 2
 
 _ENV_TRUE_VALUES = {"1", "true", "yes"}
 

@@ -15,14 +15,37 @@ def _ensure_repo_root_on_path() -> None:
         sys.path.insert(0, repo_root)
 
 
+def _load_s2and_rust_from_site_packages() -> Optional[Any]:
+    try:
+        import importlib.util
+        from importlib.machinery import PathFinder
+
+        site_paths = [p for p in sys.path if "site-packages" in p]
+        spec = PathFinder.find_spec("s2and_rust", site_paths)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["s2and_rust"] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
 def _load_s2and_rust(force_reload: bool = False) -> Optional[Any]:
     if force_reload:
         sys.modules.pop("s2and_rust", None)
+        sys.modules.pop("s2and_rust.s2and_rust", None)
     try:
         module = importlib.import_module("s2and_rust")
     except Exception:
-        return None
-    return module if hasattr(module, "RustFeaturizer") else None
+        module = _load_s2and_rust_from_site_packages()
+    if module is None or not hasattr(module, "RustFeaturizer"):
+        # Local package shadowing can hide an installed extension; retry from site-packages.
+        sys.modules.pop("s2and_rust", None)
+        sys.modules.pop("s2and_rust.s2and_rust", None)
+        module = _load_s2and_rust_from_site_packages()
+    return module if module is not None and hasattr(module, "RustFeaturizer") else None
 
 
 # Treat extension as Any for typing; it is optional and dynamically loaded.

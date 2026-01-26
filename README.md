@@ -22,8 +22,8 @@ python -m pip install --user --upgrade uv
 
 ```bash
 # create the project venv (uv defaults to .venv if you don't give a name)
-# note that you can't go past 3.12 for now because of fasttext
-uv venv --python 3.11.9
+# use Python 3.11.x (fasttext doesn't support 3.12+ here)
+uv venv --python 3.11.13
 ```
 
 2. Activate the venv (choose one):
@@ -43,14 +43,14 @@ source .venv/bin/activate
 
 ```bash
 # prefer uv --active so uv uses your activated environment
-uv sync --active --all-extras --dev
+uv sync --active --extra dev
 ```
 
 4. (Recommended) Build/install the Rust extension into the active venv:
 
 ```bash
 # requires Rust toolchain on PATH (rustc/cargo)
-uv run --active maturin develop -m s2and_rust/Cargo.toml
+uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
 Notes:
@@ -65,7 +65,7 @@ Notes:
 To run the tests, use the following command:
 
 ```bash
-uv run pytest tests/
+uv run --no-project pytest tests/
 ```
 
 To run the entire CI suite mimicking the GH Actions, use the following command:
@@ -74,18 +74,18 @@ python scripts\run_ci_locally.py
 ```
 
 ## Running scripts
-When running scripts from the repo, prefer `uv run` so the installed packages (including the Rust extension)
+When running scripts from the repo, prefer `uv run --no-project` so the installed packages (including the Rust extension)
 resolve from site-packages. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
 
 ```bash
-uv run python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
 ```
 
 Profiling (Rust, prod-mode):
 
 ```bash
 S2AND_RUST_PROD_MODE=1 S2AND_USE_RUST_FEATURIZER=1 S2AND_USE_RUST_CONSTRAINT=1 \
-  uv run python scripts/profile_kisti_rust_prod.py
+  uv run --no-project python scripts/profile_kisti_rust_prod.py
 ```
 
 ## Rust featurizer (optional, enabled by default)

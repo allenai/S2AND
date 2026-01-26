@@ -795,7 +795,8 @@ def many_pairs_featurize(
         did_rust_batch = False
         if use_rust and use_rust_batch and feature_port.s2and_rust is not None and len(pieces_of_work) > 0:
             logger.info(f"Making {len(pieces_of_work)} feature vectors in Rust batch mode")
-            rust_featurizer = feature_port._get_rust_featurizer(dataset, write_cache=use_cache)
+            write_cache_flag = use_cache if use_cache else None
+            rust_featurizer = feature_port._get_rust_featurizer(dataset, write_cache=write_cache_flag)
             if n_jobs > 1:
                 os.environ["RAYON_NUM_THREADS"] = str(n_jobs)
             rust_pairs = [pair for pair, _ in pieces_of_work]

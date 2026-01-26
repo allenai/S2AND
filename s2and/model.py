@@ -39,6 +39,25 @@ _RUST_CONSTRAINTS_AVAILABLE = True
 _USE_RUST_CONSTRAINTS_CACHE: Optional[bool] = None
 
 
+def _ensure_lightgbm_fitted(clf: Any) -> None:
+    if clf is None:
+        return
+    inner = getattr(clf, "classifier", None)
+    if inner is not None and inner is not clf:
+        _ensure_lightgbm_fitted(inner)
+    if not hasattr(lgb, "LGBMModel") or not isinstance(clf, lgb.LGBMModel):
+        return
+    booster = getattr(clf, "_Booster", None)
+    if booster is None:
+        return
+    if not getattr(clf, "fitted_", False):
+        setattr(clf, "fitted_", True)
+    if not hasattr(clf, "n_features_in_"):
+        n_feat = getattr(clf, "_n_features", None)
+        if n_feat is not None:
+            setattr(clf, "n_features_in_", n_feat)
+
+
 def _use_rust_constraints() -> bool:
     global _USE_RUST_CONSTRAINTS_CACHE
     if _USE_RUST_CONSTRAINTS_CACHE is None:
@@ -294,6 +313,8 @@ class Clusterer:
         Dict: the distance matrix dictionary, keyed by block key
         """
         _sync_rust_cluster_seeds(dataset)
+        _ensure_lightgbm_fitted(self.classifier)
+        _ensure_lightgbm_fitted(self.nameless_classifier)
         logger.info(f"Making {len(block_dict)} distance matrices")
         logger.info("Initializing pairwise_probas")
         # initialize pairwise_probas with correctly size arrays

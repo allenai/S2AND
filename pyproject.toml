@@ -7,7 +7,7 @@ name = "s2and"
 version = "0.2.0"
 description = "S2AND"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 
@@ -21,7 +21,7 @@ dependencies = [
   "requests>=2.28,<3",
   "hyperopt @ git+https://github.com/hyperopt/hyperopt.git",
   "pandas>=1.5,<2.2",
-  "lightgbm==3.2.1",
+  "lightgbm==4.6.0",
   "fastcluster>=1.2.6,<2",
   "genieclust>=1.1.4,<2",
   "matplotlib>=3.7,<3.9",
@@ -78,6 +78,9 @@ ignore = []
 # If you keep flake8, you can mirror the same line length:
 [tool.flake8]
 max-line-length = 120
+
+[tool.uv.sources]
+s2and-rust = { path = "s2and_rust" }
 
 # ------------------------
 # If you must replicate the *exact* legacy pins you sent, use this block instead

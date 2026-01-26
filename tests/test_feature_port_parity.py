@@ -104,7 +104,7 @@ def dataset():
     # Speed/safety: skip fastText (optional) to avoid large model loads in tests
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     # Force python reference featurizer for parity tests
-    os.environ.setdefault("S2AND_USE_RUST_FEATURIZER", "0")
+    os.environ["S2AND_USE_RUST_FEATURIZER"] = "0"
     # Avoid disk-cached Rust featurizer snapshots in parity tests
     os.environ.setdefault("S2AND_RUST_FEATURIZER_DISK_CACHE", "0")
 

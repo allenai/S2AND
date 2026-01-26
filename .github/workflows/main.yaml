@@ -84,10 +84,10 @@ jobs:
         shell: bash
         run: |
           if [[ -f uv.lock ]]; then
-            uv sync --all-extras --dev --frozen
+            uv sync --extra dev --frozen
           else
             # No lock present; resolve once, then install
-            uv sync --all-extras --dev
+            uv sync --extra dev
           fi
 
       # Build/install Rust extension for parity tests
@@ -96,9 +96,9 @@ jobs:
 
       # Type checking (run mypy commands directly)
       - name: mypy (s2and)
-        run: uv run mypy s2and --ignore-missing-imports
+        run: uv run --no-project mypy s2and --ignore-missing-imports
       - name: mypy (scripts)
-        run: uv run mypy scripts/*.py --ignore-missing-imports
+        run: uv run --no-project mypy scripts/*.py --ignore-missing-imports
 
       # Single pytest run with coverage (replaces the two docker pytest calls)
       - name: pytest (coverage)
@@ -106,6 +106,6 @@ jobs:
           # keep startup lean; avoid user-level plugins on hosted runners
           PYTHONPATH: .
         run: |
-          uv run pytest tests/ \
+          uv run --no-project pytest tests/ \
             --cov=s2and --cov-report=term-missing --cov-fail-under=40
 

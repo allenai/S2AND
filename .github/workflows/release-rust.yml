@@ -166,10 +166,12 @@ jobs:
 
       - name: Build wheels (universal2)
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
+        env:
+          ARCHFLAGS: "-arch x86_64 -arch arm64"
         with:
           maturin-version: v1.11.5
           command: build
-          args: --release --locked --compatibility pypi --out dist --universal2
+          args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
 
       - uses: actions/upload-artifact@v4

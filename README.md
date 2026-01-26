@@ -46,6 +46,18 @@ source .venv/bin/activate
 uv sync --active --all-extras --dev
 ```
 
+4. (Recommended) Build/install the Rust extension into the active venv:
+
+```bash
+# requires Rust toolchain on PATH (rustc/cargo)
+uv run --active maturin develop -m s2and_rust/Cargo.toml
+```
+
+Notes:
+- This installs the native module into site-packages so imports use the compiled extension.
+- If you don't want an editable install, you can `uv pip install .` instead of `uv sync`, then run the
+  `maturin develop` step above.
+
 ## Running Tests
 
 To run the tests, use the following command:
@@ -57,6 +69,63 @@ uv run pytest tests/
 To run the entire CI suite mimicking the GH Actions, use the following command:
 ```bash
 python scripts\run_ci_locally.py
+```
+
+## Running scripts
+When running scripts from the repo, prefer `uv run` so the installed packages (including the Rust extension)
+resolve from site-packages. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
+
+```bash
+uv run python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
+```
+
+Profiling (Rust, prod-mode):
+
+```bash
+S2AND_RUST_PROD_MODE=1 S2AND_USE_RUST_FEATURIZER=1 S2AND_USE_RUST_CONSTRAINT=1 \
+  uv run python scripts/profile_kisti_rust_prod.py
+```
+
+## Rust featurizer (optional, enabled by default)
+S2AND can use a Rust-backed featurizer for faster pairwise feature generation. This is **enabled by default** and falls back
+to Python if the native extension is not available.
+
+Environment toggles:
+- `S2AND_USE_RUST_FEATURIZER=0` to force the Python path.
+- `S2AND_USE_RUST_CONSTRAINT=0` to force Python `get_constraint`.
+- `S2AND_RUST_BATCH=0` to disable Rust batch mode in `many_pairs_featurize`.
+- `S2AND_RUST_BATCH_THRESHOLD` to fall back to Python for tiny batches (default: disabled).
+- `RAYON_NUM_THREADS` controls Rust parallelism (when batch mode is used).
+- `S2AND_RUST_FEATURIZER_DISK_CACHE=0` to disable on-disk Rust featurizer caching.
+- `S2AND_RUST_FEATURIZER_DISK_CACHE_WRITE=1` to force saving Rust featurizer snapshots even when feature caching is off.
+- `S2AND_RUST_PROD_MODE=1` to disable Rust snapshot load/save entirely (best for one-shot inference).
+- `S2AND_RUST_FEATURIZER_CACHE_DIR` to override the cache directory.
+
+Notes:
+- Rust batch mode is used for all `n_jobs` by default and uses Rayon internally for parallelism.
+- Rust featurizer snapshots are saved only when feature caching is enabled unless overridden via `S2AND_RUST_FEATURIZER_DISK_CACHE_WRITE=1`.
+- The Rust featurizer is built with `maturin develop -m s2and_rust/Cargo.toml`.
+
+## Prod mode (low-latency, one-shot inference)
+If your service handles single or batched blocks that are **only seen once**, enabling prod mode avoids costly
+snapshot I/O. This keeps everything in memory and relies on the per-process Rust featurizer cache.
+
+Default behavior:
+- If `S2AND_RUST_PROD_MODE` is **unset**, `dataset.mode == "inference"` implies prod mode.
+- If `S2AND_RUST_PROD_MODE` is set, it overrides the dataset mode.
+
+Recommended settings:
+- `S2AND_RUST_PROD_MODE=1`
+- `S2AND_RUST_FEATURIZER_DISK_CACHE=0` (optional; prod mode already disables read/write)
+- keep `S2AND_USE_RUST_FEATURIZER=1` and `S2AND_USE_RUST_CONSTRAINT=1`
+
+Pre-warm once at server start so requests are hot:
+
+```python
+from s2and.feature_port import warm_rust_featurizer
+
+# after you build/load your ANDData dataset:
+warm_rust_featurizer(dataset)
 ```
 
 ## Data 

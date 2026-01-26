@@ -7,13 +7,34 @@ We will use the test sets of arnnetminer and pubmed datasets as examples.
 
 import os
 import pickle
-from s2and.data import ANDData
-from s2and.eval import cluster_eval
-from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
-from s2and.featurizer import FeaturizationInfo
+import argparse
+
+
+def _apply_rust_flags(use_rust: int | None) -> None:
+    if use_rust is None:
+        return
+    flag = "1" if use_rust else "0"
+    os.environ["S2AND_USE_RUST_FEATURIZER"] = flag
+    os.environ["S2AND_USE_RUST_CONSTRAINT"] = flag
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--use-rust",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Set 1 to force Rust path, 0 to force Python path (default: env settings).",
+    )
+    args = parser.parse_args()
+
+    _apply_rust_flags(args.use_rust)
+
+    from s2and.data import ANDData
+    from s2and.eval import cluster_eval
+    from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
+    from s2and.featurizer import FeaturizationInfo
 
     n_jobs = 4
 

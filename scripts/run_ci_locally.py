@@ -62,6 +62,25 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(cmd, check=True, cwd=str(REPO), env=env)
 
 
+def ensure_rust_on_path() -> None:
+    if shutil.which("cargo") or shutil.which("rustc"):
+        return
+    candidates: list[Path] = []
+    if os.name == "nt":
+        home = os.environ.get("USERPROFILE")
+        if home:
+            candidates.append(Path(home) / ".cargo" / "bin")
+    else:
+        home = os.environ.get("HOME")
+        if home:
+            candidates.append(Path(home) / ".cargo" / "bin")
+    for candidate in candidates:
+        if candidate.is_dir():
+            os.environ["PATH"] = f"{candidate}{os.pathsep}{os.environ.get('PATH', '')}"
+            if shutil.which("cargo") or shutil.which("rustc"):
+                return
+
+
 def run_black_on(paths: list[str]) -> None:
     uvx = uvx_exe()
     if uvx:
@@ -83,6 +102,10 @@ def main() -> None:
     if lock_present:
         sync_args.append("--frozen")
     run(uv_exe() + sync_args)
+
+    # 1.5) Build Rust extension (required for parity tests)
+    ensure_rust_on_path()
+    run(uv_exe() + ["run", "--active", "maturin", "develop", "-m", "s2and_rust/Cargo.toml"])
 
     # 2) Black checks (same targets/flags as CI)
     run_black_on(["s2and"])

@@ -6,9 +6,11 @@ from s2and.data import ANDData
 from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
 from s2and.subblocking import make_subblocks
 from s2and.text import same_prefix_tokens
+from s2and.feature_port import get_constraint_rust, update_rust_cluster_seeds, _get_rust_featurizer
 
 from typing import Dict, Optional, Any, Union, List, Tuple, cast
 from collections import defaultdict
+import os
 import warnings
 import time
 from functools import partial
@@ -31,6 +33,62 @@ from sklearn.base import TransformerMixin, BaseEstimator
 from sklearn.exceptions import EfficiencyWarning
 
 logger = logging.getLogger("s2and")
+
+
+_RUST_CONSTRAINTS_AVAILABLE = True
+_USE_RUST_CONSTRAINTS_CACHE: Optional[bool] = None
+
+
+def _use_rust_constraints() -> bool:
+    global _USE_RUST_CONSTRAINTS_CACHE
+    if _USE_RUST_CONSTRAINTS_CACHE is None:
+        use_rust_feat = os.environ.get("S2AND_USE_RUST_FEATURIZER", "1").lower() in {"1", "true", "yes"}
+        use_rust_constraints = os.environ.get("S2AND_USE_RUST_CONSTRAINT", "1").lower() in {"1", "true", "yes"}
+        _USE_RUST_CONSTRAINTS_CACHE = use_rust_feat and use_rust_constraints
+    return _USE_RUST_CONSTRAINTS_CACHE
+
+
+def _get_constraint_value(
+    dataset: ANDData,
+    sig_id_1: str,
+    sig_id_2: str,
+    dont_merge_cluster_seeds: bool = True,
+    incremental_dont_use_cluster_seeds: bool = False,
+    rust_featurizer: Optional[object] = None,
+    use_rust_constraints: Optional[bool] = None,
+):
+    global _RUST_CONSTRAINTS_AVAILABLE
+    if use_rust_constraints is None:
+        use_rust_constraints = _use_rust_constraints()
+    if use_rust_constraints and _RUST_CONSTRAINTS_AVAILABLE:
+        try:
+            return get_constraint_rust(
+                dataset,
+                sig_id_1,
+                sig_id_2,
+                dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                featurizer=rust_featurizer,
+            )
+        except Exception as exc:  # pragma: no cover - native extension optional
+            _RUST_CONSTRAINTS_AVAILABLE = False
+            logger.warning(f"Rust get_constraint failed, falling back to Python: {exc}")
+    return dataset.get_constraint(
+        sig_id_1,
+        sig_id_2,
+        dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+    )
+
+
+def _sync_rust_cluster_seeds(dataset: ANDData) -> None:
+    global _RUST_CONSTRAINTS_AVAILABLE
+    if _use_rust_constraints() and _RUST_CONSTRAINTS_AVAILABLE:
+        try:
+            update_rust_cluster_seeds(dataset)
+        except Exception as exc:  # pragma: no cover - native extension optional
+            _RUST_CONSTRAINTS_AVAILABLE = False
+            logger.warning(f"Rust cluster seed sync failed, falling back to Python: {exc}")
 
 
 class Clusterer:
@@ -170,6 +228,18 @@ class Clusterer:
         -------
         yields pairs of ((sig id 1, sig id 2, label), index pair into the distance matrix, block key)
         """
+        global _RUST_CONSTRAINTS_AVAILABLE
+        rust_featurizer = None
+        use_rust_constraints = None
+        if self.use_default_constraints_as_supervision:
+            use_rust_constraints = _use_rust_constraints()
+            if use_rust_constraints and _RUST_CONSTRAINTS_AVAILABLE:
+                try:
+                    rust_featurizer = _get_rust_featurizer(dataset)
+                except Exception as exc:  # pragma: no cover - native extension optional
+                    _RUST_CONSTRAINTS_AVAILABLE = False
+                    use_rust_constraints = False
+                    logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
         for block_key, signatures in block_dict.items():
             for i, j in zip(*np.triu_indices(len(signatures), k=1)):
                 # subtracting LARGE_INTEGER so many_pairs_featurize knows not to make features
@@ -179,11 +249,14 @@ class Clusterer:
                 elif (signatures[j], signatures[i]) in partial_supervision:
                     label = partial_supervision[(signatures[j], signatures[i])] - LARGE_INTEGER
                 elif self.use_default_constraints_as_supervision:
-                    value = dataset.get_constraint(
+                    value = _get_constraint_value(
+                        dataset,
                         signatures[i],
                         signatures[j],
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                        rust_featurizer=rust_featurizer,
+                        use_rust_constraints=use_rust_constraints,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER
@@ -220,6 +293,7 @@ class Clusterer:
         -------
         Dict: the distance matrix dictionary, keyed by block key
         """
+        _sync_rust_cluster_seeds(dataset)
         logger.info(f"Making {len(block_dict)} distance matrices")
         logger.info("Initializing pairwise_probas")
         # initialize pairwise_probas with correctly size arrays
@@ -602,6 +676,7 @@ class Clusterer:
                 for cluster_id, signatures in pred_clusters.items():
                     for signature in signatures:
                         dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
+                _sync_rust_cluster_seeds(dataset)
 
                 predict_times = {}
                 for block_key, block_signatures in block_dict_subblocked_single_letter_first_names.items():
@@ -647,12 +722,14 @@ class Clusterer:
                     for cluster_id, signatures in pred_clusters_intermediate.items():
                         for signature in signatures:
                             dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
+                    _sync_rust_cluster_seeds(dataset)
 
                 # undoing the damage
                 logger.info(
                     f"Finished subblocked predict incremental. Here's how long each subblock took:", predict_times
                 )
                 dataset.cluster_seeds_require = cluster_seeds_require_original
+                _sync_rust_cluster_seeds(dataset)
                 # the output of predict_incremental_helper has the ENTIRE clustering, not just the new stuff
                 pred_clusters = pred_clusters_intermediate
             dists = None
@@ -842,6 +919,7 @@ class Clusterer:
         -------
         Dict: the predicted clusters
         """
+        _sync_rust_cluster_seeds(dataset)
         if batching_threshold is not None and len(block_signatures) > batching_threshold:
             assert batching_threshold > 0, "Batching threshold must be positive"
             # STEP 1: Make subblocks
@@ -883,10 +961,12 @@ class Clusterer:
                 for cluster_id, signatures in pred_clusters_intermediate.items():
                     for signature in signatures:
                         dataset.cluster_seeds_require[signature] = cluster_id
+                _sync_rust_cluster_seeds(dataset)
 
             # STEP 3: undo the damage to cluster_seeds_require the damage
             logger.info(f"Finished subblocked predict_incremental. Here's how long each subblock took:", predict_times)
             dataset.cluster_seeds_require = cluster_seeds_require_original
+            _sync_rust_cluster_seeds(dataset)
             return pred_clusters_intermediate
         else:
             # just call predict_incremental_helper as is
@@ -991,6 +1071,18 @@ class Clusterer:
         logger.info("Getting name constraints")
         all_pairs = []
         unassigned_signatures = []
+        global _RUST_CONSTRAINTS_AVAILABLE
+        rust_featurizer = None
+        use_rust_constraints = None
+        if self.use_default_constraints_as_supervision:
+            use_rust_constraints = _use_rust_constraints()
+            if use_rust_constraints and _RUST_CONSTRAINTS_AVAILABLE:
+                try:
+                    rust_featurizer = _get_rust_featurizer(dataset)
+                except Exception as exc:  # pragma: no cover - native extension optional
+                    _RUST_CONSTRAINTS_AVAILABLE = False
+                    use_rust_constraints = False
+                    logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
         for possibly_unassigned_signature in block_signatures:
             if possibly_unassigned_signature in cluster_seeds_require:
                 continue
@@ -1003,10 +1095,13 @@ class Clusterer:
                 elif (signature, unassigned_signature) in partial_supervision:
                     label = partial_supervision[(signature, unassigned_signature)] - LARGE_INTEGER
                 elif self.use_default_constraints_as_supervision:
-                    value = dataset.get_constraint(
+                    value = _get_constraint_value(
+                        dataset,
                         unassigned_signature,
                         signature,
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                        rust_featurizer=rust_featurizer,
+                        use_rust_constraints=use_rust_constraints,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER

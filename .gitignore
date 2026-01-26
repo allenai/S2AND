@@ -11,7 +11,9 @@ data/medline/
 data/pubmed/
 data/qian/
 data/temp/
-data/s2and-mini/
+data/s2and_mini/
+data/augmented/
+data/orcid/
 data/test/
 data/zbmath/
 data/lid.176.bin
@@ -19,6 +21,7 @@ data/LICENSE.txt
 
 # C extensions
 *.so
+*.pyd
 
 # Distribution / packaging
 .Python
@@ -64,6 +67,9 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+
+# Local scratch outputs
+scratch/
 
 # Translations
 *.mo

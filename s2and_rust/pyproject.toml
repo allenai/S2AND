@@ -14,4 +14,4 @@ authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 [tool.maturin]
 bindings = "pyo3"
 python-source = "."
-module-name = "s2and_rust"
+module-name = "s2and_rust._s2and_rust"

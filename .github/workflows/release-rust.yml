@@ -11,6 +11,14 @@ on:
         description: "Force build jobs (manual/PR testing)"
         required: false
         type: boolean
+      publish_s2and:
+        description: "Publish s2and to PyPI (manual run)"
+        required: false
+        type: boolean
+      publish_rust:
+        description: "Publish s2and-rust to PyPI (manual run)"
+        required: false
+        type: boolean
 
 jobs:
   detect-versions:
@@ -20,6 +28,8 @@ jobs:
       s2and_changed: ${{ steps.detect.outputs.s2and_changed }}
       rust_changed: ${{ steps.detect.outputs.rust_changed }}
       publish_any: ${{ steps.detect.outputs.publish_any }}
+      publish_s2and: ${{ steps.detect.outputs.publish_s2and }}
+      publish_rust: ${{ steps.detect.outputs.publish_rust }}
       force_build: ${{ steps.detect.outputs.force_build }}
     steps:
       - uses: actions/checkout@v4
@@ -46,9 +56,13 @@ jobs:
               event = json.load(f)
 
           force_build = False
+          publish_s2and = False
+          publish_rust = False
           if event_name == "workflow_dispatch":
             inputs = (event or {}).get("inputs", {})
             force_build = str(inputs.get("force_build", "")).lower() in {"1", "true", "yes", "on"}
+            publish_s2and = str(inputs.get("publish_s2and", "")).lower() in {"1", "true", "yes", "on"}
+            publish_rust = str(inputs.get("publish_rust", "")).lower() in {"1", "true", "yes", "on"}
           elif event_name == "pull_request":
             labels = (event or {}).get("pull_request", {}).get("labels", [])
             force_build = any((label or {}).get("name", "").lower() == "force-build" for label in labels)
@@ -107,25 +121,29 @@ jobs:
 
           s2and_changed = before_py_ver != cur_py_ver
           rust_changed = before_rust_py_ver != cur_rust_py_ver
-          publish_any = s2and_changed or rust_changed
+          publish_any = s2and_changed or rust_changed or publish_s2and or publish_rust
 
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as f:
             f.write(f"s2and_changed={'true' if s2and_changed else 'false'}\n")
             f.write(f"rust_changed={'true' if rust_changed else 'false'}\n")
             f.write(f"publish_any={'true' if publish_any else 'false'}\n")
+            f.write(f"publish_s2and={'true' if publish_s2and else 'false'}\n")
+            f.write(f"publish_rust={'true' if publish_rust else 'false'}\n")
             f.write(f"force_build={'true' if force_build else 'false'}\n")
 
           print(f"s2and: {before_py_ver} -> {cur_py_ver} changed={s2and_changed}")
           print(f"rust:  {before_rust_py_ver} -> {cur_rust_py_ver} changed={rust_changed}")
           print(f"force_build: {force_build}")
+          print(f"publish_s2and: {publish_s2and}")
+          print(f"publish_rust: {publish_rust}")
           PY
 
   s2and-dist:
     name: s2and sdist+wheel
     runs-on: ubuntu-latest
     needs: [detect-versions]
-    if: needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true'
+    if: needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -148,7 +166,7 @@ jobs:
     name: wheels (windows, py${{ matrix.py }})
     runs-on: windows-latest
     needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true'
+    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -178,7 +196,7 @@ jobs:
     name: wheels (macos universal2, py${{ matrix.py }})
     runs-on: macos-latest
     needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true'
+    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +231,7 @@ jobs:
     name: wheels (linux ${{ matrix.platform.name }})
     runs-on: ubuntu-latest
     needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true'
+    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -253,7 +271,7 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     needs: [detect-versions]
-    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true'
+    if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -270,10 +288,12 @@ jobs:
           name: dist-s2and-rust-sdist
           path: s2and_rust/dist/*
 
-  publish:
-    name: publish to PyPI
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.publish_any == 'true'
-    needs: [detect-versions, s2and-dist, wheels-windows, wheels-macos, wheels-linux, sdist]
+  # Publish is split so skipped build jobs don't block unrelated publishes.
+  # Manual runs can publish by setting workflow_dispatch inputs.
+  publish-s2and:
+    name: publish s2and to PyPI
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.s2and_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.publish_s2and == 'true')
+    needs: [detect-versions, s2and-dist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -287,17 +307,28 @@ jobs:
           name: dist-s2and
           path: dist/s2and
 
+      - name: Publish s2and
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/s2and
+
+  publish-rust:
+    name: publish s2and-rust to PyPI
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.rust_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.publish_rust == 'true')
+    needs: [detect-versions, wheels-windows, wheels-macos, wheels-linux, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+
+    steps:
       - name: Download s2and-rust dists
         uses: actions/download-artifact@v4
         with:
           pattern: dist-s2and-rust-*
           merge-multiple: true
           path: dist/s2and-rust
-
-      - name: Publish s2and
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/s2and
 
       - name: Publish s2and-rust
         uses: pypa/gh-action-pypi-publish@release/v1

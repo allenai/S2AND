@@ -1,64 +1,25 @@
 from typing import Optional, Any
-from types import ModuleType
 import os
 import weakref
+import threading
 import logging
-import importlib
-import sys
 
 from s2and.consts import CACHE_ROOT, FEATURIZER_VERSION, CLUSTER_SEEDS_LOOKUP, LARGE_DISTANCE
 from s2and.data import ANDData
 
 
-def _ensure_repo_root_on_path() -> None:
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-
-
-def _load_s2and_rust_from_site_packages() -> Optional[ModuleType]:
-    try:
-        import importlib.util
-        from importlib.machinery import PathFinder
-
-        site_paths = [p for p in sys.path if "site-packages" in p]
-        spec = PathFinder.find_spec("s2and_rust", site_paths)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["s2and_rust"] = module
-        spec.loader.exec_module(module)
-        return module
-    except Exception:
-        return None
-
-
-def _load_s2and_rust(force_reload: bool = False) -> Optional[ModuleType]:
-    module: Optional[ModuleType] = None
-    if force_reload:
-        sys.modules.pop("s2and_rust", None)
-        sys.modules.pop("s2and_rust.s2and_rust", None)
-    try:
-        module = importlib.import_module("s2and_rust")
-    except Exception:
-        module = _load_s2and_rust_from_site_packages()
-    if module is None or not hasattr(module, "RustFeaturizer"):
-        # Local package shadowing can hide an installed extension; retry from site-packages.
-        sys.modules.pop("s2and_rust", None)
-        sys.modules.pop("s2and_rust.s2and_rust", None)
-        module = _load_s2and_rust_from_site_packages()
-    return module if module is not None and hasattr(module, "RustFeaturizer") else None
-
-
-# Treat extension as Any for typing; it is optional and dynamically loaded.
-s2and_rust: Optional[Any] = _load_s2and_rust()
-if s2and_rust is None:
-    _ensure_repo_root_on_path()
-    s2and_rust = _load_s2and_rust(force_reload=True)
+# Treat extension as Any for typing; it is optional.
+_s2and_rust: Optional[Any]
+try:
+    import s2and_rust as _s2and_rust  # type: ignore
+except Exception:
+    _s2and_rust = None
+s2and_rust: Optional[Any] = _s2and_rust
 
 logger = logging.getLogger("s2and")
 
 _RUST_FEATURIZER_CACHE: "weakref.WeakKeyDictionary[ANDData, object]" = weakref.WeakKeyDictionary()
+_RUST_FEATURIZER_CACHE_LOCK = threading.Lock()
 RUST_FEATURIZER_CACHE_VERSION = 2
 
 _ENV_TRUE_VALUES = {"1", "true", "yes"}
@@ -88,8 +49,10 @@ def _rust_cache_path(dataset: ANDData) -> str:
         cache_dir = os.path.join(str(CACHE_ROOT), "rust_featurizer")
     os.makedirs(cache_dir, exist_ok=True)
     skip_fasttext = _env_flag("S2AND_SKIP_FASTTEXT", "")
+    rust_version = getattr(s2and_rust, "__version__", None) if s2and_rust is not None else None
+    rust_version = rust_version or str(RUST_FEATURIZER_CACHE_VERSION)
     key = (
-        f"{dataset.name}_v{FEATURIZER_VERSION}_rv{RUST_FEATURIZER_CACHE_VERSION}"
+        f"{dataset.name}_v{FEATURIZER_VERSION}_rv{rust_version}"
         f"_s{len(dataset.signatures)}_p{len(dataset.papers)}"
         f"_n{len(dataset.name_tuples)}_r{int(dataset.compute_reference_features)}"
         f"_pre{int(getattr(dataset, 'preprocess', True))}_sf{int(skip_fasttext)}"
@@ -101,7 +64,14 @@ def _get_rust_featurizer(dataset: ANDData, write_cache: Optional[bool] = None) -
     if s2and_rust is None:
         raise RuntimeError("s2and_rust extension not built. Build with: " "maturin develop -m s2and_rust/Cargo.toml")
     featurizer = _RUST_FEATURIZER_CACHE.get(dataset)
-    if featurizer is None:
+    if featurizer is not None:
+        return featurizer
+
+    with _RUST_FEATURIZER_CACHE_LOCK:
+        featurizer = _RUST_FEATURIZER_CACHE.get(dataset)
+        if featurizer is not None:
+            return featurizer
+
         use_disk_cache = _env_flag("S2AND_RUST_FEATURIZER_DISK_CACHE", "1") and not _rust_prod_mode(dataset)
         cache_path = _rust_cache_path(dataset) if use_disk_cache else None
         if use_disk_cache and cache_path and os.path.exists(cache_path):
@@ -124,6 +94,7 @@ def _get_rust_featurizer(dataset: ANDData, write_cache: Optional[bool] = None) -
                 except Exception as e:  # pragma: no cover - disk cache is best-effort
                     logger.warning(f"Failed to save Rust featurizer cache at {cache_path}: {e}")
         _RUST_FEATURIZER_CACHE[dataset] = featurizer
+
     return featurizer
 
 

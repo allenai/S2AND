@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::Bound;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyModule};
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::f64;
@@ -1590,7 +1591,13 @@ impl RustFeaturizer {
         Ok(self.featurize_pair_data(s1, s2, p1, p2))
     }
 
-    fn featurize_pairs(&self, py: Python<'_>, pairs: Vec<(String, String)>) -> PyResult<Vec<Vec<f64>>> {
+    #[pyo3(signature = (pairs, num_threads = None))]
+    fn featurize_pairs(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+        num_threads: Option<usize>,
+    ) -> PyResult<Vec<Vec<f64>>> {
         for (sig_id1, sig_id2) in pairs.iter() {
             let s1 = self
                 .signatures
@@ -1608,16 +1615,28 @@ impl RustFeaturizer {
             }
         }
         let feats = py.allow_threads(|| {
-            pairs
-                .par_iter()
-                .map(|(sig_id1, sig_id2)| {
-                    let s1 = self.signatures.get(sig_id1).unwrap();
-                    let s2 = self.signatures.get(sig_id2).unwrap();
-                    let p1 = self.papers.get(&s1.paper_id).unwrap();
-                    let p2 = self.papers.get(&s2.paper_id).unwrap();
-                    self.featurize_pair_data(s1, s2, p1, p2)
-                })
-                .collect::<Vec<_>>()
+            let compute = || {
+                pairs
+                    .par_iter()
+                    .map(|(sig_id1, sig_id2)| {
+                        let s1 = self.signatures.get(sig_id1).unwrap();
+                        let s2 = self.signatures.get(sig_id2).unwrap();
+                        let p1 = self.papers.get(&s1.paper_id).unwrap();
+                        let p2 = self.papers.get(&s2.paper_id).unwrap();
+                        self.featurize_pair_data(s1, s2, p1, p2)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if let Some(n) = num_threads {
+                let threads = n.max(1);
+                if let Ok(pool) = ThreadPoolBuilder::new().num_threads(threads).build() {
+                    pool.install(compute)
+                } else {
+                    compute()
+                }
+            } else {
+                compute()
+            }
         });
         Ok(feats)
     }
@@ -1838,7 +1857,8 @@ fn featurize_pair(
 }
 
 #[pymodule]
-fn s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(first_names_equal, m)?)?;
     m.add_function(wrap_pyfunction!(middle_initials_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(middle_names_equal, m)?)?;

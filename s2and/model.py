@@ -1116,11 +1116,15 @@ class Clusterer:
                 elif (signature, unassigned_signature) in partial_supervision:
                     label = partial_supervision[(signature, unassigned_signature)] - LARGE_INTEGER
                 elif self.use_default_constraints_as_supervision:
+                    # Explicit False: in this loop unassigned_signature is not in cluster_seeds_require,
+                    # so the "require" branch of get_constraint can never trigger anyway. This keeps
+                    # behavior identical while documenting the intent.
                     value = _get_constraint_value(
                         dataset,
                         unassigned_signature,
                         signature,
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                        incremental_dont_use_cluster_seeds=False,
                         rust_featurizer=rust_featurizer,
                         use_rust_constraints=use_rust_constraints,
                     )

@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 
 [lib]
-name = "s2and_rust"
+name = "_s2and_rust"
 crate-type = ["cdylib"]
 
 [dependencies]

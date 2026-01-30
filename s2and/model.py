@@ -523,7 +523,7 @@ class Clusterer:
             algo=partial(tpe.suggest, n_startup_jobs=5),
             max_evals=self.n_iter,
             trials=self.hyperopt_trials_store,
-            rstate=np.random.RandomState(self.random_state),
+            rstate=np.random.default_rng(self.random_state),
         )
         # hyperopt has some problems with hp.choice so we need to do this:
         assert self.hyperopt_trials_store is not None
@@ -1413,7 +1413,7 @@ class PairwiseModeler:
                 algo=tpe.suggest,
                 max_evals=self.n_iter,
                 trials=self.hyperopt_trials_store,
-                rstate=np.random.RandomState(self.random_state),
+                rstate=np.random.default_rng(self.random_state),
             )
             assert self.hyperopt_trials_store is not None
             trials_store = cast(Trials, self.hyperopt_trials_store)

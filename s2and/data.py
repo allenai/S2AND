@@ -171,7 +171,8 @@ class ANDData:
         signatures: path to the signatures json file (or the json object)
         papers: path to the papers information json file (or the json object)
         name: name of the dataset, used for caching computed features
-        mode: 'train' or 'inference'; if 'inference', everything related to splitting will be ignored
+        mode: 'train' or 'inference'; if 'inference', everything related to dataset
+            splitting will be ignored
         clusters: path to the clusters json file (or the json object)
         specter_embeddings: path to the specter embeddings pickle (or the dictionary object)
         cluster_seeds: path to the cluster seed json file (or the json object)

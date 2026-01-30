@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "s2and-rust"
+version = "0.2.0"
+description = "Rust extension for s2and"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
+
+[tool.maturin]
+bindings = "pyo3"
+python-source = "."
+module-name = "s2and_rust._s2and_rust"

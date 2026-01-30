@@ -3,9 +3,9 @@
 Run CI steps locally using the ACTIVE virtual environment.
 
 Order (matches your CI):
-  1) uv sync --all-extras --dev [--frozen if uv.lock exists]  (ACTIVE venv)
+  1) uv sync --extra dev [--frozen if uv.lock exists]  (ACTIVE venv)
   2) black checks via uvx --from black==24.8.0 ...
-  3) mypy via scripts/mypy.sh when bash is available; otherwise `uv run mypy`
+  3) mypy via scripts/mypy.sh when bash is available; otherwise `uv run --no-project mypy`
   4) pytest tests/ with coverage and PYTHONPATH=.
 
 Key fix: resolve repo root (pyproject.toml) and run all commands from there.
@@ -62,6 +62,25 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(cmd, check=True, cwd=str(REPO), env=env)
 
 
+def ensure_rust_on_path() -> None:
+    if shutil.which("cargo") or shutil.which("rustc"):
+        return
+    candidates: list[Path] = []
+    if os.name == "nt":
+        home = os.environ.get("USERPROFILE")
+        if home:
+            candidates.append(Path(home) / ".cargo" / "bin")
+    else:
+        home = os.environ.get("HOME")
+        if home:
+            candidates.append(Path(home) / ".cargo" / "bin")
+    for candidate in candidates:
+        if candidate.is_dir():
+            os.environ["PATH"] = f"{candidate}{os.pathsep}{os.environ.get('PATH', '')}"
+            if shutil.which("cargo") or shutil.which("rustc"):
+                return
+
+
 def run_black_on(paths: list[str]) -> None:
     uvx = uvx_exe()
     if uvx:
@@ -79,10 +98,14 @@ def run_black_on(paths: list[str]) -> None:
 def main() -> None:
     # 1) Sync deps into ACTIVE venv
     lock_present = (REPO / "uv.lock").exists()
-    sync_args = ["sync", "--active", "--all-extras", "--dev"]
+    sync_args = ["sync", "--active", "--extra", "dev"]
     if lock_present:
         sync_args.append("--frozen")
     run(uv_exe() + sync_args)
+
+    # 1.5) Build Rust extension (required for parity tests)
+    ensure_rust_on_path()
+    run(uv_exe() + ["run", "--active", "--no-project", "maturin", "develop", "-m", "s2and_rust/Cargo.toml"])
 
     # 2) Black checks (same targets/flags as CI)
     run_black_on(["s2and"])
@@ -91,11 +114,11 @@ def main() -> None:
         run_black_on([str(p.relative_to(REPO)) for p in script_files])
 
     # 3) mypy — run type checking commands directly
-    run(uv_exe() + ["run", "--active", "mypy", "s2and", "--ignore-missing-imports"])
+    run(uv_exe() + ["run", "--active", "--no-project", "mypy", "s2and", "--ignore-missing-imports"])
     script_files = sorted((REPO / "scripts").glob("*.py"))
     if script_files:
         script_paths = [str(p.relative_to(REPO)) for p in script_files]
-        run(uv_exe() + ["run", "--active", "mypy"] + script_paths + ["--ignore-missing-imports"])
+        run(uv_exe() + ["run", "--active", "--no-project", "mypy"] + script_paths + ["--ignore-missing-imports"])
 
     # 4) pytest — coverage flags, PYTHONPATH=.
     env = os.environ.copy()
@@ -105,6 +128,7 @@ def main() -> None:
         + [
             "run",
             "--active",
+            "--no-project",
             "pytest",
             "tests/",
             "--cov=s2and",

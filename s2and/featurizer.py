@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from s2and.data import ANDData
 from s2and.mp import UniversalPool
+from s2and import feature_port
 from s2and.consts import (
     CACHE_ROOT,
     NUMPY_NAN,
@@ -40,6 +41,43 @@ logger = logging.getLogger("s2and")
 TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 
 CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
+
+# Environment configuration caches (read once per process for consistency)
+_ENV_TRUE_VALUES = {"1", "true", "yes"}
+_USE_RUST_FEATURIZER_CACHE: Optional[bool] = None
+_USE_RUST_BATCH_CACHE: Optional[bool] = None
+_RUST_BATCH_THRESHOLD_CACHE: Optional[int] = None
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).lower() in _ENV_TRUE_VALUES
+
+
+def _use_rust_featurizer() -> bool:
+    global _USE_RUST_FEATURIZER_CACHE
+    if _USE_RUST_FEATURIZER_CACHE is None:
+        _USE_RUST_FEATURIZER_CACHE = _env_flag("S2AND_USE_RUST_FEATURIZER", "1")
+    return _USE_RUST_FEATURIZER_CACHE
+
+
+def _use_rust_batch() -> bool:
+    global _USE_RUST_BATCH_CACHE
+    if _USE_RUST_BATCH_CACHE is None:
+        _USE_RUST_BATCH_CACHE = _env_flag("S2AND_RUST_BATCH", "1")
+    return _USE_RUST_BATCH_CACHE
+
+
+def _rust_batch_threshold() -> int:
+    global _RUST_BATCH_THRESHOLD_CACHE
+    if _RUST_BATCH_THRESHOLD_CACHE is None:
+        threshold_str = os.environ.get("S2AND_RUST_BATCH_THRESHOLD", "0")
+        try:
+            threshold = int(threshold_str)
+        except ValueError:
+            threshold = 0
+        _RUST_BATCH_THRESHOLD_CACHE = max(0, threshold)
+    return _RUST_BATCH_THRESHOLD_CACHE
+
 
 # ── constants for cache writes ───────────────────────────
 INCREMENTAL_WRITE_THRESHOLD = 1000  # only write incrementally if we have at least this many new features
@@ -422,6 +460,11 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
 
     features = []
 
+    use_rust = _use_rust_featurizer()
+    if use_rust and feature_port.s2and_rust is not None:
+        features = feature_port.featurize_pair_rust(global_dataset, work_input[0], work_input[1])  # type: ignore
+        return features, index
+
     signature_1 = global_dataset.signatures[work_input[0]]  # type: ignore
     signature_2 = global_dataset.signatures[work_input[1]]  # type: ignore
 
@@ -772,7 +815,32 @@ def many_pairs_featurize(
         nameless_indices_to_use: List[int] = sorted(list(nameless_indices_to_use_set))
 
     if cache_changed:
-        if n_jobs > 1:
+        use_rust = _use_rust_featurizer()
+        use_rust_batch = _use_rust_batch()
+        rust_batch_threshold = _rust_batch_threshold()
+        if rust_batch_threshold > 0 and len(pieces_of_work) < rust_batch_threshold:
+            use_rust_batch = False
+            logger.info(
+                f"Rust batch mode disabled for small batch (size={len(pieces_of_work)} < {rust_batch_threshold})"
+            )
+        did_rust_batch = False
+        if use_rust and use_rust_batch and feature_port.s2and_rust is not None and len(pieces_of_work) > 0:
+            logger.info(f"Making {len(pieces_of_work)} feature vectors in Rust batch mode")
+            write_cache_flag = use_cache if use_cache else None
+            rust_featurizer = feature_port._get_rust_featurizer(dataset, write_cache=write_cache_flag)
+            rust_pairs = [pair for pair, _ in pieces_of_work]
+            num_threads = max(1, int(n_jobs))
+            rust_features = rust_featurizer.featurize_pairs(rust_pairs, num_threads=num_threads)
+            for feature_output, (_, index) in zip(rust_features, pieces_of_work):
+                if use_cache:
+                    cache_key = featurizer_info.feature_cache_key(signature_pairs[index])
+                    cached_features["features"][cache_key] = feature_output
+                    cached_features["__new_features__"][cache_key] = feature_output
+                    new_features_count += 1
+                features[index, :] = feature_output
+            did_rust_batch = True
+
+        if not did_rust_batch and n_jobs > 1:
             if use_cache:
                 logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in parallel")
             else:
@@ -795,7 +863,7 @@ def many_pairs_featurize(
 
                         features[index, :] = feature_output
                         pbar.update()
-        else:
+        elif not did_rust_batch:
             if use_cache:
                 logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in serial")
             else:

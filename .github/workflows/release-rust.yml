@@ -83,12 +83,30 @@ jobs:
             with open(path, "rb") as f:
               return tomllib.load(f)
 
-          def get_project_version(toml_obj, path):
+          def read_version_file(rev=None):
+            version_path = "VERSION"
+            if rev:
+              try:
+                data = subprocess.check_output(["git", "show", f"{rev}:{version_path}"], text=True)
+              except subprocess.CalledProcessError:
+                return None
+              return data.strip()
+            if not os.path.exists(version_path):
+              return None
+            with open(version_path, "r", encoding="utf-8") as f:
+              return f.read().strip()
+
+          def get_project_version(toml_obj, path, rev=None):
             if toml_obj is None:
               return None
             try:
               return toml_obj["project"]["version"]
             except KeyError:
+              # Allow dynamic version from VERSION for the root pyproject.toml.
+              if path == "pyproject.toml":
+                version = read_version_file(rev)
+                if version:
+                  return version
               raise SystemExit(f"Missing [project].version in {path}")
 
           def get_cargo_version(toml_obj, path):
@@ -112,7 +130,11 @@ jobs:
               f"Rust version mismatch: pyproject={cur_rust_py_ver} cargo={cur_rust_cargo_ver}"
             )
 
-          before_py_ver = get_project_version(read_toml_at("pyproject.toml", before), "pyproject.toml") if before else None
+          before_py_ver = (
+            get_project_version(read_toml_at("pyproject.toml", before), "pyproject.toml", before)
+            if before
+            else None
+          )
           before_rust_py_ver = (
             get_project_version(read_toml_at("s2and_rust/pyproject.toml", before), "s2and_rust/pyproject.toml")
             if before

@@ -27,6 +27,12 @@ def main() -> None:
         default=None,
         help="Set 1 to force Rust path, 0 to force Python path (default: env settings).",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Run a single dataset by name (default: run all).",
+    )
     args = parser.parse_args()
 
     _apply_rust_flags(args.use_rust)
@@ -53,6 +59,10 @@ def main() -> None:
         "qian",
         "zbmath",
     ]
+    if args.dataset is not None:
+        if args.dataset not in datasets:
+            raise ValueError(f"Unknown dataset '{args.dataset}'. Options: {', '.join(datasets)}")
+        datasets = [args.dataset]
 
     features_to_use = [
         "name_similarity",

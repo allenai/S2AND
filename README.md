@@ -73,6 +73,32 @@ To run the entire CI suite mimicking the GH Actions, use the following command:
 python scripts\run_ci_locally.py
 ```
 
+## Version bumping
+Versioning is centralized in the `VERSION` file (single source of truth). When you update it, we sync the Python/Rust
+manifests and regenerate lockfiles.
+
+One-time setup for hooks (recommended):
+```bash
+git config core.hooksPath .githooks
+```
+
+Workflow:
+```bash
+# 1) edit VERSION
+echo 0.30.0 > VERSION
+
+# 2) sync manifests
+uv run python scripts/sync_version.py
+
+# 3) regenerate lockfiles
+uv sync --extra dev
+uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml
+```
+
+Notes:
+- The pre-commit hook only runs when `VERSION` is staged and will auto-sync + regenerate lockfiles if needed.
+- `uv.lock` and `s2and_rust/Cargo.lock` are generated files and will contain the version after syncing.
+
 ## Running scripts
 When running scripts from the repo, prefer `uv run --no-project` so the installed packages (including the Rust extension)
 resolve from site-packages. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.

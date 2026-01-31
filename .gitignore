@@ -18,6 +18,7 @@ data/test/
 data/zbmath/
 data/lid.176.bin
 data/LICENSE.txt
+pypitoken
 
 # C extensions
 *.so

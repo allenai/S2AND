@@ -1219,7 +1219,7 @@ wheels = [
 
 [[package]]
 name = "s2and"
-version = "0.2.0"
+version = "0.30.0"
 source = { editable = "." }
 dependencies = [
     { name = "awscli" },
@@ -1302,7 +1302,7 @@ provides-extras = ["dev", "rust"]
 
 [[package]]
 name = "s2and-rust"
-version = "0.2.0"
+version = "0.30.0"
 source = { directory = "s2and_rust" }
 
 [[package]]

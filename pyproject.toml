@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "s2and"
-version = "0.30.0"
+dynamic = ["version"]
 description = "S2AND"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -61,6 +61,9 @@ rust = [
 
 [tool.setuptools.packages.find]
 include = ["s2and*"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
 
 # ---- Tooling config ----
 [tool.black]

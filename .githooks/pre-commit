@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+# Only run if VERSION is staged for commit.
+if ! git diff --cached --name-only --diff-filter=ACM | grep -qx "VERSION"; then
+  exit 0
+fi
+
+VERSION_FILES=(
+  "VERSION"
+  "pyproject.toml"
+  "s2and_rust/pyproject.toml"
+  "s2and_rust/Cargo.toml"
+  "uv.lock"
+  "s2and_rust/Cargo.lock"
+)
+
+if uv run python scripts/sync_version.py --check; then
+  exit 0
+fi
+
+echo "sync_version out of date; syncing manifests and lockfiles..."
+uv run python scripts/sync_version.py
+uv sync --extra dev
+uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml
+
+# Stage version-related files so the commit includes the updates.
+git add "${VERSION_FILES[@]}"

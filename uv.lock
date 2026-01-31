@@ -1219,7 +1219,6 @@ wheels = [
 
 [[package]]
 name = "s2and"
-version = "0.30.0"
 source = { editable = "." }
 dependencies = [
     { name = "awscli" },

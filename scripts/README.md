@@ -29,3 +29,4 @@ Other scripts in this folder (mostly have `use_cache=True`):
 
 Continuous integration scripts:
 - `run_ci_locally.py`: Runs the CI for the repo locally
+- `sync_version.py`: Syncs versions from `VERSION` into package manifests

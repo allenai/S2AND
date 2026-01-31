@@ -97,7 +97,9 @@ def main() -> None:
     sync_version(version)
     verify_version(version)
     print(f"Updated versions to {version}")
-    print("Next: run `uv sync --extra dev` and `uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml`.")
+    print(
+        "Next: run `uv sync --extra dev` and `uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml`."
+    )
 
 
 if __name__ == "__main__":

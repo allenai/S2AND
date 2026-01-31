@@ -118,7 +118,7 @@ fn extract_set_str(obj: &Bound<'_, PyAny>) -> PyResult<Option<HashSet<String>>> 
         return Ok(None);
     }
     let mut out = HashSet::new();
-    for item in PyIterator::from_bound_object(obj)? {
+    for item in PyIterator::from_object(obj)? {
         let v: String = item?.extract()?;
         out.insert(v);
     }
@@ -134,7 +134,7 @@ fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)
         return Ok(HashSet::new());
     }
     let mut out = HashSet::new();
-    for item in PyIterator::from_bound_object(obj)? {
+    for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
         out.insert((a, b));
@@ -147,7 +147,7 @@ fn extract_name_tuples_map(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, H
         return Ok(HashMap::new());
     }
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for item in PyIterator::from_bound_object(obj)? {
+    for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
         out.entry(a).or_insert_with(HashSet::new).insert(b);
@@ -182,7 +182,7 @@ fn extract_set_i64(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<i64>> {
         return Ok(HashSet::new());
     }
     let mut out = HashSet::new();
-    for item in PyIterator::from_bound_object(obj)? {
+    for item in PyIterator::from_object(obj)? {
         let v: i64 = item?.extract()?;
         out.insert(v);
     }
@@ -305,7 +305,7 @@ fn counter_jaccard(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<
     let mut intersection: f64 = 0.0;
 
     let items1 = c1.call_method0("items")?;
-    for item in PyIterator::from_bound_object(&items1)? {
+    for item in PyIterator::from_object(&items1)? {
         let tuple = item?;
         let key: String = tuple.get_item(0)?.extract()?;
         let v1_any = tuple.get_item(1)?;
@@ -317,7 +317,7 @@ fn counter_jaccard(counter1: Option<&Bound<'_, PyAny>>, counter2: Option<&Bound<
     }
 
     let values2 = c2.call_method0("values")?;
-    for v in PyIterator::from_bound_object(&values2)? {
+    for v in PyIterator::from_object(&values2)? {
         let v_any = v?;
         let v_f: f64 = v_any.extract()?;
         sum2 += v_f;
@@ -348,7 +348,7 @@ fn set_jaccard(set1: Option<&Bound<'_, PyAny>>, set2: Option<&Bound<'_, PyAny>>)
         return Ok(f64::NAN);
     }
     let mut intersection: i64 = 0;
-    for item in PyIterator::from_bound_object(s1)? {
+    for item in PyIterator::from_object(s1)? {
         let obj = item?;
         if s2.contains(obj)? {
             intersection += 1;

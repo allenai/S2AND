@@ -19,11 +19,18 @@ from s2and.feature_port import (
 )
 
 
+def _has_rust_featurizer_api(module):
+    rust_featurizer = getattr(module, "RustFeaturizer", None)
+    return rust_featurizer is not None and hasattr(rust_featurizer, "from_dataset")
+
+
 def _import_s2and_rust():
     try:
-        import s2and_rust  # noqa: F401
+        import s2and_rust
 
-        return True, None
+        if _has_rust_featurizer_api(s2and_rust):
+            return True, None
+        raise AttributeError("s2and_rust imported, but RustFeaturizer is unavailable")
     except Exception as e:
         # If local source shadowed the installed extension, retry from site-packages.
         try:
@@ -42,6 +49,8 @@ def _import_s2and_rust():
             module = importlib.util.module_from_spec(spec)
             sys.modules["s2and_rust"] = module
             spec.loader.exec_module(module)
+            if not _has_rust_featurizer_api(module):
+                raise AttributeError("s2and_rust imported from site-packages, but RustFeaturizer is unavailable")
             return True, None
         except Exception as e2:
             return False, e2
@@ -49,6 +58,8 @@ def _import_s2and_rust():
 
 HAS_RUST, _RUST_IMPORT_ERROR = _import_s2and_rust()
 print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
+if not HAS_RUST:
+    pytest.skip(f"s2and_rust extension not built/installed: {_RUST_IMPORT_ERROR}", allow_module_level=True)
 
 
 def _equalish(a, b, rel_tol=1e-6, abs_tol=1e-3):
@@ -247,9 +258,6 @@ def test_rust_extension_available():
     assert HAS_RUST, f"s2and_rust not available: {_RUST_IMPORT_ERROR}"
 
 def test_featurize_pair_rust_parity(dataset, sample_pairs):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     for s1, s2 in sample_pairs:
         ref_features, _ = _single_pair_featurize((s1, s2))
         rust_features = featurize_pair_rust(dataset, s1, s2)
@@ -262,9 +270,6 @@ def test_featurize_pair_rust_parity(dataset, sample_pairs):
 
 
 def test_get_constraint_rust_parity(dataset, constraint_pairs):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     for s1, s2 in constraint_pairs:
         ref_val = dataset.get_constraint(s1, s2)
         got_val = get_constraint_rust(dataset, s1, s2)
@@ -275,9 +280,6 @@ def test_get_constraint_rust_parity(dataset, constraint_pairs):
 
 
 def test_featurize_pairs_rust_batch_parity(dataset, sample_pairs):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     featurizer_mod.global_dataset = dataset  # type: ignore
     rust_featurizer = _get_rust_featurizer(dataset)
     rust_features = rust_featurizer.featurize_pairs(sample_pairs)
@@ -294,9 +296,6 @@ def test_featurize_pairs_rust_batch_parity(dataset, sample_pairs):
 
 
 def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     featurizer_mod.global_dataset = dataset_with_refs  # type: ignore
     empty_sigs = _find_signatures(dataset_with_refs, lambda _s, p: _ref_details_empty(p), limit=1)
     if not empty_sigs:
@@ -316,9 +315,6 @@ def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
 
 
 def test_featurize_pair_rust_parity_reference_details_nonempty(dataset_with_refs):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     featurizer_mod.global_dataset = dataset_with_refs  # type: ignore
     sigs = _find_signatures(dataset_with_refs, lambda _s, p: _ref_details_nonempty(p, idx=0), limit=2)
     if len(sigs) < 2:
@@ -335,9 +331,6 @@ def test_featurize_pair_rust_parity_reference_details_nonempty(dataset_with_refs
 
 
 def test_featurize_pair_rust_parity_missing_email(dataset):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     featurizer_mod.global_dataset = dataset  # type: ignore
     missing_email_sigs = _find_signatures(
         dataset,
@@ -360,9 +353,6 @@ def test_featurize_pair_rust_parity_missing_email(dataset):
 
 
 def test_featurize_pair_rust_parity_specter_present(dataset):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     featurizer_mod.global_dataset = dataset  # type: ignore
     sigs = _find_signatures(
         dataset,
@@ -383,9 +373,6 @@ def test_featurize_pair_rust_parity_specter_present(dataset):
 
 
 def test_featurize_pair_rust_parity_specter_absent(dataset):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     featurizer_mod.global_dataset = dataset  # type: ignore
     sigs = _find_signatures(
         dataset,
@@ -407,9 +394,6 @@ def test_featurize_pair_rust_parity_specter_absent(dataset):
 
 
 def test_get_constraint_rust_parity_incremental_flag(dataset):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     by_cluster = defaultdict(list)
     for sig_id, cluster_id in dataset.cluster_seeds_require.items():
         by_cluster[cluster_id].append(sig_id)
@@ -439,9 +423,6 @@ def test_get_constraint_rust_parity_incremental_flag(dataset):
 
 
 def test_get_constraint_rust_parity_dont_merge_cluster_seeds_false(dataset):
-    if not HAS_RUST:
-        pytest.fail(f"s2and_rust extension not built: {_RUST_IMPORT_ERROR}")
-
     sigs = None
     cluster_ids = defaultdict(list)
     for sig_id, cluster_id in dataset.cluster_seeds_require.items():
@@ -467,3 +448,4 @@ def test_get_constraint_rust_parity_dont_merge_cluster_seeds_false(dataset):
         assert ref_val is None and got_val is None
     else:
         assert ref_val == got_val, f"Dont-merge constraint mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
+

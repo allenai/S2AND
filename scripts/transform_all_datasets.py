@@ -157,13 +157,15 @@ def transform_signature_file(full_file_name_source: str):
             assert author_info["emails"].startswith("{")
             assert author_info["emails"].endswith("}")
             emails = EMAIL_SPECIAL_CASES.get(author_info["emails"], author_info["emails"])
-            emails_list: List[str] = list(set(re.split(r"\s|,", emails.strip('{"').strip('"}'))))
+            raw_emails = [email for email in re.split(r"\s|,", emails.strip('{"').strip('"}')) if email]
+            # Keep deterministic order from source while dropping duplicates.
+            emails_list: List[str] = list(dict.fromkeys(raw_emails))
             assert not any(re.search(r"[^\\]\"", emails) for emails in emails_list), emails_list
             if len(emails_list) != 1:
                 print(
                     f"WARNING: skipping poorly formatted email {author_info['emails']} for {author_info['first']} {author_info['last']} on {signature_info['paperid']}"
                 )
-            output_author_info["email"] = emails_list[0]
+            output_author_info["email"] = emails_list[0] if len(emails_list) > 0 else None
 
         if is_empty_value(author_info["affiliations"]):
             output_author_info["affiliations"] = []

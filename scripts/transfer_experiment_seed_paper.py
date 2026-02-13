@@ -148,6 +148,11 @@ def summary_features_analysis(
 
     feature_summary = []
 
+    def _safe_mean(values):
+        if len(values) == 0:
+            return float("nan")
+        return float(sum(values) / len(values))
+
     for s2and_feature_facet, s2_feature_facet in zip(
         [
             union_firstname_f1,
@@ -168,10 +173,10 @@ def summary_features_analysis(
             union_s2_coauthors_f1,
         ],
     ):
-        s2and_pres_avg = sum(s2and_feature_facet[1]) / len(s2and_feature_facet[1])
-        s2and_abs_avg = sum(s2and_feature_facet[0]) / len(s2and_feature_facet[0])
-        s2_pres_avg = sum(s2_feature_facet[1]) / len(s2_feature_facet[1])
-        s2_abs_avg = sum(s2_feature_facet[0]) / len(s2_feature_facet[0])
+        s2and_pres_avg = _safe_mean(s2and_feature_facet[1])
+        s2and_abs_avg = _safe_mean(s2and_feature_facet[0])
+        s2_pres_avg = _safe_mean(s2_feature_facet[1])
+        s2_abs_avg = _safe_mean(s2_feature_facet[0])
 
         feature_summary.append(
             [
@@ -225,13 +230,31 @@ def disparity_analysis(
         # skipping "-" which is present in gender
         if facet == "-":
             continue
+        s2_facet_vals = comb_s2_facet_f1.get(facet, [])
+        if len(comb_s2and_facet_f1[facet]) == 0 or len(s2_facet_vals) == 0:
+            continue
         s2and_average = sum(comb_s2and_facet_f1[facet]) / len(comb_s2and_facet_f1[facet])
-        s2_average = sum(comb_s2_facet_f1[facet]) / len(comb_s2_facet_f1[facet])
+        s2_average = sum(s2_facet_vals) / len(s2_facet_vals)
         keylist.append(facet[0:3])
         s2and_f1.append(s2and_average)
         s2_f1.append(s2_average)
 
     print("facet", keylist, s2and_f1, s2_f1)
+    if len(s2and_f1) == 0 or len(s2_f1) == 0:
+        return {
+            "S2AND std": np.nan,
+            "S2 std": np.nan,
+            "S2AND sum-diff": np.nan,
+            "S2 sum-diff": np.nan,
+            "S2AND max-perf-group": None,
+            "S2 max-perf-group": None,
+            "S2AND min-perf-group": None,
+            "S2 min-perf-group": None,
+            "S2AND max-perf": np.nan,
+            "S2 max-perf": np.nan,
+            "S2AND min-perf": np.nan,
+            "S2 min-perf": np.nan,
+        }
 
     s2and_deviation = np.std(s2and_f1)
     s2_deviation = np.std(s2_f1)
@@ -742,7 +765,9 @@ def main(
                     random_state=random_seed,
                     use_default_constraints_as_supervision=False,
                 )
-
+                union_clusterer.fit(anddatas)
+                logger.info("clusterer fit for " + str(dataset_name_tuple))
+                logger.info(f"{dataset_name_tuple} best clustering parameters: " + str(union_clusterer.best_params))
                 with open(
                     os.path.join(
                         DATA_DIR,
@@ -754,10 +779,6 @@ def main(
                     "wb",
                 ) as _pickle_file:
                     pickle.dump(union_clusterer, _pickle_file)
-
-                union_clusterer.fit(anddatas)
-                logger.info("clusterer fit for " + str(dataset_name_tuple))
-                logger.info(f"{dataset_name_tuple} best clustering parameters: " + str(union_clusterer.best_params))
 
             models: Dict[str, Any] = {}
             models["pairwise_modeler"] = union_classifier
@@ -1392,6 +1413,17 @@ if __name__ == "__main__":
 
     average_b3_f1_grid = copy.deepcopy(multi_b3_grid[0])
     average_pairwise_auroc_grid = copy.deepcopy(multi_pairwise_auroc_grid[0])
+    count_b3_grid = [[0 for _ in range(len(average_b3_f1_grid[0]))] for _ in range(len(average_b3_f1_grid))]
+    count_pairwise_grid = [
+        [0 for _ in range(len(average_pairwise_auroc_grid[0]))] for _ in range(len(average_pairwise_auroc_grid))
+    ]
+
+    for i in range(1, len(average_b3_f1_grid)):
+        for j in range(1, len(average_b3_f1_grid[0])):
+            if average_b3_f1_grid[i][j] is not None and average_b3_f1_grid[i][j] != "":
+                count_b3_grid[i][j] = 1
+            if average_pairwise_auroc_grid[i][j] is not None and average_pairwise_auroc_grid[i][j] != "":
+                count_pairwise_grid[i][j] = 1
 
     index = -1
     for b3, pairwise in zip(multi_b3_grid, multi_pairwise_auroc_grid):
@@ -1401,16 +1433,28 @@ if __name__ == "__main__":
         for i in range(1, len(average_b3_f1_grid)):
             for j in range(1, len(average_b3_f1_grid[0])):
                 if b3[i][j] is not None and b3[i][j] != "":
-                    average_b3_f1_grid[i][j] += b3[i][j]
+                    if count_b3_grid[i][j] == 0:
+                        average_b3_f1_grid[i][j] = b3[i][j]
+                    else:
+                        average_b3_f1_grid[i][j] += b3[i][j]
+                    count_b3_grid[i][j] += 1
                 if pairwise[i][j] is not None and pairwise[i][j] != "":
-                    average_pairwise_auroc_grid[i][j] += pairwise[i][j]
+                    if count_pairwise_grid[i][j] == 0:
+                        average_pairwise_auroc_grid[i][j] = pairwise[i][j]
+                    else:
+                        average_pairwise_auroc_grid[i][j] += pairwise[i][j]
+                    count_pairwise_grid[i][j] += 1
 
     for i in range(1, len(average_b3_f1_grid)):
         for j in range(1, len(average_b3_f1_grid[0])):
-            if average_b3_f1_grid[i][j] is not None and average_b3_f1_grid[i][j] != "":
-                average_b3_f1_grid[i][j] = average_b3_f1_grid[i][j] / len(multi_b3_grid)
-            if average_pairwise_auroc_grid[i][j] is not None and average_pairwise_auroc_grid[i][j] != "":
-                average_pairwise_auroc_grid[i][j] = average_pairwise_auroc_grid[i][j] / len(multi_pairwise_auroc_grid)
+            if count_b3_grid[i][j] > 0:
+                average_b3_f1_grid[i][j] = average_b3_f1_grid[i][j] / count_b3_grid[i][j]
+            else:
+                average_b3_f1_grid[i][j] = None
+            if count_pairwise_grid[i][j] > 0:
+                average_pairwise_auroc_grid[i][j] = average_pairwise_auroc_grid[i][j] / count_pairwise_grid[i][j]
+            else:
+                average_pairwise_auroc_grid[i][j] = None
 
     print("Average B3 F1:")
     b3_df = pd.DataFrame(average_b3_f1_grid)

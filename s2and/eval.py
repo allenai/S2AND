@@ -139,15 +139,18 @@ def incremental_cluster_eval(
     # use entire block of signatures for predictions
     # NOTE: train/val/test block dicts can have overlapping signatures in the incremental case
     eval_block_dict_full = {}
+    eval_block_dict_for_metrics: Dict[str, List[str]]
     if split == "test":
         for block_key, _ in test_block_dict.items():
             eval_block_dict_full[block_key] = block_dict[block_key]
         cluster_to_signatures = dataset.construct_cluster_to_signatures(test_block_dict)
+        eval_block_dict_for_metrics = test_block_dict
         for _, signatures in val_block_dict.items():
             for signature in signatures:
                 observed_signatures.add(signature)
     elif split == "val":
         cluster_to_signatures = dataset.construct_cluster_to_signatures(val_block_dict)
+        eval_block_dict_for_metrics = val_block_dict
         eval_block_dict_full = copy.deepcopy(val_block_dict)
         for block_key, signatures in train_block_dict.items():
             if block_key in eval_block_dict_full:
@@ -183,10 +186,10 @@ def incremental_cluster_eval(
     )
     metrics = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
     metrics["Cluster (P, R F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, eval_only_pred_clusters, test_block_dict, "clusters"
+        cluster_to_signatures, eval_only_pred_clusters, eval_block_dict_for_metrics, "clusters"
     )
     metrics["Cluster Macro (P, R, F1)"] = pairwise_precision_recall_fscore(
-        cluster_to_signatures, eval_only_pred_clusters, test_block_dict, "cmacro"
+        cluster_to_signatures, eval_only_pred_clusters, eval_block_dict_for_metrics, "cmacro"
     )
 
     return metrics, b3_metrics_per_signature
@@ -634,6 +637,15 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     intersections = {}
     per_signature_metrics = {}
     n_samples = len(tcset)
+    if n_samples == 0:
+        return (
+            np.round(0.0, 3),
+            np.round(0.0, 3),
+            np.round(0.0, 3),
+            per_signature_metrics,
+            [],
+            [],
+        )
 
     true_bigger_ratios, pred_bigger_ratios = [], []
     for item in list(tcset):
@@ -731,8 +743,9 @@ def cluster_precision_recall_fscore(
             for j in range(i + 1, len(sort_sign)):
                 syspairs.add((sort_sign[i], sort_sign[j]))
 
-    precision: float = len(goldpairs.intersection(syspairs)) / len(syspairs)
-    recall: float = len(goldpairs.intersection(syspairs)) / len(goldpairs)
+    overlap = len(goldpairs.intersection(syspairs))
+    precision = overlap / len(syspairs) if len(syspairs) > 0 else 0.0
+    recall = overlap / len(goldpairs) if len(goldpairs) > 0 else 0.0
 
     return precision, recall, f1_score(precision, recall)
 
@@ -788,6 +801,8 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
         return np.round(precision, 3), np.round(recall, 3), np.round(f1, 3)
 
     elif strategy == "cmacro":
+        if len(test_block) == 0:
+            return np.round(0.0, 3), np.round(0.0, 3), np.round(0.0, 3)
         mprecision = 0
         mrecall = 0
         mf1 = 0

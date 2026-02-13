@@ -628,6 +628,32 @@ if __name__ == "__main__":
     average_pairwise_auroc_grid = copy.deepcopy(multi_pairwise_auroc_grid[0])
     average_pairwise_class_f1_grid = copy.deepcopy(multi_pairwise_class_f1_grid[0])
     average_class_ap_grid = copy.deepcopy(multi_average_precision_grid[0])
+    count_b3_grid = [[0 for _ in range(len(average_b3_f1_grid[0]))] for _ in range(len(average_b3_f1_grid))]
+    count_macro_f1_grid = [
+        [0 for _ in range(len(average_pairwise_f1_macro_grid[0]))] for _ in range(len(average_pairwise_f1_macro_grid))
+    ]
+    count_auroc_grid = [
+        [0 for _ in range(len(average_pairwise_auroc_grid[0]))] for _ in range(len(average_pairwise_auroc_grid))
+    ]
+    count_class_f1_grid = [
+        [0 for _ in range(len(average_pairwise_class_f1_grid[0]))] for _ in range(len(average_pairwise_class_f1_grid))
+    ]
+    count_ap_grid = [[0 for _ in range(len(average_class_ap_grid[0]))] for _ in range(len(average_class_ap_grid))]
+
+    for i in range(1, len(average_b3_f1_grid)):
+        for j in range(1, len(average_b3_f1_grid[0])):
+            if i != j:
+                continue
+            if average_b3_f1_grid[i][j] is not None:
+                count_b3_grid[i][j] = 1
+            if average_pairwise_f1_macro_grid[i][j] is not None:
+                count_macro_f1_grid[i][j] = 1
+            if average_pairwise_auroc_grid[i][j] is not None:
+                count_auroc_grid[i][j] = 1
+            if average_pairwise_class_f1_grid[i][j] is not None:
+                count_class_f1_grid[i][j] = 1
+            if average_class_ap_grid[i][j] is not None:
+                count_ap_grid[i][j] = 1
 
     index = -1
     for b3, macro_f1, pairwise, class_f1, ap in zip(
@@ -644,27 +670,58 @@ if __name__ == "__main__":
             for j in range(1, len(average_b3_f1_grid[0])):
                 if i == j:
                     if b3[i][j] is not None:
-                        average_b3_f1_grid[i][j] += b3[i][j]
+                        if count_b3_grid[i][j] == 0:
+                            average_b3_f1_grid[i][j] = b3[i][j]
+                        else:
+                            average_b3_f1_grid[i][j] += b3[i][j]
+                        count_b3_grid[i][j] += 1
                     if macro_f1[i][j] is not None:
-                        average_pairwise_f1_macro_grid[i][j] += macro_f1[i][j]
-                    average_pairwise_auroc_grid[i][j] += pairwise[i][j]
-                    average_pairwise_class_f1_grid[i][j] += class_f1[i][j]
-                    average_class_ap_grid[i][j] += ap[i][j]
+                        if count_macro_f1_grid[i][j] == 0:
+                            average_pairwise_f1_macro_grid[i][j] = macro_f1[i][j]
+                        else:
+                            average_pairwise_f1_macro_grid[i][j] += macro_f1[i][j]
+                        count_macro_f1_grid[i][j] += 1
+                    if pairwise[i][j] is not None:
+                        if count_auroc_grid[i][j] == 0:
+                            average_pairwise_auroc_grid[i][j] = pairwise[i][j]
+                        else:
+                            average_pairwise_auroc_grid[i][j] += pairwise[i][j]
+                        count_auroc_grid[i][j] += 1
+                    if class_f1[i][j] is not None:
+                        if count_class_f1_grid[i][j] == 0:
+                            average_pairwise_class_f1_grid[i][j] = class_f1[i][j]
+                        else:
+                            average_pairwise_class_f1_grid[i][j] += class_f1[i][j]
+                        count_class_f1_grid[i][j] += 1
+                    if ap[i][j] is not None:
+                        if count_ap_grid[i][j] == 0:
+                            average_class_ap_grid[i][j] = ap[i][j]
+                        else:
+                            average_class_ap_grid[i][j] += ap[i][j]
+                        count_ap_grid[i][j] += 1
 
     for i in range(1, len(average_b3_f1_grid)):
         for j in range(1, len(average_b3_f1_grid[0])):
             if i == j:
-                if average_b3_f1_grid[i][j] is not None:
-                    average_b3_f1_grid[i][j] = average_b3_f1_grid[i][j] / len(multi_b3_grid)
-                if average_pairwise_f1_macro_grid[i][j] is not None:
-                    average_pairwise_f1_macro_grid[i][j] = average_pairwise_f1_macro_grid[i][j] / len(
-                        multi_pairwise_macro_f1_grid
-                    )
-                average_pairwise_auroc_grid[i][j] = average_pairwise_auroc_grid[i][j] / len(multi_pairwise_auroc_grid)
-                average_pairwise_class_f1_grid[i][j] = average_pairwise_class_f1_grid[i][j] / len(
-                    multi_pairwise_class_f1_grid
+                average_b3_f1_grid[i][j] = (
+                    average_b3_f1_grid[i][j] / count_b3_grid[i][j] if count_b3_grid[i][j] > 0 else None
                 )
-                average_class_ap_grid[i][j] = average_class_ap_grid[i][j] / len(multi_average_precision_grid)
+                average_pairwise_f1_macro_grid[i][j] = (
+                    average_pairwise_f1_macro_grid[i][j] / count_macro_f1_grid[i][j]
+                    if count_macro_f1_grid[i][j] > 0
+                    else None
+                )
+                average_pairwise_auroc_grid[i][j] = (
+                    average_pairwise_auroc_grid[i][j] / count_auroc_grid[i][j] if count_auroc_grid[i][j] > 0 else None
+                )
+                average_pairwise_class_f1_grid[i][j] = (
+                    average_pairwise_class_f1_grid[i][j] / count_class_f1_grid[i][j]
+                    if count_class_f1_grid[i][j] > 0
+                    else None
+                )
+                average_class_ap_grid[i][j] = (
+                    average_class_ap_grid[i][j] / count_ap_grid[i][j] if count_ap_grid[i][j] > 0 else None
+                )
 
     print("Average B3 F1:")
     b3_df = pd.DataFrame(average_b3_f1_grid)

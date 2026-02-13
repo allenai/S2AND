@@ -141,7 +141,7 @@ class FeaturizationInfo:
     Class to store information about how to generate and cache features
 
     Inputs:
-        features_to_use: List[str[]]
+        features_to_use: List[str]
             list of feature types to use
         featurizer_version: int
             What version of the featurizer we are on. This should be
@@ -151,24 +151,26 @@ class FeaturizationInfo:
 
     def __init__(
         self,
-        features_to_use: List[str] = [
-            "name_similarity",
-            "affiliation_similarity",
-            "email_similarity",
-            "coauthor_similarity",
-            "venue_similarity",
-            "year_diff",
-            "title_similarity",
-            "reference_features",
-            "misc_features",
-            "name_counts",
-            "embedding_similarity",
-            "journal_similarity",
-            "advanced_name_similarity",
-        ],
+        features_to_use: Optional[List[str]] = None,
         featurizer_version: int = FEATURIZER_VERSION,
     ):
-        self.features_to_use = features_to_use
+        if features_to_use is None:
+            features_to_use = [
+                "name_similarity",
+                "affiliation_similarity",
+                "email_similarity",
+                "coauthor_similarity",
+                "venue_similarity",
+                "year_diff",
+                "title_similarity",
+                "reference_features",
+                "misc_features",
+                "name_counts",
+                "embedding_similarity",
+                "journal_similarity",
+                "advanced_name_similarity",
+            ]
+        self.features_to_use = list(features_to_use)
 
         self.feature_group_to_index = {
             "name_similarity": [0, 1, 2, 3, 4, 5],

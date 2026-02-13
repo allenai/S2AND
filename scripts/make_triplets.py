@@ -204,27 +204,25 @@ def generate_block_rankformat(
             new_negs.append(x)
         negatives = new_negs
 
+        hard_negatives_target = num_hard_negatives
+        random_negatives_target = num_random_negatives
         # Try to keep ratio for papers that don't have enough negatives
-        if len(negatives) < (num_hard_negatives + num_random_negatives):
-            s = num_hard_negatives + num_random_negatives
-            num_hard_negatives = num_hard_negatives // s
-            num_random_negatives = num_random_negatives // s
-
-            # If rounding down reduced total negatives, give the remainder to random
-            r = len(negatives) - (num_hard_negatives + num_random_negatives)
-            num_random_negatives += r
+        total_requested = hard_negatives_target + random_negatives_target
+        if total_requested > 0 and len(negatives) < total_requested:
+            hard_negatives_target = int((len(negatives) * hard_negatives_target) / total_requested)
+            random_negatives_target = len(negatives) - hard_negatives_target
 
         hard_negatives = []
-        if num_hard_negatives != 0:
+        if hard_negatives_target != 0:
             negatives.sort(reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg))
-            hard_negatives = negatives[:num_hard_negatives]
-            negatives = negatives[num_hard_negatives:]
+            hard_negatives = negatives[:hard_negatives_target]
+            negatives = negatives[hard_negatives_target:]
 
         random_negatives = []
-        if num_random_negatives != 0:
+        if random_negatives_target != 0:
             rng.shuffle(negatives)
-            random_negatives = negatives[:num_random_negatives]
-            negatives = negatives[num_random_negatives:]
+            random_negatives = negatives[:random_negatives_target]
+            negatives = negatives[random_negatives_target:]
 
         negatives = hard_negatives + random_negatives
         rng.shuffle(negatives)

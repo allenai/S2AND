@@ -61,35 +61,53 @@ def sampling(
 
     random.seed(random_seed)
 
+    all_candidates = (
+        same_name_different_cluster
+        + different_name_same_cluster
+        + same_name_same_cluster
+        + different_name_different_cluster
+    )
+    target_size = min(sample_size, len(all_candidates))
+    if target_size <= 0:
+        return []
+
     if balanced_homonyms_and_synonyms:
-        same_name_different_cluster_pairs = random.sample(
+        buckets = [
             same_name_different_cluster,
-            min(len(same_name_different_cluster), math.ceil(sample_size / 4)),
-        )
-        different_name_same_cluster_pairs = random.sample(
             different_name_same_cluster,
-            min(len(different_name_same_cluster), math.ceil(sample_size / 4)),
-        )
-        same_name_same_cluster_pairs = random.sample(
             same_name_same_cluster,
-            min(len(same_name_same_cluster), math.ceil(sample_size / 4)),
-        )
-        different_name_different_cluster_pairs = random.sample(
             different_name_different_cluster,
-            min(len(different_name_different_cluster), math.ceil(sample_size / 4)),
-        )
-        pairs = (
-            same_name_different_cluster_pairs
-            + different_name_same_cluster_pairs
-            + same_name_same_cluster_pairs
-            + different_name_different_cluster_pairs
-        )
+        ]
+        per_bucket_target = int(math.ceil(target_size / 4))
+        sampled_buckets = []
+        leftovers = []
+        for bucket in buckets:
+            take = min(len(bucket), per_bucket_target)
+            sampled = random.sample(bucket, take)
+            sampled_buckets.append(sampled)
+            sampled_set = set(sampled)
+            leftovers.extend([pair for pair in bucket if pair not in sampled_set])
+        pairs = [pair for sampled in sampled_buckets for pair in sampled]
+        if len(pairs) < target_size and len(leftovers) > 0:
+            pairs.extend(random.sample(leftovers, min(target_size - len(pairs), len(leftovers))))
     else:
         positive = same_name_same_cluster + different_name_same_cluster
         negative = same_name_different_cluster + different_name_different_cluster
-        pairs = random.sample(positive, min(len(positive), math.ceil(sample_size / 2))) + random.sample(
-            negative, min(len(negative), math.ceil(sample_size / 2))
-        )
+        pos_target = int(math.ceil(target_size / 2))
+        neg_target = target_size - pos_target
+
+        pos_sample = random.sample(positive, min(len(positive), pos_target))
+        neg_sample = random.sample(negative, min(len(negative), neg_target))
+        pairs = pos_sample + neg_sample
+
+        if len(pairs) < target_size:
+            pos_left = [pair for pair in positive if pair not in set(pos_sample)]
+            neg_left = [pair for pair in negative if pair not in set(neg_sample)]
+            leftovers = pos_left + neg_left
+            pairs.extend(random.sample(leftovers, min(target_size - len(pairs), len(leftovers))))
+
+    if len(pairs) > target_size:
+        pairs = random.sample(pairs, target_size)
 
     return random.sample(pairs, len(pairs))
 

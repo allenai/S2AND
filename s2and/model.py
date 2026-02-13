@@ -717,10 +717,12 @@ class Clusterer:
                         f"desired_memory_use: {desired_memory_use}",
                         f"actual_memory_usage: {actual_memory_usage}",
                     )
-                    if actual_memory_usage > desired_memory_use:
+                    if N <= 0:
+                        loop_batching_threshold = None  # type: ignore
+                    elif actual_memory_usage > desired_memory_use:
                         # we need to have a loop_batching_threshold such that
                         # loop_batching_threshold * N = desired_memory_use
-                        loop_batching_threshold = int(desired_memory_use / N)
+                        loop_batching_threshold = max(1, int(desired_memory_use / N))
                     else:
                         # already within memory limits using no batching
                         loop_batching_threshold = None  # type: ignore
@@ -1422,7 +1424,7 @@ class PairwiseModeler:
             self.estimator.set_params(**self.best_params)
         else:
             self.best_params = {}
-            self.hyperopt_trials_store == {}
+            self.hyperopt_trials_store = {}
 
         # refitting but only on training data so as not to leak anything
         self.classifier = self.estimator.fit(X_train, y_train)

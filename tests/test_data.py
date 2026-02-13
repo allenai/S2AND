@@ -74,11 +74,11 @@ class TestData(unittest.TestCase):
             train_block_dict, val_block_dict, test_block_dict
         )
         assert sum([int(pair[2]) for pair in train_pairs]) == 500
-        assert len(train_pairs) == 1000 and len(val_pairs) == 429 and len(test_pairs) == 376
+        assert len(train_pairs) == 1000 and len(val_pairs) == 500 and len(test_pairs) == 500
         assert (
             train_pairs[0] == ("4389", "4493", 0)
-            and val_pairs[0] == ("621", "636", 0)
-            and test_pairs[0] == ("2550", "2622", 0)
+            and val_pairs[0] == ("185", "197", 0)
+            and test_pairs[0] == ("2431", "2437", 1)
         )
 
         # Test adding the all test pairs flag to the test above
@@ -86,7 +86,7 @@ class TestData(unittest.TestCase):
         train_pairs, val_pairs, test_pairs = self.qian_dataset.split_pairs(
             train_block_dict, val_block_dict, test_block_dict
         )
-        assert len(train_pairs) == 1000, len(val_pairs) == 429 and len(test_pairs) == 7244
+        assert len(train_pairs) == 1000, len(val_pairs) == 500 and len(test_pairs) == 7244
 
     def test_blocks(self):
         original_blocks = self.dummy_dataset.get_original_blocks()

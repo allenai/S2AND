@@ -70,6 +70,7 @@ random_seed = 42
 n_jobs = 4
 
 TRAIN_FLAG = False
+MODEL = "production_model_v1.2.pickle"  # 1.0, 1.1, 1.2. 1.2 uses specter2. the rest user specter1
 
 # aminer has too much variance
 # medline is pairwise only
@@ -83,7 +84,7 @@ datasets = [
 ]
 
 # to train the pairwise model, we define which feature categories to use
-# here it is all of them
+# here it is all of them except reference model.
 features_to_use = [
     "name_similarity",
     "affiliation_similarity",
@@ -92,7 +93,7 @@ features_to_use = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
+    # "reference_features",
     "misc_features",
     "name_counts",
     "embedding_similarity",
@@ -114,16 +115,18 @@ nameless_featurization_info = FeaturizationInfo(
     features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
 )
 
-# this is the prod 1.1 model, which we may or may not retrain
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "production_model_v1.1.pickle"), "rb") as f:
+# this is the prod 1.2 model, which we may or may not retrain
+with open(os.path.join(PROJECT_ROOT_PATH, "data", MODEL), "rb") as f:
     clusterer = pickle.load(f)["clusterer"]
     clusterer.use_cache = False  # very important for this experiment!!!
 
 results = {}
 num_test_blocks = {}
 for specter_suffix in specter_suffixes:
+    print(f"=== specter_suffix: {specter_suffix} ===")
     cluster_metrics_all = []
     for dataset_name in datasets:
+        print(f"-- dataset: {dataset_name} --")
         anddata = ANDData(
             signatures=os.path.join(data_original, dataset_name, dataset_name + "_signatures.json"),
             papers=os.path.join(data_original, dataset_name, dataset_name + "_papers.json"),
@@ -207,6 +210,9 @@ for i in range(len(datasets)):
     print(f"Performance with SPECTERv1 data, on {datasets[i]} (B3): {result_specter1[i]['B3 (P, R, F1)']}")
     print(f"Performance with SPECTERv2 data, on {datasets[i]} (B3): {result_specter2[i]['B3 (P, R, F1)']}")
     print()
+
+if os.environ.get("S2AND_RUN_ITERATIVE_COMPARISON", "0").lower() not in {"1", "true", "yes"}:
+    raise SystemExit(0)
 
 
 """

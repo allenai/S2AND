@@ -266,11 +266,11 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
             "Subdividing the subblocks that could not be subdivided via middle names using SPECTER (and random subblocking)"
         )
     for key, sig_ids_loop in output_for_specter.items():
+        output_loop = {}
         if len(sig_ids_loop) <= maximum_size:
             # edge case where the subblock is already fine
             output_loop[key] = sig_ids_loop
         else:
-            output_loop = {}
             specter_clustering = cluster_with_specter(sig_ids_loop, anddata, target_subblock_size=maximum_size)
             # prepend the key to the specter_clustering keys
             for key_loop in list(specter_clustering.keys()):

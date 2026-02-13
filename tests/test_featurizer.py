@@ -42,6 +42,14 @@ class TestData(unittest.TestCase):
             if not both_nan:
                 self.assertAlmostEqual(array_1[i], array_2[i], msg=i)
 
+    def test_default_features_are_instance_isolated(self):
+        first = FeaturizationInfo()
+        first.features_to_use.remove("name_similarity")
+
+        second = FeaturizationInfo()
+        assert "name_similarity" in second.features_to_use
+        assert first.features_to_use is not second.features_to_use
+
     def test_featurizer(self):
         test_pairs = [
             ("3", "0", 0),

@@ -62,3 +62,30 @@ def test_pairwise_modeler_hyperopt_small():
 
     probs = modeler.predict_proba(X_val)
     assert probs.shape == (6, 2)
+
+
+def test_pairwise_modeler_resets_trials_when_search_space_empty():
+    rng = np.random.RandomState(1)
+    X_train = rng.normal(size=(12, 3))
+    y_train = np.array([0, 1] * 6)
+    X_val = rng.normal(size=(6, 3))
+    y_val = np.array([0, 1, 0, 1, 0, 1])
+
+    modeler = PairwiseModeler(
+        estimator=LogisticRegression(max_iter=50, solver="liblinear"),
+        search_space={"C": hp.uniform("C_reset_test", 0.1, 1.0)},
+        n_iter=3,
+        n_jobs=1,
+        random_state=1,
+    )
+
+    first_trials = modeler.fit(X_train, y_train, X_val, y_val)
+    assert isinstance(first_trials, Trials)
+    assert len(first_trials.trials) == 3
+
+    modeler.search_space = {}
+    second_trials = modeler.fit(X_train, y_train, X_val, y_val)
+
+    assert modeler.best_params == {}
+    assert second_trials == {}
+    assert modeler.hyperopt_trials_store == {}

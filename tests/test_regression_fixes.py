@@ -13,6 +13,7 @@ import s2and.subblocking as subblocking_module
 from s2and.eval import b3_precision_recall_fscore, incremental_cluster_eval, pairwise_precision_recall_fscore
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
+from s2and.runtime import RuntimeContext
 from s2and.sampling import sampling
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -196,7 +197,7 @@ def test_generate_block_rankformat_does_not_mutate_negative_targets_across_queri
 
 
 def test_transform_signature_file_handles_empty_email_field(tmp_path):
-    transform_module = _load_script_module("scripts/transform_all_datasets.py", "transform_all_datasets_regression")
+    transform_module = _load_script_module("scripts/archive/transform_all_datasets.py", "transform_all_datasets_regression")
 
     signatures = {
         "1": {
@@ -229,7 +230,7 @@ def test_transform_signature_file_handles_empty_email_field(tmp_path):
     ("script_path", "module_name"),
     [
         ("scripts/transfer_experiment_seed_paper.py", "transfer_seed_regression"),
-        ("scripts/transfer_experiment_internal.py", "transfer_internal_regression"),
+        ("scripts/internal/transfer_experiment_internal.py", "transfer_internal_regression"),
         ("scripts/custom_block_transfer_experiment_seed_paper.py", "transfer_custom_regression"),
     ],
 )
@@ -283,7 +284,11 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     clusterer = Clusterer(featurizer_info=featurizer_info, classifier=None, n_jobs=1, use_cache=False)
 
-    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda _dataset: None)
+    monkeypatch.setattr(
+        model_module,
+        "_sync_rust_cluster_seeds",
+        lambda _dataset, runtime_context=None, use_cache=False: None,
+    )
     monkeypatch.setattr(
         model_module,
         "make_subblocks",
@@ -305,7 +310,12 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
 
     def fake_predict_incremental(self, block_signatures, dataset, *args, **kwargs):
         captured["batching_threshold"] = kwargs["batching_threshold"]
-        return {"merged": list(dataset.cluster_seeds_require.keys()) + list(block_signatures)}
+        return {
+            "clusters": {"merged": list(dataset.cluster_seeds_require.keys()) + list(block_signatures)},
+            "phase_b_mode": "exact",
+            "phase_b_budget_bytes": 0,
+            "phase_b_required_bytes": 0,
+        }
 
     monkeypatch.setattr(Clusterer, "predict_helper", fake_predict_helper)
     monkeypatch.setattr(Clusterer, "predict_incremental", fake_predict_incremental)
@@ -318,3 +328,72 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
     )
 
     assert captured["batching_threshold"] == 1
+
+
+def test_distance_matrix_helper_forwards_use_cache_to_rust_constraints(monkeypatch):
+    dataset = SimpleNamespace()
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    clusterer = Clusterer(
+        featurizer_info=featurizer_info,
+        classifier=None,
+        n_jobs=1,
+        use_cache=False,
+        use_default_constraints_as_supervision=True,
+    )
+
+    captured = {"featurizer_use_cache": None, "constraint_use_cache": None}
+
+    monkeypatch.setattr(model_module, "_use_rust_constraints", lambda runtime_context=None: True)
+    monkeypatch.setattr(
+        model_module,
+        "_get_rust_featurizer",
+        lambda _dataset, runtime_context=None, use_cache=False: captured.__setitem__(
+            "featurizer_use_cache", use_cache
+        )
+        or object(),
+    )
+
+    def fake_get_constraint_value(*args, use_cache=False, **kwargs):
+        del args, kwargs
+        captured["constraint_use_cache"] = use_cache
+        return None
+
+    monkeypatch.setattr(model_module, "_get_constraint_value", fake_get_constraint_value)
+
+    helper = clusterer.distance_matrix_helper({"b": ["s1", "s2"]}, dataset, partial_supervision={})
+    next(helper)
+
+    assert captured["featurizer_use_cache"] is False
+    assert captured["constraint_use_cache"] is False
+
+
+def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_update(_dataset, runtime_context=None, use_cache=False):
+        del runtime_context, use_cache
+        calls["count"] += 1
+
+    monkeypatch.setattr(model_module, "update_rust_cluster_seeds", fake_update)
+
+    dataset = SimpleNamespace(
+        cluster_seeds_require={},
+        cluster_seeds_disallow=set(),
+        _cluster_seeds_version=1,
+    )
+    runtime_context = RuntimeContext(
+        operation="constraints",
+        requested_backend="rust",
+        resolved_backend="rust",
+        stage_enablement={"constraints": True, "ingest_preprocess": False, "pair_featurization": False},
+        run_id="run-1",
+        source="default",
+    )
+
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
+    assert calls["count"] == 1
+
+    dataset._cluster_seeds_version += 1
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
+    assert calls["count"] == 2

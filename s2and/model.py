@@ -6,11 +6,16 @@ from s2and.data import ANDData
 from s2and.consts import LARGE_INTEGER, DEFAULT_CHUNK_SIZE
 from s2and.subblocking import make_subblocks
 from s2and.text import same_prefix_tokens
-from s2and.feature_port import get_constraint_rust, update_rust_cluster_seeds, _get_rust_featurizer
+from s2and.feature_port import (
+    _get_rust_featurizer,
+    get_constraint_rust,
+    update_rust_cluster_seeds,
+)
+from s2and import memory_budget
+from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 
-from typing import Dict, Optional, Any, Union, List, Tuple, cast
+from typing import Dict, Optional, Any, Union, List, Tuple, Set, Literal
 from collections import defaultdict
-import os
 import warnings
 import time
 from functools import partial
@@ -19,6 +24,7 @@ import logging
 import copy
 import math
 import inspect
+import os
 
 import numpy as np
 from scipy.cluster.hierarchy import fcluster
@@ -33,10 +39,83 @@ from sklearn.base import TransformerMixin, BaseEstimator
 from sklearn.exceptions import EfficiencyWarning
 
 logger = logging.getLogger("s2and")
+IncrementalPhaseBMode = Literal["exact", "subblock_local"]
 
 
-_RUST_CONSTRAINTS_AVAILABLE = True
-_USE_RUST_CONSTRAINTS_CACHE: Optional[bool] = None
+def _build_incremental_result(
+    clusters: Dict[str, List[str]],
+    *,
+    phase_b_mode: IncrementalPhaseBMode,
+    phase_b_budget_bytes: int,
+    phase_b_required_bytes: int,
+) -> Dict[str, Any]:
+    return {
+        "clusters": clusters,
+        "phase_b_mode": phase_b_mode,
+        "phase_b_budget_bytes": int(phase_b_budget_bytes),
+        "phase_b_required_bytes": int(phase_b_required_bytes),
+    }
+
+
+def _validate_positive_total_ram_bytes(total_ram_bytes: int, *, source: str) -> int:
+    return memory_budget.validate_positive_total_ram_bytes(total_ram_bytes, source=source)
+
+
+def _detect_total_ram_bytes_best_effort() -> Tuple[Optional[int], str]:
+    return memory_budget.detect_total_ram_bytes_best_effort()
+
+
+def _detect_cgroup_total_ram_bytes_best_effort() -> Tuple[Optional[int], str]:
+    return memory_budget.detect_cgroup_total_ram_bytes_best_effort()
+
+
+def _current_rss_bytes_best_effort(total_ram_bytes: int) -> Tuple[int, str]:
+    return memory_budget.current_rss_bytes_best_effort(total_ram_bytes)
+
+
+def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: Optional[int] = None) -> Tuple[int, str]:
+    return memory_budget.resolve_total_ram_bytes(
+        total_ram_bytes,
+        detect_cgroup_fn=_detect_cgroup_total_ram_bytes_best_effort,
+        detect_total_fn=_detect_total_ram_bytes_best_effort,
+    )
+
+
+def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
+    """Count the number of feature indices selected by features_to_use."""
+    indices: set[int] = set()
+    for feature_name in featurizer_info.features_to_use:
+        indices.update(featurizer_info.feature_group_to_index[feature_name])
+    return len(indices)
+
+
+def _compute_incremental_memory_limits(
+    num_features: int,
+    *,
+    selected_feature_count: Optional[int] = None,
+    nameless_feature_count: int = 0,
+    total_ram_bytes: Optional[int] = None,
+) -> Dict[str, Union[int, str]]:
+    return memory_budget.compute_incremental_phase_split_limits(
+        num_features,
+        selected_feature_count=selected_feature_count,
+        nameless_feature_count=nameless_feature_count,
+        total_ram_bytes=total_ram_bytes,
+        detect_cgroup_fn=_detect_cgroup_total_ram_bytes_best_effort,
+        detect_total_fn=_detect_total_ram_bytes_best_effort,
+        current_rss_fn=_current_rss_bytes_best_effort,
+    )
+
+
+def _signature_first_for_rules(signature: Any) -> str:
+    return signature.author_info_first_normalized_without_apostrophe or signature.author_info_first or ""
+
+
+def _next_unused_cluster_id(pred_clusters: dict[str, Any], start: int) -> int:
+    cluster_id = int(start)
+    while str(cluster_id) in pred_clusters:
+        cluster_id += 1
+    return cluster_id
 
 
 def _ensure_lightgbm_fitted(clf: Any) -> None:
@@ -58,13 +137,155 @@ def _ensure_lightgbm_fitted(clf: Any) -> None:
             setattr(clf, "n_features_in_", n_feat)
 
 
-def _use_rust_constraints() -> bool:
-    global _USE_RUST_CONSTRAINTS_CACHE
-    if _USE_RUST_CONSTRAINTS_CACHE is None:
-        use_rust_feat = os.environ.get("S2AND_USE_RUST_FEATURIZER", "1").lower() in {"1", "true", "yes"}
-        use_rust_constraints = os.environ.get("S2AND_USE_RUST_CONSTRAINT", "1").lower() in {"1", "true", "yes"}
-        _USE_RUST_CONSTRAINTS_CACHE = use_rust_feat and use_rust_constraints
-    return _USE_RUST_CONSTRAINTS_CACHE
+def _predict_class0_with_runtime(
+    classifier: Any,
+    features: np.ndarray,
+    model_role: str,
+    rust_failure_counts: Dict[str, int],
+    runtime_context: Optional[RuntimeContext] = None,
+) -> Tuple[np.ndarray, float, str]:
+    features_2d = np.asarray(features, dtype=np.float64, order="C")
+    if features_2d.size == 0:
+        return np.asarray([], dtype=np.float64), 0.0, "none"
+
+    python_start = time.perf_counter()
+    predictions = classifier.predict_proba(features_2d)[:, 0]
+    return predictions, time.perf_counter() - python_start, "python"
+
+
+def _predict_and_combine(
+    classifier: Any,
+    nameless_classifier: Optional[Any],
+    features: np.ndarray,
+    labels: np.ndarray,
+    nameless_features: Optional[np.ndarray],
+    batch_label: Union[int, str],
+    rust_failure_counts: Dict[str, int],
+    runtime_context: Optional[RuntimeContext] = None,
+) -> Tuple[np.ndarray, float]:
+    """Predict with main (and optional nameless) classifier, log telemetry, return (predictions, seconds)."""
+    row_count = int(features.shape[0])
+    if row_count <= 0:
+        return np.asarray([], dtype=np.float64), 0.0
+
+    predict_flag = np.isnan(labels)
+    not_predict_flag = ~predict_flag
+    predicted_rows = int(np.count_nonzero(predict_flag))
+    predictions = np.zeros(row_count)
+    seconds = 0.0
+
+    # Boolean indexing creates a large temporary copy (often comparable to the full
+    # features matrix) when most rows are predicted. Avoid that peak by predicting
+    # on the full matrix in that case and overriding constrained rows afterwards.
+    copy_avoid_threshold_bytes = 128 * (1 << 20)
+    would_copy_bytes = 0
+    if predicted_rows > 0 and predicted_rows < row_count:
+        would_copy_bytes += int(predicted_rows) * int(features.shape[1]) * int(features.dtype.itemsize)
+        if nameless_classifier is not None and nameless_features is not None:
+            would_copy_bytes += (
+                int(predicted_rows) * int(nameless_features.shape[1]) * int(nameless_features.dtype.itemsize)
+            )
+
+    predict_on_full_matrix = predicted_rows > 0 and (
+        predicted_rows == row_count or would_copy_bytes >= int(copy_avoid_threshold_bytes)
+    )
+
+    if predicted_rows > 0:
+        if predict_on_full_matrix:
+            main_pred, main_sec, main_be = _predict_class0_with_runtime(
+                classifier,
+                features,
+                "main",
+                rust_failure_counts,
+                runtime_context=runtime_context,
+            )
+            if nameless_classifier is not None:
+                nl_pred, nl_sec, nl_be = _predict_class0_with_runtime(
+                    nameless_classifier,
+                    nameless_features,  # type: ignore[arg-type]
+                    "nameless",
+                    rust_failure_counts,
+                    runtime_context=runtime_context,
+                )
+                seconds += main_sec + nl_sec
+                logger.info(
+                    "Telemetry: model_predict batch=%s main=%s nameless=%s main_s=%.3f nl_s=%.3f rows=%d",
+                    batch_label,
+                    main_be,
+                    nl_be,
+                    main_sec,
+                    nl_sec,
+                    predicted_rows,
+                )
+                predictions[:] = (main_pred + nl_pred) / 2
+            else:
+                seconds += main_sec
+                logger.info(
+                    "Telemetry: model_predict batch=%s main=%s main_s=%.3f rows=%d",
+                    batch_label,
+                    main_be,
+                    main_sec,
+                    predicted_rows,
+                )
+                predictions[:] = main_pred
+        else:
+            predict_features = features[predict_flag, :]
+            main_pred, main_sec, main_be = _predict_class0_with_runtime(
+                classifier,
+                predict_features,
+                "main",
+                rust_failure_counts,
+                runtime_context=runtime_context,
+            )
+            if nameless_classifier is not None:
+                nl_pred, nl_sec, nl_be = _predict_class0_with_runtime(
+                    nameless_classifier,
+                    nameless_features[predict_flag, :],  # type: ignore[index]
+                    "nameless",
+                    rust_failure_counts,
+                    runtime_context=runtime_context,
+                )
+                seconds += main_sec + nl_sec
+                logger.info(
+                    "Telemetry: model_predict batch=%s main=%s nameless=%s main_s=%.3f nl_s=%.3f rows=%d",
+                    batch_label,
+                    main_be,
+                    nl_be,
+                    main_sec,
+                    nl_sec,
+                    predicted_rows,
+                )
+                predictions[predict_flag] = (main_pred + nl_pred) / 2
+            else:
+                seconds += main_sec
+                logger.info(
+                    "Telemetry: model_predict batch=%s main=%s main_s=%.3f rows=%d",
+                    batch_label,
+                    main_be,
+                    main_sec,
+                    predicted_rows,
+                )
+                predictions[predict_flag] = main_pred
+
+    if np.any(not_predict_flag):
+        predictions[not_predict_flag] = labels[not_predict_flag] + LARGE_INTEGER
+    return predictions, seconds
+
+
+def _use_rust_constraints(runtime_context: Optional[RuntimeContext] = None) -> bool:
+    if runtime_context is None:
+        runtime_context = build_runtime_context("constraints")
+    return stage_uses_rust(runtime_context, "constraints")
+
+
+def _cluster_seeds_version(dataset: ANDData) -> int:
+    return int(getattr(dataset, "_cluster_seeds_version", 0))
+
+
+def _bump_cluster_seeds_version(dataset: ANDData) -> int:
+    next_version = _cluster_seeds_version(dataset) + 1
+    setattr(dataset, "_cluster_seeds_version", next_version)
+    return next_version
 
 
 def _get_constraint_value(
@@ -75,11 +296,14 @@ def _get_constraint_value(
     incremental_dont_use_cluster_seeds: bool = False,
     rust_featurizer: Optional[object] = None,
     use_rust_constraints: Optional[bool] = None,
+    runtime_context: Optional[RuntimeContext] = None,
+    use_cache: bool = False,
 ):
-    global _RUST_CONSTRAINTS_AVAILABLE
+    if runtime_context is None:
+        runtime_context = build_runtime_context("constraints")
     if use_rust_constraints is None:
-        use_rust_constraints = _use_rust_constraints()
-    if use_rust_constraints and _RUST_CONSTRAINTS_AVAILABLE:
+        use_rust_constraints = _use_rust_constraints(runtime_context)
+    if use_rust_constraints:
         try:
             return get_constraint_rust(
                 dataset,
@@ -88,9 +312,15 @@ def _get_constraint_value(
                 dont_merge_cluster_seeds=dont_merge_cluster_seeds,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 featurizer=rust_featurizer,
+                runtime_context=runtime_context,
+                use_cache=use_cache,
             )
         except Exception as exc:  # pragma: no cover - native extension optional
-            _RUST_CONSTRAINTS_AVAILABLE = False
+            if stage_uses_rust(runtime_context, "constraints"):
+                raise RuntimeError(
+                    "Rust constraint evaluation failed in strict rust backend "
+                    f"(pair=({sig_id_1}, {sig_id_2}) run_id={runtime_context.run_id} error={exc})"
+                ) from exc
             logger.warning(f"Rust get_constraint failed, falling back to Python: {exc}")
     return dataset.get_constraint(
         sig_id_1,
@@ -100,14 +330,114 @@ def _get_constraint_value(
     )
 
 
-def _sync_rust_cluster_seeds(dataset: ANDData) -> None:
-    global _RUST_CONSTRAINTS_AVAILABLE
-    if _use_rust_constraints() and _RUST_CONSTRAINTS_AVAILABLE:
+def _sync_rust_cluster_seeds(
+    dataset: ANDData,
+    runtime_context: Optional[RuntimeContext] = None,
+    use_cache: bool = False,
+) -> None:
+    if runtime_context is None:
+        runtime_context = build_runtime_context("constraints")
+    if _use_rust_constraints(runtime_context):
+        seed_version = _cluster_seeds_version(dataset)
+        require = getattr(dataset, "cluster_seeds_require", {})
+        disallow = getattr(dataset, "cluster_seeds_disallow", set())
+        require_id = int(id(require))
+        disallow_id = int(id(disallow))
+        require_len = int(len(require))
+        disallow_len = int(len(disallow))
+
+        last_synced = getattr(dataset, "_rust_cluster_seeds_synced_version", None)
+        last_require_id = getattr(dataset, "_rust_cluster_seeds_require_id", None)
+        last_disallow_id = getattr(dataset, "_rust_cluster_seeds_disallow_id", None)
+        last_require_len = getattr(dataset, "_rust_cluster_seeds_require_len", None)
+        last_disallow_len = getattr(dataset, "_rust_cluster_seeds_disallow_len", None)
+        if (
+            last_synced == seed_version
+            and last_require_id == require_id
+            and last_require_len == require_len
+            and last_disallow_id == disallow_id
+            and last_disallow_len == disallow_len
+        ):
+            return
         try:
-            update_rust_cluster_seeds(dataset)
+            update_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=use_cache)
+            setattr(dataset, "_rust_cluster_seeds_synced_version", seed_version)
+            setattr(dataset, "_rust_cluster_seeds_require_id", require_id)
+            setattr(dataset, "_rust_cluster_seeds_require_len", require_len)
+            setattr(dataset, "_rust_cluster_seeds_disallow_id", disallow_id)
+            setattr(dataset, "_rust_cluster_seeds_disallow_len", disallow_len)
         except Exception as exc:  # pragma: no cover - native extension optional
-            _RUST_CONSTRAINTS_AVAILABLE = False
+            if stage_uses_rust(runtime_context, "constraints"):
+                raise RuntimeError(
+                    "Rust cluster seed sync failed in strict rust backend "
+                    f"(run_id={runtime_context.run_id} error={exc})"
+                ) from exc
             logger.warning(f"Rust cluster seed sync failed, falling back to Python: {exc}")
+
+
+def _initialize_incremental_constraint_backend(
+    dataset: ANDData,
+    *,
+    use_default_constraints_as_supervision: bool,
+    runtime_context: RuntimeContext,
+    use_cache: bool = False,
+) -> Tuple[Optional[object], Optional[bool]]:
+    if not use_default_constraints_as_supervision:
+        return None, None
+
+    use_rust_constraints = _use_rust_constraints(runtime_context)
+    if not use_rust_constraints:
+        return None, False
+
+    try:
+        rust_featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+    except Exception as exc:  # pragma: no cover - native extension optional
+        if stage_uses_rust(runtime_context, "constraints"):
+            raise RuntimeError(
+                "Rust constraint stage requested but Rust featurizer init failed "
+                f"(run_id={runtime_context.run_id} error={exc})"
+            ) from exc
+        logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
+        return None, False
+
+    return rust_featurizer, True
+
+
+def _resolve_incremental_pair_label(
+    dataset: ANDData,
+    unassigned_signature: str,
+    assigned_signature: str,
+    *,
+    partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+    use_default_constraints_as_supervision: bool,
+    dont_merge_cluster_seeds: bool,
+    incremental_dont_use_cluster_seeds: bool,
+    rust_featurizer: Optional[object],
+    use_rust_constraints: Optional[bool],
+    runtime_context: RuntimeContext,
+    use_cache: bool = False,
+) -> float:
+    if (unassigned_signature, assigned_signature) in partial_supervision:
+        return partial_supervision[(unassigned_signature, assigned_signature)] - LARGE_INTEGER
+    if (assigned_signature, unassigned_signature) in partial_supervision:
+        return partial_supervision[(assigned_signature, unassigned_signature)] - LARGE_INTEGER
+    if not use_default_constraints_as_supervision:
+        return np.nan
+
+    value = _get_constraint_value(
+        dataset,
+        unassigned_signature,
+        assigned_signature,
+        dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+        rust_featurizer=rust_featurizer,
+        use_rust_constraints=use_rust_constraints,
+        runtime_context=runtime_context,
+        use_cache=use_cache,
+    )
+    if value is not None:
+        return value - LARGE_INTEGER
+    return np.nan
 
 
 class Clusterer:
@@ -228,6 +558,7 @@ class Clusterer:
         dataset: ANDData,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]],
         incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: Optional[RuntimeContext] = None,
     ):
         """
         Helper generator function to yield one pair for batch featurization on the fly
@@ -247,16 +578,25 @@ class Clusterer:
         -------
         yields pairs of ((sig id 1, sig id 2, label), index pair into the distance matrix, block key)
         """
-        global _RUST_CONSTRAINTS_AVAILABLE
+        if runtime_context is None:
+            runtime_context = build_runtime_context("constraints")
         rust_featurizer = None
         use_rust_constraints = None
         if self.use_default_constraints_as_supervision:
-            use_rust_constraints = _use_rust_constraints()
-            if use_rust_constraints and _RUST_CONSTRAINTS_AVAILABLE:
+            use_rust_constraints = _use_rust_constraints(runtime_context)
+            if use_rust_constraints:
                 try:
-                    rust_featurizer = _get_rust_featurizer(dataset)
+                    rust_featurizer = _get_rust_featurizer(
+                        dataset,
+                        runtime_context=runtime_context,
+                        use_cache=self.use_cache,
+                    )
                 except Exception as exc:  # pragma: no cover - native extension optional
-                    _RUST_CONSTRAINTS_AVAILABLE = False
+                    if stage_uses_rust(runtime_context, "constraints"):
+                        raise RuntimeError(
+                            "Rust constraint stage requested but Rust featurizer init failed "
+                            f"(run_id={runtime_context.run_id} error={exc})"
+                        ) from exc
                     use_rust_constraints = False
                     logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
         for block_key, signatures in block_dict.items():
@@ -276,6 +616,8 @@ class Clusterer:
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                         rust_featurizer=rust_featurizer,
                         use_rust_constraints=use_rust_constraints,
+                        runtime_context=runtime_context,
+                        use_cache=self.use_cache,
                     )
                     if value is not None:
                         label = value - LARGE_INTEGER
@@ -312,7 +654,8 @@ class Clusterer:
         -------
         Dict: the distance matrix dictionary, keyed by block key
         """
-        _sync_rust_cluster_seeds(dataset)
+        runtime_context = build_runtime_context("model_predict")
+        _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
         _ensure_lightgbm_fitted(self.classifier)
         _ensure_lightgbm_fitted(self.nameless_classifier)
         logger.info(f"Making {len(block_dict)} distance matrices")
@@ -338,11 +681,14 @@ class Clusterer:
             dataset,
             partial_supervision,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
         )
 
         prev_block_key = ""
         batch_num = 0
         num_batches = math.ceil(num_pairs / self.batch_size)
+        model_predict_seconds = 0.0
+        rust_failure_counts: Dict[str, int] = {"main": 0, "nameless": 0}
         while True:
             logger.info(f"Featurizing batch {batch_num}/{num_batches}")
             count = 0
@@ -361,7 +707,7 @@ class Clusterer:
             if len(pairs) == 0:
                 break
 
-            batch_features, _, batch_nameless_features = many_pairs_featurize(
+            batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
                 pairs,
                 dataset,
                 self.featurizer_info,
@@ -369,33 +715,20 @@ class Clusterer:
                 use_cache=self.use_cache,
                 chunk_size=DEFAULT_CHUNK_SIZE,
                 nameless_featurizer_info=self.nameless_featurizer_info,
+                runtime_context=runtime_context,
             )
-            # get predictions where there isn't partial supervision
-            # and fill the rest with partial supervision
-            # undoing the offset by LARGE_INTEGER from above
-            logger.info("Making predict flags to separate partial supervision from prediction")
-            batch_labels = np.array([i[2] for i in pairs])
-            predict_flag = np.isnan(batch_labels)
-            not_predict_flag = ~predict_flag
-            batch_predictions = np.zeros(len(batch_features))
-            # index 0 is p(not the same)
-            logger.info("Doing pairwise classification")
-            if np.any(predict_flag):
-                if self.nameless_classifier is not None:
-                    batch_predictions[predict_flag] = (
-                        self.classifier.predict_proba(batch_features[predict_flag, :])[:, 0]
-                        + self.nameless_classifier.predict_proba(
-                            batch_nameless_features[predict_flag, :]  # type: ignore
-                        )[:, 0]
-                    ) / 2
-                else:
-                    batch_predictions[predict_flag] = self.classifier.predict_proba(batch_features[predict_flag, :])[
-                        :, 0
-                    ]
-            if np.any(not_predict_flag):
-                batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
+            batch_predictions, batch_seconds = _predict_and_combine(
+                self.classifier,
+                self.nameless_classifier,
+                batch_features,
+                batch_labels,
+                batch_nameless_features,
+                batch_num,
+                rust_failure_counts,
+                runtime_context=runtime_context,
+            )
+            model_predict_seconds += batch_seconds
 
-            logger.info("Constructing distance matrices")
             for within_batch_index, (prediction, signature_pair) in tqdm(
                 enumerate(zip(batch_predictions, pairs)),
                 total=len(batch_predictions),
@@ -427,6 +760,11 @@ class Clusterer:
                 pairwise_proba += pairwise_proba.T
                 np.fill_diagonal(pairwise_proba, 0)
 
+        logger.info(
+            "Telemetry stage: stage=model_predict_total seconds=%.3f blocks=%d",
+            model_predict_seconds,
+            len(block_dict),
+        )
         logger.info(f"{len(block_dict)} distance matrices made")
         return pairwise_probas
 
@@ -459,6 +797,7 @@ class Clusterer:
         val_block_dict_list = []
         val_cluster_to_signatures_list = []
         val_dists_list = []
+        val_datasets_list: List[ANDData] = []
         weights: List[float] = []
         for dataset in datasets:
             # blocks
@@ -484,6 +823,7 @@ class Clusterer:
             else:
                 val_dists = val_dists_precomputed[dataset.name]
             val_dists_list.append(val_dists)
+            val_datasets_list.append(dataset)
 
             # weights for weighted F1 average: total # of signatures in dataset
             weights.append(np.sum([len(i) for i in val_block_dict.values()]))
@@ -492,12 +832,12 @@ class Clusterer:
             self.set_params(params)
             f1s = []
             ratios = []
-            for val_block_dict, val_cluster_to_signatures, val_dists in zip(
-                val_block_dict_list, val_cluster_to_signatures_list, val_dists_list
+            for val_dataset, val_block_dict, val_cluster_to_signatures, val_dists in zip(
+                val_datasets_list, val_block_dict_list, val_cluster_to_signatures_list, val_dists_list
             ):
                 pred_clusters, _ = self.predict(
                     val_block_dict,
-                    dataset=None,
+                    dataset=val_dataset,
                     dists=val_dists,
                 )
                 (
@@ -526,9 +866,8 @@ class Clusterer:
             rstate=np.random.default_rng(self.random_state),
         )
         # hyperopt has some problems with hp.choice so we need to do this:
-        assert self.hyperopt_trials_store is not None
-        trials_store = cast(Trials, self.hyperopt_trials_store)
-        best_params = space_eval(self.search_space, trials_store.argmin)
+        assert isinstance(self.hyperopt_trials_store, Trials)
+        best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
         self.best_params = {k: intify(v) for k, v in best_params.items()}
         self.set_params(self.best_params)
 
@@ -568,6 +907,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool = False,
         batching_threshold: Optional[int] = None,
         desired_memory_use: Optional[int] = None,
+        runtime_context: Optional[RuntimeContext] = None,
     ) -> Tuple[Dict[str, List[str]], Optional[Dict[str, np.ndarray]]]:
         """
         Predicts clusters
@@ -605,8 +945,12 @@ class Clusterer:
         Returns
         -------
         Dict: the predicted clusters
-        Dict: the predicted distance matrices
+        Optional[Dict]: the predicted distance matrices. This is None when
+        distances are built and clustered in the fused one-block-at-a-time path.
         """
+
+        if runtime_context is None:
+            runtime_context = build_runtime_context("cluster_predict")
 
         # the approach will be to (1) take every block, apply subblocking function to it
         # (2) then run the clusterer on the subblocked blocks, taking care to remove that that are single-letter first names
@@ -620,12 +964,14 @@ class Clusterer:
 
             # run subblocking on each block in the block_dict
             block_dict_subblocked = {}
-            for block_key, block_signatures in block_dict.items():
+            for block_key in sorted(block_dict, key=str):
+                block_signatures = block_dict[block_key]
                 if len(block_signatures) > batching_threshold:
                     # run subblocking on this block
                     subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
                     # add these subblocks to the block_dict
-                    for subblock_key, subblock_signatures in subblocks.items():
+                    for subblock_key in sorted(subblocks, key=str):
+                        subblock_signatures = subblocks[subblock_key]
                         block_dict_subblocked[block_key + "|subblock=" + subblock_key] = subblock_signatures
                         assert len(subblock_signatures) <= batching_threshold, "Subblock is too big for some reason!"
                 else:
@@ -637,7 +983,7 @@ class Clusterer:
             block_dict_subblocked_single_letter_first_names = {
                 block_key: block_signatures
                 for block_key, block_signatures in block_dict_subblocked.items()
-                if len(dataset.signatures[block_signatures[0]].author_info_first_normalized_without_apostrophe) <= 1
+                if len(_signature_first_for_rules(dataset.signatures[block_signatures[0]])) <= 1
             }
             block_dict_subblocked_multiple_letter_first_names = {
                 block_key: block_signatures
@@ -668,7 +1014,8 @@ class Clusterer:
                 else:
                     logger.info("Running predict on subblocks with multiple letter first names")
                 predict_times = {}
-                for block_key, block_signatures in block_dict_subblocked_multiple_letter_first_names.items():
+                for block_key in sorted(block_dict_subblocked_multiple_letter_first_names, key=str):
+                    block_signatures = block_dict_subblocked_multiple_letter_first_names[block_key]
                     logger.info(f"Working on subblock {block_key}")
                     start = time.time()
                     pred_clusters_intermediate, _ = self.predict_helper(
@@ -679,6 +1026,7 @@ class Clusterer:
                         partial_supervision,
                         use_s2_clusters,
                         incremental_dont_use_cluster_seeds,
+                        runtime_context=runtime_context,
                     )
                     end = time.time()
                     total_predict_time = end - start
@@ -697,10 +1045,12 @@ class Clusterer:
                 for cluster_id, signatures in pred_clusters.items():
                     for signature in signatures:
                         dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
-                _sync_rust_cluster_seeds(dataset)
+                _bump_cluster_seeds_version(dataset)
+                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
 
                 predict_times = {}
-                for block_key, block_signatures in block_dict_subblocked_single_letter_first_names.items():
+                for block_key in sorted(block_dict_subblocked_single_letter_first_names, key=str):
+                    block_signatures = block_dict_subblocked_single_letter_first_names[block_key]
                     # we have to be super careful here and adjust the batching threshold take into account
                     # the implied requirement of passing batching_threshold into batch predict:
                     # it essentially assumes that max memory is batching_threshold ** 2,
@@ -730,13 +1080,15 @@ class Clusterer:
                         f"Working on subblock {block_key} with computed batching threshold {loop_batching_threshold}"
                     )
                     start_predict_time = time.time()
-                    pred_clusters_intermediate = self.predict_incremental(
+                    incremental_result = self.predict_incremental(
                         block_signatures,
                         dataset,
                         prevent_new_incompatibilities=True,
                         batching_threshold=loop_batching_threshold,
                         partial_supervision=partial_supervision,
+                        runtime_context=runtime_context,
                     )
+                    pred_clusters_intermediate = incremental_result["clusters"]
                     end_predict_time = time.time()
                     total_predict_time = end_predict_time - start_predict_time
                     predict_times[block_key] = total_predict_time
@@ -745,14 +1097,16 @@ class Clusterer:
                     for cluster_id, signatures in pred_clusters_intermediate.items():
                         for signature in signatures:
                             dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
-                    _sync_rust_cluster_seeds(dataset)
+                    _bump_cluster_seeds_version(dataset)
+                    _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
 
                 # undoing the damage
                 logger.info(
-                    f"Finished subblocked predict incremental. Here's how long each subblock took:", predict_times
+                    f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}"
                 )
                 dataset.cluster_seeds_require = cluster_seeds_require_original
-                _sync_rust_cluster_seeds(dataset)
+                _bump_cluster_seeds_version(dataset)
+                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
                 # the output of predict_incremental_helper has the ENTIRE clustering, not just the new stuff
                 pred_clusters = pred_clusters_intermediate
             dists = None
@@ -769,12 +1123,53 @@ class Clusterer:
                 partial_supervision,
                 use_s2_clusters,
                 incremental_dont_use_cluster_seeds,
+                runtime_context=runtime_context,
             )
             end = time.time()
             total_predict_time = end - start
             logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
 
         return dict(pred_clusters), dists
+
+    def _cluster_one_block(
+        self,
+        block_signatures: List[str],
+        dist_matrix: Optional[np.ndarray],
+        cluster_model_params: Optional[Dict[str, Any]],
+        dataset: ANDData,
+        all_disallow_signature_ids: Set[str],
+    ) -> list:
+        """Cluster one block from a distance matrix and return labels."""
+        if len(block_signatures) <= 1:
+            return [0]
+
+        if dist_matrix is None:
+            raise ValueError("Distance matrix is required for blocks with more than one signature.")
+
+        cluster_model = self.set_params(cluster_model_params, clone_flag=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=EfficiencyWarning)
+            cluster_model.fit(dist_matrix)
+        labels = cluster_model.labels_
+        max_label = labels.max()
+        negative_one_label_locations = np.where(labels == -1)[0]
+        for i, loc in enumerate(negative_one_label_locations):
+            labels[loc] = max_label + 1 + i
+        if self.use_default_constraints_as_supervision:
+            disallow_signature_ids = all_disallow_signature_ids
+            inverse_id_map = defaultdict(set)
+            for signature_id, label in zip(block_signatures, labels):
+                if signature_id in dataset.cluster_seeds_require and signature_id not in disallow_signature_ids:
+                    inverse_id_map[dataset.cluster_seeds_require[signature_id]].add(label)
+            to_join_sets = [sorted(join_set) for join_set in inverse_id_map.values() if len(join_set) > 1]
+            mapped_labels = {label: label for label in labels}
+            labels = np.array(labels)
+            for join_set in to_join_sets:
+                for other_label in join_set[1:]:
+                    labels[labels == mapped_labels[other_label]] = mapped_labels[join_set[0]]
+                    mapped_labels[other_label] = mapped_labels[join_set[0]]
+            labels = list(labels)
+        return labels
 
     def predict_helper(
         self,
@@ -785,6 +1180,7 @@ class Clusterer:
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
         use_s2_clusters: bool = False,
         incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: Optional[RuntimeContext] = None,
     ) -> Tuple[Dict[str, List[str]], Optional[Dict[str, np.ndarray]]]:
         """
         Predicts clusters
@@ -809,8 +1205,11 @@ class Clusterer:
         Returns
         -------
         Dict: the predicted clusters
-        Dict: the predicted distance matrices
+        Optional[Dict]: the predicted distance matrices. This is None when
+        distances are built and clustered in the fused one-block-at-a-time path.
         """
+        if runtime_context is None:
+            runtime_context = build_runtime_context("cluster_predict")
 
         pred_clusters = defaultdict(list)
 
@@ -822,78 +1221,910 @@ class Clusterer:
 
             return dict(pred_clusters), dists
 
-        if dists is None:
-            dists = self.make_distance_matrices(
-                block_dict,
-                dataset,
-                partial_supervision,
-                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            )
-
-        # we may need this set later for post-hoc merging
+        # pre-compute disallow set for post-hoc constraint merging
+        all_disallow_signature_ids: Set[str] = set()
         if self.use_default_constraints_as_supervision:
-            all_disallow_signature_ids = set()
             for sig_id_a, sig_id_b in dataset.cluster_seeds_disallow:
                 all_disallow_signature_ids.add(sig_id_a)
                 all_disallow_signature_ids.add(sig_id_b)
 
+        effective_cluster_model_params = cluster_model_params
+        fastcluster_fused_dtype = np.float16
+        if isinstance(self.cluster_model, FastCluster):
+            fastcluster_params: Dict[str, Any] = dict(cluster_model_params or {})
+            # Reused matrices should stay immutable by default; single-use fused path favors lower peak memory.
+            if "preserve_input" not in fastcluster_params:
+                fastcluster_params["preserve_input"] = bool(dists is not None)
+            effective_cluster_model_params = fastcluster_params
+            if dists is None:
+                fastcluster_fused_dtype = np.float64
+
+        if dists is not None:
+            # precomputed dists (hyperopt path) — cluster from existing matrices
+            for block_key in block_dict.keys():
+                if block_key not in dists:
+                    raise KeyError(f"Missing precomputed distance matrix for block '{block_key}'")
+                labels = self._cluster_one_block(
+                    block_dict[block_key],
+                    dists[block_key],
+                    effective_cluster_model_params,
+                    dataset,
+                    all_disallow_signature_ids,
+                )
+                for signature, label in zip(block_dict[block_key], labels):
+                    pred_clusters[block_key + "_" + str(label)].append(signature)
+            return dict(pred_clusters), dists
+
+        # fused path: build one block's matrix, cluster it, free it, repeat
+        _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
+        _ensure_lightgbm_fitted(self.classifier)
+        _ensure_lightgbm_fitted(self.nameless_classifier)
+
+        helper_output = self.distance_matrix_helper(
+            block_dict,
+            dataset,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+        )
+
+        prev_block_key = ""
+        pairwise_proba: Optional[np.ndarray] = None
+        block_pair_index = 0
+        seen_block_keys: set = set()
+        batch_num = 0
+        num_pairs = sum(len(sigs) * (len(sigs) - 1) // 2 for sigs in block_dict.values())
+        num_batches = math.ceil(num_pairs / self.batch_size) if num_pairs > 0 else 0
+        model_predict_seconds = 0.0
+        rust_failure_counts: Dict[str, int] = {"main": 0, "nameless": 0}
+
+        while True:
+            logger.info(f"Featurizing batch {batch_num}/{num_batches}")
+            count = 0
+            pairs: list = []
+            indices: list = []
+            blocks: list = []
+            for item in helper_output:
+                pairs.append(item[0])
+                indices.append(item[1])
+                blocks.append(item[2])
+                count += 1
+                if count == self.batch_size:
+                    break
+
+            if len(pairs) == 0:
+                break
+
+            batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
+                pairs,
+                dataset,
+                self.featurizer_info,
+                self.n_jobs,
+                use_cache=self.use_cache,
+                chunk_size=DEFAULT_CHUNK_SIZE,
+                nameless_featurizer_info=self.nameless_featurizer_info,
+                runtime_context=runtime_context,
+            )
+            batch_predictions, batch_seconds = _predict_and_combine(
+                self.classifier,
+                self.nameless_classifier,
+                batch_features,
+                batch_labels,
+                batch_nameless_features,
+                batch_num,
+                rust_failure_counts,
+                runtime_context=runtime_context,
+            )
+            model_predict_seconds += batch_seconds
+
+            for within_batch_index, prediction in enumerate(batch_predictions):
+                block_key = blocks[within_batch_index]
+                if block_key != prev_block_key:
+                    # cluster the completed block
+                    if prev_block_key != "" and pairwise_proba is not None:
+                        if not isinstance(self.cluster_model, FastCluster):
+                            pairwise_proba += pairwise_proba.T
+                            np.fill_diagonal(pairwise_proba, 0)
+                        labels = self._cluster_one_block(
+                            block_dict[prev_block_key],
+                            pairwise_proba,
+                            effective_cluster_model_params,
+                            dataset,
+                            all_disallow_signature_ids,
+                        )
+                        for signature, label in zip(block_dict[prev_block_key], labels):
+                            pred_clusters[prev_block_key + "_" + str(label)].append(signature)
+                        del pairwise_proba
+
+                    # allocate new block's matrix
+                    seen_block_keys.add(block_key)
+                    block_size = len(block_dict[block_key])
+                    if isinstance(self.cluster_model, FastCluster):
+                        pairwise_proba = np.zeros(block_size * (block_size - 1) // 2, dtype=fastcluster_fused_dtype)
+                    else:
+                        pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
+                    block_pair_index = 0
+
+                if isinstance(self.cluster_model, FastCluster):
+                    assert pairwise_proba is not None
+                    pairwise_proba[block_pair_index] = prediction
+                else:
+                    assert pairwise_proba is not None
+                    i, j = indices[within_batch_index]
+                    pairwise_proba[i, j] = prediction
+                block_pair_index += 1
+                prev_block_key = block_key
+
+            if count < self.batch_size:
+                break
+            batch_num += 1
+
+        # cluster the final block
+        if prev_block_key != "" and pairwise_proba is not None:
+            if not isinstance(self.cluster_model, FastCluster):
+                pairwise_proba += pairwise_proba.T
+                np.fill_diagonal(pairwise_proba, 0)
+            labels = self._cluster_one_block(
+                block_dict[prev_block_key],
+                pairwise_proba,
+                effective_cluster_model_params,
+                dataset,
+                all_disallow_signature_ids,
+            )
+            for signature, label in zip(block_dict[prev_block_key], labels):
+                pred_clusters[prev_block_key + "_" + str(label)].append(signature)
+            del pairwise_proba
+
+        # handle singleton blocks (0 or 1 signature — never appeared in generator)
         for block_key in block_dict.keys():
-            if block_key in dists and len(block_dict[block_key]) > 1:
-                cluster_model = self.set_params(cluster_model_params, clone_flag=True)
-                with warnings.catch_warnings():
-                    # annoying sparse matrix not sorted warning
-                    warnings.simplefilter("ignore", category=EfficiencyWarning)
-                    cluster_model.fit(dists[block_key])
-                labels = cluster_model.labels_
-                # in HDBSCAN the labels of -1 are actually "outliers"
-                # each of these gets its own label starting at
-                # max label + 1 and going up
-                max_label = labels.max()
-                negative_one_label_locations = np.where(labels == -1)[0]
-                for i, loc in enumerate(negative_one_label_locations):
-                    labels[loc] = max_label + 1 + i
+            if block_key not in seen_block_keys:
+                for signature in block_dict[block_key]:
+                    pred_clusters[block_key + "_0"].append(signature)
 
-                if self.use_default_constraints_as_supervision:
-                    # at this point it is possible that clusters that should be merged
-                    # are STILL not joined together
-                    # due to the 0 enforced distance not being enough to outweigh
-                    # a lot of large distances. the 0 enforced distance is between pairs
-                    # of signatures that are passed in via cluster_seeds_require.
-                    # this is a way to tell S2AND that we want these two to be in the same
-                    # cluster. but the way that clusters are joined is that we compute
-                    # *average* distance between all pairs, so the 0s may not be enough
-                    # to drag the average below the threshold eps.
-                    # so we manually go through the clusters
-                    # find which ones overlap according to cluster_seeds_require
-                    # note: if the signature id appears in cluster_seeds_disallow
-                    # then we won't try to merge it as there may be conflicts
-                    # that there is no clear way to resolve
-                    inverse_id_map = defaultdict(set)
-                    for signature_id, label in zip(block_dict[block_key], labels):
-                        if (
-                            signature_id in dataset.cluster_seeds_require
-                            and signature_id not in all_disallow_signature_ids
-                        ):
-                            inverse_id_map[dataset.cluster_seeds_require[signature_id]].add(label)
+        logger.info(
+            "Telemetry stage: stage=model_predict_total seconds=%.3f blocks=%d",
+            model_predict_seconds,
+            len(block_dict),
+        )
+        return dict(pred_clusters), None
 
-                    # now join any clusters that have overlapping ids
-                    # this is a tad tricky because as we merge clusters, we need to
-                    # keep track of where they are going
-                    to_join_sets = [sorted(join_set) for join_set in inverse_id_map.values() if len(join_set) > 1]
-                    mapped_labels = {label: label for label in labels}
-                    labels = np.array(labels)
-                    for join_set in to_join_sets:
-                        for other_label in join_set[1:]:
-                            labels[labels == mapped_labels[other_label]] = mapped_labels[join_set[0]]
-                            mapped_labels[other_label] = mapped_labels[join_set[0]]
-                    labels = list(labels)
+    def _build_incremental_seed_setup(
+        self,
+        dataset: ANDData,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+        runtime_context: RuntimeContext,
+    ) -> Tuple[
+        Dict[str, Union[int, str]],
+        Dict[Union[int, str], Union[int, str]],
+        Dict[Union[int, str], List[str]],
+    ]:
+        recluster_map: Dict[Union[int, str], Union[int, str]] = {}
+        cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
+        cluster_seeds_require_inverse: Dict[Union[int, str], List[str]] = defaultdict(list)
+        for signature_id, cluster_num in dataset.cluster_seeds_require.items():
+            cluster_seeds_require_inverse[cluster_num].append(signature_id)
+
+        # Split altered claimed profiles once so incremental assignment can map back to original cluster IDs.
+        if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
+            logger.info("Dealing with altered cluster signatures")
+            altered_cluster_nums = set(
+                dataset.cluster_seeds_require[altered_signature_id]
+                for altered_signature_id in dataset.altered_cluster_signatures
+                if altered_signature_id in dataset.cluster_seeds_require
+            )
+            for altered_cluster_num in altered_cluster_nums:
+                signature_ids_for_cluster_num = cluster_seeds_require_inverse.get(altered_cluster_num, [])
+                if len(signature_ids_for_cluster_num) == 0:
+                    continue
+
+                # During this pre-split, do not apply incoming cluster seeds as constraints.
+                reclustered_output, _ = self.predict_helper(
+                    {"block": signature_ids_for_cluster_num},
+                    dataset,
+                    incremental_dont_use_cluster_seeds=True,
+                    partial_supervision=partial_supervision,
+                    runtime_context=runtime_context,
+                )
+                if len(reclustered_output) <= 1:
+                    continue
+                for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):
+                    new_cluster_num = str(altered_cluster_num) + f"_{i}"
+                    recluster_map[new_cluster_num] = altered_cluster_num
+                    for reclustered_signature_id in new_cluster_of_signatures:
+                        cluster_seeds_require[reclustered_signature_id] = new_cluster_num  # type: ignore
+
+        return cluster_seeds_require, recluster_map, cluster_seeds_require_inverse
+
+    def _phase_a_seed_distances(
+        self,
+        unassigned_signature_ids: List[str],
+        cluster_seeds_require: Dict[str, Union[int, str]],
+        dataset: ANDData,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+        signature_to_cluster_sum_count: Dict[str, Dict[Union[int, str], List[Union[float, int]]]],
+        chunk_pairs: int,
+        chunk_limits: Optional[Dict[str, Union[int, str]]],
+        runtime_context: RuntimeContext,
+        total_ram_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if chunk_pairs <= 0:
+            raise ValueError("chunk_pairs must be positive")
+
+        pair_buffer: List[Tuple[str, str, float]] = []
+        rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
+            dataset,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+        )
+        constraint_pairs_total = 0
+        constraint_chunks_total = 0
+        model_predict_total_seconds = 0.0
+        accumulator_warned = False
+        accumulator_entries_peak = 0
+        chunk_features_peak_bytes = 0
+        chunk_pairs_peak = 0
+        adaptive_halvings = 0
+        total_ram_for_phase = total_ram_bytes
+        rss_source = "unavailable"
+        rss_before_bytes = 0
+        rss_peak_bytes = 0
+
+        if total_ram_for_phase is None and chunk_limits is not None:
+            total_ram_for_phase = int(chunk_limits["total_ram_bytes"])
+
+        if total_ram_for_phase is not None:
+            rss_before_bytes, rss_source = _current_rss_bytes_best_effort(total_ram_for_phase)
+            rss_peak_bytes = rss_before_bytes
+
+        def _accumulator_entry_count() -> int:
+            return int(sum(len(cluster_map) for cluster_map in signature_to_cluster_sum_count.values()))
+
+        def _process_incremental_chunk(chunk_pairs_buffer: List[Tuple[str, str, float]]) -> None:
+            nonlocal accumulator_entries_peak
+            nonlocal accumulator_warned
+            nonlocal constraint_pairs_total
+            nonlocal constraint_chunks_total
+            nonlocal model_predict_total_seconds
+            nonlocal rss_peak_bytes
+            nonlocal chunk_features_peak_bytes
+            nonlocal chunk_pairs_peak
+            nonlocal chunk_pairs
+            nonlocal adaptive_halvings
+
+            if len(chunk_pairs_buffer) == 0:
+                return
+
+            chunk_pairs_peak = max(chunk_pairs_peak, len(chunk_pairs_buffer))
+            chunk_features, chunk_labels, chunk_nameless_features = many_pairs_featurize(
+                chunk_pairs_buffer,
+                dataset,
+                self.featurizer_info,
+                self.n_jobs,
+                use_cache=self.use_cache,
+                chunk_size=DEFAULT_CHUNK_SIZE,
+                nameless_featurizer_info=self.nameless_featurizer_info,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_for_phase,
+            )
+            chunk_feature_bytes = int(getattr(chunk_features, "nbytes", 0))
+            if chunk_nameless_features is not None:
+                chunk_feature_bytes += int(getattr(chunk_nameless_features, "nbytes", 0))
+            chunk_features_peak_bytes = max(chunk_features_peak_bytes, chunk_feature_bytes)
+            rust_failure_counts: Dict[str, int] = {"main": 0, "nameless": 0}
+            chunk_predictions, chunk_model_seconds = _predict_and_combine(
+                self.classifier,
+                self.nameless_classifier,
+                chunk_features,
+                chunk_labels,
+                chunk_nameless_features,
+                f"phase_a_chunk_{constraint_chunks_total + 1}",
+                rust_failure_counts,
+                runtime_context=runtime_context,
+            )
+            model_predict_total_seconds += chunk_model_seconds
+
+            for signature_pair, dist in zip(chunk_pairs_buffer, chunk_predictions):
+                unassigned_signature, assigned_signature, _ = signature_pair
+                if assigned_signature not in cluster_seeds_require:
+                    continue
+                cluster_id = cluster_seeds_require[assigned_signature]
+                cluster_sum_count = signature_to_cluster_sum_count.setdefault(unassigned_signature, {})
+                total_count = cluster_sum_count.setdefault(cluster_id, [0.0, 0])
+                total_count[0] = float(total_count[0]) + float(dist)
+                total_count[1] = int(total_count[1]) + 1
+
+            constraint_pairs_total += len(chunk_pairs_buffer)
+            constraint_chunks_total += 1
+            accumulator_entries = _accumulator_entry_count()
+            accumulator_entries_peak = max(accumulator_entries_peak, accumulator_entries)
+
+            if (
+                not accumulator_warned
+                and chunk_limits is not None
+                and accumulator_entries >= int(chunk_limits["accumulator_warn"])
+            ):
+                accumulator_warned = True
+                logger.warning(
+                    "Phase A accumulator approaching limit: entries=%d warn=%d max=%d run_id=%s",
+                    accumulator_entries,
+                    int(chunk_limits["accumulator_warn"]),
+                    int(chunk_limits["accumulator_max"]),
+                    runtime_context.run_id,
+                )
+
+            if chunk_limits is not None and accumulator_entries > int(chunk_limits["accumulator_max"]):
+                clusters_touched_avg = float(accumulator_entries) / float(max(1, len(signature_to_cluster_sum_count)))
+                raise RuntimeError(
+                    "Phase A accumulator exceeded limit: "
+                    f"entries={accumulator_entries} max={int(chunk_limits['accumulator_max'])} "
+                    f"warn={int(chunk_limits['accumulator_warn'])} "
+                    f"chunk_pairs={int(chunk_limits['chunk_pairs'])} "
+                    f"available_bytes={int(chunk_limits['available_bytes'])} "
+                    f"current_rss_bytes={int(chunk_limits['current_rss_bytes'])} "
+                    f"unassigned_signatures={len(signature_to_cluster_sum_count)} "
+                    f"clusters_touched_avg={clusters_touched_avg:.3f}. "
+                    "Pass total_ram_bytes and/or lower batching threshold."
+                )
+
+            # Fix #5: fallback accumulator bound when chunk_limits is None.
+            if chunk_limits is None and accumulator_entries > memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES:
+                raise RuntimeError(
+                    f"Phase A accumulator exceeded fallback limit: "
+                    f"entries={accumulator_entries} max={memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES}. "
+                    "Pass total_ram_bytes to enable proper memory budgeting."
+                )
+
+            if total_ram_for_phase is not None:
+                rss_now, _ = _current_rss_bytes_best_effort(total_ram_for_phase)
+                rss_peak_bytes = max(rss_peak_bytes, rss_now)
+
+            # Fix #3: adaptive chunking — halve chunk_pairs if observed RSS delta exceeds prediction.
+            if total_ram_for_phase is not None and adaptive_halvings < 3:
+                acc_entry_bytes = int(memory_budget.INCREMENTAL_ACCUMULATOR_ENTRY_BYTES)
+                if chunk_limits is not None and "accumulator_entry_bytes" in chunk_limits:
+                    acc_entry_bytes = int(chunk_limits["accumulator_entry_bytes"])
+                current_predicted_delta = (
+                    chunk_features_peak_bytes
+                    + accumulator_entries_peak * acc_entry_bytes
+                    + chunk_pairs_peak * int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES)
+                    + int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES)
+                )
+                current_observed_delta = max(0, rss_peak_bytes - rss_before_bytes)
+                if current_predicted_delta > 0 and current_observed_delta > current_predicted_delta * 1.2:
+                    chunk_pairs = max(1, chunk_pairs // 2)
+                    adaptive_halvings += 1
+                    logger.warning(
+                        "Phase A adaptive chunking: observed_delta=%d > predicted_delta=%d * 1.2; "
+                        "halving chunk_pairs to %d (halving %d/3) run_id=%s",
+                        current_observed_delta,
+                        current_predicted_delta,
+                        chunk_pairs,
+                        adaptive_halvings,
+                        runtime_context.run_id,
+                    )
+
+            del chunk_features
+            del chunk_nameless_features
+            del chunk_predictions
+            del chunk_labels
+
+        for unassigned_signature in unassigned_signature_ids:
+            for signature in cluster_seeds_require.keys():
+                label = _resolve_incremental_pair_label(
+                    dataset,
+                    unassigned_signature,
+                    signature,
+                    partial_supervision=partial_supervision,
+                    use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+                    dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                    incremental_dont_use_cluster_seeds=False,
+                    rust_featurizer=rust_featurizer,
+                    use_rust_constraints=use_rust_constraints,
+                    runtime_context=runtime_context,
+                    use_cache=self.use_cache,
+                )
+                pair_buffer.append((unassigned_signature, signature, label))
+                if len(pair_buffer) >= chunk_pairs:
+                    _process_incremental_chunk(pair_buffer)
+                    pair_buffer = []
+
+        if len(pair_buffer) > 0:
+            _process_incremental_chunk(pair_buffer)
+
+        rss_after_bytes = rss_before_bytes
+        if total_ram_for_phase is not None:
+            rss_after_bytes, _ = _current_rss_bytes_best_effort(total_ram_for_phase)
+        accumulator_entry_bytes = int(memory_budget.INCREMENTAL_ACCUMULATOR_ENTRY_BYTES)
+        if chunk_limits is not None and "accumulator_entry_bytes" in chunk_limits:
+            accumulator_entry_bytes = int(chunk_limits["accumulator_entry_bytes"])
+        phase_a_pair_buffer_peak_bytes = int(chunk_pairs_peak) * int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES)
+        phase_a_predicted_peak_delta_bytes = (
+            int(chunk_features_peak_bytes)
+            + int(accumulator_entries_peak) * accumulator_entry_bytes
+            + int(phase_a_pair_buffer_peak_bytes)
+            + int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES)
+        )
+        phase_a_prediction = memory_budget.summarize_prediction_accuracy(
+            stage_name="phase_a_seed_distances",
+            predicted_peak_delta_bytes=phase_a_predicted_peak_delta_bytes,
+            rss_before_bytes=rss_before_bytes,
+            rss_peak_bytes=rss_peak_bytes,
+            rss_after_bytes=rss_after_bytes,
+        )
+
+        return {
+            "constraint_pairs_total": int(constraint_pairs_total),
+            "constraint_chunks_total": int(constraint_chunks_total),
+            "accumulator_entries_peak": int(accumulator_entries_peak),
+            "model_predict_seconds": float(model_predict_total_seconds),
+            "phase_a_prediction_contract_version": str(phase_a_prediction["prediction_contract_version"]),
+            "phase_a_predicted_peak_delta_bytes": int(phase_a_prediction["predicted_peak_delta_bytes"]),
+            "phase_a_predicted_peak_rss_bytes": int(phase_a_prediction["predicted_peak_rss_bytes"]),
+            # Backward-compatible alias; prefer phase_a_predicted_peak_delta_bytes.
+            "phase_a_predicted_bytes": int(phase_a_prediction["predicted_bytes"]),
+            "phase_a_rss_before_bytes": int(phase_a_prediction["rss_before_bytes"]),
+            "phase_a_rss_peak_bytes": int(phase_a_prediction["rss_peak_bytes"]),
+            "phase_a_rss_after_bytes": int(phase_a_prediction["rss_after_bytes"]),
+            "phase_a_observed_peak_delta_bytes": int(phase_a_prediction["observed_peak_delta_bytes"]),
+            "phase_a_prediction_error_ratio": float(phase_a_prediction["prediction_error_ratio"]),
+            "phase_a_underpredicted": bool(phase_a_prediction["underpredicted"]),
+            "phase_a_rss_source": str(rss_source),
+            "phase_a_chunk_features_peak_bytes": int(chunk_features_peak_bytes),
+            "phase_a_pair_buffer_peak_bytes": int(phase_a_pair_buffer_peak_bytes),
+            "phase_a_accumulator_entry_bytes": int(accumulator_entry_bytes),
+            "phase_a_pair_buffer_entry_bytes": int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES),
+            "phase_a_fixed_overhead_bytes": int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES),
+            "phase_a_adaptive_halvings": int(adaptive_halvings),
+        }
+
+    def _convert_sum_count_to_average_distances(
+        self,
+        signature_to_cluster_sum_count: Dict[str, Dict[Union[int, str], List[Union[float, int]]]],
+    ) -> Dict[str, Dict[Union[int, str], Tuple[float, int]]]:
+        signature_to_cluster_to_average_dist: Dict[str, Dict[Union[int, str], Tuple[float, int]]] = defaultdict(dict)
+        for signature_id, cluster_sum_count in signature_to_cluster_sum_count.items():
+            for cluster_id, sum_count in cluster_sum_count.items():
+                total = float(sum_count[0])
+                count = int(sum_count[1])
+                if count <= 0:
+                    continue
+                signature_to_cluster_to_average_dist[signature_id][cluster_id] = (total / float(count), count)
+        return signature_to_cluster_to_average_dist
+
+    def _run_incremental_phases_bcd(
+        self,
+        unassigned_signature_ids: List[str],
+        dataset: ANDData,
+        signature_to_cluster_to_average_dist: Dict[str, Dict[Union[int, str], Tuple[float, int]]],
+        cluster_seeds_require: Dict[str, Union[int, str]],
+        recluster_map: Dict[Union[int, str], Union[int, str]],
+        cluster_seeds_require_inverse: Dict[Union[int, str], List[str]],
+        prevent_new_incompatibilities: bool,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+        runtime_context: RuntimeContext,
+    ) -> Dict[str, List[str]]:
+        logger.info("Batch clustering the unassigned signatures")
+        incremental_only_clusters, _ = self.predict_helper(
+            {"incremental_unassigned": unassigned_signature_ids},
+            dataset,
+            partial_supervision=partial_supervision,
+            runtime_context=runtime_context,
+        )
+
+        logger.info(
+            f"Made {len(incremental_only_clusters)} clusters out of {len(unassigned_signature_ids)} unassigned signatures"
+        )
+
+        # Average over Phase A signature-to-seed distances at the pre-cluster level.
+        cluster_ids = sorted(set(cluster_seeds_require.values()), key=lambda cluster_id: str(cluster_id))
+        for incremental_cluster_signature_ids in incremental_only_clusters.values():
+            for cluster_id in cluster_ids:
+                dists = []
+                for signature in incremental_cluster_signature_ids:
+                    cluster_entry = signature_to_cluster_to_average_dist.get(signature, {}).get(cluster_id)
+                    if cluster_entry is None:
+                        continue
+                    if int(cluster_entry[1]) <= 0:
+                        continue
+                    dists.append(float(cluster_entry[0]))
+                if len(dists) == 0:
+                    continue
+                out = (float(np.mean(dists)), len(dists))
+                for signature in incremental_cluster_signature_ids:
+                    signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out
+
+        logger.info("Assigning unassigned signatures for incremental clustering")
+        pred_clusters = defaultdict(list)
+        singleton_signatures = []
+        for signature_id, cluster_id in dataset.cluster_seeds_require.items():
+            pred_clusters[f"{cluster_id}"].append(signature_id)
+        for unassigned_signature in unassigned_signature_ids:
+            cluster_dists = signature_to_cluster_to_average_dist.get(unassigned_signature, {})
+            best_cluster_id = None
+            best_dist = float("inf")
+            for cluster_id, (average_dist, _) in cluster_dists.items():
+                if average_dist < best_dist and average_dist < self.cluster_model.eps:
+                    best_cluster_id = cluster_id
+                    best_dist = average_dist
+            if best_cluster_id is not None:
+                # undo the altered-cluster split if applicable
+                new_name_disallowed = False
+                if best_cluster_id in recluster_map:
+                    best_cluster_id = recluster_map[best_cluster_id]
+
+                    if prevent_new_incompatibilities:
+                        # restrict reclusterings that would add a new name incompatibility to the main cluster
+                        main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
+                        all_firsts = set(
+                            _signature_first_for_rules(dataset.signatures[signature_id])
+                            for signature_id in main_cluster_signatures
+                        )
+                        all_firsts = {first for first in all_firsts if len(first) > 1}
+
+                        # if all existing first names are single characters, there is nothing else to check
+                        if len(all_firsts) > 0:
+                            first_unassigned = _signature_first_for_rules(dataset.signatures[unassigned_signature])
+                            match_found = False
+                            for first_assigned in all_firsts:
+                                prefix = same_prefix_tokens(first_assigned, first_unassigned)
+                                known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
+
+                                if prefix or known_alias:
+                                    match_found = True
+                                    break
+                            # if not a prefix/alias match to any existing name, disallow this merge
+                            if not match_found:
+                                signature = dataset.signatures[unassigned_signature]
+                                first = signature.author_info_first
+                                last = signature.author_info_last
+                                paper_id = signature.paper_id
+                                logger.info(
+                                    (
+                                        "Incremental clustering prevented a name compatibility issue from being "
+                                        f"added while clustering {first} {last} on {paper_id}"
+                                    )
+                                )
+                                new_name_disallowed = True
+
+                if new_name_disallowed:
+                    singleton_signatures.append(unassigned_signature)
+                else:
+                    pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
             else:
-                labels = [0]
+                singleton_signatures.append(unassigned_signature)
 
-            for signature, label in zip(block_dict[block_key], labels):
-                pred_clusters[block_key + "_" + str(label)].append(signature)
+        # all remaining singletons are reclustered together
+        if len(singleton_signatures) > 0:
+            logger.info("Clustering together the still unassigned signatures")
+            reclustered_output, _ = self.predict_helper(
+                {"block": singleton_signatures},
+                dataset,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+            )
+            new_cluster_id = _next_unused_cluster_id(pred_clusters, int(dataset.max_seed_cluster_id or 0))
+            for new_cluster in reclustered_output.values():
+                new_cluster_id = _next_unused_cluster_id(pred_clusters, new_cluster_id)
+                pred_clusters[str(new_cluster_id)] = new_cluster
+                new_cluster_id += 1
+        logger.info("Done. Returning incrementally predicted clusters")
+        return dict(pred_clusters)
 
-        return dict(pred_clusters), dists
+    def _phase_split_subblock_fallback(
+        self,
+        block_signatures: List[str],
+        subblocks: Dict[str, List[str]],
+        dataset: ANDData,
+        all_unassigned: List[str],
+        signature_to_cluster_to_average_dist: Dict[str, Dict[Union[int, str], Tuple[float, int]]],
+        cluster_seeds_require: Dict[str, Union[int, str]],
+        recluster_map: Dict[Union[int, str], Union[int, str]],
+        cluster_seeds_require_inverse: Dict[Union[int, str], List[str]],
+        prevent_new_incompatibilities: bool,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+        runtime_context: RuntimeContext,
+    ) -> Dict[str, List[str]]:
+        del all_unassigned  # fallback is intentionally subblock-local in Phase B/C/D
+        cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
+        original_seed_sigs = set(cluster_seeds_require_original.keys())
+        original_cluster_ids = set(str(cid) for cid in cluster_seeds_require_original.values())
+        predict_times: Dict[str, float] = {}
+        merged_sig_to_cluster: Dict[str, Union[int, str]] = {}
+        next_new_cluster_id = _next_unused_cluster_id({}, int(dataset.max_seed_cluster_id or 0))
+
+        for subblock_key, subblock_signatures in sorted(subblocks.items()):
+            subblock_unassigned = [s for s in subblock_signatures if s not in cluster_seeds_require]
+            if len(subblock_unassigned) == 0:
+                continue
+            start_predict_time = time.time()
+            subblock_distances = {
+                signature_id: dict(signature_to_cluster_to_average_dist.get(signature_id, {}))
+                for signature_id in subblock_unassigned
+            }
+            subblock_result = self._run_incremental_phases_bcd(
+                subblock_unassigned,
+                dataset,
+                subblock_distances,
+                cluster_seeds_require,
+                recluster_map,
+                cluster_seeds_require_inverse,
+                prevent_new_incompatibilities,
+                partial_supervision,
+                runtime_context,
+            )
+            predict_times[subblock_key] = time.time() - start_predict_time
+
+            subblock_non_seed = set(subblock_signatures) - original_seed_sigs
+            local_new_id_remap: Dict[str, str] = {}
+            for cluster_id_str, cluster_sigs in subblock_result.items():
+                for sig in cluster_sigs:
+                    if sig not in subblock_non_seed:
+                        continue
+                    if cluster_id_str in original_cluster_ids:
+                        merged_sig_to_cluster[sig] = cluster_id_str
+                    else:
+                        if cluster_id_str not in local_new_id_remap:
+                            local_new_id_remap[cluster_id_str] = str(next_new_cluster_id)
+                            next_new_cluster_id += 1
+                        merged_sig_to_cluster[sig] = local_new_id_remap[cluster_id_str]
+
+        pred_clusters_final: Dict[str, List[str]] = defaultdict(list)
+        for sig_id, cluster_id in cluster_seeds_require_original.items():
+            pred_clusters_final[str(cluster_id)].append(sig_id)
+        for sig_id, cluster_id in merged_sig_to_cluster.items():
+            pred_clusters_final[str(cluster_id)].append(sig_id)
+
+        predicted_signatures = {sig_id for sigs in pred_clusters_final.values() for sig_id in sigs}
+        missing_signatures = [sig_id for sig_id in block_signatures if sig_id not in predicted_signatures]
+        if len(missing_signatures) > 0:
+            logger.error(
+                "Subblock-local phase-split fallback produced incomplete signature coverage; adding singleton fallbacks. "
+                "missing=%d total_block_signatures=%d",
+                len(missing_signatures),
+                len(block_signatures),
+            )
+            for missing_signature in missing_signatures:
+                next_new_cluster_id = _next_unused_cluster_id(pred_clusters_final, next_new_cluster_id)
+                pred_clusters_final[str(next_new_cluster_id)] = [missing_signature]
+                next_new_cluster_id += 1
+
+        logger.warning(
+            "Phase-split fallback completed with subblock-local Phase B/C/D; "
+            "results may diverge from monolithic. subblocks=%d predict_times=%s",
+            len(subblocks),
+            predict_times,
+        )
+        return dict(pred_clusters_final)
+
+    def _predict_incremental_phase_split(
+        self,
+        block_signatures: List[str],
+        dataset: ANDData,
+        prevent_new_incompatibilities: bool,
+        batching_threshold: int,
+        partial_supervision: Dict[Tuple[str, str], Union[int, float]],
+        runtime_context: RuntimeContext,
+        total_ram_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        logger.info("Phase-split incremental enabled")
+        cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
+        all_unassigned = [
+            signature_id for signature_id in block_signatures if signature_id not in cluster_seeds_require_original
+        ]
+
+        cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = self._build_incremental_seed_setup(
+            dataset,
+            partial_supervision,
+            runtime_context,
+        )
+        subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
+
+        selected_count = _count_selected_features(self.featurizer_info)
+        nameless_count = (
+            _count_selected_features(self.nameless_featurizer_info)
+            if self.nameless_featurizer_info is not None
+            else 0
+        )
+        chunk_limits = _compute_incremental_memory_limits(
+            self.featurizer_info.number_of_features,
+            selected_feature_count=selected_count,
+            nameless_feature_count=nameless_count,
+            total_ram_bytes=total_ram_bytes,
+        )
+        chunk_pairs = int(chunk_limits["chunk_pairs"])
+        logger.info(
+            "Phase-split Phase A chunking: chunk_pairs=%d total_ram=%d total_ram_source=%s "
+            "rss=%d rss_source=%s available=%d accumulator_warn=%d accumulator_max=%d",
+            chunk_pairs,
+            int(chunk_limits["total_ram_bytes"]),
+            str(chunk_limits["total_ram_source"]),
+            int(chunk_limits["current_rss_bytes"]),
+            str(chunk_limits["current_rss_source"]),
+            int(chunk_limits["available_bytes"]),
+            int(chunk_limits["accumulator_warn"]),
+            int(chunk_limits["accumulator_max"]),
+        )
+
+        signature_to_cluster_sum_count: Dict[str, Dict[Union[int, str], List[Union[float, int]]]] = defaultdict(dict)
+        phase_a_pairs_total = 0
+        phase_a_chunks_total = 0
+        phase_a_accumulator_peak = 0
+        phase_a_accumulator_peak_sample = 0
+        phase_a_model_predict_seconds = 0.0
+        phase_a_prediction_contract_version = "unknown"
+        phase_a_predicted_peak_delta_bytes = 0
+        phase_a_predicted_peak_rss_bytes = 0
+        phase_a_predicted_bytes = 0
+        phase_a_rss_before_bytes = 0
+        phase_a_rss_peak_bytes = 0
+        phase_a_rss_after_bytes = 0
+        phase_a_rss_source = "unavailable"
+        phase_a_observed_peak_delta_bytes = 0
+        phase_a_prediction_error_ratio = 0.0
+        phase_a_underpredicted = False
+        phase_a_chunk_features_peak_bytes = 0
+        phase_a_pair_buffer_peak_bytes = 0
+        phase_a_accumulator_entry_bytes = 0
+        phase_a_pair_buffer_entry_bytes = 0
+        phase_a_fixed_overhead_bytes = 0
+        phase_a_worst_sample: Optional[Dict[str, Any]] = None
+
+        for subblock_signatures in subblocks.values():
+            subblock_unassigned = [
+                signature_id for signature_id in subblock_signatures if signature_id not in cluster_seeds_require
+            ]
+            if len(subblock_unassigned) == 0:
+                continue
+            phase_a_telemetry = self._phase_a_seed_distances(
+                subblock_unassigned,
+                cluster_seeds_require,
+                dataset,
+                partial_supervision,
+                signature_to_cluster_sum_count,
+                chunk_pairs,
+                chunk_limits,
+                runtime_context,
+                total_ram_bytes=int(chunk_limits["total_ram_bytes"]),
+            )
+            phase_a_pairs_total += int(phase_a_telemetry["constraint_pairs_total"])
+            phase_a_chunks_total += int(phase_a_telemetry["constraint_chunks_total"])
+            phase_a_accumulator_peak = max(phase_a_accumulator_peak, int(phase_a_telemetry["accumulator_entries_peak"]))
+            phase_a_model_predict_seconds += float(phase_a_telemetry["model_predict_seconds"])
+            candidate_ratio = float(phase_a_telemetry["phase_a_prediction_error_ratio"])
+            candidate_observed_delta = int(phase_a_telemetry["phase_a_observed_peak_delta_bytes"])
+            if phase_a_worst_sample is None:
+                phase_a_worst_sample = phase_a_telemetry
+            else:
+                current_ratio = float(phase_a_worst_sample["phase_a_prediction_error_ratio"])
+                current_observed_delta = int(phase_a_worst_sample["phase_a_observed_peak_delta_bytes"])
+                if candidate_ratio > current_ratio or (
+                    candidate_ratio == current_ratio and candidate_observed_delta > current_observed_delta
+                ):
+                    phase_a_worst_sample = phase_a_telemetry
+            phase_a_underpredicted = phase_a_underpredicted or bool(phase_a_telemetry["phase_a_underpredicted"])
+
+        if phase_a_worst_sample is not None:
+            phase_a_prediction_contract_version = str(phase_a_worst_sample["phase_a_prediction_contract_version"])
+            phase_a_predicted_peak_delta_bytes = int(phase_a_worst_sample["phase_a_predicted_peak_delta_bytes"])
+            phase_a_predicted_peak_rss_bytes = int(phase_a_worst_sample["phase_a_predicted_peak_rss_bytes"])
+            phase_a_predicted_bytes = int(phase_a_worst_sample["phase_a_predicted_bytes"])
+            phase_a_rss_before_bytes = int(phase_a_worst_sample["phase_a_rss_before_bytes"])
+            phase_a_rss_peak_bytes = int(phase_a_worst_sample["phase_a_rss_peak_bytes"])
+            phase_a_rss_after_bytes = int(phase_a_worst_sample["phase_a_rss_after_bytes"])
+            phase_a_rss_source = str(phase_a_worst_sample["phase_a_rss_source"])
+            phase_a_observed_peak_delta_bytes = int(phase_a_worst_sample["phase_a_observed_peak_delta_bytes"])
+            phase_a_prediction_error_ratio = float(phase_a_worst_sample["phase_a_prediction_error_ratio"])
+            phase_a_accumulator_peak_sample = int(phase_a_worst_sample.get("accumulator_entries_peak", 0))
+            phase_a_chunk_features_peak_bytes = int(phase_a_worst_sample.get("phase_a_chunk_features_peak_bytes", 0))
+            phase_a_pair_buffer_peak_bytes = int(phase_a_worst_sample.get("phase_a_pair_buffer_peak_bytes", 0))
+            phase_a_accumulator_entry_bytes = int(phase_a_worst_sample.get("phase_a_accumulator_entry_bytes", 0))
+            phase_a_pair_buffer_entry_bytes = int(phase_a_worst_sample.get("phase_a_pair_buffer_entry_bytes", 0))
+            phase_a_fixed_overhead_bytes = int(phase_a_worst_sample.get("phase_a_fixed_overhead_bytes", 0))
+
+        logger.info(
+            "Telemetry: phase_split_phase_a constraints_pairs_total=%d constraint_chunks_total=%d "
+            "accumulator_entries_peak=%d accumulator_entries_peak_sample=%d "
+            "chunk_features_peak_bytes=%d phase_a_pair_buffer_peak_bytes=%d "
+            "accumulator_entry_bytes=%d phase_a_pair_buffer_entry_bytes=%d "
+            "phase_a_fixed_overhead_bytes=%d model_predict_seconds=%.3f "
+            "prediction_contract_version=%s predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d "
+            "predicted_bytes=%d rss_before_bytes=%d rss_peak_bytes=%d rss_after_bytes=%d "
+            "observed_peak_delta_bytes=%d prediction_error_ratio=%.3f underpredicted=%s rss_source=%s",
+            phase_a_pairs_total,
+            phase_a_chunks_total,
+            phase_a_accumulator_peak,
+            phase_a_accumulator_peak_sample,
+            phase_a_chunk_features_peak_bytes,
+            phase_a_pair_buffer_peak_bytes,
+            phase_a_accumulator_entry_bytes,
+            phase_a_pair_buffer_entry_bytes,
+            phase_a_fixed_overhead_bytes,
+            phase_a_model_predict_seconds,
+            phase_a_prediction_contract_version,
+            phase_a_predicted_peak_delta_bytes,
+            phase_a_predicted_peak_rss_bytes,
+            phase_a_predicted_bytes,
+            phase_a_rss_before_bytes,
+            phase_a_rss_peak_bytes,
+            phase_a_rss_after_bytes,
+            phase_a_observed_peak_delta_bytes,
+            phase_a_prediction_error_ratio,
+            phase_a_underpredicted,
+            phase_a_rss_source,
+        )
+
+        signature_to_cluster_to_average_dist = self._convert_sum_count_to_average_distances(
+            signature_to_cluster_sum_count
+        )
+        del signature_to_cluster_sum_count
+
+        unassigned_count = len(all_unassigned)
+        recluster_bytes = unassigned_count * (unassigned_count - 1) // 2 * 8
+        # Phase B budget: by this point Phase A chunk features are freed, and the original
+        # accumulator has been replaced by the converted distance dict. Available memory is
+        # the freed chunk budget + freed accumulator budget - the still-live converted dict.
+        accumulator_entry_bytes_for_budget = int(chunk_limits.get("accumulator_entry_bytes", 200))
+        estimated_converted_dict_bytes = phase_a_accumulator_peak * accumulator_entry_bytes_for_budget
+        phase_b_budget_bytes = max(
+            1,
+            int(chunk_limits["chunk_budget_bytes"])
+            + int(chunk_limits["accumulator_budget_bytes"])
+            - estimated_converted_dict_bytes,
+        )
+        if recluster_bytes > phase_b_budget_bytes:
+            logger.warning(
+                "Phase B over budget (%d bytes > %d); using subblock-local Phase B/C/D fallback.",
+                recluster_bytes,
+                phase_b_budget_bytes,
+            )
+            fallback_clusters = self._phase_split_subblock_fallback(
+                block_signatures,
+                subblocks,
+                dataset,
+                all_unassigned,
+                signature_to_cluster_to_average_dist,
+                cluster_seeds_require,
+                recluster_map,
+                cluster_seeds_require_inverse,
+                prevent_new_incompatibilities,
+                partial_supervision,
+                runtime_context,
+            )
+            logger.info(
+                "Telemetry: phase_split_phase_b mode=subblock_local required_bytes=%d budget_bytes=%d",
+                recluster_bytes,
+                phase_b_budget_bytes,
+            )
+            return _build_incremental_result(
+                fallback_clusters,
+                phase_b_mode="subblock_local",
+                phase_b_budget_bytes=phase_b_budget_bytes,
+                phase_b_required_bytes=recluster_bytes,
+            )
+
+        exact_clusters = self._run_incremental_phases_bcd(
+            all_unassigned,
+            dataset,
+            signature_to_cluster_to_average_dist,
+            cluster_seeds_require,
+            recluster_map,
+            cluster_seeds_require_inverse,
+            prevent_new_incompatibilities,
+            partial_supervision,
+            runtime_context,
+        )
+        logger.info(
+            "Telemetry: phase_split_phase_b mode=exact required_bytes=%d budget_bytes=%d",
+            recluster_bytes,
+            phase_b_budget_bytes,
+        )
+        return _build_incremental_result(
+            exact_clusters,
+            phase_b_mode="exact",
+            phase_b_budget_bytes=phase_b_budget_bytes,
+            phase_b_required_bytes=recluster_bytes,
+        )
 
     def predict_incremental(
         self,
@@ -902,7 +2133,9 @@ class Clusterer:
         prevent_new_incompatibilities: bool = True,
         batching_threshold: Optional[int] = None,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
-    ):
+        runtime_context: Optional[RuntimeContext] = None,
+        total_ram_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
         in using the cluster_seeds_require parameter of the dataset class, and skips work by simply assigning each
@@ -938,67 +2171,49 @@ class Clusterer:
             Defaults to None, which means no batching occurs
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
+        total_ram_bytes: Optional[int]
+            Optional explicit RAM budget for incremental phase-split memory-limit derivation.
         Returns
         -------
-        Dict: the predicted clusters
+        Dict: incremental clustering result payload
         """
-        _sync_rust_cluster_seeds(dataset)
-        if batching_threshold is not None and len(block_signatures) > batching_threshold:
-            assert batching_threshold > 0, "Batching threshold must be positive"
-            # STEP 1: Make subblocks
-            logger.info(f"Too many signatures to do all at once for predict_incremental. Subblocking...")
-            subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
-            cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
-
-            # STEP 2: do predict_incremental on each subblock
-            # and keep updating the cluster_seeds_require as we go
-            predict_times = {}
-            for subblock_key, subblock_signatures in subblocks.items():
-                logger.info(
-                    f"Beginning incremental clustering for {len(subblock_signatures)} signatures for subblock {subblock_key}..."
-                )
-                # since the size of each subblock is <= batching_threshold
-                # and generally the number of signatures to do incrementally << number of signatures
-                # in cluster_seed_require
-                # the helper should be able to do a full block clustering on the unassigned signatures
-                # without violating the implied maximum # of pairs constrained by batching_threshold.
-                # to be clear: the biggest block in memory should be
-                # max(batching_threshold * (total_block_size - batching_threshold), batching_threshold ** 2)
-                start_predict_time = time.time()
-                pred_clusters_intermediate = self.predict_incremental_helper(
-                    subblock_signatures,
-                    dataset,
-                    prevent_new_incompatibilities=prevent_new_incompatibilities,
-                    partial_supervision=partial_supervision,
-                )
-                end_predict_time = time.time()
-                total_predict_time = end_predict_time - start_predict_time
-                predict_times[subblock_key] = total_predict_time
-                # now we have to update dataset.cluster_seeds_require with what's in pred_clusters_intermediate
-                # remembering to undo the changes later
-                # note that cluster_seeds_require is in this format:
-                # cluster_seeds_require[signature_id] = cluster_id
-                # and pred_clusters_intermediate is the inverse...
-                # so have to invert it
-                dataset.cluster_seeds_require = {}
-                for cluster_id, signatures in pred_clusters_intermediate.items():
-                    for signature in signatures:
-                        dataset.cluster_seeds_require[signature] = cluster_id
-                _sync_rust_cluster_seeds(dataset)
-
-            # STEP 3: undo the damage to cluster_seeds_require the damage
-            logger.info(f"Finished subblocked predict_incremental. Here's how long each subblock took:", predict_times)
-            dataset.cluster_seeds_require = cluster_seeds_require_original
-            _sync_rust_cluster_seeds(dataset)
-            return pred_clusters_intermediate
-        else:
-            # just call predict_incremental_helper as is
+        if runtime_context is None:
+            runtime_context = build_runtime_context("cluster_predict_incremental")
+        _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
+        if batching_threshold is None or len(block_signatures) <= batching_threshold:
             return self.predict_incremental_helper(
                 block_signatures,
                 dataset,
                 prevent_new_incompatibilities=prevent_new_incompatibilities,
                 partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
             )
+
+        assert batching_threshold > 0, "Batching threshold must be positive"
+        if len(dataset.cluster_seeds_require) == 0:
+            logger.info(
+                "No cluster seeds provided for subblocked incremental; "
+                "falling back to monolithic incremental helper for partition parity."
+            )
+            return self.predict_incremental_helper(
+                block_signatures,
+                dataset,
+                prevent_new_incompatibilities=prevent_new_incompatibilities,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+            )
+
+        return self._predict_incremental_phase_split(
+            block_signatures,
+            dataset,
+            prevent_new_incompatibilities,
+            batching_threshold,
+            partial_supervision,
+            runtime_context,
+            total_ram_bytes=total_ram_bytes,
+        )
 
     def predict_incremental_helper(
         self,
@@ -1006,7 +2221,9 @@ class Clusterer:
         dataset: ANDData,
         prevent_new_incompatibilities: bool = True,
         partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {},
-    ):
+        runtime_context: Optional[RuntimeContext] = None,
+        total_ram_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
         in using the cluster_seeds_require parameter of the dataset class, and skips work by simply assigning each
@@ -1041,101 +2258,66 @@ class Clusterer:
             final cluster would have D Jones, David Jones, and Donald Jones.
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
+        total_ram_bytes: Optional[int]
+            Optional explicit RAM input used to derive featurization chunk budgets.
         Returns
         -------
-        Dict: the predicted clusters
+        Dict: incremental clustering result payload
         """
+        if runtime_context is None:
+            runtime_context = build_runtime_context("cluster_predict_incremental")
         logger.info(f"Beginning incremental clustering for {len(block_signatures)} signatures...")
-        recluster_map = {}
-        cluster_seeds_require = copy.deepcopy(dataset.cluster_seeds_require)
-        # splitting up the claimed profiles that we received from prod
-        # because the claimed profiles may be "unnatural" -> users joined papers that S2AND rules
-        # would never have allowed. when we are going to try to add new signatures to these claimed
-        # clusters, they should be "natural" looking to avoid impossible additions
-        # that would be prevented by the rules
-        if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
-            logger.info("Dealing with altered cluster signatures")
-            altered_cluster_nums = set(
-                # it's possible that the altered signature is not in cluster_seeds_require
-                # because we are passing a custom cluster_seeds_require here from
-                # predict, but we checked that the altered signature is in the full
-                # cluster_seeds_require during init
-                dataset.cluster_seeds_require[altered_signature_id]
-                for altered_signature_id in dataset.altered_cluster_signatures
-                if altered_signature_id in dataset.cluster_seeds_require
-            )
-            if len(altered_cluster_nums) > 0:
-                cluster_seeds_require_inverse: Dict[int, list] = {}
-                for signature_id, cluster_num in dataset.cluster_seeds_require.items():
-                    if cluster_num not in cluster_seeds_require_inverse:
-                        cluster_seeds_require_inverse[cluster_num] = []
-                    cluster_seeds_require_inverse[cluster_num].append(signature_id)
-                for altered_cluster_num in altered_cluster_nums:
-                    signature_ids_for_cluster_num = cluster_seeds_require_inverse[altered_cluster_num]
-
-                    # Note: incremental_dont_use_cluster_seeds is set to True, because at this stage
-                    # of incremental clustering we are splitting up the claimed profiles that we received
-                    # from production so that they align with s2and's predictions. When doing this, we
-                    # don't want to use the passed in cluster seeds, because they reflect the claimed profile, not
-                    # s2and's predictions
-                    reclustered_output, _ = self.predict_helper(
-                        {"block": signature_ids_for_cluster_num},
-                        dataset,
-                        incremental_dont_use_cluster_seeds=True,
-                        partial_supervision=partial_supervision,
-                    )
-                    if len(reclustered_output) > 1:
-                        for i, new_cluster_of_signatures in enumerate(reclustered_output.values()):
-                            new_cluster_num = str(altered_cluster_num) + f"_{i}"
-                            recluster_map[new_cluster_num] = altered_cluster_num
-                            for reclustered_signature_id in new_cluster_of_signatures:
-                                cluster_seeds_require[reclustered_signature_id] = new_cluster_num  # type: ignore
+        cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = self._build_incremental_seed_setup(
+            dataset,
+            partial_supervision,
+            runtime_context,
+        )
 
         logger.info("Getting name constraints")
-        all_pairs = []
-        unassigned_signatures = []
-        global _RUST_CONSTRAINTS_AVAILABLE
-        rust_featurizer = None
-        use_rust_constraints = None
-        if self.use_default_constraints_as_supervision:
-            use_rust_constraints = _use_rust_constraints()
-            if use_rust_constraints and _RUST_CONSTRAINTS_AVAILABLE:
-                try:
-                    rust_featurizer = _get_rust_featurizer(dataset)
-                except Exception as exc:  # pragma: no cover - native extension optional
-                    _RUST_CONSTRAINTS_AVAILABLE = False
-                    use_rust_constraints = False
-                    logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
+        all_pairs: List[Tuple[str, str, float]] = []
+        unassigned_signature_ids = []
+        rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
+            dataset,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+        )
+        signature_to_cluster_to_average_dist: Dict[str, Dict[Union[int, str], Tuple[float, int]]] = defaultdict(
+            lambda: defaultdict(lambda: (0.0, 0))
+        )
+
+        def _update_signature_cluster_average(
+            unassigned_signature: str, cluster_id: Union[int, str], dist: float
+        ) -> None:
+            previous_average, previous_count = signature_to_cluster_to_average_dist[unassigned_signature][cluster_id]
+            signature_to_cluster_to_average_dist[unassigned_signature][cluster_id] = (
+                (previous_average * previous_count + float(dist)) / (previous_count + 1),
+                previous_count + 1,
+            )
+
         for possibly_unassigned_signature in block_signatures:
             if possibly_unassigned_signature in cluster_seeds_require:
                 continue
             unassigned_signature = possibly_unassigned_signature
-            unassigned_signatures.append(unassigned_signature)
+            unassigned_signature_ids.append(unassigned_signature)
             for signature in cluster_seeds_require.keys():
-                label = np.nan
-                if (unassigned_signature, signature) in partial_supervision:
-                    label = partial_supervision[(unassigned_signature, signature)] - LARGE_INTEGER
-                elif (signature, unassigned_signature) in partial_supervision:
-                    label = partial_supervision[(signature, unassigned_signature)] - LARGE_INTEGER
-                elif self.use_default_constraints_as_supervision:
-                    # Explicit False: in this loop unassigned_signature is not in cluster_seeds_require,
-                    # so the "require" branch of get_constraint can never trigger anyway. This keeps
-                    # behavior identical while documenting the intent.
-                    value = _get_constraint_value(
-                        dataset,
-                        unassigned_signature,
-                        signature,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=False,
-                        rust_featurizer=rust_featurizer,
-                        use_rust_constraints=use_rust_constraints,
-                    )
-                    if value is not None:
-                        label = value - LARGE_INTEGER
+                label = _resolve_incremental_pair_label(
+                    dataset,
+                    unassigned_signature,
+                    signature,
+                    partial_supervision=partial_supervision,
+                    use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+                    dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                    incremental_dont_use_cluster_seeds=False,
+                    rust_featurizer=rust_featurizer,
+                    use_rust_constraints=use_rust_constraints,
+                    runtime_context=runtime_context,
+                    use_cache=self.use_cache,
+                )
                 all_pairs.append((unassigned_signature, signature, label))
 
         logger.info("Featurizing pairs")
-        batch_features, _, batch_nameless_features = many_pairs_featurize(
+        batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
             all_pairs,
             dataset,
             self.featurizer_info,
@@ -1143,160 +2325,50 @@ class Clusterer:
             use_cache=self.use_cache,
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=self.nameless_featurizer_info,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
 
-        # get predictions where there isn't partial supervision
-        # and fill the rest with partial supervision
-        # undoing the offset by LARGE_INTEGER from above
         logger.info("Performing pairwise classification")
-        batch_labels = np.array([i[2] for i in all_pairs])  # type: ignore
-        predict_flag = np.isnan(batch_labels)
-        not_predict_flag = ~predict_flag
-        batch_predictions = np.zeros(len(batch_features))
-        # index 0 is p(not the same)
-        if np.any(predict_flag):
-            if self.nameless_classifier is not None:
-                batch_predictions[predict_flag] = (
-                    self.classifier.predict_proba(batch_features[predict_flag, :])[:, 0]
-                    + self.nameless_classifier.predict_proba(batch_nameless_features[predict_flag, :])[  # type: ignore
-                        :, 0
-                    ]
-                ) / 2
-            else:
-                batch_predictions[predict_flag] = self.classifier.predict_proba(batch_features[predict_flag, :])[:, 0]
-        if np.any(not_predict_flag):
-            batch_predictions[not_predict_flag] = batch_labels[not_predict_flag] + LARGE_INTEGER
+        rust_failure_counts: Dict[str, int] = {"main": 0, "nameless": 0}
+        batch_predictions, model_predict_seconds = _predict_and_combine(
+            self.classifier,
+            self.nameless_classifier,
+            batch_features,
+            batch_labels,
+            batch_nameless_features,
+            "incremental",
+            rust_failure_counts,
+            runtime_context=runtime_context,
+        )
+        logger.info("Telemetry: model_predict_total seconds=%.3f blocks=1", model_predict_seconds)
 
         logger.info("Computing average distances for unassigned signatures")
-        signature_to_cluster_to_average_dist: Dict[str, Dict[int, Tuple[float, int]]] = defaultdict(
-            lambda: defaultdict(lambda: (0, 0))
-        )
         for signature_pair, dist in zip(all_pairs, batch_predictions):
             unassigned_signature, assigned_signature, _ = signature_pair
             if assigned_signature not in cluster_seeds_require:
                 continue
             cluster_id = cluster_seeds_require[assigned_signature]
-            previous_average, previous_count = signature_to_cluster_to_average_dist[unassigned_signature][cluster_id]
-            signature_to_cluster_to_average_dist[unassigned_signature][cluster_id] = (
-                (previous_average * previous_count + dist) / (previous_count + 1),
-                previous_count + 1,
-            )
+            _update_signature_cluster_average(unassigned_signature, cluster_id, float(dist))
 
-        # NEW!
-        # first cluster the unassigned signatures and then check which resulting
-        # unassigned CLUSTERS to merge with extant ones (instead of which individual signatures to merge)
-        # WARNING: this assumes that the number of unassigned signatures is less than the number
-        # of assigned signatures.
-        # if this is not the case, we may get OOM errors and need custom batching logic here
-        logger.info("Batch clustering the unassigned signatures")
-        incremental_only_clusters, _ = self.predict_helper(
-            {"incremental_unassigned": unassigned_signatures},
+        predicted_clusters = self._run_incremental_phases_bcd(
+            unassigned_signature_ids,
             dataset,
-            partial_supervision=partial_supervision,
+            signature_to_cluster_to_average_dist,
+            cluster_seeds_require,
+            recluster_map,
+            cluster_seeds_require_inverse,
+            prevent_new_incompatibilities,
+            partial_supervision,
+            runtime_context,
         )
-
-        logger.info(
-            f"Made {len(incremental_only_clusters)} clusters out of {len(unassigned_signatures)} unassigned signatures"
+        phase_b_required_bytes = len(unassigned_signature_ids) * (len(unassigned_signature_ids) - 1) // 2 * 8
+        return _build_incremental_result(
+            predicted_clusters,
+            phase_b_mode="exact",
+            phase_b_budget_bytes=phase_b_required_bytes,
+            phase_b_required_bytes=phase_b_required_bytes,
         )
-
-        # now that we have the average dist from each unassigned_signature and each signatures per cluster_id
-        # we can average these averages to get the distance between the unassigned CLUSTERS and assigned CLUSTERS
-        cluster_ids = list(set(list(cluster_seeds_require.values())))
-        for _, unassigned_signatures in incremental_only_clusters.items():
-            # we have to average each of signature_to_cluster_to_average_dist[i][cluster_id] across i per cluster_id
-            # and then replace the value in signature_to_cluster_to_average_dist with this average
-            # this is equivalent to computing the average distance between the unassigned cluster and the assigned cluster
-            for cluster_id in cluster_ids:
-                dists = [
-                    signature_to_cluster_to_average_dist[signature][cluster_id][0]
-                    for signature in unassigned_signatures
-                ]
-                out = (np.mean(dists), len(dists))
-                for signature in unassigned_signatures:
-                    signature_to_cluster_to_average_dist[signature][cluster_id] = out  # type: ignore
-
-        # end NEW!
-
-        logger.info("Assigning unassigned signatures for incremental clustering")
-        pred_clusters = defaultdict(list)
-        singleton_signatures = []
-        for signature_id, cluster_id in dataset.cluster_seeds_require.items():
-            pred_clusters[f"{cluster_id}"].append(signature_id)
-        for unassigned_signature, cluster_dists in signature_to_cluster_to_average_dist.items():
-            best_cluster_id = None
-            best_dist = float("inf")
-            for cluster_id, (average_dist, _) in cluster_dists.items():
-                if average_dist < best_dist and average_dist < self.cluster_model.eps:
-                    best_cluster_id = cluster_id
-                    best_dist = average_dist
-            if best_cluster_id is not None:
-                # undo the reclustering step
-                new_name_disallowed = False
-                if best_cluster_id in recluster_map:
-                    best_cluster_id = recluster_map[best_cluster_id]  # type: ignore
-
-                    if prevent_new_incompatibilities:
-                        # restrict reclusterings that would add a new name incompatibility to the main cluster
-                        main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
-                        all_firsts = set(
-                            [
-                                dataset.signatures[signature_id].author_info_first_normalized_without_apostrophe
-                                for signature_id in main_cluster_signatures
-                            ]
-                        )
-                        all_firsts = {first for first in all_firsts if len(first) > 1}
-
-                        # if all the existing first names in the cluster are single characters,
-                        # there is nothing else to check
-                        if len(all_firsts) > 0:
-                            first_unassigned = dataset.signatures[
-                                unassigned_signature
-                            ].author_info_first_normalized_without_apostrophe
-                            match_found = False
-                            for first_assigned in all_firsts:
-                                prefix = same_prefix_tokens(first_assigned, first_unassigned)
-                                known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
-
-                                if prefix or known_alias:
-                                    match_found = True
-                                    break
-                            # if the candidate name is a prefix or a name alias for any of the existing names,
-                            # we will allow it to cluster. If it is not, then it has been clustered with a single
-                            # character name, and we don't want to allow it
-                            if not match_found:
-                                signature = dataset.signatures[unassigned_signature]
-                                first = signature.author_info_first
-                                last = signature.author_info_last
-                                paper_id = signature.paper_id
-                                logger.info(
-                                    (
-                                        "Incremental clustering prevented a name compatibility issue from being "
-                                        f"added while clustering {first} {last} on {paper_id}"
-                                    )
-                                )
-                                new_name_disallowed = True
-
-                if new_name_disallowed:
-                    singleton_signatures.append(unassigned_signature)
-                else:
-                    pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
-            else:
-                singleton_signatures.append(unassigned_signature)
-
-        # all the singletons go through the clustering process again
-        if len(singleton_signatures) > 0:
-            logger.info("Clustering together the still unassigned signatures")
-            reclustered_output, _ = self.predict_helper(
-                {"block": singleton_signatures},
-                dataset,
-                partial_supervision=partial_supervision,
-            )
-            new_cluster_id = dataset.max_seed_cluster_id or 0
-            for new_cluster in reclustered_output.values():
-                pred_clusters[str(new_cluster_id)] = new_cluster
-                new_cluster_id += 1
-        logger.info("Done. Returning incrementally predicted clusters")
-        return dict(pred_clusters)
 
 
 class PairwiseModeler:
@@ -1371,7 +2443,7 @@ class PairwiseModeler:
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.best_params: Optional[Dict] = None
-        self.hyperopt_trials_store: Optional[Trials] = None
+        self.hyperopt_trials_store: Optional[Union[Trials, Dict[Any, Any]]] = None
         self.classifier: Optional[Any] = None
 
     def fit(
@@ -1380,7 +2452,7 @@ class PairwiseModeler:
         y_train: Union[np.ndarray[Any, Any], None, Any],
         X_val: Union[np.ndarray[Any, Any], None, Any],
         y_val: Union[np.ndarray[Any, Any], None, Any],
-    ) -> Trials:
+    ) -> Union[Trials, Dict[Any, Any]]:
         """
         Fits the classifier
 
@@ -1417,9 +2489,8 @@ class PairwiseModeler:
                 trials=self.hyperopt_trials_store,
                 rstate=np.random.default_rng(self.random_state),
             )
-            assert self.hyperopt_trials_store is not None
-            trials_store = cast(Trials, self.hyperopt_trials_store)
-            best_params = space_eval(self.search_space, trials_store.argmin)
+            assert isinstance(self.hyperopt_trials_store, Trials)
+            best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
             self.best_params = {k: intify(v) for k, v in best_params.items()}
             self.estimator.set_params(**self.best_params)
         else:
@@ -1429,11 +2500,171 @@ class PairwiseModeler:
         # refitting but only on training data so as not to leak anything
         self.classifier = self.estimator.fit(X_train, y_train)
 
+        assert self.hyperopt_trials_store is not None
         return self.hyperopt_trials_store
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self.classifier is not None, "You need to call fit first"
         return self.classifier.predict_proba(X)
+
+
+def intify(x):
+    """Hyperopt is bad at ints..."""
+    if hasattr(x, "is_integer") and x.is_integer():
+        return int(x)
+    else:
+        return x
+
+
+class FastCluster(TransformerMixin, BaseEstimator):
+    """
+    A scikit-learn wrapper for fastcluster.
+    Inputs:
+        linkage: string (default="average")
+            Agglomerative linkage method. Defaults to "average".
+            Must be one of "'complete', 'average', 'single,
+            'weighted', 'ward', 'centroid', 'median'."
+        eps: float (default=0.5)
+            Cutoff used to determine number of clusters.
+        preserve_input: bool (default=True)
+            Whether to preserve the X input or modify in place.
+            Defaults to False, which modifies in place.
+        input_as_observation_matrix: bool (default=False)
+            If True, the input to fit/transform must be a 2-D array
+            of observation vectors (N by d). If False input to fit/transform
+            must be a 1-D condensed distance matrix, then it must be a
+            (N choose 2) sized vector, where N is the number
+            of original observations paired in the distance matrix, and
+            d is the dimensionality of the vector space.
+
+    Note: FastCluster does *not* support two-dimensional distance matrices
+    as input. They *must* be flattened. For more details, please see:
+    https://cran.r-project.org/web/packages/fastcluster/vignettes/fastcluster.pdf
+    """
+
+    def __init__(
+        self,
+        linkage: str = "average",
+        eps: float = 0.5,
+        preserve_input: bool = True,
+        input_as_observation_matrix: bool = False,
+    ):
+        if linkage not in {
+            "complete",
+            "average",
+            "weighted",
+            "ward",
+            "centroid",
+            "median",
+            "single",
+        }:
+            raise Exception(
+                "The 'linkage' parameter has to be one of: "
+                + "'single', complete', 'average', 'weighted', 'ward', 'centroid', 'median'."
+            )
+
+        self.linkage = linkage
+        self.eps = eps
+        self.preserve_input = preserve_input
+        self.input_as_observation_matrix = input_as_observation_matrix
+        self.labels_ = None
+
+    # ---- new: robust get_params ----
+    def get_params(self, deep=True):
+        """
+        Return params but gracefully handle the case where an instance
+        (e.g., loaded from an old pickle) is missing attributes.
+        """
+        params = {}
+        sig = inspect.signature(self.__class__.__init__)
+        for name, param in sig.parameters.items():
+            if name == "self":
+                continue
+            # prefer the runtime attribute if present, otherwise the __init__ default
+            if hasattr(self, name):
+                params[name] = getattr(self, name)
+            else:
+                params[name] = param.default if param.default is not inspect._empty else None
+
+        if deep:
+            # sklearn convention: include nested estimator params with __ separator
+            for key, val in list(params.items()):
+                if hasattr(val, "get_params"):
+                    for subk, subv in val.get_params(deep=True).items():
+                        params[f"{key}__{subk}"] = subv
+        return params
+
+    # ---- new: ensure defaults after unpickling ----
+    def __setstate__(self, state):
+        """
+        Called on unpickle. Populate any missing ctor attrs with their defaults.
+        """
+        self.__dict__.update(state)
+        sig = inspect.signature(self.__class__.__init__)
+        for name, param in sig.parameters.items():
+            if name == "self":
+                continue
+            if not hasattr(self, name):
+                default = param.default if param.default is not inspect._empty else None
+                setattr(self, name, default)
+
+    def fit(self, X: np.ndarray) -> "FastCluster":
+        """
+        Fit the estimator on input data. The results are stored in self.labels_.
+        Parameters
+        ----------
+        X: np.array
+            The input may be either a 1-D condensed distance matrix
+            or a 2-D array of observation vectors. If X is a 1-D condensed distance
+            matrix, then it must be (N choose 2) sized vector, where N is the number
+            of original observations paired in the distance matrix. If X is 2-D
+            then the flag `input_as_observation_matrix` must be set to True in init.
+        Returns
+        -------
+        self
+        """
+        X = np.asarray(X)
+        if len(X.shape) == 1 and self.input_as_observation_matrix:
+            raise Exception(
+                "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. "
+                "If you intended to pass in an observation matrix, it must be 2-D (N x feature_dimension)."
+            )
+        elif len(X.shape) == 2 and not self.input_as_observation_matrix:
+            raise Exception(
+                "Input to fit is two-dimensional, but input_as_observation_matrix flag is set to False. "
+                "If you intended to pass in a distance matrix, it must be flattened (1-D)."
+            )
+        elif len(X.shape) > 2:
+            raise Exception("The input to fit can only be one-dimensional or two-dimensional.")
+        Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
+        self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
+        return self
+
+    def fit_transform(
+        self,
+        X: np.ndarray,
+        y: Optional[np.ndarray] = None,
+        **fit_params: Any,
+    ) -> np.ndarray:
+        """
+        Fit the estimator on input data, and returns results.
+        Parameters
+        ----------
+        X: np.array
+            The input may be either a 1-D condensed distance matrix
+            or a 2-D array of observation vectors. If X is a 1-D condensed distance
+            matrix, then it must be (N choose 2) sized vector, where N is the number
+            of original observations paired in the distance matrix.
+        Returns
+        -------
+        np.array: A N-length array of clustering labels.
+        """
+        del y, fit_params
+        self.fit(X)
+        return self.labels_  # type: ignore
+
+    def transform(self, X: np.ndarray):
+        raise Exception("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
 
 
 class VotingClassifier:
@@ -1539,156 +2770,3 @@ class VotingClassifier:
     def _predict(self, X):
         """Collect results from clf.predict calls."""
         return np.asarray([clf.predict(X) for clf in self.estimators]).T
-
-
-def intify(x):
-    """Hyperopt is bad at ints..."""
-    if hasattr(x, "is_integer") and x.is_integer():
-        return int(x)
-    else:
-        return x
-
-
-class FastCluster(TransformerMixin, BaseEstimator):
-    """
-    A scikit-learn wrapper for fastcluster.
-    Inputs:
-        linkage: string (default="average")
-            Agglomerative linkage method. Defaults to "average".
-            Must be one of "'complete', 'average', 'single,
-            'weighted', 'ward', 'centroid', 'median'."
-        eps: float (default=0.5)
-            Cutoff used to determine number of clusters.
-        preserve_input: bool (default=True)
-            Whether to preserve the X input or modify in place.
-            Defaults to False, which modifies in place.
-        input_as_observation_matrix: bool (default=False)
-            If True, the input to fit/transform must be a 2-D array
-            of observation vectors (N by d). If False input to fit/transform
-            must be a 1-D condensed distance matrix, then it must be a
-            (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix, and
-            d is the dimensionality of the vector space.
-
-    Note: FastCluster does *not* support two-dimensional distance matrices
-    as input. They *must* be flattened. For more details, please see:
-    https://cran.r-project.org/web/packages/fastcluster/vignettes/fastcluster.pdf
-    """
-
-    def __init__(
-        self,
-        linkage: str = "average",
-        eps: float = 0.5,
-        preserve_input: bool = True,
-        input_as_observation_matrix: bool = False,
-    ):
-        if linkage not in {
-            "complete",
-            "average",
-            "weighted",
-            "ward",
-            "centroid",
-            "median",
-            "single",
-        }:
-            raise Exception(
-                "The 'linkage' parameter has to be one of: "
-                + "'single', complete', 'average', 'weighted', 'ward', 'centroid', 'median'."
-            )
-
-        self.linkage = linkage
-        self.eps = eps
-        self.preserve_input = preserve_input
-        self.input_as_observation_matrix = input_as_observation_matrix
-        self.labels_ = None
-
-    # ---- new: robust get_params ----
-    def get_params(self, deep=True):
-        """
-        Return params but gracefully handle the case where an instance
-        (e.g., loaded from an old pickle) is missing attributes.
-        """
-        params = {}
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            # prefer the runtime attribute if present, otherwise the __init__ default
-            if hasattr(self, name):
-                params[name] = getattr(self, name)
-            else:
-                params[name] = param.default if param.default is not inspect._empty else None
-
-        if deep:
-            # sklearn convention: include nested estimator params with __ separator
-            for key, val in list(params.items()):
-                if hasattr(val, "get_params"):
-                    for subk, subv in val.get_params(deep=True).items():
-                        params[f"{key}__{subk}"] = subv
-        return params
-
-    # ---- new: ensure defaults after unpickling ----
-    def __setstate__(self, state):
-        """
-        Called on unpickle. Populate any missing ctor attrs with their defaults.
-        """
-        self.__dict__.update(state)
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            if not hasattr(self, name):
-                default = param.default if param.default is not inspect._empty else None
-                setattr(self, name, default)
-
-    def fit(self, X: np.ndarray) -> np.ndarray:
-        """
-        Fit the estimator on input data. The results are stored in self.labels_.
-        Parameters
-        ----------
-        X: np.array
-            The input may be either a 1-D condensed distance matrix
-            or a 2-D array of observation vectors. If X is a 1-D condensed distance
-            matrix, then it must be (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix. If X is 2-D
-            then the flag `input_as_observation_matrix` must be set to True in init.
-        Returns
-        -------
-        self
-        """
-        X = np.asarray(X)
-        if len(X.shape) == 1 and self.input_as_observation_matrix:
-            raise Exception(
-                "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. "
-                "If you intended to pass in an observation matrix, it must be 2-D (N x feature_dimension)."
-            )
-        elif len(X.shape) == 2 and not self.input_as_observation_matrix:
-            raise Exception(
-                "Input to fit is two-dimensional, but input_as_observation_matrix flag is set to False. "
-                "If you intended to pass in a distance matrix, it must be flattened (1-D)."
-            )
-        elif len(X.shape) > 2:
-            raise Exception("The input to fit can only be one-dimensional or two-dimensional.")
-        Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
-        self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
-        return self
-
-    def fit_transform(self, X: np.ndarray) -> np.ndarray:
-        """
-        Fit the estimator on input data, and returns results.
-        Parameters
-        ----------
-        X: np.array
-            The input may be either a 1-D condensed distance matrix
-            or a 2-D array of observation vectors. If X is a 1-D condensed distance
-            matrix, then it must be (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix.
-        Returns
-        -------
-        np.array: A N-length array of clustering labels.
-        """
-        self.fit(X)
-        return self.labels_  # type: ignore
-
-    def transform(self, X: np.ndarray):
-        raise Exception("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")

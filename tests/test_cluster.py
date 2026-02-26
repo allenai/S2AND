@@ -102,3 +102,26 @@ class TestClusterer(unittest.TestCase):
         # stricter batching - just making sure it doesn't break
         self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=2)
         self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=1)
+
+    def test_fused_path_equivalence(self):
+        """The fused cluster-and-free path (dists=None) must produce
+        identical pred_clusters as the two-phase path (precomputed dists)."""
+        block = {
+            "a sattar": ["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+        }
+        # two-phase: build dists first, then cluster from precomputed
+        dists = self.dummy_clusterer.make_distance_matrices(block, self.dummy_dataset)
+        precomputed_result, _ = self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists=dists)
+
+        # fused: dists=None triggers cluster-and-free
+        fused_result, fused_dists = self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists=None)
+
+        self.assertIsNone(fused_dists)
+        self.assertEqual(precomputed_result, fused_result)
+
+    def test_predict_helper_missing_precomputed_dists_raises(self):
+        block = {
+            "a sattar": ["0", "1", "2"],
+        }
+        with pytest.raises(KeyError, match="Missing precomputed distance matrix for block"):
+            self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists={})

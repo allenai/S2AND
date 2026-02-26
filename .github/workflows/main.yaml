@@ -27,30 +27,43 @@ jobs:
           key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       # Style checks via uvx (no env creation needed, blazing fast)
-      - name: black (s2and/)
-        run: uvx --from black==24.8.0 black s2and --check --line-length 120
-      - name: black (scripts/*.py)
+      - name: ruff format (s2and/)
+        run: uvx --from ruff==0.6.9 ruff format --check s2and
+      - name: ruff format (scripts/*.py)
         shell: bash
         run: |
           shopt -s nullglob
           files=(scripts/*.py)
           if (( ${#files[@]} )); then
-            uvx --from black==24.8.0 black "${files[@]}" --check --line-length 120
+            uvx --from ruff==0.6.9 ruff format --check "${files[@]}"
           fi
 
   typecheck-and-test:
+    name: typecheck-and-test (${{ matrix.lane }})
     runs-on: ubuntu-latest
     needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [py-only, rust-enabled]
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v3
 
+      # Optional: ensure a specific Python (uv can also manage this on its own)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Setup Rust
+        if: matrix.lane == 'rust-enabled'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo build
+        if: matrix.lane == 'rust-enabled'
         uses: actions/cache@v4
         with:
           path: |
@@ -61,12 +74,6 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
-      # Optional: ensure a specific Python (uv can also manage this on its own)
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       # Cache uv resolver + wheels + project venv
       - name: Cache uv + venv
         uses: actions/cache@v4
@@ -74,8 +81,9 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: uv-venv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          key: uv-venv-${{ runner.os }}-py311-${{ matrix.lane }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
+            uv-venv-${{ runner.os }}-py311-${{ matrix.lane }}-
             uv-venv-${{ runner.os }}-py311-
             uv-venv-
 
@@ -84,28 +92,80 @@ jobs:
         shell: bash
         run: |
           if [[ -f uv.lock ]]; then
-            uv sync --extra dev --frozen
+            if [[ "${{ matrix.lane }}" == "rust-enabled" ]]; then
+              uv sync --extra dev --extra rust --frozen
+            else
+              uv sync --extra dev --frozen
+            fi
           else
             # No lock present; resolve once, then install
-            uv sync --extra dev
+            if [[ "${{ matrix.lane }}" == "rust-enabled" ]]; then
+              uv sync --extra dev --extra rust
+            else
+              uv sync --extra dev
+            fi
           fi
 
       # Build/install Rust extension for parity tests
       - name: Build Rust extension
-        run: uvx --from maturin maturin develop -m s2and_rust/Cargo.toml
+        if: matrix.lane == 'rust-enabled'
+        run: uv run maturin develop -m s2and_rust/Cargo.toml
 
-      # Type checking (run mypy commands directly)
-      - name: mypy (s2and)
-        run: uv run --no-project mypy s2and --ignore-missing-imports
-      - name: mypy (scripts)
-        run: uv run --no-project mypy scripts/*.py --ignore-missing-imports
+      - name: Rust parity guardrail: feature parity
+        if: matrix.lane == 'rust-enabled'
+        run: uv run pytest -q tests/test_feature_port_parity.py
 
-      # Single pytest run with coverage (replaces the two docker pytest calls)
-      - name: pytest (coverage)
+      - name: Rust parity guardrail: signature preprocess parity
+        if: matrix.lane == 'rust-enabled'
+        run: uv run pytest -q tests/test_rust_signature_preprocess.py
+
+      - name: Rust parity guardrail: batch chunking/fallback parity
+        if: matrix.lane == 'rust-enabled'
+        run: uv run pytest -q tests/test_rust_batch_chunking.py
+
+      - name: Rust parity guardrail: JSON ingest parity
+        if: matrix.lane == 'rust-enabled'
+        run: uv run pytest -q tests/test_rust_from_json_paths.py
+
+      # Type checking (ty with tuned migration rules)
+      - name: ty (s2and)
+        run: |
+          uvx --from ty==0.0.18 ty check s2and \
+            --ignore unresolved-import \
+            --ignore unused-type-ignore-comment \
+            --ignore possibly-missing-attribute \
+            --ignore unresolved-global
+      - name: ty (scripts)
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(scripts/*.py)
+          if (( ${#files[@]} )); then
+            uvx --from ty==0.0.18 ty check "${files[@]}" \
+              --ignore unresolved-import \
+              --ignore unused-type-ignore-comment \
+              --ignore possibly-missing-attribute \
+              --ignore unresolved-global \
+              --ignore unresolved-reference \
+              --ignore unresolved-attribute
+          fi
+
+      - name: pytest (coverage, py-only)
+        if: matrix.lane == 'py-only'
+        env:
+          # keep startup lean; avoid user-level plugins on hosted runners
+          PYTHONPATH: .
+          S2AND_BACKEND: python
+        run: |
+          uv run pytest tests/ \
+            --cov=s2and --cov-report=term-missing --cov-fail-under=40
+
+      - name: pytest (coverage, rust-enabled)
+        if: matrix.lane == 'rust-enabled'
         env:
           # keep startup lean; avoid user-level plugins on hosted runners
           PYTHONPATH: .
         run: |
-          uv run --no-project pytest tests/ \
+          uv run pytest tests/ \
             --cov=s2and --cov-report=term-missing --cov-fail-under=40
 

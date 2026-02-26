@@ -3,11 +3,13 @@ from typing import Optional, Union, Dict, List, Any, Tuple, Set, NamedTuple
 import os
 import re
 import json
-import platform
 import numpy as np
 import pandas as pd
 import logging
 import pickle
+import tempfile
+import threading
+import time
 from tqdm import tqdm
 
 from functools import reduce
@@ -33,12 +35,15 @@ from s2and.text import (
     get_text_ngrams_words,
     detect_language,
     same_prefix_tokens,
+    split_first_middle_hyphen_aware,
     AFFILIATIONS_STOP_WORDS,
     VENUE_STOP_WORDS,
     NAME_PREFIXES,
     DROPPED_AFFIXES,
     ORCID_PATTERN,
 )
+from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
+from s2and.rust_lifecycle import build_rust_lifecycle_policy
 
 logger = logging.getLogger("s2and")
 
@@ -50,6 +55,8 @@ CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 
 # Cache for large, immutable resources loaded across instances
 _NAME_COUNTS_CACHE: Optional[Tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int]]] = None
+_NAME_COUNTS_CACHE_LOCK = threading.Lock()
+SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
 
 
 # ------------------------ Local helpers (backcompat shims) ------------------------
@@ -87,17 +94,78 @@ def _load_name_counts_cached() -> Tuple[Dict[str, int], Dict[str, int], Dict[str
     Avoids repeatedly unpickling ~600MB file in tests/short runs.
     """
     global _NAME_COUNTS_CACHE
-    if _NAME_COUNTS_CACHE is None:
-        with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-            _NAME_COUNTS_CACHE = pickle.load(f)
+    if _NAME_COUNTS_CACHE is not None:
+        return _NAME_COUNTS_CACHE  # type: ignore[return-value]
+    with _NAME_COUNTS_CACHE_LOCK:
+        # Double-check after acquiring lock (another thread may have loaded).
+        if _NAME_COUNTS_CACHE is None:
+            with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
+                _NAME_COUNTS_CACHE = pickle.load(f)
     return _NAME_COUNTS_CACHE  # type: ignore[return-value]
 
 
+def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> Tuple[bool, bool, bool]:
+    use_rust_backend = stage_uses_rust(runtime_context, "ingest_preprocess")
+    if not use_rust_backend:
+        return False, False, False
+
+    rust_module_available = False
+    try:
+        from s2and import feature_port
+
+        rust_module_available = feature_port.rust_featurizer_available()
+    except Exception:
+        rust_module_available = False
+
+    if not rust_module_available:
+        raise RuntimeError(
+            "Rust backend requested for ingest_preprocess but s2and_rust extension is unavailable "
+            f"(run_id={runtime_context.run_id})"
+        )
+
+    return True, True, True
+
+
+def _prefilter_affiliation_text(affiliations: List[str]) -> str:
+    if not affiliations:
+        return ""
+    tokens = [word for word in " ".join(affiliations).split() if word not in AFFILIATIONS_STOP_WORDS and len(word) > 1]
+    return " ".join(tokens)
+
+
+def _signature_has_materialized_name_counts(signature: "Signature") -> bool:
+    counts = signature.author_info_name_counts
+    if counts is None:
+        return False
+    return any(value is not None for value in counts)
+
+
+def _ordered_coauthors_for_signature(signature: "Signature", papers: Dict[str, "Paper"]) -> List[str]:
+    if len(papers) == 0:
+        return []
+    paper = papers.get(str(signature.paper_id))
+    if paper is None:
+        return []
+    return [author.author_name for author in paper.authors if author.position != signature.author_info_position]
+
+
+def _python_signature_ngrams_batch(
+    coauthor_texts: List[str], affiliation_texts: List[str]
+) -> Tuple[List[Counter], List[Counter]]:
+    coauthor_counters = [
+        get_text_ngrams(text, stopwords=None, use_bigrams=True) if text else Counter() for text in coauthor_texts
+    ]
+    affiliation_counters = [
+        get_text_ngrams_words(text, stopwords=set()) if text else Counter() for text in affiliation_texts
+    ]
+    return coauthor_counters, affiliation_counters
+
+
 class NameCounts(NamedTuple):
-    first: Optional[int]
-    last: Optional[int]
-    first_last: Optional[int]
-    last_first_initial: Optional[int]
+    first: Optional[float]
+    last: Optional[float]
+    first_last: Optional[float]
+    last_first_initial: Optional[float]
 
 
 class Signature(NamedTuple):
@@ -235,9 +303,9 @@ class ANDData:
         specter_embeddings: Optional[Union[str, Dict]] = None,
         cluster_seeds: Optional[Union[str, Dict]] = None,
         altered_cluster_signatures: Optional[Union[str, List, Set]] = None,
-        train_pairs: Optional[Union[str, List]] = None,
-        val_pairs: Optional[Union[str, List]] = None,
-        test_pairs: Optional[Union[str, List]] = None,
+        train_pairs: Optional[Union[str, pd.DataFrame]] = None,
+        val_pairs: Optional[Union[str, pd.DataFrame]] = None,
+        test_pairs: Optional[Union[str, pd.DataFrame]] = None,
         train_blocks: Optional[Union[str, List]] = None,
         val_blocks: Optional[Union[str, List]] = None,
         test_blocks: Optional[Union[str, List]] = None,
@@ -267,6 +335,23 @@ class ANDData:
         sinonym_overwrite_min_ratio: Optional[float] = 3.0,
         compute_reference_features: bool = False,
     ):
+        init_start = time.perf_counter()
+        self.runtime_context = build_runtime_context("dataset_build")
+        self.signatures_path = signatures if isinstance(signatures, str) else None
+        self.papers_path = papers if isinstance(papers, str) else None
+        self._rust_ingest_tmpdir = None  # TemporaryDirectory; prevent leak
+        self.clusters_path = clusters if isinstance(clusters, str) else None
+        self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
+        self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
+        self.rust_lifecycle_policy = build_rust_lifecycle_policy(
+            backend=self.runtime_context.resolved_backend,
+            mode=mode,
+            has_signatures_path=self.signatures_path is not None,
+            has_papers_path=self.papers_path is not None,
+            preprocess=preprocess,
+            stage_enablement=self.runtime_context.stage_enablement,
+        )
+
         if mode == "train":
             if train_blocks is not None and block_type != "original":
                 logger.warning("If you are passing in training/val/test blocks, then you may want original blocks.")
@@ -286,8 +371,11 @@ class ANDData:
                 raise Exception("Train blocks still needs clusters")
 
         # Load signatures first so we can restrict papers/specter to relevant subset
+        signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
-        self.signatures = self.maybe_load_json(signatures)
+        raw_signatures = self.maybe_load_json(signatures)
+        raw_signatures_for_json = dict(raw_signatures)
+        self.signatures = raw_signatures
         # convert dictionary to namedtuples for memory reduction
         for signature_id, signature in self.signatures.items():
             self.signatures[signature_id] = Signature(
@@ -327,13 +415,44 @@ class ANDData:
                 signature_id=signature["signature_id"],
             )
         logger.info("loaded signatures")
+        logger.info(
+            "Telemetry stage: stage=anddata_ingest_signatures seconds=%.3f signatures=%d",
+            time.perf_counter() - signatures_stage_start,
+            len(self.signatures),
+        )
 
         # Determine the set of papers referenced by signatures
         needed_paper_ids: Set[str] = set(str(sig.paper_id) for sig in self.signatures.values())
 
+        papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
         raw_papers = self.maybe_load_json(papers)
         filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
+        if (
+            self.rust_lifecycle_policy.rust_build_path == "from_json_paths"
+            and self.signatures_path is not None
+            and self.papers_path is not None
+            and len(filtered_papers) < len(raw_papers)
+        ):
+            filtered_paths_start = time.perf_counter()
+            self._rust_ingest_tmpdir = tempfile.TemporaryDirectory(prefix="s2and_rust_json_ingest_")
+            filtered_dir = self._rust_ingest_tmpdir.name
+            filtered_signatures_path = os.path.join(filtered_dir, "signatures_filtered.json")
+            filtered_papers_path = os.path.join(filtered_dir, "papers_filtered.json")
+            with open(filtered_signatures_path, "w", encoding="utf-8") as signatures_file:
+                json.dump(raw_signatures_for_json, signatures_file)
+            with open(filtered_papers_path, "w", encoding="utf-8") as papers_file:
+                json.dump(filtered_papers, papers_file)
+            self.signatures_path = filtered_signatures_path
+            self.papers_path = filtered_papers_path
+            logger.info(
+                "Rust JSON ingest: materialized filtered JSON payloads signatures=%d papers=%d source_papers=%d "
+                "seconds=%.3f",
+                len(raw_signatures_for_json),
+                len(filtered_papers),
+                len(raw_papers),
+                time.perf_counter() - filtered_paths_start,
+            )
         self.papers = {}
         # convert dictionary to namedtuples for memory reduction
         for paper_id, paper in filtered_papers.items():
@@ -363,6 +482,12 @@ class ANDData:
                 paper_id=paper["paper_id"],
             )
         logger.info(f"loaded papers subset: {len(self.papers)}/{len(raw_papers)} relevant")
+        logger.info(
+            "Telemetry stage: stage=anddata_ingest_papers seconds=%.3f retained_papers=%d source_papers=%d",
+            time.perf_counter() - papers_stage_start,
+            len(self.papers),
+            len(raw_papers),
+        )
 
         # Optional Sinonym pre-step: normalize Chinese names from papers and overwrite signatures
         # This runs before other preprocessing so downstream steps use updated names
@@ -426,6 +551,9 @@ class ANDData:
                 cluster_num += 1
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
+        # Versioned seed state for Rust sync dedupe.
+        self._cluster_seeds_version = 1
+        self._rust_cluster_seeds_synced_version = 0
         # check that all of the altered_clustere_signatures are in the cluster_seeds_require
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
@@ -506,30 +634,57 @@ class ANDData:
             self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
         self.preprocess = preprocess
 
+        resolved_name_tuples: Set[Tuple[str, str]]
         if name_tuples == "filtered":
-            self.name_tuples = set()
+            resolved_name_tuples = set()
             with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt"), "r") as f2:  # type: ignore
                 for line in f2:
                     line_split = line.strip().split(",")  # type: ignore
-                    self.name_tuples.add((line_split[0], line_split[1]))
+                    resolved_name_tuples.add((line_split[0], line_split[1]))
         elif name_tuples is None:
-            self.name_tuples = set()
+            resolved_name_tuples = set()
             with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt"), "r") as f2:  # type: ignore
                 for line in f2:
                     line_split = line.strip().split(",")  # type: ignore
-                    self.name_tuples.add((line_split[0], line_split[1]))
+                    resolved_name_tuples.add((line_split[0], line_split[1]))
+        elif isinstance(name_tuples, set):
+            resolved_name_tuples = name_tuples
         else:
-            self.name_tuples = name_tuples  # type: ignore
+            raise ValueError("name_tuples must be None, 'filtered', or a set of (first_a, first_b) tuples")
+        self.name_tuples = resolved_name_tuples
 
-        logger.info("preprocessing papers")
-        self.papers = preprocess_papers_parallel(
-            self.papers, self.n_jobs, self.preprocess, compute_reference_features=self.compute_reference_features
+        preprocess_papers_stage_start = time.perf_counter()
+        if self.rust_lifecycle_policy.skip_python_paper_preprocess:
+            # Rust JSON ingest rebuilds paper preprocessing natively; avoid duplicate Python work.
+            logger.info("Rust JSON ingest active: skipping Python paper preprocessing")
+        else:
+            logger.info("preprocessing papers")
+            self.papers = preprocess_papers_parallel(
+                self.papers,
+                self.n_jobs,
+                self.preprocess,
+                compute_reference_features=self.compute_reference_features,
+            )
+            logger.info("preprocessed papers")
+        logger.info(
+            "Telemetry stage: stage=anddata_preprocess_papers seconds=%.3f papers=%d",
+            time.perf_counter() - preprocess_papers_stage_start,
+            len(self.papers),
         )
-        logger.info("preprocessed papers")
 
+        preprocess_signatures_stage_start = time.perf_counter()
         logger.info("preprocessing signatures")
         self.preprocess_signatures(name_counts_loaded)
         logger.info("preprocessed signatures")
+        logger.info(
+            "Telemetry stage: stage=anddata_preprocess_signatures seconds=%.3f signatures=%d",
+            time.perf_counter() - preprocess_signatures_stage_start,
+            len(self.signatures),
+        )
+        logger.info(
+            "Telemetry stage: stage=anddata_total_init seconds=%.3f",
+            time.perf_counter() - init_start,
+        )
 
     @staticmethod
     def get_full_name_for_features(signature: Signature, include_last: bool = True, include_suffix: bool = True) -> str:
@@ -561,6 +716,50 @@ class ANDData:
         name_parts = [part.strip() for part in list_of_parts if part is not None and len(part) != 0]
         return " ".join(name_parts)
 
+    def _compute_signature_name_counts(
+        self,
+        signature: Signature,
+        *,
+        first_raw: str,
+        middle_raw: str,
+        first_without_apostrophe: Optional[str],
+        last_normalized: Optional[str],
+    ) -> NameCounts:
+        # Backward-compatibility for name count keys:
+        # - Historically, counts used the legacy single-token `author_info_first_normalized`.
+        # - With Sinonym, `author_info_first_normalized_without_apostrophe` can contain multiple tokens
+        #   for hyphenated Chinese given names (for counts only, join internal spaces when raw first had '-').
+        counts_first_without_apostrophe = first_without_apostrophe
+        counts_last_normalized = last_normalized
+        if counts_first_without_apostrophe is None or counts_last_normalized is None:
+            counts_first_without_apostrophe, _ = split_first_middle_hyphen_aware(first_raw, middle_raw)
+            counts_last_normalized = normalize_text(signature.author_info_last)
+        first_normalized_token_for_counts = (
+            counts_first_without_apostrophe.split(" ")[0] if counts_first_without_apostrophe else ""
+        )
+        first_for_counts = first_normalized_token_for_counts
+        if "-" in first_raw:
+            joined = (counts_first_without_apostrophe or "").replace(" ", "")
+            if joined:
+                first_for_counts = joined
+
+        # Backward-compatibility for last-name count keys:
+        # treat space/hyphen variants as the same token ("ou yang" -> "ouyang").
+        last_for_counts = _canonicalize_last_for_counts(signature.author_info_last, counts_last_normalized)
+
+        first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
+        first_initial = first_for_counts if len(first_for_counts) > 0 else ""
+        last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
+
+        return NameCounts(
+            first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),  # type: ignore
+            last=self.last_dict.get(last_for_counts, 1),
+            first_last=(
+                self.first_last_dict.get(first_last_for_count, 1) if len(first_for_counts) > 1 else np.nan  # type: ignore
+            ),
+            last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
+        )
+
     def preprocess_signatures(self, load_name_counts: bool):
         """
         Preprocess the signatures, doing lots of normalization and feature creation
@@ -574,119 +773,254 @@ class ANDData:
         -------
         nothing, modifies self.signatures
         """
-        for signature_id, signature in tqdm(self.signatures.items(), desc="Preprocessing signatures"):
-            # our normalization scheme is to normalize first and middle separately,
-            # join them, then take the first token of the combined join
-            # NOTE: Hyphen-aware handling
-            # - First/middle: handled via split_first_middle_hyphen_aware (keeps hyphenated Chinese given names together).
-            # - Surname: for downstream lookups/constraints we also treat hyphen/space variants equivalently.
-            # TODO(s2and): Once name_counts/name_tuples are regenerated with Sinonym-aware canonicalization,
-            #              remove the backward-compat shims added below for last-name counts/constraints.
-            first_raw = signature.author_info_first or ""
-            middle_raw = signature.author_info_middle or ""
+        runtime_context = self.runtime_context
+        use_rust_backend, use_rust_featurizer, rust_module_available = _signature_preprocess_backend_decision(
+            runtime_context
+        )
+        defer_signature_ngrams_to_rust = self.rust_lifecycle_policy.defer_signature_ngrams_to_rust
+        defer_signature_fields_to_rust = self.rust_lifecycle_policy.defer_signature_fields_to_rust
+        logger.info(
+            "Signature preprocessing backend decision: backend=%s use_rust_featurizer=%s rust_module_available=%s "
+            "defer_signature_ngrams_to_rust=%s defer_signature_fields_to_rust=%s "
+            "requested_backend=%s resolved_backend=%s run_id=%s",
+            "rust" if use_rust_backend else "python",
+            use_rust_featurizer,
+            rust_module_available,
+            defer_signature_ngrams_to_rust,
+            defer_signature_fields_to_rust,
+            runtime_context.requested_backend,
+            runtime_context.resolved_backend,
+            runtime_context.run_id,
+        )
 
-            # Default normalization (keeps legacy behavior for counts/lookups)
-            first_normalized = normalize_text(first_raw)
-            middle_normalized = normalize_text(middle_raw)
-            first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
-            if first_middle_normalized_split and first_middle_normalized_split[0] in NAME_PREFIXES:
-                first_middle_normalized_split = first_middle_normalized_split[1:]
+        signature_ids = list(self.signatures.keys())
+        with tqdm(total=len(signature_ids), desc="Preprocessing signatures") as progress_bar:
+            for batch_start in range(0, len(signature_ids), SIGNATURE_PREPROCESS_BATCH_SIZE):
+                batch_signature_ids = signature_ids[batch_start : batch_start + SIGNATURE_PREPROCESS_BATCH_SIZE]
+                batch_rows = []
+                batch_coauthor_texts: List[str] = []
+                batch_affiliation_texts: List[str] = []
 
-            # Hyphen-preserving split for the "without_apostrophe" canonical fields
-            # Centralize in s2and.text for reuse by other scripts
-            from s2and.text import split_first_middle_hyphen_aware
+                for signature_id in batch_signature_ids:
+                    signature = self.signatures[signature_id]
 
-            first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(first_raw, middle_raw)
-
-            coauthors: Optional[List[str]] = None
-            if len(self.papers) != 0:
-                paper = self.papers[str(signature.paper_id)]
-                coauthors = [
-                    author.author_name for author in paper.authors if author.position != signature.author_info_position
-                ]
-
-            signature = signature._replace(
-                # need this for name counts (legacy single-token behavior)
-                author_info_first_normalized=first_middle_normalized_split[0] if first_middle_normalized_split else "",
-                # canonical fields used across featurization, prediction, etc.
-                author_info_first_normalized_without_apostrophe=first_without_apostrophe,
-                author_info_middle_normalized_without_apostrophe=middle_without_apostrophe,
-                author_info_last_normalized=normalize_text(signature.author_info_last),
-                author_info_suffix_normalized=normalize_text(signature.author_info_suffix or ""),
-                author_info_coauthors=set(coauthors) if coauthors is not None else None,
-                author_info_coauthor_blocks=(
-                    set([compute_block(author) for author in coauthors]) if coauthors is not None else None
-                ),
-            )
-
-            if self.preprocess:
-                affiliations = [normalize_text(affiliation) for affiliation in signature.author_info_affiliations]
-                affiliations_n_grams = get_text_ngrams_words(
-                    " ".join(affiliations),
-                    AFFILIATIONS_STOP_WORDS,
-                )
-
-                if load_name_counts:
-                    # Backward-compatibility for name count keys:
-                    # - Historically, counts used the legacy single-token `author_info_first_normalized`.
-                    # - With Sinonym, `author_info_first_normalized_without_apostrophe` can contain multiple tokens
-                    #   for hyphenated Chinese given names (e.g., "qi xin"). For counts only, we heuristically
-                    #   join internal spaces to form a single token ("qixin") IF the raw first contained a hyphen.
-                    # - This preserves old behavior for most names while improving lookups for hyphenated cases.
-                    # TODO: revisit once we re-extract name_counts using Sinonym-aware canonicalization.
-                    first_for_counts = signature.author_info_first_normalized or ""
-                    raw_first = signature.author_info_first or ""
-                    if "-" in raw_first:
-                        joined = (signature.author_info_first_normalized_without_apostrophe or "").replace(" ", "")
-                        if joined:
-                            first_for_counts = joined
-                    # Backward-compatibility for last name keys:
-                    # - Historically, last names were single tokens; normalization turns hyphens into spaces
-                    #   (e.g., "ou-yang" -> "ou yang"). For counts only, treat space/hyphen variants as the
-                    #   same token by joining internal spaces ("ouyang").
-                    # TODO(s2and): remove this once name_counts are regenerated with hyphen-aware surnames.
-                    last_norm = signature.author_info_last_normalized or ""
-                    raw_last = signature.author_info_last or ""
-                    last_for_counts = _canonicalize_last_for_counts(raw_last, last_norm)
-
-                    first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
-                    first_initial = first_for_counts if len(first_for_counts) > 0 else ""
-                    last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
-
-                    counts = NameCounts(
-                        first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),  # type: ignore
-                        last=self.last_dict.get(last_for_counts, 1),
-                        first_last=(
-                            self.first_last_dict.get(first_last_for_count, 1)  # type: ignore
-                            if len(first_for_counts) > 1
-                            else np.nan
-                        ),
-                        last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
+                    first_raw = signature.author_info_first or ""
+                    middle_raw = signature.author_info_middle or ""
+                    stored_first_normalized_token: Optional[str] = signature.author_info_first_normalized
+                    stored_first_without_apostrophe: Optional[str] = (
+                        signature.author_info_first_normalized_without_apostrophe
                     )
-                else:
-                    counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
+                    stored_middle_without_apostrophe: Optional[str] = (
+                        signature.author_info_middle_normalized_without_apostrophe
+                    )
+                    stored_last_normalized: Optional[str] = signature.author_info_last_normalized
+                    stored_suffix_normalized: Optional[str] = signature.author_info_suffix_normalized
 
-                signature = signature._replace(
-                    author_info_full_name=ANDData.get_full_name_for_features(signature).strip(),
-                    author_info_affiliations=affiliations,
-                    author_info_affiliations_n_grams=affiliations_n_grams,
-                    author_info_coauthor_n_grams=(
-                        get_text_ngrams(" ".join(coauthors), stopwords=None, use_bigrams=True)
-                        if coauthors is not None
-                        else Counter()
-                    ),
-                    author_info_name_counts=counts,
-                )
+                    coauthors: Optional[List[str]] = None
+                    if len(self.papers) != 0 and not defer_signature_fields_to_rust:
+                        coauthors = _ordered_coauthors_for_signature(signature, self.papers)
 
-                # we need a regex to extract the 16 digits, keeping in mind the last digit could be X
-                if signature.author_info_orcid is not None:
-                    orcid = re.findall(ORCID_PATTERN, signature.author_info_orcid)
-                    if len(orcid) > 0:
-                        signature = signature._replace(author_info_orcid=orcid[0].upper().replace("-", ""))
-                    else:
-                        signature = signature._replace(author_info_orcid=None)
+                    coauthor_set = set(coauthors) if coauthors is not None else None
+                    coauthor_blocks = (
+                        set(compute_block(author) for author in coauthors) if coauthors is not None else None
+                    )
 
-            self.signatures[signature_id] = signature
+                    affiliations: List[str] = signature.author_info_affiliations
+                    full_name = signature.author_info_full_name
+                    counts = signature.author_info_name_counts
+                    normalized_orcid = signature.author_info_orcid
+                    coauthor_text = ""
+                    affiliation_text = ""
+
+                    if self.preprocess:
+                        if defer_signature_fields_to_rust:
+                            stored_first_normalized_token = None
+                            stored_first_without_apostrophe = None
+                            stored_middle_without_apostrophe = None
+                            stored_last_normalized = None
+                            stored_suffix_normalized = None
+                            coauthor_set = None
+                            coauthor_blocks = None
+                            if full_name is None:
+                                full_name_parts = [
+                                    signature.author_info_first,
+                                    signature.author_info_middle,
+                                    signature.author_info_last,
+                                    signature.author_info_suffix,
+                                ]
+                                full_name = " ".join(
+                                    [part.strip() for part in full_name_parts if part is not None and len(part) != 0]
+                                ).strip()
+                        else:
+                            # our normalization scheme is to normalize first and middle separately,
+                            # join them, then take the first token of the combined join
+                            first_normalized = normalize_text(first_raw)
+                            middle_normalized = normalize_text(middle_raw)
+                            first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
+                            if first_middle_normalized_split and first_middle_normalized_split[0] in NAME_PREFIXES:
+                                first_middle_normalized_split = first_middle_normalized_split[1:]
+
+                            # Hyphen-preserving split for canonical fields.
+                            first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(
+                                first_raw,
+                                middle_raw,
+                            )
+                            stored_first_normalized_token = (
+                                first_middle_normalized_split[0] if first_middle_normalized_split else ""
+                            )
+                            stored_first_without_apostrophe = first_without_apostrophe
+                            stored_middle_without_apostrophe = middle_without_apostrophe
+                            stored_last_normalized = normalize_text(signature.author_info_last)
+                            stored_suffix_normalized = normalize_text(signature.author_info_suffix or "")
+                            affiliations = [
+                                normalize_text(affiliation) for affiliation in signature.author_info_affiliations
+                            ]
+                            if not defer_signature_ngrams_to_rust:
+                                coauthor_text = " ".join(coauthors) if coauthors is not None else ""
+                                affiliation_text = _prefilter_affiliation_text(affiliations)
+
+                        if load_name_counts:
+                            counts = self._compute_signature_name_counts(
+                                signature,
+                                first_raw=first_raw,
+                                middle_raw=middle_raw,
+                                first_without_apostrophe=stored_first_without_apostrophe,
+                                last_normalized=stored_last_normalized,
+                            )
+                        else:
+                            counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
+
+                        if not defer_signature_fields_to_rust:
+                            full_name_parts = [
+                                stored_first_without_apostrophe or signature.author_info_first,
+                                stored_middle_without_apostrophe or signature.author_info_middle,
+                                stored_last_normalized or signature.author_info_last,
+                                stored_suffix_normalized or signature.author_info_suffix,
+                            ]
+                            full_name = " ".join(
+                                [part.strip() for part in full_name_parts if part is not None and len(part) != 0]
+                            ).strip()
+
+                            # we need a regex to extract the 16 digits, keeping in mind the last digit could be X
+                            if signature.author_info_orcid is not None:
+                                orcid = re.findall(ORCID_PATTERN, signature.author_info_orcid)
+                                if len(orcid) > 0:
+                                    normalized_orcid = orcid[0].upper().replace("-", "")
+                                else:
+                                    normalized_orcid = None
+
+                    batch_rows.append(
+                        {
+                            "signature_id": signature_id,
+                            "signature": signature,
+                            "first_normalized_token": stored_first_normalized_token,
+                            "first_without_apostrophe": stored_first_without_apostrophe,
+                            "middle_without_apostrophe": stored_middle_without_apostrophe,
+                            "last_normalized": stored_last_normalized,
+                            "suffix_normalized": stored_suffix_normalized,
+                            "coauthor_set": coauthor_set,
+                            "coauthor_blocks": coauthor_blocks,
+                            "affiliations": affiliations,
+                            "full_name": full_name,
+                            "counts": counts,
+                            "normalized_orcid": normalized_orcid,
+                            "coauthor_text": coauthor_text,
+                            "affiliation_text": affiliation_text,
+                        }
+                    )
+
+                    if self.preprocess and not defer_signature_ngrams_to_rust:
+                        batch_coauthor_texts.append(coauthor_text)
+                        batch_affiliation_texts.append(affiliation_text)
+
+                batch_coauthor_ngrams: List[Counter] = []
+                batch_affiliation_ngrams: List[Counter] = []
+                if self.preprocess and not defer_signature_ngrams_to_rust:
+                    batch_coauthor_ngrams, batch_affiliation_ngrams = _python_signature_ngrams_batch(
+                        batch_coauthor_texts,
+                        batch_affiliation_texts,
+                    )
+
+                for idx, row in enumerate(batch_rows):
+                    replace_kwargs = {
+                        "author_info_first_normalized": row["first_normalized_token"],
+                        "author_info_first_normalized_without_apostrophe": row["first_without_apostrophe"],
+                        "author_info_middle_normalized_without_apostrophe": row["middle_without_apostrophe"],
+                        "author_info_last_normalized": row["last_normalized"],
+                        "author_info_suffix_normalized": row["suffix_normalized"],
+                        "author_info_coauthors": row["coauthor_set"],
+                        "author_info_coauthor_blocks": row["coauthor_blocks"],
+                    }
+                    if self.preprocess:
+                        replace_kwargs.update(
+                            {
+                                "author_info_full_name": row["full_name"],
+                                "author_info_affiliations": row["affiliations"],
+                                "author_info_affiliations_n_grams": (
+                                    None if defer_signature_ngrams_to_rust else batch_affiliation_ngrams[idx]
+                                ),
+                                "author_info_coauthor_n_grams": (
+                                    None if defer_signature_ngrams_to_rust else batch_coauthor_ngrams[idx]
+                                ),
+                                "author_info_name_counts": row["counts"],
+                                "author_info_orcid": row["normalized_orcid"],
+                            }
+                        )
+                    self.signatures[row["signature_id"]] = row["signature"]._replace(**replace_kwargs)
+
+                progress_bar.update(len(batch_signature_ids))
+
+    def materialize_signature_ngrams_python(self, batch_size: int = SIGNATURE_PREPROCESS_BATCH_SIZE) -> None:
+        """
+        Materialize signature n-gram Counters in Python for signatures that are missing them.
+
+        This is primarily intended for fallback/debug paths when Rust-owned signature n-grams
+        are deferred during preprocessing.
+        """
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+        signature_ids = list(self.signatures.keys())
+        logger.info("Materializing missing signature ngrams in Python for %d signatures", len(signature_ids))
+        with tqdm(total=len(signature_ids), desc="Materializing signature ngrams") as progress_bar:
+            for batch_start in range(0, len(signature_ids), batch_size):
+                batch_signature_ids = signature_ids[batch_start : batch_start + batch_size]
+                pending_signature_ids: List[str] = []
+                batch_coauthor_texts: List[str] = []
+                batch_affiliation_texts: List[str] = []
+
+                for signature_id in batch_signature_ids:
+                    signature = self.signatures[signature_id]
+                    if (
+                        signature.author_info_affiliations_n_grams is not None
+                        and signature.author_info_coauthor_n_grams is not None
+                    ):
+                        continue
+
+                    coauthors = _ordered_coauthors_for_signature(signature, self.papers)
+                    coauthor_text = " ".join(coauthors) if len(coauthors) > 0 else ""
+                    normalized_affiliations = [
+                        normalize_text(affiliation) for affiliation in list(signature.author_info_affiliations or [])
+                    ]
+                    affiliation_text = _prefilter_affiliation_text(normalized_affiliations)
+
+                    pending_signature_ids.append(signature_id)
+                    batch_coauthor_texts.append(coauthor_text)
+                    batch_affiliation_texts.append(affiliation_text)
+
+                if pending_signature_ids:
+                    batch_coauthor_ngrams, batch_affiliation_ngrams = _python_signature_ngrams_batch(
+                        batch_coauthor_texts,
+                        batch_affiliation_texts,
+                    )
+                    for idx, signature_id in enumerate(pending_signature_ids):
+                        signature = self.signatures[signature_id]
+                        self.signatures[signature_id] = signature._replace(
+                            author_info_affiliations_n_grams=batch_affiliation_ngrams[idx],
+                            author_info_coauthor_n_grams=batch_coauthor_ngrams[idx],
+                        )
+
+                progress_bar.update(len(batch_signature_ids))
 
     @staticmethod
     def maybe_load_json(path_or_json: Optional[Union[str, Union[List, Dict]]]) -> Any:
@@ -743,10 +1077,11 @@ class ANDData:
         -------
         either the loaded dataframe, or the passed in object
         """
-        if type(path_or_dataframe) == str:
+        if isinstance(path_or_dataframe, str):
             return pd.read_csv(path_or_dataframe, sep=",")
-        else:
+        if path_or_dataframe is None or isinstance(path_or_dataframe, pd.DataFrame):
             return path_or_dataframe
+        raise TypeError(f"Expected dataframe path or DataFrame, got {type(path_or_dataframe)}")
 
     @staticmethod
     def maybe_load_specter(path_or_pickle: Optional[Union[str, Dict]]) -> Optional[Dict]:
@@ -762,15 +1097,24 @@ class ANDData:
         -------
         either the loaded json, or the passed in object
         """
+        loaded: Optional[Union[Dict, Tuple, Any]]
         if isinstance(path_or_pickle, str):
             with open(path_or_pickle, "rb") as _pickle_file:
-                X, keys = pickle.load(_pickle_file)
-            D = {}
-            for i, key in enumerate(keys):
-                D[key] = X[i, :]
-            return D
+                loaded = pickle.load(_pickle_file)
         else:
-            return path_or_pickle
+            loaded = path_or_pickle
+
+        if loaded is None or isinstance(loaded, dict):
+            return loaded
+
+        if isinstance(loaded, tuple) and len(loaded) == 2:
+            matrix, keys = loaded
+            specter_by_key: Dict[Any, Any] = {}
+            for i, key in enumerate(keys):
+                specter_by_key[key] = matrix[i, :]
+            return specter_by_key
+
+        raise TypeError(f"Unsupported specter pickle payload type: {type(loaded)}")
 
     def get_original_blocks(self) -> Dict[str, List[str]]:
         """
@@ -780,14 +1124,10 @@ class ANDData:
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        block = {}
+        block: Dict[str, List[str]] = defaultdict(list)
         for signature_id, signature in self.signatures.items():
-            block_id = signature.author_info_given_block
-            if block_id not in block:
-                block[block_id] = [signature_id]
-            else:
-                block[block_id].append(signature_id)
-        return block
+            block[signature.author_info_given_block].append(signature_id)
+        return dict(block)
 
     def get_s2_blocks(self) -> Dict[str, List[str]]:
         """
@@ -797,14 +1137,10 @@ class ANDData:
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        block: Dict[str, List[str]] = {}
+        block: Dict[str, List[str]] = defaultdict(list)
         for signature_id, signature in self.signatures.items():
-            block_id = signature.author_info_block
-            if block_id not in block:
-                block[block_id] = [signature_id]
-            else:
-                block[block_id].append(signature_id)
-        return block
+            block[signature.author_info_block].append(signature_id)
+        return dict(block)
 
     def get_blocks(self) -> Dict[str, List[str]]:
         """
@@ -865,15 +1201,37 @@ class ANDData:
         -------
         float: the constraint value
         """
-        first_1 = self.signatures[signature_id_1].author_info_first_normalized_without_apostrophe
-        first_2 = self.signatures[signature_id_2].author_info_first_normalized_without_apostrophe
-        middle_1 = self.signatures[signature_id_1].author_info_middle_normalized_without_apostrophe.split()
+        signature_1 = self.signatures[signature_id_1]
+        signature_2 = self.signatures[signature_id_2]
 
-        paper_1 = self.papers[str(self.signatures[signature_id_1].paper_id)]
-        paper_2 = self.papers[str(self.signatures[signature_id_2].paper_id)]
+        def _materialize_constraint_name_parts(signature: Signature) -> Tuple[str, str]:
+            first = signature.author_info_first_normalized_without_apostrophe
+            middle = signature.author_info_middle_normalized_without_apostrophe
+            if first is None or middle is None:
+                computed_first, computed_middle = split_first_middle_hyphen_aware(
+                    signature.author_info_first,
+                    signature.author_info_middle,
+                )
+                if first is None:
+                    first = computed_first
+                if middle is None:
+                    middle = computed_middle
+            return first or "", middle or ""
 
-        orcid_1 = self.signatures[signature_id_1].author_info_orcid
-        orcid_2 = self.signatures[signature_id_2].author_info_orcid
+        def _materialize_constraint_last_normalized(signature: Signature) -> str:
+            if signature.author_info_last_normalized is not None:
+                return signature.author_info_last_normalized
+            return normalize_text(signature.author_info_last)
+
+        first_1, middle_1_text = _materialize_constraint_name_parts(signature_1)
+        first_2, middle_2_text = _materialize_constraint_name_parts(signature_2)
+        middle_1 = middle_1_text.split()
+
+        paper_1 = self.papers[str(signature_1.paper_id)]
+        paper_2 = self.papers[str(signature_2.paper_id)]
+
+        orcid_1 = signature_1.author_info_orcid
+        orcid_2 = signature_2.author_info_orcid
 
         # cluster seeds have precedence
         if (signature_id_1, signature_id_2) in self.cluster_seeds_disallow or (
@@ -898,8 +1256,8 @@ class ANDData:
         # just-in-case last name constraint: if last names are different (hyphen/space-insensitive), then disallow
         # TODO(s2and): remove hyphen/space-insensitive shim once canonicalization is unified end-to-end
         elif not _lasts_equivalent_for_constraint(
-            self.signatures[signature_id_1].author_info_last_normalized or "",
-            self.signatures[signature_id_2].author_info_last_normalized or "",
+            _materialize_constraint_last_normalized(signature_1),
+            _materialize_constraint_last_normalized(signature_2),
         ):
             return high_value
         # just-in-case first initial constraint: if first initials are different, then disallow
@@ -912,7 +1270,6 @@ class ANDData:
             return high_value
         # and then name based constraints
         else:
-            signature_2 = self.signatures[signature_id_2]
             # either a known alias or a prefix of the other
             # if neither, then we'll say it's impossible to be the same person
             # Backward-compatibility: `first_1`/`first_2` can now be multi-token (Sinonym output).
@@ -934,7 +1291,7 @@ class ANDData:
             # dont cluster together if there is no intersection between the sets of middle initials
             # and both sets are not empty
             elif len(middle_1) > 0:
-                middle_2 = signature_2.author_info_middle_normalized_without_apostrophe.split()
+                middle_2 = middle_2_text.split()
                 if len(middle_2) > 0:
                     overlapping_affixes = set(middle_2).intersection(middle_1).intersection(DROPPED_AFFIXES)
                     middle_1_all = [word for word in middle_1 if len(word) > 0 and word not in overlapping_affixes]
@@ -1127,11 +1484,8 @@ class ANDData:
         val_block_dict: Dict[str, List[str]] = {}
         test_block_dict: Dict[str, List[str]] = {}
 
-        logger.info("split_cluster_signatures_fixed")
         if self.val_blocks is None:
-            logger.info("Val blocks are None")
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
-            logger.info(f"train_prob {train_prob, self.train_ratio, self.val_ratio}")
             np.random.seed(self.random_seed)
             split_prob = np.random.rand(len(self.train_blocks))
             for block_id, signature in blocks.items():
@@ -1182,7 +1536,6 @@ class ANDData:
         test_block_dict: Dict[str, List[str]] = {}
 
         test_signatures = self.test_signatures
-        logger.info("fixed signatures split")
 
         if self.val_signatures is None:
             train_signatures = []
@@ -1272,10 +1625,13 @@ class ANDData:
         -------
         Dict: the dictionary mapping cluster to signatures
         """
+        if self.signature_to_cluster_id is None:
+            raise ValueError("signature_to_cluster_id is required to construct cluster_to_signatures")
+        signature_to_cluster_id = self.signature_to_cluster_id
         cluster_to_signatures = defaultdict(list)
         for signatures in block_dict.values():
             for signature in signatures:
-                true_cluster_id = self.signature_to_cluster_id[signature]
+                true_cluster_id = signature_to_cluster_id[signature]
                 cluster_to_signatures[true_cluster_id].append(signature)
 
         return dict(cluster_to_signatures)
@@ -1402,12 +1758,15 @@ class ANDData:
         possible: List[Tuple[str, str, Union[int, float]]] = []
 
         if not self.pair_sampling_block:
+            if self.signature_to_cluster_id is None:
+                raise ValueError("signature_to_cluster_id is required for non-block pair sampling")
+            signature_to_cluster_id = self.signature_to_cluster_id
             for i, s1 in enumerate(signature_ids):
                 for s2 in signature_ids[i + 1 :]:
                     s1_name = self.get_full_name(s1)
                     s2_name = self.get_full_name(s2)
-                    s1_cluster = self.signature_to_cluster_id[s1]
-                    s2_cluster = self.signature_to_cluster_id[s2]
+                    s1_cluster = signature_to_cluster_id[s1]
+                    s2_cluster = signature_to_cluster_id[s2]
                     if s1_cluster == s2_cluster:
                         if s1_name == s2_name:
                             same_name_same_cluster.append((s1, s2, 1))
@@ -1432,13 +1791,16 @@ class ANDData:
                         else:
                             possible.append((s1, s2, NUMPY_NAN))
         else:
+            if self.signature_to_cluster_id is None:
+                raise ValueError("signature_to_cluster_id is required for balanced pair sampling")
+            signature_to_cluster_id = self.signature_to_cluster_id
             for _, signatures in blocks.items():
                 for i, s1 in enumerate(signatures):
                     for s2 in signatures[i + 1 :]:
                         s1_name = self.get_full_name(s1)
                         s2_name = self.get_full_name(s2)
-                        s1_cluster = self.signature_to_cluster_id[s1]
-                        s2_cluster = self.signature_to_cluster_id[s2]
+                        s1_cluster = signature_to_cluster_id[s1]
+                        s2_cluster = signature_to_cluster_id[s2]
                         if s1_cluster == s2_cluster:
                             if s1_name == s2_name:
                                 same_name_same_cluster.append((s1, s2, 1))
@@ -1667,7 +2029,6 @@ def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: in
     if n_jobs > 1:
         # On Windows, prefer threads to avoid spawn/import guard issues in child processes.
         # On Unix, use processes for CPU-bound work.
-        use_threads = platform.system() == "Windows"  # not using at the moment because threads doesn't parallelize well
         with UniversalPool(processes=n_jobs, use_threads=False) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
@@ -1801,11 +2162,9 @@ def apply_sinonym_overwrites(
             new_block = None
             try:
                 if first and last:
-                    # TODO(s2and): When blocks are recomputed everywhere from Sinonym-aware
-                    # canonical forms, remove the hyphen/space-insensitive surname join here.
-                    surname_for_block = re.sub(r"[\s-]+", "", last.lower())
-                    new_block = f"{first[:1].lower()} {surname_for_block}".strip()
-            except Exception as e:
+                    # Match standard block computation: first-initial + last, then normalize.
+                    new_block = normalize_text(f"{first[:1]} {last}")
+            except Exception:
                 # Log any unexpected formatting issues; keep prior block on error
                 logger.exception(
                     "Error computing new block for signature_id=%s (paper_id=%s, position=%s)",

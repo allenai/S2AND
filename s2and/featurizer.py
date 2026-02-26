@@ -1,6 +1,8 @@
 from typing import Tuple, List, Union, Dict, Callable, Any, Optional
 
 import os
+import contextlib
+import gc
 import json
 import tempfile
 import orjson
@@ -17,6 +19,8 @@ from tqdm import tqdm
 from s2and.data import ANDData
 from s2and.mp import UniversalPool
 from s2and import feature_port
+from s2and import memory_budget
+from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.consts import (
     CACHE_ROOT,
     NUMPY_NAN,
@@ -41,42 +45,328 @@ logger = logging.getLogger("s2and")
 TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
 
 CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
-
-# Environment configuration caches (read once per process for consistency)
-_ENV_TRUE_VALUES = {"1", "true", "yes"}
-_USE_RUST_FEATURIZER_CACHE: Optional[bool] = None
-_USE_RUST_BATCH_CACHE: Optional[bool] = None
-_RUST_BATCH_THRESHOLD_CACHE: Optional[int] = None
-
-
-def _env_flag(name: str, default: str = "0") -> bool:
-    return os.environ.get(name, default).lower() in _ENV_TRUE_VALUES
+_CACHED_FEATURES_LOCK = threading.Lock()
+global_dataset: ANDData | None = None
+global_runtime_context: Optional[RuntimeContext] = None
+_RUST_BATCH_CALIBRATION_LOCK = threading.Lock()
+_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES: Optional[int] = None
+_RUST_BATCH_CALIBRATION_ATTEMPTED = False
 
 
-def _use_rust_featurizer() -> bool:
-    global _USE_RUST_FEATURIZER_CACHE
-    if _USE_RUST_FEATURIZER_CACHE is None:
-        _USE_RUST_FEATURIZER_CACHE = _env_flag("S2AND_USE_RUST_FEATURIZER", "1")
-    return _USE_RUST_FEATURIZER_CACHE
+def _use_rust_featurizer(runtime_context: Optional[RuntimeContext] = None) -> bool:
+    if runtime_context is None:
+        runtime_context = build_runtime_context("pair_featurization")
+    return stage_uses_rust(runtime_context, "pair_featurization")
 
 
-def _use_rust_batch() -> bool:
-    global _USE_RUST_BATCH_CACHE
-    if _USE_RUST_BATCH_CACHE is None:
-        _USE_RUST_BATCH_CACHE = _env_flag("S2AND_RUST_BATCH", "1")
-    return _USE_RUST_BATCH_CACHE
+def _has_missing_signature_ngrams_for_pairs(
+    dataset: ANDData,
+    signature_pairs: List[Tuple[str, str, Union[int, float]]],
+) -> Tuple[bool, int]:
+    signatures = getattr(dataset, "signatures", {})
+    if not signatures:
+        return False, 0
+
+    inspected = 0
+    inspected_signature_ids = set()
+    for sig_id_1, sig_id_2, _ in signature_pairs:
+        for signature_id in (sig_id_1, sig_id_2):
+            if signature_id in inspected_signature_ids:
+                continue
+            inspected_signature_ids.add(signature_id)
+            signature = signatures.get(signature_id)
+            if signature is None:
+                continue
+            inspected += 1
+            if signature.author_info_affiliations_n_grams is None or signature.author_info_coauthor_n_grams is None:
+                return True, inspected
+    return False, inspected
 
 
-def _rust_batch_threshold() -> int:
-    global _RUST_BATCH_THRESHOLD_CACHE
-    if _RUST_BATCH_THRESHOLD_CACHE is None:
-        threshold_str = os.environ.get("S2AND_RUST_BATCH_THRESHOLD", "0")
-        try:
-            threshold = int(threshold_str)
-        except ValueError:
-            threshold = 0
-        _RUST_BATCH_THRESHOLD_CACHE = max(0, threshold)
-    return _RUST_BATCH_THRESHOLD_CACHE
+def _ensure_python_pair_signature_ngrams(
+    dataset: ANDData,
+    signature_pairs: List[Tuple[str, str, Union[int, float]]],
+    runtime_context: RuntimeContext,
+) -> None:
+    if _use_rust_featurizer(runtime_context):
+        return
+    if getattr(dataset, "_s2and_python_pair_ngrams_ready", False):
+        return
+
+    materialize_fn = getattr(dataset, "materialize_signature_ngrams_python", None)
+    if materialize_fn is None:
+        return
+
+    has_missing_ngrams, inspected_signature_count = _has_missing_signature_ngrams_for_pairs(dataset, signature_pairs)
+    if not has_missing_ngrams:
+        setattr(dataset, "_s2and_python_pair_ngrams_ready", True)
+        return
+
+    materialize_start = time.perf_counter()
+    materialize_fn()
+    setattr(dataset, "_s2and_python_pair_ngrams_ready", True)
+    logger.info(
+        "Telemetry stage: stage=python_pair_signature_ngrams_materialize seconds=%.3f "
+        "inspected_signatures=%d total_signatures=%d requested_backend=%s resolved_backend=%s run_id=%s",
+        time.perf_counter() - materialize_start,
+        inspected_signature_count,
+        len(getattr(dataset, "signatures", {})),
+        runtime_context.requested_backend,
+        runtime_context.resolved_backend,
+        runtime_context.run_id,
+    )
+
+
+def _rust_batch_chunk_plan(
+    *,
+    feature_count: int,
+    total_pairs: int,
+    total_rows: int,
+    selected_feature_count: int,
+    nameless_feature_count: int,
+    total_ram_bytes: Optional[int],
+    base_chunk_pairs: Optional[int] = None,
+    row_overhead_bytes: Optional[int] = None,
+    persistent_row_overhead_bytes: Optional[int] = None,
+    fixed_overhead_bytes: Optional[int] = None,
+) -> Dict[str, Union[int, str, float]]:
+    return memory_budget.compute_rust_batch_chunk_plan(
+        num_features=feature_count,
+        total_pairs=total_pairs,
+        total_rows=total_rows,
+        selected_feature_count=selected_feature_count,
+        nameless_feature_count=nameless_feature_count,
+        total_ram_bytes=total_ram_bytes,
+        base_chunk_pairs=base_chunk_pairs,
+        row_overhead_bytes=row_overhead_bytes,
+        persistent_row_overhead_bytes=persistent_row_overhead_bytes,
+        fixed_overhead_bytes=fixed_overhead_bytes,
+    )
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return bool(default)
+    normalized = raw_value.strip().lower()
+    return normalized not in {"0", "false", "no", "off", ""}
+
+
+def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_total_pairs: int) -> List[int]:
+    bounded_total_pairs = max(0, int(total_pairs))
+    if probe_count <= 0:
+        return []
+    if bounded_total_pairs < max(int(min_total_pairs), int(probe_count)):
+        return []
+
+    canonical = [10_000, 50_000, 100_000]
+    canonical_fits = [value for value in canonical if value <= bounded_total_pairs]
+    if len(canonical_fits) >= probe_count:
+        return canonical_fits[:probe_count]
+
+    quantile_rows: List[int] = []
+    for probe_index in range(probe_count):
+        quantile = float(probe_index + 1) / float(probe_count)
+        row_count = int(round(float(bounded_total_pairs) * quantile))
+        row_count = max(1, min(bounded_total_pairs, row_count))
+        quantile_rows.append(row_count)
+
+    deduped = sorted(set(quantile_rows))
+    if len(deduped) < probe_count:
+        return []
+    return deduped[-probe_count:]
+
+
+def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
+    *,
+    rust_featurizer: Any,
+    pieces_of_work: List[Tuple[Tuple[str, str], int]],
+    use_indexed_pairs: bool,
+    signature_id_to_index: Dict[str, int],
+    rust_selected_indices: Optional[List[int]],
+    selected_feature_count: int,
+    nameless_feature_count: int,
+    row_overhead_bytes: int,
+    persistent_row_overhead_bytes: int,
+    num_threads: int,
+    total_ram_for_stage: Optional[int],
+    run_id: str,
+) -> Optional[int]:
+    global _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES
+    global _RUST_BATCH_CALIBRATION_ATTEMPTED
+
+    if not _env_bool("S2AND_RUST_BATCH_STARTUP_CALIBRATION", default=True):
+        return None
+
+    try:
+        probe_count = max(1, int(os.environ.get("S2AND_RUST_BATCH_CALIBRATION_PROBE_COUNT", "3")))
+    except ValueError:
+        probe_count = 3
+    try:
+        min_total_pairs = max(1, int(os.environ.get("S2AND_RUST_BATCH_CALIBRATION_MIN_TOTAL_PAIRS", "30000")))
+    except ValueError:
+        min_total_pairs = 30_000
+
+    with _RUST_BATCH_CALIBRATION_LOCK:
+        if _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES is not None:
+            return int(_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES)
+        if _RUST_BATCH_CALIBRATION_ATTEMPTED:
+            return None
+
+    probe_rows = _rust_batch_probe_row_counts(
+        len(pieces_of_work),
+        probe_count=probe_count,
+        min_total_pairs=min_total_pairs,
+    )
+    if len(probe_rows) < probe_count:
+        return None
+    if total_ram_for_stage is None:
+        return None
+
+    fixed_samples: List[int] = []
+    chunk_feature_count = max(1, int(selected_feature_count) + int(nameless_feature_count))
+    row_overhead_bounded = max(0, int(row_overhead_bytes))
+    persistent_row_overhead_bounded = max(0, int(persistent_row_overhead_bytes))
+
+    try:
+        for row_count in probe_rows:
+            probe_work = pieces_of_work[: int(row_count)]
+            if len(probe_work) < int(row_count):
+                continue
+            probe_pairs = [pair for pair, _ in probe_work]
+            rss_before_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
+            rss_peak_bytes = rss_before_bytes
+
+            probe_features = np.empty((int(row_count), int(selected_feature_count)), dtype=np.float64)
+            probe_nameless_features: Optional[np.ndarray] = None
+            if int(nameless_feature_count) > 0:
+                probe_nameless_features = np.empty((int(row_count), int(nameless_feature_count)), dtype=np.float64)
+            probe_labels = np.empty(int(row_count), dtype=np.float64)
+
+            rss_now_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
+            rss_peak_bytes = max(rss_peak_bytes, int(rss_now_bytes))
+
+            if use_indexed_pairs:
+                probe_pairs_indexed = [
+                    (signature_id_to_index[pair[0]], signature_id_to_index[pair[1]]) for pair in probe_pairs
+                ]
+                probe_chunk = np.asarray(
+                    rust_featurizer.featurize_pairs_matrix_indexed(
+                        probe_pairs_indexed,
+                        rust_selected_indices,
+                        int(num_threads),
+                        np.nan,
+                    ),
+                    dtype=np.float64,
+                )
+            elif hasattr(rust_featurizer, "featurize_pairs_matrix"):
+                probe_chunk = np.asarray(
+                    rust_featurizer.featurize_pairs_matrix(
+                        probe_pairs,
+                        rust_selected_indices,
+                        int(num_threads),
+                        np.nan,
+                    ),
+                    dtype=np.float64,
+                )
+            else:
+                probe_chunk = np.asarray(
+                    rust_featurizer.featurize_pairs(probe_pairs, num_threads=int(num_threads)),
+                    dtype=np.float64,
+                )
+
+            rss_after_call_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
+            rss_peak_bytes = max(rss_peak_bytes, int(rss_after_call_bytes))
+            observed_peak_delta_bytes = int(rss_peak_bytes) - int(rss_before_bytes)
+
+            modeled_features_bytes = int(row_count) * int(selected_feature_count + nameless_feature_count) * 8
+            modeled_labels_bytes = int(row_count) * 8
+            modeled_chunk_bytes = int(row_count) * int(chunk_feature_count * 8 + row_overhead_bounded)
+            modeled_persistent_bytes = int(row_count) * int(persistent_row_overhead_bounded)
+            estimated_fixed_bytes = int(
+                observed_peak_delta_bytes
+                - modeled_features_bytes
+                - modeled_labels_bytes
+                - modeled_chunk_bytes
+                - modeled_persistent_bytes
+            )
+            fixed_samples.append(estimated_fixed_bytes)
+
+            del probe_features
+            del probe_nameless_features
+            del probe_labels
+            del probe_chunk
+            gc.collect()
+    except Exception as exc:
+        with _RUST_BATCH_CALIBRATION_LOCK:
+            _RUST_BATCH_CALIBRATION_ATTEMPTED = True
+        logger.warning(
+            "Rust batch startup calibration failed; using configured fixed overhead " "(run_id=%s error=%s)",
+            run_id,
+            exc,
+        )
+        return None
+
+    if not fixed_samples:
+        return None
+
+    calibrated_fixed_bytes = max(0, int(max(fixed_samples)))
+    calibrated_fixed_bytes = min(calibrated_fixed_bytes, 512 * (1 << 20))
+
+    with _RUST_BATCH_CALIBRATION_LOCK:
+        _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES = int(calibrated_fixed_bytes)
+        _RUST_BATCH_CALIBRATION_ATTEMPTED = True
+
+    logger.info(
+        "Telemetry: rust_batch_startup_calibration probes=%d probe_rows=%s "
+        "fixed_overhead_bytes_calibrated=%d row_overhead_bytes=%d persistent_row_overhead_bytes=%d run_id=%s",
+        len(probe_rows),
+        ",".join(str(v) for v in probe_rows),
+        int(calibrated_fixed_bytes),
+        int(row_overhead_bounded),
+        int(persistent_row_overhead_bounded),
+        run_id,
+    )
+    return int(calibrated_fixed_bytes)
+
+
+def _log_featurization_backend_decision(
+    runtime_context: RuntimeContext,
+    pieces_of_work_count: int,
+    n_jobs: int,
+    use_rust_featurizer: bool,
+    rust_module_available: bool,
+) -> None:
+    if pieces_of_work_count <= 0:
+        logger.info("Featurization backend decision: skipped compute (all pairs were cached or pre-labeled)")
+        return
+
+    if use_rust_featurizer and rust_module_available:
+        backend = "rust_batch"
+    else:
+        backend = "python_parallel" if n_jobs > 1 else "python_serial"
+
+    logger.info(
+        "Featurization backend decision: backend=%s pieces=%d n_jobs=%d "
+        "use_rust_featurizer=%s rust_module_available=%s "
+        "requested_backend=%s resolved_backend=%s run_id=%s",
+        backend,
+        pieces_of_work_count,
+        n_jobs,
+        use_rust_featurizer,
+        rust_module_available,
+        runtime_context.requested_backend,
+        runtime_context.resolved_backend,
+        runtime_context.run_id,
+    )
+
+    notes = []
+    if not use_rust_featurizer:
+        notes.append("pair_featurization stage set to Python by runtime context")
+    if use_rust_featurizer and not rust_module_available:
+        notes.append("s2and_rust extension unavailable")
+    if notes:
+        logger.info("Featurization backend notes: %s", "; ".join(notes))
 
 
 # ── constants for cache writes ───────────────────────────
@@ -439,7 +729,9 @@ class FeaturizationInfo:
 NUM_FEATURES = FeaturizationInfo().number_of_features
 
 
-def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tuple[List[Union[int, float]], int]:
+def _single_pair_featurize(
+    work_input: Tuple[str, str], index: int = -1, force_python: bool = False
+) -> Tuple[List[Union[int, float]], int]:
     """
     Creates the features array for a single signature pair
     NOTE: This function uses a global variable to support faster multiprocessing. That means that this function
@@ -459,22 +751,42 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     Tuple: tuple of the features array, and the index, which is simply passed through
     """
     global global_dataset
+    global global_runtime_context
 
     features = []
+    dataset = global_dataset
+    if dataset is None:
+        raise RuntimeError("global_dataset is not initialized; call many_pairs_featurize first")
 
-    use_rust = _use_rust_featurizer()
-    if use_rust and feature_port.s2and_rust is not None:
-        features = feature_port.featurize_pair_rust(global_dataset, work_input[0], work_input[1])  # type: ignore
-        return features, index
+    runtime_context = global_runtime_context
+    if runtime_context is None:
+        runtime_context = build_runtime_context("pair_featurization", emit_startup_warning=False)
+    use_rust = _use_rust_featurizer(runtime_context)
+    if not force_python and use_rust and feature_port.s2and_rust is not None:
+        try:
+            features = feature_port.featurize_pair_rust(  # type: ignore
+                dataset,
+                work_input[0],
+                work_input[1],
+                runtime_context=runtime_context,
+            )
+            return features, index
+        except Exception as exc:
+            if stage_uses_rust(runtime_context, "pair_featurization"):
+                raise RuntimeError(
+                    "Rust pair featurization failed in strict rust backend "
+                    f"(run_id={runtime_context.run_id} pair={work_input} error={exc})"
+                ) from exc
+            logger.warning("Rust pair featurization failed, falling back to Python for this process: %s", exc)
 
-    signature_1 = global_dataset.signatures[work_input[0]]  # type: ignore
-    signature_2 = global_dataset.signatures[work_input[1]]  # type: ignore
+    signature_1 = dataset.signatures[work_input[0]]
+    signature_2 = dataset.signatures[work_input[1]]
 
     paper_id_1 = signature_1.paper_id
     paper_id_2 = signature_2.paper_id
 
-    paper_1 = global_dataset.papers[str(paper_id_1)]  # type: ignore
-    paper_2 = global_dataset.papers[str(paper_id_2)]  # type: ignore
+    paper_1 = dataset.papers[str(paper_id_1)]
+    paper_2 = dataset.papers[str(paper_id_2)]
 
     features.extend(
         [
@@ -596,7 +908,7 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
     # Reference-derived features: optionally disabled
     references_1 = set(paper_1.references or [])
     references_2 = set(paper_2.references or [])
-    compute_ref = bool(getattr(global_dataset, "compute_reference_features", False))  # type: ignore
+    compute_ref = bool(getattr(dataset, "compute_reference_features", False))
     if compute_ref and paper_1.reference_details is not None and paper_2.reference_details is not None:
         features.extend(
             [
@@ -641,13 +953,13 @@ def _single_pair_featurize(work_input: Tuple[str, str], index: int = -1) -> Tupl
 
     specter_1 = None
     specter_2 = None
-    if english_or_unknown_count == 2 and global_dataset.specter_embeddings is not None:  # type: ignore
-        if str(paper_id_1) in global_dataset.specter_embeddings:  # type: ignore
-            specter_1 = global_dataset.specter_embeddings[str(paper_id_1)]  # type: ignore
+    if english_or_unknown_count == 2 and dataset.specter_embeddings is not None:
+        if str(paper_id_1) in dataset.specter_embeddings:
+            specter_1 = dataset.specter_embeddings[str(paper_id_1)]
             if np.all(specter_1 == 0):
                 specter_1 = None
-        if str(paper_id_2) in global_dataset.specter_embeddings:  # type: ignore
-            specter_2 = global_dataset.specter_embeddings[str(paper_id_2)]  # type: ignore
+        if str(paper_id_2) in dataset.specter_embeddings:
+            specter_2 = dataset.specter_embeddings[str(paper_id_2)]
             if np.all(specter_2 == 0):
                 specter_2 = None
 
@@ -702,6 +1014,8 @@ def many_pairs_featurize(
     nameless_featurizer_info: Optional[FeaturizationInfo] = None,
     nan_value: float = np.nan,
     delete_training_data: bool = False,
+    runtime_context: Optional[RuntimeContext] = None,
+    total_ram_bytes: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Featurizes many pairs
@@ -728,6 +1042,8 @@ def many_pairs_featurize(
         the value to replace nans with
     delete_training_data: bool
         Whether to delete some suspicious training rows
+    total_ram_bytes: Optional[int]
+        Optional explicit RAM input used for stage-wise memory budgeting of Rust batch featurization.
 
     Returns
     -------
@@ -742,13 +1058,110 @@ def many_pairs_featurize(
         raise ValueError(
             "'reference_features' requested in features_to_use but dataset.compute_reference_features is False."
         )
+    featurize_start = time.perf_counter()
+    backend_used = "cached_only"
+    if runtime_context is None:
+        runtime_context = build_runtime_context("featurization_run")
+    _ensure_python_pair_signature_ngrams(dataset, signature_pairs, runtime_context)
 
     global global_dataset
-    global_dataset = dataset  # type: ignore
+    global global_runtime_context
+    global_dataset = dataset
+    global_runtime_context = runtime_context
 
     cached_features: Dict[str, Any] = {"features": {}}
     cache_changed = False
     new_features_count = 0
+    did_rust_batch = False
+    rust_batch_plan: Optional[Dict[str, Union[int, str, float]]] = None
+    rust_batch_failure_reason: Optional[str] = None
+    rust_batch_total_ram_for_stage: Optional[int] = None
+    rust_batch_rss_before_bytes = 0
+    rust_batch_rss_peak_bytes = 0
+    rust_batch_rss_source = "unavailable"
+    rust_batch_rss_baseline_locked = False
+
+    if _use_rust_featurizer(runtime_context):
+        if feature_port.s2and_rust is None:
+            if stage_uses_rust(runtime_context, "pair_featurization"):
+                raise RuntimeError(
+                    "Rust backend requested for pair_featurization but s2and_rust extension is unavailable "
+                    f"(run_id={runtime_context.run_id})"
+                )
+        else:
+            try:
+                # Prewarm so from_dataset build doesn't land inside the RSS measurement window.
+                feature_port._get_rust_featurizer(
+                    dataset,
+                    use_cache=use_cache,
+                    runtime_context=runtime_context,
+                )
+            except Exception as exc:
+                if stage_uses_rust(runtime_context, "pair_featurization"):
+                    raise RuntimeError(
+                        "Rust featurizer init failed in strict rust backend "
+                        f"(run_id={runtime_context.run_id} error={exc})"
+                    ) from exc
+                logger.warning(f"Rust featurizer init failed, falling back to Python: {exc}")
+        try:
+            rust_batch_total_ram_for_stage, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
+            rust_batch_rss_before_bytes, rust_batch_rss_source = memory_budget.current_rss_bytes_best_effort(
+                rust_batch_total_ram_for_stage
+            )
+            rust_batch_rss_peak_bytes = rust_batch_rss_before_bytes
+            rust_batch_rss_baseline_locked = True
+        except RuntimeError:
+            # Preserve behavior for all-cached paths when RAM autodetection is unavailable.
+            rust_batch_total_ram_for_stage = None
+
+    def _sample_rust_batch_rss_peak() -> None:
+        nonlocal rust_batch_rss_peak_bytes
+        if rust_batch_total_ram_for_stage is None:
+            return
+        rss_now, _ = memory_budget.current_rss_bytes_best_effort(rust_batch_total_ram_for_stage)
+        if rss_now > rust_batch_rss_peak_bytes:
+            rust_batch_rss_peak_bytes = rss_now
+
+    class _RustBatchRssSampler:
+        def __init__(self, interval_seconds: float):
+            self.interval_seconds = interval_seconds
+            self._stop = threading.Event()
+            self._thread: Optional[threading.Thread] = None
+
+        def _run(self) -> None:
+            while not self._stop.is_set():
+                _sample_rust_batch_rss_peak()
+                self._stop.wait(self.interval_seconds)
+
+        def __enter__(self):
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=2)
+            return False
+
+    def _rust_batch_sampler_context():
+        if rust_batch_total_ram_for_stage is None:
+            return contextlib.nullcontext()
+        try:
+            interval_ms = int(os.environ.get("S2AND_RUST_BATCH_RSS_SAMPLER_MS", "0"))
+        except ValueError:
+            interval_ms = 0
+        if interval_ms <= 0:
+            return contextlib.nullcontext()
+        return _RustBatchRssSampler(interval_ms / 1000.0)
+
+    if use_cache and getattr(dataset, "mode", "") == "inference":
+        logger.warning(
+            "use_cache=True with dataset.mode='inference': the Python feature pair cache "
+            "will read/write JSON to disk. This is independent of Rust featurizer disk cache "
+            "(which follows dataset lifecycle mode). Set use_cache=False for production inference."
+        )
 
     if use_cache:
         logger.info("Loading cache...")
@@ -756,8 +1169,10 @@ def many_pairs_featurize(
             os.makedirs(featurizer_info.cache_directory(dataset.name))
         cache_path = featurizer_info.cache_file_path(dataset.name)
         if os.path.exists(cache_path):
-            if cache_path in CACHED_FEATURES:
-                cached_features = CACHED_FEATURES[cache_path]
+            with _CACHED_FEATURES_LOCK:
+                in_memory = CACHED_FEATURES.get(cache_path)
+            if in_memory is not None:
+                cached_features = in_memory
             else:
                 # fast path: orjson, fallback: stdlib json (handles legacy NaN)
                 try:
@@ -777,8 +1192,45 @@ def many_pairs_featurize(
         if "__new_features__" not in cached_features:
             cached_features["__new_features__"] = {}
 
-    features = np.ones((len(signature_pairs), NUM_FEATURES)) * (-LARGE_INTEGER)
+    indices_to_use_set: set[int] = set()
+    for feature_name in featurizer_info.features_to_use:
+        indices_to_use_set.update(featurizer_info.feature_group_to_index[feature_name])
+    indices_to_use: List[int] = sorted(indices_to_use_set)
+
+    nameless_indices_to_use: List[int] = []
+    if nameless_featurizer_info is not None:
+        nameless_indices_to_use_set: set[int] = set()
+        for feature_name in nameless_featurizer_info.features_to_use:
+            nameless_indices_to_use_set.update(nameless_featurizer_info.feature_group_to_index[feature_name])
+        nameless_indices_to_use = sorted(nameless_indices_to_use_set)
+
+    identity_selected_indices = indices_to_use == list(range(NUM_FEATURES))
+    coauthor_similarity_index: Optional[int] = None
+    coauthor_similarity_values: Optional[np.ndarray] = None
+    if delete_training_data:
+        coauthor_similarity_index = featurizer_info.get_feature_names().index("coauthor_similarity")
+        coauthor_similarity_values = np.full(len(signature_pairs), -float(LARGE_INTEGER), dtype=np.float64)
+
+    indices_needed_for_compute: List[int] = sorted(
+        set(indices_to_use)
+        | set(nameless_indices_to_use)
+        | ({coauthor_similarity_index} if coauthor_similarity_index is not None else set())
+    )
+
+    features = np.full(
+        (len(signature_pairs), len(indices_to_use)),
+        -float(LARGE_INTEGER),
+        dtype=np.float64,
+    )
     labels = np.zeros(len(signature_pairs))
+    nameless_features: Optional[np.ndarray] = None
+    if nameless_featurizer_info is not None:
+        nameless_features = np.full(
+            (len(signature_pairs), len(nameless_indices_to_use)),
+            -float(LARGE_INTEGER),
+            dtype=np.float64,
+        )
+    _sample_rust_batch_rss_peak()
     pieces_of_work = []
     logger.info(f"Creating {len(signature_pairs)} pieces of work")
     for i, pair in tqdm(enumerate(signature_pairs), desc="Creating work", disable=len(signature_pairs) <= 100000):
@@ -788,61 +1240,369 @@ def many_pairs_featurize(
         if pair[2] < 0:
             continue
 
-        cache_key = pair[0] + "___" + pair[1]
-        if use_cache and cache_key in cached_features["features"]:
-            cached_vector = cached_features["features"][cache_key]
-            features[i, :] = cached_vector
-            continue
-
-        cache_key = pair[1] + "___" + pair[0]
-        if use_cache and cache_key in cached_features["features"]:
-            cached_vector = cached_features["features"][cache_key]
-            features[i, :] = cached_vector
-            continue
+        if use_cache:
+            cache_key = pair[0] + "___" + pair[1]
+            cached_vector = cached_features["features"].get(cache_key)
+            if cached_vector is None:
+                cache_key = pair[1] + "___" + pair[0]
+                cached_vector = cached_features["features"].get(cache_key)
+            if cached_vector is not None:
+                cached_arr = np.asarray(cached_vector, dtype=np.float64)
+                if identity_selected_indices:
+                    features[i, :] = cached_arr
+                else:
+                    features[i, :] = cached_arr[indices_to_use]
+                if nameless_features is not None:
+                    nameless_features[i, :] = cached_arr[nameless_indices_to_use]
+                if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
+                    coauthor_similarity_values[i] = cached_arr[coauthor_similarity_index]
+                continue
 
         cache_changed = True
         pieces_of_work.append(((pair[0], pair[1]), i))
 
     logger.info("Created pieces of work")
 
-    indices_to_use_set = set()
-    for feature_name in featurizer_info.features_to_use:
-        indices_to_use_set.update(featurizer_info.feature_group_to_index[feature_name])
-    indices_to_use: List[int] = sorted(list(indices_to_use_set))
-
-    if nameless_featurizer_info:
-        nameless_indices_to_use_set = set()
-        for feature_name in nameless_featurizer_info.features_to_use:
-            nameless_indices_to_use_set.update(nameless_featurizer_info.feature_group_to_index[feature_name])
-        nameless_indices_to_use: List[int] = sorted(list(nameless_indices_to_use_set))
-
     if cache_changed:
-        use_rust = _use_rust_featurizer()
-        use_rust_batch = _use_rust_batch()
-        rust_batch_threshold = _rust_batch_threshold()
-        if rust_batch_threshold > 0 and len(pieces_of_work) < rust_batch_threshold:
-            use_rust_batch = False
-            logger.info(
-                f"Rust batch mode disabled for small batch (size={len(pieces_of_work)} < {rust_batch_threshold})"
+        use_rust = _use_rust_featurizer(runtime_context)
+        rust_module_available = feature_port.s2and_rust is not None if use_rust else False
+        rust_mode = use_rust
+        if use_rust and not rust_module_available:
+            raise RuntimeError(
+                "Rust backend requested for pair_featurization but s2and_rust extension is unavailable "
+                f"(run_id={runtime_context.run_id})"
             )
-        did_rust_batch = False
-        if use_rust and use_rust_batch and feature_port.s2and_rust is not None and len(pieces_of_work) > 0:
-            logger.info(f"Making {len(pieces_of_work)} feature vectors in Rust batch mode")
-            write_cache_flag = use_cache if use_cache else None
-            rust_featurizer = feature_port._get_rust_featurizer(dataset, write_cache=write_cache_flag)
-            rust_pairs = [pair for pair, _ in pieces_of_work]
-            num_threads = max(1, int(n_jobs))
-            rust_features = rust_featurizer.featurize_pairs(rust_pairs, num_threads=num_threads)
-            for feature_output, (_, index) in zip(rust_features, pieces_of_work):
-                if use_cache:
-                    cache_key = featurizer_info.feature_cache_key(signature_pairs[index])
-                    cached_features["features"][cache_key] = feature_output
-                    cached_features["__new_features__"][cache_key] = feature_output
-                    new_features_count += 1
-                features[index, :] = feature_output
-            did_rust_batch = True
 
-        if not did_rust_batch and n_jobs > 1:
+        _log_featurization_backend_decision(
+            runtime_context=runtime_context,
+            pieces_of_work_count=len(pieces_of_work),
+            n_jobs=n_jobs,
+            use_rust_featurizer=use_rust,
+            rust_module_available=rust_module_available,
+        )
+
+        if use_rust and rust_module_available and len(pieces_of_work) > 0:
+            try:
+                rust_featurizer = feature_port._get_rust_featurizer(
+                    dataset,
+                    use_cache=use_cache,
+                    runtime_context=runtime_context,
+                )
+                use_indexed_pairs = bool(
+                    hasattr(rust_featurizer, "featurize_pairs_matrix_indexed")
+                    and hasattr(rust_featurizer, "signature_ids")
+                )
+                supports_matrix_api = bool(use_indexed_pairs or hasattr(rust_featurizer, "featurize_pairs_matrix"))
+                rust_selected_indices: Optional[List[int]] = None
+                if supports_matrix_api and not use_cache and len(indices_needed_for_compute) > 0:
+                    rust_selected_indices = indices_needed_for_compute
+                signature_id_to_index: Dict[str, int] = {}
+                if use_indexed_pairs:
+                    rust_signature_ids = rust_featurizer.signature_ids()
+                    signature_id_to_index = {str(sig_id): int(idx) for idx, sig_id in enumerate(rust_signature_ids)}
+                    logger.info("Rust indexed pair API enabled (signature_count=%d)", len(signature_id_to_index))
+                rust_feature_count = NUM_FEATURES if rust_selected_indices is None else len(rust_selected_indices)
+                rust_prediction_params = memory_budget.resolve_rust_batch_prediction_params()
+                calibrated_fixed_overhead_bytes: Optional[int] = None
+                if rust_batch_total_ram_for_stage is not None:
+                    calibrated_fixed_overhead_bytes = _maybe_calibrate_rust_batch_fixed_overhead_bytes(
+                        rust_featurizer=rust_featurizer,
+                        pieces_of_work=pieces_of_work,
+                        use_indexed_pairs=use_indexed_pairs,
+                        signature_id_to_index=signature_id_to_index,
+                        rust_selected_indices=rust_selected_indices,
+                        selected_feature_count=len(indices_to_use),
+                        nameless_feature_count=len(nameless_indices_to_use),
+                        row_overhead_bytes=int(rust_prediction_params["row_overhead_bytes"]),
+                        persistent_row_overhead_bytes=int(rust_prediction_params["persistent_row_overhead_bytes"]),
+                        num_threads=max(1, int(n_jobs)),
+                        total_ram_for_stage=rust_batch_total_ram_for_stage,
+                        run_id=runtime_context.run_id,
+                    )
+                fixed_overhead_bytes_for_plan = (
+                    int(calibrated_fixed_overhead_bytes)
+                    if calibrated_fixed_overhead_bytes is not None
+                    else int(rust_prediction_params["fixed_overhead_bytes"])
+                )
+
+                rust_batch_plan = _rust_batch_chunk_plan(
+                    feature_count=rust_feature_count,
+                    total_pairs=len(pieces_of_work),
+                    total_rows=len(signature_pairs),
+                    selected_feature_count=len(indices_to_use),
+                    nameless_feature_count=len(nameless_indices_to_use),
+                    total_ram_bytes=rust_batch_total_ram_for_stage
+                    if rust_batch_total_ram_for_stage is not None
+                    else total_ram_bytes,
+                    base_chunk_pairs=int(rust_prediction_params["base_chunk_pairs"]),
+                    row_overhead_bytes=int(rust_prediction_params["row_overhead_bytes"]),
+                    persistent_row_overhead_bytes=int(rust_prediction_params["persistent_row_overhead_bytes"]),
+                    fixed_overhead_bytes=int(fixed_overhead_bytes_for_plan),
+                )
+                target_chunk_size = int(rust_batch_plan["chunk_pairs"])
+                total_ram_for_stage = int(rust_batch_plan["total_ram_bytes"])
+                predicted_stage_peak_delta_bytes = int(
+                    rust_batch_plan.get(
+                        "predicted_stage_peak_delta_bytes", rust_batch_plan["predicted_stage_peak_bytes"]
+                    )
+                )
+                predicted_stage_peak_rss_bytes = int(
+                    rust_batch_plan.get(
+                        "predicted_stage_peak_rss_bytes",
+                        int(rust_batch_plan["current_rss_bytes"]) + predicted_stage_peak_delta_bytes,
+                    )
+                )
+                if rust_batch_total_ram_for_stage != total_ram_for_stage:
+                    rust_batch_total_ram_for_stage = total_ram_for_stage
+                    if not rust_batch_rss_baseline_locked:
+                        rust_batch_rss_before_bytes, rust_batch_rss_source = (
+                            memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
+                        )
+                        rust_batch_rss_peak_bytes = rust_batch_rss_before_bytes
+                _sample_rust_batch_rss_peak()
+                logger.info(
+                    "Making %d feature vectors in Rust batch mode (target_chunk_size=%d "
+                    "base_chunk_pairs=%d bytes_per_pair_row=%d predicted_chunk_bytes=%d "
+                    "predicted_stage_peak_delta_bytes=%d predicted_stage_peak_rss_bytes=%d stage_budget_bytes=%d "
+                    "total_ram=%d total_ram_source=%s available=%d)",
+                    len(pieces_of_work),
+                    target_chunk_size,
+                    int(rust_batch_plan["base_chunk_pairs"]),
+                    int(rust_batch_plan["bytes_per_pair_row"]),
+                    int(rust_batch_plan["predicted_chunk_bytes"]),
+                    predicted_stage_peak_delta_bytes,
+                    predicted_stage_peak_rss_bytes,
+                    int(rust_batch_plan["stage_budget_bytes"]),
+                    int(rust_batch_plan["total_ram_bytes"]),
+                    str(rust_batch_plan["total_ram_source"]),
+                    int(rust_batch_plan["available_bytes"]),
+                )
+                selected_positions: List[int] = indices_to_use
+                nameless_positions: List[int] = nameless_indices_to_use
+                coauthor_position: Optional[int] = coauthor_similarity_index
+                if rust_selected_indices is not None:
+                    pos_by_feature_idx = {
+                        int(feature_idx): int(pos) for pos, feature_idx in enumerate(rust_selected_indices)
+                    }
+                    selected_positions = [pos_by_feature_idx[idx] for idx in indices_to_use]
+                    nameless_positions = [pos_by_feature_idx[idx] for idx in nameless_indices_to_use]
+                    if coauthor_similarity_index is not None:
+                        coauthor_position = pos_by_feature_idx[coauthor_similarity_index]
+                num_threads = max(1, int(n_jobs))
+                with _rust_batch_sampler_context():
+                    with tqdm(
+                        total=len(pieces_of_work),
+                        desc="Rust batch featurization",
+                        disable=len(pieces_of_work) <= 10000,
+                    ) as pbar:
+                        start_index = 0
+                        while start_index < len(pieces_of_work):
+                            chunk_work = pieces_of_work[start_index : start_index + target_chunk_size]
+                            rust_pairs_chunk = [pair for pair, _ in chunk_work]
+                            if use_indexed_pairs:
+                                rust_pairs_chunk_indexed = [
+                                    (signature_id_to_index[pair[0]], signature_id_to_index[pair[1]])
+                                    for pair in rust_pairs_chunk
+                                ]
+                                rust_features_chunk = np.asarray(
+                                    rust_featurizer.featurize_pairs_matrix_indexed(
+                                        rust_pairs_chunk_indexed,
+                                        rust_selected_indices,
+                                        num_threads,
+                                        np.nan,
+                                    ),
+                                    dtype=np.float64,
+                                )
+                            elif hasattr(rust_featurizer, "featurize_pairs_matrix"):
+                                rust_features_chunk = np.asarray(
+                                    rust_featurizer.featurize_pairs_matrix(
+                                        rust_pairs_chunk,
+                                        rust_selected_indices,
+                                        num_threads,
+                                        np.nan,
+                                    ),
+                                    dtype=np.float64,
+                                )
+                            else:
+                                if rust_selected_indices is not None:
+                                    raise RuntimeError(
+                                        "Rust batch selected-indices requested but featurize_pairs_matrix APIs are unavailable "
+                                        f"(run_id={runtime_context.run_id})"
+                                    )
+                                rust_features_chunk = np.asarray(
+                                    rust_featurizer.featurize_pairs(rust_pairs_chunk, num_threads=num_threads),
+                                    dtype=np.float64,
+                                )
+                            if rust_features_chunk.shape[0] != len(chunk_work):
+                                raise RuntimeError(
+                                    "Rust batch featurizer returned mismatched feature count: "
+                                    f"expected={len(chunk_work)} got={rust_features_chunk.shape[0]}"
+                                )
+                            rust_chunk_columns = int(rust_features_chunk.shape[1])
+                            selected_column_count = (
+                                len(rust_selected_indices) if rust_selected_indices is not None else NUM_FEATURES
+                            )
+                            if rust_selected_indices is None and rust_chunk_columns != NUM_FEATURES:
+                                raise RuntimeError(
+                                    "Rust batch featurizer returned unexpected feature width: "
+                                    f"expected={NUM_FEATURES} got={rust_chunk_columns}"
+                                )
+                            if rust_selected_indices is not None and rust_chunk_columns not in {
+                                NUM_FEATURES,
+                                selected_column_count,
+                            }:
+                                raise RuntimeError(
+                                    "Rust batch featurizer returned unexpected feature width: "
+                                    f"expected={selected_column_count} (selected) or {NUM_FEATURES} (full) got={rust_chunk_columns}"
+                                )
+                            rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
+                            chunk_indices = [index for _, index in chunk_work]
+
+                            if use_cache:
+                                for row_offset, index in enumerate(chunk_indices):
+                                    feature_output = rust_features_chunk[row_offset]
+                                    cache_key = featurizer_info.feature_cache_key(signature_pairs[index])
+                                    feature_output_cached = np.asarray(feature_output, dtype=np.float64).copy()
+                                    cached_features["features"][cache_key] = feature_output_cached
+                                    cached_features["__new_features__"][cache_key] = feature_output_cached
+                                    new_features_count += 1
+
+                                    if rust_chunk_is_full:
+                                        if identity_selected_indices:
+                                            features[index, :] = feature_output
+                                        else:
+                                            features[index, :] = feature_output[indices_to_use]
+                                        if nameless_features is not None:
+                                            nameless_features[index, :] = feature_output[nameless_indices_to_use]
+                                        if (
+                                            coauthor_similarity_values is not None
+                                            and coauthor_similarity_index is not None
+                                        ):
+                                            coauthor_similarity_values[index] = feature_output[
+                                                coauthor_similarity_index
+                                            ]
+                                    else:
+                                        features[index, :] = feature_output[selected_positions]
+                                        if nameless_features is not None:
+                                            nameless_features[index, :] = feature_output[nameless_positions]
+                                        if (
+                                            coauthor_similarity_values is not None
+                                            and coauthor_similarity_index is not None
+                                            and coauthor_position is not None
+                                        ):
+                                            coauthor_similarity_values[index] = feature_output[coauthor_position]
+                            else:
+                                chunk_slice: slice | None = None
+                                if chunk_indices:
+                                    chunk_start = int(chunk_indices[0])
+                                    contiguous = True
+                                    for offset, index in enumerate(chunk_indices):
+                                        if int(index) != chunk_start + offset:
+                                            contiguous = False
+                                            break
+                                    if contiguous:
+                                        chunk_slice = slice(chunk_start, chunk_start + len(chunk_indices))
+
+                                if chunk_slice is not None:
+                                    if rust_chunk_is_full:
+                                        if identity_selected_indices:
+                                            features[chunk_slice, :] = rust_features_chunk
+                                        else:
+                                            np.take(
+                                                rust_features_chunk,
+                                                indices_to_use,
+                                                axis=1,
+                                                out=features[chunk_slice, :],
+                                            )
+                                        if nameless_features is not None:
+                                            np.take(
+                                                rust_features_chunk,
+                                                nameless_indices_to_use,
+                                                axis=1,
+                                                out=nameless_features[chunk_slice, :],
+                                            )
+                                        if (
+                                            coauthor_similarity_values is not None
+                                            and coauthor_similarity_index is not None
+                                        ):
+                                            coauthor_similarity_values[chunk_slice] = rust_features_chunk[
+                                                :, coauthor_similarity_index
+                                            ]
+                                    else:
+                                        np.take(
+                                            rust_features_chunk,
+                                            selected_positions,
+                                            axis=1,
+                                            out=features[chunk_slice, :],
+                                        )
+                                        if nameless_features is not None:
+                                            np.take(
+                                                rust_features_chunk,
+                                                nameless_positions,
+                                                axis=1,
+                                                out=nameless_features[chunk_slice, :],
+                                            )
+                                        if (
+                                            coauthor_similarity_values is not None
+                                            and coauthor_similarity_index is not None
+                                            and coauthor_position is not None
+                                        ):
+                                            coauthor_similarity_values[chunk_slice] = rust_features_chunk[
+                                                :, coauthor_position
+                                            ]
+                                else:
+                                    if rust_chunk_is_full:
+                                        if identity_selected_indices:
+                                            features[chunk_indices, :] = rust_features_chunk
+                                        else:
+                                            features[chunk_indices, :] = rust_features_chunk[:, indices_to_use]
+                                        if nameless_features is not None:
+                                            nameless_features[chunk_indices, :] = rust_features_chunk[
+                                                :, nameless_indices_to_use
+                                            ]
+                                        if (
+                                            coauthor_similarity_values is not None
+                                            and coauthor_similarity_index is not None
+                                        ):
+                                            coauthor_similarity_values[chunk_indices] = rust_features_chunk[
+                                                :, coauthor_similarity_index
+                                            ]
+                                    else:
+                                        features[chunk_indices, :] = rust_features_chunk[:, selected_positions]
+                                        if nameless_features is not None:
+                                            nameless_features[chunk_indices, :] = rust_features_chunk[
+                                                :, nameless_positions
+                                            ]
+                                        if (
+                                            coauthor_similarity_values is not None
+                                            and coauthor_similarity_index is not None
+                                            and coauthor_position is not None
+                                        ):
+                                            coauthor_similarity_values[chunk_indices] = rust_features_chunk[
+                                                :, coauthor_position
+                                            ]
+                            _sample_rust_batch_rss_peak()
+                            pbar.update(len(chunk_work))
+                            start_index += len(chunk_work)
+                _sample_rust_batch_rss_peak()
+                did_rust_batch = True
+                backend_used = "rust_batch"
+            except Exception as exc:
+                rust_batch_failure_reason = str(exc)
+                raise RuntimeError(
+                    "Rust batch featurization failed in strict rust backend "
+                    f"(pairs={len(pieces_of_work)} run_id={runtime_context.run_id} "
+                    f"failure_reason={rust_batch_failure_reason})"
+                ) from exc
+
+        if rust_mode and not did_rust_batch and len(pieces_of_work) > 0:
+            raise RuntimeError(
+                "Rust pair_featurization stage was selected but Rust batch execution did not complete "
+                f"(run_id={runtime_context.run_id})"
+            )
+
+        if not did_rust_batch and n_jobs > 1 and not rust_mode:
+            backend_used = "python_parallel"
             if use_cache:
                 logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in parallel")
             else:
@@ -863,14 +1623,26 @@ def many_pairs_featurize(
                             cached_features["__new_features__"][cache_key] = feature_output
                             new_features_count += 1
 
-                        features[index, :] = feature_output
+                        feature_output_arr = np.asarray(feature_output, dtype=np.float64)
+                        if identity_selected_indices:
+                            features[index, :] = feature_output_arr
+                        else:
+                            features[index, :] = feature_output_arr[indices_to_use]
+                        if nameless_features is not None:
+                            nameless_features[index, :] = feature_output_arr[nameless_indices_to_use]
+                        if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
+                            coauthor_similarity_values[index] = feature_output_arr[coauthor_similarity_index]
                         pbar.update()
         elif not did_rust_batch:
+            backend_used = "python_serial"
             if use_cache:
                 logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in serial")
             else:
                 logger.info(f"Making {len(pieces_of_work)} feature vectors in serial")
-            partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
+            worker = (
+                functools.partial(_single_pair_featurize, force_python=True) if rust_mode else _single_pair_featurize
+            )
+            partial_func = functools.partial(parallel_helper, worker_func=worker)
             for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
                 result = partial_func(piece)
                 if use_cache:
@@ -879,8 +1651,25 @@ def many_pairs_featurize(
                     cached_features["__new_features__"][cache_key] = result[0]
                     new_features_count += 1
 
-                features[result[1], :] = result[0]
+                feature_output_arr = np.asarray(result[0], dtype=np.float64)
+                if identity_selected_indices:
+                    features[result[1], :] = feature_output_arr
+                else:
+                    features[result[1], :] = feature_output_arr[indices_to_use]
+                if nameless_features is not None:
+                    nameless_features[result[1], :] = feature_output_arr[nameless_indices_to_use]
+                if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
+                    coauthor_similarity_values[result[1]] = feature_output_arr[coauthor_similarity_index]
+        if rust_batch_failure_reason is not None:
+            logger.info(
+                "Rust batch fallback event: pairs=%d fallback_backend=python_serial failure_reason=%s",
+                len(pieces_of_work),
+                rust_batch_failure_reason,
+            )
+        _sample_rust_batch_rss_peak()
         logger.info("Work completed")
+    else:
+        logger.info("Featurization backend decision: skipped compute (all pairs were cached or pre-labeled)")
 
     if use_cache and cache_changed:
         # Only do incremental writes if we have enough new features to justify the overhead
@@ -892,6 +1681,7 @@ def many_pairs_featurize(
             _background_writer.queue_write(featurizer_info, cached_features, dataset.name)
         else:
             logger.info(f"Only {new_features_in_buffer} new features - will write at end")
+    _sample_rust_batch_rss_peak()
 
     # Always write any remaining new features at the end
     if use_cache and cache_changed and len(cached_features.get("__new_features__", {})) > 0:
@@ -899,36 +1689,92 @@ def many_pairs_featurize(
         logger.info(f"Writing final {new_features_in_buffer} new features to cache")
         featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
         logger.info(f"Cache written with {len(cached_features['features'])} total keys.")
+    _sample_rust_batch_rss_peak()
 
     if use_cache:
         logger.info("Writing to in memory cache")
         # use the variable from above, to be sure we are using the same path
         cache_path = featurizer_info.cache_file_path(dataset.name)
-        CACHED_FEATURES[cache_path] = cached_features
+        with _CACHED_FEATURES_LOCK:
+            CACHED_FEATURES[cache_path] = cached_features
         logger.info("In memory cache written")
+    _sample_rust_batch_rss_peak()
 
     if delete_training_data:
         logger.info("Deleting some training rows")
         negative_label_indices = labels == 0
-        high_coauthor_sim_indices = features[:, featurizer_info.get_feature_names().index("coauthor_similarity")] > 0.95
+        if coauthor_similarity_values is None:
+            raise RuntimeError("delete_training_data requires coauthor_similarity_values to be computed")
+        high_coauthor_sim_indices = coauthor_similarity_values > 0.95
         indices_to_remove = negative_label_indices & high_coauthor_sim_indices
         logger.info(f"Intending to remove {sum(indices_to_remove)} rows")
         original_size = len(labels)
         features = features[~indices_to_remove, :]
+        if nameless_features is not None:
+            nameless_features = nameless_features[~indices_to_remove, :]
         labels = labels[~indices_to_remove]
         logger.info(f"Removed {original_size - features.shape[0]} rows and {original_size - len(labels)} labels")
+    _sample_rust_batch_rss_peak()
 
     logger.info("Making numpy arrays for features and labels")
-    # have to do this before subselecting features
-    if nameless_featurizer_info is not None:
-        nameless_features = features[:, nameless_indices_to_use]
+    if nameless_features is not None:
         nameless_features[np.isnan(nameless_features)] = nan_value
-    else:
-        nameless_features = None  # type: ignore
-
-    features = features[:, indices_to_use]
+        _sample_rust_batch_rss_peak()
     features[np.isnan(features)] = nan_value
+    _sample_rust_batch_rss_peak()
 
+    if did_rust_batch and rust_batch_plan is not None:
+        _sample_rust_batch_rss_peak()
+        rss_after_bytes = rust_batch_rss_before_bytes
+        if rust_batch_total_ram_for_stage is not None:
+            rss_after_bytes, _ = memory_budget.current_rss_bytes_best_effort(rust_batch_total_ram_for_stage)
+            _sample_rust_batch_rss_peak()
+        rust_batch_prediction = memory_budget.summarize_prediction_accuracy(
+            stage_name="pair_featurization_rust_batch",
+            predicted_peak_delta_bytes=int(
+                rust_batch_plan.get("predicted_stage_peak_delta_bytes", rust_batch_plan["predicted_stage_peak_bytes"])
+            ),
+            rss_before_bytes=rust_batch_rss_before_bytes,
+            rss_peak_bytes=rust_batch_rss_peak_bytes,
+            rss_after_bytes=rss_after_bytes,
+        )
+        logger.info(
+            "Telemetry: pair_featurization_memory stage=%s prediction_contract_version=%s "
+            "predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d predicted_bytes=%d "
+            "total_rows=%d selected_feature_count=%d nameless_feature_count=%d "
+            "predicted_features_matrix_bytes=%d predicted_labels_bytes=%d predicted_chunk_bytes=%d "
+            "predicted_persistent_row_overhead_bytes=%d predicted_fixed_overhead_bytes=%d "
+            "rss_before_bytes=%d rss_peak_bytes=%d rss_after_bytes=%d observed_peak_delta_bytes=%d "
+            "prediction_error_ratio=%.3f underpredicted=%s rss_source=%s",
+            rust_batch_prediction["stage_name"],
+            str(rust_batch_prediction["prediction_contract_version"]),
+            int(rust_batch_prediction["predicted_peak_delta_bytes"]),
+            int(rust_batch_prediction["predicted_peak_rss_bytes"]),
+            int(rust_batch_prediction["predicted_bytes"]),
+            int(rust_batch_plan.get("total_rows", len(signature_pairs))),
+            int(rust_batch_plan.get("selected_feature_count", 0)),
+            int(rust_batch_plan.get("nameless_feature_count", 0)),
+            int(rust_batch_plan.get("predicted_features_matrix_bytes", 0)),
+            int(rust_batch_plan.get("predicted_labels_bytes", 0)),
+            int(rust_batch_plan.get("predicted_chunk_bytes", 0)),
+            int(rust_batch_plan.get("predicted_persistent_row_overhead_bytes", 0)),
+            int(rust_batch_plan.get("predicted_fixed_overhead_bytes", 0)),
+            int(rust_batch_prediction["rss_before_bytes"]),
+            int(rust_batch_prediction["rss_peak_bytes"]),
+            int(rust_batch_prediction["rss_after_bytes"]),
+            int(rust_batch_prediction["observed_peak_delta_bytes"]),
+            float(rust_batch_prediction["prediction_error_ratio"]),
+            bool(rust_batch_prediction["underpredicted"]),
+            rust_batch_rss_source,
+        )
+
+    logger.info(
+        "Telemetry stage: stage=pair_featurization seconds=%.3f total_pairs=%d uncached_pairs=%d backend=%s",
+        time.perf_counter() - featurize_start,
+        len(signature_pairs),
+        len(pieces_of_work),
+        backend_used,
+    )
     logger.info("Numpy arrays made")
     return features, labels, nameless_features
 
@@ -942,6 +1788,7 @@ def featurize(
     nameless_featurizer_info: Optional[FeaturizationInfo] = None,
     nan_value: float = np.nan,
     delete_training_data: bool = False,
+    total_ram_bytes: Optional[int] = None,
 ) -> Union[Tuple[TupleOfArrays, TupleOfArrays, TupleOfArrays], TupleOfArrays]:
     """
     Featurizes the input dataset
@@ -966,6 +1813,8 @@ def featurize(
         the value to replace nans with
     delete_training_data: bool
         Whether to delete some suspicious training examples
+    total_ram_bytes: Optional[int]
+        Optional explicit RAM input used for stage-wise memory budgeting.
 
     Returns
     -------
@@ -993,6 +1842,7 @@ def featurize(
             nameless_featurizer_info,
             nan_value,
             False,
+            total_ram_bytes=total_ram_bytes,
         )
         logger.info("featurized all pairs")
         return all_features
@@ -1033,6 +1883,7 @@ def featurize(
             nameless_featurizer_info,
             nan_value,
             delete_training_data,
+            total_ram_bytes=total_ram_bytes,
         )
         logger.info("featurized train, featurizing val")
         val_features = many_pairs_featurize(
@@ -1045,6 +1896,7 @@ def featurize(
             nameless_featurizer_info,
             nan_value,
             False,
+            total_ram_bytes=total_ram_bytes,
         )
         logger.info("featurized val, featurizing test")
         test_features = many_pairs_featurize(
@@ -1057,6 +1909,7 @@ def featurize(
             nameless_featurizer_info,
             nan_value,
             False,
+            total_ram_bytes=total_ram_bytes,
         )
         logger.info("featurized test")
         return train_features, val_features, test_features

@@ -42,6 +42,13 @@ source .venv/bin/activate
 3. Install project dependencies (dev extras):
 
 ```bash
+# recommended: when the extension is available, default runtime uses Rust on beneficial stages.
+uv pip install "s2and[rust]"
+# default runtime is Python (`auto` resolves to Python).
+uv pip install s2and
+```
+
+```bash
 # prefer uv --active so uv uses your activated environment
 uv sync --active --extra dev
 ```
@@ -70,7 +77,19 @@ uv run --no-project pytest tests/
 
 To run the entire CI suite mimicking the GH Actions, use the following command:
 ```bash
-python scripts\run_ci_locally.py
+uv run python scripts/run_ci_locally.py
+```
+
+To run CI checks locally without Rust extension compilation (faster iteration), run:
+```bash
+uv sync --active --extra dev --frozen
+uvx --from ruff==0.6.9 ruff format --check s2and scripts/*.py
+uvx --from ty==0.0.18 ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
+uvx --from ty==0.0.18 ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
+# macOS/Linux:
+PYTHONPATH=. uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
+# Windows PowerShell:
+$env:PYTHONPATH='.'; uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
 ```
 
 ## Version bumping
@@ -107,50 +126,80 @@ resolve from site-packages. Avoid setting `PYTHONPATH` to the repo root, which c
 uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
 ```
 
-Profiling (Rust, prod-mode):
+Profiling (Rust inference):
 
 ```bash
-S2AND_RUST_PROD_MODE=1 S2AND_USE_RUST_FEATURIZER=1 S2AND_USE_RUST_CONSTRAINT=1 \
-  uv run --no-project python scripts/profile_kisti_rust_prod.py
+S2AND_BACKEND=rust uv run --no-project python scripts/profile_kisti_rust_prod.py
 ```
 
-## Rust featurizer (optional, enabled by default)
-S2AND can use a Rust-backed featurizer for faster pairwise feature generation. This is **enabled by default** and falls back
-to Python if the native extension is not available.
+Benchmark baseline ownership:
+- Active Rust runtime gate baselines and promotion rules: `docs/rust_operational_baselines.md`
+- Historical compare logs (forensics only): `docs/archive/rust_compare_log_202602.md`
+
+## Rust featurizer (runtime backend)
+S2AND backend selection is controlled by one public env var:
+- `S2AND_BACKEND=auto` (default when unset)
+- `S2AND_BACKEND=rust` (strict Rust mode for migrated stages)
+- `S2AND_BACKEND=python` (Python-only path; zero Rust calls)
+
+`auto` resolves to Rust only when core Rust runtime capability is available
+(`s2and_rust` extension importable, required `RustFeaturizer` API markers present,
+and extension version is parseable semver meeting the minimum supported version);
+otherwise it resolves to Python.
+
+Install contract:
+
+
+In `rust` backend mode, migrated Rust stages fail fast on Rust-stage errors (no silent Python rescue). In `auto`
+mode, fallback only occurs during backend resolution; runtime Rust-stage failures still fail fast.
 
 Install the Rust extension from wheels (when available):
 ```bash
 uv pip install "s2and[rust]"
 ```
 
-Environment toggles:
-- `S2AND_USE_RUST_FEATURIZER=0` to force the Python path.
-- `S2AND_USE_RUST_CONSTRAINT=0` to force Python `get_constraint`.
-- `S2AND_RUST_BATCH=0` to disable Rust batch mode in `many_pairs_featurize`.
-- `S2AND_RUST_BATCH_THRESHOLD` to fall back to Python for tiny batches (default: disabled).
-- `RAYON_NUM_THREADS` controls Rust parallelism (when batch mode is used).
-- `S2AND_RUST_FEATURIZER_DISK_CACHE=0` to disable on-disk Rust featurizer caching.
-- `S2AND_RUST_FEATURIZER_DISK_CACHE_WRITE=1` to force saving Rust featurizer snapshots even when feature caching is off.
-- `S2AND_RUST_PROD_MODE=1` to disable Rust snapshot load/save entirely (best for one-shot inference).
-- `S2AND_RUST_FEATURIZER_CACHE_DIR` to override the cache directory.
+Stable runtime controls:
+- `S2AND_BACKEND=python|rust|auto` to select runtime backend.
+- `S2AND_RUST_NAME_COUNTS_JSON=<path>` to provide artifact-backed name-count lookups for Rust JSON ingest.
+  This is used when `from_json_paths` is active and dataset signature-level name counts are not available.
+- `Clusterer.predict_incremental(..., total_ram_bytes=<int>)` to provide explicit RAM input for phase-split chunk/budget derivation.
+
+Advanced/internal knobs (not a stable public API):
+- `S2AND_RUST_FEATURIZER_MAX_INMEM=<int>` — cap in-memory Rust featurizer entries (`0` = unbounded).
+  Quick guide: use `1` for single-dataset-per-process workloads; use `2-3` if one process alternates among a few datasets.
+  This knob only matters when `use_cache=True`, and it is read once at process start.
+- `S2AND_NORMALIZATION_VERSION=<string>` — normalization version expected by artifact-backed name-count ingest. Default `legacy_compat`.
+- `S2AND_ALLOW_NORMALIZATION_VERSION_MISMATCH=0|1` — allow artifact-backed name-count ingest with missing/mismatched normalization metadata. Default `0`.
+- `S2AND_SKIP_FASTTEXT=0|1` — skip FastText loading (tests/benchmarks). Default `0`.
+- `RAYON_NUM_THREADS=<int>` — Rust-side thread count (standard Rayon env var).
 
 Notes:
 - Rust batch mode is used for all `n_jobs` by default and uses Rayon internally for parallelism.
-- Rust featurizer snapshots are saved only when feature caching is enabled unless overridden via `S2AND_RUST_FEATURIZER_DISK_CACHE_WRITE=1`.
+- Rust batch chunk sizing is stage-budgeted from current RSS and total RAM (explicit `total_ram_bytes` when provided, otherwise autodetect).
+- Rust batch mode uses chunked calls internally and shows a tqdm progress bar for large batches.
+- In Rust mode, pair featurization enforces a single parallelism layer: Rust threads in batch mode; Python process pools are not used.
+- Resolved Rust defaults use Rust for `ingest_preprocess`, `constraints`, and `pair_featurization`.
+- Signature preprocessing follows runtime backend selection (`S2AND_BACKEND`).
+- When Rust is enabled, signature affiliation/coauthor n-gram Counters may be deferred in Python (`None`) and computed
+  natively during Rust featurizer construction.
+- If a Python code path needs eager signature n-gram Counters, call `ANDData.materialize_signature_ngrams_python()`.
 - The Rust featurizer is built with `maturin develop -m s2and_rust/Cargo.toml`.
 
-## Prod mode (low-latency, one-shot inference)
-If your service handles single or batched blocks that are **only seen once**, enabling prod mode avoids costly
-snapshot I/O. This keeps everything in memory and relies on the per-process Rust featurizer cache.
+Name-count artifact exporter for JSON ingest:
 
-Default behavior:
-- If `S2AND_RUST_PROD_MODE` is **unset**, `dataset.mode == "inference"` implies prod mode.
-- If `S2AND_RUST_PROD_MODE` is set, it overrides the dataset mode.
+```bash
+uv run --no-project python scripts/export_name_counts_for_rust.py --output data/name_counts_rust.json
+```
 
-Recommended settings:
-- `S2AND_RUST_PROD_MODE=1`
-- `S2AND_RUST_FEATURIZER_DISK_CACHE=0` (optional; prod mode already disables read/write)
-- keep `S2AND_USE_RUST_FEATURIZER=1` and `S2AND_USE_RUST_CONSTRAINT=1`
+## Cache policy
+Cache behavior is controlled by one flag: `use_cache` (Python + Rust).
+- Default: `use_cache=False`.
+- `use_cache=False`: no Python pair-feature cache read/write, no Rust featurizer in-memory cache, and no Rust disk cache read/write.
+- `use_cache=True`: enable Python pair-feature cache and Rust featurizer cache (in-memory + disk).
+- Cache root directory: `S2AND_CACHE` (defaults to `~/.s2and`).
+
+Recommended setting for one-shot inference services:
+- `S2AND_BACKEND=rust`
 
 Pre-warm once at server start so requests are hot:
 
@@ -158,7 +207,7 @@ Pre-warm once at server start so requests are hot:
 from s2and.feature_port import warm_rust_featurizer
 
 # after you build/load your ANDData dataset:
-warm_rust_featurizer(dataset)
+warm_rust_featurizer(dataset, use_cache=True)
 ```
 
 ## Data 
@@ -263,7 +312,7 @@ metrics, metrics_per_signature = cluster_eval(dataset, clusterer)
 print(metrics)
 ```
 
-For a fuller example, please see the transfer script: `scripts/transfer_experiment.py`.
+For a fuller example, please see the transfer script: `scripts/transfer_experiment_seed_paper.py`.
 
 ## How to use S2AND for predicting with a saved model
 Assuming you have a clusterer already fit, you can dump the model to disk like so
@@ -290,6 +339,7 @@ anddata = ANDData(
     block_type="s2",
 )
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
+# pred_distance_matrices can be None when using memory-optimized fused clustering
 ```
 ## How to use the released production model
 We provide a trained production model (the one that is used in the Semantic Scholar website and API) in the S3 bucket along with the datasets, in the file `production_model_v1.1.pickle`. To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data. The older "v1.0" model is also available, but it's worse.
@@ -298,6 +348,20 @@ Please note that the production models still use SPECTER1, and these embeddings 
 
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.
+
+For very large incremental blocks, phase-split mode is used automatically when subblocking is active (i.e., when `batching_threshold` is set and the block exceeds it). Phase-split subblocks Phase A and then:
+- runs Phase B globally when it fits budget (`phase_b_mode="exact"`),
+- auto-falls back to subblock-local B/C/D when over budget (`phase_b_mode="subblock_local"`).
+
+`predict_incremental` returns a payload with:
+- `clusters`
+- `phase_b_mode`
+- `phase_b_budget_bytes`
+- `phase_b_required_bytes`
+
+RAM policy:
+- Preferred: pass `total_ram_bytes=<int>` directly to `predict_incremental`.
+- If omitted, runtime auto-detects RAM (cgroup first, then host probes) and applies a `0.8` safety factor before deriving budgets.
 
 ## Reproducibility
 The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`, in the branch `s2and_paper`. 
@@ -313,7 +377,7 @@ Then, Rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` shoul
 
 Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (very close to what is running on the Semantic Scholar website, except the production model doesn't compute the reference features) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "How to use S2AND for predicting with a saved model", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
 
-Note that by default we are using the `--use_cache` flag, which will cache all the features so future reruns are faster. There are two things to be aware of: (a) the cache is stored in RAM and can be huge (100gb+) and (b) if you intend to change the features and rerun, you'll have to turn off the cache or the new features won't be used.
+`use_cache` defaults to `False` in the current codebase. Enable it explicitly when you want cached reruns, and disable it when validating feature changes or running one-shot experiments.
 
 ## Licensing
 The code in this repo is released under the Apache 2.0 license. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).

@@ -14,7 +14,6 @@ EXP_DIR = os.path.join(CONFIG["internal_data_dir"], "experiments/paper_experimen
 
 
 def plot_box(s2and_performance: dict, s2_performance: dict, figs_path: str, title: str, total_bins: int = 5):
-
     b3 = []
     keylist = []
     model = []
@@ -137,7 +136,6 @@ def plot_facets(
     gender_ethnicity_available=True,
     save_results=True,
 ):
-
     pred_facets = [
         union_gender_f1,
         union_ethnicity_f1,
@@ -193,7 +191,6 @@ def plot_facets(
         num_bins.remove(0)
 
     for pred_facet, s2_facet, plot_name, bin_size in zip(pred_facets, s2_facets, plot_names, num_bins):
-
         if save_results:
             with open(figs_path + plot_name + "_dict_pred.json", "w") as fp:
                 json.dump(pred_facet, fp, indent=4)

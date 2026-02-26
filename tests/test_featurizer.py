@@ -1,6 +1,11 @@
 import unittest
 import pytest
 import numpy as np
+from types import SimpleNamespace
+
+import s2and.feature_port as feature_port
+import s2and.memory_budget as memory_budget
+from s2and.runtime import RuntimeContext
 
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
@@ -141,6 +146,51 @@ class TestData(unittest.TestCase):
             0.7777777777777778,
             0.5407407407407407,
         ]
+
+
+def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):
+    dataset = SimpleNamespace(name="dummy", mode="train", compute_reference_features=False)
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    runtime_context = RuntimeContext(
+        operation="featurization_run",
+        requested_backend="rust",
+        resolved_backend="rust",
+        stage_enablement={"pair_featurization": True, "constraints": False, "ingest_preprocess": False},
+        run_id="run-1",
+        source="default",
+    )
+
+    state = {"prewarm_called": False, "rss_called": False}
+
+    def fake_get_rust_featurizer(*_args, **_kwargs):
+        state["prewarm_called"] = True
+        return object()
+
+    def fake_resolve_total_ram_bytes(_total_ram_bytes):
+        return 1024, "test"
+
+    def fake_current_rss(_total_ram_bytes):
+        state["rss_called"] = True
+        assert state["prewarm_called"] is True
+        return 128, "test"
+
+    monkeypatch.setattr(feature_port, "s2and_rust", object())
+    monkeypatch.setattr(feature_port, "_get_rust_featurizer", fake_get_rust_featurizer)
+    monkeypatch.setattr(memory_budget, "resolve_total_ram_bytes", fake_resolve_total_ram_bytes)
+    monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", fake_current_rss)
+
+    many_pairs_featurize(
+        [("a", "b", -1)],
+        dataset,
+        featurizer_info,
+        n_jobs=1,
+        use_cache=False,
+        chunk_size=1,
+        runtime_context=runtime_context,
+    )
+
+    assert state["prewarm_called"] is True
+    assert state["rss_called"] is True
 
     def test_featurizer_without_reference_features_raises(self):
         # Build a dataset with reference features enabled (baseline) and disabled

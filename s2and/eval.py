@@ -12,7 +12,6 @@ if TYPE_CHECKING:  # need this for circular import issues
 
 import os
 from os.path import join
-from functools import reduce
 import itertools
 from collections import defaultdict
 
@@ -159,11 +158,14 @@ def incremental_cluster_eval(
         raise Exception("Evaluation split must be one of: {val, test}!")
 
     partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {}
+    if dataset.signature_to_cluster_id is None:
+        raise ValueError("cluster_eval requires dataset.signature_to_cluster_id")
+    signature_to_cluster_id = dataset.signature_to_cluster_id
     list_obs_signatures = list(observed_signatures)
     # considers the supervision as distances
     for i, signature_i in enumerate(list_obs_signatures):
         for signature_j in list_obs_signatures[i + 1 : len(list_obs_signatures)]:
-            if dataset.signature_to_cluster_id[signature_i] == dataset.signature_to_cluster_id[signature_j]:
+            if signature_to_cluster_id[signature_i] == signature_to_cluster_id[signature_j]:
                 partial_supervision[(signature_i, signature_j)] = 0
             else:
                 partial_supervision[(signature_i, signature_j)] = 1
@@ -258,6 +260,9 @@ def facet_eval(
 
     # we need to know the length of each cluster
     assert dataset.clusters is not None
+    if dataset.signature_to_cluster_id is None:
+        raise ValueError("facet_eval requires dataset.signature_to_cluster_id")
+    signature_to_cluster_id = dataset.signature_to_cluster_id
     cluster_len_dict = {}
     for cluster_id, cluster_dict in dataset.clusters.items():
         cluster_len_dict[cluster_id] = len(cluster_dict["signature_ids"])
@@ -278,9 +283,7 @@ def facet_eval(
                 same_block = signature_a.author_info_block == signature_b.author_info_block
             if same_block:
                 same_name = signature_a.author_info_full_name == signature_b.author_info_full_name
-                same_cluster = (
-                    dataset.signature_to_cluster_id[signature_key_a] == dataset.signature_to_cluster_id[signature_key_b]
-                )
+                same_cluster = signature_to_cluster_id[signature_key_a] == signature_to_cluster_id[signature_key_b]
                 if same_name and not same_cluster:
                     homonymity[signature_key_a] += 1
                     homonymity[signature_key_b] += 1
@@ -313,7 +316,7 @@ def facet_eval(
     for signature_key, (p, r, f1) in metrics_per_signature.items():
         _signature_dict = dict()
 
-        cluster_id = dataset.signature_to_cluster_id[signature_key]
+        cluster_id = signature_to_cluster_id[signature_key]
         signature = dataset.signatures[signature_key]
         paper = dataset.papers[str(signature.paper_id)]
 
@@ -862,12 +865,30 @@ def claims_eval(
         whether to output shaps for the incorrect pairs (slow)
     optional_name: str
         what name to use to write output instead of the featurizer version
+        note: distance matrices may not be available from `clusterer.predict`
+        if the clusterer uses a fused memory-optimized path
 
     Returns
     -------
     Dict: dictionary of metrics for this block based on claims data
     """
     blocks = dataset.get_blocks()
+    # Snapshot metadata before predict so inference-state release policies
+    # inside clusterer.predict do not break first-party eval consumers.
+    paper_metadata_by_id: Dict[str, Tuple[str, List[str]]] = {}
+    signature_affiliations_by_id: Dict[str, List[str]] = {}
+    for block_signatures in blocks.values():
+        for signature_id in block_signatures:
+            signature_info = dataset.signatures[signature_id]
+            signature_affiliations_by_id[signature_id] = list(signature_info.author_info_affiliations)
+            paper_id, _ = signature_id.split("___")
+            if paper_id not in paper_metadata_by_id:
+                paper = dataset.papers[paper_id]
+                paper_metadata_by_id[paper_id] = (
+                    paper.title,
+                    [author.author_name for author in paper.authors],
+                )
+
     preds, dists = clusterer.predict(blocks, dataset)
 
     all_block_signatures = set()
@@ -913,11 +934,8 @@ def claims_eval(
         cluster_output = []
         for signature in cluster_signatures:
             paper_id, _ = signature.split("___")
-            paper = dataset.papers[paper_id]
-            signature_info = dataset.signatures[signature]
-            title = paper.title
-            authors = [author.author_name for author in paper.authors]
-            affiliations = signature_info.author_info_affiliations
+            title, authors = paper_metadata_by_id[paper_id]
+            affiliations = signature_affiliations_by_id[signature]
             cluster_output.append((paper_id, signature, title, affiliations, authors))
         output_to_write[cluster_key] = cluster_output
 
@@ -926,12 +944,10 @@ def claims_eval(
     # keep tqdm off for programmatic runs; enable by setting env var if desired
     for id1, id2, pred_same, gold_same in tqdm(sig_pairs, disable=True):
         paper_id1, _ = id1.split("___")
-        paper1 = dataset.papers[paper_id1]
-        title1 = paper1.title
+        title1 = paper_metadata_by_id[paper_id1][0]
 
         paper_id2, _ = id2.split("___")
-        paper2 = dataset.papers[paper_id2]
-        title2 = paper2.title
+        title2 = paper_metadata_by_id[paper_id2][0]
 
         # temporarily silence noisy handlers
         _prev_level = logger.level
@@ -1010,9 +1026,12 @@ def claims_eval(
         with open(join(directory_for_caching, f"preds_{suffix}.json"), "w") as _json_file:
             json.dump(output_to_write, _json_file)
 
-        logger.info("Writing dists to disk")
-        with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
-            pickle.dump(dists, _pkl_file)
+        if dists is None:
+            logger.info("Skipping distance matrix dump because clusterer.predict returned dists=None")
+        else:
+            logger.info("Writing dists to disk")
+            with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
+                pickle.dump(dists, _pkl_file)
         logger.info("Done dumping")
 
     precision = tp / (tp + fp) if tp + fp > 0 else np.nan

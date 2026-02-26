@@ -177,17 +177,32 @@ def _attach_fake_specter_embeddings(ds, max_papers=2, dim=8):
     return ds
 
 
+def _reset_featurizer_env_caches():
+    featurizer_mod._RUST_BATCH_CHUNK_SIZE_CACHE = None
+    featurizer_mod._RUST_BATCH_MAX_CHUNK_MB_CACHE = None
+
+
+def _build_labeled_pairs(sig_ids, count=20, seed=123):
+    rng = random.Random(seed)
+    pairs = []
+    while len(pairs) < count:
+        s1 = rng.choice(sig_ids)
+        s2 = rng.choice(sig_ids)
+        if s1 == s2:
+            continue
+        pairs.append((s1, s2, 0))
+    return pairs
+
+
 @pytest.fixture(scope="session")
 def dataset():
     # Speed/safety: skip fastText (optional) to avoid large model loads in tests
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     # Force python reference featurizer for parity tests
-    os.environ["S2AND_USE_RUST_FEATURIZER"] = "0"
-    # Avoid disk-cached Rust featurizer snapshots in parity tests
-    os.environ.setdefault("S2AND_RUST_FEATURIZER_DISK_CACHE", "0")
+    os.environ["S2AND_BACKEND"] = "python"
 
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-    ds = _load_dataset_from_dir(data_dir, "dummy")
+    ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
     ds = _attach_fake_specter_embeddings(ds)
     # set global for _single_pair_featurize
     featurizer_mod.global_dataset = ds  # type: ignore
@@ -199,12 +214,10 @@ def dataset_with_refs():
     # Speed/safety: skip fastText (optional) to avoid large model loads in tests
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     # Force python reference featurizer for parity tests
-    os.environ.setdefault("S2AND_USE_RUST_FEATURIZER", "0")
-    # Avoid disk-cached Rust featurizer snapshots in parity tests
-    os.environ.setdefault("S2AND_RUST_FEATURIZER_DISK_CACHE", "0")
+    os.environ.setdefault("S2AND_BACKEND", "python")
 
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "qian")
-    ds = _load_dataset_from_dir(data_dir, "qian", compute_reference_features=True)
+    ds = _load_dataset_from_dir(data_dir, "qian_parity_session", compute_reference_features=True)
     return ds
 
 
@@ -257,6 +270,105 @@ def constraint_pairs(dataset, sample_pairs):
 def test_rust_extension_available():
     assert HAS_RUST, f"s2and_rust not available: {_RUST_IMPORT_ERROR}"
 
+
+def test_rust_featurizer_supports_string_paper_ids():
+    # Regression guard: datasets may use non-numeric paper IDs (e.g., "app:123").
+    signatures = {
+        "s1": {
+            "signature_id": "s1",
+            "paper_id": "app:1",
+            "author_info": {
+                "position": 0,
+                "block": "alice_smith",
+                "first": "Alice",
+                "middle": "",
+                "last": "Smith",
+                "suffix": None,
+                "email": None,
+                "affiliations": [],
+                "given_block": "alice_smith",
+            },
+        },
+        "s2": {
+            "signature_id": "s2",
+            "paper_id": "app:2",
+            "author_info": {
+                "position": 0,
+                "block": "alice_smith",
+                "first": "Alice",
+                "middle": "",
+                "last": "Smith",
+                "suffix": None,
+                "email": None,
+                "affiliations": [],
+                "given_block": "alice_smith",
+            },
+        },
+    }
+    papers = {
+        "app:1": {
+            "paper_id": "app:1",
+            "title": "A",
+            "abstract": "",
+            "authors": [
+                {"author_name": "Alice Smith", "position": 0},
+                {"author_name": "Bob Jones", "position": 1},
+            ],
+            "venue": "",
+            "journal_name": "",
+            "year": 2020,
+            "references": [],
+        },
+        "app:2": {
+            "paper_id": "app:2",
+            "title": "B",
+            "abstract": "",
+            "authors": [
+                {"author_name": "Alice Smith", "position": 0},
+                {"author_name": "Carol Lee", "position": 1},
+            ],
+            "venue": "",
+            "journal_name": "",
+            "year": 2021,
+            "references": [],
+        },
+    }
+    clusters = {
+        "c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1},
+    }
+
+    ds = ANDData(
+        signatures=signatures,
+        papers=papers,
+        name="rust_string_id_regression",
+        mode="train",
+        specter_embeddings=None,
+        clusters=clusters,
+        cluster_seeds=None,
+        block_type="s2",
+        train_pairs=None,
+        val_pairs=None,
+        test_pairs=None,
+        train_pairs_size=10,
+        val_pairs_size=10,
+        test_pairs_size=10,
+        n_jobs=1,
+        load_name_counts=False,
+        preprocess=True,
+        random_seed=42,
+        name_tuples="filtered",
+        use_orcid_id=True,
+        use_sinonym_overwrite=False,
+        compute_reference_features=False,
+    )
+
+    features = featurize_pair_rust(ds, "s1", "s2")
+    assert len(features) > 0
+
+    constraint = get_constraint_rust(ds, "s1", "s2")
+    assert constraint is None or isinstance(constraint, (int, float))
+
+
 def test_featurize_pair_rust_parity(dataset, sample_pairs):
     for s1, s2 in sample_pairs:
         ref_features, _ = _single_pair_featurize((s1, s2))
@@ -267,6 +379,80 @@ def test_featurize_pair_rust_parity(dataset, sample_pairs):
                 f"Featurize pair mismatch at index {idx} for pair {s1},{s2}: "
                 f"ref={ref_val}, got={got_val}"
             )
+
+
+def test_featurize_pair_rust_parity_with_deferred_signature_ngrams(dataset, sample_pairs, monkeypatch):
+    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
+    monkeypatch.setenv("S2AND_BACKEND", "rust")
+
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+    ds_rust = _load_dataset_from_dir(data_dir, "dummy_rust_deferred")
+    ds_rust = _attach_fake_specter_embeddings(ds_rust)
+    for signature in ds_rust.signatures.values():
+        assert signature.author_info_affiliations_n_grams is None
+        assert signature.author_info_coauthor_n_grams is None
+
+    featurizer_mod.global_dataset = dataset  # type: ignore
+    for s1, s2 in sample_pairs[:5]:
+        ref_features, _ = _single_pair_featurize((s1, s2))
+        rust_features = featurize_pair_rust(ds_rust, s1, s2)
+        assert len(ref_features) == len(rust_features)
+        for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features)):
+            assert _equalish(ref_val, got_val), (
+                f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: "
+                f"ref={ref_val}, got={got_val}"
+            )
+
+
+def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch):
+    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
+
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    _reset_featurizer_env_caches()
+    ds_python = _load_dataset_from_dir(
+        data_dir,
+        "dummy_python_end_to_end",
+        compute_reference_features=True,
+    )
+    ds_python = _attach_fake_specter_embeddings(ds_python)
+    sig_ids = list(ds_python.signatures.keys())
+    pairs = _build_labeled_pairs(sig_ids, count=25, seed=7)
+    featurizer_info = featurizer_mod.FeaturizationInfo()
+    features_python, labels_python, _ = featurizer_mod.many_pairs_featurize(
+        pairs,
+        ds_python,
+        featurizer_info,
+        n_jobs=2,
+        use_cache=False,
+        chunk_size=4,
+        nan_value=np.nan,
+    )
+
+    monkeypatch.setenv("S2AND_BACKEND", "rust")
+    _reset_featurizer_env_caches()
+    ds_rust = _load_dataset_from_dir(
+        data_dir,
+        "dummy_rust_end_to_end",
+        compute_reference_features=True,
+    )
+    ds_rust = _attach_fake_specter_embeddings(ds_rust)
+    features_rust, labels_rust, _ = featurizer_mod.many_pairs_featurize(
+        pairs,
+        ds_rust,
+        featurizer_info,
+        n_jobs=2,
+        use_cache=False,
+        chunk_size=4,
+        nan_value=np.nan,
+    )
+
+    assert np.array_equal(labels_python, labels_rust)
+    assert features_python.shape == features_rust.shape
+    close_mask = np.isclose(features_python, features_rust, rtol=1e-6, atol=1e-3, equal_nan=True)
+    assert np.all(close_mask), f"Feature matrix mismatch count: {int((~close_mask).sum())}"
+    _reset_featurizer_env_caches()
 
 
 def test_get_constraint_rust_parity(dataset, constraint_pairs):

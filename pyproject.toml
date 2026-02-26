@@ -46,11 +46,9 @@ dev = [
   "pytest==8.4.1",
   "pytest-cov>=4,<6",
   # Type checking
-  "mypy>=1.5.1",
+  "ty==0.0.18",
   # Linters/formatters
-  "black==24.8.0",
-  "flake8>=6,<8",   # or prefer ruff below
-  "ruff>=0.4,<0.7",
+  "ruff==0.6.9",
   # CLI helpers used in some repos
   "click>=8,<9",
   "ipykernel",
@@ -66,27 +64,27 @@ include = ["s2and*"]
 version = { file = "VERSION" }
 
 # ---- Tooling config ----
-[tool.black]
-line-length = 120
-target-version = ["py311"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
 
-# (Optional) Ruff config if you use it instead of flake8
+# Ruff config (used for lint + format)
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+
+[tool.ruff.lint]
 select = ["E","F","I","UP","B"]
 ignore = []
 
-# If you keep flake8, you can mirror the same line length:
-[tool.flake8]
-max-line-length = 120
-
 [tool.uv.sources]
 s2and-rust = { path = "s2and_rust" }
+
+[dependency-groups]
+dev = [
+    "maturin>=1.12.4",
+]
 
 # ------------------------
 # If you must replicate the *exact* legacy pins you sent, use this block instead
@@ -117,9 +115,8 @@ s2and-rust = { path = "s2and_rust" }
 # dev = [
 #   "pytest==8.4.1",
 #   "pytest-cov==2.10.1",
-#   "flake8==3.8.3",
-#   "black==22.3.0",
-#   "mypy>=1.5.1",
+#   "ruff==0.6.9",
+#   "ty==0.0.18",
 #   'importlib-metadata==4.13.0; python_version < "3.10"',
 #   "click>=7.1.2",
 # ]

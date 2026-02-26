@@ -9,7 +9,8 @@ from hashlib import sha256
 
 import requests  # type: ignore[import-untyped]
 
-CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and")))
+from s2and.consts import CACHE_ROOT
+
 ARTIFACTS_CACHE = str(CACHE_ROOT / "artifacts")
 
 # file largely taken from https://github.com/allenai/scispacy/blob/master/scispacy/file_cache.py

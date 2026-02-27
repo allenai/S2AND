@@ -1,29 +1,23 @@
-"""Benchmark paper preprocessing: threads vs processes for UniversalPool.
+"""Benchmark paper preprocessing: threads vs processes via UniversalPool.
 
-Tests whether switching UniversalPool from ThreadPoolExecutor (default)
-to ProcessPoolExecutor improves wall-clock time for preprocess_papers_parallel,
-which is GIL-bound Python string work (normalize_text, get_text_ngrams, etc.).
+Tests UniversalPool with use_threads=True vs use_threads=False to measure
+whether process-based parallelism helps for GIL-bound preprocessing work.
 
-NOTE: On Windows, spawn-context processes don't inherit module-level globals.
-preprocess_paper_1 depends on `global_preprocess`, so we must either
-(a) set it via an initializer, or (b) avoid ProcessPoolExecutor entirely.
-This benchmark handles it by directly using multiprocessing.Pool with an
-initializer for the process-based case.
+Separates pool creation time from work time so Windows spawn overhead
+is visible but doesn't obscure the parallelism signal.
 
 Usage:
-    .venv/Scripts/python.exe -u scripts/bench_paper_preprocess_pool.py --dataset kisti --n-jobs 8
-    .venv/Scripts/python.exe -u scripts/bench_paper_preprocess_pool.py --dataset kisti --n-jobs 8 --rounds 3
-    .venv/Scripts/python.exe -u scripts/bench_paper_preprocess_pool.py --dataset kisti --process-start-method spawn
+    .venv/Scripts/python.exe -u scripts/bench_paper_preprocess_pool.py --dataset kisti
+    .venv/Scripts/python.exe -u scripts/bench_paper_preprocess_pool.py --dataset kisti --n-jobs 8 --rounds 3 --serial
 """
 
 import argparse
-import copy
 import json
-import multiprocessing as mp
 import os
+import platform
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -31,8 +25,16 @@ sys.path.insert(0, PROJECT_ROOT)
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 
-def load_raw_papers_and_signatures(dataset_name: str):
-    """Load papers as namedtuples with in_signatures flags set."""
+# ---------------------------------------------------------------------------
+# Dataset loader
+# ---------------------------------------------------------------------------
+
+
+def load_dataset(dataset_name: str):
+    """Load papers as Paper namedtuples with in_signatures flags set.
+
+    Returns (papers_dict, n_signatures).
+    """
     from s2and.data import Author, Paper
 
     sig_path = os.path.join(DATA_DIR, dataset_name, f"{dataset_name}_signatures.json")
@@ -90,182 +92,140 @@ def load_raw_papers_and_signatures(dataset_name: str):
     return papers, len(raw_sigs)
 
 
-# --- Worker initializer for spawn-context processes ---
+# ---------------------------------------------------------------------------
+# Benchmark runners
+# ---------------------------------------------------------------------------
 
 
-def _init_worker_global_preprocess(preprocess_flag: bool):
-    """Set the module-level global that preprocess_paper_1 depends on."""
-    import s2and.data as data_mod
-
-    data_mod.global_preprocess = preprocess_flag
-
-
-# --- Direct process pool that properly initializes workers ---
-
-CHUNK_SIZE = 1000
-
-
-def _resolve_process_start_method(requested: str) -> str:
-    """Resolve process start method for this platform."""
-    if requested != "auto":
-        return requested
-    if sys.platform.startswith("win") or sys.platform == "darwin":
-        return "spawn"
-    return "fork"
-
-
-def _preprocess_papers_with_processes(
-    papers_dict, n_jobs: int, preprocess: bool = True, process_start_method: str = "auto"
-):
-    """Run preprocess_papers_parallel logic using ProcessPoolExecutor with initializer."""
-    from collections import Counter
-
-    import s2and.data as data_mod
-
-    # Set in parent too (for consistency)
-    data_mod.global_preprocess = preprocess
-
-    output = {}
-    start_method = _resolve_process_start_method(process_start_method)
-    available = mp.get_all_start_methods()
-    if start_method not in available:
-        raise ValueError(f"Unsupported process start method '{start_method}' on this platform. Available: {available}")
-    ctx = mp.get_context(start_method)
-    with ProcessPoolExecutor(
-        max_workers=n_jobs,
-        mp_context=ctx,
-        initializer=_init_worker_global_preprocess,
-        initargs=(preprocess,),
-    ) as executor:
-        # Submit in chunks, collect in order
-        items = list(papers_dict.items())
-        futures = []
-        for chunk_start in range(0, len(items), CHUNK_SIZE):
-            chunk = items[chunk_start : chunk_start + CHUNK_SIZE]
-            futures.append(executor.submit(_process_chunk, chunk))
-
-        for fut in futures:
-            for key, value in fut.result():
-                output[key] = value
-
-    # Ensure reference_details exists (mirrors preprocess_papers_parallel)
-    if preprocess:
-        empty_tuple = (Counter(), Counter(), Counter(), Counter())
-        for k, v in output.items():
-            if v.reference_details is None:
-                output[k] = v._replace(reference_details=empty_tuple)
-
-    return output
-
-
-def _process_chunk(chunk):
-    """Process a chunk of papers in a worker process."""
+def bench_serial(papers_dict):
+    """Serial baseline -- no pool, raw loop. Matches production n_jobs=1 path."""
     from s2and.data import preprocess_paper_1
 
-    results = []
-    for item in chunk:
-        results.append(preprocess_paper_1(item))
-    return results
+    t0 = time.perf_counter()
+    count = 0
+    for item in papers_dict.items():
+        preprocess_paper_1(item, preprocess=True)
+        count += 1
+    elapsed = time.perf_counter() - t0
+
+    return elapsed, count
 
 
-def bench_threads(papers_dict, n_jobs: int, preprocess: bool = True):
-    """Run with threads (current default)."""
-    from s2and.data import preprocess_papers_parallel
+def bench(papers_dict, n_jobs, use_threads, chunk_size=1000):
+    """Benchmark UniversalPool.imap for preprocess_paper_1.
 
-    papers_copy = copy.deepcopy(papers_dict)
-    start = time.perf_counter()
-    result = preprocess_papers_parallel(papers_copy, n_jobs, preprocess)
-    elapsed = time.perf_counter() - start
-    return elapsed, len(result)
+    Returns (pool_create_secs, work_secs, n_papers_out).
+    """
+    from s2and.data import preprocess_paper_1
+    from s2and.mp import UniversalPool
+
+    func = partial(preprocess_paper_1, preprocess=True)
+
+    # --- time pool creation separately ---
+    t0 = time.perf_counter()
+    pool = UniversalPool(processes=n_jobs, use_threads=use_threads)
+    pool_time = time.perf_counter() - t0
+
+    # --- time work ---
+    t1 = time.perf_counter()
+    count = 0
+    with pool:
+        for _key, _value in pool.imap(func, papers_dict.items(), chunk_size):
+            count += 1
+    work_time = time.perf_counter() - t1
+
+    return pool_time, work_time, count
 
 
-def bench_serial(papers_dict, preprocess: bool = True):
-    """Run single-threaded."""
-    from s2and.data import preprocess_papers_parallel
-
-    papers_copy = copy.deepcopy(papers_dict)
-    start = time.perf_counter()
-    result = preprocess_papers_parallel(papers_copy, 1, preprocess)
-    elapsed = time.perf_counter() - start
-    return elapsed, len(result)
-
-
-def bench_processes(papers_dict, n_jobs: int, preprocess: bool = True, process_start_method: str = "auto"):
-    """Run with process pool (properly initializing globals for spawn/fork)."""
-    papers_copy = copy.deepcopy(papers_dict)
-    start = time.perf_counter()
-    result = _preprocess_papers_with_processes(
-        papers_copy, n_jobs, preprocess, process_start_method=process_start_method
-    )
-    elapsed = time.perf_counter() - start
-    return elapsed, len(result)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark paper preprocessing: threads vs processes")
+    parser = argparse.ArgumentParser(
+        description="Benchmark paper preprocessing: threads vs processes via UniversalPool"
+    )
     parser.add_argument("--dataset", default="kisti", help="Dataset name (default: kisti)")
     parser.add_argument("--n-jobs", type=int, default=8, help="Number of workers (default: 8)")
-    parser.add_argument("--rounds", type=int, default=3, help="Number of rounds per config (default: 3)")
-    parser.add_argument("--single-thread", action="store_true", help="Also benchmark n_jobs=1 as baseline")
-    parser.add_argument(
-        "--process-start-method",
-        default="auto",
-        choices=["auto", "spawn", "fork", "forkserver"],
-        help="Multiprocessing start method for process benchmark (default: auto).",
-    )
+    parser.add_argument("--rounds", type=int, default=3, help="Rounds per config (default: 3)")
+    parser.add_argument("--serial", action="store_true", help="Include serial (no-pool) baseline")
+    parser.add_argument("--chunk-size", type=int, default=1000, help="imap chunk size (default: 1000)")
     args = parser.parse_args()
 
-    resolved_method = _resolve_process_start_method(args.process_start_method)
-    print(f"Process start method: requested={args.process_start_method} resolved={resolved_method}", flush=True)
-    print(f"Loading {args.dataset} papers...", flush=True)
-    papers, n_sigs = load_raw_papers_and_signatures(args.dataset)
-    print(f"  {len(papers)} papers (from {n_sigs} signatures)", flush=True)
+    print(f"Platform: {platform.system()} ({platform.platform()})")
+    print(f"Python:   {sys.version}")
+    print(f"Workers:  {args.n_jobs}    Chunk size: {args.chunk_size}    Rounds: {args.rounds}")
+    print(flush=True)
 
+    print(f"Loading dataset '{args.dataset}'...")
+    papers, n_sigs = load_dataset(args.dataset)
+    print(f"  {len(papers):,} papers ({n_sigs:,} signatures)")
+    print(flush=True)
+
+    # (label, use_threads) -- use_threads=None means serial
     configs = []
-    if args.single_thread:
-        configs.append(("serial", "serial"))
-    configs.append(("threads", "threads"))
-    configs.append(("processes", "processes"))
+    if args.serial:
+        configs.append(("serial (no pool)", None))
+    configs.append((f"threads x{args.n_jobs}", True))
+    configs.append((f"processes x{args.n_jobs}", False))
 
     results = {}
-    for label, mode in configs:
-        display = f"{label} (n_jobs={'1' if mode == 'serial' else str(args.n_jobs)})"
-        times = []
+    for label, use_threads in configs:
+        print(f"--- {label} ---")
+        rounds_data = []
         for r in range(args.rounds):
-            if mode == "serial":
+            if use_threads is None:
                 elapsed, count = bench_serial(papers)
-            elif mode == "threads":
-                elapsed, count = bench_threads(papers, args.n_jobs)
+                print(f"  round {r + 1}: {elapsed:.3f}s  ({count:,} papers)", flush=True)
+                rounds_data.append({"work": elapsed, "pool": 0.0, "count": count})
             else:
-                elapsed, count = bench_processes(papers, args.n_jobs, process_start_method=args.process_start_method)
-            times.append(elapsed)
-            print(f"  {display} round {r+1}/{args.rounds}: {elapsed:.3f}s ({count} papers)", flush=True)
-        avg = sum(times) / len(times)
-        best = min(times)
-        results[display] = {"times": times, "avg": avg, "best": best}
-
-    print(flush=True)
-    print("=" * 65, flush=True)
-    print(f"Results: {args.dataset} ({len(papers)} papers, {args.rounds} rounds)", flush=True)
-    print("=" * 65, flush=True)
-    for label, data in results.items():
-        times_str = ", ".join(f"{t:.3f}" for t in data["times"])
-        print(f"  {label:35s}  avg={data['avg']:.3f}s  best={data['best']:.3f}s  [{times_str}]", flush=True)
-
-    # Comparison
-    labels = list(results.keys())
-    thread_labels = [label_name for label_name in labels if "threads" in label_name]
-    proc_labels = [label_name for label_name in labels if "processes" in label_name]
-    if thread_labels and proc_labels:
-        t_avg = results[thread_labels[0]]["avg"]
-        p_avg = results[proc_labels[0]]["avg"]
-        delta = t_avg - p_avg
-        pct = (delta / t_avg) * 100 if t_avg > 0 else 0
+                pool_t, work_t, count = bench(papers, args.n_jobs, use_threads=use_threads, chunk_size=args.chunk_size)
+                total = pool_t + work_t
+                print(
+                    f"  round {r + 1}: pool={pool_t:.3f}s  work={work_t:.3f}s  total={total:.3f}s  ({count:,} papers)",
+                    flush=True,
+                )
+                rounds_data.append({"work": work_t, "pool": pool_t, "count": count})
+        results[label] = rounds_data
         print(flush=True)
-        if delta > 0:
-            print(f"  >>> Processes faster by {delta:.3f}s ({pct:.1f}%)", flush=True)
+
+    # --- Summary table ---
+    print("=" * 75)
+    print(f"Summary: {args.dataset} | {len(papers):,} papers | {args.rounds} rounds | chunk={args.chunk_size}")
+    print("=" * 75)
+    print(f"  {'Config':<25s}  {'Avg Work':>9s}  {'Best Work':>10s}  {'Avg Pool':>9s}  {'Avg Total':>10s}")
+    print(f"  {'-' * 25}  {'-' * 9}  {'-' * 10}  {'-' * 9}  {'-' * 10}")
+    for label, rounds_data in results.items():
+        avg_work = sum(d["work"] for d in rounds_data) / len(rounds_data)
+        best_work = min(d["work"] for d in rounds_data)
+        avg_pool = sum(d["pool"] for d in rounds_data) / len(rounds_data)
+        avg_total = avg_work + avg_pool
+        print(f"  {label:<25s}  {avg_work:>8.3f}s  {best_work:>9.3f}s  {avg_pool:>8.3f}s  {avg_total:>9.3f}s")
+
+    # --- Thread vs Process comparison ---
+    thread_key = f"threads x{args.n_jobs}"
+    proc_key = f"processes x{args.n_jobs}"
+    if thread_key in results and proc_key in results:
+        t_work = sum(d["work"] for d in results[thread_key]) / len(results[thread_key])
+        p_work = sum(d["work"] for d in results[proc_key]) / len(results[proc_key])
+        t_pool = sum(d["pool"] for d in results[thread_key]) / len(results[thread_key])
+        p_pool = sum(d["pool"] for d in results[proc_key]) / len(results[proc_key])
+
+        delta_work = t_work - p_work
+        pct_work = (delta_work / t_work) * 100 if t_work > 0 else 0
+        print()
+        if delta_work > 0:
+            print(f"  Work only: processes faster by {delta_work:.3f}s ({pct_work:.1f}%)")
         else:
-            print(f"  >>> Threads faster by {-delta:.3f}s ({-pct:.1f}%)", flush=True)
+            print(f"  Work only: threads faster by {-delta_work:.3f}s ({-pct_work:.1f}%)")
+
+        t_total = t_work + t_pool
+        p_total = p_work + p_pool
+        delta_total = t_total - p_total
+        if abs(delta_total - delta_work) > 0.01:
+            winner = "processes" if delta_total > 0 else "threads"
+            print(f"  Including pool creation: {winner} faster by {abs(delta_total):.3f}s total")
 
 
 if __name__ == "__main__":

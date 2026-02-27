@@ -1,37 +1,46 @@
 from __future__ import annotations
 
 import argparse
-import datetime
-import importlib.util
+import importlib
 import json
 import os
-import platform
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from types import ModuleType
-from typing import Any
-
-import psutil
+from typing import TYPE_CHECKING, Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_INTERNAL_DIR = Path(__file__).resolve().parent / "_rust_suite"
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+
+# Ensure `scripts/_rust_suite` is importable even when this file is loaded via
+# `importlib.util.spec_from_file_location` in tests (sys.path won't include scripts/).
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+if TYPE_CHECKING:
+    from scripts._rust_suite.common import ProcessTreeRSSMonitor as CommonProcessTreeRSSMonitor
+    from scripts._rust_suite.common import RSSMonitor as CommonRSSMonitor
+    from scripts._rust_suite.common import build_run_metadata as common_build_run_metadata
+else:
+    from _rust_suite.common import ProcessTreeRSSMonitor as CommonProcessTreeRSSMonitor
+    from _rust_suite.common import RSSMonitor as CommonRSSMonitor
+    from _rust_suite.common import build_run_metadata as common_build_run_metadata
 
 RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
 RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
 
-_MODULE_FILES = {
-    "compare": "compare_cmd",
-    "transfer_mini": "transfer_mini_cmd",
-    "prod_inference": "prod_inference_cmd",
-    "largest_block": "largest_block_cmd",
-    "big_block_incremental": "big_block_incremental_cmd",
-    "featurizer_reuse": "featurizer_reuse_cmd",
-    "stress_rebuild": "stress_rebuild_cmd",
-    "calibrate_phase_a": "calibrate_phase_a_cmd",
-    "calibrate_rust_batch": "calibrate_rust_batch_cmd",
-    "measure_counter_data": "measure_counter_data_cmd",
+_MODULE_IMPORTS = {
+    "compare": "_rust_suite.compare_cmd",
+    "transfer_mini": "_rust_suite.transfer_mini_cmd",
+    "prod_inference": "_rust_suite.prod_inference_cmd",
+    "largest_block": "_rust_suite.largest_block_cmd",
+    "big_block_incremental": "_rust_suite.big_block_incremental_cmd",
+    "featurizer_reuse": "_rust_suite.featurizer_reuse_cmd",
+    "stress_rebuild": "_rust_suite.stress_rebuild_cmd",
+    "calibrate_phase_a": "_rust_suite.calibrate_phase_a_cmd",
+    "calibrate_rust_batch": "_rust_suite.calibrate_rust_batch_cmd",
+    "measure_counter_data": "_rust_suite.measure_counter_data_cmd",
 }
 
 _MODULE_CACHE: dict[str, ModuleType] = {}
@@ -39,188 +48,18 @@ _ACTIVE_CANONICAL_ARGV: list[str] | None = None
 _ACTIVE_CANONICAL_COMMAND: str | None = None
 
 
-def _run_git_command(project_root: Path, args: list[str]) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = completed.stdout.strip()
-    return value or None
-
-
 def _build_run_metadata() -> dict[str, Any]:
-    env_keys = (
-        "S2AND_BACKEND",
-        "S2AND_SKIP_FASTTEXT",
-        "S2AND_RUST_FEATURIZER_MAX_INMEM",
-        "S2AND_RUST_BATCH_RSS_SAMPLER_MS",
-        "S2AND_NORMALIZATION_VERSION",
-        "S2AND_RUST_NAME_COUNTS_JSON",
-        "PYTHONHASHSEED",
-        "RAYON_NUM_THREADS",
-        "OMP_NUM_THREADS",
-    )
-    env_snapshot = {key: os.environ[key] for key in env_keys if key in os.environ}
-    git_status = _run_git_command(PROJECT_ROOT, ["status", "--porcelain"])
     canonical_argv = _ACTIVE_CANONICAL_ARGV if _ACTIVE_CANONICAL_ARGV is not None else list(sys.argv)
-    return {
-        "generated_at_utc": datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(),
-        "script": str(Path(__file__).resolve()),
-        "argv": list(canonical_argv),
-        "cwd": os.getcwd(),
-        "python_executable": sys.executable,
-        "python_version": sys.version.split()[0],
-        "platform": platform.platform(),
-        "project_root": str(PROJECT_ROOT),
-        "git_commit": _run_git_command(PROJECT_ROOT, ["rev-parse", "HEAD"]),
-        "git_branch": _run_git_command(PROJECT_ROOT, ["rev-parse", "--abbrev-ref", "HEAD"]),
-        "git_dirty": (None if git_status is None else bool(git_status)),
-        "env": env_snapshot,
-    }
+    return common_build_run_metadata(
+        script_path=Path(__file__).resolve(),
+        argv=list(canonical_argv),
+        project_root=PROJECT_ROOT,
+    )
 
 
-class ProcessTreeRSSMonitor:
-    """Monitor peak RSS across current process and all child workers."""
-
-    def __init__(self, interval_seconds: float = 0.05):
-        self.interval_seconds = interval_seconds
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._process = psutil.Process()
-        self.peak_rss_bytes = 0
-
-    def _tree_rss_bytes(self) -> int:
-        rss_total = 0
-        processes = [self._process]
-        try:
-            processes.extend(self._process.children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.Error):
-            pass
-        for proc in processes:
-            try:
-                rss_total += int(proc.memory_info().rss)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        return rss_total
-
-    def sample_rss_bytes(self) -> int:
-        rss = self._tree_rss_bytes()
-        if rss > self.peak_rss_bytes:
-            self.peak_rss_bytes = rss
-        return rss
-
-    def sample_gb(self) -> float:
-        return self.sample_rss_bytes() / (1024**3)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.sample_rss_bytes()
-            self._stop.wait(self.interval_seconds)
-
-    def start(self) -> None:
-        self.peak_rss_bytes = self.sample_rss_bytes()
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-
-    def __enter__(self) -> ProcessTreeRSSMonitor:
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.stop()
-
-    @property
-    def peak_gb(self) -> float:
-        return self.peak_rss_bytes / (1024**3)
-
-
-class RSSMonitor:
-    """Monitor peak RSS for current process only."""
-
-    def __init__(self, interval_seconds: float = 0.05):
-        self.interval_seconds = interval_seconds
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._process = psutil.Process()
-        self.peak_rss_bytes = 0
-
-    def _rss_bytes(self) -> int:
-        return int(self._process.memory_info().rss)
-
-    def sample_rss_bytes(self) -> int:
-        rss = self._rss_bytes()
-        if rss > self.peak_rss_bytes:
-            self.peak_rss_bytes = rss
-        return rss
-
-    def sample_gb(self) -> float:
-        return self.sample_rss_bytes() / (1024**3)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.sample_rss_bytes()
-            self._stop.wait(self.interval_seconds)
-
-    def start(self) -> None:
-        self.peak_rss_bytes = self.sample_rss_bytes()
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-
-    def __enter__(self) -> RSSMonitor:
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.stop()
-
-    @property
-    def peak_gb(self) -> float:
-        return self.peak_rss_bytes / (1024**3)
-
-
-def _patch_internal_module(module_key: str, module: ModuleType) -> None:
-    if hasattr(module, "_build_run_metadata"):
-        module._build_run_metadata = _build_run_metadata
-    if hasattr(module, "ProcessTreeRSSMonitor"):
-        module.ProcessTreeRSSMonitor = ProcessTreeRSSMonitor
-    if hasattr(module, "RSSMonitor"):
-        module.RSSMonitor = RSSMonitor
-
-    if module_key == "transfer_mini":
-
-        def _resolve_data_dir_from_repo_root() -> str:
-            config_path = PROJECT_ROOT / "data" / "path_config.json"
-            with config_path.open("r", encoding="utf-8") as infile:
-                config = json.load(infile)
-            internal = str(config.get("internal_data_dir", "")).strip()
-            if internal and Path(internal).exists():
-                return internal
-            return str(PROJECT_ROOT / "data")
-
-        module._resolve_data_dir = _resolve_data_dir_from_repo_root
-
-    if module_key == "largest_block":
-        module.PROJECT_ROOT = PROJECT_ROOT
-        module.DATA_DIR = PROJECT_ROOT / "data"
-        module.DEFAULT_MODEL_PATH = str((PROJECT_ROOT / "data" / "production_model_v1.1.pickle").resolve())
+# Preserve historical test-facing helper exports while using shared implementations.
+ProcessTreeRSSMonitor = CommonProcessTreeRSSMonitor
+RSSMonitor = CommonRSSMonitor
 
 
 def _load_internal_module(module_key: str) -> ModuleType:
@@ -228,18 +67,8 @@ def _load_internal_module(module_key: str) -> ModuleType:
     if cached is not None:
         return cached
 
-    file_stem = _MODULE_FILES[module_key]
-    module_path = _INTERNAL_DIR / f"{file_stem}.py"
-    if not module_path.exists():
-        raise FileNotFoundError(f"Missing internal rust-suite module: {module_path}")
-
-    spec = importlib.util.spec_from_file_location(f"rust_suite_internal_{file_stem}", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to load internal module spec: {module_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _patch_internal_module(module_key, module)
+    module_path = _MODULE_IMPORTS[module_key]
+    module = importlib.import_module(module_path)
     _MODULE_CACHE[module_key] = module
     return module
 
@@ -305,6 +134,31 @@ def _effective_train_pairs_size(n_train_pairs: int, mode: str) -> int:
     return _load_internal_module("transfer_mini")._effective_train_pairs_size(n_train_pairs, mode)
 
 
+def _build_workload(
+    *,
+    datasets: list[str],
+    target: str,
+    n_jobs: int,
+    n_train_pairs: int,
+    n_iter: int,
+    random_seed: int,
+    train_pairs_size_mode: str,
+) -> dict[str, Any]:
+    return _load_internal_module("transfer_mini")._build_workload(
+        datasets=datasets,
+        target=target,
+        n_jobs=n_jobs,
+        n_train_pairs=n_train_pairs,
+        n_iter=n_iter,
+        random_seed=random_seed,
+        train_pairs_size_mode=train_pairs_size_mode,
+    )
+
+
+def _workload_id(workload: dict[str, Any]) -> str:
+    return _load_internal_module("transfer_mini")._workload_id(workload)
+
+
 def _resolve_dataset_file(
     data_dir: str,
     dataset_name: str,
@@ -363,7 +217,7 @@ def _single_run(
     rust_warm_featurizer_before_predict: int = 0,
     run_label: str | None = None,
 ) -> dict[str, Any]:
-    return _load_internal_module("prod_inference")._single_run(
+    result = _load_internal_module("prod_inference")._single_run(
         backend=backend,
         dataset_name=dataset_name,
         n_jobs=n_jobs,
@@ -374,6 +228,11 @@ def _single_run(
         rust_warm_featurizer_before_predict=rust_warm_featurizer_before_predict,
         run_label=run_label,
     )
+    # Ensure metadata points to the canonical CLI entrypoint (this file), even if
+    # internal modules are invoked directly.
+    if isinstance(result, dict):
+        result["run_metadata"] = _build_run_metadata()
+    return result
 
 
 def _run_single_subprocess(
@@ -474,6 +333,10 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 def run_rebuild_stress(**kwargs: Any) -> dict[str, Any]:
     return _load_internal_module("stress_rebuild").run_rebuild_stress(**kwargs)
+
+
+def _rss_growth_fraction(rss_peak_gb_by_iteration: list[float]) -> float | None:
+    return _load_internal_module("stress_rebuild")._rss_growth_fraction(rss_peak_gb_by_iteration)
 
 
 _COMMANDS = {

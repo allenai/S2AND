@@ -502,38 +502,22 @@ def _resolve_constraint_labels_batch(
 
     start = time.perf_counter()
     values: list[float | None]
-    if use_rust_constraints and rust_featurizer is not None:
+    if use_rust_constraints and rust_featurizer is not None and mode == "indexed":
         try:
-            if mode == "indexed":
-                if signature_index_by_id is None:
-                    raise RuntimeError("Indexed constraint API requested without signature index lookup")
-                indexed_pairs = [(signature_index_by_id[s1], signature_index_by_id[s2]) for s1, s2 in unresolved_pairs]
-                values = get_constraints_matrix_indexed_rust(
-                    dataset,
-                    indexed_pairs,
-                    dont_merge_cluster_seeds=dont_merge_cluster_seeds,
-                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                    num_threads=num_threads,
-                    featurizer=rust_featurizer,
-                    runtime_context=runtime_context,
-                    use_cache=use_cache,
-                )
-                telemetry["rust_batch_call_count"] = 1
-            else:
-                values = [
-                    get_constraint_rust(
-                        dataset,
-                        s1,
-                        s2,
-                        dont_merge_cluster_seeds=dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                        featurizer=rust_featurizer,
-                        runtime_context=runtime_context,
-                        use_cache=use_cache,
-                    )
-                    for s1, s2 in unresolved_pairs
-                ]
-                telemetry["rust_batch_call_count"] = int(len(unresolved_pairs))
+            if signature_index_by_id is None:
+                raise RuntimeError("Indexed constraint API requested without signature index lookup")
+            indexed_pairs = [(signature_index_by_id[s1], signature_index_by_id[s2]) for s1, s2 in unresolved_pairs]
+            values = get_constraints_matrix_indexed_rust(
+                dataset,
+                indexed_pairs,
+                dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                num_threads=num_threads,
+                featurizer=rust_featurizer,
+                runtime_context=runtime_context,
+                use_cache=use_cache,
+            )
+            telemetry["rust_batch_call_count"] = 1
         except Exception as exc:  # pragma: no cover - native extension optional
             if stage_uses_rust(runtime_context, "constraints"):
                 raise RuntimeError(
@@ -1694,10 +1678,13 @@ class Clusterer:
                         f"(run_id={runtime_context.run_id} error={exc})"
                     ) from exc
                 logger.warning(
-                    "Rust indexed constraint setup failed in phase A; falling back to per-pair constraints: %s",
+                    "Rust indexed constraint setup failed in phase A; disabling Rust constraints and falling back "
+                    "to Python: %s",
                     exc,
                 )
-                constraint_api_mode = "fallback"
+                use_rust_constraints = False
+                rust_featurizer = None
+                constraint_api_mode = "python"
         constraint_pairs_total = 0
         constraint_chunks_total = 0
         constraint_partial_hits_total = 0
@@ -2674,11 +2661,13 @@ class Clusterer:
                         f"(run_id={runtime_context.run_id} error={exc})"
                     ) from exc
                 logger.warning(
-                    "Rust indexed constraint setup failed in incremental helper; falling back to per-pair "
-                    "constraints: %s",
+                    "Rust indexed constraint setup failed in incremental helper; disabling Rust constraints and "
+                    "falling back to Python: %s",
                     exc,
                 )
-                constraint_api_mode = "fallback"
+                use_rust_constraints = False
+                rust_featurizer = None
+                constraint_api_mode = "python"
         signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]] = defaultdict(
             lambda: defaultdict(lambda: (0.0, 0))
         )

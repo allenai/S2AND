@@ -26,16 +26,19 @@ class UniversalPool:
     with ordered streaming imap and cross-platform support.
     """
 
-    def __init__(self, processes: int | None = None, use_threads: bool = True):
+    def __init__(self, processes: int | None = None, use_threads: bool | None = None):
         """
         Initialize UniversalPool with optimal worker selection.
 
         Args:
             processes: Number of workers (defaults to CPU count)
-            use_threads: Use threads instead of processes (default True).
-                        Threads avoid serialization overhead and work well
-                        when the GIL is released (NumPy, I/O operations).
+            use_threads: Use threads instead of processes.  When None (default),
+                        auto-selects based on platform: processes on Linux (fork
+                        is cheap and bypasses the GIL for CPU-bound work), threads
+                        on Windows/macOS (spawn overhead is too high).
         """
+        if use_threads is None:
+            use_threads = platform.system() in ("Windows", "Darwin")
         self.processes = processes or os.cpu_count()
         self._pool: ProcessPoolExecutor | ThreadPoolExecutor
 
@@ -105,6 +108,6 @@ class UniversalPool:
 
 
 # convenience factory
-def get_pool(processes: int | None = None, threads: bool = True) -> UniversalPool:
+def get_pool(processes: int | None = None, threads: bool | None = None) -> UniversalPool:
     """Get a pool that works on all platforms with optimal performance."""
     return UniversalPool(processes, use_threads=threads)

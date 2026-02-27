@@ -22,7 +22,7 @@ def generate(input_tuples):
         api_key=API_KEY,
     )
 
-    model = "gemini-2.5-pro"
+    model = "gemini-3.1-pro-preview"
     contents = [
         types.Content(
             role="user",

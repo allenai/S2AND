@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
-from functools import reduce
+from functools import partial, reduce
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -45,8 +45,6 @@ from s2and.text import (
 
 logger = logging.getLogger("s2and")
 
-# Global variable for multiprocessing
-global_preprocess: bool
 # Lazy-initialized global for Sinonym detector within worker processes
 _SINONYM_DETECTOR = None  # type: ignore
 CHUNK_SIZE = 1000  # for multiprocessing imap chunks
@@ -2118,9 +2116,7 @@ def sinonym_preprocess_papers_parallel(papers_dict: dict[str, Paper], n_jobs: in
     """
     output: dict[str, dict[int, Any]] = {}
     if n_jobs > 1:
-        # On Windows, prefer threads to avoid spawn/import guard issues in child processes.
-        # On Unix, use processes for CPU-bound work.
-        with UniversalPool(processes=n_jobs, use_threads=(os.name == "nt")) as p:  # type: ignore
+        with UniversalPool(processes=n_jobs) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
                 # Build a lightweight iterable to minimize serialization overhead
@@ -2322,7 +2318,7 @@ def apply_sinonym_overwrites_to_papers(
     return updates
 
 
-def preprocess_paper_1(item: tuple[str, Paper]) -> tuple[str, Paper]:
+def preprocess_paper_1(item: tuple[str, Paper], *, preprocess: bool = True) -> tuple[str, Paper]:
     """
     helper function to perform most of the preprocessing of a paper
 
@@ -2335,8 +2331,6 @@ def preprocess_paper_1(item: tuple[str, Paper]) -> tuple[str, Paper]:
     -------
     Tuple[str, Paper]: tuple of paper id and preprocessed Paper object
     """
-    global global_preprocess  # type: ignore
-
     key, paper = item
 
     if paper.in_signatures:
@@ -2353,7 +2347,7 @@ def preprocess_paper_1(item: tuple[str, Paper]) -> tuple[str, Paper]:
     ]
     paper = paper._replace(title=title, title_ngrams_words=title_ngrams_words, authors=authors)
 
-    if global_preprocess:  # type: ignore
+    if preprocess:
         venue = normalize_text(paper.venue)
         journal_name = normalize_text(paper.journal_name)
         paper = paper._replace(venue=venue, journal_name=journal_name)
@@ -2434,22 +2428,19 @@ def preprocess_papers_parallel(
     -------
     Dict: the preprocessed papers dictionary
     """
-    # we still want it set in the parent for the single-CPU path
-    global global_preprocess
-    global_preprocess = preprocess
-
     output: dict = {}
     if n_jobs > 1:
         # Use UniversalPool to replicate the original p.imap() streaming behavior
         with UniversalPool(processes=n_jobs) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
-                for key, value in p.imap(preprocess_paper_1, papers_dict.items(), CHUNK_SIZE):
+                func = partial(preprocess_paper_1, preprocess=preprocess)
+                for key, value in p.imap(func, papers_dict.items(), CHUNK_SIZE):
                     output[key] = value
                     pbar.update()
     else:
         for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers 1/2"):
-            k, v = preprocess_paper_1(item)
+            k, v = preprocess_paper_1(item, preprocess=preprocess)
             output[k] = v
 
     # -------- second stage (reference features) -------

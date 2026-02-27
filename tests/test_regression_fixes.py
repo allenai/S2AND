@@ -116,69 +116,6 @@ def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypa
     assert output == {"ab|middle=cd": ["s1"]}
 
 
-def test_generate_block_rankformat_does_not_mutate_negative_targets_across_queries():
-    make_triplets_module = _load_script_module("scripts/make_triplets.py", "make_triplets_regression")
-
-    class NoShuffleRng:
-        def shuffle(self, values):
-            return None
-
-    class Signature:
-        def __init__(self, paper_id, coauthors):
-            self.paper_id = paper_id
-            self.author_info_coauthors = coauthors
-
-    dataset = SimpleNamespace()
-    dataset.signatures = {
-        "q1": Signature(1, ["x", "y"]),
-        "p1": Signature(2, []),
-        "q2": Signature(3, ["y"]),
-        "p2": Signature(4, []),
-        "n1": Signature(5, []),
-        "n2": Signature(6, ["x"]),
-        "n3": Signature(7, ["x"]),
-        "n4": Signature(8, ["x"]),
-    }
-    dataset.clusters = {
-        "c1": {"signature_ids": ["q1", "p1"]},
-        "c2": {"signature_ids": ["q2", "p2"]},
-        "c3": {"signature_ids": ["n1"]},
-        "c4": {"signature_ids": ["n2"]},
-        "c5": {"signature_ids": ["n3"]},
-        "c6": {"signature_ids": ["n4"]},
-    }
-    dataset.signature_to_cluster_id = {
-        "q1": "c1",
-        "p1": "c1",
-        "q2": "c2",
-        "p2": "c2",
-        "n1": "c3",
-        "n2": "c4",
-        "n3": "c5",
-        "n4": "c6",
-    }
-
-    rows = list(
-        make_triplets_module.generate_block_rankformat(
-            dataset=dataset,
-            block_sigs=["q1", "q2", "n1", "n2", "n3", "n4"],
-            rng=NoShuffleRng(),
-            num_queries=2,
-            num_positives=1,
-            num_random_negatives=1,
-            num_hard_negatives=3,
-            negative_ranker_fn=lambda query_sig, neg_sig: neg_sig.paper_id,
-            used_pairs=set(),
-            blacklisted_papers=set(),
-        )
-    )
-
-    rows_by_query = {row["query"]: row for row in rows if row["query"] in {"1", "3"}}
-
-    assert len(rows_by_query["1"]["negatives"]) == 1
-    assert len(rows_by_query["3"]["negatives"]) == 4
-
-
 def test_transform_signature_file_handles_empty_email_field(tmp_path):
     transform_module = _load_script_module(
         "scripts/archive/transform_all_datasets.py",

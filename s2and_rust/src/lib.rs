@@ -113,6 +113,8 @@ struct PaperData {
     is_reliable: bool,
     journal_ngrams: Option<CounterData>,
     specter: Option<Vec<f32>>,
+    #[serde(default)]
+    specter_norm: Option<f64>,
 }
 
 #[pyclass]
@@ -128,6 +130,10 @@ struct RustFeaturizer {
     compute_reference_features: bool,
     cluster_seed_require_value: f64,
     cluster_seed_disallow_value: f64,
+    #[serde(skip)]
+    cached_signature_id_order: OnceLock<Vec<String>>,
+    #[serde(skip)]
+    cached_full_feature_count: OnceLock<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -1515,9 +1521,27 @@ fn counter_jaccard_data(
         (c2, c1)
     };
     let mut intersection = 0.0f64;
-    for (h, v1) in small.entries.iter() {
-        if let Ok(idx) = large.entries.binary_search_by_key(h, |e| e.0) {
-            intersection += (*v1).min(large.entries[idx].1) as f64;
+    if large.entries.len() < small.entries.len().saturating_mul(4) {
+        let mut small_idx = 0usize;
+        let mut large_idx = 0usize;
+        while small_idx < small.entries.len() && large_idx < large.entries.len() {
+            let (small_hash, small_value) = small.entries[small_idx];
+            let (large_hash, large_value) = large.entries[large_idx];
+            if small_hash == large_hash {
+                intersection += small_value.min(large_value) as f64;
+                small_idx += 1;
+                large_idx += 1;
+            } else if small_hash < large_hash {
+                small_idx += 1;
+            } else {
+                large_idx += 1;
+            }
+        }
+    } else {
+        for (h, v1) in small.entries.iter() {
+            if let Ok(idx) = large.entries.binary_search_by_key(h, |e| e.0) {
+                intersection += (*v1).min(large.entries[idx].1) as f64;
+            }
         }
     }
     let union = c1.sum as f64 + c2.sum as f64 - intersection;
@@ -1791,6 +1815,18 @@ fn cosine_sim_vec_f32(a: &[f32], b: &[f32]) -> f64 {
     } else {
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
+}
+
+fn cosine_sim_with_norms(a: &[f32], norm_a: f64, b: &[f32], norm_b: f64) -> f64 {
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let len = a.len().min(b.len());
+    for i in 0..len {
+        dot += (a[i] as f64) * (b[i] as f64);
+    }
+    dot / (norm_a * norm_b)
 }
 
 fn levenshtein_distance(a: &str, b: &str) -> usize {
@@ -2175,8 +2211,14 @@ impl RustFeaturizer {
 
         let specter_sim =
             if english_or_unknown_count == 2 && p1.specter.is_some() && p2.specter.is_some() {
-                let score =
-                    cosine_sim_vec_f32(p1.specter.as_ref().unwrap(), p2.specter.as_ref().unwrap());
+                let specter_a = p1.specter.as_ref().unwrap();
+                let specter_b = p2.specter.as_ref().unwrap();
+                let score = match (p1.specter_norm, p2.specter_norm) {
+                    (Some(norm_a), Some(norm_b)) if specter_a.len() == specter_b.len() => {
+                        cosine_sim_with_norms(specter_a, norm_a, specter_b, norm_b)
+                    }
+                    _ => cosine_sim_vec_f32(specter_a, specter_b),
+                };
                 score + 1.0
             } else {
                 f64::NAN
@@ -2427,13 +2469,21 @@ impl RustFeaturizer {
         Ok(())
     }
 
-    fn signature_id_order(&self) -> Vec<String> {
+    fn signature_id_order(&self) -> &[String] {
         if !self.signature_ids.is_empty() {
-            return self.signature_ids.clone();
+            return self.signature_ids.as_slice();
         }
-        let mut ids: Vec<String> = self.signatures.keys().cloned().collect();
-        ids.sort_unstable();
-        ids
+        self.cached_signature_id_order
+            .get_or_init(|| {
+                let mut ids: Vec<String> = self.signatures.keys().cloned().collect();
+                ids.sort_unstable();
+                ids
+            })
+            .as_slice()
+    }
+
+    fn full_feature_count(&self) -> usize {
+        *self.cached_full_feature_count.get_or_init(|| 39usize)
     }
 }
 
@@ -2581,6 +2631,16 @@ impl RustFeaturizer {
             } else {
                 None
             };
+            let specter_norm = specter.as_ref().map(|values| {
+                values
+                    .iter()
+                    .map(|value| {
+                        let value_f64 = *value as f64;
+                        value_f64 * value_f64
+                    })
+                    .sum::<f64>()
+                    .sqrt()
+            });
 
             papers.insert(
                 paper_id,
@@ -2599,6 +2659,7 @@ impl RustFeaturizer {
                     is_reliable,
                     journal_ngrams,
                     specter,
+                    specter_norm,
                     ref_details_present,
                 },
             );
@@ -2891,6 +2952,8 @@ impl RustFeaturizer {
             compute_reference_features,
             cluster_seed_require_value,
             cluster_seed_disallow_value,
+            cached_signature_id_order: OnceLock::new(),
+            cached_full_feature_count: OnceLock::new(),
         })
     }
 
@@ -3526,6 +3589,16 @@ impl RustFeaturizer {
                 } else {
                     None
                 };
+                let specter_norm = specter.as_ref().map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            let value_f64 = *value as f64;
+                            value_f64 * value_f64
+                        })
+                        .sum::<f64>()
+                        .sqrt()
+                });
 
                 papers.insert(
                     paper_id.clone(),
@@ -3545,6 +3618,7 @@ impl RustFeaturizer {
                         is_reliable: paper.is_reliable,
                         journal_ngrams: paper.journal_ngrams.clone(),
                         specter,
+                        specter_norm,
                     },
                 );
             }
@@ -3555,6 +3629,16 @@ impl RustFeaturizer {
                 } else {
                     None
                 };
+                let specter_norm = specter.as_ref().map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            let value_f64 = *value as f64;
+                            value_f64 * value_f64
+                        })
+                        .sum::<f64>()
+                        .sqrt()
+                });
                 papers.insert(
                     paper_id,
                     PaperData {
@@ -3573,6 +3657,7 @@ impl RustFeaturizer {
                         is_reliable: paper.is_reliable,
                         journal_ngrams: paper.journal_ngrams,
                         specter,
+                        specter_norm,
                     },
                 );
             }
@@ -3635,6 +3720,8 @@ impl RustFeaturizer {
             compute_reference_features,
             cluster_seed_require_value,
             cluster_seed_disallow_value,
+            cached_signature_id_order: OnceLock::new(),
+            cached_full_feature_count: OnceLock::new(),
         })
     }
 
@@ -3871,7 +3958,7 @@ impl RustFeaturizer {
     }
 
     fn signature_ids(&self) -> Vec<String> {
-        self.signature_id_order()
+        self.signature_id_order().to_vec()
     }
 
     fn update_signature_name_counts(&mut self, signatures: &Bound<'_, PyAny>) -> PyResult<usize> {
@@ -3928,28 +4015,39 @@ impl RustFeaturizer {
             }
         }
 
-        let first_pair = pairs.first().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Unexpected empty pair list")
-        })?;
-        let first_s1 = self
-            .signatures
-            .get(&first_pair.0)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_pair.0.clone()))?;
-        let first_s2 = self
-            .signatures
-            .get(&first_pair.1)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_pair.1.clone()))?;
-        let first_p1 = self
-            .papers
-            .get(&first_s1.paper_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_s1.paper_id.to_string()))?;
-        let first_p2 = self
-            .papers
-            .get(&first_s2.paper_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_s2.paper_id.to_string()))?;
-        let full_cols = self
-            .featurize_pair_data(first_s1, first_s2, first_p1, first_p2)
-            .len();
+        let mut id_to_lookup_idx: HashMap<&str, usize> = HashMap::with_capacity(row_count.saturating_mul(2));
+        let mut lookup: Vec<(&SignatureData, &PaperData)> = Vec::new();
+        for (sig_id1, sig_id2) in pairs.iter() {
+            for sig_id in [sig_id1.as_str(), sig_id2.as_str()] {
+                if id_to_lookup_idx.contains_key(sig_id) {
+                    continue;
+                }
+                let signature = self
+                    .signatures
+                    .get(sig_id)
+                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id.to_string()))?;
+                let paper = self
+                    .papers
+                    .get(&signature.paper_id)
+                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string()))?;
+                let lookup_idx = lookup.len();
+                lookup.push((signature, paper));
+                id_to_lookup_idx.insert(sig_id, lookup_idx);
+            }
+        }
+
+        let mut indexed_pairs: Vec<(usize, usize)> = Vec::with_capacity(row_count);
+        for (sig_id1, sig_id2) in pairs.iter() {
+            let left_idx = *id_to_lookup_idx
+                .get(sig_id1.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id1.clone()))?;
+            let right_idx = *id_to_lookup_idx
+                .get(sig_id2.as_str())
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id2.clone()))?;
+            indexed_pairs.push((left_idx, right_idx));
+        }
+
+        let full_cols = self.full_feature_count();
         let indices: Vec<usize> = selected_indices.unwrap_or_else(|| (0..full_cols).collect());
         for idx in indices.iter() {
             if *idx >= full_cols {
@@ -3969,12 +4067,10 @@ impl RustFeaturizer {
                 let mut buffer = vec![0.0_f64; row_count * out_cols];
                 buffer
                     .par_chunks_mut(out_cols)
-                    .zip(pairs.par_iter())
-                    .for_each(|(out_row, (sig_id1, sig_id2))| {
-                        let s1 = self.signatures.get(sig_id1).unwrap();
-                        let s2 = self.signatures.get(sig_id2).unwrap();
-                        let p1 = self.papers.get(&s1.paper_id).unwrap();
-                        let p2 = self.papers.get(&s2.paper_id).unwrap();
+                    .zip(indexed_pairs.par_iter())
+                    .for_each(|(out_row, (left_idx, right_idx))| {
+                        let (s1, p1) = lookup[*left_idx];
+                        let (s2, p2) = lookup[*right_idx];
                         let row = self.featurize_pair_data(s1, s2, p1, p2);
                         for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
                             let mut value = row[*idx];
@@ -4026,57 +4122,22 @@ impl RustFeaturizer {
                     signature_ids.len()
                 )));
             }
-
-            let left_id = &signature_ids[left];
-            let right_id = &signature_ids[right];
-            let s1 = self
-                .signatures
-                .get(left_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(left_id.clone()))?;
-            let s2 = self
-                .signatures
-                .get(right_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(right_id.clone()))?;
-            if self.papers.get(&s1.paper_id).is_none() {
-                return Err(pyo3::exceptions::PyKeyError::new_err(
-                    s1.paper_id.to_string(),
-                ));
-            }
-            if self.papers.get(&s2.paper_id).is_none() {
-                return Err(pyo3::exceptions::PyKeyError::new_err(
-                    s2.paper_id.to_string(),
-                ));
-            }
         }
 
-        let first_pair = pairs.first().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Unexpected empty pair list")
-        })?;
-        let first_left_id = signature_ids.get(first_pair.0 as usize).ok_or_else(|| {
-            pyo3::exceptions::PyIndexError::new_err("First pair index out of range")
-        })?;
-        let first_right_id = signature_ids.get(first_pair.1 as usize).ok_or_else(|| {
-            pyo3::exceptions::PyIndexError::new_err("First pair index out of range")
-        })?;
-        let first_s1 = self
-            .signatures
-            .get(first_left_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_left_id.clone()))?;
-        let first_s2 = self
-            .signatures
-            .get(first_right_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_right_id.clone()))?;
-        let first_p1 = self
-            .papers
-            .get(&first_s1.paper_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_s1.paper_id.to_string()))?;
-        let first_p2 = self
-            .papers
-            .get(&first_s2.paper_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(first_s2.paper_id.to_string()))?;
-        let full_cols = self
-            .featurize_pair_data(first_s1, first_s2, first_p1, first_p2)
-            .len();
+        let mut lookup: Vec<(&SignatureData, &PaperData)> = Vec::with_capacity(signature_ids.len());
+        for signature_id in signature_ids.iter() {
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self
+                .papers
+                .get(&signature.paper_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string()))?;
+            lookup.push((signature, paper));
+        }
+
+        let full_cols = self.full_feature_count();
         let indices: Vec<usize> = selected_indices.unwrap_or_else(|| (0..full_cols).collect());
         for idx in indices.iter() {
             if *idx >= full_cols {
@@ -4099,12 +4160,8 @@ impl RustFeaturizer {
                     .par_chunks_mut(out_cols)
                     .zip(pairs.par_iter())
                     .for_each(|(out_row, (left_idx, right_idx))| {
-                        let left_id = &signature_ids[*left_idx as usize];
-                        let right_id = &signature_ids[*right_idx as usize];
-                        let s1 = self.signatures.get(left_id).unwrap();
-                        let s2 = self.signatures.get(right_id).unwrap();
-                        let p1 = self.papers.get(&s1.paper_id).unwrap();
-                        let p2 = self.papers.get(&s2.paper_id).unwrap();
+                        let (s1, p1) = lookup[*left_idx as usize];
+                        let (s2, p2) = lookup[*right_idx as usize];
                         let row = self.featurize_pair_data(s1, s2, p1, p2);
                         for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
                             let mut value = row[*idx];
@@ -4149,9 +4206,24 @@ impl RustFeaturizer {
     }
 }
 
+#[pyfunction]
+fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let build_info = PyDict::new(py);
+    build_info.set_item("crate_version", env!("CARGO_PKG_VERSION"))?;
+    build_info.set_item("profile", option_env!("PROFILE").unwrap_or("unknown"))?;
+    build_info.set_item("debug_assertions", cfg!(debug_assertions))?;
+    build_info.set_item("debug", option_env!("DEBUG").unwrap_or("unknown"))?;
+    build_info.set_item("opt_level", option_env!("OPT_LEVEL").unwrap_or("unknown"))?;
+    build_info.set_item("target", option_env!("TARGET").unwrap_or("unknown"))?;
+    build_info.set_item("host", option_env!("HOST").unwrap_or("unknown"))?;
+    build_info.set_item("rustc", option_env!("RUSTC").unwrap_or("unknown"))?;
+    Ok(build_info.unbind())
+}
+
 #[pymodule]
 fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
     m.add_function(wrap_pyfunction!(signature_ngrams_batch, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_json_ingest_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(reset_last_json_ingest_telemetry, m)?)?;

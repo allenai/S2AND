@@ -76,7 +76,6 @@ def _cache_size() -> int:
 @pytest.fixture(autouse=True)
 def _reset_feature_port_state(monkeypatch, tmp_path):
     feature_port.clear_rust_featurizer_cache()
-    feature_port._NAME_COUNTS_NORMALIZATION_VERSION_CACHE.clear()
     feature_port._RUST_FEATURIZER_MAX_INMEM_CACHE = None
     DummyRustFeaturizer.created = []
     DummyRustFeaturizer.from_json_created = []
@@ -319,6 +318,8 @@ def test_json_ingest_routes_canonical_payload(monkeypatch):
         feature_port.CLUSTER_SEEDS_LOOKUP["require"],
         feature_port.CLUSTER_SEEDS_LOOKUP["disallow"],
         8,
+        None,
+        False,
     )
 
 

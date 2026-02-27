@@ -12,6 +12,7 @@
 | `rust_suite.py featurizer-reuse` | Repeated KISTI predictions, same-object vs re-instantiated | Featurizer cache hit rate, per-iteration timing, RSS |
 | `rust_suite.py largest-block` | Profile Python vs Rust on one large block | Partition diff (digest + per-signature), latency, RSS; optional `--quality-check` + `--constraint-sample` |
 | `rust_suite.py big-block-incremental` | Compare incremental baseline vs phase-split incremental behavior on giant-block subsets | Runtime delta, peak RSS delta, cluster-equivalence / partition-diff, `phase_b_mode` telemetry |
+| `rust_suite.py stress-rebuild` | Repeat Rust featurizer construction (`from_json_paths` / `from_dataset`) to stress lifecycle stability | Per-iteration elapsed + RSS peaks, RSS growth fraction, failure payloads |
 
 ### Rust utilities
 
@@ -36,11 +37,9 @@
 | `full_model_dump.py` | Train and dump a full model on all datasets (includes unreleased data) |
 | `make_s2and_mini_dataset.py` | Create a smaller dataset for faster iteration (skips medline) |
 | `make_s2and_name_tuples.py` | Create name tuples file of known aliases |
-| `make_triplets.py` | Generate training triplets |
 | `make_inventors_s2and_subset.py` | Create inventors S2AND subset |
 | `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms |
 | `generate_inventors_hf_specter_embeddings.py` | Generate SPECTER embeddings for inventors dataset |
-| `make_classification_style.py` | Convert data to classification-style format |
 | `LLM_based_filtering_of_name_tuples.py` | Filter name tuples using Gemini 2.5 Pro (costs money to re-run) |
 | `get_name_counts.py` | Documentation for how name counts metadata was collected (internal data) |
 | `get_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |

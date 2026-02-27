@@ -290,6 +290,10 @@ def test_repeated_rust_featurizer_rebuild_dummy_smoke(build_path, tmp_path):
     assert output_path.exists()
     assert len(result["iterations"]) == 3
     assert all(iteration["status"] == "ok" for iteration in result["iterations"])
+    assert "rss_peak_gb_by_iteration" in result
+    assert len(result["rss_peak_gb_by_iteration"]) == 3
+    assert "rss_growth_fraction" in result
+    assert all("rss_peak_gb" in iteration for iteration in result["iterations"])
 
 
 @pytest.mark.skipif(

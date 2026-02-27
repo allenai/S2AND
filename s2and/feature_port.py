@@ -1,5 +1,4 @@
 import hashlib
-import inspect
 import json
 import logging
 import math
@@ -43,7 +42,7 @@ class _CacheEntry:
 _RUST_FEATURIZER_CACHE: "weakref.WeakKeyDictionary[ANDData, _CacheEntry]" = weakref.WeakKeyDictionary()
 _RUST_FEATURIZER_CACHE_LOCK = threading.Lock()
 _RUST_FEATURIZER_ACCESS_COUNTER = 0
-RUST_FEATURIZER_CACHE_VERSION = 5
+RUST_FEATURIZER_CACHE_VERSION = 6
 _ENV_TRUE_VALUES = {"1", "true", "yes"}
 _RUST_BUILD_ERROR = "s2and_rust extension not built. Build with: maturin develop -m s2and_rust/Cargo.toml"
 _SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE = 2048
@@ -53,8 +52,6 @@ _RUST_FEATURIZER_CACHE_METADATA_SCHEMA_VERSION = 1
 DEFAULT_NORMALIZATION_VERSION = "legacy_compat"
 NORMALIZATION_VERSION_ENV = "S2AND_NORMALIZATION_VERSION"
 ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV = "S2AND_ALLOW_NORMALIZATION_VERSION_MISMATCH"
-_NAME_COUNTS_NORMALIZATION_VERSION_CACHE: dict[str, tuple[int, str | None]] = {}
-_NAME_COUNTS_NORMALIZATION_VERSION_CACHE_LOCK = threading.Lock()
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -310,96 +307,6 @@ def _allow_normalization_version_mismatch() -> bool:
     return _env_flag(ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV, "0")
 
 
-def _verify_name_counts_normalization_version(name_counts_path: str) -> None:
-    """Fail fast when a name-count artifact normalization version mismatches expectations."""
-
-    if not name_counts_path:
-        raise RuntimeError("Missing name_counts_path")
-    absolute_path = os.path.abspath(name_counts_path)
-    try:
-        stat_result = os.stat(absolute_path)
-    except OSError as exc:
-        raise RuntimeError(f"Name counts artifact not found: {absolute_path}") from exc
-    mtime_ns = int(stat_result.st_mtime_ns)
-
-    cached_version: str | None = None
-    with _NAME_COUNTS_NORMALIZATION_VERSION_CACHE_LOCK:
-        cached = _NAME_COUNTS_NORMALIZATION_VERSION_CACHE.get(absolute_path)
-        if cached is not None and cached[0] == mtime_ns:
-            cached_version = cached[1]
-        else:
-            try:
-                with open(absolute_path, encoding="utf-8") as file_obj:
-                    payload = json.load(file_obj)
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"Failed to load name counts artifact JSON: {absolute_path}") from exc
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"Invalid name counts artifact JSON payload: {absolute_path}")
-            raw_version = payload.get("normalization_version")
-            cached_version = str(raw_version).strip() if raw_version is not None else None
-            cached_version = cached_version or None
-            _NAME_COUNTS_NORMALIZATION_VERSION_CACHE[absolute_path] = (mtime_ns, cached_version)
-
-    if cached_version is None:
-        raise RuntimeError(f"Missing normalization_version in name counts artifact: {absolute_path}")
-
-    expected = _expected_normalization_version()
-    if cached_version != expected and not _allow_normalization_version_mismatch():
-        raise RuntimeError(
-            "Normalization version mismatch for name counts artifact: "
-            f"artifact={cached_version} expected={expected} path={absolute_path}"
-        )
-
-
-def _from_json_paths_supports_normalization_args(rust_featurizer_cls: Any) -> bool:
-    """Return True when RustFeaturizer.from_json_paths accepts normalization version args."""
-
-    if rust_featurizer_cls is None:
-        return False
-    from_json_paths = getattr(rust_featurizer_cls, "from_json_paths", None)
-    if from_json_paths is None:
-        return False
-
-    text_signature = getattr(from_json_paths, "__text_signature__", None)
-    if isinstance(text_signature, str) and text_signature:
-        if (
-            "expected_normalization_version" in text_signature
-            and "allow_normalization_version_mismatch" in text_signature
-        ):
-            return True
-
-    try:
-        signature = inspect.signature(from_json_paths)
-    except (TypeError, ValueError):
-        signature = None
-
-    if signature is None:
-        doc = getattr(from_json_paths, "__doc__", None)
-        if isinstance(doc, str):
-            if "expected_normalization_version" in doc and "allow_normalization_version_mismatch" in doc:
-                return True
-        return False
-
-    if (
-        "expected_normalization_version" in signature.parameters
-        and "allow_normalization_version_mismatch" in signature.parameters
-    ):
-        return True
-
-    params = list(signature.parameters.values())
-    if any(param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for param in params):
-        # Avoid false positives when the signature is not introspectable.
-        return False
-
-    positional_params = [
-        param
-        for param in params
-        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    # Legacy contract has 12 positional args; normalization version adds 2.
-    return len(positional_params) >= 14
-
-
 def _build_rust_featurizer_from_json_paths(
     dataset: Any,
     num_threads: int,
@@ -461,10 +368,7 @@ def _build_rust_featurizer_from_json_paths(
             "name-count features will be NaN."
         )
 
-    supports_normalization_args = _from_json_paths_supports_normalization_args(rust_featurizer_cls)
-
-    # Normalization version validation can be delegated to Rust (newer API) to avoid
-    # a redundant Python json.load(); fall back to Python validation for older APIs.
+    # Normalization version validation is delegated to Rust when using artifact name counts.
     normalization_check_executed = False
     normalization_version_for_rust: str | None = None
     allow_mismatch_for_rust = False
@@ -474,12 +378,8 @@ def _build_rust_featurizer_from_json_paths(
             "Rust JSON ingest: selected artifact name-count source path=%s; this can increase latency/RSS.",
             name_counts_path,
         )
-        if supports_normalization_args:
-            normalization_version_for_rust = _expected_normalization_version()
-            allow_mismatch_for_rust = _allow_normalization_version_mismatch()
-        else:
-            # Older Rust APIs cannot receive expected_normalization_version; validate in Python.
-            _verify_name_counts_normalization_version(str(name_counts_path))
+        normalization_version_for_rust = _expected_normalization_version()
+        allow_mismatch_for_rust = _allow_normalization_version_mismatch()
 
     logger.info(
         "Telemetry stage: stage=rust_json_ingest_name_counts_source "
@@ -511,11 +411,7 @@ def _build_rust_featurizer_from_json_paths(
         allow_normalization_version_mismatch=allow_mismatch_for_rust,
     )
     args = contract.as_from_json_paths_args()
-    if supports_normalization_args:
-        featurizer = rust_featurizer_cls.from_json_paths(*args)
-    else:
-        # Older Rust APIs do not accept the final normalization-version args.
-        featurizer = rust_featurizer_cls.from_json_paths(*args[:-2])
+    featurizer = rust_featurizer_cls.from_json_paths(*args)
     ffi_seconds = time.perf_counter() - ffi_start
 
     post_build_seconds = 0.0

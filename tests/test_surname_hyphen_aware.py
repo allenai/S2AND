@@ -1,9 +1,8 @@
-import pytest
 
 from s2and.data import (
     Signature,
-    _lasts_equivalent_for_constraint,
     _canonicalize_last_for_counts,
+    _lasts_equivalent_for_constraint,
     apply_sinonym_overwrites,
 )
 

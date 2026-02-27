@@ -1,16 +1,18 @@
-import random
-import os
 import json
+import logging
+import os
+import random
+from collections import defaultdict
+from itertools import combinations
+
+import genieclust
 import numpy as np
 import pandas as pd
-import logging
-from itertools import combinations
-from collections import defaultdict
-from sklearn.preprocessing import MultiLabelBinarizer
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
-import genieclust
-from s2and.consts import SPECTER_DIM, PROJECT_ROOT_PATH
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import MultiLabelBinarizer
+
+from s2and.consts import PROJECT_ROOT_PATH, SPECTER_DIM
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
     compute_block,
@@ -19,11 +21,10 @@ from s2and.text import (
     split_first_middle_hyphen_aware,
 )
 
-
 logger = logging.getLogger("s2and")
 
 
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json"), "r") as f:
+with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json")) as f:
     FIRST_K_LETTER_COUNTS = json.load(f)
 
 
@@ -107,7 +108,7 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
 
         # all together now
         X = X_specter + np.mean([X_svd, X_svd2], axis=0)
-    except:
+    except Exception:
         X = X_specter
 
     # how many subblocks do we want given this data and target subblock size?
@@ -118,11 +119,11 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
     try:
         g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01)
         labels = g.fit_predict(X)
-    except:
+    except Exception:
         labels = np.zeros(len(signature_ids), dtype=int)
 
     subblocks = defaultdict(list)
-    for sig_id, label in zip(signature_ids, labels):
+    for sig_id, label in zip(signature_ids, labels, strict=False):
         subblocks[label].append(sig_id)
     # if any subblock is above the target size, just chop it up randomly into pieces that are below the target size
     seed_base = int(getattr(anddata, "random_seed", 0) or 0)
@@ -200,7 +201,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         signature_ids = signature_ids[bad_size_flag]
         k += 1
     # last ditch clean-up in case things didn't work out
-    if len(names) > 0 and clean_break == False:
+    if len(names) > 0 and not clean_break:
         output_cant_subdivide["final"] = signature_ids
     # assert that the combo of the output and output_cant_subdivide is a complete clustering of the input signature_ids
     assert (
@@ -307,7 +308,8 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     # which also does totally random sub-blocking in case things went awry
     if len(output_for_specter) > 0:
         logger.info(
-            "Subdividing the subblocks that could not be subdivided via middle names using SPECTER (and random subblocking)"
+            "Subdividing the subblocks that could not be subdivided via middle names using SPECTER "
+            "(and random subblocking)"
         )
     for key, sig_ids_loop in output_for_specter.items():
         output_loop = {}
@@ -500,7 +502,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
             if orcid is not None:
                 orcid_to_sig_id_subblock_id[orcid].append((sig_id, subblock_id))
     # 2: for each orcid, if there is more than one unique subblock_id, then we need to move signature_ids around
-    for orcid, sig_id_subblock_id in orcid_to_sig_id_subblock_id.items():
+    for _orcid, sig_id_subblock_id in orcid_to_sig_id_subblock_id.items():
         unique_subblock_ids = sorted({item[1] for item in sig_id_subblock_id})
         if len(unique_subblock_ids) > 1:
             # 3: pick a subblock that isn't already maximum size
@@ -537,6 +539,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
 
     average_subblock_length = np.mean([len(output[k]) for k in output])
     logger.info(
-        f"Done subblocking. There are {len(output)} subblocks with an average of {average_subblock_length} signatures each."
+        f"Done subblocking. There are {len(output)} subblocks with an average of "
+        f"{average_subblock_length} signatures each."
     )
     return output

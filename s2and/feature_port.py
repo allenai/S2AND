@@ -1,5 +1,5 @@
-import hashlib
 import inspect
+import hashlib
 import json
 import logging
 import math
@@ -48,11 +48,12 @@ _ENV_TRUE_VALUES = {"1", "true", "yes"}
 _RUST_BUILD_ERROR = "s2and_rust extension not built. Build with: maturin develop -m s2and_rust/Cargo.toml"
 _SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE = 2048
 _RUST_FEATURIZER_CACHE_METADATA_SCHEMA_VERSION = 1
+# TODO(s2and): Flip to "canonical_v2" once canonical artifacts (name counts, name tuples,
+# ORCID prefix counts) are regenerated per docs/normalization_migration.md.
 DEFAULT_NORMALIZATION_VERSION = "legacy_compat"
 NORMALIZATION_VERSION_ENV = "S2AND_NORMALIZATION_VERSION"
 ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV = "S2AND_ALLOW_NORMALIZATION_VERSION_MISMATCH"
-
-_NAME_COUNTS_NORMALIZATION_VERSION_CACHE: set[tuple[str, int]] = set()
+_NAME_COUNTS_NORMALIZATION_VERSION_CACHE: dict[str, tuple[int, str | None]] = {}
 _NAME_COUNTS_NORMALIZATION_VERSION_CACHE_LOCK = threading.Lock()
 
 
@@ -309,61 +310,93 @@ def _allow_normalization_version_mismatch() -> bool:
     return _env_flag(ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV, "0")
 
 
-def _name_counts_normalization_cache_key(name_counts_path: str) -> tuple[str, int] | None:
-    try:
-        stat_result = os.stat(name_counts_path)
-    except OSError:
-        return None
-    return os.path.abspath(name_counts_path), int(stat_result.st_mtime_ns)
+def _verify_name_counts_normalization_version(name_counts_path: str) -> None:
+    """Fail fast when a name-count artifact normalization version mismatches expectations."""
 
-
-def _verify_name_counts_normalization_version(name_counts_path: str | None) -> bool:
     if not name_counts_path:
-        return False
-    cache_key = _name_counts_normalization_cache_key(name_counts_path)
-    if cache_key is not None:
-        with _NAME_COUNTS_NORMALIZATION_VERSION_CACHE_LOCK:
-            if cache_key in _NAME_COUNTS_NORMALIZATION_VERSION_CACHE:
-                return False
-    with open(name_counts_path, encoding="utf-8") as name_counts_file:
-        payload = json.load(name_counts_file)
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Invalid name counts payload (expected JSON object): path={name_counts_path}")
+        raise RuntimeError("Missing name_counts_path")
+    absolute_path = os.path.abspath(name_counts_path)
+    try:
+        stat_result = os.stat(absolute_path)
+    except OSError as exc:
+        raise RuntimeError(f"Name counts artifact not found: {absolute_path}") from exc
+    mtime_ns = int(stat_result.st_mtime_ns)
 
-    expected_version = _expected_normalization_version()
-    artifact_version = payload.get("normalization_version")
-    mismatch_message: str | None = None
-    if artifact_version is None:
-        mismatch_message = (
-            "Missing normalization_version in name counts artifact; fail-fast by default. "
-            f"path={name_counts_path} expected={expected_version} "
-            f"override={ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV}=1"
+    cached_version: str | None = None
+    with _NAME_COUNTS_NORMALIZATION_VERSION_CACHE_LOCK:
+        cached = _NAME_COUNTS_NORMALIZATION_VERSION_CACHE.get(absolute_path)
+        if cached is not None and cached[0] == mtime_ns:
+            cached_version = cached[1]
+        else:
+            try:
+                with open(absolute_path, encoding="utf-8") as file_obj:
+                    payload = json.load(file_obj)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"Failed to load name counts artifact JSON: {absolute_path}") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"Invalid name counts artifact JSON payload: {absolute_path}")
+            raw_version = payload.get("normalization_version")
+            cached_version = str(raw_version).strip() if raw_version is not None else None
+            cached_version = cached_version or None
+            _NAME_COUNTS_NORMALIZATION_VERSION_CACHE[absolute_path] = (mtime_ns, cached_version)
+
+    if cached_version is None:
+        raise RuntimeError(f"Missing normalization_version in name counts artifact: {absolute_path}")
+
+    expected = _expected_normalization_version()
+    if cached_version != expected and not _allow_normalization_version_mismatch():
+        raise RuntimeError(
+            "Normalization version mismatch for name counts artifact: "
+            f"artifact={cached_version} expected={expected} path={absolute_path}"
         )
-    elif str(artifact_version) != expected_version:
-        mismatch_message = (
-            "Normalization version mismatch between runtime and name-count artifact; fail-fast by default. "
-            f"path={name_counts_path} expected={expected_version} artifact={artifact_version} "
-            f"override={ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV}=1"
-        )
-    if mismatch_message is not None:
-        if not _allow_normalization_version_mismatch():
-            raise RuntimeError(mismatch_message)
-        logger.warning("%s", mismatch_message)
-    if cache_key is not None:
-        with _NAME_COUNTS_NORMALIZATION_VERSION_CACHE_LOCK:
-            _NAME_COUNTS_NORMALIZATION_VERSION_CACHE.add(cache_key)
-    return True
 
 
 def _from_json_paths_supports_normalization_args(rust_featurizer_cls: Any) -> bool:
+    """Return True when RustFeaturizer.from_json_paths accepts normalization version args."""
+
+    if rust_featurizer_cls is None:
+        return False
     from_json_paths = getattr(rust_featurizer_cls, "from_json_paths", None)
     if from_json_paths is None:
         return False
+
+    text_signature = getattr(from_json_paths, "__text_signature__", None)
+    if isinstance(text_signature, str) and text_signature:
+        if "expected_normalization_version" in text_signature and "allow_normalization_version_mismatch" in text_signature:
+            return True
+
     try:
-        params = inspect.signature(from_json_paths).parameters
+        signature = inspect.signature(from_json_paths)
     except (TypeError, ValueError):
+        signature = None
+
+    if signature is None:
+        doc = getattr(from_json_paths, "__doc__", None)
+        if isinstance(doc, str):
+            if "expected_normalization_version" in doc and "allow_normalization_version_mismatch" in doc:
+                return True
         return False
-    return "expected_normalization_version" in params and "allow_normalization_version_mismatch" in params
+
+    if (
+        "expected_normalization_version" in signature.parameters
+        and "allow_normalization_version_mismatch" in signature.parameters
+    ):
+        return True
+
+    params = list(signature.parameters.values())
+    if any(
+        param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for param in params
+    ):
+        # Avoid false positives when the signature is not introspectable.
+        return False
+
+    positional_params = [
+        param
+        for param in params
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    # Legacy contract has 12 positional args; normalization version adds 2.
+    return len(positional_params) >= 14
 
 
 def _build_rust_featurizer_from_json_paths(
@@ -375,6 +408,9 @@ def _build_rust_featurizer_from_json_paths(
     pre_build_start = time.perf_counter()
     if s2and_rust is None:
         raise RuntimeError(_RUST_BUILD_ERROR)
+    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
+    if not capabilities.core_runtime_available:
+        raise RuntimeError(f"Rust runtime unavailable: {capabilities.reason}")
     rust_featurizer_cls = getattr(s2and_rust, "RustFeaturizer", None)
     if rust_featurizer_cls is None or not hasattr(rust_featurizer_cls, "from_json_paths"):
         raise RuntimeError("s2and_rust extension does not expose RustFeaturizer.from_json_paths")
@@ -424,41 +460,40 @@ def _build_rust_featurizer_from_json_paths(
             "name-count features will be NaN."
         )
 
-    # Normalization version validation is performed by Rust during name-count
-    # JSON parsing, avoiding a redundant full json.load() in Python.
-    supports_normalization_version_args = _from_json_paths_supports_normalization_args(rust_featurizer_cls)
+    supports_normalization_args = _from_json_paths_supports_normalization_args(rust_featurizer_cls)
+
+    # Normalization version validation can be delegated to Rust (newer API) to avoid
+    # a redundant Python json.load(); fall back to Python validation for older APIs.
     normalization_check_executed = False
     normalization_version_for_rust: str | None = None
     allow_mismatch_for_rust = False
     if name_counts_source == "artifact":
+        normalization_check_executed = True
         logger.warning(
             "Rust JSON ingest: selected artifact name-count source path=%s; this can increase latency/RSS.",
             name_counts_path,
         )
-        if supports_normalization_version_args:
+        if supports_normalization_args:
             normalization_version_for_rust = _expected_normalization_version()
             allow_mismatch_for_rust = _allow_normalization_version_mismatch()
         else:
-            logger.warning(
-                "Rust JSON ingest: extension from_json_paths lacks normalization-version args; "
-                "executing Python-side normalization-version validation before legacy call.",
-            )
-            normalization_check_executed = _verify_name_counts_normalization_version(name_counts_path)
+            # Older Rust APIs cannot receive expected_normalization_version; validate in Python.
+            _verify_name_counts_normalization_version(str(name_counts_path))
 
     logger.info(
         "Telemetry stage: stage=rust_json_ingest_name_counts_source "
         "name_counts_source=%s signatures_total=%d signatures_with_counts=%d "
         "overlay_api_available=%s artifact_configured=%s "
-        "normalization_version_args_supported=%s normalization_check_executed=%s "
-        "normalization_version_delegated_to_rust=%s dataset=%s",
+        "normalization_check_executed=%s normalization_version_delegated_to_rust=%s "
+        "allow_normalization_version_mismatch=%s dataset=%s",
         name_counts_source,
         signatures_total,
         signatures_with_counts,
         rust_can_overlay_signature_counts,
         artifact_configured,
-        supports_normalization_version_args,
         normalization_check_executed,
         normalization_version_for_rust is not None,
+        allow_mismatch_for_rust,
         _dataset_name_for_logs(dataset),
     )
 
@@ -474,9 +509,12 @@ def _build_rust_featurizer_from_json_paths(
         expected_normalization_version=normalization_version_for_rust,
         allow_normalization_version_mismatch=allow_mismatch_for_rust,
     )
-    featurizer = rust_featurizer_cls.from_json_paths(
-        *contract.as_from_json_paths_args(include_normalization_version_args=supports_normalization_version_args)
-    )
+    args = contract.as_from_json_paths_args()
+    if supports_normalization_args:
+        featurizer = rust_featurizer_cls.from_json_paths(*args)
+    else:
+        # Older Rust APIs do not accept the final normalization-version args.
+        featurizer = rust_featurizer_cls.from_json_paths(*args[:-2])
     ffi_seconds = time.perf_counter() - ffi_start
 
     post_build_seconds = 0.0
@@ -707,7 +745,7 @@ def _get_rust_featurizer(
             run_id,
             entry.build_count if entry is not None else 0,
         )
-        if cache_hit:
+        if entry is not None:
             _touch_rust_featurizer(dataset)
             return entry.featurizer
 
@@ -848,6 +886,69 @@ def get_constraint_rust(
         high_value,
         dont_merge_cluster_seeds,
         incremental_dont_use_cluster_seeds,
+    )
+
+
+def get_constraints_matrix_rust(
+    dataset: ANDData,
+    pairs: list[tuple[str, str]],
+    low_value: float = 0.0,
+    high_value: float = LARGE_DISTANCE,
+    dont_merge_cluster_seeds: bool = True,
+    incremental_dont_use_cluster_seeds: bool = False,
+    num_threads: int | None = None,
+    featurizer: Any | None = None,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+) -> list[float | None]:
+    if s2and_rust is None:
+        raise RuntimeError(_RUST_BUILD_ERROR)
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+
+    get_constraints_matrix = getattr(featurizer, "get_constraints_matrix", None)
+    if not callable(get_constraints_matrix):
+        raise RuntimeError(
+            "RustFeaturizer.get_constraints_matrix is unavailable; rebuild/install s2and-rust>=0.31.0."
+        )
+    return list(
+        get_constraints_matrix(
+            pairs,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+            num_threads,
+        )
+    )
+
+
+def get_constraints_matrix_indexed_rust(
+    dataset: ANDData,
+    pairs: list[tuple[int, int]],
+    low_value: float = 0.0,
+    high_value: float = LARGE_DISTANCE,
+    dont_merge_cluster_seeds: bool = True,
+    incremental_dont_use_cluster_seeds: bool = False,
+    num_threads: int | None = None,
+    featurizer: Any | None = None,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+) -> list[float | None]:
+    if s2and_rust is None:
+        raise RuntimeError(_RUST_BUILD_ERROR)
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+
+    return list(
+        featurizer.get_constraints_matrix_indexed(
+            pairs,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+            num_threads,
+        )
     )
 
 

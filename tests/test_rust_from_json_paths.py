@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
 import random
 from collections import defaultdict
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +47,17 @@ EXPECTED_CALLBACK_COUNT_KEYS = {
     "get_text_ngrams_calls",
     "get_text_ngrams_words_calls",
 }
+
+
+def _load_stress_module():
+    script_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Missing rust suite script: {script_path}")
+    spec = importlib.util.spec_from_file_location("rust_suite", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(autouse=True)
@@ -256,3 +269,50 @@ def test_from_json_paths_signature_name_counts_overlay_parity_dummy():
             assert _equalish(ref_val, got_val), (
                 f"Name-count mismatch idx={idx} pair=({s1},{s2}) ref={ref_val} got={got_val}"
             )
+
+
+@pytest.mark.parametrize("build_path", ["from_json_paths", "from_dataset"])
+def test_repeated_rust_featurizer_rebuild_dummy_smoke(build_path, tmp_path):
+    stress_module = _load_stress_module()
+    output_path = tmp_path / f"stress_{build_path}_dummy.json"
+    result = stress_module.run_rebuild_stress(
+        dataset="dummy",
+        build_path=build_path,
+        repeats=3,
+        num_threads=1,
+        write_json=str(output_path),
+    )
+
+    assert result["dataset"] == "dummy"
+    assert result["build_path"] == build_path
+    assert result["success_count"] == 3
+    assert result["failure_count"] == 0
+    assert output_path.exists()
+    assert len(result["iterations"]) == 3
+    assert all(iteration["status"] == "ok" for iteration in result["iterations"])
+
+
+@pytest.mark.skipif(
+    os.environ.get("S2AND_RUN_HEAVY_RUST_STRESS", "0") != "1",
+    reason="Set S2AND_RUN_HEAVY_RUST_STRESS=1 to run AMiner rebuild stress.",
+)
+def test_repeated_from_json_paths_aminer_opt_in(tmp_path):
+    aminer_signatures = Path(PROJECT_ROOT_PATH) / "data" / "aminer" / "aminer_signatures.json"
+    if not aminer_signatures.exists():
+        pytest.skip(f"AMiner signatures fixture unavailable: {aminer_signatures}")
+
+    stress_module = _load_stress_module()
+    output_path = tmp_path / "stress_rust_from_json_paths_aminer.json"
+    result = stress_module.run_rebuild_stress(
+        dataset="aminer",
+        build_path="from_json_paths",
+        repeats=6,
+        num_threads=1,
+        write_json=str(output_path),
+    )
+
+    assert result["dataset"] == "aminer"
+    assert result["build_path"] == "from_json_paths"
+    assert result["success_count"] == 6
+    assert result["failure_count"] == 0
+    assert output_path.exists()

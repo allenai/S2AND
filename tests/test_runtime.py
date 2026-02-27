@@ -71,15 +71,17 @@ def test_resolve_backend_invalid_value_raises(monkeypatch: pytest.MonkeyPatch):
         runtime.resolve_backend(emit_startup_warning=False)
 
 
-def test_runtime_context_stage_enablement(monkeypatch: pytest.MonkeyPatch):
+def test_runtime_context_use_rust(monkeypatch: pytest.MonkeyPatch):
     _clear_runtime_env(monkeypatch)
     monkeypatch.setenv("S2AND_BACKEND", "python")
     python_context = runtime.build_runtime_context("unit_test", emit_startup_warning=False)
+    assert python_context.use_rust is False
     assert python_context.stage_backend("pair_featurization") == "python"
     assert python_context.stage_backend("constraints") == "python"
 
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     rust_context = runtime.build_runtime_context("unit_test", emit_startup_warning=False)
+    assert rust_context.use_rust is True
     assert rust_context.stage_backend("pair_featurization") == "rust"
     assert rust_context.stage_backend("constraints") == "rust"
 

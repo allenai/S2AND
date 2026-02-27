@@ -1,10 +1,9 @@
-from typing import Any, List, Dict
-
-import os
 import argparse
-import shutil
 import json
+import os
 import re
+import shutil
+from typing import Any
 
 EMAIL_SPECIAL_CASES = {
     '{"dianwenju@fudan.edu.cn hu.haifeng@sipi.com.cn"}': "hu.haifeng@sipi.com.cn",
@@ -41,8 +40,14 @@ EMAIL_SPECIAL_CASES = {
     '{"hrmaskf@hku.hk yxliang@hku.hk ytf0707@126.com"}': "hrmaskf@hku.hk",
     '{"njzhaxm@qq.com ws0801@hotmail.com"}': "ws0801@hotmail.com",
     '{"wangzy@nju.edu.cn sunping@nju.edu.cn"}': "sunping@nju.edu.cn",
-    '{"preecer@uah.edu James.Burgess@uah.edu charles.dermer@nrl.navy.mil nicola.omodei@stanford.edu azk@mpe"}': "charles.dermer@nrl.navy.mil",
-    '{"sjzhu@umd.edu jchiang@slac.stanford.edu charles.dermer@nrl.navy.mil nicola.omodei@stanford.edu giaco"}': "charles.dermer@nrl.navy.mil",
+    (
+        '{"preecer@uah.edu James.Burgess@uah.edu charles.dermer@nrl.navy.mil '
+        'nicola.omodei@stanford.edu azk@mpe"}'
+    ): "charles.dermer@nrl.navy.mil",
+    (
+        '{"sjzhu@umd.edu jchiang@slac.stanford.edu charles.dermer@nrl.navy.mil '
+        'nicola.omodei@stanford.edu giaco"}'
+    ): "charles.dermer@nrl.navy.mil",
     '{"bjbohr@nbi,dk"}': "bjbohr@nbi.dk",
     '{"31848346@qq.com xiaofangsun@hotmail.com yongfan011@gzhmu.edu.cn"}': "yongfan011@gzhmu.edu.cn",
 }
@@ -101,7 +106,7 @@ def transform_paper_file(full_file_name_source: str):
 
     output_data = {}
     for paper_id, paper_info in input_data.items():
-        output_row: Dict[str, Any] = {}
+        output_row: dict[str, Any] = {}
         output_row["paper_id"] = int(paper_id)
         output_row["title"] = paper_info["title"] if not is_empty_value(paper_info["title"]) else None
         output_row["abstract"] = paper_info["abstract"] if not is_empty_value(paper_info["abstract"]) else None
@@ -110,7 +115,7 @@ def transform_paper_file(full_file_name_source: str):
         )
         output_row["venue"] = paper_info["venue"] if not is_empty_value(paper_info["venue"]) else None
 
-        assert type(paper_info["year"]) == int
+        assert isinstance(paper_info["year"], int)
         output_row["year"] = paper_info["year"]
 
         assert paper_info["sources"].startswith("{")
@@ -138,12 +143,12 @@ def transform_signature_file(full_file_name_source: str):
 
     output_data = {}
     for signature_id, signature_info in input_data.items():
-        output_row: Dict[str, Any] = {}
+        output_row: dict[str, Any] = {}
         output_row["signature_id"] = str(signature_id)
         output_row["paper_id"] = int(signature_info["paperid"])
 
         author_info = signature_info["authorinfo"]
-        output_author_info: Dict[str, Any] = {}
+        output_author_info: dict[str, Any] = {}
         output_author_info["position"] = int(author_info["position"])
         output_author_info["block"] = author_info["block"]
         output_author_info["first"] = author_info["first"] if not is_empty_value(author_info["first"]) else None
@@ -159,11 +164,12 @@ def transform_signature_file(full_file_name_source: str):
             emails = EMAIL_SPECIAL_CASES.get(author_info["emails"], author_info["emails"])
             raw_emails = [email for email in re.split(r"\s|,", emails.strip('{"').strip('"}')) if email]
             # Keep deterministic order from source while dropping duplicates.
-            emails_list: List[str] = list(dict.fromkeys(raw_emails))
+            emails_list: list[str] = list(dict.fromkeys(raw_emails))
             assert not any(re.search(r"[^\\]\"", emails) for emails in emails_list), emails_list
             if len(emails_list) != 1:
                 print(
-                    f"WARNING: skipping poorly formatted email {author_info['emails']} for {author_info['first']} {author_info['last']} on {signature_info['paperid']}"
+                    f"WARNING: skipping poorly formatted email {author_info['emails']} for "
+                    f"{author_info['first']} {author_info['last']} on {signature_info['paperid']}"
                 )
             output_author_info["email"] = emails_list[0] if len(emails_list) > 0 else None
 
@@ -171,7 +177,7 @@ def transform_signature_file(full_file_name_source: str):
             output_author_info["affiliations"] = []
         else:
             affiliations = AFFILIATION_SPECIAL_CASES.get(author_info["affiliations"], author_info["affiliations"])
-            affiliations_list: List[str] = list(set(affiliations.strip('{"').strip('"}').split('","')))
+            affiliations_list: list[str] = list(set(affiliations.strip('{"').strip('"}').split('","')))
             assert len(affiliations_list) >= 1
             if any(re.search(r"[^\\]\"", affiliation) for affiliation in affiliations_list):
                 print(f"WARNING: affiliation has a quote {affiliations_list}")

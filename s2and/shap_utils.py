@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from os.path import join
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Union
 
 import numpy as np
 
@@ -88,11 +89,11 @@ def _shap_values_for_tree_model(model, X, class_index: int = 1) -> np.ndarray:
 
 def _safe_summary_plot(
     shap_values: np.ndarray,
-    X: Union[np.ndarray, Any],
+    X: np.ndarray | Any,
     feature_names: Sequence[str],
     shap_plot_type: str,
     outpath: str,
-    fig_num: Optional[int] = None,
+    fig_num: int | None = None,
 ) -> None:
     """
     Prefer legacy summary_plot for cross-version compatibility.
@@ -136,9 +137,9 @@ def compute_shap_summary_plots(
     figs_path: str,
     nameless_classifier=None,
     nameless_X=None,
-    nameless_feature_names: Optional[Sequence[str]] = None,
+    nameless_feature_names: Sequence[str] | None = None,
     class_index: int = 1,
-) -> List[str]:
+) -> list[str]:
     """
     Computes SHAP values and writes summary plots as PNGs.
     Returns list of written file paths.
@@ -166,13 +167,13 @@ def compute_shap_summary_plots(
     -------
     List[str] : list of saved file paths
     """
-    outputs: List[str] = []
+    outputs: list[str] = []
     assert shap_feature_names is not None
 
     # Branch 1: ensemble averaging
     ensemble = _iter_estimators(classifier)
     if ensemble:
-        vals_list: List[np.ndarray] = []
+        vals_list: list[np.ndarray] = []
         for c in ensemble:
             base = _base_estimator(c)
             vals_list.append(_shap_values_for_tree_model(base, X, class_index))
@@ -184,7 +185,7 @@ def compute_shap_summary_plots(
 
     # Branch 2: two-model (named + nameless)
     if nameless_classifier is not None:
-        pairs: List[Tuple[object, np.ndarray, Sequence[str], str]] = []
+        pairs: list[tuple[object, np.ndarray, Sequence[str], str]] = []
 
         base_a = _base_estimator(classifier)
         vals_a = _shap_values_for_tree_model(base_a, X, class_index)

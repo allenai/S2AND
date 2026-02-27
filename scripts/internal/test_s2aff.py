@@ -1,4 +1,6 @@
 # mypy: ignore-errors
+# ruff: noqa: E402
+
 """
 In this script we try to answer the question: if we deploy S2AFF, will S2AND care?
 
@@ -13,10 +15,11 @@ import os
 
 os.environ["OMP_NUM_THREADS"] = "4"
 
-import pickle
 import numpy as np
+
 from s2and.data import ANDData
 from s2and.eval import cluster_eval
+from s2and.serialization import load_pickle_with_verified_label_encoder_compat
 
 data_original = "/net/nfs2.s2-research/phantasm/S2AND/s2and_mini/"
 data_s2aff = "/home/sergey/S2AFF/data/s2and_mini/"
@@ -36,13 +39,11 @@ datasets = [
 ]
 
 # this is the prod 1.1 model
-with open("data/production_model_v1.1.pickle", "rb") as f:
-    clusterer = pickle.load(f)["clusterer"]
-    clusterer.use_cache = False
+clusterer = load_pickle_with_verified_label_encoder_compat("data/production_model_v1.1.pickle")["clusterer"]
+clusterer.use_cache = False
 
-with open("data/model_dump_specter2.pickle", "rb") as f:
-    clusterer2 = pickle.load(f)["clusterer"]
-    clusterer2.use_cache = False
+clusterer2 = load_pickle_with_verified_label_encoder_compat("data/model_dump_specter2.pickle")["clusterer"]
+clusterer2.use_cache = False
 
 
 def extract_a_nice_trials_object(clusterer):
@@ -56,7 +57,7 @@ def extract_a_nice_trials_object(clusterer):
     sort_indices = np.argsort(eps)
     eps = np.array(eps)[sort_indices]
     losses = np.array(losses)[sort_indices]
-    return {i: j for i, j in zip(eps, losses)}
+    return {i: j for i, j in zip(eps, losses, strict=False)}
 
 
 trials1 = extract_a_nice_trials_object(clusterer)
@@ -117,8 +118,8 @@ for i in range(len(datasets)):
 
 
 # dive in
-from s2and.featurizer import featurize
 from s2and.consts import DEFAULT_CHUNK_SIZE
+from s2and.featurizer import featurize
 
 dataset_name = "pubmed"
 
@@ -201,10 +202,30 @@ for key in b3_metrics_per_signature1.keys():
 featurization_info = clusterer.featurizer_info
 nameless_featurization_info = clusterer.nameless_featurizer_info
 
-_, _, test1 = featurize(anddata1, featurization_info, n_jobs=4, use_cache=False, chunk_size=DEFAULT_CHUNK_SIZE, nameless_featurizer_info=nameless_featurization_info, nan_value=np.nan)  # type: ignore
+_, _, test1 = featurize(
+    anddata1,
+    featurization_info,
+    n_jobs=4,
+    use_cache=False,
+    chunk_size=DEFAULT_CHUNK_SIZE,
+    nameless_featurizer_info=nameless_featurization_info,
+    nan_value=np.nan,
+)  # type: ignore
+if test1 is None:
+    raise RuntimeError("Expected featurize to return test split outputs for anddata1")
 X_test1, y_test1, nameless_X_test1 = test1
 
-_, _, test2 = featurize(anddata2, featurization_info, n_jobs=4, use_cache=False, chunk_size=DEFAULT_CHUNK_SIZE, nameless_featurizer_info=nameless_featurization_info, nan_value=np.nan)  # type: ignore
+_, _, test2 = featurize(
+    anddata2,
+    featurization_info,
+    n_jobs=4,
+    use_cache=False,
+    chunk_size=DEFAULT_CHUNK_SIZE,
+    nameless_featurizer_info=nameless_featurization_info,
+    nan_value=np.nan,
+)  # type: ignore
+if test2 is None:
+    raise RuntimeError("Expected featurize to return test split outputs for anddata2")
 X_test2, y_test2, nameless_X_test2 = test2
 
 aff_ind = featurization_info.get_feature_names().index("affiliation_overlap")

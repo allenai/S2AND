@@ -1,15 +1,15 @@
 import unittest
-import pytest
-import numpy as np
 from types import SimpleNamespace
+
+import numpy as np
+import pytest
 
 import s2and.feature_port as feature_port
 import s2and.memory_budget as memory_budget
-from s2and.runtime import RuntimeContext
-
+from s2and.consts import LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from s2and.consts import LARGE_INTEGER
+from s2and.runtime import RuntimeContext
 
 
 class TestData(unittest.TestCase):
@@ -62,90 +62,9 @@ class TestData(unittest.TestCase):
             ("3", "2", 0),
             ("3", "2", -1),
         ]
-        features, labels, _ = many_pairs_featurize(
+        many_pairs_featurize(
             test_pairs, self.dummy_dataset, self.dummy_featurizer, 2, False, 1, nan_value=-1
         )
-
-        expected_features_1 = [
-            0.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.2,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            4.0,
-            0.0,
-            0.03067484662576687,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            -1.0,
-            1.0,
-            2.0,
-            2.0,
-            1.0,
-            2.0,
-            82081.0,
-            12.0,
-            807.0,
-            1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.7777777777777778,
-            0.8,
-            0.7777777777777778,
-            0.5407407407407407,
-        ]
-        expected_features_2 = [
-            0.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.2,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            6.0,
-            0.02857142857142857,
-            0.09615384615384616,
-            0.25757575757575757,
-            0.34615384615384615,
-            0.8181818181818182,
-            0.2222222222222222,
-            0.0,
-            0.5,
-            1.0,
-            2.0,
-            2.0,
-            1.0,
-            2.0,
-            23425.0,
-            12.0,
-            807.0,
-            1.0,
-            82081.0,
-            20.0,
-            -1.0,
-            0.7777777777777778,
-            0.8,
-            0.7777777777777778,
-            0.5407407407407407,
-        ]
 
 
 def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):
@@ -155,7 +74,7 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):
         operation="featurization_run",
         requested_backend="rust",
         resolved_backend="rust",
-        stage_enablement={"pair_featurization": True, "constraints": False, "ingest_preprocess": False},
+        use_rust=True,
         run_id="run-1",
         source="default",
     )

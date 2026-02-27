@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from s2and.runtime import Backend, RuntimeStage
+from s2and.runtime import Backend
 
 RustBuildPath = Literal["from_dataset", "from_json_paths"]
 
@@ -37,25 +37,22 @@ def build_rust_lifecycle_policy(
     has_signatures_path: bool,
     has_papers_path: bool,
     preprocess: bool,
-    stage_enablement: dict[RuntimeStage, bool],
+    use_rust: bool,
+    use_sinonym_overwrite: bool = False,
 ) -> RustLifecyclePolicy:
     if backend == "python":
         return PYTHON_ONLY_POLICY
 
     is_inference = _is_inference_mode(mode)
-    ingest_enabled = bool(stage_enablement.get("ingest_preprocess", False))
-    pair_enabled = bool(stage_enablement.get("pair_featurization", False))
-    constraints_enabled = bool(stage_enablement.get("constraints", False))
 
-    rust_json_ingest_requested = is_inference and ingest_enabled
     rust_build_path: RustBuildPath = (
         "from_json_paths" if is_inference and has_signatures_path and has_papers_path else "from_dataset"
     )
 
-    skip_python_paper_preprocess = bool(preprocess and rust_json_ingest_requested)
-    defer_signature_ngrams_to_rust = bool(preprocess and ingest_enabled)
+    skip_python_paper_preprocess = bool(preprocess and use_rust and rust_build_path == "from_json_paths")
+    defer_signature_ngrams_to_rust = bool(preprocess and use_rust)
     defer_signature_fields_to_rust = bool(
-        preprocess and ingest_enabled and pair_enabled and constraints_enabled and not rust_json_ingest_requested
+        preprocess and use_rust and not (is_inference and use_rust)
     )
 
     return RustLifecyclePolicy(

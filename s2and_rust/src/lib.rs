@@ -2195,6 +2195,238 @@ impl RustFeaturizer {
         feats
     }
 
+    fn constraint_value_from_records(
+        &self,
+        sig_id1: &str,
+        sig_id2: &str,
+        s1: &SignatureData,
+        s2: &SignatureData,
+        p1: &PaperData,
+        p2: &PaperData,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+    ) -> Option<f64> {
+        let sig1 = sig_id1.to_string();
+        let sig2 = sig_id2.to_string();
+        if self
+            .cluster_seeds_disallow
+            .contains(&(sig1.clone(), sig2.clone()))
+            || self
+                .cluster_seeds_disallow
+                .contains(&(sig2.clone(), sig1.clone()))
+        {
+            return Some(self.cluster_seed_disallow_value);
+        }
+
+        if !incremental_dont_use_cluster_seeds {
+            if let (Some(c1), Some(c2)) = (
+                self.cluster_seeds_require.get(sig_id1),
+                self.cluster_seeds_require.get(sig_id2),
+            ) {
+                if c1 == c2 {
+                    return Some(self.cluster_seed_require_value);
+                }
+            }
+        }
+
+        if dont_merge_cluster_seeds {
+            if let (Some(c1), Some(c2)) = (
+                self.cluster_seeds_require.get(sig_id1),
+                self.cluster_seeds_require.get(sig_id2),
+            ) {
+                if c1 != c2 {
+                    return Some(self.cluster_seed_disallow_value);
+                }
+            }
+        }
+
+        if let (Some(o1), Some(o2)) = (s1.orcid.as_deref(), s2.orcid.as_deref()) {
+            if o1 == o2 {
+                return Some(low_value);
+            }
+        }
+
+        let last1 = s1.last_normalized.as_deref().unwrap_or("");
+        let last2 = s2.last_normalized.as_deref().unwrap_or("");
+        if !lasts_equivalent_for_constraint(last1, last2) {
+            return Some(high_value);
+        }
+
+        let first1 = s1.first.as_deref().unwrap_or("");
+        let first2 = s2.first.as_deref().unwrap_or("");
+        if !first1.is_empty() && !first2.is_empty() {
+            if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
+                if c1 != c2 {
+                    return Some(high_value);
+                }
+            }
+        }
+
+        if p1.is_reliable && p2.is_reliable {
+            let l1 = p1.predicted_language.as_deref();
+            let l2 = p2.predicted_language.as_deref();
+            if l1 != l2 {
+                return Some(high_value);
+            }
+        }
+
+        let f1_join: String = first1.split_whitespace().collect();
+        let f2_join: String = first2.split_whitespace().collect();
+        let f1_tok = first1.split_whitespace().next().unwrap_or(first1);
+        let f2_tok = first2.split_whitespace().next().unwrap_or(first2);
+        let known_alias = name_tuple_contains(&self.name_tuples, first1, first2)
+            || name_tuple_contains(&self.name_tuples, &f1_join, &f2_join)
+            || name_tuple_contains(&self.name_tuples, f1_tok, f2_tok);
+
+        let prefix = same_prefix_tokens(first1, first2);
+        if !prefix && !known_alias {
+            return Some(high_value);
+        }
+
+        let middle1_str = s1.middle.as_deref().unwrap_or("");
+        let middle1_tokens: Vec<&str> = middle1_str.split_whitespace().collect();
+        if !middle1_tokens.is_empty() {
+            let middle2_str = s2.middle.as_deref().unwrap_or("");
+            let middle2_tokens: Vec<&str> = middle2_str.split_whitespace().collect();
+            if !middle2_tokens.is_empty() {
+                let middle1_set: HashSet<&str> = middle1_tokens.iter().copied().collect();
+                let middle2_set: HashSet<&str> = middle2_tokens.iter().copied().collect();
+                let mut overlapping_affixes: HashSet<&str> = HashSet::new();
+                for token in middle1_set.intersection(&middle2_set) {
+                    if is_dropped_affix(token) {
+                        overlapping_affixes.insert(*token);
+                    }
+                }
+
+                let middle_1_all: Vec<&str> = middle1_tokens
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && !overlapping_affixes.contains(w))
+                    .collect();
+                let middle_2_all: Vec<&str> = middle2_tokens
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && !overlapping_affixes.contains(w))
+                    .collect();
+
+                let middle_1_words: HashSet<&str> = middle_1_all
+                    .iter()
+                    .copied()
+                    .filter(|w| py_len(w) > 1)
+                    .collect();
+                let middle_2_words: HashSet<&str> = middle_2_all
+                    .iter()
+                    .copied()
+                    .filter(|w| py_len(w) > 1)
+                    .collect();
+
+                let mut middle_1_firsts: HashSet<char> = HashSet::new();
+                for word in middle_1_all.iter() {
+                    if let Some(ch) = word.chars().next() {
+                        middle_1_firsts.insert(ch);
+                    }
+                }
+                let mut middle_2_firsts: HashSet<char> = HashSet::new();
+                for word in middle_2_all.iter() {
+                    if let Some(ch) = word.chars().next() {
+                        middle_2_firsts.insert(ch);
+                    }
+                }
+
+                let conflicting_initials = !middle_1_firsts.is_empty()
+                    && !middle_2_firsts.is_empty()
+                    && middle_1_firsts.is_disjoint(&middle_2_firsts);
+
+                let mut middle_1_chars: HashSet<char> = HashSet::new();
+                for word in middle_1_words.iter() {
+                    for ch in word.chars() {
+                        middle_1_chars.insert(ch);
+                    }
+                }
+                let mut middle_2_chars: HashSet<char> = HashSet::new();
+                for word in middle_2_words.iter() {
+                    for ch in word.chars() {
+                        middle_2_chars.insert(ch);
+                    }
+                }
+
+                let conflicting_full_names = !middle_1_words.is_empty()
+                    && !middle_2_words.is_empty()
+                    && middle_1_words.is_disjoint(&middle_2_words)
+                    && middle_1_chars != middle_2_chars;
+
+                if conflicting_initials || conflicting_full_names {
+                    return Some(high_value);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn get_constraint_value_for_pair(
+        &self,
+        sig_id1: &str,
+        sig_id2: &str,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+    ) -> PyResult<Option<f64>> {
+        let s1 = self
+            .signatures
+            .get(sig_id1)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id1.to_string()))?;
+        let s2 = self
+            .signatures
+            .get(sig_id2)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id2.to_string()))?;
+        let p1 = self
+            .papers
+            .get(&s1.paper_id)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(s1.paper_id.to_string()))?;
+        let p2 = self
+            .papers
+            .get(&s2.paper_id)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(s2.paper_id.to_string()))?;
+        Ok(self.constraint_value_from_records(
+            sig_id1,
+            sig_id2,
+            s1,
+            s2,
+            p1,
+            p2,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+        ))
+    }
+
+    fn validate_constraint_pair_inputs(&self, sig_id1: &str, sig_id2: &str) -> PyResult<()> {
+        let s1 = self
+            .signatures
+            .get(sig_id1)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id1.to_string()))?;
+        let s2 = self
+            .signatures
+            .get(sig_id2)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id2.to_string()))?;
+        if self.papers.get(&s1.paper_id).is_none() {
+            return Err(pyo3::exceptions::PyKeyError::new_err(
+                s1.paper_id.to_string(),
+            ));
+        }
+        if self.papers.get(&s2.paper_id).is_none() {
+            return Err(pyo3::exceptions::PyKeyError::new_err(
+                s2.paper_id.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn signature_id_order(&self) -> Vec<String> {
         if !self.signature_ids.is_empty() {
             return self.signature_ids.clone();
@@ -2570,8 +2802,10 @@ impl RustFeaturizer {
                         &unidecode_char_map,
                     ));
                 }
-                let prefiltered =
-                    prefilter_affiliation_text(&normalized_affiliation_list, &affiliation_stopwords);
+                let prefiltered = prefilter_affiliation_text(
+                    &normalized_affiliation_list,
+                    &affiliation_stopwords,
+                );
                 if !prefiltered.is_empty() {
                     affiliation_text_for_compute = Some(prefiltered);
                 }
@@ -3433,179 +3667,142 @@ impl RustFeaturizer {
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
     ) -> PyResult<Option<f64>> {
-        let s1 = self
-            .signatures
-            .get(sig_id1)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id1.to_string()))?;
-        let s2 = self
-            .signatures
-            .get(sig_id2)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id2.to_string()))?;
-        let p1 = self
-            .papers
-            .get(&s1.paper_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(s1.paper_id.to_string()))?;
-        let p2 = self
-            .papers
-            .get(&s2.paper_id)
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(s2.paper_id.to_string()))?;
+        self.get_constraint_value_for_pair(
+            sig_id1,
+            sig_id2,
+            low_value,
+            high_value,
+            dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds,
+        )
+    }
 
-        let sig1 = sig_id1.to_string();
-        let sig2 = sig_id2.to_string();
-        if self
-            .cluster_seeds_disallow
-            .contains(&(sig1.clone(), sig2.clone()))
-            || self
-                .cluster_seeds_disallow
-                .contains(&(sig2.clone(), sig1.clone()))
-        {
-            return Ok(Some(self.cluster_seed_disallow_value));
+    #[pyo3(
+        signature = (
+            pairs,
+            low_value = 0.0,
+            high_value = 10000.0,
+            dont_merge_cluster_seeds = true,
+            incremental_dont_use_cluster_seeds = false,
+            num_threads = None
+        )
+    )]
+    fn get_constraints_matrix(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        num_threads: Option<usize>,
+    ) -> PyResult<Vec<Option<f64>>> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
         }
 
-        if !incremental_dont_use_cluster_seeds {
-            if let (Some(c1), Some(c2)) = (
-                self.cluster_seeds_require.get(sig_id1),
-                self.cluster_seeds_require.get(sig_id2),
-            ) {
-                if c1 == c2 {
-                    return Ok(Some(self.cluster_seed_require_value));
-                }
+        for (sig_id1, sig_id2) in pairs.iter() {
+            self.validate_constraint_pair_inputs(sig_id1, sig_id2)?;
+        }
+
+        let values = py.allow_threads(|| {
+            let compute = || {
+                pairs
+                    .par_iter()
+                    .map(|(sig_id1, sig_id2)| {
+                        let s1 = self.signatures.get(sig_id1).unwrap();
+                        let s2 = self.signatures.get(sig_id2).unwrap();
+                        let p1 = self.papers.get(&s1.paper_id).unwrap();
+                        let p2 = self.papers.get(&s2.paper_id).unwrap();
+                        self.constraint_value_from_records(
+                            sig_id1,
+                            sig_id2,
+                            s1,
+                            s2,
+                            p1,
+                            p2,
+                            low_value,
+                            high_value,
+                            dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        Ok(values)
+    }
+
+    #[pyo3(
+        signature = (
+            pairs,
+            low_value = 0.0,
+            high_value = 10000.0,
+            dont_merge_cluster_seeds = true,
+            incremental_dont_use_cluster_seeds = false,
+            num_threads = None
+        )
+    )]
+    fn get_constraints_matrix_indexed(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(u32, u32)>,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        num_threads: Option<usize>,
+    ) -> PyResult<Vec<Option<f64>>> {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        for (left_idx, right_idx) in pairs.iter() {
+            let left = *left_idx as usize;
+            let right = *right_idx as usize;
+            if left >= signature_count || right >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "pair index out of range: left={} right={} signature_count={}",
+                    left, right, signature_count
+                )));
             }
+            self.validate_constraint_pair_inputs(&signature_ids[left], &signature_ids[right])?;
         }
 
-        if dont_merge_cluster_seeds {
-            if let (Some(c1), Some(c2)) = (
-                self.cluster_seeds_require.get(sig_id1),
-                self.cluster_seeds_require.get(sig_id2),
-            ) {
-                if c1 != c2 {
-                    return Ok(Some(self.cluster_seed_disallow_value));
-                }
-            }
-        }
+        let values = py.allow_threads(|| {
+            let compute = || {
+                pairs
+                    .par_iter()
+                    .map(|(left_idx, right_idx)| {
+                        let left_id = &signature_ids[*left_idx as usize];
+                        let right_id = &signature_ids[*right_idx as usize];
+                        let s1 = self.signatures.get(left_id).unwrap();
+                        let s2 = self.signatures.get(right_id).unwrap();
+                        let p1 = self.papers.get(&s1.paper_id).unwrap();
+                        let p2 = self.papers.get(&s2.paper_id).unwrap();
+                        self.constraint_value_from_records(
+                            left_id,
+                            right_id,
+                            s1,
+                            s2,
+                            p1,
+                            p2,
+                            low_value,
+                            high_value,
+                            dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
 
-        if let (Some(o1), Some(o2)) = (s1.orcid.as_deref(), s2.orcid.as_deref()) {
-            if o1 == o2 {
-                return Ok(Some(low_value));
-            }
-        }
-
-        let last1 = s1.last_normalized.as_deref().unwrap_or("");
-        let last2 = s2.last_normalized.as_deref().unwrap_or("");
-        if !lasts_equivalent_for_constraint(last1, last2) {
-            return Ok(Some(high_value));
-        }
-
-        let first1 = s1.first.as_deref().unwrap_or("");
-        let first2 = s2.first.as_deref().unwrap_or("");
-        if !first1.is_empty() && !first2.is_empty() {
-            if let (Some(c1), Some(c2)) = (first1.chars().next(), first2.chars().next()) {
-                if c1 != c2 {
-                    return Ok(Some(high_value));
-                }
-            }
-        }
-
-        if p1.is_reliable && p2.is_reliable {
-            let l1 = p1.predicted_language.as_deref();
-            let l2 = p2.predicted_language.as_deref();
-            if l1 != l2 {
-                return Ok(Some(high_value));
-            }
-        }
-
-        let f1_join: String = first1.split_whitespace().collect();
-        let f2_join: String = first2.split_whitespace().collect();
-        let f1_tok = first1.split_whitespace().next().unwrap_or(first1);
-        let f2_tok = first2.split_whitespace().next().unwrap_or(first2);
-        let known_alias = name_tuple_contains(&self.name_tuples, first1, first2)
-            || name_tuple_contains(&self.name_tuples, &f1_join, &f2_join)
-            || name_tuple_contains(&self.name_tuples, f1_tok, f2_tok);
-
-        let prefix = same_prefix_tokens(first1, first2);
-        if !prefix && !known_alias {
-            return Ok(Some(high_value));
-        }
-
-        let middle1_str = s1.middle.as_deref().unwrap_or("");
-        let middle1_tokens: Vec<&str> = middle1_str.split_whitespace().collect();
-        if !middle1_tokens.is_empty() {
-            let middle2_str = s2.middle.as_deref().unwrap_or("");
-            let middle2_tokens: Vec<&str> = middle2_str.split_whitespace().collect();
-            if !middle2_tokens.is_empty() {
-                let middle1_set: HashSet<&str> = middle1_tokens.iter().copied().collect();
-                let middle2_set: HashSet<&str> = middle2_tokens.iter().copied().collect();
-                let mut overlapping_affixes: HashSet<&str> = HashSet::new();
-                for token in middle1_set.intersection(&middle2_set) {
-                    if is_dropped_affix(token) {
-                        overlapping_affixes.insert(*token);
-                    }
-                }
-
-                let middle_1_all: Vec<&str> = middle1_tokens
-                    .iter()
-                    .copied()
-                    .filter(|w| !w.is_empty() && !overlapping_affixes.contains(w))
-                    .collect();
-                let middle_2_all: Vec<&str> = middle2_tokens
-                    .iter()
-                    .copied()
-                    .filter(|w| !w.is_empty() && !overlapping_affixes.contains(w))
-                    .collect();
-
-                let middle_1_words: HashSet<&str> = middle_1_all
-                    .iter()
-                    .copied()
-                    .filter(|w| py_len(w) > 1)
-                    .collect();
-                let middle_2_words: HashSet<&str> = middle_2_all
-                    .iter()
-                    .copied()
-                    .filter(|w| py_len(w) > 1)
-                    .collect();
-
-                let mut middle_1_firsts: HashSet<char> = HashSet::new();
-                for word in middle_1_all.iter() {
-                    if let Some(ch) = word.chars().next() {
-                        middle_1_firsts.insert(ch);
-                    }
-                }
-                let mut middle_2_firsts: HashSet<char> = HashSet::new();
-                for word in middle_2_all.iter() {
-                    if let Some(ch) = word.chars().next() {
-                        middle_2_firsts.insert(ch);
-                    }
-                }
-
-                let conflicting_initials = !middle_1_firsts.is_empty()
-                    && !middle_2_firsts.is_empty()
-                    && middle_1_firsts.is_disjoint(&middle_2_firsts);
-
-                let mut middle_1_chars: HashSet<char> = HashSet::new();
-                for word in middle_1_words.iter() {
-                    for ch in word.chars() {
-                        middle_1_chars.insert(ch);
-                    }
-                }
-                let mut middle_2_chars: HashSet<char> = HashSet::new();
-                for word in middle_2_words.iter() {
-                    for ch in word.chars() {
-                        middle_2_chars.insert(ch);
-                    }
-                }
-
-                let conflicting_full_names = !middle_1_words.is_empty()
-                    && !middle_2_words.is_empty()
-                    && middle_1_words.is_disjoint(&middle_2_words)
-                    && middle_1_chars != middle_2_chars;
-
-                if conflicting_initials || conflicting_full_names {
-                    return Ok(Some(high_value));
-                }
-            }
-        }
-
-        Ok(None)
+        Ok(values)
     }
 
     fn featurize_pair(&self, sig_id1: &str, sig_id2: &str) -> PyResult<Vec<f64>> {

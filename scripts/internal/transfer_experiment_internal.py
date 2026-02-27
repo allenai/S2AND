@@ -1,59 +1,65 @@
+# ruff: noqa: E402
+
 """
 Results (s2aff is missing but it made things worse)
 -------
                    aminer  arnetminer  inspire kisti   orcid  pubmed   qian   zbmath
 specterV1           0.703       0.881    0.934  0.951  0.965   0.936  0.924   0.905
 specterV2           0.743       0.897    0.931  0.961  0.966   0.920  0.948   0.905
-+ filtered          0.747       0.897    0.934  0.959  0.964   0.920  0.949   0.908  
++ filtered          0.747       0.897    0.934  0.959  0.964   0.920  0.949   0.908
 + no extra prefix   0.414       0.366    0.545  0.321  0.678   0.380  0.288   0.500
 """
 
-import os
 import json
+import os
 
 # this is from when we updated S2AND with SPECTER2 and also with S2AFF outputs
-SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][1]
+SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][0]
 SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]
 NAME_TUPLES_VARIANT = ["original", "filtered"][1]
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
 DATA_DIR = CONFIG["internal_data_dir"]
 if not os.path.exists(DATA_DIR):
-    PROJECT_ROOT_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    PROJECT_ROOT_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     DATA_DIR = os.path.join(PROJECT_ROOT_PATH, "data")
 
 os.environ["S2AND_CACHE"] = os.path.join(DATA_DIR, ".feature_cache")
 os.environ["OMP_NUM_THREADS"] = "8"
+# Keep only a tiny number of in-memory Rust featurizers in this multi-dataset script
+# to prevent native-memory buildup across datasets.
+os.environ.setdefault("S2AND_RUST_FEATURIZER_MAX_INMEM", "1")
 
-import copy
 import argparse
+import copy
 import logging
 import pickle
-from typing import Dict, Any, Optional, List
 from collections import defaultdict
+from typing import Any
 
-from tqdm import tqdm
 import numpy as np
 import pandas as pd
-
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.cluster import DBSCAN
-from sklearn.linear_model import BayesianRidge, LogisticRegressionCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.impute import IterativeImputer
-from sklearn.pipeline import make_pipeline
-
-from s2and.data import ANDData
-from s2and.featurizer import featurize, FeaturizationInfo
-from s2and.model import PairwiseModeler, Clusterer, FastCluster
-from s2and.eval import pairwise_eval, cluster_eval, facet_eval
-from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE, NAME_COUNTS_PATH
-from s2and.file_cache import cached_path
-from s2and.plotting_utils import plot_facets
 from hyperopt import hp
+from sklearn.cluster import DBSCAN
+from sklearn.experimental import enable_iterative_imputer  # noqa
+from sklearn.impute import IterativeImputer
+from sklearn.linear_model import BayesianRidge, LogisticRegressionCV
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
+
+from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
+from s2and.data import ANDData
+from s2and.eval import cluster_eval, facet_eval, pairwise_eval
+from s2and.featurizer import FeaturizationInfo, featurize
+from s2and.file_cache import cached_path
+from s2and.model import Clusterer, FastCluster, PairwiseModeler
+from s2and.plotting_utils import plot_facets
 
 logger = logging.getLogger("s2and")
 
@@ -196,7 +202,7 @@ def summary_features_analysis(
             union_s2_venue_f1,
             union_s2_references_f1,
             union_s2_coauthors_f1,
-        ],
+        ], strict=False,
     ):
         s2and_pres_avg = _safe_mean(s2and_feature_facet[1])
         s2and_abs_avg = _safe_mean(s2and_feature_facet[0])
@@ -251,7 +257,7 @@ def disparity_analysis(
     s2_f1 = []
     keylist = []
 
-    for facet, f1 in comb_s2and_facet_f1.items():
+    for facet in comb_s2and_facet_f1:
         s2_facet_vals = comb_s2_facet_f1.get(facet, [])
         if len(comb_s2and_facet_f1[facet]) == 0 or len(s2_facet_vals) == 0:
             continue
@@ -384,7 +390,7 @@ def update_facets(
             comb_venue_f1,
             comb_references_f1,
             comb_coauthors_f1,
-        ],
+        ], strict=False,
     ):
         for key, f1 in individual_facet.items():
             combined_facet[key].extend(f1)
@@ -421,7 +427,7 @@ def main(
     skip_individual_models: bool,
     skip_union_models: bool,
     n_train_pairs_size: int,
-    feature_groups_to_skip: List[str],
+    feature_groups_to_skip: list[str],
     use_linear_pairwise_model: bool,
     gender_ethnicity_available: bool,
     use_cache: bool,
@@ -435,7 +441,7 @@ def main(
     N_TRAIN_PAIRS_SIZE = n_train_pairs_size
     USE_CACHE = use_cache
     logger.info(
-        (
+        
             f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
             f"N_JOBS={N_JOBS}, "
             f"USE_MONOTONE_CONSTRAINTS={USE_MONOTONE_CONSTRAINTS}, "
@@ -450,7 +456,7 @@ def main(
             f"feature_groups_to_skip={feature_groups_to_skip}, "
             f"use_linear_pairwise_model={use_linear_pairwise_model}, "
             f"USE_CACHE={USE_CACHE}, "
-        )
+        
     )
 
     FEATURES_TO_USE = [
@@ -492,21 +498,23 @@ def main(
         "qian",
         "zbmath",
         "augmented",
+        "inventors_s2and",
     ]
 
     TARGET_DATASET_NAMES = [
-        "aminer",
-        "arnetminer",
-        "inspire",
-        "kisti",
-        "orcid",
-        "pubmed",
-        "qian",
-        "zbmath",
-        "augmented",
+        # "aminer",
+        # "arnetminer",
+        # "inspire",
+        # "kisti",
+        # "orcid",
+        # "pubmed",
+        # "qian",
+        # "zbmath",
+        # "augmented",
+        "inventors_s2and",
     ]
 
-    DATASETS_FOR_UNION: List[str] = [
+    DATASETS_FOR_UNION: list[str] = [
         "aminer",
         "arnetminer",
         "inspire",
@@ -516,6 +524,7 @@ def main(
         "qian",
         "zbmath",
         "augmented",
+        "inventors_s2and",
     ]
 
     if not exclude_medline:
@@ -527,10 +536,10 @@ def main(
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
     NAN_VALUE = np.nan
 
-    cluster_search_space: Dict[str, Any] = {
+    cluster_search_space: dict[str, Any] = {
         "eps": hp.uniform("choice", 0, 1),
     }
-    pairwise_search_space: Optional[Dict[str, Any]] = None
+    pairwise_search_space: dict[str, Any] | None = None
     estimator: Any = None
     if use_linear_pairwise_model:
         estimator = make_pipeline(
@@ -585,11 +594,11 @@ def main(
     }
     logger.info("loaded name counts")
 
-    datasets: Dict[str, Any] = {}
+    datasets: dict[str, Any] = {}
     for dataset_name in tqdm(DATASETS_TO_TRAIN, desc="Processing datasets and fitting base models"):
         logger.info("")
         logger.info(f"processing dataset {dataset_name}")
-        clusters_path: Optional[str] = None
+        clusters_path: str | None = None
         if dataset_name not in PAIRWISE_ONLY_DATASETS:
             clusters_path = os.path.join(DATA_DIR, dataset_name, dataset_name + "_clusters.json")
             train_pairs_path = None
@@ -627,7 +636,15 @@ def main(
         logger.info(f"dataset {dataset_name} loaded")
 
         logger.info(f"featurizing {dataset_name}")
-        train, val, test = featurize(anddata, FEATURIZER_INFO, n_jobs=N_JOBS, use_cache=USE_CACHE, chunk_size=DEFAULT_CHUNK_SIZE, nameless_featurizer_info=NAMELESS_FEATURIZER_INFO, nan_value=NAN_VALUE)  # type: ignore
+        train, val, test = featurize(
+            anddata,
+            FEATURIZER_INFO,
+            n_jobs=N_JOBS,
+            use_cache=USE_CACHE,
+            chunk_size=DEFAULT_CHUNK_SIZE,
+            nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
+            nan_value=NAN_VALUE,
+        )  # type: ignore
         X_train, y_train, nameless_X_train = train
         # if we sampled more training pairs than required, then we downsample
         if len(y_train) > N_TRAIN_PAIRS_SIZE:
@@ -642,9 +659,9 @@ def main(
         X_test, y_test, nameless_X_test = test
         logger.info(f"dataset {dataset_name} featurized")
 
-        pairwise_modeler: Optional[PairwiseModeler] = None
+        pairwise_modeler: PairwiseModeler | None = None
         nameless_pairwise_modeler = None
-        cluster: Optional[Clusterer] = None
+        cluster: Clusterer | None = None
         if INDIVIDUAL_MODELS and dataset_name in SOURCE_DATASET_NAMES:
             logger.info(f"fitting pairwise for {dataset_name}")
             pairwise_modeler = PairwiseModeler(
@@ -695,7 +712,7 @@ def main(
                 logger.info(f"clusterer fit for {dataset_name}")
                 logger.info(f"{dataset_name} best clustering parameters: " + str(cluster.best_params))
 
-        dataset: Dict[str, Any] = {}
+        dataset: dict[str, Any] = {}
         dataset["anddata"] = anddata
         dataset["X_train"] = X_train
         dataset["y_train"] = y_train
@@ -776,7 +793,7 @@ def main(
                 nameless_union_classifier.fit(nameless_X_train, y_train, nameless_X_val, y_val)
                 logger.info("nameless pairwise fit for " + str(dataset_name_tuple))
 
-            union_clusterer: Optional[Clusterer] = None
+            union_clusterer: Clusterer | None = None
             if len(anddatas) > 0:
                 distances_for_sparsity = [1 - pred[1] for pred in union_classifier.predict_proba(X_train)]
                 threshold = np.percentile(distances_for_sparsity, [10, 20, 30, 40, 50, 60, 70, 80, 90])
@@ -803,7 +820,7 @@ def main(
                 logger.info("clusterer fit for " + str(dataset_name_tuple))
                 logger.info(f"{dataset_name_tuple} best clustering parameters: " + str(union_clusterer.best_params))
 
-            models: Dict[str, Any] = {}
+            models: dict[str, Any] = {}
             models["pairwise_modeler"] = union_classifier
             models["nameless_pairwise_modeler"] = nameless_union_classifier
             models["clusterer"] = union_clusterer
@@ -836,8 +853,8 @@ def main(
         logger.info("starting individual model evaluation")
         for _, source_dataset in tqdm(datasets.items(), desc="Evaluating individual models"):
             for _, target_dataset in datasets.items():
-                if not (source_dataset["name"] in SOURCE_DATASET_NAMES) or (
-                    not target_dataset["name"] in TARGET_DATASET_NAMES
+                if source_dataset["name"] not in SOURCE_DATASET_NAMES or (
+                    target_dataset["name"] not in TARGET_DATASET_NAMES
                 ):
                     continue
 
@@ -870,41 +887,41 @@ def main(
 
     # union
     if UNION_MODELS:
-        union_gender_f1: Dict[str, List] = defaultdict(list)
-        union_ethnicity_f1: Dict[str, List] = defaultdict(list)
-        union_author_num_f1: Dict[int, List] = defaultdict(list)
-        union_year_f1: Dict[int, List] = defaultdict(list)
-        union_block_len_f1: Dict[int, List] = defaultdict(list)
-        union_cluster_len_f1: Dict[int, List] = defaultdict(list)
-        union_homonymity_f1: Dict[int, List] = defaultdict(list)
-        union_synonymity_f1: Dict[int, List] = defaultdict(list)
+        union_gender_f1: dict[str, list] = defaultdict(list)
+        union_ethnicity_f1: dict[str, list] = defaultdict(list)
+        union_author_num_f1: dict[int, list] = defaultdict(list)
+        union_year_f1: dict[int, list] = defaultdict(list)
+        union_block_len_f1: dict[int, list] = defaultdict(list)
+        union_cluster_len_f1: dict[int, list] = defaultdict(list)
+        union_homonymity_f1: dict[int, list] = defaultdict(list)
+        union_synonymity_f1: dict[int, list] = defaultdict(list)
 
         # features availability
-        union_firstname_f1: Dict[str, List] = defaultdict(list)
-        union_affiliation_f1: Dict[str, List] = defaultdict(list)
-        union_email_f1: Dict[int, List] = defaultdict(list)
-        union_abstract_f1: Dict[int, List] = defaultdict(list)
-        union_venue_f1: Dict[int, List] = defaultdict(list)
-        union_references_f1: Dict[int, List] = defaultdict(list)
-        union_coauthors_f1: Dict[int, List] = defaultdict(list)
+        union_firstname_f1: dict[str, list] = defaultdict(list)
+        union_affiliation_f1: dict[str, list] = defaultdict(list)
+        union_email_f1: dict[int, list] = defaultdict(list)
+        union_abstract_f1: dict[int, list] = defaultdict(list)
+        union_venue_f1: dict[int, list] = defaultdict(list)
+        union_references_f1: dict[int, list] = defaultdict(list)
+        union_coauthors_f1: dict[int, list] = defaultdict(list)
 
-        union_s2_gender_f1: Dict[str, List] = defaultdict(list)
-        union_s2_ethnicity_f1: Dict[str, List] = defaultdict(list)
-        union_s2_author_num_f1: Dict[int, List] = defaultdict(list)
-        union_s2_year_f1: Dict[int, List] = defaultdict(list)
-        union_s2_block_len_f1: Dict[int, List] = defaultdict(list)
-        union_s2_cluster_len_f1: Dict[int, List] = defaultdict(list)
-        union_s2_homonymity_f1: Dict[int, List] = defaultdict(list)
-        union_s2_synonymity_f1: Dict[int, List] = defaultdict(list)
+        union_s2_gender_f1: dict[str, list] = defaultdict(list)
+        union_s2_ethnicity_f1: dict[str, list] = defaultdict(list)
+        union_s2_author_num_f1: dict[int, list] = defaultdict(list)
+        union_s2_year_f1: dict[int, list] = defaultdict(list)
+        union_s2_block_len_f1: dict[int, list] = defaultdict(list)
+        union_s2_cluster_len_f1: dict[int, list] = defaultdict(list)
+        union_s2_homonymity_f1: dict[int, list] = defaultdict(list)
+        union_s2_synonymity_f1: dict[int, list] = defaultdict(list)
 
         # features availability
-        union_s2_firstname_f1: Dict[str, List] = defaultdict(list)
-        union_s2_affiliation_f1: Dict[str, List] = defaultdict(list)
-        union_s2_email_f1: Dict[int, List] = defaultdict(list)
-        union_s2_abstract_f1: Dict[int, List] = defaultdict(list)
-        union_s2_venue_f1: Dict[int, List] = defaultdict(list)
-        union_s2_references_f1: Dict[int, List] = defaultdict(list)
-        union_s2_coauthors_f1: Dict[int, List] = defaultdict(list)
+        union_s2_firstname_f1: dict[str, list] = defaultdict(list)
+        union_s2_affiliation_f1: dict[str, list] = defaultdict(list)
+        union_s2_email_f1: dict[int, list] = defaultdict(list)
+        union_s2_abstract_f1: dict[int, list] = defaultdict(list)
+        union_s2_venue_f1: dict[int, list] = defaultdict(list)
+        union_s2_references_f1: dict[int, list] = defaultdict(list)
+        union_s2_coauthors_f1: dict[int, list] = defaultdict(list)
 
         logger.info("started evaluating unions")
         for _, target_dataset in tqdm(datasets.items(), desc="Evaluating union models"):
@@ -1421,7 +1438,7 @@ if __name__ == "__main__":
                 count_pairwise_grid[i][j] = 1
 
     index = -1
-    for b3, pairwise in zip(multi_b3_grid, multi_pairwise_auroc_grid):
+    for b3, pairwise in zip(multi_b3_grid, multi_pairwise_auroc_grid, strict=False):
         index += 1
         if index == 0:
             continue

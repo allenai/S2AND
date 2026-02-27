@@ -4,11 +4,11 @@ but the name_pairs have since been modified. Don't rerun this -> it's historical
 Important note: the github file has no names with apostraphes or dashes.
 """
 
-from s2and.text import normalize_text
-from s2and.consts import CONFIG
 import os
 import urllib.request
 
+from s2and.consts import CONFIG
+from s2and.text import normalize_text
 
 # source here: https://github.com/Christopher-Thornton/hmni/blob/master/dev/name_pairs.txt
 url = "https://raw.githubusercontent.com/Christopher-Thornton/hmni/master/dev/name_pairs.txt"

@@ -1,21 +1,25 @@
-from typing import Dict, Any
+# ruff: noqa: E402
 
-import os
 import json
+import os
+from typing import Any
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
 os.environ["OMP_NUM_THREADS"] = "1"
 
+import argparse
 import logging
-from collections import defaultdict
 import pickle
+import random
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
-import random
-import argparse
 
 logger = logging.getLogger("s2and")
 logger.setLevel(logging.INFO)
@@ -33,12 +37,12 @@ DATA_DIR = CONFIG["internal_data_dir"]
 
 # NOTE: This script will not run, because these functions need to access internal resources
 from scripts.redshift_funcs import (
-    get_all_author_rows_for_block_key,
     get_affiliations,
+    get_all_author_rows_for_block_key,
     get_all_references,
-    make_s2ids_table,
-    get_paper_all_metadata,
     get_author_ids_for_papers,
+    get_paper_all_metadata,
+    make_s2ids_table,
     specterize,
 )
 
@@ -138,7 +142,7 @@ def main(num_blocks: int):
         logger.info("Affiliations dict made")
 
         for _, paper_row in tqdm(all_metadata.iterrows(), desc="making papers dict"):
-            output_row: Dict[str, Any] = {}
+            output_row: dict[str, Any] = {}
             output_row["paper_id"] = int(paper_row["corpus_paper_id"])
             output_row["title"] = paper_row["title"]
             output_row["abstract"] = paper_row["abstract"]
@@ -168,10 +172,10 @@ def main(num_blocks: int):
             claims_papers[str(paper_row["corpus_paper_id"])] = output_row
 
         for _, author_row in tqdm(all_author_rows.iterrows(), desc="making signatures dict"):
-            output_signature: Dict[str, Any] = {}
+            output_signature: dict[str, Any] = {}
             output_signature["signature_id"] = str(author_row["corpus_paper_id"]) + "___" + str(author_row["position"])
             output_signature["paper_id"] = int(author_row["corpus_paper_id"])
-            output_author_info: Dict[str, Any] = {}
+            output_author_info: dict[str, Any] = {}
             output_author_info["position"] = int(author_row["position"])
             output_author_info["block"] = author_row["cluster_block_key"]
             output_author_info["first"] = author_row["first"]

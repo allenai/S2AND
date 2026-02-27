@@ -1,8 +1,10 @@
-import os
-import json
-import pickle
 import collections
+import json
+import os
+import pickle
+
 import numpy as np
+
 from s2and.consts import CONFIG
 
 DATA_DIR = CONFIG["main_data_dir"]
@@ -81,7 +83,7 @@ print("Finished loading data.  Filtering...")
 # the goal is speed so we'll remove the largest blocks
 # also only keep top 1000 blocks max
 # aminer has 32k, inspire has 15k, and kisti has 7k blocks
-for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers_all, X_all, keys_all):
+for dataset, s, c, p, X, k in zip(DATASETS, signatures_all, clusters_all, papers_all, X_all, keys_all, strict=False):
     blocks = []
     for v in s.values():
         blocks.append(v["author_info"]["block"])

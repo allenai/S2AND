@@ -6,13 +6,13 @@ import json
 import logging
 import os
 
-import tqdm
 import numpy as np
+import tqdm
 
 import s2and
-from s2and.data import ANDData
 from s2and.consts import CONFIG
-from s2and.text import counter_jaccard, cosine_sim, STOPWORDS
+from s2and.data import ANDData
+from s2and.text import STOPWORDS, cosine_sim, counter_jaccard
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def make_dataset_triplets(args, dataset):
     for split_name, split_blocks in block_splits.items():
         triplets[split_name] = []
         pbar = tqdm.tqdm(split_blocks.items(), total=len(split_blocks))
-        for block_name, block_sigs in pbar:
+        for _block_name, block_sigs in pbar:
             triplets[split_name].extend(
                 generate_block_triplets(
                     dataset,
@@ -127,7 +127,7 @@ def make_dataset_triplets(args, dataset):
                     negative_ranker_fn=ranker,
                 )
             )
-            pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
+            pbar.desc = f"size={sum(len(x) for x in triplets.values())}"
         if len(triplets[split_name]) > args.max_triplets_per_dataset_split:
             rng.shuffle(triplets[split_name])
             triplets[split_name] = triplets[split_name][: args.max_triplets_per_dataset_split]
@@ -152,6 +152,14 @@ def generate_block_rankformat(
 
     if blacklisted_papers is None:
         blacklisted_papers = set()
+    if used_pairs is None:
+        used_pairs = set()
+    if num_queries is None or num_positives is None:
+        raise ValueError("num_queries and num_positives must be provided")
+    if num_random_negatives is None:
+        num_random_negatives = 0
+    if num_hard_negatives is None:
+        num_hard_negatives = 0
 
     if num_hard_negatives != 0 and negative_ranker_fn is None:
         raise ValueError("Asked for hard negatives but no negative_ranker_fn was given")
@@ -214,6 +222,7 @@ def generate_block_rankformat(
 
         hard_negatives = []
         if hard_negatives_target != 0:
+            assert negative_ranker_fn is not None
             negatives.sort(reverse=True, key=lambda neg: negative_ranker_fn(query_sig, neg))
             hard_negatives = negatives[:hard_negatives_target]
             negatives = negatives[hard_negatives_target:]
@@ -256,14 +265,14 @@ def make_dataset_rankformat(args, dataset, used_pairs=None, test_papers=None):
         block_splits["test"],
     ) = dataset.split_cluster_signatures()
 
-    with open(os.path.join(args.output, "block_sigs_{}.json".format(dataset.name)), "x") as f:
+    with open(os.path.join(args.output, f"block_sigs_{dataset.name}.json"), "x") as f:
         json.dump(block_splits, f)
 
     triplets = dict()
     for split_name, split_blocks in block_splits.items():
         triplets[split_name] = []
         pbar = tqdm.tqdm(split_blocks.items(), total=len(split_blocks))
-        for block_name, block_sigs in pbar:
+        for _block_name, block_sigs in pbar:
             triplets[split_name].extend(
                 generate_block_rankformat(
                     dataset,
@@ -278,7 +287,7 @@ def make_dataset_rankformat(args, dataset, used_pairs=None, test_papers=None):
                     blacklisted_papers=(test_papers if split_name != "test" else None),
                 )
             )
-            pbar.desc = "size={}".format(sum(len(x) for x in triplets.values()))
+            pbar.desc = f"size={sum(len(x) for x in triplets.values())}"
         if len(triplets[split_name]) > args.max_triplets_per_dataset_split:
             rng.shuffle(triplets[split_name])
             triplets[split_name] = triplets[split_name][: args.max_triplets_per_dataset_split]
@@ -345,7 +354,7 @@ def main():
         open_fn = open
         extension = ""
     else:
-        raise ValueError("Invalid compression {}".format(args.compression))
+        raise ValueError(f"Invalid compression {args.compression}")
 
     os.makedirs(args.output, exist_ok=True)
     with (
@@ -368,7 +377,7 @@ def main():
         # later we do normal s2and eval using embeddings from the
         # triplet-trained model
         for dataset_name in datasets:
-            logger.info("loading {}".format(dataset_name))
+            logger.info(f"loading {dataset_name}")
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
             test_blocks = dataset.split_cluster_signatures()[2]
@@ -380,15 +389,15 @@ def main():
                     for x in dataset.clusters[dataset.signature_to_cluster_id[sig]]["signature_ids"]
                 }
 
-        logger.info("Reserved {} test papers".format(len(test_papers)))
+        logger.info(f"Reserved {len(test_papers)} test papers")
 
         for dataset_name in datasets:
-            logger.info("loading {}".format(dataset_name))
+            logger.info(f"loading {dataset_name}")
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
             triplets = make_dataset_rankformat(args, dataset, used_pairs=used_id_pairs, test_papers=test_papers)
             logger.info(
-                "made {} examples for {}. Saving...".format(sum(len(x) for x in triplets.values()), dataset_name)
+                f"made {sum(len(x) for x in triplets.values())} examples for {dataset_name}. Saving..."
             )
             for split_name, file_obj in file_objs.items():
                 for row in triplets[split_name]:

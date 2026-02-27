@@ -27,6 +27,41 @@ def test_resolve_total_ram_cgroup_uses_safety_factor():
     assert source == "cgroup:test_80pct"
 
 
+def test_detect_total_ram_windows_fallback_used_when_psutil_missing(monkeypatch):
+    monkeypatch.setattr(memory_budget, "_psutil_virtual_memory_total_bytes_best_effort", lambda: None)
+    monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
+    monkeypatch.setattr(memory_budget, "_windows_total_ram_bytes_best_effort", lambda: (123_456, "winapi:test"))
+    total, source = memory_budget.detect_total_ram_bytes_best_effort()
+    assert total == 123_456
+    assert source == "winapi:test"
+
+
+def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
+    monkeypatch.setattr(memory_budget, "_psutil_virtual_memory_total_bytes_best_effort", lambda: None)
+    monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
+    monkeypatch.setattr(memory_budget, "_windows_total_ram_bytes_best_effort", lambda: (10_000, "winapi:test"))
+    resolved, source = memory_budget.resolve_total_ram_bytes(
+        None,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
+    )
+    assert resolved == 8000
+    assert source == "winapi:test_80pct"
+
+
+def test_current_rss_windows_fallback_used_when_psutil_missing(monkeypatch):
+    monkeypatch.setattr(memory_budget, "_psutil_process_rss_bytes_best_effort", lambda: None)
+    monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        memory_budget,
+        "_windows_process_working_set_bytes_best_effort",
+        lambda: (654_321, "winapi:test"),
+    )
+    rss, source = memory_budget.current_rss_bytes_best_effort(10_000_000)
+    assert rss == 654_321
+    assert source == "winapi:test"
+
+
 def test_compute_incremental_limits_uses_available_bytes():
     limits = memory_budget.compute_incremental_phase_split_limits(
         num_features=64,
@@ -204,7 +239,66 @@ def test_rust_batch_selected_features_tighter_chunk_sizing():
     assert int(selected["chunk_pairs"]) >= int(legacy["chunk_pairs"])
 
 
-def test_fallback_accumulator_max_entries_exists():
-    """Fix #5: FALLBACK_ACCUMULATOR_MAX_ENTRIES constant should be defined."""
-    assert hasattr(memory_budget, "FALLBACK_ACCUMULATOR_MAX_ENTRIES")
-    assert memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES > 0
+
+def test_degenerate_budget_logs_warning(caplog):
+    """When RSS exceeds total_ram - safety_margin, a warning should be logged."""
+    with caplog.at_level(logging.WARNING, logger="s2and"):
+        snapshot = memory_budget.memory_snapshot_for_stage(
+            total_ram_bytes=1_000_000,
+            safety_margin_fraction=0.10,
+            detect_cgroup_fn=lambda: (None, "unavailable"),
+            detect_total_fn=lambda: (None, "unavailable"),
+            # RSS > total - safety => degenerate
+            current_rss_fn=lambda _total: (950_000, "rss:test"),
+        )
+    assert snapshot.available_bytes == 1
+    assert any("degenerate" in r.message for r in caplog.records)
+
+
+def test_effective_available_fraction_in_snapshot():
+    """MemorySnapshot should include effective_available_fraction."""
+    snapshot = memory_budget.memory_snapshot_for_stage(
+        total_ram_bytes=1_000_000,
+        safety_margin_fraction=0.10,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (200_000, "rss:test"),
+    )
+    # available = 1_000_000 - 200_000 - 100_000 = 700_000
+    assert snapshot.available_bytes == 700_000
+    expected_fraction = 700_000 / 1_000_000
+    assert abs(snapshot.effective_available_fraction - expected_fraction) < 1e-6
+
+
+def test_effective_available_fraction_in_incremental_limits():
+    """compute_incremental_phase_split_limits should include effective_available_fraction."""
+    limits = memory_budget.compute_incremental_phase_split_limits(
+        num_features=64,
+        total_ram_bytes=1_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (200_000, "rss:test"),
+    )
+    assert "effective_available_fraction" in limits
+    assert float(limits["effective_available_fraction"]) == pytest.approx(0.7, abs=1e-6)
+
+
+def test_effective_available_fraction_in_rust_batch_plan():
+    """compute_rust_batch_chunk_plan should include effective_available_fraction."""
+    plan = memory_budget.compute_rust_batch_chunk_plan(
+        num_features=64,
+        total_pairs=1000,
+        total_ram_bytes=1_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (200_000, "rss:test"),
+    )
+    assert "effective_available_fraction" in plan
+    assert float(plan["effective_available_fraction"]) == pytest.approx(0.7, abs=1e-6)
+
+
+def test_gc_collect_and_log(caplog):
+    """gc_collect_and_log should run without error."""
+    with caplog.at_level(logging.INFO, logger="s2and"):
+        memory_budget.gc_collect_and_log("test_stage")
+    # We can't assert exact collection counts, but it should not raise.

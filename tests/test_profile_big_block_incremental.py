@@ -10,8 +10,8 @@ from s2and.consts import PROJECT_ROOT_PATH
 
 
 def _load_module():
-    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "profile_big_block_incremental.py"
-    spec = importlib.util.spec_from_file_location("profile_big_block_incremental", module_path)
+    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
+    spec = importlib.util.spec_from_file_location("rust_suite", module_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -65,4 +65,3 @@ def test_paper_block_safety_rejects_empty_author_names():
     module = _load_module()
     assert module._paper_has_block_safe_author_names({"authors": [{"author_name": "Jane Doe"}]}) is True
     assert module._paper_has_block_safe_author_names({"authors": [{"author_name": ""}]}) is False
-

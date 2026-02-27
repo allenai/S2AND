@@ -8,8 +8,8 @@ import os
 import tqdm
 
 import s2and
-from s2and.data import ANDData
 from s2and.consts import CONFIG
+from s2and.data import ANDData
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def main():
         open_fn = open
         extension = ""
     else:
-        raise ValueError("Invalid compression {}".format(args.compression))
+        raise ValueError(f"Invalid compression {args.compression}")
 
     os.makedirs(args.output, exist_ok=True)
     with (
@@ -127,12 +127,12 @@ def main():
         file_objs = {"train": train_f, "dev": dev_f, "test": test_f}
 
         for dataset_name in DATASETS:
-            logger.info("loading {}".format(dataset_name))
+            logger.info(f"loading {dataset_name}")
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
             examples = make_dataset_pairwise_classification_style(args, dataset)
             logger.info(
-                "made {} examples for {}. Saving...".format(sum(len(x) for x in examples.values()), dataset_name)
+                f"made {sum(len(x) for x in examples.values())} examples for {dataset_name}. Saving..."
             )
             for split_name, file_obj in file_objs.items():
                 for row in examples[split_name]:

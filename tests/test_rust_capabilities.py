@@ -75,6 +75,18 @@ def test_detect_rust_runtime_capabilities_rejects_old_version():
         def from_json_paths(*args, **kwargs):
             return None
 
+        def signature_ids(self):
+            return []
+
+        def get_constraint(self, *args, **kwargs):
+            return None
+
+        def get_constraints_matrix(self, *args, **kwargs):
+            return []
+
+        def get_constraints_matrix_indexed(self, *args, **kwargs):
+            return []
+
         def featurize_pairs_matrix_indexed(self, *args, **kwargs):
             return None
 
@@ -100,6 +112,18 @@ def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
         @staticmethod
         def from_json_paths(*args, **kwargs):
             return None
+
+        def signature_ids(self):
+            return []
+
+        def get_constraint(self, *args, **kwargs):
+            return None
+
+        def get_constraints_matrix(self, *args, **kwargs):
+            return []
+
+        def get_constraints_matrix_indexed(self, *args, **kwargs):
+            return []
 
         def featurize_pairs_matrix_indexed(self, *args, **kwargs):
             return None

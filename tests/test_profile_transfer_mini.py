@@ -9,8 +9,8 @@ from s2and.consts import PROJECT_ROOT_PATH
 
 
 def _load_module():
-    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "profile_transfer_mini.py"
-    spec = importlib.util.spec_from_file_location("profile_transfer_mini", module_path)
+    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
+    spec = importlib.util.spec_from_file_location("rust_suite", module_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -143,5 +143,5 @@ def test_build_run_metadata_handles_missing_git(monkeypatch):
     assert metadata["git_commit"] is None
     assert metadata["git_branch"] is None
     assert metadata["git_dirty"] is None
-    assert metadata["script"].endswith("profile_transfer_mini.py")
+    assert metadata["script"].endswith("rust_suite.py")
     assert isinstance(metadata["env"], dict)

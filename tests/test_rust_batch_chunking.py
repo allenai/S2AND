@@ -67,7 +67,7 @@ def test_rust_batch_probe_row_counts_uses_three_probes():
     assert derived[0] < derived[1] < derived[2]
 
 
-def test_rust_batch_plan_uses_calibrated_fixed_overhead(monkeypatch):
+def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
     dataset = _build_dummy_dataset("dummy_rust_chunking_calibrated_fixed")
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = _build_pairs(5)
@@ -119,7 +119,7 @@ def test_rust_batch_plan_uses_calibrated_fixed_overhead(monkeypatch):
     )
 
     assert captured_fixed
-    assert captured_fixed[0] == 4242
+    assert captured_fixed[0] == 1_000_000
 
 
 def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):

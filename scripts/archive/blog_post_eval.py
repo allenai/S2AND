@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 """
 This script generates results that are needed for the blog post.
 Here are all the commands that one needs to run:
@@ -7,40 +9,45 @@ python scripts/blog_post_eval.py --random_seed 42 --experiment_name qian_only --
 python scripts/blog_post_eval.py --random_seed 42 --experiment_name exclude_augmented --exclude_augmented
 python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_rules --dont_use_rules
 python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_nameless_model --dont_use_nameless_model
-python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_specter --feature_groups_to_skip embedding_similarity
-python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_name_counts --feature_groups_to_skip name_counts
+python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_specter
+  --feature_groups_to_skip embedding_similarity
+python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_name_counts
+  --feature_groups_to_skip name_counts
 """
 
-from typing import Optional, List, Dict, Any
-
-import os
 import json
+import os
+from typing import Any
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
 os.environ["OMP_NUM_THREADS"] = "8"
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
-import numpy as np
-import logging
 import argparse
-import pickle
 import json
+import logging
+import pickle
+
+import numpy as np
 import pandas as pd
+from hyperopt import hp
 from tqdm import tqdm
 
-from s2and.data import ANDData
-from s2and.featurizer import featurize, FeaturizationInfo
-from s2and.model import PairwiseModeler, Clusterer, FastCluster
 from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_PATH
+from s2and.data import ANDData
 from s2and.eval import claims_eval
+from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.file_cache import cached_path
-
-from hyperopt import hp
+from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 logger = logging.getLogger("s2and")
+
+os.environ["S2AND_BACKEND"] = "python"
 
 search_space = {
     "eps": hp.uniform("choice", 0, 1),
@@ -77,7 +84,7 @@ def main(
     dont_use_monotone_constraints: bool,
     exclude_augmented: bool,
     single_dataset: str,
-    feature_groups_to_skip: List[str],
+    feature_groups_to_skip: list[str],
     n_jobs: int,
     random_seed: int,
 ):
@@ -120,7 +127,7 @@ def main(
     datasets = {}
     for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fitting base models"):
         logger.info(f"processing dataset {dataset_name}")
-        clusters_path: Optional[str] = None
+        clusters_path: str | None = None
         if dataset_name not in PAIRWISE_ONLY_DATASETS:
             clusters_path = os.path.join(DATA_DIR, dataset_name, dataset_name + "_clusters.json")
             train_pairs_path = None
@@ -165,7 +172,7 @@ def main(
         X_train, y_train, nameless_X_train = train
         X_val, y_val, nameless_X_val = val
 
-        dataset: Dict[Any, Any] = {}
+        dataset: dict[Any, Any] = {}
         dataset["anddata"] = anddata
         dataset["X_train"] = X_train
         dataset["y_train"] = y_train

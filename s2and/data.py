@@ -1,49 +1,47 @@
-from typing import Optional, Union, Dict, List, Any, Tuple, Set, NamedTuple
-
-import os
-import re
 import json
-import numpy as np
-import pandas as pd
 import logging
+import os
 import pickle
+import re
 import tempfile
 import threading
 import time
-from tqdm import tqdm
-
+from collections import Counter, defaultdict
 from functools import reduce
-from collections import defaultdict, Counter
+from typing import Any, NamedTuple
 
+import numpy as np
+import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
-from s2and.mp import UniversalPool
-from s2and.sampling import sampling, random_sampling
 from s2and.consts import (
-    NUMPY_NAN,
-    NAME_COUNTS_PATH,
-    PROJECT_ROOT_PATH,
-    LARGE_DISTANCE,
     CLUSTER_SEEDS_LOOKUP,
+    LARGE_DISTANCE,
+    NAME_COUNTS_PATH,
+    NUMPY_NAN,
+    PROJECT_ROOT_PATH,
 )
 from s2and.file_cache import cached_path
-from s2and.text import (
-    normalize_text,
-    get_text_ngrams,
-    compute_block,
-    get_text_ngrams_words,
-    detect_language,
-    same_prefix_tokens,
-    split_first_middle_hyphen_aware,
-    AFFILIATIONS_STOP_WORDS,
-    VENUE_STOP_WORDS,
-    NAME_PREFIXES,
-    DROPPED_AFFIXES,
-    ORCID_PATTERN,
-)
+from s2and.mp import UniversalPool
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.rust_lifecycle import build_rust_lifecycle_policy
+from s2and.sampling import random_sampling, sampling
+from s2and.text import (
+    AFFILIATIONS_STOP_WORDS,
+    DROPPED_AFFIXES,
+    NAME_PREFIXES,
+    ORCID_PATTERN,
+    VENUE_STOP_WORDS,
+    compute_block,
+    detect_language,
+    get_text_ngrams,
+    get_text_ngrams_words,
+    normalize_text,
+    same_prefix_tokens,
+    split_first_middle_hyphen_aware,
+)
 
 logger = logging.getLogger("s2and")
 
@@ -54,7 +52,7 @@ _SINONYM_DETECTOR = None  # type: ignore
 CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 
 # Cache for large, immutable resources loaded across instances
-_NAME_COUNTS_CACHE: Optional[Tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int]]] = None
+_NAME_COUNTS_CACHE: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _NAME_COUNTS_CACHE_LOCK = threading.Lock()
 SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
 
@@ -75,7 +73,7 @@ def _lasts_equivalent_for_constraint(l1: str, l2: str) -> bool:
     return l1.replace(" ", "") == l2.replace(" ", "")
 
 
-def _canonicalize_last_for_counts(raw_last: Optional[str], normalized_last: str) -> str:
+def _canonicalize_last_for_counts(raw_last: str | None, normalized_last: str) -> str:
     """Canonicalize last name for legacy count lookups.
 
     Join internal spaces for hyphen/compound surnames so historical single-token
@@ -88,7 +86,7 @@ def _canonicalize_last_for_counts(raw_last: Optional[str], normalized_last: str)
     return normalized_last or ""
 
 
-def _load_name_counts_cached() -> Tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int]]:
+def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
     """Load name count dictionaries once per process and cache them.
 
     Avoids repeatedly unpickling ~600MB file in tests/short runs.
@@ -104,7 +102,7 @@ def _load_name_counts_cached() -> Tuple[Dict[str, int], Dict[str, int], Dict[str
     return _NAME_COUNTS_CACHE  # type: ignore[return-value]
 
 
-def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> Tuple[bool, bool, bool]:
+def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> tuple[bool, bool, bool]:
     use_rust_backend = stage_uses_rust(runtime_context, "ingest_preprocess")
     if not use_rust_backend:
         return False, False, False
@@ -126,7 +124,7 @@ def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> T
     return True, True, True
 
 
-def _prefilter_affiliation_text(affiliations: List[str]) -> str:
+def _prefilter_affiliation_text(affiliations: list[str]) -> str:
     if not affiliations:
         return ""
     tokens = [word for word in " ".join(affiliations).split() if word not in AFFILIATIONS_STOP_WORDS and len(word) > 1]
@@ -140,7 +138,7 @@ def _signature_has_materialized_name_counts(signature: "Signature") -> bool:
     return any(value is not None for value in counts)
 
 
-def _ordered_coauthors_for_signature(signature: "Signature", papers: Dict[str, "Paper"]) -> List[str]:
+def _ordered_coauthors_for_signature(signature: "Signature", papers: dict[str, "Paper"]) -> list[str]:
     if len(papers) == 0:
         return []
     paper = papers.get(str(signature.paper_id))
@@ -150,8 +148,8 @@ def _ordered_coauthors_for_signature(signature: "Signature", papers: Dict[str, "
 
 
 def _python_signature_ngrams_batch(
-    coauthor_texts: List[str], affiliation_texts: List[str]
-) -> Tuple[List[Counter], List[Counter]]:
+    coauthor_texts: list[str], affiliation_texts: list[str]
+) -> tuple[list[Counter], list[Counter]]:
     coauthor_counters = [
         get_text_ngrams(text, stopwords=None, use_bigrams=True) if text else Counter() for text in coauthor_texts
     ]
@@ -162,40 +160,40 @@ def _python_signature_ngrams_batch(
 
 
 class NameCounts(NamedTuple):
-    first: Optional[float]
-    last: Optional[float]
-    first_last: Optional[float]
-    last_first_initial: Optional[float]
+    first: float | None
+    last: float | None
+    first_last: float | None
+    last_first_initial: float | None
 
 
 class Signature(NamedTuple):
-    author_info_first: Optional[str]
-    author_info_first_normalized_without_apostrophe: Optional[str]
-    author_info_middle: Optional[str]
-    author_info_middle_normalized_without_apostrophe: Optional[str]
-    author_info_last_normalized: Optional[str]
+    author_info_first: str | None
+    author_info_first_normalized_without_apostrophe: str | None
+    author_info_middle: str | None
+    author_info_middle_normalized_without_apostrophe: str | None
+    author_info_last_normalized: str | None
     author_info_last: str
-    author_info_suffix_normalized: Optional[str]
-    author_info_suffix: Optional[str]
-    author_info_first_normalized: Optional[str]
-    author_info_coauthors: Optional[List[str]]
-    author_info_coauthor_blocks: Optional[List[str]]
-    author_info_full_name: Optional[str]
-    author_info_affiliations: List[str]
-    author_info_affiliations_n_grams: Optional[Counter]
-    author_info_coauthor_n_grams: Optional[Counter]
-    author_info_email: Optional[str]
-    author_info_orcid: Optional[str]
-    author_info_name_counts: Optional[NameCounts]
+    author_info_suffix_normalized: str | None
+    author_info_suffix: str | None
+    author_info_first_normalized: str | None
+    author_info_coauthors: list[str] | None
+    author_info_coauthor_blocks: list[str] | None
+    author_info_full_name: str | None
+    author_info_affiliations: list[str]
+    author_info_affiliations_n_grams: Counter | None
+    author_info_coauthor_n_grams: Counter | None
+    author_info_email: str | None
+    author_info_orcid: str | None
+    author_info_name_counts: NameCounts | None
     author_info_position: int
     author_info_block: str
-    author_info_given_block: Optional[str]
-    author_info_estimated_gender: Optional[str]
-    author_info_estimated_ethnicity: Optional[str]
+    author_info_given_block: str | None
+    author_info_estimated_gender: str | None
+    author_info_estimated_ethnicity: str | None
     paper_id: int
-    sourced_author_source: Optional[str]
-    sourced_author_ids: List[str]
-    author_id: Optional[int]
+    sourced_author_source: str | None
+    sourced_author_ids: list[str]
+    author_id: int | None
     signature_id: str
 
 
@@ -206,29 +204,29 @@ class Author(NamedTuple):
 
 class Paper(NamedTuple):
     title: str
-    has_abstract: Optional[bool]
-    in_signatures: Optional[bool]
-    is_english: Optional[bool]
-    is_reliable: Optional[bool]
-    predicted_language: Optional[str]
-    title_ngrams_words: Optional[Counter]
-    authors: List[Author]
-    venue: Optional[str]
-    journal_name: Optional[str]
-    title_ngrams_chars: Optional[Counter]
-    venue_ngrams: Optional[Counter]
-    journal_ngrams: Optional[Counter]
-    reference_details: Optional[Tuple[Counter, Counter, Counter, Counter]]
-    year: Optional[int]
-    references: Optional[List[int]]
+    has_abstract: bool | None
+    in_signatures: bool | None
+    is_english: bool | None
+    is_reliable: bool | None
+    predicted_language: str | None
+    title_ngrams_words: Counter | None
+    authors: list[Author]
+    venue: str | None
+    journal_name: str | None
+    title_ngrams_chars: Counter | None
+    venue_ngrams: Counter | None
+    journal_ngrams: Counter | None
+    reference_details: tuple[Counter, Counter, Counter, Counter] | None
+    year: int | None
+    references: list[int] | None
     paper_id: int
 
 
 class MiniPaper(NamedTuple):
     title: str
-    venue: Optional[str]
-    journal_name: Optional[str]
-    authors: List[str]
+    venue: str | None
+    journal_name: str | None
+    authors: list[str]
 
 
 class ANDData:
@@ -295,23 +293,23 @@ class ANDData:
 
     def __init__(
         self,
-        signatures: Union[str, Dict],
-        papers: Union[str, Dict],
+        signatures: str | dict,
+        papers: str | dict,
         name: str,
         mode: str = "train",
-        clusters: Optional[Union[str, Dict]] = None,
-        specter_embeddings: Optional[Union[str, Dict]] = None,
-        cluster_seeds: Optional[Union[str, Dict]] = None,
-        altered_cluster_signatures: Optional[Union[str, List, Set]] = None,
-        train_pairs: Optional[Union[str, pd.DataFrame]] = None,
-        val_pairs: Optional[Union[str, pd.DataFrame]] = None,
-        test_pairs: Optional[Union[str, pd.DataFrame]] = None,
-        train_blocks: Optional[Union[str, List]] = None,
-        val_blocks: Optional[Union[str, List]] = None,
-        test_blocks: Optional[Union[str, List]] = None,
-        train_signatures: Optional[Union[str, List]] = None,
-        val_signatures: Optional[Union[str, List]] = None,
-        test_signatures: Optional[Union[str, List]] = None,
+        clusters: str | dict | None = None,
+        specter_embeddings: str | dict | None = None,
+        cluster_seeds: str | dict | None = None,
+        altered_cluster_signatures: str | list | set | None = None,
+        train_pairs: str | pd.DataFrame | None = None,
+        val_pairs: str | pd.DataFrame | None = None,
+        test_pairs: str | pd.DataFrame | None = None,
+        train_blocks: str | list | None = None,
+        val_blocks: str | list | None = None,
+        test_blocks: str | list | None = None,
+        train_signatures: str | list | None = None,
+        val_signatures: str | list | None = None,
+        test_signatures: str | list | None = None,
         block_type: str = "s2",
         unit_of_data_split: str = "blocks",
         num_clusters_for_block_size: int = 1,
@@ -326,13 +324,13 @@ class ANDData:
         pair_sampling_balanced_homonym_synonym: bool = False,
         all_test_pairs_flag: bool = False,
         random_seed: int = 1111,
-        load_name_counts: Union[bool, Dict] = True,
+        load_name_counts: bool | dict = True,
         n_jobs: int = 1,
         preprocess: bool = True,
-        name_tuples: Optional[Union[Set[Tuple[str, str]], str]] = "filtered",
+        name_tuples: set[tuple[str, str]] | str | None = "filtered",
         use_orcid_id: bool = True,
         use_sinonym_overwrite: bool = False,
-        sinonym_overwrite_min_ratio: Optional[float] = 3.0,
+        sinonym_overwrite_min_ratio: float | None = 3.0,
         compute_reference_features: bool = False,
     ):
         init_start = time.perf_counter()
@@ -349,7 +347,12 @@ class ANDData:
             has_signatures_path=self.signatures_path is not None,
             has_papers_path=self.papers_path is not None,
             preprocess=preprocess,
-            stage_enablement=self.runtime_context.stage_enablement,
+            use_rust=self.runtime_context.use_rust,
+            use_sinonym_overwrite=use_sinonym_overwrite,
+        )
+        defer_rust_json_ingest_write_for_sinonym = self._should_defer_rust_json_ingest_write_for_sinonym(
+            mode=mode,
+            use_sinonym_overwrite=use_sinonym_overwrite,
         )
 
         if mode == "train":
@@ -357,18 +360,18 @@ class ANDData:
                 logger.warning("If you are passing in training/val/test blocks, then you may want original blocks.")
 
             if unit_of_data_split == "blocks" and not pair_sampling_block:
-                raise Exception("Block-based cluster splits are not compatible with sampling stratgies 0 and 1.")
+                raise ValueError("Block-based cluster splits are not compatible with sampling strategies 0 and 1.")
 
             if (clusters is not None and train_pairs is not None) or (
                 clusters is None and train_pairs is None and train_blocks is None
             ):
-                raise Exception("Set exactly one of clusters and train_pairs")
+                raise ValueError("Set exactly one of clusters and train_pairs")
 
             if train_blocks is not None and train_pairs is not None:
-                raise Exception("Can't pass in both train_blocks and train_pairs")
+                raise ValueError("Can't pass in both train_blocks and train_pairs")
 
             if train_blocks is not None and clusters is None:
-                raise Exception("Train blocks still needs clusters")
+                raise ValueError("Train blocks still needs clusters")
 
         # Load signatures first so we can restrict papers/specter to relevant subset
         signatures_stage_start = time.perf_counter()
@@ -422,36 +425,26 @@ class ANDData:
         )
 
         # Determine the set of papers referenced by signatures
-        needed_paper_ids: Set[str] = set(str(sig.paper_id) for sig in self.signatures.values())
+        needed_paper_ids: set[str] = set(str(sig.paper_id) for sig in self.signatures.values())
 
         papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
         raw_papers = self.maybe_load_json(papers)
         filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
-        if (
+        rust_json_ingest_from_paths = bool(
             self.rust_lifecycle_policy.rust_build_path == "from_json_paths"
             and self.signatures_path is not None
             and self.papers_path is not None
+        )
+        if (
+            rust_json_ingest_from_paths
             and len(filtered_papers) < len(raw_papers)
+            and not defer_rust_json_ingest_write_for_sinonym
         ):
-            filtered_paths_start = time.perf_counter()
-            self._rust_ingest_tmpdir = tempfile.TemporaryDirectory(prefix="s2and_rust_json_ingest_")
-            filtered_dir = self._rust_ingest_tmpdir.name
-            filtered_signatures_path = os.path.join(filtered_dir, "signatures_filtered.json")
-            filtered_papers_path = os.path.join(filtered_dir, "papers_filtered.json")
-            with open(filtered_signatures_path, "w", encoding="utf-8") as signatures_file:
-                json.dump(raw_signatures_for_json, signatures_file)
-            with open(filtered_papers_path, "w", encoding="utf-8") as papers_file:
-                json.dump(filtered_papers, papers_file)
-            self.signatures_path = filtered_signatures_path
-            self.papers_path = filtered_papers_path
-            logger.info(
-                "Rust JSON ingest: materialized filtered JSON payloads signatures=%d papers=%d source_papers=%d "
-                "seconds=%.3f",
-                len(raw_signatures_for_json),
-                len(filtered_papers),
-                len(raw_papers),
-                time.perf_counter() - filtered_paths_start,
+            self._materialize_rust_json_ingest_filtered_payload(
+                raw_signatures_for_json=raw_signatures_for_json,
+                filtered_papers_for_json=filtered_papers,
+                source_papers_count=len(raw_papers),
             )
         self.papers = {}
         # convert dictionary to namedtuples for memory reduction
@@ -516,11 +509,21 @@ class ANDData:
                 self.papers, sinonym_results, allow_overwrite_pos=allow_overwrite_pos
             )
             logger.info(f"Sinonym overwrote {paper_overwrite_count} paper author name(s)")
+            if defer_rust_json_ingest_write_for_sinonym:
+                self._sync_in_memory_names_to_rust_json_payload(
+                    raw_signatures_for_json=raw_signatures_for_json,
+                    filtered_papers_for_json=filtered_papers,
+                )
+                self._materialize_rust_json_ingest_filtered_payload(
+                    raw_signatures_for_json=raw_signatures_for_json,
+                    filtered_papers_for_json=filtered_papers,
+                    source_papers_count=len(raw_papers),
+                )
 
         self.name = name
         self.mode = mode
         logger.info("loading clusters")
-        self.clusters: Optional[Dict] = self.maybe_load_json(clusters)
+        self.clusters: dict | None = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
         self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
         # prevents errors during testing where we have no specter embeddings
@@ -558,7 +561,7 @@ class ANDData:
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
                 if signature_id not in self.cluster_seeds_require:
-                    raise Exception(f"Altered cluster signature {signature_id} not in cluster_seeds_require")
+                    raise ValueError(f"Altered cluster signature {signature_id} not in cluster_seeds_require")
         self.train_pairs = self.maybe_load_dataframe(train_pairs)
         self.val_pairs = self.maybe_load_dataframe(val_pairs)
         self.test_pairs = self.maybe_load_dataframe(test_pairs)
@@ -602,7 +605,7 @@ class ANDData:
             self.all_test_pairs_flag = True
             self.block_type = "s2"  # pure inference is for S2 probably?
         else:
-            raise Exception(f"Unknown mode: {self.mode}")
+            raise ValueError(f"Unknown mode: {self.mode}")
 
         name_counts_loaded = False
         if isinstance(load_name_counts, dict):
@@ -634,16 +637,16 @@ class ANDData:
             self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
         self.preprocess = preprocess
 
-        resolved_name_tuples: Set[Tuple[str, str]]
+        resolved_name_tuples: set[tuple[str, str]]
         if name_tuples == "filtered":
             resolved_name_tuples = set()
-            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt"), "r") as f2:  # type: ignore
+            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt")) as f2:  # type: ignore
                 for line in f2:
                     line_split = line.strip().split(",")  # type: ignore
                     resolved_name_tuples.add((line_split[0], line_split[1]))
         elif name_tuples is None:
             resolved_name_tuples = set()
-            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt"), "r") as f2:  # type: ignore
+            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt")) as f2:  # type: ignore
                 for line in f2:
                     line_split = line.strip().split(",")  # type: ignore
                     resolved_name_tuples.add((line_split[0], line_split[1]))
@@ -686,6 +689,85 @@ class ANDData:
             time.perf_counter() - init_start,
         )
 
+    def _should_defer_rust_json_ingest_write_for_sinonym(self, *, mode: str, use_sinonym_overwrite: bool) -> bool:
+        if not use_sinonym_overwrite:
+            return False
+        return bool(
+            mode.strip().lower() == "inference"
+            and self.runtime_context.resolved_backend == "rust"
+            and self.rust_lifecycle_policy.rust_build_path == "from_json_paths"
+            and self.signatures_path is not None
+            and self.papers_path is not None
+        )
+
+    def _sync_in_memory_names_to_rust_json_payload(
+        self,
+        *,
+        raw_signatures_for_json: dict[Any, Any],
+        filtered_papers_for_json: dict[Any, Any],
+    ) -> None:
+        for signature_id, signature in self.signatures.items():
+            signature_payload = raw_signatures_for_json.get(signature_id)
+            if signature_payload is None:
+                signature_payload = raw_signatures_for_json.get(str(signature_id))
+            if not isinstance(signature_payload, dict):
+                continue
+            author_info_payload = signature_payload.get("author_info")
+            if not isinstance(author_info_payload, dict):
+                continue
+            author_info_payload["first"] = signature.author_info_first
+            author_info_payload["middle"] = signature.author_info_middle
+            author_info_payload["last"] = signature.author_info_last
+            author_info_payload["block"] = signature.author_info_block
+
+        for paper_id, paper_payload in filtered_papers_for_json.items():
+            paper = self.papers.get(paper_id)
+            if paper is None:
+                paper = self.papers.get(str(paper_id))
+            if paper is None or not isinstance(paper_payload, dict):
+                continue
+            author_payloads = paper_payload.get("authors")
+            if not isinstance(author_payloads, list):
+                continue
+            position_to_name: dict[Any, str] = {}
+            for author in paper.authors:
+                position_to_name[author.position] = author.author_name
+                position_to_name[str(author.position)] = author.author_name
+            for author_payload in author_payloads:
+                if not isinstance(author_payload, dict):
+                    continue
+                author_name = position_to_name.get(author_payload.get("position"))
+                if author_name is not None:
+                    author_payload["author_name"] = author_name
+
+    def _materialize_rust_json_ingest_filtered_payload(
+        self,
+        *,
+        raw_signatures_for_json: dict[Any, Any],
+        filtered_papers_for_json: dict[Any, Any],
+        source_papers_count: int,
+    ) -> None:
+        filtered_paths_start = time.perf_counter()
+        if self._rust_ingest_tmpdir is None:
+            self._rust_ingest_tmpdir = tempfile.TemporaryDirectory(prefix="s2and_rust_json_ingest_")
+        filtered_dir = self._rust_ingest_tmpdir.name
+        filtered_signatures_path = os.path.join(filtered_dir, "signatures_filtered.json")
+        filtered_papers_path = os.path.join(filtered_dir, "papers_filtered.json")
+        with open(filtered_signatures_path, "w", encoding="utf-8") as signatures_file:
+            json.dump(raw_signatures_for_json, signatures_file)
+        with open(filtered_papers_path, "w", encoding="utf-8") as papers_file:
+            json.dump(filtered_papers_for_json, papers_file)
+        self.signatures_path = filtered_signatures_path
+        self.papers_path = filtered_papers_path
+        logger.info(
+            "Rust JSON ingest: materialized filtered JSON payloads signatures=%d papers=%d source_papers=%d "
+            "seconds=%.3f",
+            len(raw_signatures_for_json),
+            len(filtered_papers_for_json),
+            source_papers_count,
+            time.perf_counter() - filtered_paths_start,
+        )
+
     @staticmethod
     def get_full_name_for_features(signature: Signature, include_last: bool = True, include_suffix: bool = True) -> str:
         """
@@ -722,8 +804,8 @@ class ANDData:
         *,
         first_raw: str,
         middle_raw: str,
-        first_without_apostrophe: Optional[str],
-        last_normalized: Optional[str],
+        first_without_apostrophe: str | None,
+        last_normalized: str | None,
     ) -> NameCounts:
         # Backward-compatibility for name count keys:
         # - Historically, counts used the legacy single-token `author_info_first_normalized`.
@@ -798,25 +880,25 @@ class ANDData:
             for batch_start in range(0, len(signature_ids), SIGNATURE_PREPROCESS_BATCH_SIZE):
                 batch_signature_ids = signature_ids[batch_start : batch_start + SIGNATURE_PREPROCESS_BATCH_SIZE]
                 batch_rows = []
-                batch_coauthor_texts: List[str] = []
-                batch_affiliation_texts: List[str] = []
+                batch_coauthor_texts: list[str] = []
+                batch_affiliation_texts: list[str] = []
 
                 for signature_id in batch_signature_ids:
                     signature = self.signatures[signature_id]
 
                     first_raw = signature.author_info_first or ""
                     middle_raw = signature.author_info_middle or ""
-                    stored_first_normalized_token: Optional[str] = signature.author_info_first_normalized
-                    stored_first_without_apostrophe: Optional[str] = (
+                    stored_first_normalized_token: str | None = signature.author_info_first_normalized
+                    stored_first_without_apostrophe: str | None = (
                         signature.author_info_first_normalized_without_apostrophe
                     )
-                    stored_middle_without_apostrophe: Optional[str] = (
+                    stored_middle_without_apostrophe: str | None = (
                         signature.author_info_middle_normalized_without_apostrophe
                     )
-                    stored_last_normalized: Optional[str] = signature.author_info_last_normalized
-                    stored_suffix_normalized: Optional[str] = signature.author_info_suffix_normalized
+                    stored_last_normalized: str | None = signature.author_info_last_normalized
+                    stored_suffix_normalized: str | None = signature.author_info_suffix_normalized
 
-                    coauthors: Optional[List[str]] = None
+                    coauthors: list[str] | None = None
                     if len(self.papers) != 0 and not defer_signature_fields_to_rust:
                         coauthors = _ordered_coauthors_for_signature(signature, self.papers)
 
@@ -825,7 +907,7 @@ class ANDData:
                         set(compute_block(author) for author in coauthors) if coauthors is not None else None
                     )
 
-                    affiliations: List[str] = signature.author_info_affiliations
+                    affiliations: list[str] = signature.author_info_affiliations
                     full_name = signature.author_info_full_name
                     counts = signature.author_info_name_counts
                     normalized_orcid = signature.author_info_orcid
@@ -933,8 +1015,8 @@ class ANDData:
                         batch_coauthor_texts.append(coauthor_text)
                         batch_affiliation_texts.append(affiliation_text)
 
-                batch_coauthor_ngrams: List[Counter] = []
-                batch_affiliation_ngrams: List[Counter] = []
+                batch_coauthor_ngrams: list[Counter] = []
+                batch_affiliation_ngrams: list[Counter] = []
                 if self.preprocess and not defer_signature_ngrams_to_rust:
                     batch_coauthor_ngrams, batch_affiliation_ngrams = _python_signature_ngrams_batch(
                         batch_coauthor_texts,
@@ -985,9 +1067,9 @@ class ANDData:
         with tqdm(total=len(signature_ids), desc="Materializing signature ngrams") as progress_bar:
             for batch_start in range(0, len(signature_ids), batch_size):
                 batch_signature_ids = signature_ids[batch_start : batch_start + batch_size]
-                pending_signature_ids: List[str] = []
-                batch_coauthor_texts: List[str] = []
-                batch_affiliation_texts: List[str] = []
+                pending_signature_ids: list[str] = []
+                batch_coauthor_texts: list[str] = []
+                batch_affiliation_texts: list[str] = []
 
                 for signature_id in batch_signature_ids:
                     signature = self.signatures[signature_id]
@@ -1023,7 +1105,7 @@ class ANDData:
                 progress_bar.update(len(batch_signature_ids))
 
     @staticmethod
-    def maybe_load_json(path_or_json: Optional[Union[str, Union[List, Dict]]]) -> Any:
+    def maybe_load_json(path_or_json: str | list | dict | None) -> Any:
         """
         Either loads a dictionary from a json file or passes through the object
 
@@ -1044,7 +1126,7 @@ class ANDData:
             return path_or_json
 
     @staticmethod
-    def maybe_load_list(path_or_list: Optional[Union[str, list, Set]]) -> Optional[Union[list, Set]]:
+    def maybe_load_list(path_or_list: str | list | set | None) -> list | set | None:
         """
         Either loads a list from a text file or passes through the object
 
@@ -1058,13 +1140,13 @@ class ANDData:
         either the loaded list, or the passed in object
         """
         if isinstance(path_or_list, str):
-            with open(path_or_list, "r") as f:
+            with open(path_or_list) as f:
                 return f.read().strip().split("\n")
         else:
             return path_or_list
 
     @staticmethod
-    def maybe_load_dataframe(path_or_dataframe: Optional[Union[str, pd.DataFrame]]) -> Optional[pd.DataFrame]:
+    def maybe_load_dataframe(path_or_dataframe: str | pd.DataFrame | None) -> pd.DataFrame | None:
         """
         Either loads a dataframe from a csv file or passes through the object
 
@@ -1084,7 +1166,7 @@ class ANDData:
         raise TypeError(f"Expected dataframe path or DataFrame, got {type(path_or_dataframe)}")
 
     @staticmethod
-    def maybe_load_specter(path_or_pickle: Optional[Union[str, Dict]]) -> Optional[Dict]:
+    def maybe_load_specter(path_or_pickle: str | dict | None) -> dict | None:
         """
         Either loads a dictionary from a pickle file or passes through the object
 
@@ -1097,7 +1179,7 @@ class ANDData:
         -------
         either the loaded json, or the passed in object
         """
-        loaded: Optional[Union[Dict, Tuple, Any]]
+        loaded: dict | tuple | Any | None
         if isinstance(path_or_pickle, str):
             with open(path_or_pickle, "rb") as _pickle_file:
                 loaded = pickle.load(_pickle_file)
@@ -1109,14 +1191,14 @@ class ANDData:
 
         if isinstance(loaded, tuple) and len(loaded) == 2:
             matrix, keys = loaded
-            specter_by_key: Dict[Any, Any] = {}
+            specter_by_key: dict[Any, Any] = {}
             for i, key in enumerate(keys):
                 specter_by_key[key] = matrix[i, :]
             return specter_by_key
 
         raise TypeError(f"Unsupported specter pickle payload type: {type(loaded)}")
 
-    def get_original_blocks(self) -> Dict[str, List[str]]:
+    def get_original_blocks(self) -> dict[str, list[str]]:
         """
         Gets the block dict based on the blocks provided with the dataset
 
@@ -1124,12 +1206,12 @@ class ANDData:
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        block: Dict[str, List[str]] = defaultdict(list)
+        block: dict[str, list[str]] = defaultdict(list)
         for signature_id, signature in self.signatures.items():
             block[signature.author_info_given_block].append(signature_id)
         return dict(block)
 
-    def get_s2_blocks(self) -> Dict[str, List[str]]:
+    def get_s2_blocks(self) -> dict[str, list[str]]:
         """
         Gets the block dict based on the blocks provided by Semantic Scholar data
 
@@ -1137,12 +1219,12 @@ class ANDData:
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        block: Dict[str, List[str]] = defaultdict(list)
+        block: dict[str, list[str]] = defaultdict(list)
         for signature_id, signature in self.signatures.items():
             block[signature.author_info_block].append(signature_id)
         return dict(block)
 
-    def get_blocks(self) -> Dict[str, List[str]]:
+    def get_blocks(self) -> dict[str, list[str]]:
         """
         Gets the block dict
 
@@ -1155,17 +1237,17 @@ class ANDData:
         elif self.block_type == "original":
             return self.get_original_blocks()
         else:
-            raise Exception(f"Unknown block type: {self.block_type}")
+            raise ValueError(f"Unknown block type: {self.block_type}")
 
     def get_constraint(
         self,
         signature_id_1: str,
         signature_id_2: str,
-        low_value: Union[float, int] = 0,
-        high_value: Union[float, int] = LARGE_DISTANCE,
+        low_value: float | int = 0,
+        high_value: float | int = LARGE_DISTANCE,
         dont_merge_cluster_seeds: bool = True,
         incremental_dont_use_cluster_seeds: bool = False,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Applies cluster_seeds and generates the default
         constraints which are:
 
@@ -1204,7 +1286,7 @@ class ANDData:
         signature_1 = self.signatures[signature_id_1]
         signature_2 = self.signatures[signature_id_2]
 
-        def _materialize_constraint_name_parts(signature: Signature) -> Tuple[str, str]:
+        def _materialize_constraint_name_parts(signature: Signature) -> tuple[str, str]:
             first = signature.author_info_first_normalized_without_apostrophe
             middle = signature.author_info_middle_normalized_without_apostrophe
             if first is None or middle is None:
@@ -1315,7 +1397,7 @@ class ANDData:
                         return high_value
         return None
 
-    def get_signatures_to_block(self) -> Dict[str, str]:
+    def get_signatures_to_block(self) -> dict[str, str]:
         """
         Creates a dictionary mapping signature id to block key
 
@@ -1323,7 +1405,7 @@ class ANDData:
         -------
         Dict: the signature to block dictionary
         """
-        signatures_to_block: Dict[str, str] = {}
+        signatures_to_block: dict[str, str] = {}
         block_dict = self.get_blocks()
         for block_key, signatures in block_dict.items():
             for signature in signatures:
@@ -1331,8 +1413,8 @@ class ANDData:
         return signatures_to_block
 
     def split_blocks_helper(
-        self, blocks_dict: Dict[str, List[str]]
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+        self, blocks_dict: dict[str, list[str]]
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
         """
         Splits the block dict into train/val/test blocks
 
@@ -1379,7 +1461,7 @@ class ANDData:
 
         return train_block_dict, val_block_dict, test_block_dict
 
-    def group_signature_helper(self, signature_list: List[str]) -> Dict[str, List[str]]:
+    def group_signature_helper(self, signature_list: list[str]) -> dict[str, list[str]]:
         """
         creates a block dict containing a specific input signature list
 
@@ -1392,7 +1474,7 @@ class ANDData:
         -------
         Dict: the block dict for the input signatures
         """
-        block_to_signatures: Dict[str, List[str]] = {}
+        block_to_signatures: dict[str, list[str]] = {}
 
         for s in signature_list:
             if self.signature_to_block[s] not in block_to_signatures:
@@ -1403,7 +1485,7 @@ class ANDData:
 
     def split_cluster_signatures(
         self,
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
         """
         Splits the block dict into train/val/test blocks based on split type requested.
         Options for splitting are `signatures`, `blocks`, and `time`
@@ -1441,7 +1523,7 @@ class ANDData:
             return train_block_dict, val_block_dict, test_block_dict
 
         elif self.unit_of_data_split == "time":
-            signature_to_year: Dict[str, int] = {}
+            signature_to_year: dict[str, int] = {}
             for signature_id, signature in self.signatures.items():
                 # paper_id should be kept as string, so it can be matched to papers.json
                 paper_id = str(signature.paper_id)
@@ -1465,11 +1547,11 @@ class ANDData:
             return train_block_dict, val_block_dict, test_block_dict
 
         else:
-            raise Exception(f"Unknown unit_of_data_split: {self.unit_of_data_split}")
+            raise ValueError(f"Unknown unit_of_data_split: {self.unit_of_data_split}")
 
     def split_cluster_signatures_fixed(
         self,
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
         """
         Splits the block dict into train/val/test blocks based on a fixed block
         based split
@@ -1480,9 +1562,9 @@ class ANDData:
         """
         blocks = self.get_blocks()
 
-        train_block_dict: Dict[str, List[str]] = {}
-        val_block_dict: Dict[str, List[str]] = {}
-        test_block_dict: Dict[str, List[str]] = {}
+        train_block_dict: dict[str, list[str]] = {}
+        val_block_dict: dict[str, list[str]] = {}
+        test_block_dict: dict[str, list[str]] = {}
 
         if self.val_blocks is None:
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
@@ -1522,7 +1604,7 @@ class ANDData:
 
     def split_data_signatures_fixed(
         self,
-    ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
         """
         Splits the block dict into train/val/test blocks based on a fixed signature
         based split
@@ -1531,9 +1613,9 @@ class ANDData:
         -------
         train/val/test block dictionaries
         """
-        train_block_dict: Dict[str, List[str]] = {}
-        val_block_dict: Dict[str, List[str]] = {}
-        test_block_dict: Dict[str, List[str]] = {}
+        train_block_dict: dict[str, list[str]] = {}
+        val_block_dict: dict[str, list[str]] = {}
+        test_block_dict: dict[str, list[str]] = {}
 
         test_signatures = self.test_signatures
 
@@ -1543,7 +1625,7 @@ class ANDData:
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
             np.random.seed(self.random_seed)
             split_prob = np.random.rand(len(self.train_signatures))
-            for signature, p in zip(self.train_signatures, split_prob):
+            for signature, p in zip(self.train_signatures, split_prob, strict=False):
                 if p < train_prob:
                     train_signatures.append(signature)
                 else:
@@ -1561,13 +1643,13 @@ class ANDData:
 
     def split_pairs(
         self,
-        train_signatures: Dict[str, List[str]],
-        val_signatures: Dict[str, List[str]],
-        test_signatures: Dict[str, List[str]],
-    ) -> Tuple[
-        List[Tuple[str, str, Union[int, float]]],
-        List[Tuple[str, str, Union[int, float]]],
-        List[Tuple[str, str, Union[int, float]]],
+        train_signatures: dict[str, list[str]],
+        val_signatures: dict[str, list[str]],
+        test_signatures: dict[str, list[str]],
+    ) -> tuple[
+        list[tuple[str, str, int | float]],
+        list[tuple[str, str, int | float]],
+        list[tuple[str, str, int | float]],
     ]:
         """
         creates pairs for the pairwise classification task
@@ -1611,8 +1693,8 @@ class ANDData:
 
     def construct_cluster_to_signatures(
         self,
-        block_dict: Dict[str, List[str]],
-    ) -> Dict[str, List[str]]:
+        block_dict: dict[str, list[str]],
+    ) -> dict[str, list[str]]:
         """
         creates a dictionary mapping cluster to signatures
 
@@ -1638,10 +1720,10 @@ class ANDData:
 
     def fixed_pairs(
         self,
-    ) -> Tuple[
-        List[Tuple[str, str, Union[int, float]]],
-        List[Tuple[str, str, Union[int, float]]],
-        List[Tuple[str, str, Union[int, float]]],
+    ) -> tuple[
+        list[tuple[str, str, int | float]],
+        list[tuple[str, str, int | float]],
+        list[tuple[str, str, int | float]],
     ]:
         """
         creates pairs for the pairwise classification task from a fixed train/val/test split
@@ -1674,7 +1756,7 @@ class ANDData:
 
         return train_pairs, val_pairs, test_pairs
 
-    def all_pairs(self) -> List[Tuple[str, str, Union[int, float]]]:
+    def all_pairs(self) -> list[tuple[str, str, int | float]]:
         """
         creates all pairs within blocks, probably used for inference
 
@@ -1713,10 +1795,10 @@ class ANDData:
     def pair_sampling(
         self,
         sample_size: int,
-        signature_ids: List[str],
-        blocks: Dict[str, List[str]],
+        signature_ids: list[str],
+        blocks: dict[str, list[str]],
         all_pairs: bool = False,
-    ) -> List[Tuple[str, str, Union[int, float]]]:
+    ) -> list[tuple[str, str, int | float]]:
         """
         Enumerates all pairs exhaustively, and samples pairs according to the four different strategies.
 
@@ -1751,11 +1833,11 @@ class ANDData:
                Not using blocks and not doing balancing is not supported, and homonym/synonym\
                 balancing without pos/neg balancing is not supported"
 
-        same_name_different_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        same_name_same_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        different_name_same_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        different_name_different_cluster: List[Tuple[str, str, Union[int, float]]] = []
-        possible: List[Tuple[str, str, Union[int, float]]] = []
+        same_name_different_cluster: list[tuple[str, str, int | float]] = []
+        same_name_same_cluster: list[tuple[str, str, int | float]] = []
+        different_name_same_cluster: list[tuple[str, str, int | float]] = []
+        different_name_different_cluster: list[tuple[str, str, int | float]] = []
+        possible: list[tuple[str, str, int | float]] = []
 
         if not self.pair_sampling_block:
             if self.signature_to_cluster_id is None:
@@ -1818,7 +1900,7 @@ class ANDData:
                 or self.pair_sampling_balanced_classes
                 or not self.pair_sampling_block
             ):
-                all_pairs_output: List[Tuple[str, str, Union[int, float]]] = (
+                all_pairs_output: list[tuple[str, str, int | float]] = (
                     same_name_different_cluster
                     + same_name_same_cluster
                     + different_name_same_cluster
@@ -1866,7 +1948,7 @@ def _ensure_sinonym_detector():
     return _SINONYM_DETECTOR
 
 
-def _parse_sinonym_name(name_or_struct: Any) -> Tuple[str, str, str]:
+def _parse_sinonym_name(name_or_struct: Any) -> tuple[str, str, str]:
     """Extract (first, middle, last) from Sinonym output using ParsedName only.
 
     Expected input is a structure derived from ParseResult.parsed, either:
@@ -1932,7 +2014,7 @@ def _parse_sinonym_name(name_or_struct: Any) -> Tuple[str, str, str]:
     return "", "", ""
 
 
-def _normalized_first_last_from_signature(sig: Signature) -> Tuple[str, str]:
+def _normalized_first_last_from_signature(sig: Signature) -> tuple[str, str]:
     """Construct normalized (first, last) similar to preprocess_signatures().
 
     Uses hyphen-aware first/middle split and normalize_text for last.
@@ -1947,26 +2029,30 @@ def _normalized_first_last_from_signature(sig: Signature) -> Tuple[str, str]:
 
 
 def compute_sinonym_overwrite_allowlist(
-    signatures: Dict[str, Signature],
-    per_paper_results: Dict[str, Dict[int, Any]],
+    signatures: dict[str, Signature],
+    per_paper_results: dict[str, dict[int, Any]],
     min_ratio: float = 3.0,
-) -> Dict[str, Set[int]]:
-    """Compute overwrite allowlist: use multi-author ratio (x>=min_ratio*y) when any multi-author evidence exists; otherwise, use single-author rule (flip if a>0)."""
-    from collections import defaultdict
+) -> dict[str, set[int]]:
+    """Compute overwrite allowlist.
+
+    Use multi-author ratio (x >= min_ratio * y) when any multi-author evidence exists; otherwise, use
+    single-author rule (flip if a > 0).
+    """
     import re
+    from collections import defaultdict
 
     def _canon(s: str) -> str:
         # Lower and drop non-letters to align spaces/hyphens variants
         return re.sub(r"[^a-z]", "", (s or "").lower())
 
     # Detect multi-author papers via unique author positions present among signatures
-    paper_pos_sets: Dict[str, Set[int]] = defaultdict(set)
+    paper_pos_sets: dict[str, set[int]] = defaultdict(set)
     for sig in signatures.values():
         paper_pos_sets[str(sig.paper_id)].add(sig.author_info_position)
 
     # Counts per normalized name: [a, b, x, y]
     # a,b from single-author papers; x,y from multi-author papers
-    name_counts: Dict[str, List[int]] = defaultdict(lambda: [0, 0, 0, 0])
+    name_counts: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
 
     # Aggregate counts
     for sig in signatures.values():
@@ -1997,7 +2083,7 @@ def compute_sinonym_overwrite_allowlist(
                 name_counts[name_key][1] += 1  # b
 
     # Decide qualified names
-    qualified_names: Set[str] = set()
+    qualified_names: set[str] = set()
     for name, counts in name_counts.items():
         a, b, x, y = counts
         if (x + y) > 0:
@@ -2008,7 +2094,7 @@ def compute_sinonym_overwrite_allowlist(
                 qualified_names.add(name)
 
     # Build allowlist for all occurrences of qualified names
-    allow: Dict[str, Set[int]] = {}
+    allow: dict[str, set[int]] = {}
     for sig in signatures.values():
         o_first, o_last = _normalized_first_last_from_signature(sig)
         name_key = (o_first + " " + o_last).strip()
@@ -2018,18 +2104,18 @@ def compute_sinonym_overwrite_allowlist(
     return allow
 
 
-def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: int) -> Dict[str, Dict[int, Any]]:
+def sinonym_preprocess_papers_parallel(papers_dict: dict[str, Paper], n_jobs: int) -> dict[str, dict[int, Any]]:
     """Parallel wrapper for running Sinonym preprocessing across papers.
 
     Returns a mapping: paper_id -> { position -> structured result }, where each
     structured result is:
       - { 'surname_tokens': [...], 'given_tokens': [...], 'original_compound_surname': Optional[str] }
     """
-    output: Dict[str, Dict[int, Any]] = {}
+    output: dict[str, dict[int, Any]] = {}
     if n_jobs > 1:
         # On Windows, prefer threads to avoid spawn/import guard issues in child processes.
         # On Unix, use processes for CPU-bound work.
-        with UniversalPool(processes=n_jobs, use_threads=False) as p:  # type: ignore
+        with UniversalPool(processes=n_jobs, use_threads=(os.name == "nt")) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
                 # Build a lightweight iterable to minimize serialization overhead
@@ -2058,7 +2144,7 @@ def sinonym_preprocess_papers_parallel(papers_dict: Dict[str, Paper], n_jobs: in
     return output
 
 
-def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> Tuple[str, Dict[int, Any]]:
+def _sinonym_preprocess_paper_light(item: tuple[str, list[tuple[int, str]]]) -> tuple[str, dict[int, Any]]:
     """Lightweight variant: input is (paper_id, [(position, author_name), ...]).
     Returns a mapping: paper_id -> { position -> structured result }, where each structured result is:
     {
@@ -2071,8 +2157,8 @@ def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> 
     key, pos_names = item
 
     # Collect positions and names, skipping None defensively
-    positions: List[int] = []
-    names: List[str] = []
+    positions: list[int] = []
+    names: list[str] = []
     for pos, name in pos_names:
         if name is not None:
             positions.append(pos)
@@ -2084,14 +2170,14 @@ def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> 
     detector = _ensure_sinonym_detector()
     results = detector.process_name_batch(names)  # type: ignore[attr-defined]
 
-    pos_to_norm: Dict[int, Any] = {}
+    pos_to_norm: dict[int, Any] = {}
 
     # If any author in the batch is non-Chinese (unsuccessful), then for the
     # Chinese authors use parsed_original_order instead of parsed.
     any_non_success = any(not getattr(res, "success", False) for res in (results or []))
 
     # Keep only successful (Chinese) parses; align safely via zip
-    for pos, res in zip(positions, (results or [])):
+    for pos, res in zip(positions, (results or []), strict=False):
         success = getattr(res, "success", False)
         if not success:
             continue
@@ -2123,11 +2209,11 @@ def _sinonym_preprocess_paper_light(item: Tuple[str, List[Tuple[int, str]]]) -> 
 
 
 def apply_sinonym_overwrites(
-    signatures: Dict[str, Signature],
-    per_paper_results: Dict[str, Dict[int, Any]],
+    signatures: dict[str, Signature],
+    per_paper_results: dict[str, dict[int, Any]],
     *,
     overwrite_blocks: bool = False,
-    allow_overwrite_pos: Optional[Dict[str, Set[int]]] = None,
+    allow_overwrite_pos: dict[str, set[int]] | None = None,
 ) -> int:
     """Overwrite signature name parts with Sinonym-normalized names where applicable.
 
@@ -2189,9 +2275,9 @@ def apply_sinonym_overwrites(
 
 
 def apply_sinonym_overwrites_to_papers(
-    papers: Dict[str, Paper],
-    per_paper_results: Dict[str, Dict[int, Any]],
-    allow_overwrite_pos: Optional[Dict[str, Set[int]]] = None,
+    papers: dict[str, Paper],
+    per_paper_results: dict[str, dict[int, Any]],
+    allow_overwrite_pos: dict[str, set[int]] | None = None,
 ) -> int:
     """Apply Sinonym-normalized names to Paper.authors for co-author features.
 
@@ -2231,7 +2317,7 @@ def apply_sinonym_overwrites_to_papers(
     return updates
 
 
-def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
+def preprocess_paper_1(item: tuple[str, Paper]) -> tuple[str, Paper]:
     """
     helper function to perform most of the preprocessing of a paper
 
@@ -2279,7 +2365,7 @@ def preprocess_paper_1(item: Tuple[str, Paper]) -> Tuple[str, Paper]:
     return (key, paper)
 
 
-def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, Paper]:
+def preprocess_paper_2(item: tuple[str, Paper, list[MiniPaper]]) -> tuple[str, Paper]:
     """
     helper function to perform preprocessing of the reference details for a paper.
     Note: this happens after the main paper preprocessing has occurred.
@@ -2299,7 +2385,7 @@ def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, P
     venues = " ".join(filter(None, [paper.venue for paper in reference_papers]))
     journals = " ".join(filter(None, [paper.journal_name for paper in reference_papers]))
 
-    authors: List[str] = list(
+    authors: list[str] = list(
         filter(
             None,
             [author.strip() for paper in reference_papers for author in paper.authors],
@@ -2321,12 +2407,12 @@ def preprocess_paper_2(item: Tuple[str, Paper, List[MiniPaper]]) -> Tuple[str, P
 
 
 def preprocess_papers_parallel(
-    papers_dict: Dict,
+    papers_dict: dict,
     n_jobs: int,
     preprocess: bool,
     *,
     compute_reference_features: bool = False,
-) -> Dict:
+) -> dict:
     """
     helper function to preprocess papers
 
@@ -2347,7 +2433,7 @@ def preprocess_papers_parallel(
     global global_preprocess
     global_preprocess = preprocess
 
-    output: Dict = {}
+    output: dict = {}
     if n_jobs > 1:
         # Use UniversalPool to replicate the original p.imap() streaming behavior
         with UniversalPool(processes=n_jobs) as p:  # type: ignore
@@ -2394,7 +2480,7 @@ def preprocess_papers_parallel(
                 output[k] = v
     elif preprocess and not compute_reference_features:
         # Ensure reference_details exists as empty counters to keep downstream code safe
-        empty_tuple: Tuple[Counter, Counter, Counter, Counter] = (
+        empty_tuple: tuple[Counter, Counter, Counter, Counter] = (
             Counter(),
             Counter(),
             Counter(),

@@ -10,7 +10,7 @@ logger = logging.getLogger("s2and")
 AUTODETECT_RAM_SAFETY_FACTOR = 0.8
 DEFAULT_SAFETY_MARGIN_FRACTION = 0.10
 # Approximate bytes/entry for Phase A's `signature_to_cluster_sum_count` accumulator.
-# Calibrated on big-block telemetry (Feb 2026); tune via `scripts/calibrate_phase_a_accumulator.py`.
+# Calibrated on big-block telemetry (Feb 2026); tune via `scripts/rust_suite.py calibrate-phase-a`.
 INCREMENTAL_ACCUMULATOR_ENTRY_BYTES = 200
 
 # Rust batch featurization defaults (override via S2AND_RUST_BATCH_* env vars).
@@ -34,6 +34,8 @@ class MemorySnapshot:
     current_rss_source: str
     safety_margin_bytes: int
     available_bytes: int
+    # What fraction of total_ram_bytes is actually usable after subtracting RSS and safety margin.
+    effective_available_fraction: float
 
 
 def _env_int(name: str, *, default: int, min_value: int) -> int:
@@ -86,27 +88,148 @@ def validate_positive_total_ram_bytes(total_ram_bytes: int, *, source: str) -> i
     return parsed
 
 
-def detect_total_ram_bytes_best_effort() -> tuple[int | None, str]:
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
     try:
         import psutil  # type: ignore
-
+    except Exception:
+        return None
+    try:
         total = int(psutil.virtual_memory().total)
-        if total > 0:
-            return total, "psutil.virtual_memory"
+    except Exception:
+        return None
+    if total > 0:
+        return total
+    return None
+
+
+def _psutil_process_rss_bytes_best_effort() -> int | None:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return None
+    try:
+        rss = int(psutil.Process().memory_info().rss)
+    except Exception:
+        return None
+    if rss >= 0:
+        return rss
+    return None
+
+
+def _proc_meminfo_total_ram_bytes_best_effort() -> tuple[int | None, str]:
+    meminfo_path = "/proc/meminfo"
+    if not os.path.exists(meminfo_path):
+        return None, "unavailable"
+    try:
+        with open(meminfo_path, encoding="utf-8") as meminfo_file:
+            for line in meminfo_file:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024, "proc_meminfo"
     except Exception:
         pass
+    return None, "unavailable"
 
-    meminfo_path = "/proc/meminfo"
-    if os.path.exists(meminfo_path):
-        try:
-            with open(meminfo_path, encoding="utf-8") as meminfo_file:
-                for line in meminfo_file:
-                    if line.startswith("MemTotal:"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            return int(parts[1]) * 1024, "proc_meminfo"
-        except Exception:
-            pass
+
+def _proc_status_rss_bytes_best_effort() -> tuple[int | None, str]:
+    status_path = "/proc/self/status"
+    if not os.path.exists(status_path):
+        return None, "unavailable"
+    try:
+        with open(status_path, encoding="utf-8") as status_file:
+            for line in status_file:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024, "proc_status_vmrss"
+    except Exception:
+        pass
+    return None, "unavailable"
+
+
+def _windows_total_ram_bytes_best_effort() -> tuple[int | None, str]:
+    if not _is_windows():
+        return None, "unavailable"
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None, "unavailable"
+        total = int(status.ullTotalPhys)
+        if total > 0:
+            return total, "winapi_globalmemorystatusex"
+    except Exception as exc:
+        logger.debug("Windows total RAM detection failed: %s", exc)
+    return None, "unavailable"
+
+
+def _windows_process_working_set_bytes_best_effort() -> tuple[int | None, str]:
+    if not _is_windows():
+        return None, "unavailable"
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        process_handle = ctypes.windll.kernel32.GetCurrentProcess()
+        if not ctypes.windll.psapi.GetProcessMemoryInfo(process_handle, ctypes.byref(counters), counters.cb):
+            return None, "unavailable"
+        rss = int(counters.WorkingSetSize)
+        if rss >= 0:
+            return rss, "winapi_process_working_set"
+    except Exception as exc:
+        logger.debug("Windows RSS detection failed: %s", exc)
+    return None, "unavailable"
+
+
+def detect_total_ram_bytes_best_effort() -> tuple[int | None, str]:
+    total = _psutil_virtual_memory_total_bytes_best_effort()
+    if total is not None:
+        return int(total), "psutil.virtual_memory"
+
+    win_total, win_source = _windows_total_ram_bytes_best_effort()
+    if win_total is not None:
+        return int(win_total), str(win_source)
+
+    proc_total, proc_source = _proc_meminfo_total_ram_bytes_best_effort()
+    if proc_total is not None:
+        return int(proc_total), str(proc_source)
 
     return None, "unavailable"
 
@@ -142,32 +265,38 @@ def detect_cgroup_total_ram_bytes_best_effort() -> tuple[int | None, str]:
 
 
 def current_rss_bytes_best_effort(total_ram_bytes: int) -> tuple[int, str]:
-    try:
-        import psutil  # type: ignore
+    rss = _psutil_process_rss_bytes_best_effort()
+    if rss is not None:
+        return int(rss), "psutil_process_rss"
 
-        return int(psutil.Process().memory_info().rss), "psutil_process_rss"
-    except Exception:
-        pass
+    win_rss, win_source = _windows_process_working_set_bytes_best_effort()
+    if win_rss is not None:
+        return int(win_rss), str(win_source)
 
-    status_path = "/proc/self/status"
-    if os.path.exists(status_path):
-        try:
-            with open(status_path, encoding="utf-8") as status_file:
-                for line in status_file:
-                    if line.startswith("VmRSS:"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            return int(parts[1]) * 1024, "proc_status_vmrss"
-        except Exception:
-            pass
+    proc_rss, proc_source = _proc_status_rss_bytes_best_effort()
+    if proc_rss is not None:
+        return int(proc_rss), str(proc_source)
 
     logger.warning(
-        "Unable to determine process RSS (psutil unavailable and /proc/self/status not found); "
+        "Unable to determine process RSS (psutil unavailable and no platform RSS fallback available); "
         "falling back to 50%% of total_ram_bytes=%d. Memory budgeting may be inaccurate. "
         "Install psutil for reliable RSS measurement.",
         total_ram_bytes,
     )
     return int(0.5 * total_ram_bytes), "fallback_half_total"
+
+
+def gc_collect_and_log(stage_name: str) -> None:
+    """Hint the garbage collector between stages to reduce stale RSS inflation.
+
+    Calling ``gc.collect()`` encourages Python to release reference-counted
+    objects that would otherwise inflate RSS seen by the next stage's snapshot.
+    """
+    import gc
+
+    collected = gc.collect()
+    if collected > 0:
+        logger.info("Inter-stage GC after %s: collected %d objects", stage_name, collected)
 
 
 def resolve_total_ram_bytes(
@@ -211,7 +340,21 @@ def memory_snapshot_for_stage(
     resolve_rss = current_rss_fn or current_rss_bytes_best_effort
     current_rss_bytes, current_rss_source = resolve_rss(resolved_total_ram_bytes)
     safety_margin_bytes = int(float(safety_margin_fraction) * float(resolved_total_ram_bytes))
-    available_bytes = max(1, resolved_total_ram_bytes - current_rss_bytes - safety_margin_bytes)
+    raw_available = resolved_total_ram_bytes - current_rss_bytes - safety_margin_bytes
+    available_bytes = max(1, raw_available)
+    if raw_available <= 0:
+        effective_pct = 100.0 * float(current_rss_bytes) / float(max(1, resolved_total_ram_bytes))
+        logger.warning(
+            "Memory budget is degenerate: current_rss_bytes=%d (%.1f%% of total_ram_bytes=%d) "
+            "exceeds usable headroom (safety_margin=%.0f%%). "
+            "Chunk sizes will be minimal and throughput will be severely degraded. "
+            "Consider passing a larger total_ram_bytes or reducing process memory usage.",
+            current_rss_bytes,
+            effective_pct,
+            resolved_total_ram_bytes,
+            safety_margin_fraction * 100.0,
+        )
+    effective_available_fraction = float(available_bytes) / float(max(1, resolved_total_ram_bytes))
     return MemorySnapshot(
         total_ram_bytes=resolved_total_ram_bytes,
         total_ram_source=total_ram_source,
@@ -219,6 +362,7 @@ def memory_snapshot_for_stage(
         current_rss_source=current_rss_source,
         safety_margin_bytes=safety_margin_bytes,
         available_bytes=available_bytes,
+        effective_available_fraction=effective_available_fraction,
     )
 
 
@@ -236,7 +380,7 @@ def compute_incremental_phase_split_limits(
     detect_cgroup_fn: Callable[[], tuple[int | None, str]] | None = None,
     detect_total_fn: Callable[[], tuple[int | None, str]] | None = None,
     current_rss_fn: Callable[[int], tuple[int, str]] | None = None,
-) -> dict[str, int | str]:
+) -> dict[str, int | str | float]:
     snapshot = memory_snapshot_for_stage(
         total_ram_bytes=total_ram_bytes,
         safety_margin_fraction=safety_margin_fraction,
@@ -282,6 +426,7 @@ def compute_incremental_phase_split_limits(
         "current_rss_bytes": snapshot.current_rss_bytes,
         "current_rss_source": snapshot.current_rss_source,
         "available_bytes": snapshot.available_bytes,
+        "effective_available_fraction": snapshot.effective_available_fraction,
         "safety_margin_bytes": snapshot.safety_margin_bytes,
         "chunk_budget_bytes": chunk_budget_bytes,
         "accumulator_budget_bytes": accumulator_budget_bytes,
@@ -373,6 +518,7 @@ def compute_rust_batch_chunk_plan(
         "current_rss_bytes": snapshot.current_rss_bytes,
         "current_rss_source": snapshot.current_rss_source,
         "available_bytes": snapshot.available_bytes,
+        "effective_available_fraction": snapshot.effective_available_fraction,
         "safety_margin_bytes": snapshot.safety_margin_bytes,
         "stage_budget_fraction": float(stage_budget_fraction),
         "stage_budget_bytes": int(stage_budget_bytes),
@@ -411,12 +557,11 @@ def summarize_prediction_accuracy(
     rss_peak_bytes: int,
     rss_after_bytes: int,
 ) -> dict[str, str | int | float | bool]:
-    if predicted_peak_delta_bytes is None and predicted_bytes is None:
+    predicted_delta = predicted_peak_delta_bytes if predicted_peak_delta_bytes is not None else predicted_bytes
+    if predicted_delta is None:
         raise ValueError("Either predicted_peak_delta_bytes or predicted_bytes must be provided.")
-    if predicted_peak_delta_bytes is None:
-        predicted_peak_delta_bytes = predicted_bytes
 
-    bounded_predicted_delta = max(1, int(predicted_peak_delta_bytes))
+    bounded_predicted_delta = max(1, int(predicted_delta))
     bounded_before = max(0, int(rss_before_bytes))
     bounded_peak = max(bounded_before, int(rss_peak_bytes))
     bounded_after = max(0, int(rss_after_bytes))

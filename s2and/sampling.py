@@ -1,8 +1,6 @@
-from typing import List, Tuple, Union, Any
-
-import random
 import math
-
+import random
+from typing import Any
 
 """
 Sampling code modified from:
@@ -11,14 +9,14 @@ https://github.com/glouppe/beard/blob/9fb268736d195dd0c27cd0ae2915d8e00bbb4e2c/e
 
 
 def sampling(
-    same_name_different_cluster: List[Tuple[str, str, Union[int, float]]],
-    different_name_same_cluster: List[Tuple[str, str, Union[int, float]]],
-    same_name_same_cluster: List[Tuple[str, str, Union[int, float]]],
-    different_name_different_cluster: List[Tuple[str, str, Union[int, float]]],
+    same_name_different_cluster: list[tuple[str, str, int | float]],
+    different_name_same_cluster: list[tuple[str, str, int | float]],
+    same_name_same_cluster: list[tuple[str, str, int | float]],
+    different_name_different_cluster: list[tuple[str, str, int | float]],
     sample_size: int,
     balanced_homonyms_and_synonyms: bool,
     random_seed: int,
-) -> List[Tuple[str, str, Union[int, float]]]:
+) -> list[tuple[str, str, int | float]]:
     """
     Samples pairs from the input list of pairs computed exhaustively from pair_sampling.
     Two criteria includes whether balance pairs based on positive/negative classes only
@@ -112,7 +110,7 @@ def sampling(
     return random.sample(pairs, len(pairs))
 
 
-def random_sampling(possible: List[Any], sample_size: int, random_seed: int) -> List[Any]:
+def random_sampling(possible: list[Any], sample_size: int, random_seed: int) -> list[Any]:
     """
     Randomly samples a list
 

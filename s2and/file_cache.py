@@ -1,11 +1,11 @@
+import json
 import os
 import shutil
 import tempfile
-import json
-from urllib.parse import urlparse
-from pathlib import Path
-from typing import Tuple, Union, IO, Optional
 from hashlib import sha256
+from pathlib import Path
+from typing import IO
+from urllib.parse import urlparse
 
 import requests  # type: ignore[import-untyped]
 
@@ -16,7 +16,7 @@ ARTIFACTS_CACHE = str(CACHE_ROOT / "artifacts")
 # file largely taken from https://github.com/allenai/scispacy/blob/master/scispacy/file_cache.py
 
 
-def cached_path(url_or_filename: Union[str, Path], cache_dir: Optional[str] = None) -> str:
+def cached_path(url_or_filename: str | Path, cache_dir: str | None = None) -> str:
     """
     Given something that might be a URL (or might be a local path),
     determine which. If it's a URL, download the file and cache it, and
@@ -38,13 +38,13 @@ def cached_path(url_or_filename: Union[str, Path], cache_dir: Optional[str] = No
         return url_or_filename
     elif parsed.scheme == "":
         # File, but it doesn't exist.
-        raise FileNotFoundError("file {} not found".format(url_or_filename))
+        raise FileNotFoundError(f"file {url_or_filename} not found")
     else:
         # Something unknown
-        raise ValueError("unable to parse {} as a URL or as a local path".format(url_or_filename))
+        raise ValueError(f"unable to parse {url_or_filename} as a URL or as a local path")
 
 
-def url_to_filename(url: str, etag: Optional[str] = None) -> str:
+def url_to_filename(url: str, etag: str | None = None) -> str:
     """
     Convert `url` into a hashed filename in a repeatable way.
     If `etag` is specified, append its hash to the url's, delimited
@@ -65,29 +65,6 @@ def url_to_filename(url: str, etag: Optional[str] = None) -> str:
     return filename
 
 
-def filename_to_url(filename: str, cache_dir: Optional[str] = None) -> Tuple[str, str]:
-    """
-    Return the url and etag (which may be ``None``) stored for `filename`.
-    Raise ``FileNotFoundError`` if `filename` or its stored metadata do not exist.
-    """
-    if cache_dir is None:
-        cache_dir = ARTIFACTS_CACHE
-
-    cache_path = os.path.join(cache_dir, filename)
-    if not os.path.exists(cache_path):
-        raise FileNotFoundError("file {} not found".format(cache_path))
-
-    meta_path = cache_path + ".json"
-    if not os.path.exists(meta_path):
-        raise FileNotFoundError("file {} not found".format(meta_path))
-
-    with open(meta_path) as meta_file:
-        metadata = json.load(meta_file)
-    url = metadata["url"]
-    etag = metadata["etag"]
-
-    return url, etag
-
 
 def http_get(url: str, temp_file: IO) -> None:
     req = requests.get(url, stream=True)
@@ -96,7 +73,7 @@ def http_get(url: str, temp_file: IO) -> None:
             temp_file.write(chunk)
 
 
-def get_from_cache(url: str, cache_dir: Optional[str] = None) -> str:
+def get_from_cache(url: str, cache_dir: str | None = None) -> str:
     """
     Given a URL, look for the corresponding dataset in the local cache.
     If it's not there, download it. Then return the path to the cached file.
@@ -108,7 +85,7 @@ def get_from_cache(url: str, cache_dir: Optional[str] = None) -> str:
 
     response = requests.head(url, allow_redirects=True)
     if response.status_code != 200:
-        raise IOError("HEAD request failed for url {} with status code {}".format(url, response.status_code))
+        raise OSError(f"HEAD request failed for url {url} with status code {response.status_code}")
     etag = response.headers.get("ETag")
 
     filename = url_to_filename(url, etag)

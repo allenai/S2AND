@@ -1,17 +1,22 @@
-import os
-import json
+# ruff: noqa: E402
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+import json
+import os
+
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
-import pickle
-import urllib.request
-import urllib.parse
 import json as json_module
+import pickle
+import urllib.parse
+import urllib.request
+
 import pandas as pd
+
 from s2and.data import ANDData
-from typing import Dict, List
 
 """
 This script creates pairs and embeddings to be used in make_augmentation_dataset_b.py
@@ -26,7 +31,9 @@ def chunks(lst, chunk_size=16):
         yield lst[i : i + chunk_size]
 
 
-def embed(papers, embeddings_by_paper_id: Dict[str, List[float]] = {}):
+def embed(papers, embeddings_by_paper_id: dict[str, list[float]] | None = None):
+    if embeddings_by_paper_id is None:
+        embeddings_by_paper_id = {}
     papers_to_embed = [p for p in papers if p["paper_id"] not in embeddings_by_paper_id]
     unembedded_papers = []
     for chunk in chunks(papers_to_embed):
@@ -135,9 +142,9 @@ for dataset_name, anddata in datasets.items():
     with open(os.path.join(DATA_DIR, dataset_name, dataset_name + "_papers.json")) as f:
         papers_dict = json.load(f)
     titles_dict = {
-        dataset_name
-        + "_"
-        + str(anddata.signatures[i].paper_id): papers_dict[str(anddata.signatures[i].paper_id)]["title"]
+        dataset_name + "_" + str(anddata.signatures[i].paper_id): papers_dict[str(anddata.signatures[i].paper_id)][
+            "title"
+        ]
         for i in train_sigs.union(val_sigs).union(test_sigs)
     }
     all_titles_dict.update(titles_dict)

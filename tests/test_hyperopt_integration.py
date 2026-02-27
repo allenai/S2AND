@@ -1,6 +1,6 @@
-import numpy as np
 from functools import partial
 
+import numpy as np
 from hyperopt import Trials, fmin, hp, space_eval, tpe
 from hyperopt.pyll import scope
 from sklearn.linear_model import LogisticRegression

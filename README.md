@@ -129,12 +129,12 @@ uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.p
 Profiling (Rust inference):
 
 ```bash
-S2AND_BACKEND=rust uv run --no-project python scripts/profile_kisti_rust_prod.py
+S2AND_BACKEND=rust uv run --no-project python scripts/rust_suite.py prod-inference
 ```
 
 Benchmark baseline ownership:
-- Active Rust runtime gate baselines and promotion rules: `docs/rust_operational_baselines.md`
-- Historical compare logs (forensics only): `docs/archive/rust_compare_log_202602.md`
+- Active Rust runtime gate baselines and promotion rules: `docs/rust/baselines.md`
+- Historical compare logs (forensics only): `docs/archive/README.md`
 
 ## Rust featurizer (runtime backend)
 S2AND backend selection is controlled by one public env var:
@@ -400,3 +400,4 @@ If you use S2AND in your research, please cite [S2AND: A Benchmark and Evaluatio
 
 S2AND is an open-source project developed by [the Allen Institute for Artificial Intelligence (AI2)](http://www.allenai.org).
 AI2 is a non-profit institute with the mission to contribute to humanity through high-impact AI research and engineering.
+

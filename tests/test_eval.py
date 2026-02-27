@@ -1,15 +1,16 @@
-import unittest
-import tempfile
 import os
+import tempfile
+import unittest
+
 import numpy as np
 
+import s2and.shap_utils as shap_utils
 from s2and.eval import (
     b3_precision_recall_fscore,
     claims_eval,
     f1_score,
     pairwise_eval,
 )
-import s2and.shap_utils as shap_utils
 
 
 class TestB3AndF1(unittest.TestCase):

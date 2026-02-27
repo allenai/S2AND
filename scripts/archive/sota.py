@@ -1,6 +1,8 @@
-from typing import Dict, Any, Optional
-import os
+# ruff: noqa: E402
+
 import json
+import os
+from typing import Any
 
 CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
 with open(CONFIG_LOCATION) as _json_file:
@@ -8,12 +10,13 @@ with open(CONFIG_LOCATION) as _json_file:
 
 os.environ["OMP_NUM_THREADS"] = "8"
 
-import copy
-import numpy as np
-import pandas as pd
 import argparse
+import copy
 import logging
 import pickle
+
+import numpy as np
+import pandas as pd
 
 logger = logging.getLogger("s2and")
 
@@ -21,16 +24,15 @@ from tqdm import tqdm
 
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["main_data_dir"], ".feature_cache")
 
+from hyperopt import hp
 from sklearn.cluster import DBSCAN
 
+from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
 from s2and.data import ANDData
-from s2and.featurizer import featurize, FeaturizationInfo
-from s2and.model import PairwiseModeler, Clusterer, FastCluster
-from s2and.eval import pairwise_eval, cluster_eval
-from s2and.consts import FEATURIZER_VERSION, DEFAULT_CHUNK_SIZE, NAME_COUNTS_PATH
+from s2and.eval import cluster_eval, pairwise_eval
+from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.file_cache import cached_path
-from hyperopt import hp
-
+from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 search_space = {
     "eps": hp.uniform("choice", 0, 1),
@@ -159,7 +161,7 @@ def main(
     N_JOBS = n_jobs
     USE_MONOTONE_CONSTRAINTS = not dont_use_monotone_constraints
     logger.info(
-        (
+        
             f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
             f"N_JOBS={N_JOBS}, "
             f"USE_MONOTONE_CONSTRAINTS={USE_MONOTONE_CONSTRAINTS}, "
@@ -167,7 +169,7 @@ def main(
             f"use_dbscan={use_dbscan}, "
             f"negative_one_for_nan={negative_one_for_nan}, "
             f"random_seed={random_seed}"
-        )
+        
     )
 
     if inspire_only:
@@ -208,21 +210,21 @@ def main(
     }
     logger.info("loaded name counts")
 
-    datasets: Dict[str, Any] = {}
+    datasets: dict[str, Any] = {}
 
     for dataset_name in tqdm(DATASET_NAMES, desc="Processing datasets and fitting base models"):
         logger.info("")
         logger.info(f"processing dataset {dataset_name}")
-        clusters_path: Optional[str] = None
-        train_blocks: Optional[str] = None
-        val_blocks: Optional[str] = None
-        test_blocks: Optional[str] = None
-        train_pairs_path: Optional[str] = None
-        val_pairs_path: Optional[str] = None
-        test_pairs_path: Optional[str] = None
-        train_signatures: Optional[str] = None
-        val_signatures: Optional[str] = None
-        test_signatures: Optional[str] = None
+        clusters_path: str | None = None
+        train_blocks: str | None = None
+        val_blocks: str | None = None
+        test_blocks: str | None = None
+        train_pairs_path: str | None = None
+        val_pairs_path: str | None = None
+        test_pairs_path: str | None = None
+        train_signatures: str | None = None
+        val_signatures: str | None = None
+        test_signatures: str | None = None
 
         if dataset_name in FIXED_BLOCK:
             logger.info("FIXED BLOCK")
@@ -313,16 +315,24 @@ def main(
         logger.info(f"dataset {dataset_name} loaded")
 
         logger.info(f"featurizing {dataset_name}")
-        train, val, test = featurize(anddata, FEATURIZER_INFO, n_jobs=N_JOBS, use_cache=USE_CACHE, chunk_size=DEFAULT_CHUNK_SIZE, nameless_featurizer_info=NAMELESS_FEATURIZER_INFO, nan_value=NAN_VALUE)  # type: ignore
+        train, val, test = featurize(
+            anddata,
+            FEATURIZER_INFO,
+            n_jobs=N_JOBS,
+            use_cache=USE_CACHE,
+            chunk_size=DEFAULT_CHUNK_SIZE,
+            nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
+            nan_value=NAN_VALUE,
+        )  # type: ignore
         X_train, y_train, nameless_X_train = train
         X_val, y_val, nameless_X_val = val
         assert test is not None
         X_test, y_test, nameless_X_test = test
         logger.info(f"dataset {dataset_name} featurized")
 
-        pairwise_modeler: Optional[PairwiseModeler] = None
+        pairwise_modeler: PairwiseModeler | None = None
         nameless_pairwise_modeler = None
-        cluster: Optional[Clusterer] = None
+        cluster: Clusterer | None = None
         logger.info(f"fitting pairwise for {dataset_name}")
         pairwise_modeler = PairwiseModeler(
             n_iter=N_ITER,
@@ -368,7 +378,7 @@ def main(
             logger.info(f"clusterer fit for {dataset_name}")
             logger.info(f"{dataset_name} best clustering parameters: " + str(cluster.best_params))
 
-        dataset: Dict[str, Any] = {}
+        dataset: dict[str, Any] = {}
         dataset["anddata"] = anddata
         dataset["X_train"] = X_train
         dataset["y_train"] = y_train
@@ -661,7 +671,7 @@ if __name__ == "__main__":
         multi_pairwise_macro_f1_grid,
         multi_pairwise_auroc_grid,
         multi_pairwise_class_f1_grid,
-        multi_average_precision_grid,
+        multi_average_precision_grid, strict=False,
     ):
         index += 1
         if index == 0:

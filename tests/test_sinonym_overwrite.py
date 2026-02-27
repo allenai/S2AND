@@ -1,12 +1,9 @@
-import math
-from typing import Dict, Any, Tuple
-
-import pytest
+from typing import Any
 
 from s2and.data import Signature, compute_sinonym_overwrite_allowlist
 
 
-def make_sig(sig_id: str, paper_id: int, pos: int, first: str, middle: str, last: str) -> Tuple[str, Signature]:
+def make_sig(sig_id: str, paper_id: int, pos: int, first: str, middle: str, last: str) -> tuple[str, Signature]:
     # Build a Signature with only the fields used by gating logic
     sig = Signature(
         author_info_first=first,
@@ -41,7 +38,7 @@ def make_sig(sig_id: str, paper_id: int, pos: int, first: str, middle: str, last
     return sig_id, sig
 
 
-def make_parsed(given: str, surname: str) -> Dict[str, Any]:
+def make_parsed(given: str, surname: str) -> dict[str, Any]:
     return {
         "given_tokens": [t for t in given.split("-") if t],
         "surname_tokens": [t for t in surname.split("-") if t],
@@ -50,11 +47,11 @@ def make_parsed(given: str, surname: str) -> Dict[str, Any]:
     }
 
 
-def build_per_paper(*entries: Tuple[int, int, str, str]) -> Dict[str, Dict[int, Any]]:
+def build_per_paper(*entries: tuple[int, int, str, str]) -> dict[str, dict[int, Any]]:
     """
     entries of (paper_id, pos, sinonym_given, sinonym_surname)
     """
-    m: Dict[str, Dict[int, Any]] = {}
+    m: dict[str, dict[int, Any]] = {}
     for pid, pos, given, surname in entries:
         m.setdefault(str(pid), {})[pos] = make_parsed(given, surname)
     return m

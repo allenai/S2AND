@@ -1,14 +1,14 @@
 import unittest
-import pytest
+
+import lightgbm as lgb
 import numpy as np
-import pickle
+import pytest
 
 import s2and.featurizer
-from s2and.data import ANDData
-from s2and.model import Clusterer
-from s2and.featurizer import FeaturizationInfo
 from s2and.consts import LARGE_DISTANCE
-import lightgbm as lgb
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo
+from s2and.model import Clusterer
 
 
 class TestClusterer(unittest.TestCase):
@@ -45,9 +45,6 @@ class TestClusterer(unittest.TestCase):
         )
 
     def test_get_constraints(self):
-        block = {
-            "a sattar": ["0", "1", "2"],
-        }
         constraint_1 = self.dummy_dataset.get_constraint("0", "1", low_value=0, high_value=2)
         constraint_2 = self.dummy_dataset.get_constraint("1", "0", low_value=0, high_value=2)
         constraint_3 = self.dummy_dataset.get_constraint("1", "2", low_value=0, high_value=2)

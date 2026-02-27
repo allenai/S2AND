@@ -14,11 +14,6 @@ logger = logging.getLogger("s2and")
 Backend = Literal["python", "rust"]
 RequestedBackend = Literal["python", "rust", "auto"]
 RuntimeSource = Literal["S2AND_BACKEND", "default"]
-RuntimeStage = Literal[
-    "ingest_preprocess",
-    "constraints",
-    "pair_featurization",
-]
 
 _STARTUP_WARNING_EMITTED = False
 _STARTUP_WARNING_LOCK = threading.Lock()
@@ -37,12 +32,12 @@ class RuntimeContext:
     operation: str
     requested_backend: RequestedBackend | None
     resolved_backend: Backend
-    stage_enablement: dict[RuntimeStage, bool]
+    use_rust: bool
     run_id: str
     source: RuntimeSource
 
-    def stage_backend(self, stage: RuntimeStage) -> Backend:
-        return "rust" if self.stage_enablement.get(stage, False) else "python"
+    def stage_backend(self, stage: str) -> Backend:
+        return "rust" if self.use_rust else "python"
 
 
 def _normalize_backend_value(value: str) -> str:
@@ -117,20 +112,6 @@ def resolve_backend(*, emit_startup_warning: bool = True) -> BackendResolution:
     return resolution
 
 
-def _stage_enablement_for_backend(backend: Backend) -> dict[RuntimeStage, bool]:
-    if backend == "python":
-        return {
-            "ingest_preprocess": False,
-            "constraints": False,
-            "pair_featurization": False,
-        }
-    return {
-        "ingest_preprocess": True,
-        "constraints": True,
-        "pair_featurization": True,
-    }
-
-
 def build_runtime_context(
     operation: str,
     *,
@@ -145,14 +126,14 @@ def build_runtime_context(
         operation=operation,
         requested_backend=resolution.requested_backend,
         resolved_backend=resolution.resolved_backend,
-        stage_enablement=_stage_enablement_for_backend(resolution.resolved_backend),
+        use_rust=resolution.resolved_backend == "rust",
         run_id=effective_run_id,
         source=resolution.source,
     )
 
 
-def stage_uses_rust(runtime_context: RuntimeContext, stage: RuntimeStage) -> bool:
-    return runtime_context.stage_enablement.get(stage, False)
+def stage_uses_rust(runtime_context: RuntimeContext, stage: str) -> bool:
+    return runtime_context.use_rust
 
 
 def reset_runtime_warning_state_for_tests() -> None:

@@ -1,7 +1,11 @@
-import os
-import json
+# ruff: noqa: E402
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+import json
+import os
+
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
@@ -10,16 +14,19 @@ os.environ["OMP_NUM_THREADS"] = "8"
 import argparse
 import logging
 import pickle
+
 from tqdm import tqdm
 
 logger = logging.getLogger("s2and")
 
+os.environ["S2AND_BACKEND"] = "python"
+
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
+from s2and.consts import NAME_COUNTS_PATH
 from s2and.data import ANDData
 from s2and.eval import claims_eval
 from s2and.file_cache import cached_path
-from s2and.consts import NAME_COUNTS_PATH
 
 DATA_DIR = os.path.join(CONFIG["internal_data_dir"], "claims")
 BLOCK_DATASETS_DIR = os.path.join(DATA_DIR, "block_datasets")

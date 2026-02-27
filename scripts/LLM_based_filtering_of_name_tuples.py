@@ -1,11 +1,17 @@
 # To run this code you need to install the following dependencies:
 # uv pip install google-genai
 
+import concurrent.futures
 import os
+import unicodedata
+import urllib.request
+from itertools import islice
+
 from google import genai
 from google.genai import types
-from itertools import islice
-import unicodedata
+
+from s2and.consts import CONFIG
+from s2and.text import normalize_text
 
 API_KEY = "<insert your gemini key here>"
 
@@ -22,11 +28,12 @@ def generate(input_tuples):
             role="user",
             parts=[
                 types.Part.from_text(
-                    text=f"""Here are name tuples that might be synonyms or variants or spelling variants of one another:
+                    text=f"""
+Here are name tuples that might be synonyms or variants or spelling variants of one another:
 
-{tuples_str}
+ {tuples_str}
 
-output the ones that are correct. 
+ output the ones that are correct. 
 exclude wrong ones like (jon,jack) but include spelling variants, nicknames, pet names, misspellings etc etc. 
 output every pair that is plausibly referring to the same human.
 also output are not plausibly referring to the same human
@@ -34,10 +41,10 @@ we also want to separate out chinese names, so output those separately.
 
 output the VERBATIM correct ones 
 then a newline 
-then the bad ones 
-then a newline
-then the chinese ones only
-and nothing else at all"""
+  then the bad ones 
+  then a newline
+  then the chinese ones only
+  and nothing else at all"""
                 ),
             ],
         ),
@@ -58,21 +65,18 @@ and nothing else at all"""
 
     try:
         out = output.candidates[0].content.parts[0].text
-    except:
+    except (AttributeError, IndexError, TypeError):
         out = "Error: No output from model"
     return input_tuples, out
 
 
 # import all the rows of s2and_name_tuples_filtered.txt
 def read_name_tuples(file_path):
-    with open(file_path, "r") as file:
+    with open(file_path) as file:
         return [line.strip() for line in file if line.strip()]
 
 
 input_tuples = read_name_tuples(os.path.join(CONFIG["main_data_dir"], "s2and_name_tuples_filtered.txt"))
-
-# testing
-import concurrent.futures
 
 
 def batched(iterable, n):
@@ -104,9 +108,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
 keep_tuples = []
 bad_tuples = []
 chinese_tuples = []
-for input_batch, output in results:
+for _input_batch, output in results:
     if output.startswith("Error:"):
-        print(f"Error in batch")
+        print("Error in batch")
         continue
 
     parts = output.split("\n\n")
@@ -178,7 +182,7 @@ and nothing else at all"""
 
     try:
         out = output.candidates[0].content.parts[0].text
-    except:
+    except (AttributeError, IndexError, TypeError):
         out = "Error: No output from model"
     return input_tuples, out
 
@@ -203,9 +207,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
 # parse the chinese results
 chinese_keep_tuples = []
 chinese_bad_tuples = []
-for input_batch, output in results_chinese:
+for _input_batch, output in results_chinese:
     if output.startswith("Error:"):
-        print(f"Error in chinese batch")
+        print("Error in chinese batch")
         continue
 
     parts = output.split("\n\n")
@@ -248,11 +252,6 @@ for t in final_keep_tuples_fixed:
 
 # now we should try to reconstruct the original unnormalized name file
 # from the web and then filter it down to the final keep tuples
-from s2and.text import normalize_text
-from s2and.consts import CONFIG
-import os
-import urllib.request
-
 url = "https://raw.githubusercontent.com/Christopher-Thornton/hmni/master/dev/name_pairs.txt"
 with urllib.request.urlopen(url) as response:
     content = response.read().decode("utf-8")
@@ -288,8 +287,9 @@ def generate_normalized(input_tuples):
             parts=[
                 types.Part.from_text(
                     text=f"""Here are some names that have been normalized to lowercase and various punctuation removed:
-{tuples_str}
-For each one of these, output the name as it would appear in a real name, with proper capitalization and punctuation (apostraphes and dashes).
+ {tuples_str}
+For each one of these, output the name as it would appear in a real name, with proper capitalization and punctuation
+(apostrophes and dashes).
 Output the names in the same order as they appear in the input, one per line."""
                 ),
             ],
@@ -311,7 +311,7 @@ Output the names in the same order as they appear in the input, one per line."""
 
     try:
         out = output.candidates[0].content.parts[0].text
-    except:
+    except (AttributeError, IndexError, TypeError):
         out = "Error: No output from model"
     return input_tuples, out
 
@@ -351,12 +351,12 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
 # parse the normalized results
 for input_batch, output in results_normalized:
     if output.startswith("Error:"):
-        print(f"Error in normalization batch")
+        print("Error in normalization batch")
         continue
 
     output_lines = output.strip().split("\n")
     if len(output_lines) == len(input_batch):
-        for normalized_name, unnormalized_name in zip(input_batch, output_lines):
+        for normalized_name, unnormalized_name in zip(input_batch, output_lines, strict=False):
             normalized_to_unnormalized[normalized_name] = unnormalized_name.strip()
     else:
         print(f"Mismatch in batch size: input={len(input_batch)}, output={len(output_lines)}")
@@ -376,7 +376,7 @@ if missing_unnormalized:
         if not output.startswith("Error:"):
             output_lines = output.strip().split("\n")
             if len(output_lines) == len(missing_unnormalized):
-                for normalized_name, unnormalized_name in zip(missing_unnormalized, output_lines):
+                for normalized_name, unnormalized_name in zip(missing_unnormalized, output_lines, strict=False):
                     normalized_to_unnormalized[normalized_name] = unnormalized_name.strip()
                 print(f"Successfully unnormalized {len(missing_unnormalized)} additional names")
             else:
@@ -412,7 +412,6 @@ if not_found_tuples:
         print(f"  {name}")
 
 # save the matching original lines to a file
-import unicodedata
 
 
 def standardize_punctuation(s):

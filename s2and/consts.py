@@ -1,8 +1,9 @@
-import numpy as np
-from pathlib import Path
-import os
 import json
 import logging
+import os
+from pathlib import Path
+
+import numpy as np
 
 logger = logging.getLogger("s2and")
 

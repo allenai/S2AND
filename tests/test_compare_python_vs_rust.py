@@ -5,13 +5,14 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from s2and.consts import PROJECT_ROOT_PATH
 
 
 def _load_compare_module():
-    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "compare_python_vs_rust.py"
-    spec = importlib.util.spec_from_file_location("compare_python_vs_rust", module_path)
+    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
+    spec = importlib.util.spec_from_file_location("rust_suite", module_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -143,6 +144,12 @@ def test_build_run_metadata_handles_missing_git(monkeypatch):
     assert metadata["git_commit"] is None
     assert metadata["git_branch"] is None
     assert metadata["git_dirty"] is None
-    assert metadata["script"].endswith("compare_python_vs_rust.py")
+    assert metadata["script"].endswith("rust_suite.py")
     assert isinstance(metadata["env"], dict)
 
+
+def test_rust_suite_requires_subcommand():
+    module = _load_compare_module()
+    with pytest.raises(SystemExit) as exc_info:
+        module.main([])
+    assert int(exc_info.value.code) != 0

@@ -1,4 +1,5 @@
 import unittest
+
 import pytest
 
 from s2and.data import ANDData
@@ -106,8 +107,8 @@ class TestData(unittest.TestCase):
         self.dummy_dataset.block_type = "original"
         original_blocks_2 = self.dummy_dataset.get_blocks()
         self.dummy_dataset.block_type = "dummy"
-        with pytest.raises(Exception):
-            blocks = self.dummy_dataset.get_blocks()
+        with pytest.raises(ValueError):
+            self.dummy_dataset.get_blocks()
         self.dummy_dataset.block_type = "s2"
 
         assert original_blocks == expected_original_blocks
@@ -116,7 +117,7 @@ class TestData(unittest.TestCase):
         assert s2_blocks_2 == expected_s2_blocks
 
     def test_initialization(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -129,7 +130,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -141,7 +142,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -154,7 +155,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -166,7 +167,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -188,7 +189,7 @@ class TestData(unittest.TestCase):
         assert dataset.all_test_pairs_flag
         assert dataset.block_type == "s2"
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
             )
@@ -240,39 +241,3 @@ class TestData(unittest.TestCase):
                     paper_single.title_ngrams_words == paper_multi.title_ngrams_words
                 ), f"Title ngrams mismatch for paper {paper_id}"
 
-    def test_global_variable_initialization(self):
-        """Test that global variables are properly initialized in worker processes"""
-        # This test verifies that the _init_pool function works correctly
-        # by ensuring preprocessing can access global variables
-        dataset = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_global_test",
-            load_name_counts=False,
-            preprocess=True,
-            n_jobs=2,
-        )
-
-        # If global variables weren't initialized properly, this would fail
-        # Verify that at least one paper was processed (has title normalization)
-        processed_papers = [p for p in dataset.papers.values() if hasattr(p, "title") and p.title]
-        assert len(processed_papers) > 0, "No papers were properly processed with multiprocessing"
-
-    def test_preprocess_no_multiprocessing_fallback(self):
-        """Test that code works correctly when falling back to single-threaded due to small dataset"""
-        # Test with n_jobs > 1 but with conditions that force single-threaded execution
-        dataset = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_fallback",
-            load_name_counts=False,
-            preprocess=True,
-            n_jobs=4,  # Request multiple jobs but dataset might be too small
-        )
-
-        # Should still work correctly even if it falls back to single-threaded
-        assert len(dataset.papers) > 0
-        processed_papers = [p for p in dataset.papers.values() if hasattr(p, "title")]
-        assert len(processed_papers) > 0

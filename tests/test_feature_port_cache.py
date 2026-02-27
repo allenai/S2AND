@@ -436,8 +436,6 @@ def test_load_s2and_rust_extension_falls_back_from_namespace_package(monkeypatch
         if name == "s2and_rust":
             return NamespaceOnly()
         if name == "s2and_rust._s2and_rust":
-            raise ImportError("no direct extension module at namespace root")
-        if name == "s2and_rust.s2and_rust._s2and_rust":
             return NativeExtension
         raise ImportError(name)
 
@@ -447,8 +445,8 @@ def test_load_s2and_rust_extension_falls_back_from_namespace_package(monkeypatch
     assert loaded is NativeExtension
 
 
-def test_load_s2and_rust_extension_prefers_richer_api_surface(monkeypatch):
-    class StaleRustFeaturizer:
+def test_load_s2and_rust_extension_returns_first_valid_module(monkeypatch):
+    class ValidRustFeaturizer:
         @staticmethod
         def from_dataset(*args, **kwargs):
             return None
@@ -460,29 +458,15 @@ def test_load_s2and_rust_extension_prefers_richer_api_surface(monkeypatch):
         def signature_ids(self):
             return []
 
-    class FreshRustFeaturizer(StaleRustFeaturizer):
-        def featurize_pairs_matrix_indexed(self, *args, **kwargs):
-            return None
-
-        def update_signature_name_counts(self, *args, **kwargs):
-            return 0
-
-    class StaleModule:
-        RustFeaturizer = StaleRustFeaturizer
-
-    class FreshModule:
-        RustFeaturizer = FreshRustFeaturizer
+    class TopLevelModule:
+        RustFeaturizer = ValidRustFeaturizer
 
     def fake_import_module(name: str):
         if name == "s2and_rust":
-            return StaleModule
-        if name == "s2and_rust._s2and_rust":
-            return StaleModule
-        if name == "s2and_rust.s2and_rust._s2and_rust":
-            return FreshModule
+            return TopLevelModule
         raise ImportError(name)
 
     monkeypatch.setattr(rust_capabilities.importlib, "import_module", fake_import_module)
 
     loaded = rust_capabilities.load_s2and_rust_extension()
-    assert loaded is FreshModule
+    assert loaded is TopLevelModule

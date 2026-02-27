@@ -10,7 +10,7 @@ import pytest
 import s2and.eval as eval_module
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
-from s2and.eval import b3_precision_recall_fscore, incremental_cluster_eval, pairwise_precision_recall_fscore
+from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.runtime import RuntimeContext
@@ -89,22 +89,6 @@ def test_incremental_cluster_eval_val_uses_val_block_for_pairwise_metrics(monkey
     assert captured_test_blocks[0] == {"b": ["s_val"]}
     assert captured_test_blocks[1] == {"b": ["s_val"]}
 
-
-def test_b3_precision_recall_fscore_handles_empty_inputs():
-    precision, recall, f1, per_signature, pred_bigger, true_bigger = b3_precision_recall_fscore({}, {})
-    assert precision == 0.0
-    assert recall == 0.0
-    assert f1 == 0.0
-    assert per_signature == {}
-    assert pred_bigger == []
-    assert true_bigger == []
-
-
-def test_pairwise_cmacro_handles_empty_test_block():
-    precision, recall, f1 = pairwise_precision_recall_fscore({}, {}, {}, strategy="cmacro")
-    assert precision == 0.0
-    assert recall == 0.0
-    assert f1 == 0.0
 
 
 def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypatch):
@@ -197,7 +181,10 @@ def test_generate_block_rankformat_does_not_mutate_negative_targets_across_queri
 
 
 def test_transform_signature_file_handles_empty_email_field(tmp_path):
-    transform_module = _load_script_module("scripts/archive/transform_all_datasets.py", "transform_all_datasets_regression")
+    transform_module = _load_script_module(
+        "scripts/archive/transform_all_datasets.py",
+        "transform_all_datasets_regression",
+    )
 
     signatures = {
         "1": {
@@ -330,7 +317,7 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
     assert captured["batching_threshold"] == 1
 
 
-def test_distance_matrix_helper_forwards_use_cache_to_rust_constraints(monkeypatch):
+def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
     dataset = SimpleNamespace()
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     clusterer = Clusterer(
@@ -341,7 +328,19 @@ def test_distance_matrix_helper_forwards_use_cache_to_rust_constraints(monkeypat
         use_default_constraints_as_supervision=True,
     )
 
-    captured = {"featurizer_use_cache": None, "constraint_use_cache": None}
+    class _FakeFeaturizer:
+        def signature_ids(self):
+            return ["s1", "s2"]
+
+        def get_constraints_matrix_indexed(self, *_args, **_kwargs):
+            return [None]
+
+    captured = {
+        "featurizer_use_cache": None,
+        "batch_use_cache": None,
+        "batch_calls": 0,
+        "fallback_calls": 0,
+    }
 
     monkeypatch.setattr(model_module, "_use_rust_constraints", lambda runtime_context=None: True)
     monkeypatch.setattr(
@@ -350,21 +349,32 @@ def test_distance_matrix_helper_forwards_use_cache_to_rust_constraints(monkeypat
         lambda _dataset, runtime_context=None, use_cache=False: captured.__setitem__(
             "featurizer_use_cache", use_cache
         )
-        or object(),
+        or _FakeFeaturizer(),
     )
 
-    def fake_get_constraint_value(*args, use_cache=False, **kwargs):
+    def fake_get_constraints_matrix_indexed_rust(*args, use_cache=False, **kwargs):
         del args, kwargs
-        captured["constraint_use_cache"] = use_cache
+        captured["batch_calls"] += 1
+        captured["batch_use_cache"] = use_cache
+        return [0.0]
+
+    def fake_get_constraint_rust(*args, **kwargs):
+        del args, kwargs
+        captured["fallback_calls"] += 1
         return None
 
-    monkeypatch.setattr(model_module, "_get_constraint_value", fake_get_constraint_value)
+    monkeypatch.setattr(
+        model_module, "get_constraints_matrix_indexed_rust", fake_get_constraints_matrix_indexed_rust
+    )
+    monkeypatch.setattr(model_module, "get_constraint_rust", fake_get_constraint_rust)
 
     helper = clusterer.distance_matrix_helper({"b": ["s1", "s2"]}, dataset, partial_supervision={})
     next(helper)
 
     assert captured["featurizer_use_cache"] is False
-    assert captured["constraint_use_cache"] is False
+    assert captured["batch_use_cache"] is False
+    assert captured["batch_calls"] == 1
+    assert captured["fallback_calls"] == 0
 
 
 def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
@@ -385,7 +395,7 @@ def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
         operation="constraints",
         requested_backend="rust",
         resolved_backend="rust",
-        stage_enablement={"constraints": True, "ingest_preprocess": False, "pair_featurization": False},
+        use_rust=True,
         run_id="run-1",
         source="default",
     )

@@ -1,59 +1,58 @@
-from typing import Tuple, List, Union, Dict, Callable, Any, Optional
-
-import os
 import contextlib
+import functools
 import gc
 import json
-import tempfile
-import orjson
-import numpy as np
-import functools
 import logging
-from collections import Counter
-import threading
+import os
 import queue
+import tempfile
+import threading
 import time
+from collections import Counter
+from collections.abc import Callable
+from typing import Any
 
+import numpy as np
+import orjson
 from tqdm import tqdm
 
-from s2and.data import ANDData
-from s2and.mp import UniversalPool
-from s2and import feature_port
-from s2and import memory_budget
-from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
+from s2and import feature_port, memory_budget
 from s2and.consts import (
     CACHE_ROOT,
-    NUMPY_NAN,
+    DEFAULT_CHUNK_SIZE,
     FEATURIZER_VERSION,
     LARGE_INTEGER,
-    DEFAULT_CHUNK_SIZE,
+    NUMPY_NAN,
 )
+from s2and.data import ANDData
+from s2and.mp import UniversalPool
+from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.text import (
+    TEXT_FUNCTIONS,
+    cosine_sim,
+    counter_jaccard,
+    diff,
     equal,
     equal_middle,
-    diff,
-    name_counts,
-    TEXT_FUNCTIONS,
-    name_text_features,
     jaccard,
-    counter_jaccard,
-    cosine_sim,
+    name_counts,
+    name_text_features,
 )
 
 logger = logging.getLogger("s2and")
 
-TupleOfArrays = Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]
+TupleOfArrays = tuple[np.ndarray, np.ndarray, np.ndarray | None]
 
-CACHED_FEATURES: Dict[str, Dict[str, Any]] = {}
+CACHED_FEATURES: dict[str, dict[str, Any]] = {}
 _CACHED_FEATURES_LOCK = threading.Lock()
 global_dataset: ANDData | None = None
-global_runtime_context: Optional[RuntimeContext] = None
+global_runtime_context: RuntimeContext | None = None
 _RUST_BATCH_CALIBRATION_LOCK = threading.Lock()
-_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES: Optional[int] = None
+_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES: int | None = None
 _RUST_BATCH_CALIBRATION_ATTEMPTED = False
 
 
-def _use_rust_featurizer(runtime_context: Optional[RuntimeContext] = None) -> bool:
+def _use_rust_featurizer(runtime_context: RuntimeContext | None = None) -> bool:
     if runtime_context is None:
         runtime_context = build_runtime_context("pair_featurization")
     return stage_uses_rust(runtime_context, "pair_featurization")
@@ -61,8 +60,8 @@ def _use_rust_featurizer(runtime_context: Optional[RuntimeContext] = None) -> bo
 
 def _has_missing_signature_ngrams_for_pairs(
     dataset: ANDData,
-    signature_pairs: List[Tuple[str, str, Union[int, float]]],
-) -> Tuple[bool, int]:
+    signature_pairs: list[tuple[str, str, int | float]],
+) -> tuple[bool, int]:
     signatures = getattr(dataset, "signatures", {})
     if not signatures:
         return False, 0
@@ -85,7 +84,7 @@ def _has_missing_signature_ngrams_for_pairs(
 
 def _ensure_python_pair_signature_ngrams(
     dataset: ANDData,
-    signature_pairs: List[Tuple[str, str, Union[int, float]]],
+    signature_pairs: list[tuple[str, str, int | float]],
     runtime_context: RuntimeContext,
 ) -> None:
     if _use_rust_featurizer(runtime_context):
@@ -99,12 +98,12 @@ def _ensure_python_pair_signature_ngrams(
 
     has_missing_ngrams, inspected_signature_count = _has_missing_signature_ngrams_for_pairs(dataset, signature_pairs)
     if not has_missing_ngrams:
-        setattr(dataset, "_s2and_python_pair_ngrams_ready", True)
+        dataset._s2and_python_pair_ngrams_ready = True
         return
 
     materialize_start = time.perf_counter()
     materialize_fn()
-    setattr(dataset, "_s2and_python_pair_ngrams_ready", True)
+    dataset._s2and_python_pair_ngrams_ready = True
     logger.info(
         "Telemetry stage: stage=python_pair_signature_ngrams_materialize seconds=%.3f "
         "inspected_signatures=%d total_signatures=%d requested_backend=%s resolved_backend=%s run_id=%s",
@@ -124,12 +123,12 @@ def _rust_batch_chunk_plan(
     total_rows: int,
     selected_feature_count: int,
     nameless_feature_count: int,
-    total_ram_bytes: Optional[int],
-    base_chunk_pairs: Optional[int] = None,
-    row_overhead_bytes: Optional[int] = None,
-    persistent_row_overhead_bytes: Optional[int] = None,
-    fixed_overhead_bytes: Optional[int] = None,
-) -> Dict[str, Union[int, str, float]]:
+    total_ram_bytes: int | None,
+    base_chunk_pairs: int | None = None,
+    row_overhead_bytes: int | None = None,
+    persistent_row_overhead_bytes: int | None = None,
+    fixed_overhead_bytes: int | None = None,
+) -> dict[str, int | str | float]:
     return memory_budget.compute_rust_batch_chunk_plan(
         num_features=feature_count,
         total_pairs=total_pairs,
@@ -152,7 +151,7 @@ def _env_bool(name: str, *, default: bool) -> bool:
     return normalized not in {"0", "false", "no", "off", ""}
 
 
-def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_total_pairs: int) -> List[int]:
+def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_total_pairs: int) -> list[int]:
     bounded_total_pairs = max(0, int(total_pairs))
     if probe_count <= 0:
         return []
@@ -164,7 +163,7 @@ def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_tota
     if len(canonical_fits) >= probe_count:
         return canonical_fits[:probe_count]
 
-    quantile_rows: List[int] = []
+    quantile_rows: list[int] = []
     for probe_index in range(probe_count):
         quantile = float(probe_index + 1) / float(probe_count)
         row_count = int(round(float(bounded_total_pairs) * quantile))
@@ -177,21 +176,31 @@ def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_tota
     return deduped[-probe_count:]
 
 
+def _touch_numpy_pages(array: np.ndarray) -> None:
+    if array.size <= 0:
+        return
+    byte_view = array.view(np.uint8).ravel()
+    byte_view[0] = 0
+    byte_view[-1] = 0
+    byte_view[::4096] = 0
+
+
 def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
     *,
     rust_featurizer: Any,
-    pieces_of_work: List[Tuple[Tuple[str, str], int]],
+    pieces_of_work: list[tuple[tuple[str, str], int]],
     use_indexed_pairs: bool,
-    signature_id_to_index: Dict[str, int],
-    rust_selected_indices: Optional[List[int]],
+    signature_id_to_index: dict[str, int],
+    rust_selected_indices: list[int] | None,
     selected_feature_count: int,
     nameless_feature_count: int,
     row_overhead_bytes: int,
     persistent_row_overhead_bytes: int,
+    configured_fixed_overhead_bytes: int,
     num_threads: int,
-    total_ram_for_stage: Optional[int],
+    total_ram_for_stage: int | None,
     run_id: str,
-) -> Optional[int]:
+) -> int | None:
     global _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES
     global _RUST_BATCH_CALIBRATION_ATTEMPTED
 
@@ -223,7 +232,7 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
     if total_ram_for_stage is None:
         return None
 
-    fixed_samples: List[int] = []
+    fixed_samples: list[int] = []
     chunk_feature_count = max(1, int(selected_feature_count) + int(nameless_feature_count))
     row_overhead_bounded = max(0, int(row_overhead_bytes))
     persistent_row_overhead_bounded = max(0, int(persistent_row_overhead_bytes))
@@ -238,10 +247,14 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
             rss_peak_bytes = rss_before_bytes
 
             probe_features = np.empty((int(row_count), int(selected_feature_count)), dtype=np.float64)
-            probe_nameless_features: Optional[np.ndarray] = None
+            probe_nameless_features: np.ndarray | None = None
             if int(nameless_feature_count) > 0:
                 probe_nameless_features = np.empty((int(row_count), int(nameless_feature_count)), dtype=np.float64)
             probe_labels = np.empty(int(row_count), dtype=np.float64)
+            _touch_numpy_pages(probe_features)
+            if probe_nameless_features is not None:
+                _touch_numpy_pages(probe_nameless_features)
+            _touch_numpy_pages(probe_labels)
 
             rss_now_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_stage)
             rss_peak_bytes = max(rss_peak_bytes, int(rss_now_bytes))
@@ -310,8 +323,15 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
     if not fixed_samples:
         return None
 
-    calibrated_fixed_bytes = max(0, int(max(fixed_samples)))
-    calibrated_fixed_bytes = min(calibrated_fixed_bytes, 512 * (1 << 20))
+    observed_fixed_bytes_estimate = max(0, int(max(fixed_samples)))
+    observed_fixed_bytes_estimate = min(observed_fixed_bytes_estimate, 512 * (1 << 20))
+    configured_fixed_bytes = max(0, int(configured_fixed_overhead_bytes))
+    if observed_fixed_bytes_estimate <= int(float(configured_fixed_bytes) * 1.2):
+        with _RUST_BATCH_CALIBRATION_LOCK:
+            _RUST_BATCH_CALIBRATION_ATTEMPTED = True
+        return None
+
+    calibrated_fixed_bytes = max(configured_fixed_bytes, observed_fixed_bytes_estimate)
 
     with _RUST_BATCH_CALIBRATION_LOCK:
         _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES = int(calibrated_fixed_bytes)
@@ -441,7 +461,7 @@ class FeaturizationInfo:
 
     def __init__(
         self,
-        features_to_use: Optional[List[str]] = None,
+        features_to_use: list[str] | None = None,
         featurizer_version: int = FEATURIZER_VERSION,
     ):
         if features_to_use is None:
@@ -515,7 +535,7 @@ class FeaturizationInfo:
         # NOTE: Increment this anytime a change is made to the featurization logic
         self.featurizer_version = featurizer_version
 
-    def get_feature_names(self) -> List[str]:
+    def get_feature_names(self) -> list[str]:
         """
         Gets all of the feature names
 
@@ -614,7 +634,7 @@ class FeaturizationInfo:
         return feature_names
 
     @staticmethod
-    def feature_cache_key(signature_pair: Tuple) -> str:
+    def feature_cache_key(signature_pair: tuple) -> str:
         """
         returns the key in the feature cache dictionary for a signature pair
 
@@ -662,7 +682,7 @@ class FeaturizationInfo:
             "all_features.json",
         )
 
-    def write_cache(self, cached_features: Dict, dataset_name: str, incremental: bool = False):
+    def write_cache(self, cached_features: dict, dataset_name: str, incremental: bool = False):
         """
         Writes the cached features to the features cache file
 
@@ -683,7 +703,7 @@ class FeaturizationInfo:
 
         if incremental and "__new_features__" in cached_features:
             # Load existing cache and merge with new features
-            existing_cache: Dict[str, Any] = {"features": {}}
+            existing_cache: dict[str, Any] = {"features": {}}
             if os.path.exists(path):
                 try:
                     with open(path, "rb") as fh:
@@ -717,7 +737,7 @@ class FeaturizationInfo:
                 # atomic; old cache either stays or is replaced in a single syscall
                 os.replace(tmp_path, path)
                 break  # Success, exit retry loop
-            except (OSError, IOError) as e:
+            except OSError as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Cache write attempt {attempt + 1} failed: {e}, retrying...")
                     time.sleep(0.1 * (attempt + 1))  # Exponential backoff
@@ -730,8 +750,8 @@ NUM_FEATURES = FeaturizationInfo().number_of_features
 
 
 def _single_pair_featurize(
-    work_input: Tuple[str, str], index: int = -1, force_python: bool = False
-) -> Tuple[List[Union[int, float]], int]:
+    work_input: tuple[str, str], index: int = -1, force_python: bool = False
+) -> tuple[list[int | float], int]:
     """
     Creates the features array for a single signature pair
     NOTE: This function uses a global variable to support faster multiprocessing. That means that this function
@@ -838,10 +858,10 @@ def _single_pair_featurize(
         )
     )
 
-    email_prefix_1: Optional[str] = None
-    email_prefix_2: Optional[str] = None
-    email_suffix_1: Optional[str] = None
-    email_suffix_2: Optional[str] = None
+    email_prefix_1: str | None = None
+    email_prefix_2: str | None = None
+    email_suffix_1: str | None = None
+    email_suffix_2: str | None = None
     if (
         signature_1.author_info_email is not None
         and len(signature_1.author_info_email) > 0
@@ -985,7 +1005,7 @@ def _single_pair_featurize(
     return features, index
 
 
-def parallel_helper(piece_of_work: Tuple, worker_func: Callable):
+def parallel_helper(piece_of_work: tuple, worker_func: Callable):
     """
     Helper function to explode tuple arguments
 
@@ -1005,18 +1025,18 @@ def parallel_helper(piece_of_work: Tuple, worker_func: Callable):
 
 
 def many_pairs_featurize(
-    signature_pairs: List[Tuple[str, str, Union[int, float]]],
+    signature_pairs: list[tuple[str, str, int | float]],
     dataset: ANDData,
     featurizer_info: FeaturizationInfo,
     n_jobs: int,
     use_cache: bool,
     chunk_size: int,
-    nameless_featurizer_info: Optional[FeaturizationInfo] = None,
+    nameless_featurizer_info: FeaturizationInfo | None = None,
     nan_value: float = np.nan,
     delete_training_data: bool = False,
-    runtime_context: Optional[RuntimeContext] = None,
-    total_ram_bytes: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    runtime_context: RuntimeContext | None = None,
+    total_ram_bytes: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
     Featurizes many pairs
 
@@ -1069,17 +1089,18 @@ def many_pairs_featurize(
     global_dataset = dataset
     global_runtime_context = runtime_context
 
-    cached_features: Dict[str, Any] = {"features": {}}
+    cached_features: dict[str, Any] = {"features": {}}
     cache_changed = False
     new_features_count = 0
     did_rust_batch = False
-    rust_batch_plan: Optional[Dict[str, Union[int, str, float]]] = None
-    rust_batch_failure_reason: Optional[str] = None
-    rust_batch_total_ram_for_stage: Optional[int] = None
+    rust_batch_plan: dict[str, int | str | float] | None = None
+    rust_batch_failure_reason: str | None = None
+    rust_batch_total_ram_for_stage: int | None = None
     rust_batch_rss_before_bytes = 0
     rust_batch_rss_peak_bytes = 0
     rust_batch_rss_source = "unavailable"
     rust_batch_rss_baseline_locked = False
+    rust_batch_adaptive_halvings = 0
 
     if _use_rust_featurizer(runtime_context):
         if feature_port.s2and_rust is None:
@@ -1126,7 +1147,7 @@ def many_pairs_featurize(
         def __init__(self, interval_seconds: float):
             self.interval_seconds = interval_seconds
             self._stop = threading.Event()
-            self._thread: Optional[threading.Thread] = None
+            self._thread: threading.Thread | None = None
 
         def _run(self) -> None:
             while not self._stop.is_set():
@@ -1179,7 +1200,7 @@ def many_pairs_featurize(
                     with open(cache_path, "rb") as fh:
                         cached_features = orjson.loads(fh.read())
                 except ValueError:
-                    with open(cache_path, "r", encoding="utf-8") as fh:
+                    with open(cache_path, encoding="utf-8") as fh:
                         cached_features = json.load(fh)
                 logger.info(f"Cache loaded with {len(cached_features['features'])} keys")
         else:
@@ -1195,9 +1216,9 @@ def many_pairs_featurize(
     indices_to_use_set: set[int] = set()
     for feature_name in featurizer_info.features_to_use:
         indices_to_use_set.update(featurizer_info.feature_group_to_index[feature_name])
-    indices_to_use: List[int] = sorted(indices_to_use_set)
+    indices_to_use: list[int] = sorted(indices_to_use_set)
 
-    nameless_indices_to_use: List[int] = []
+    nameless_indices_to_use: list[int] = []
     if nameless_featurizer_info is not None:
         nameless_indices_to_use_set: set[int] = set()
         for feature_name in nameless_featurizer_info.features_to_use:
@@ -1205,13 +1226,13 @@ def many_pairs_featurize(
         nameless_indices_to_use = sorted(nameless_indices_to_use_set)
 
     identity_selected_indices = indices_to_use == list(range(NUM_FEATURES))
-    coauthor_similarity_index: Optional[int] = None
-    coauthor_similarity_values: Optional[np.ndarray] = None
+    coauthor_similarity_index: int | None = None
+    coauthor_similarity_values: np.ndarray | None = None
     if delete_training_data:
         coauthor_similarity_index = featurizer_info.get_feature_names().index("coauthor_similarity")
         coauthor_similarity_values = np.full(len(signature_pairs), -float(LARGE_INTEGER), dtype=np.float64)
 
-    indices_needed_for_compute: List[int] = sorted(
+    indices_needed_for_compute: list[int] = sorted(
         set(indices_to_use)
         | set(nameless_indices_to_use)
         | ({coauthor_similarity_index} if coauthor_similarity_index is not None else set())
@@ -1223,7 +1244,7 @@ def many_pairs_featurize(
         dtype=np.float64,
     )
     labels = np.zeros(len(signature_pairs))
-    nameless_features: Optional[np.ndarray] = None
+    nameless_features: np.ndarray | None = None
     if nameless_featurizer_info is not None:
         nameless_features = np.full(
             (len(signature_pairs), len(nameless_indices_to_use)),
@@ -1293,17 +1314,18 @@ def many_pairs_featurize(
                     and hasattr(rust_featurizer, "signature_ids")
                 )
                 supports_matrix_api = bool(use_indexed_pairs or hasattr(rust_featurizer, "featurize_pairs_matrix"))
-                rust_selected_indices: Optional[List[int]] = None
+                rust_selected_indices: list[int] | None = None
                 if supports_matrix_api and not use_cache and len(indices_needed_for_compute) > 0:
                     rust_selected_indices = indices_needed_for_compute
-                signature_id_to_index: Dict[str, int] = {}
+                signature_id_to_index: dict[str, int] = {}
                 if use_indexed_pairs:
                     rust_signature_ids = rust_featurizer.signature_ids()
                     signature_id_to_index = {str(sig_id): int(idx) for idx, sig_id in enumerate(rust_signature_ids)}
                     logger.info("Rust indexed pair API enabled (signature_count=%d)", len(signature_id_to_index))
                 rust_feature_count = NUM_FEATURES if rust_selected_indices is None else len(rust_selected_indices)
                 rust_prediction_params = memory_budget.resolve_rust_batch_prediction_params()
-                calibrated_fixed_overhead_bytes: Optional[int] = None
+                configured_fixed_overhead_bytes = int(rust_prediction_params["fixed_overhead_bytes"])
+                calibrated_fixed_overhead_bytes: int | None = None
                 if rust_batch_total_ram_for_stage is not None:
                     calibrated_fixed_overhead_bytes = _maybe_calibrate_rust_batch_fixed_overhead_bytes(
                         rust_featurizer=rust_featurizer,
@@ -1315,15 +1337,17 @@ def many_pairs_featurize(
                         nameless_feature_count=len(nameless_indices_to_use),
                         row_overhead_bytes=int(rust_prediction_params["row_overhead_bytes"]),
                         persistent_row_overhead_bytes=int(rust_prediction_params["persistent_row_overhead_bytes"]),
+                        configured_fixed_overhead_bytes=configured_fixed_overhead_bytes,
                         num_threads=max(1, int(n_jobs)),
                         total_ram_for_stage=rust_batch_total_ram_for_stage,
                         run_id=runtime_context.run_id,
                     )
-                fixed_overhead_bytes_for_plan = (
-                    int(calibrated_fixed_overhead_bytes)
-                    if calibrated_fixed_overhead_bytes is not None
-                    else int(rust_prediction_params["fixed_overhead_bytes"])
-                )
+                fixed_overhead_bytes_for_plan = configured_fixed_overhead_bytes
+                if calibrated_fixed_overhead_bytes is not None:
+                    fixed_overhead_bytes_for_plan = max(
+                        configured_fixed_overhead_bytes,
+                        int(calibrated_fixed_overhead_bytes),
+                    )
 
                 rust_batch_plan = _rust_batch_chunk_plan(
                     feature_count=rust_feature_count,
@@ -1377,9 +1401,9 @@ def many_pairs_featurize(
                     str(rust_batch_plan["total_ram_source"]),
                     int(rust_batch_plan["available_bytes"]),
                 )
-                selected_positions: List[int] = indices_to_use
-                nameless_positions: List[int] = nameless_indices_to_use
-                coauthor_position: Optional[int] = coauthor_similarity_index
+                selected_positions: list[int] = indices_to_use
+                nameless_positions: list[int] = nameless_indices_to_use
+                coauthor_position: int | None = coauthor_similarity_index
                 if rust_selected_indices is not None:
                     pos_by_feature_idx = {
                         int(feature_idx): int(pos) for pos, feature_idx in enumerate(rust_selected_indices)
@@ -1389,6 +1413,7 @@ def many_pairs_featurize(
                     if coauthor_similarity_index is not None:
                         coauthor_position = pos_by_feature_idx[coauthor_similarity_index]
                 num_threads = max(1, int(n_jobs))
+                rust_batch_adaptive_halvings = 0
                 with _rust_batch_sampler_context():
                     with tqdm(
                         total=len(pieces_of_work),
@@ -1426,7 +1451,8 @@ def many_pairs_featurize(
                             else:
                                 if rust_selected_indices is not None:
                                     raise RuntimeError(
-                                        "Rust batch selected-indices requested but featurize_pairs_matrix APIs are unavailable "
+                                        "Rust batch selected-indices requested but "
+                                        "featurize_pairs_matrix APIs are unavailable "
                                         f"(run_id={runtime_context.run_id})"
                                     )
                                 rust_features_chunk = np.asarray(
@@ -1453,7 +1479,8 @@ def many_pairs_featurize(
                             }:
                                 raise RuntimeError(
                                     "Rust batch featurizer returned unexpected feature width: "
-                                    f"expected={selected_column_count} (selected) or {NUM_FEATURES} (full) got={rust_chunk_columns}"
+                                    f"expected={selected_column_count} (selected) or {NUM_FEATURES} (full) "
+                                    f"got={rust_chunk_columns}"
                                 )
                             rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
                             chunk_indices = [index for _, index in chunk_work]
@@ -1582,6 +1609,26 @@ def many_pairs_featurize(
                                                 :, coauthor_position
                                             ]
                             _sample_rust_batch_rss_peak()
+                            # Adaptive halving: if observed RSS delta significantly exceeds
+                            # the predicted stage peak, halve target_chunk_size (up to 3 times).
+                            if (
+                                rust_batch_total_ram_for_stage is not None
+                                and rust_batch_adaptive_halvings < 3
+                                and predicted_stage_peak_delta_bytes > 0
+                            ):
+                                observed_delta = max(0, rust_batch_rss_peak_bytes - rust_batch_rss_before_bytes)
+                                if observed_delta > predicted_stage_peak_delta_bytes * 1.2:
+                                    target_chunk_size = max(1, target_chunk_size // 2)
+                                    rust_batch_adaptive_halvings += 1
+                                    logger.warning(
+                                        "Rust batch adaptive chunking: observed_delta=%d > predicted_delta=%d * 1.2; "
+                                        "halving target_chunk_size to %d (halving %d/3) run_id=%s",
+                                        observed_delta,
+                                        predicted_stage_peak_delta_bytes,
+                                        target_chunk_size,
+                                        rust_batch_adaptive_halvings,
+                                        runtime_context.run_id,
+                                    )
                             pbar.update(len(chunk_work))
                             start_index += len(chunk_work)
                 _sample_rust_batch_rss_peak()
@@ -1745,7 +1792,7 @@ def many_pairs_featurize(
             "predicted_features_matrix_bytes=%d predicted_labels_bytes=%d predicted_chunk_bytes=%d "
             "predicted_persistent_row_overhead_bytes=%d predicted_fixed_overhead_bytes=%d "
             "rss_before_bytes=%d rss_peak_bytes=%d rss_after_bytes=%d observed_peak_delta_bytes=%d "
-            "prediction_error_ratio=%.3f underpredicted=%s rss_source=%s",
+            "prediction_error_ratio=%.3f underpredicted=%s adaptive_halvings=%d rss_source=%s",
             rust_batch_prediction["stage_name"],
             str(rust_batch_prediction["prediction_contract_version"]),
             int(rust_batch_prediction["predicted_peak_delta_bytes"]),
@@ -1765,6 +1812,7 @@ def many_pairs_featurize(
             int(rust_batch_prediction["observed_peak_delta_bytes"]),
             float(rust_batch_prediction["prediction_error_ratio"]),
             bool(rust_batch_prediction["underpredicted"]),
+            rust_batch_adaptive_halvings,
             rust_batch_rss_source,
         )
 
@@ -1785,11 +1833,11 @@ def featurize(
     n_jobs: int = 1,
     use_cache: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
-    nameless_featurizer_info: Optional[FeaturizationInfo] = None,
+    nameless_featurizer_info: FeaturizationInfo | None = None,
     nan_value: float = np.nan,
     delete_training_data: bool = False,
-    total_ram_bytes: Optional[int] = None,
-) -> Union[Tuple[TupleOfArrays, TupleOfArrays, TupleOfArrays], TupleOfArrays]:
+    total_ram_bytes: int | None = None,
+) -> tuple[TupleOfArrays, TupleOfArrays, TupleOfArrays] | TupleOfArrays:
     """
     Featurizes the input dataset
 

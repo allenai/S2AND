@@ -16,6 +16,7 @@ data/augmented/
 data/orcid/
 data/test/
 data/zbmath/
+data/inventors*/
 data/lid.176.bin
 data/LICENSE.txt
 pypitoken

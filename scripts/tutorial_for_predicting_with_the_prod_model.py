@@ -5,17 +5,14 @@ This script demonstrates how to use the production S2AND model (v1.1) for cluste
 We will use the test sets of arnnetminer and pubmed datasets as examples.
 """
 
-import os
-import pickle
 import argparse
+import os
 
 
-def _apply_rust_flags(use_rust: int | None) -> None:
+def _apply_backend_flag(use_rust: int | None) -> None:
     if use_rust is None:
         return
-    flag = "1" if use_rust else "0"
-    os.environ["S2AND_USE_RUST_FEATURIZER"] = flag
-    os.environ["S2AND_USE_RUST_CONSTRAINT"] = flag
+    os.environ["S2AND_BACKEND"] = "rust" if use_rust else "python"
 
 
 def main() -> None:
@@ -35,12 +32,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    _apply_rust_flags(args.use_rust)
+    _apply_backend_flag(args.use_rust)
 
+    from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
     from s2and.data import ANDData
     from s2and.eval import cluster_eval
-    from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
     from s2and.featurizer import FeaturizationInfo
+    from s2and.serialization import load_pickle_with_verified_label_encoder_compat
 
     n_jobs = 4
 
@@ -94,12 +92,13 @@ def main() -> None:
     nameless_featurization_info = FeaturizationInfo(
         features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
     )
+    _ = (featurization_info, nameless_featurization_info)
 
     # this is the prod 1.1 model
-    with open(os.path.join(PROJECT_ROOT_PATH, "data", "production_model_v1.1.pickle"), "rb") as f:
-        clusterer = pickle.load(f)["clusterer"]
-        clusterer.use_cache = False  # very important for this experiment!!!
-        clusterer.n_jobs = n_jobs
+    model_path = os.path.join(PROJECT_ROOT_PATH, "data", "production_model_v1.1.pickle")
+    clusterer = load_pickle_with_verified_label_encoder_compat(model_path)["clusterer"]
+    clusterer.use_cache = False  # very important for this experiment!!!
+    clusterer.n_jobs = n_jobs
 
     num_test_blocks = {}
 

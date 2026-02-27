@@ -1,13 +1,28 @@
-import unittest
 import random
-import numpy as np
+import unittest
 from collections import Counter
 
+import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from s2and.text import normalize_text, name_text_features, cosine_sim, get_text_ngrams, get_text_ngrams_words, equal, equal_middle, equal_initial, counter_jaccard, jaccard, compute_block, diff, name_counts, detect_language
 from s2and.consts import NUMPY_NAN
 from s2and.data import NameCounts
+from s2and.text import (
+    compute_block,
+    cosine_sim,
+    counter_jaccard,
+    detect_language,
+    diff,
+    equal,
+    equal_initial,
+    equal_middle,
+    get_text_ngrams,
+    get_text_ngrams_words,
+    jaccard,
+    name_counts,
+    name_text_features,
+    normalize_text,
+)
 
 
 class TestClusterer(unittest.TestCase):
@@ -19,8 +34,6 @@ class TestClusterer(unittest.TestCase):
         assert "text" == normalize_text("te'xt", True)
 
     def test_name_similarity_features(self):
-        a = [NUMPY_NAN] * 4
-        b = name_text_features("", None)
         assert [NUMPY_NAN] * 4 == name_text_features("", None)
         assert [0.0, 0.0, 0.0, 1.0] == name_text_features("text", "text")
         assert all([s >= 0.0 and s <= 1.0 for s in name_text_features("textual", "txt")])
@@ -37,17 +50,63 @@ class TestClusterer(unittest.TestCase):
     def test_get_text_ngrams(self):
         assert Counter() == get_text_ngrams(None)
         assert Counter() == get_text_ngrams("the")
-        assert Counter(["hell", "ello", "hel", "ell", "llo", "he", "el", "ll", "lo", "wor", "wo", "or"]) == get_text_ngrams(
-            "hello wor"
-        )
         assert Counter(
-            ["hell", "ello", "hel", "ell", "llo", "he", "el", "ll", "lo", "wor", "wo", "or", "h", "e", "l", "l", "o", "w", "o", "r"]
+            [
+                "hell",
+                "ello",
+                "hel",
+                "ell",
+                "llo",
+                "he",
+                "el",
+                "ll",
+                "lo",
+                "wor",
+                "wo",
+                "or",
+            ]
+        ) == get_text_ngrams("hello wor")
+        assert Counter(
+            [
+                "hell",
+                "ello",
+                "hel",
+                "ell",
+                "llo",
+                "he",
+                "el",
+                "ll",
+                "lo",
+                "wor",
+                "wo",
+                "or",
+                "h",
+                "e",
+                "l",
+                "l",
+                "o",
+                "w",
+                "o",
+                "r",
+            ]
         ) == get_text_ngrams("hello wor", use_unigrams=True)
 
     def test_get_text_ngrams_words(self):
         assert Counter() == get_text_ngrams_words(None)
         assert Counter() == get_text_ngrams_words("the")
-        assert Counter(["quick green fox", "green fox jumped", "quick green", "green fox", "fox jumped", "quick", "green", "fox", "jumped"]) == get_text_ngrams_words("the quick green fox jumped")
+        assert Counter(
+            [
+                "quick green fox",
+                "green fox jumped",
+                "quick green",
+                "green fox",
+                "fox jumped",
+                "quick",
+                "green",
+                "fox",
+                "jumped",
+            ]
+        ) == get_text_ngrams_words("the quick green fox jumped")
 
     def test_equal(self):
         assert np.isnan(equal(None, None))
@@ -83,7 +142,7 @@ class TestClusterer(unittest.TestCase):
     def test_jaccard(self):
         assert np.isnan(jaccard({}, {}))
         self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5}, {1,2,3,4,6}))
-        self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5,5}, {1,2,3,4,6}))
+        self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5}, {1,2,3,4,6}))
 
     def test_compute_block(self):
         assert "" == compute_block("")
@@ -101,7 +160,8 @@ class TestClusterer(unittest.TestCase):
         assert [4, 99, 10, 200, 5, 100] == name_counts(nc1, nc2)
 
     def test_detect_language(self):
-        is_reliable, is_english, predicted_language = detect_language("Genetic behavior of resistance to the beet cyst as a way to enchant")
+        text = "Genetic behavior of resistance to the beet cyst as a way to enchant"
+        is_reliable, is_english, predicted_language = detect_language(text)
         assert is_reliable is True
         assert is_english is True
-        assert predicted_language == 'en'
+        assert predicted_language == "en"

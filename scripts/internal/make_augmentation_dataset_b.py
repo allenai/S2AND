@@ -1,9 +1,12 @@
-from typing import Dict, Any
+# ruff: noqa: E402
 
-import os
 import json
+import os
+from typing import Any
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
+CONFIG_LOCATION = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
+)
 with open(CONFIG_LOCATION) as _json_file:
     CONFIG = json.load(_json_file)
 
@@ -11,22 +14,22 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "<fill me in>"
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
-import numpy as np
-import pandas as pd
 import argparse
+import copy
 import logging
 import pickle
-import copy
 import random
 from collections import defaultdict
 
+import numpy as np
+import pandas as pd
+
 logger = logging.getLogger("s2and")
 
-from tqdm import tqdm
-from s2and.data import ANDData
-
-
 from google.cloud import translate_v2
+from tqdm import tqdm
+
+from s2and.data import ANDData
 
 translate_client = translate_v2.Client()
 
@@ -84,7 +87,7 @@ def main(
     with open(os.path.join(AUGMENTATION_DIR, "title_only_specters.pickle"), "rb") as _pickle_file:
         title_only_specter = pickle.load(_pickle_file)
 
-    datasets: Dict[str, Any] = {}
+    datasets: dict[str, Any] = {}
     for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fitting base models"):
         logger.info("")
         logger.info(f"processing dataset {dataset_name}")
@@ -110,7 +113,7 @@ def main(
     train_pairs = []
     val_pairs = []
     test_pairs = []
-    pair_counts: Dict[str, Dict[str, Dict[int, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    pair_counts: dict[str, dict[str, dict[int, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 
     for row in augmentation_pairs:
         split = row["split"]
@@ -123,7 +126,9 @@ def main(
         max_value = (
             max_train_positives_per_dataset
             if split == "train"
-            else max_val_positives_per_dataset if split == "val" else max_test_positives_per_dataset
+            else max_val_positives_per_dataset
+            if split == "val"
+            else max_test_positives_per_dataset
         ) * (negatives_multiplier if label == 0 else 1.0)
         if count_value >= max_value or dataset_name not in SOURCE_DATASET_NAMES:
             continue
@@ -140,7 +145,7 @@ def main(
             test_pairs.append(pair)
 
     logger.info(f"Total pairs (train, val, test): {len(train_pairs)}, {len(val_pairs)}, {len(test_pairs)}")
-    pair_counts_dict: Dict[str, Dict[str, Dict[int, int]]] = {}
+    pair_counts_dict: dict[str, dict[str, dict[int, int]]] = {}
     for dataset, d1 in pair_counts.items():
         pair_counts_dict[dataset] = {}
         for split, d2 in d1.items():

@@ -48,20 +48,6 @@ def test_build_rust_json_ingest_contract_collects_canonical_fields():
         None,
         False,
     )
-    assert contract.as_from_json_paths_args(include_normalization_version_args=False) == (
-        "signatures.json",
-        "papers.json",
-        "clusters.json",
-        "cluster_seeds.json",
-        "specter.pkl",
-        "name_tuples.txt",
-        "name_counts.json",
-        False,
-        True,
-        0.0,
-        10000.0,
-        4,
-    )
 
 
 def test_build_rust_json_ingest_contract_requires_signature_and_paper_paths():

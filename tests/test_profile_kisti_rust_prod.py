@@ -10,8 +10,8 @@ from s2and.consts import PROJECT_ROOT_PATH
 
 
 def _load_profile_module():
-    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "profile_kisti_rust_prod.py"
-    spec = importlib.util.spec_from_file_location("profile_kisti_rust_prod", module_path)
+    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
+    spec = importlib.util.spec_from_file_location("rust_suite", module_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -75,7 +75,7 @@ def test_single_run_sets_env_and_returns_result(tmp_path, monkeypatch):
     )
 
     assert result["backend"] == "rust"
-    assert result["run_metadata"]["script"].endswith("profile_kisti_rust_prod.py")
+    assert result["run_metadata"]["script"].endswith("rust_suite.py")
     assert isinstance(result["run_metadata"]["env"], dict)
 
 
@@ -111,7 +111,7 @@ def test_run_single_subprocess_passes_flags_and_parses_result(monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", _fake_run)
 
     module._run_single_subprocess(
-        script_path=Path("scripts/profile_kisti_rust_prod.py"),
+        script_path=Path("scripts/rust_suite.py"),
         backend="rust",
         dataset_name="kisti",
         n_jobs=4,
@@ -168,7 +168,7 @@ def test_single_run_warms_featurizer_when_requested(tmp_path, monkeypatch):
     assert len(warm_calls) == 1
     assert result["rust_warm_featurizer_before_predict"] == 1
     assert result["rust_warm_featurizer_seconds"] >= 0.0
-    assert result["run_metadata"]["script"].endswith("profile_kisti_rust_prod.py")
+    assert result["run_metadata"]["script"].endswith("rust_suite.py")
 
 
 def test_build_run_metadata_handles_missing_git(monkeypatch):
@@ -183,4 +183,4 @@ def test_build_run_metadata_handles_missing_git(monkeypatch):
     assert metadata["git_commit"] is None
     assert metadata["git_branch"] is None
     assert metadata["git_dirty"] is None
-    assert metadata["script"].endswith("profile_kisti_rust_prod.py")
+    assert metadata["script"].endswith("rust_suite.py")

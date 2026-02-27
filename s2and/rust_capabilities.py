@@ -10,6 +10,10 @@ _ENV_TRUE_VALUES = {"1", "true", "yes"}
 _CORE_REQUIRED_FEATURIZER_MARKERS = (
     "from_dataset",
     "from_json_paths",
+    "signature_ids",
+    "get_constraint",
+    "get_constraints_matrix",
+    "get_constraints_matrix_indexed",
     "featurize_pairs_matrix_indexed",
     "update_signature_name_counts",
 )
@@ -59,29 +63,33 @@ def load_s2and_rust_extension() -> Any | None:
     except Exception:
         return None
 
-    best_module: Any | None = module if _rust_featurizer_api_score(module) >= 0 else None
-    best_score = _rust_featurizer_api_score(best_module) if best_module is not None else -1
+    shim_score = _rust_featurizer_api_score(module)
 
-    # Workspace runs can resolve `s2and_rust` to a namespace package at repo root.
-    # Probe common submodule paths for the compiled extension and prefer whichever
-    # module exposes the richest RustFeaturizer API surface.
-    for candidate in ("s2and_rust._s2and_rust", "s2and_rust.s2and_rust._s2and_rust", "s2and_rust.s2and_rust"):
-        try:
-            candidate_module = importlib.import_module(candidate)
-        except Exception:
-            continue
-        candidate_score = _rust_featurizer_api_score(candidate_module)
-        if candidate_score > best_score:
-            best_module = candidate_module
-            best_score = candidate_score
-            continue
-        if candidate_score == best_score and best_module is not None:
-            best_version = _module_version_tuple(best_module)
+    # Workspace runs can resolve `s2and_rust` to a pure-Python shim while the compiled
+    # extension lives in a submodule. Prefer the versioned native module when scores tie.
+    candidate_module: Any | None = None
+    try:
+        candidate_module = importlib.import_module("s2and_rust._s2and_rust")
+    except Exception:
+        candidate_module = None
+
+    candidate_score = _rust_featurizer_api_score(candidate_module) if candidate_module is not None else -1
+    if candidate_module is not None and candidate_score >= 0:
+        if candidate_score > shim_score:
+            return candidate_module
+        if candidate_score == shim_score:
+            shim_version = _module_version_tuple(module)
             candidate_version = _module_version_tuple(candidate_module)
-            if best_version is None and candidate_version is not None:
-                best_module = candidate_module
-                best_score = candidate_score
-    return best_module
+            if candidate_version is not None and shim_version is None:
+                return candidate_module
+            if candidate_version is not None and shim_version is not None and candidate_version > shim_version:
+                return candidate_module
+
+    if shim_score >= 0:
+        return module
+    if candidate_module is not None and candidate_score >= 0:
+        return candidate_module
+    return None
 
 
 def detect_rust_runtime_capabilities(extension_module: Any | None = None) -> RustRuntimeCapabilities:

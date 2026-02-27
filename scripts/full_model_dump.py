@@ -5,27 +5,28 @@ Ai2 employee, the complete data (with augmented dataset and specter2 pickles) is
 """
 
 import os
+
 from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
 
 os.environ["OMP_NUM_THREADS"] = "8"
 os.environ["S2AND_CACHE"] = os.path.join(PROJECT_ROOT_PATH, "data", ".feature_cache")
 
-import numpy as np
 import logging
 import pickle
-from typing import Optional, Dict, Any
+from typing import Any
+
+import numpy as np
+from hyperopt import hp
 from tqdm import tqdm
 
-from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
+from s2and.consts import PROJECT_ROOT_PATH
 from s2and.data import ANDData
-from s2and.featurizer import featurize, FeaturizationInfo
-from s2and.model import PairwiseModeler, Clusterer, FastCluster
-
-from hyperopt import hp
+from s2and.featurizer import FeaturizationInfo, featurize
+from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 logger = logging.getLogger("s2and")
 
-SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][0]
+SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][1]
 SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]
 
 USE_CACHE = False
@@ -94,10 +95,10 @@ def main():
     """
     This script is used to train and dump a model trained on all the datasets
     """
-    datasets: Dict[str, Dict[str, Any]] = {}
+    datasets: dict[str, dict[str, Any]] = {}
     for dataset_name in tqdm(SOURCE_DATASET_NAMES, desc="Processing datasets and fitting base models"):
         logger.info(f"processing dataset {dataset_name}")
-        clusters_path: Optional[str] = None
+        clusters_path: str | None = None
         if dataset_name not in PAIRWISE_ONLY_DATASETS:
             clusters_path = os.path.join(DATA_DIR, dataset_name, dataset_name + "_clusters.json")
             train_pairs_path = None
@@ -147,7 +148,7 @@ def main():
         X_val, y_val, nameless_X_val = val
         X_test, y_test, nameless_X_test = test
 
-        dataset: Dict[str, Any] = {}
+        dataset: dict[str, Any] = {}
         dataset["anddata"] = anddata
         dataset["X_train"] = X_train
         dataset["y_train"] = y_train

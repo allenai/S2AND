@@ -28,8 +28,8 @@ class RustJsonIngestContract:
     expected_normalization_version: str | None = None
     allow_normalization_version_mismatch: bool = False
 
-    def as_from_json_paths_args(self, *, include_normalization_version_args: bool = True) -> tuple[Any, ...]:
-        base_args: tuple[Any, ...] = (
+    def as_from_json_paths_args(self) -> tuple[Any, ...]:
+        return (
             self.signatures_path,
             self.papers_path,
             self.clusters_path,
@@ -42,13 +42,9 @@ class RustJsonIngestContract:
             self.cluster_seed_require_value,
             self.cluster_seed_disallow_value,
             self.num_threads,
+            self.expected_normalization_version,
+            self.allow_normalization_version_mismatch,
         )
-        if include_normalization_version_args:
-            return base_args + (
-                self.expected_normalization_version,
-                self.allow_normalization_version_mismatch,
-            )
-        return base_args
 
 
 def build_rust_json_ingest_contract(

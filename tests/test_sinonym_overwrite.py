@@ -59,22 +59,28 @@ def build_per_paper(*entries: tuple[int, int, str, str]) -> dict[str, dict[int, 
 
 def test_multi_author_ratio_pass():
     # Name: "ping zhang" (x=3, y=1) with ratio=3.0 => 3 >= 3*1 -> yes
-    sigs = dict([
-        make_sig("s1", 1, 0, "ping", "", "zhang"),  # target on multi-author paper 1
-        make_sig("s2", 1, 1, "co", "", "author"),   # coauthor to make it multi-author
-        make_sig("s3", 2, 0, "ping", "", "zhang"),  # target on multi-author paper 2
-        make_sig("s4", 2, 1, "co2", "", "author2"),
-        make_sig("s5", 3, 0, "ping", "", "zhang"),  # target on multi-author paper 3
-        make_sig("s6", 3, 1, "co3", "", "author3"),
-        make_sig("s7", 4, 0, "ping", "", "zhang"),  # target on multi-author paper 4 (not-flip)
-        make_sig("s8", 4, 1, "co4", "", "author4"),
-    ])
+    sigs = dict(
+        [
+            make_sig("s1", 1, 0, "ping", "", "zhang"),  # target on multi-author paper 1
+            make_sig("s2", 1, 1, "co", "", "author"),  # coauthor to make it multi-author
+            make_sig("s3", 2, 0, "ping", "", "zhang"),  # target on multi-author paper 2
+            make_sig("s4", 2, 1, "co2", "", "author2"),
+            make_sig("s5", 3, 0, "ping", "", "zhang"),  # target on multi-author paper 3
+            make_sig("s6", 3, 1, "co3", "", "author3"),
+            make_sig("s7", 4, 0, "ping", "", "zhang"),  # target on multi-author paper 4 (not-flip)
+            make_sig("s8", 4, 1, "co4", "", "author4"),
+        ]
+    )
     # sinonym parses: three flips (zhang,ping) and one not-flip (ping,zhang)
     ppr = build_per_paper(
-        (1, 0, "zhang", "ping"), (1, 1, "co", "author"),
-        (2, 0, "zhang", "ping"), (2, 1, "co2", "author2"),
-        (3, 0, "zhang", "ping"), (3, 1, "co3", "author3"),
-        (4, 0, "ping", "zhang"), (4, 1, "co4", "author4"),
+        (1, 0, "zhang", "ping"),
+        (1, 1, "co", "author"),
+        (2, 0, "zhang", "ping"),
+        (2, 1, "co2", "author2"),
+        (3, 0, "zhang", "ping"),
+        (3, 1, "co3", "author3"),
+        (4, 0, "ping", "zhang"),
+        (4, 1, "co4", "author4"),
     )
     allow = compute_sinonym_overwrite_allowlist(sigs, ppr, min_ratio=3.0)
     assert "1" in allow and 0 in allow["1"]
@@ -85,20 +91,32 @@ def test_multi_author_ratio_pass():
 
 def test_multi_author_ratio_fail():
     # Name: "pei wang" (x=2, y=3) with ratio=3.0 => 2 >= 9? no
-    sigs = dict([
-        make_sig("s1", 10, 0, "pei", "", "wang"), make_sig("s2", 10, 1, "co", "", "author"),
-        make_sig("s3", 11, 0, "pei", "", "wang"), make_sig("s4", 11, 1, "co", "", "author"),
-        make_sig("s5", 12, 0, "pei", "", "wang"), make_sig("s6", 12, 1, "co", "", "author"),
-        make_sig("s7", 13, 0, "pei", "", "wang"), make_sig("s8", 13, 1, "co", "", "author"),
-        make_sig("s9", 14, 0, "pei", "", "wang"), make_sig("s10",14, 1, "co", "", "author"),
-    ])
+    sigs = dict(
+        [
+            make_sig("s1", 10, 0, "pei", "", "wang"),
+            make_sig("s2", 10, 1, "co", "", "author"),
+            make_sig("s3", 11, 0, "pei", "", "wang"),
+            make_sig("s4", 11, 1, "co", "", "author"),
+            make_sig("s5", 12, 0, "pei", "", "wang"),
+            make_sig("s6", 12, 1, "co", "", "author"),
+            make_sig("s7", 13, 0, "pei", "", "wang"),
+            make_sig("s8", 13, 1, "co", "", "author"),
+            make_sig("s9", 14, 0, "pei", "", "wang"),
+            make_sig("s10", 14, 1, "co", "", "author"),
+        ]
+    )
     # sinonym: two flips (wang,pei) and three not-flips (pei,wang)
     ppr = build_per_paper(
-        (10, 0, "wang", "pei"), (10, 1, "co", "author"),
-        (11, 0, "wang", "pei"), (11, 1, "co", "author"),
-        (12, 0, "pei",  "wang"), (12, 1, "co", "author"),
-        (13, 0, "pei",  "wang"), (13, 1, "co", "author"),
-        (14, 0, "pei",  "wang"), (14, 1, "co", "author"),
+        (10, 0, "wang", "pei"),
+        (10, 1, "co", "author"),
+        (11, 0, "wang", "pei"),
+        (11, 1, "co", "author"),
+        (12, 0, "pei", "wang"),
+        (12, 1, "co", "author"),
+        (13, 0, "pei", "wang"),
+        (13, 1, "co", "author"),
+        (14, 0, "pei", "wang"),
+        (14, 1, "co", "author"),
     )
     allow = compute_sinonym_overwrite_allowlist(sigs, ppr, min_ratio=3.0)
     assert "10" not in allow or 0 not in allow["10"]
@@ -107,13 +125,19 @@ def test_multi_author_ratio_fail():
 
 def test_multi_author_all_flips_yes():
     # y=0, x>0 implies ratio passes
-    sigs = dict([
-        make_sig("s1", 20, 0, "yang", "", "peng"), make_sig("s2", 20, 1, "co", "", "author"),
-        make_sig("s3", 21, 0, "yang", "", "peng"), make_sig("s4", 21, 1, "co", "", "author"),
-    ])
+    sigs = dict(
+        [
+            make_sig("s1", 20, 0, "yang", "", "peng"),
+            make_sig("s2", 20, 1, "co", "", "author"),
+            make_sig("s3", 21, 0, "yang", "", "peng"),
+            make_sig("s4", 21, 1, "co", "", "author"),
+        ]
+    )
     ppr = build_per_paper(
-        (20, 0, "peng", "yang"), (20, 1, "co", "author"),
-        (21, 0, "peng", "yang"), (21, 1, "co", "author"),
+        (20, 0, "peng", "yang"),
+        (20, 1, "co", "author"),
+        (21, 0, "peng", "yang"),
+        (21, 1, "co", "author"),
     )
     allow = compute_sinonym_overwrite_allowlist(sigs, ppr, min_ratio=3.0)
     assert "20" in allow and 0 in allow["20"]
@@ -122,9 +146,11 @@ def test_multi_author_all_flips_yes():
 
 def test_single_author_only_flip_yes():
     # Only single-author evidence; a>0 -> overwrite
-    sigs = dict([
-        make_sig("s1", 30, 0, "yang", "", "peng"),
-    ])
+    sigs = dict(
+        [
+            make_sig("s1", 30, 0, "yang", "", "peng"),
+        ]
+    )
     ppr = build_per_paper(
         (30, 0, "peng", "yang"),
     )
@@ -134,9 +160,11 @@ def test_single_author_only_flip_yes():
 
 def test_single_author_only_not_flip_no():
     # Only single-author evidence; b>0 -> do not overwrite
-    sigs = dict([
-        make_sig("s1", 31, 0, "xiaofei", "", "lu"),
-    ])
+    sigs = dict(
+        [
+            make_sig("s1", 31, 0, "xiaofei", "", "lu"),
+        ]
+    )
     ppr = build_per_paper(
         (31, 0, "xiaofei", "lu"),
     )
@@ -148,16 +176,22 @@ def test_mixed_single_and_multi_prioritizes_multi():
     # Multi-author y>0 dominates over single-author a>many; expect no overwrite
     # Multi-author: y=2 (not flips), x=0 (no flips) -> do not overwrite
     # Single-author: several flips (a>0), but should be ignored since x+y>0
-    sigs = dict([
-        make_sig("m1", 40, 0, "pei", "", "wang"), make_sig("m2", 40, 1, "co", "", "author"),
-        make_sig("m3", 41, 0, "pei", "", "wang"), make_sig("m4", 41, 1, "co", "", "author"),
-        # Single-author occurrences for same name
-        make_sig("s1", 42, 0, "pei", "", "wang"),
-        make_sig("s2", 43, 0, "pei", "", "wang"),
-    ])
+    sigs = dict(
+        [
+            make_sig("m1", 40, 0, "pei", "", "wang"),
+            make_sig("m2", 40, 1, "co", "", "author"),
+            make_sig("m3", 41, 0, "pei", "", "wang"),
+            make_sig("m4", 41, 1, "co", "", "author"),
+            # Single-author occurrences for same name
+            make_sig("s1", 42, 0, "pei", "", "wang"),
+            make_sig("s2", 43, 0, "pei", "", "wang"),
+        ]
+    )
     ppr = build_per_paper(
-        (40, 0, "pei", "wang"), (40, 1, "co", "author"),
-        (41, 0, "pei", "wang"), (41, 1, "co", "author"),
+        (40, 0, "pei", "wang"),
+        (40, 1, "co", "author"),
+        (41, 0, "pei", "wang"),
+        (41, 1, "co", "author"),
         (42, 0, "wang", "pei"),  # single-author flip
         (43, 0, "wang", "pei"),  # single-author flip
     )

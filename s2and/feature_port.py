@@ -1,5 +1,5 @@
-import inspect
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -362,7 +362,10 @@ def _from_json_paths_supports_normalization_args(rust_featurizer_cls: Any) -> bo
 
     text_signature = getattr(from_json_paths, "__text_signature__", None)
     if isinstance(text_signature, str) and text_signature:
-        if "expected_normalization_version" in text_signature and "allow_normalization_version_mismatch" in text_signature:
+        if (
+            "expected_normalization_version" in text_signature
+            and "allow_normalization_version_mismatch" in text_signature
+        ):
             return True
 
     try:
@@ -384,9 +387,7 @@ def _from_json_paths_supports_normalization_args(rust_featurizer_cls: Any) -> bo
         return True
 
     params = list(signature.parameters.values())
-    if any(
-        param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for param in params
-    ):
+    if any(param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for param in params):
         # Avoid false positives when the signature is not introspectable.
         return False
 
@@ -908,9 +909,7 @@ def get_constraints_matrix_rust(
 
     get_constraints_matrix = getattr(featurizer, "get_constraints_matrix", None)
     if not callable(get_constraints_matrix):
-        raise RuntimeError(
-            "RustFeaturizer.get_constraints_matrix is unavailable; rebuild/install s2and-rust>=0.31.0."
-        )
+        raise RuntimeError("RustFeaturizer.get_constraints_matrix is unavailable; rebuild/install s2and-rust>=0.31.0.")
     return list(
         get_constraints_matrix(
             pairs,

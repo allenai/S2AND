@@ -51,9 +51,7 @@ def build_rust_lifecycle_policy(
 
     skip_python_paper_preprocess = bool(preprocess and use_rust and rust_build_path == "from_json_paths")
     defer_signature_ngrams_to_rust = bool(preprocess and use_rust)
-    defer_signature_fields_to_rust = bool(
-        preprocess and use_rust and not (is_inference and use_rust)
-    )
+    defer_signature_fields_to_rust = bool(preprocess and use_rust and not (is_inference and use_rust))
 
     return RustLifecyclePolicy(
         rust_build_path=rust_build_path,

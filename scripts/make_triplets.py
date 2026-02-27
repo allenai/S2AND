@@ -396,9 +396,7 @@ def main():
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
             triplets = make_dataset_rankformat(args, dataset, used_pairs=used_id_pairs, test_papers=test_papers)
-            logger.info(
-                f"made {sum(len(x) for x in triplets.values())} examples for {dataset_name}. Saving..."
-            )
+            logger.info(f"made {sum(len(x) for x in triplets.values())} examples for {dataset_name}. Saving...")
             for split_name, file_obj in file_objs.items():
                 for row in triplets[split_name]:
                     # Filter duplicates (would lose a bit less data doing this

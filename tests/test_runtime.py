@@ -6,9 +6,7 @@ from s2and import runtime
 
 
 def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        "S2AND_BACKEND",
-    ):
+    for name in ("S2AND_BACKEND",):
         monkeypatch.delenv(name, raising=False)
     runtime.reset_runtime_warning_state_for_tests()
 
@@ -84,5 +82,3 @@ def test_runtime_context_use_rust(monkeypatch: pytest.MonkeyPatch):
     assert rust_context.use_rust is True
     assert rust_context.stage_backend("pair_featurization") == "rust"
     assert rust_context.stage_backend("constraints") == "rust"
-
-

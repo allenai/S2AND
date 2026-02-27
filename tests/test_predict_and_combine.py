@@ -103,4 +103,3 @@ def test_predict_and_combine_averages_nameless_classifier():
     expected[:2] = (main_pred + nl_pred) / 2.0
     expected[2] = 0.0
     assert np.allclose(predictions, expected)
-

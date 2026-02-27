@@ -161,15 +161,13 @@ def main(
     N_JOBS = n_jobs
     USE_MONOTONE_CONSTRAINTS = not dont_use_monotone_constraints
     logger.info(
-        
-            f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
-            f"N_JOBS={N_JOBS}, "
-            f"USE_MONOTONE_CONSTRAINTS={USE_MONOTONE_CONSTRAINTS}, "
-            f"linkage={linkage}, "
-            f"use_dbscan={use_dbscan}, "
-            f"negative_one_for_nan={negative_one_for_nan}, "
-            f"random_seed={random_seed}"
-        
+        f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
+        f"N_JOBS={N_JOBS}, "
+        f"USE_MONOTONE_CONSTRAINTS={USE_MONOTONE_CONSTRAINTS}, "
+        f"linkage={linkage}, "
+        f"use_dbscan={use_dbscan}, "
+        f"negative_one_for_nan={negative_one_for_nan}, "
+        f"random_seed={random_seed}"
     )
 
     if inspire_only:
@@ -671,7 +669,8 @@ if __name__ == "__main__":
         multi_pairwise_macro_f1_grid,
         multi_pairwise_auroc_grid,
         multi_pairwise_class_f1_grid,
-        multi_average_precision_grid, strict=False,
+        multi_average_precision_grid,
+        strict=False,
     ):
         index += 1
         if index == 0:

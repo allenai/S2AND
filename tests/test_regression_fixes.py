@@ -90,7 +90,6 @@ def test_incremental_cluster_eval_val_uses_val_block_for_pairwise_metrics(monkey
     assert captured_test_blocks[1] == {"b": ["s_val"]}
 
 
-
 def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypatch):
     class Signature:
         def __init__(self, first_name, middle_name, orcid=None):
@@ -346,9 +345,7 @@ def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
     monkeypatch.setattr(
         model_module,
         "_get_rust_featurizer",
-        lambda _dataset, runtime_context=None, use_cache=False: captured.__setitem__(
-            "featurizer_use_cache", use_cache
-        )
+        lambda _dataset, runtime_context=None, use_cache=False: captured.__setitem__("featurizer_use_cache", use_cache)
         or _FakeFeaturizer(),
     )
 
@@ -363,9 +360,7 @@ def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
         captured["fallback_calls"] += 1
         return None
 
-    monkeypatch.setattr(
-        model_module, "get_constraints_matrix_indexed_rust", fake_get_constraints_matrix_indexed_rust
-    )
+    monkeypatch.setattr(model_module, "get_constraints_matrix_indexed_rust", fake_get_constraints_matrix_indexed_rust)
     monkeypatch.setattr(model_module, "get_constraint_rust", fake_get_constraint_rust)
 
     helper = clusterer.distance_matrix_helper({"b": ["s1", "s2"]}, dataset, partial_supervision={})

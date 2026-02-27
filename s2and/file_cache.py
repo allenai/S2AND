@@ -65,7 +65,6 @@ def url_to_filename(url: str, etag: str | None = None) -> str:
     return filename
 
 
-
 def http_get(url: str, temp_file: IO) -> None:
     req = requests.get(url, stream=True)
     for chunk in req.iter_content(chunk_size=1024):

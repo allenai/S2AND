@@ -62,9 +62,7 @@ class TestData(unittest.TestCase):
             ("3", "2", 0),
             ("3", "2", -1),
         ]
-        many_pairs_featurize(
-            test_pairs, self.dummy_dataset, self.dummy_featurizer, 2, False, 1, nan_value=-1
-        )
+        many_pairs_featurize(test_pairs, self.dummy_dataset, self.dummy_featurizer, 2, False, 1, nan_value=-1)
 
 
 def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):

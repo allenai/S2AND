@@ -101,11 +101,7 @@ def test_run_single_subprocess_passes_flags_and_parses_result(monkeypatch):
     def _fake_run(cmd, capture_output, text, check):
         del capture_output, text, check
         captured_cmd.extend(cmd)
-        stdout = (
-            f"{module.RESULT_JSON_START}\n"
-            f"{json.dumps(payload)}\n"
-            f"{module.RESULT_JSON_END}\n"
-        )
+        stdout = f"{module.RESULT_JSON_START}\n" f"{json.dumps(payload)}\n" f"{module.RESULT_JSON_END}\n"
         return SimpleNamespace(stdout=stdout)
 
     monkeypatch.setattr(module.subprocess, "run", _fake_run)

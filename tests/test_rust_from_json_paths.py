@@ -266,9 +266,9 @@ def test_from_json_paths_signature_name_counts_overlay_parity_dummy():
         for idx in name_count_indices:
             ref_val = ref_features[idx]
             got_val = got_features[idx]
-            assert _equalish(ref_val, got_val), (
-                f"Name-count mismatch idx={idx} pair=({s1},{s2}) ref={ref_val} got={got_val}"
-            )
+            assert _equalish(
+                ref_val, got_val
+            ), f"Name-count mismatch idx={idx} pair=({s1},{s2}) ref={ref_val} got={got_val}"
 
 
 @pytest.mark.parametrize("build_path", ["from_json_paths", "from_dataset"])

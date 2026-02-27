@@ -14,6 +14,18 @@ class DummyRustFeaturizer:
     def __init__(self, dataset_name: str):
         self.dataset_name = dataset_name
 
+    def signature_ids(self):
+        return []
+
+    def get_constraint(self, *_args, **_kwargs):
+        return None
+
+    def get_constraints_matrix(self, *_args, **_kwargs):
+        return []
+
+    def get_constraints_matrix_indexed(self, *_args, **_kwargs):
+        return []
+
     @classmethod
     def from_dataset(cls, dataset, _require_value, _disallow_value, _num_threads=None):
         cls.created.append(dataset.name)

@@ -202,7 +202,8 @@ def summary_features_analysis(
             union_s2_venue_f1,
             union_s2_references_f1,
             union_s2_coauthors_f1,
-        ], strict=False,
+        ],
+        strict=False,
     ):
         s2and_pres_avg = _safe_mean(s2and_feature_facet[1])
         s2and_abs_avg = _safe_mean(s2and_feature_facet[0])
@@ -390,7 +391,8 @@ def update_facets(
             comb_venue_f1,
             comb_references_f1,
             comb_coauthors_f1,
-        ], strict=False,
+        ],
+        strict=False,
     ):
         for key, f1 in individual_facet.items():
             combined_facet[key].extend(f1)
@@ -441,22 +443,20 @@ def main(
     N_TRAIN_PAIRS_SIZE = n_train_pairs_size
     USE_CACHE = use_cache
     logger.info(
-        
-            f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
-            f"N_JOBS={N_JOBS}, "
-            f"USE_MONOTONE_CONSTRAINTS={USE_MONOTONE_CONSTRAINTS}, "
-            f"exclude_medline={exclude_medline}, "
-            f"linkage={linkage}, "
-            f"use_dbscan={use_dbscan}, "
-            f"LEAVE_SELF_OUT_FOR_UNION={LEAVE_SELF_OUT_FOR_UNION}, "
-            f"random_seed={random_seed}, "
-            f"INDIVIDUAL_MODELS={INDIVIDUAL_MODELS}, "
-            f"UNION_MODELS={UNION_MODELS}, "
-            f"N_TRAIN_PAIRS_SIZE={N_TRAIN_PAIRS_SIZE}, "
-            f"feature_groups_to_skip={feature_groups_to_skip}, "
-            f"use_linear_pairwise_model={use_linear_pairwise_model}, "
-            f"USE_CACHE={USE_CACHE}, "
-        
+        f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
+        f"N_JOBS={N_JOBS}, "
+        f"USE_MONOTONE_CONSTRAINTS={USE_MONOTONE_CONSTRAINTS}, "
+        f"exclude_medline={exclude_medline}, "
+        f"linkage={linkage}, "
+        f"use_dbscan={use_dbscan}, "
+        f"LEAVE_SELF_OUT_FOR_UNION={LEAVE_SELF_OUT_FOR_UNION}, "
+        f"random_seed={random_seed}, "
+        f"INDIVIDUAL_MODELS={INDIVIDUAL_MODELS}, "
+        f"UNION_MODELS={UNION_MODELS}, "
+        f"N_TRAIN_PAIRS_SIZE={N_TRAIN_PAIRS_SIZE}, "
+        f"feature_groups_to_skip={feature_groups_to_skip}, "
+        f"use_linear_pairwise_model={use_linear_pairwise_model}, "
+        f"USE_CACHE={USE_CACHE}, "
     )
 
     FEATURES_TO_USE = [

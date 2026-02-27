@@ -68,7 +68,6 @@ def test_rust_backend_pair_featurization_fails_fast_on_rust_error(monkeypatch):
     monkeypatch.setattr(feature_port, "s2and_rust", object())
     monkeypatch.setattr(feature_port, "_get_rust_featurizer", lambda *_args, **_kwargs: FailingRustFeaturizer())
 
-
     with pytest.raises(RuntimeError, match="strict rust backend"):
         many_pairs_featurize(
             pairs,
@@ -79,5 +78,3 @@ def test_rust_backend_pair_featurization_fails_fast_on_rust_error(monkeypatch):
             chunk_size=1,
             nan_value=np.nan,
         )
-
-

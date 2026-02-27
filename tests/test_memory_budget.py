@@ -220,9 +220,7 @@ def test_rust_batch_selected_features_tighter_chunk_sizing():
     )
     # No selected_feature_count (legacy): chunk_feature_count = full = 100
     # bytes_per_pair_row = 100*8 + 128 = 928
-    legacy = memory_budget.compute_rust_batch_chunk_plan(
-        num_features=100, total_pairs=50_000, **common_kwargs
-    )
+    legacy = memory_budget.compute_rust_batch_chunk_plan(num_features=100, total_pairs=50_000, **common_kwargs)
     assert int(legacy["bytes_per_pair_row"]) == 100 * 8 + 128
 
     # With selected=20, nameless=5: chunk_feature_count = 25
@@ -237,7 +235,6 @@ def test_rust_batch_selected_features_tighter_chunk_sizing():
     assert int(selected["bytes_per_pair_row"]) == 25 * 8 + 128
     # Tighter row estimate -> more pairs per chunk
     assert int(selected["chunk_pairs"]) >= int(legacy["chunk_pairs"])
-
 
 
 def test_degenerate_budget_logs_warning(caplog):

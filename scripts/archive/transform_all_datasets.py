@@ -41,12 +41,10 @@ EMAIL_SPECIAL_CASES = {
     '{"njzhaxm@qq.com ws0801@hotmail.com"}': "ws0801@hotmail.com",
     '{"wangzy@nju.edu.cn sunping@nju.edu.cn"}': "sunping@nju.edu.cn",
     (
-        '{"preecer@uah.edu James.Burgess@uah.edu charles.dermer@nrl.navy.mil '
-        'nicola.omodei@stanford.edu azk@mpe"}'
+        '{"preecer@uah.edu James.Burgess@uah.edu charles.dermer@nrl.navy.mil ' 'nicola.omodei@stanford.edu azk@mpe"}'
     ): "charles.dermer@nrl.navy.mil",
     (
-        '{"sjzhu@umd.edu jchiang@slac.stanford.edu charles.dermer@nrl.navy.mil '
-        'nicola.omodei@stanford.edu giaco"}'
+        '{"sjzhu@umd.edu jchiang@slac.stanford.edu charles.dermer@nrl.navy.mil ' 'nicola.omodei@stanford.edu giaco"}'
     ): "charles.dermer@nrl.navy.mil",
     '{"bjbohr@nbi,dk"}': "bjbohr@nbi.dk",
     '{"31848346@qq.com xiaofangsun@hotmail.com yongfan011@gzhmu.edu.cn"}': "yongfan011@gzhmu.edu.cn",

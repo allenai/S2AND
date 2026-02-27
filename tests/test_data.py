@@ -240,4 +240,3 @@ class TestData(unittest.TestCase):
                 assert (
                     paper_single.title_ngrams_words == paper_multi.title_ngrams_words
                 ), f"Title ngrams mismatch for paper {paper_id}"
-

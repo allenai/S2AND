@@ -221,5 +221,3 @@ def test_rust_json_ingest_uses_minimal_python_paper_preprocess():
     assert inference_paper.title_ngrams_chars is None
     assert train_paper.title_ngrams_words is not None
     assert inference_paper.title_ngrams_words is None
-
-

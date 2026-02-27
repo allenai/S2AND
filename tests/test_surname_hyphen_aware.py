@@ -1,4 +1,3 @@
-
 from s2and.data import (
     Signature,
     _canonicalize_last_for_counts,
@@ -76,4 +75,3 @@ def test_apply_sinonym_overwrites_block_compound_surname():
     assert updated == 1
     new_sig = signatures["s1"]
     assert new_sig.author_info_block == "q ou yang"
-

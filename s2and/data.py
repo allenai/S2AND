@@ -338,6 +338,11 @@ class ANDData:
         self.signatures_path = signatures if isinstance(signatures, str) else None
         self.papers_path = papers if isinstance(papers, str) else None
         self._rust_ingest_tmpdir = None  # TemporaryDirectory; prevent leak
+        self._s2and_python_pair_ngrams_ready: bool = False
+        self._rust_cluster_seeds_require_id: int | None = None
+        self._rust_cluster_seeds_require_len: int | None = None
+        self._rust_cluster_seeds_disallow_id: int | None = None
+        self._rust_cluster_seeds_disallow_len: int | None = None
         self.clusters_path = clusters if isinstance(clusters, str) else None
         self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None

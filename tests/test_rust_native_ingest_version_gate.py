@@ -10,11 +10,8 @@ import s2and.feature_port as feature_port
 _rust_available = feature_port.s2and_rust is not None and hasattr(
     getattr(feature_port.s2and_rust, "RustFeaturizer", None), "from_json_paths"
 )
-_rust_supports_normalization_args = (
-    _rust_available
-    and feature_port._from_json_paths_supports_normalization_args(
-        getattr(feature_port.s2and_rust, "RustFeaturizer", None)
-    )
+_rust_supports_normalization_args = _rust_available and feature_port._from_json_paths_supports_normalization_args(
+    getattr(feature_port.s2and_rust, "RustFeaturizer", None)
 )
 _skip_no_rust = pytest.mark.skipif(not _rust_available, reason="s2and_rust extension unavailable")
 _skip_no_normalization_args = pytest.mark.skipif(
@@ -111,17 +108,42 @@ def test_name_counts_version_gate_caches_by_path_and_mtime(tmp_path, monkeypatch
 
 def _write_minimal_ingest_files(tmp_path):
     """Write minimal signatures/papers JSON for from_json_paths."""
-    sigs = {"1": {"paper_id": "p1",
-                  "author_info": {"first": "A", "middle": None, "last": "B", "suffix": None,
-                                  "position": 0, "email": None, "affiliations": [],
-                                  "block": "a b", "estimated_ethnicity": None,
-                                  "estimated_gender": None, "given_block": "a b"},
-                  "signature_id": "1", "given_name": "A B",
-                  "sourced_author_ids": [], "sourced_author_source": None}}
-    papers = {"p1": {"paper_id": "p1", "title": "Test", "venue": "", "journal_name": "",
-                      "authors": [{"position": 0, "author_name": "A B"}],
-                      "references": [], "year": 2020, "abstract": "",
-                      "sources": [], "fields_of_study": []}}
+    sigs = {
+        "1": {
+            "paper_id": "p1",
+            "author_info": {
+                "first": "A",
+                "middle": None,
+                "last": "B",
+                "suffix": None,
+                "position": 0,
+                "email": None,
+                "affiliations": [],
+                "block": "a b",
+                "estimated_ethnicity": None,
+                "estimated_gender": None,
+                "given_block": "a b",
+            },
+            "signature_id": "1",
+            "given_name": "A B",
+            "sourced_author_ids": [],
+            "sourced_author_source": None,
+        }
+    }
+    papers = {
+        "p1": {
+            "paper_id": "p1",
+            "title": "Test",
+            "venue": "",
+            "journal_name": "",
+            "authors": [{"position": 0, "author_name": "A B"}],
+            "references": [],
+            "year": 2020,
+            "abstract": "",
+            "sources": [],
+            "fields_of_study": [],
+        }
+    }
     sig_path = tmp_path / "sigs.json"
     paper_path = tmp_path / "papers.json"
     sig_path.write_text(json.dumps(sigs), encoding="utf-8")
@@ -129,24 +151,26 @@ def _write_minimal_ingest_files(tmp_path):
     return str(sig_path), str(paper_path)
 
 
-def _call_from_json_paths(sig_path, paper_path, *, name_counts_path, expected_normalization_version,
-                          allow_normalization_version_mismatch):
+def _call_from_json_paths(
+    sig_path, paper_path, *, name_counts_path, expected_normalization_version, allow_normalization_version_mismatch
+):
     """Call from_json_paths with positional args matching the ingest contract."""
     # Positional order: signatures, papers, clusters, cluster_seeds, specter,
     #   name_tuples, name_counts, preprocess, compute_ref, seed_require, seed_disallow,
     #   num_threads, expected_normalization_version, allow_normalization_version_mismatch
     feature_port.s2and_rust.RustFeaturizer.from_json_paths(
-        sig_path, paper_path,
-        None,   # clusters_path
-        None,   # cluster_seeds_path
-        None,   # specter_embeddings_path
-        None,   # name_tuples_path
+        sig_path,
+        paper_path,
+        None,  # clusters_path
+        None,  # cluster_seeds_path
+        None,  # specter_embeddings_path
+        None,  # name_tuples_path
         name_counts_path,
-        True,   # preprocess
+        True,  # preprocess
         False,  # compute_reference_features
-        0.0,    # cluster_seed_require_value
+        0.0,  # cluster_seed_require_value
         10000.0,  # cluster_seed_disallow_value
-        1,      # num_threads
+        1,  # num_threads
         expected_normalization_version,
         allow_normalization_version_mismatch,
     )
@@ -161,7 +185,8 @@ def test_rust_version_gate_fails_on_missing_version(tmp_path):
 
     with pytest.raises(RuntimeError, match="Missing normalization_version"):
         _call_from_json_paths(
-            sig_path, paper_path,
+            sig_path,
+            paper_path,
             name_counts_path=str(artifact_path),
             expected_normalization_version="legacy_compat",
             allow_normalization_version_mismatch=False,
@@ -177,7 +202,8 @@ def test_rust_version_gate_fails_on_mismatch(tmp_path):
 
     with pytest.raises(RuntimeError, match="Normalization version mismatch"):
         _call_from_json_paths(
-            sig_path, paper_path,
+            sig_path,
+            paper_path,
             name_counts_path=str(artifact_path),
             expected_normalization_version="legacy_compat",
             allow_normalization_version_mismatch=False,
@@ -193,7 +219,8 @@ def test_rust_version_gate_allows_override(tmp_path):
 
     # Should NOT raise when allow_normalization_version_mismatch=True
     _call_from_json_paths(
-        sig_path, paper_path,
+        sig_path,
+        paper_path,
         name_counts_path=str(artifact_path),
         expected_normalization_version="legacy_compat",
         allow_normalization_version_mismatch=True,
@@ -208,7 +235,8 @@ def test_rust_version_gate_accepts_matching_version(tmp_path):
     sig_path, paper_path = _write_minimal_ingest_files(tmp_path)
 
     _call_from_json_paths(
-        sig_path, paper_path,
+        sig_path,
+        paper_path,
         name_counts_path=str(artifact_path),
         expected_normalization_version="legacy_compat",
         allow_normalization_version_mismatch=False,
@@ -225,7 +253,8 @@ def test_rust_skips_validation_when_no_expected_version(tmp_path):
 
     # Should NOT raise — no expected version means no check
     _call_from_json_paths(
-        sig_path, paper_path,
+        sig_path,
+        paper_path,
         name_counts_path=str(artifact_path),
         expected_normalization_version=None,
         allow_normalization_version_mismatch=False,

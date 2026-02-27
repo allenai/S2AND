@@ -1930,8 +1930,7 @@ class Clusterer:
             constraint_batch_seconds_total += float(batch_telemetry["elapsed_seconds"])
             constraint_api_modes.add(str(batch_telemetry["api_mode"]))
             pair_buffer = [
-                (sig_id_1, sig_id_2, label)
-                for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=False)
+                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=False)
             ]
             _process_incremental_chunk(pair_buffer)
 
@@ -2102,10 +2101,8 @@ class Clusterer:
                                 last = signature.author_info_last
                                 paper_id = signature.paper_id
                                 logger.info(
-                                    
-                                        "Incremental clustering prevented a name compatibility issue from being "
-                                        f"added while clustering {first} {last} on {paper_id}"
-                                    
+                                    "Incremental clustering prevented a name compatibility issue from being "
+                                    f"added while clustering {first} {last} on {paper_id}"
                                 )
                                 new_name_disallowed = True
 
@@ -2693,9 +2690,7 @@ class Clusterer:
         constraint_batch_seconds_total = 0.0
         constraint_api_modes: set[str] = set()
 
-        def _update_signature_cluster_average(
-            unassigned_signature: str, cluster_id: int | str, dist: float
-        ) -> None:
+        def _update_signature_cluster_average(unassigned_signature: str, cluster_id: int | str, dist: float) -> None:
             previous_average, previous_count = signature_to_cluster_to_average_dist[unassigned_signature][cluster_id]
             signature_to_cluster_to_average_dist[unassigned_signature][cluster_id] = (
                 (previous_average * previous_count + float(dist)) / (previous_count + 1),
@@ -2760,8 +2755,7 @@ class Clusterer:
             constraint_batch_seconds_total += float(batch_telemetry["elapsed_seconds"])
             constraint_api_modes.add(str(batch_telemetry["api_mode"]))
             all_pairs.extend(
-                (sig_id_1, sig_id_2, label)
-                for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=False)
+                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=False)
             )
 
         logger.info(

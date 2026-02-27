@@ -344,7 +344,7 @@ for dataset_name in ["aminer", "arnetminer", "kisti", "qian", "zbmath", "inspire
         shuffle(random_block)
         random_block_train, random_block_test = (
             random_block[: int(0.9 * len(random_block))],
-        random_block[int(0.9 * len(random_block)) :],
+            random_block[int(0.9 * len(random_block)) :],
         )
 
         if len(random_block_test) > 0 and len(random_block_train) > 0:

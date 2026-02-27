@@ -135,14 +135,13 @@ class TestClusterer(unittest.TestCase):
 
     def test_counter_jaccard(self):
         assert np.isnan(counter_jaccard(Counter(), Counter()))
-        self.assertAlmostEqual(4/6, counter_jaccard(Counter([1,2,3,4,5]), Counter([1,2,3,4,6])))
-        self.assertAlmostEqual(4/7, counter_jaccard(Counter([1,2,3,4,5,5]), Counter([1,2,3,4,6])))
-
+        self.assertAlmostEqual(4 / 6, counter_jaccard(Counter([1, 2, 3, 4, 5]), Counter([1, 2, 3, 4, 6])))
+        self.assertAlmostEqual(4 / 7, counter_jaccard(Counter([1, 2, 3, 4, 5, 5]), Counter([1, 2, 3, 4, 6])))
 
     def test_jaccard(self):
         assert np.isnan(jaccard({}, {}))
-        self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5}, {1,2,3,4,6}))
-        self.assertAlmostEqual(4/6, jaccard({1,2,3,4,5}, {1,2,3,4,6}))
+        self.assertAlmostEqual(4 / 6, jaccard({1, 2, 3, 4, 5}, {1, 2, 3, 4, 6}))
+        self.assertAlmostEqual(4 / 6, jaccard({1, 2, 3, 4, 5}, {1, 2, 3, 4, 6}))
 
     def test_compute_block(self):
         assert "" == compute_block("")

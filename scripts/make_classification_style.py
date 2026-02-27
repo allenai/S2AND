@@ -131,9 +131,7 @@ def main():
             dataset = load_dataset(args.data_dir, dataset_name, args.seed)
 
             examples = make_dataset_pairwise_classification_style(args, dataset)
-            logger.info(
-                f"made {sum(len(x) for x in examples.values())} examples for {dataset_name}. Saving..."
-            )
+            logger.info(f"made {sum(len(x) for x in examples.values())} examples for {dataset_name}. Saving...")
             for split_name, file_obj in file_objs.items():
                 for row in examples[split_name]:
                     file_obj.write(

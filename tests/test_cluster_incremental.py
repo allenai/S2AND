@@ -98,9 +98,7 @@ class TestClusterer(unittest.TestCase):
         self.dummy_dataset.altered_cluster_signatures = ["1", "5"]
         self.dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
         block = ["3", "4", "8"]
-        output = _clusters(
-            self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=None)
-        )
+        output = _clusters(self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=None))
         expected_output = {"0": ["1", "2", "5", "8"], "1": ["6", "7", "3", "4"]}
         assert output == expected_output
 
@@ -150,7 +148,6 @@ def _mock_incremental_limits(
         "accumulator_warn": 1_000_000,
         "accumulator_max": 2_000_000,
     }
-
 
 
 def test_next_unused_cluster_id_prevents_overwrite():
@@ -363,7 +360,6 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(monkeypatch)
     assert observed_order == ["block|subblock=alpha", "block|subblock=zeta"]
 
 
-
 def test_ram_arg_overrides_autodetect(monkeypatch):
     monkeypatch.setattr(model_module, "_detect_cgroup_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
     monkeypatch.setattr(model_module, "_detect_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
@@ -447,9 +443,7 @@ def test_phase_a_overflow_surfaces_in_result_and_telemetry(monkeypatch, caplog):
 
     assert bool(result["phase_a_accumulator_overflow_early_stop"]) is True
     overflow_logs = [
-        record.message
-        for record in caplog.records
-        if "Telemetry: phase_split_phase_a_overflow" in record.message
+        record.message for record in caplog.records if "Telemetry: phase_split_phase_a_overflow" in record.message
     ]
     assert overflow_logs
     assert "overflow_early_stop=True" in overflow_logs[-1]

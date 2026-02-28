@@ -1,6 +1,40 @@
+# mypy: ignore-errors
+# ruff: noqa: E402
+
+"""
+Evaluate production S2AND models (SPECTER1 vs SPECTER2) on various datasets.
+
+Usage:
+    # Evaluate on inventors_s2and (default)
+    python scripts/eval_prod_models.py
+
+    # Evaluate on s2and_mini datasets
+    python scripts/eval_prod_models.py --dataset mini
+
+    # Retrain from scratch instead of using prod models
+    python scripts/eval_prod_models.py --train
+
+    # Override seed / n_jobs
+    python scripts/eval_prod_models.py --seed 42 --n_jobs 8
+"""
+
+import argparse
 import os
 
-os.environ["OMP_NUM_THREADS"] = "4"
+parser = argparse.ArgumentParser(description="Evaluate prod S2AND models (SPECTER1 vs SPECTER2)")
+parser.add_argument(
+    "--dataset",
+    choices=["inventors_s2and", "mini"],
+    default="inventors_s2and",
+    help="Which dataset(s) to evaluate on (default: inventors_s2and)",
+)
+parser.add_argument("--seed", type=int, default=1, help="Random seed (default: 1, matches transfer_experiment_internal)")
+parser.add_argument("--n_jobs", type=int, default=4, help="Number of parallel jobs (default: 4)")
+parser.add_argument("--train", action="store_true", help="Retrain models from scratch instead of loading prod pickles")
+args = parser.parse_args()
+
+n_jobs = args.n_jobs
+os.environ["OMP_NUM_THREADS"] = str(n_jobs)
 
 import numpy as np
 
@@ -11,29 +45,28 @@ from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, PairwiseModeler
 from s2and.serialization import load_pickle_with_verified_label_encoder_compat
 
-data_original = os.path.join(PROJECT_ROOT_PATH, "data")
+random_seed = args.seed
+TRAIN_FLAG = args.train
 
-specter_suffixes = ["_specter.pickle", "_specter2.pkl"]
-
-random_seed = 42
-n_jobs = 4
-
-
-TRAIN_FLAG = False
-#  1.0, 1.1, 1.2. 1.2 uses specter2. the rest user specter1
+# specter suffix -> production model pickle
+# v1.1 was trained on specter1 features, v1.2 on specter2
 MODELS = {
     "_specter.pickle": "production_model_v1.1.pickle",
     "_specter2.pkl": "production_model_v1.2.pickle",
 }
+specter_suffixes = list(MODELS.keys())
 
-# aminer has too much variance
-# medline is pairwise only
-datasets = [
-    "inventors_s2and",
-]
+if args.dataset == "mini":
+    data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
+    # aminer has too much variance; medline is pairwise only
+    datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
+else:
+    data_original = os.path.join(PROJECT_ROOT_PATH, "data")
+    datasets = ["inventors_s2and"]
 
 
 def resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str, fallback_name: str) -> str:
+    """Try preferred filename, then fallback, raising FileNotFoundError if neither exists."""
     preferred_path = os.path.join(data_root, dataset_name, preferred_name)
     if os.path.exists(preferred_path):
         return preferred_path
@@ -43,8 +76,7 @@ def resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str,
     raise FileNotFoundError(f"Missing dataset file. Tried '{preferred_path}' and '{fallback_path}'.")
 
 
-# to train the pairwise model, we define which feature categories to use
-# here it is all of them except reference model.
+# feature categories (all except reference_features)
 features_to_use = [
     "name_similarity",
     "affiliation_similarity",
@@ -61,66 +93,54 @@ features_to_use = [
     "advanced_name_similarity",
 ]
 
-# we also have this special second "nameless" model that doesn't use any name-based features
-# it helps to improve clustering performance by preventing model overreliance on names
+# nameless model: no name-based features (prevents model overreliance on names)
 nameless_features_to_use = [
-    feature_name
-    for feature_name in features_to_use
-    if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
+    f for f in features_to_use if f not in {"name_similarity", "advanced_name_similarity", "name_counts"}
 ]
 
-# we store all the information about the features in this convenient wrapper
 featurization_info = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
 nameless_featurization_info = FeaturizationInfo(
     features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
 )
 
+print(f"Config: dataset={args.dataset}, seed={random_seed}, n_jobs={n_jobs}, train={TRAIN_FLAG}")
+print(f"Datasets: {datasets}")
+print()
 
 results = {}
 num_test_blocks = {}
 for specter_suffix in specter_suffixes:
     clusterer = None
 
-    # when not retraining, load the pre-trained model artifact
     if not TRAIN_FLAG:
-        model_path = os.path.join(PROJECT_ROOT_PATH, "data", MODELS[specter_suffix])
+        model_name = MODELS[specter_suffix]
+        model_path = os.path.join(PROJECT_ROOT_PATH, "data", model_name)
         if not os.path.exists(model_path):
             raise FileNotFoundError(
-                "Missing model artifact at "
-                f"{model_path}. This repo clone does not include production model pickles. "
-                "Either set TRAIN_FLAG=True to retrain, or place the model pickle in data/."
+                f"Missing model artifact at {model_path}. "
+                "Either use --train to retrain, or place the model pickle in data/."
             )
+        print(f"=== specter_suffix: {specter_suffix}, model: {model_name} ===")
         clusterer = load_pickle_with_verified_label_encoder_compat(model_path)["clusterer"]
-        clusterer.use_cache = False  # very important for this experiment!!!
+        clusterer.use_cache = False
         clusterer.n_jobs = n_jobs
+    else:
+        print(f"=== specter_suffix: {specter_suffix}, training from scratch ===")
 
-    print(f"=== specter_suffix: {specter_suffix} ===")
     cluster_metrics_all = []
     for dataset_name in datasets:
         print(f"-- dataset: {dataset_name} --")
         signatures_path = resolve_dataset_file(
-            data_original,
-            dataset_name,
-            f"{dataset_name}_signatures.json",
-            "signatures.json",
+            data_original, dataset_name, f"{dataset_name}_signatures.json", "signatures.json"
         )
         papers_path = resolve_dataset_file(
-            data_original,
-            dataset_name,
-            f"{dataset_name}_papers.json",
-            "papers.json",
+            data_original, dataset_name, f"{dataset_name}_papers.json", "papers.json"
         )
         clusters_path = resolve_dataset_file(
-            data_original,
-            dataset_name,
-            f"{dataset_name}_clusters.json",
-            "clusters.json",
+            data_original, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"
         )
         embeddings_path = resolve_dataset_file(
-            data_original,
-            dataset_name,
-            f"{dataset_name}{specter_suffix}",
-            specter_suffix.lstrip("_"),
+            data_original, dataset_name, f"{dataset_name}{specter_suffix}", specter_suffix.lstrip("_")
         )
         anddata = ANDData(
             signatures=signatures_path,
@@ -146,7 +166,6 @@ for specter_suffix in specter_suffixes:
         num_test_blocks[dataset_name] = len(test_block_dict)
 
         if TRAIN_FLAG:
-            # now we can actually go and get the pairwise training, val and test data
             train, val, test = featurize(
                 anddata,
                 featurization_info,
@@ -155,24 +174,20 @@ for specter_suffix in specter_suffixes:
                 chunk_size=DEFAULT_CHUNK_SIZE,
                 nameless_featurizer_info=nameless_featurization_info,
                 nan_value=np.nan,
-            )  # type: ignore
+            )
             X_train, y_train, nameless_X_train = train
             X_val, y_val, nameless_X_val = val
             X_test, y_test, nameless_X_test = test
 
-            # now we define and fit the pairwise modelers
             pairwise_modeler = PairwiseModeler(
-                n_iter=25,  # number of hyperparameter search iterations
-                estimator=None,  # this will use the default LightGBM classifier
-                search_space=None,  # this will use the default LightGBM search space
-                monotone_constraints=(
-                    featurization_info.lightgbm_monotone_constraints
-                ),  # we use monotonicity constraints to make the model more sensible
+                n_iter=25,
+                estimator=None,
+                search_space=None,
+                monotone_constraints=featurization_info.lightgbm_monotone_constraints,
                 random_state=random_seed,
             )
             pairwise_modeler.fit(X_train, y_train, X_val, y_val)
 
-            # as mentioned above, there are 2: one with all features and a nameless one
             nameless_pairwise_modeler = PairwiseModeler(
                 n_iter=25,
                 estimator=None,
@@ -182,21 +197,20 @@ for specter_suffix in specter_suffixes:
             )
             nameless_pairwise_modeler.fit(nameless_X_train, y_train, nameless_X_val, y_val)
 
-            # now we can fit the clusterer itself
             clusterer = Clusterer(
                 featurization_info,
-                pairwise_modeler.classifier,  # the actual pairwise classifier
+                pairwise_modeler.classifier,
                 n_jobs=n_jobs,
                 use_cache=False,
-                nameless_classifier=nameless_pairwise_modeler.classifier,  # the nameless pairwise classifier
+                nameless_classifier=nameless_pairwise_modeler.classifier,
                 nameless_featurizer_info=nameless_featurization_info,
                 random_state=random_seed,
-                use_default_constraints_as_supervision=False,  # used by S2 prod, not in S2AND paper
+                use_default_constraints_as_supervision=False,
             )
             clusterer.fit(anddata)
 
         if clusterer is None:
-            raise RuntimeError("Clusterer was not initialized. Check TRAIN_FLAG and model artifact path.")
+            raise RuntimeError("Clusterer was not initialized. Check --train flag and model artifact path.")
 
         cluster_metrics, b3_metrics_per_signature = cluster_eval(
             anddata,
@@ -208,13 +222,18 @@ for specter_suffix in specter_suffixes:
         cluster_metrics_all.append(cluster_metrics)
 
     results[specter_suffix] = cluster_metrics_all
-    b3s = [i["B3 (P, R, F1)"][-1] for i in cluster_metrics_all]
-    print(b3s, sum(b3s) / len(b3s))
+    b3s = [m["B3 (P, R, F1)"][-1] for m in cluster_metrics_all]
+    print(f"B3 F1s: {b3s}, mean: {sum(b3s) / len(b3s):.3f}")
+    print()
 
+# summary
+print("=" * 60)
+print("Summary")
+print("=" * 60)
 result_specter1 = results["_specter.pickle"]
 result_specter2 = results["_specter2.pkl"]
 
-for i in range(len(datasets)):
-    print(f"Performance with SPECTERv1 data, on {datasets[i]} (B3): {result_specter1[i]['B3 (P, R, F1)']}")
-    print(f"Performance with SPECTERv2 data, on {datasets[i]} (B3): {result_specter2[i]['B3 (P, R, F1)']}")
+for i, dataset_name in enumerate(datasets):
+    print(f"Performance with SPECTERv1 data, on {dataset_name} (B3): {result_specter1[i]['B3 (P, R, F1)']}")
+    print(f"Performance with SPECTERv2 data, on {dataset_name} (B3): {result_specter2[i]['B3 (P, R, F1)']}")
     print()

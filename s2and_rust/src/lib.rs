@@ -213,6 +213,54 @@ where
     compute()
 }
 
+fn upper_triangle_total_pairs(block_size: usize) -> usize {
+    block_size.saturating_mul(block_size.saturating_sub(1)) / 2
+}
+
+fn upper_triangle_pairs_for_range(
+    block_size: usize,
+    start_offset: usize,
+    max_pairs: Option<usize>,
+) -> PyResult<Vec<(usize, usize)>> {
+    let total_pairs = upper_triangle_total_pairs(block_size);
+    if start_offset > total_pairs {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "start_offset out of range: start_offset={} total_pairs={}",
+            start_offset, total_pairs
+        )));
+    }
+    let remaining = total_pairs.saturating_sub(start_offset);
+    let pair_count = max_pairs.unwrap_or(remaining).min(remaining);
+    if pair_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut local_i = 0usize;
+    let mut offset_in_row = start_offset;
+    while local_i + 1 < block_size {
+        let row_pairs = block_size - local_i - 1;
+        if offset_in_row < row_pairs {
+            break;
+        }
+        offset_in_row -= row_pairs;
+        local_i += 1;
+    }
+    if local_i + 1 >= block_size {
+        return Ok(Vec::new());
+    }
+    let mut local_j = local_i + 1 + offset_in_row;
+    let mut pairs = Vec::with_capacity(pair_count);
+    for _ in 0..pair_count {
+        pairs.push((local_i, local_j));
+        local_j += 1;
+        if local_j >= block_size {
+            local_i += 1;
+            local_j = local_i + 1;
+        }
+    }
+    Ok(pairs)
+}
+
 #[pyfunction]
 fn get_last_json_ingest_telemetry(py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
     let slot = json_ingest_telemetry_slot().lock().map_err(|_| {
@@ -2018,11 +2066,15 @@ fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f64; 4] {
     [lev, pref, lcs, jaro]
 }
 
+const PAPER_IDX_TITLE: usize = 0;
 const PAPER_IDX_HAS_ABSTRACT: usize = 1;
+const PAPER_IDX_IN_SIGNATURES: usize = 2;
 const PAPER_IDX_IS_RELIABLE: usize = 4;
 const PAPER_IDX_PREDICTED_LANGUAGE: usize = 5;
 const PAPER_IDX_TITLE_NGRAMS_WORDS: usize = 6;
 const PAPER_IDX_AUTHORS: usize = 7;
+const PAPER_IDX_VENUE: usize = 8;
+const PAPER_IDX_JOURNAL_NAME: usize = 9;
 const PAPER_IDX_TITLE_NGRAMS_CHARS: usize = 10;
 const PAPER_IDX_VENUE_NGRAMS: usize = 11;
 const PAPER_IDX_JOURNAL_NGRAMS: usize = 12;
@@ -2030,12 +2082,17 @@ const PAPER_IDX_REFERENCE_DETAILS: usize = 13;
 const PAPER_IDX_YEAR: usize = 14;
 const PAPER_IDX_REFERENCES: usize = 15;
 const PAPER_IDX_PAPER_ID: usize = 16;
-const PAPER_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 12] = [
+const FROM_DATASET_PAPER_PREPROCESS_CHUNK_SIZE: usize = 4096;
+const PAPER_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 16] = [
+    (PAPER_IDX_TITLE, "title"),
     (PAPER_IDX_HAS_ABSTRACT, "has_abstract"),
+    (PAPER_IDX_IN_SIGNATURES, "in_signatures"),
     (PAPER_IDX_IS_RELIABLE, "is_reliable"),
     (PAPER_IDX_PREDICTED_LANGUAGE, "predicted_language"),
     (PAPER_IDX_TITLE_NGRAMS_WORDS, "title_ngrams_words"),
     (PAPER_IDX_AUTHORS, "authors"),
+    (PAPER_IDX_VENUE, "venue"),
+    (PAPER_IDX_JOURNAL_NAME, "journal_name"),
     (PAPER_IDX_TITLE_NGRAMS_CHARS, "title_ngrams_chars"),
     (PAPER_IDX_VENUE_NGRAMS, "venue_ngrams"),
     (PAPER_IDX_JOURNAL_NGRAMS, "journal_ngrams"),
@@ -2489,6 +2546,9 @@ impl RustFeaturizer {
 
 #[pymethods]
 impl RustFeaturizer {
+    #[classattr]
+    const SUPPORTS_FROM_DATASET_PAPER_PREPROCESS: bool = true;
+
     #[staticmethod]
     #[pyo3(signature = (dataset, cluster_seed_require_value = 0.0, cluster_seed_disallow_value = 10000.0, num_threads = None))]
     fn from_dataset(
@@ -2502,6 +2562,43 @@ impl RustFeaturizer {
             .getattr("compute_reference_features")
             .and_then(|v| v.extract())
             .unwrap_or(false);
+        let preprocess: bool = dataset
+            .getattr("preprocess")
+            .and_then(|v| v.extract())
+            .unwrap_or(true);
+
+        let text_module = py.import("s2and.text")?;
+        let unidecode = text_module.getattr("unidecode")?;
+        let stop_words = extract_string_set(&text_module.getattr("STOPWORDS")?)?;
+        let venue_stop_words = extract_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
+        let name_prefixes = extract_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
+        let affiliation_stopwords = extract_affiliation_stopwords(py)?;
+        let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+        let mut language_detector: Option<LanguageDetectorCompat> = None;
+
+        #[derive(Clone)]
+        struct PaperInput {
+            paper_id: PaperId,
+            raw_title: String,
+            raw_venue: String,
+            raw_journal_name: String,
+            raw_authors: Vec<(i64, String)>,
+            need_title_words: bool,
+            need_title_chars: bool,
+            need_venue_ngrams: bool,
+            need_journal_ngrams: bool,
+            need_author_normalization: bool,
+        }
+
+        #[derive(Clone)]
+        struct PaperComputed {
+            paper_id: PaperId,
+            normalized_authors: Vec<(i64, String)>,
+            title_words: Option<CounterData>,
+            title_chars: Option<CounterData>,
+            venue_ngrams: Option<CounterData>,
+            journal_ngrams: Option<CounterData>,
+        }
 
         let papers_obj = dataset.getattr("papers")?;
         let papers_dict = papers_obj.downcast::<PyDict>()?;
@@ -2518,6 +2615,7 @@ impl RustFeaturizer {
         let mut papers = HashMap::with_capacity(papers_dict.len());
         let mut paper_authors_by_id: HashMap<PaperId, Vec<(i64, String)>> =
             HashMap::with_capacity(papers_dict.len());
+        let mut paper_inputs: Vec<PaperInput> = Vec::new();
         for (_paper_id_obj, paper_obj) in papers_dict.iter() {
             let paper_id = extract_id_string(&get_namedtuple_item_or_attr(
                 &paper_obj,
@@ -2525,6 +2623,35 @@ impl RustFeaturizer {
                 PAPER_IDX_PAPER_ID,
                 "paper_id",
             )?)?;
+            let raw_title = extract_string_opt(&get_namedtuple_item_or_attr(
+                &paper_obj,
+                use_paper_tuple_fastpath,
+                PAPER_IDX_TITLE,
+                "title",
+            )?)?
+            .unwrap_or_default();
+            let raw_venue = extract_string_opt(&get_namedtuple_item_or_attr(
+                &paper_obj,
+                use_paper_tuple_fastpath,
+                PAPER_IDX_VENUE,
+                "venue",
+            )?)?
+            .unwrap_or_default();
+            let raw_journal_name = extract_string_opt(&get_namedtuple_item_or_attr(
+                &paper_obj,
+                use_paper_tuple_fastpath,
+                PAPER_IDX_JOURNAL_NAME,
+                "journal_name",
+            )?)?
+            .unwrap_or_default();
+            let in_signatures: Option<bool> = get_namedtuple_item_or_attr(
+                &paper_obj,
+                use_paper_tuple_fastpath,
+                PAPER_IDX_IN_SIGNATURES,
+                "in_signatures",
+            )?
+            .extract()?;
+            let in_signatures = in_signatures.unwrap_or(false);
             let venue_ngrams = extract_counter(&get_namedtuple_item_or_attr(
                 &paper_obj,
                 use_paper_tuple_fastpath,
@@ -2556,7 +2683,6 @@ impl RustFeaturizer {
                     PAPER_IDX_AUTHORS,
                     "authors",
                 )?)?;
-            paper_authors_by_id.insert(paper_id.clone(), paper_authors);
 
             let ref_details_present;
             let mut ref_authors = None;
@@ -2611,20 +2737,75 @@ impl RustFeaturizer {
                 "has_abstract",
             )?
             .extract()?;
-            let predicted_language = extract_string_opt(&get_namedtuple_item_or_attr(
+            let mut predicted_language = extract_string_opt(&get_namedtuple_item_or_attr(
                 &paper_obj,
                 use_paper_tuple_fastpath,
                 PAPER_IDX_PREDICTED_LANGUAGE,
                 "predicted_language",
             )?)?;
-            let is_reliable: Option<bool> = get_namedtuple_item_or_attr(
+            let is_reliable_raw: Option<bool> = get_namedtuple_item_or_attr(
                 &paper_obj,
                 use_paper_tuple_fastpath,
                 PAPER_IDX_IS_RELIABLE,
                 "is_reliable",
             )?
             .extract()?;
-            let is_reliable = is_reliable.unwrap_or(false);
+            let mut is_reliable = is_reliable_raw.unwrap_or(false);
+
+            let need_title_words = title_words.is_none();
+            let need_title_chars = preprocess && in_signatures && title_chars.is_none();
+            let need_venue_ngrams = preprocess && in_signatures && venue_ngrams.is_none();
+            let need_journal_ngrams = preprocess && in_signatures && journal_ngrams.is_none();
+            let need_language = in_signatures && predicted_language.is_none();
+            if need_language {
+                if language_detector.is_none() {
+                    language_detector = Some(LanguageDetectorCompat::new(py));
+                }
+                let detector = language_detector.as_ref().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err("missing language detector")
+                })?;
+                let (reliable, _is_english, language) = detector.detect(&raw_title);
+                predicted_language = Some(language);
+                is_reliable = reliable;
+            }
+
+            let need_author_normalization = need_title_words
+                || need_title_chars
+                || need_venue_ngrams
+                || need_journal_ngrams
+                || need_language;
+            if need_title_words
+                || need_title_chars
+                || need_venue_ngrams
+                || need_journal_ngrams
+                || need_author_normalization
+            {
+                ensure_unidecode_for_text(&unidecode, &raw_title, &mut unidecode_char_map)?;
+                if preprocess {
+                    ensure_unidecode_for_text(&unidecode, &raw_venue, &mut unidecode_char_map)?;
+                    ensure_unidecode_for_text(
+                        &unidecode,
+                        &raw_journal_name,
+                        &mut unidecode_char_map,
+                    )?;
+                }
+                for (_, author_name) in paper_authors.iter() {
+                    ensure_unidecode_for_text(&unidecode, author_name, &mut unidecode_char_map)?;
+                }
+                paper_inputs.push(PaperInput {
+                    paper_id: paper_id.clone(),
+                    raw_title,
+                    raw_venue,
+                    raw_journal_name,
+                    raw_authors: paper_authors.clone(),
+                    need_title_words,
+                    need_title_chars,
+                    need_venue_ngrams,
+                    need_journal_ngrams,
+                    need_author_normalization,
+                });
+            }
+            paper_authors_by_id.insert(paper_id.clone(), paper_authors);
 
             let specter = if let Some(spec_dict) = &specter_dict {
                 extract_specter_for_paper_id(spec_dict, &paper_id)?
@@ -2665,12 +2846,131 @@ impl RustFeaturizer {
             );
         }
 
-        let text_module = py.import("s2and.text")?;
-        let unidecode = text_module.getattr("unidecode")?;
-        let name_prefixes_obj = text_module.getattr("NAME_PREFIXES")?;
-        let name_prefixes = extract_string_set(&name_prefixes_obj)?;
-        let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+        for paper_input_chunk in paper_inputs.chunks(FROM_DATASET_PAPER_PREPROCESS_CHUNK_SIZE) {
+            let computed_chunk: Vec<PaperComputed> = py.allow_threads(|| {
+                let compute = || {
+                    paper_input_chunk
+                        .par_iter()
+                        .map(|paper_input| {
+                            let normalized_title = normalize_text_compat_from_map(
+                                &paper_input.raw_title,
+                                false,
+                                &unidecode_char_map,
+                            );
+                            let normalized_venue = if paper_input.need_venue_ngrams {
+                                Some(normalize_text_compat_from_map(
+                                    &paper_input.raw_venue,
+                                    false,
+                                    &unidecode_char_map,
+                                ))
+                            } else {
+                                None
+                            };
+                            let normalized_journal = if paper_input.need_journal_ngrams {
+                                Some(normalize_text_compat_from_map(
+                                    &paper_input.raw_journal_name,
+                                    false,
+                                    &unidecode_char_map,
+                                ))
+                            } else {
+                                None
+                            };
+                            let normalized_authors = if paper_input.need_author_normalization {
+                                paper_input
+                                    .raw_authors
+                                    .iter()
+                                    .map(|(position, raw_name)| {
+                                        (
+                                            *position,
+                                            normalize_text_compat_from_map(
+                                                raw_name,
+                                                false,
+                                                &unidecode_char_map,
+                                            ),
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                paper_input.raw_authors.clone()
+                            };
+                            let title_words = if paper_input.need_title_words {
+                                counter_data_from_usize_map(word_ngrams_counter_python_compat(
+                                    &normalized_title,
+                                    &stop_words,
+                                ))
+                            } else {
+                                None
+                            };
+                            let title_chars = if paper_input.need_title_chars {
+                                counter_data_from_usize_map(char_ngrams_counter_python_compat(
+                                    &normalized_title,
+                                    false,
+                                    true,
+                                    Some(&stop_words),
+                                ))
+                            } else {
+                                None
+                            };
+                            let venue_ngrams = if paper_input.need_venue_ngrams {
+                                counter_data_from_usize_map(char_ngrams_counter_python_compat(
+                                    normalized_venue.as_deref().unwrap_or(""),
+                                    false,
+                                    true,
+                                    Some(&venue_stop_words),
+                                ))
+                            } else {
+                                None
+                            };
+                            let journal_ngrams = if paper_input.need_journal_ngrams {
+                                counter_data_from_usize_map(char_ngrams_counter_python_compat(
+                                    normalized_journal.as_deref().unwrap_or(""),
+                                    false,
+                                    true,
+                                    Some(&venue_stop_words),
+                                ))
+                            } else {
+                                None
+                            };
+                            PaperComputed {
+                                paper_id: paper_input.paper_id.clone(),
+                                normalized_authors,
+                                title_words,
+                                title_chars,
+                                venue_ngrams,
+                                journal_ngrams,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+                install_with_optional_rayon_pool(num_threads, compute)
+            });
+            for computed in computed_chunk {
+                let PaperComputed {
+                    paper_id,
+                    normalized_authors,
+                    title_words,
+                    title_chars,
+                    venue_ngrams,
+                    journal_ngrams,
+                } = computed;
+                if let Some(paper) = papers.get_mut(&paper_id) {
+                    if let Some(counter) = title_words {
+                        paper.title_words = Some(counter);
+                    }
+                    if let Some(counter) = title_chars {
+                        paper.title_chars = Some(counter);
+                    }
+                    if let Some(counter) = venue_ngrams {
+                        paper.venue_ngrams = Some(counter);
+                    }
+                    if let Some(counter) = journal_ngrams {
+                        paper.journal_ngrams = Some(counter);
+                    }
+                }
+                paper_authors_by_id.insert(paper_id, normalized_authors);
+            }
+        }
+
         let signatures_obj = dataset.getattr("signatures")?;
         let signatures_dict = signatures_obj.downcast::<PyDict>()?;
         let use_signature_tuple_fastpath = validate_dict_namedtuple_fastpath_contract(
@@ -3857,7 +4157,19 @@ impl RustFeaturizer {
                     left, right, signature_count
                 )));
             }
-            self.validate_constraint_pair_inputs(&signature_ids[left], &signature_ids[right])?;
+        }
+
+        let mut lookup: Vec<(&String, &SignatureData, &PaperData)> =
+            Vec::with_capacity(signature_count);
+        for signature_id in signature_ids.iter() {
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            lookup.push((signature_id, signature, paper));
         }
 
         let values = py.allow_threads(|| {
@@ -3865,12 +4177,8 @@ impl RustFeaturizer {
                 pairs
                     .par_iter()
                     .map(|(left_idx, right_idx)| {
-                        let left_id = &signature_ids[*left_idx as usize];
-                        let right_id = &signature_ids[*right_idx as usize];
-                        let s1 = self.signatures.get(left_id).unwrap();
-                        let s2 = self.signatures.get(right_id).unwrap();
-                        let p1 = self.papers.get(&s1.paper_id).unwrap();
-                        let p2 = self.papers.get(&s2.paper_id).unwrap();
+                        let (left_id, s1, p1) = lookup[*left_idx as usize];
+                        let (right_id, s2, p2) = lookup[*right_idx as usize];
                         self.constraint_value_from_records(
                             left_id,
                             right_id,
@@ -3890,6 +4198,95 @@ impl RustFeaturizer {
         });
 
         Ok(values)
+    }
+
+    #[pyo3(
+        signature = (
+            block_signature_indices,
+            start_offset = 0,
+            max_pairs = None,
+            low_value = 0.0,
+            high_value = 10000.0,
+            dont_merge_cluster_seeds = true,
+            incremental_dont_use_cluster_seeds = false,
+            num_threads = None
+        )
+    )]
+    fn get_constraints_block_upper_triangle_indexed(
+        &self,
+        py: Python<'_>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        num_threads: Option<usize>,
+    ) -> PyResult<(Vec<u32>, Vec<u32>, Vec<Option<f64>>)> {
+        if block_signature_indices.len() <= 1 {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            if global_idx >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "block signature index out of range: index={} signature_count={}",
+                    global_idx, signature_count
+                )));
+            }
+        }
+
+        let mut block_lookup: Vec<(&String, &SignatureData, &PaperData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            let signature_id = &signature_ids[global_idx];
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            block_lookup.push((signature_id, signature, paper));
+        }
+
+        let local_pairs = upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        if local_pairs.is_empty() {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        let left_indices: Vec<u32> = local_pairs.iter().map(|(left, _)| *left as u32).collect();
+        let right_indices: Vec<u32> = local_pairs.iter().map(|(_, right)| *right as u32).collect();
+        let values = py.allow_threads(|| {
+            let compute = || {
+                local_pairs
+                    .par_iter()
+                    .map(|(left_idx, right_idx)| {
+                        let (left_id, s1, p1) = block_lookup[*left_idx];
+                        let (right_id, s2, p2) = block_lookup[*right_idx];
+                        self.constraint_value_from_records(
+                            left_id,
+                            right_id,
+                            s1,
+                            s2,
+                            p1,
+                            p2,
+                            low_value,
+                            high_value,
+                            dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+        Ok((left_indices, right_indices, values))
     }
 
     fn featurize_pair(&self, sig_id1: &str, sig_id2: &str) -> PyResult<Vec<f64>> {
@@ -4015,7 +4412,8 @@ impl RustFeaturizer {
             }
         }
 
-        let mut id_to_lookup_idx: HashMap<&str, usize> = HashMap::with_capacity(row_count.saturating_mul(2));
+        let mut id_to_lookup_idx: HashMap<&str, usize> =
+            HashMap::with_capacity(row_count.saturating_mul(2));
         let mut lookup: Vec<(&SignatureData, &PaperData)> = Vec::new();
         for (sig_id1, sig_id2) in pairs.iter() {
             for sig_id in [sig_id1.as_str(), sig_id2.as_str()] {
@@ -4026,10 +4424,9 @@ impl RustFeaturizer {
                     .signatures
                     .get(sig_id)
                     .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(sig_id.to_string()))?;
-                let paper = self
-                    .papers
-                    .get(&signature.paper_id)
-                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string()))?;
+                let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+                })?;
                 let lookup_idx = lookup.len();
                 lookup.push((signature, paper));
                 id_to_lookup_idx.insert(sig_id, lookup_idx);
@@ -4130,10 +4527,9 @@ impl RustFeaturizer {
                 .signatures
                 .get(signature_id)
                 .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
-            let paper = self
-                .papers
-                .get(&signature.paper_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
             lookup.push((signature, paper));
         }
 
@@ -4162,6 +4558,114 @@ impl RustFeaturizer {
                     .for_each(|(out_row, (left_idx, right_idx))| {
                         let (s1, p1) = lookup[*left_idx as usize];
                         let (s2, p2) = lookup[*right_idx as usize];
+                        let row = self.featurize_pair_data(s1, s2, p1, p2);
+                        for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
+                            let mut value = row[*idx];
+                            if value.is_nan() && !nan_value.is_nan() {
+                                value = nan_value;
+                            }
+                            *dest = value;
+                        }
+                    });
+                buffer
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        let array =
+            numpy::ndarray::Array2::from_shape_vec((row_count, out_cols), out).map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build output matrix: {}",
+                    err
+                ))
+            })?;
+        Ok(array.to_pyarray(py))
+    }
+
+    #[pyo3(
+        signature = (
+            block_signature_indices,
+            start_offset = 0,
+            max_pairs = None,
+            selected_indices = None,
+            num_threads = None,
+            nan_value = f64::NAN
+        )
+    )]
+    fn featurize_block_upper_triangle_matrix_indexed<'py>(
+        &self,
+        py: Python<'py>,
+        block_signature_indices: Vec<u32>,
+        start_offset: usize,
+        max_pairs: Option<usize>,
+        selected_indices: Option<Vec<usize>>,
+        num_threads: Option<usize>,
+        nan_value: f64,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        if block_signature_indices.len() <= 1 {
+            let empty = numpy::ndarray::Array2::<f64>::zeros((0, 0));
+            return Ok(empty.to_pyarray(py));
+        }
+
+        let signature_ids = self.signature_id_order();
+        let signature_count = signature_ids.len();
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            if global_idx >= signature_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "block signature index out of range: index={} signature_count={}",
+                    global_idx, signature_count
+                )));
+            }
+        }
+
+        let mut block_lookup: Vec<(&SignatureData, &PaperData)> =
+            Vec::with_capacity(block_signature_indices.len());
+        for signature_index in block_signature_indices.iter() {
+            let global_idx = *signature_index as usize;
+            let signature_id = &signature_ids[global_idx];
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            block_lookup.push((signature, paper));
+        }
+
+        let local_pairs = upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        let row_count = local_pairs.len();
+        if row_count == 0 {
+            let empty = numpy::ndarray::Array2::<f64>::zeros((0, 0));
+            return Ok(empty.to_pyarray(py));
+        }
+
+        let full_cols = self.full_feature_count();
+        let indices: Vec<usize> = selected_indices.unwrap_or_else(|| (0..full_cols).collect());
+        for idx in indices.iter() {
+            if *idx >= full_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "selected_indices contains out-of-range index {} for {} columns",
+                    idx, full_cols
+                )));
+            }
+        }
+        let out_cols = indices.len();
+        if out_cols == 0 {
+            let empty_cols = numpy::ndarray::Array2::<f64>::zeros((row_count, 0));
+            return Ok(empty_cols.to_pyarray(py));
+        }
+
+        let out = py.allow_threads(|| {
+            let compute = || {
+                let mut buffer = vec![0.0_f64; row_count * out_cols];
+                buffer
+                    .par_chunks_mut(out_cols)
+                    .zip(local_pairs.par_iter())
+                    .for_each(|(out_row, (left_idx, right_idx))| {
+                        let (s1, p1) = block_lookup[*left_idx];
+                        let (s2, p2) = block_lookup[*right_idx];
                         let row = self.featurize_pair_data(s1, s2, p1, p2);
                         for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
                             let mut value = row[*idx];

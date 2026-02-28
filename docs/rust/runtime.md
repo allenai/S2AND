@@ -1,6 +1,6 @@
 # Rust Runtime And Performance Plan
 
-Status date: 2026-02-27
+Status date: 2026-02-28
 
 ## Current Frontier
 
@@ -14,7 +14,7 @@ Baselines and promotion rules live in:
 
 Primary train/eval command:
 
-`uv run python scripts/internal/transfer_experiment_internal.py --experiment_name inventors_s2and_union_eval --leave_self_in --skip_individual_models --random_seed 1 --n_jobs 8`
+`uv run python scripts/archive/transfer_experiment_internal.py --experiment_name inventors_s2and_union_eval --leave_self_in --skip_individual_models --random_seed 1 --n_jobs 8`
 
 Project goals:
 
@@ -70,6 +70,20 @@ Project goals:
     - total RAM fallback: `GlobalMemoryStatusEx`
     - RSS fallback: `GetProcessMemoryInfo` (working set)
     - tests: `tests/test_memory_budget.py` (Windows fallbacks monkeypatched; no real WinAPI calls)
+18. Training-mode deferred paper preprocessing in Rust `from_dataset` is implemented and capability-gated:
+    - capability marker: `SUPPORTS_FROM_DATASET_PAPER_PREPROCESS`
+    - chunked deferred-paper compute in Rust (`FROM_DATASET_PAPER_PREPROCESS_CHUNK_SIZE=4096`)
+    - Python lifecycle gate includes `compute_reference_features=False` safeguard
+    - coverage: `tests/test_rust_from_dataset_contract.py`, `tests/test_preprocess_papers_parallel_defaults.py`
+19. L1b production training-path cleanup boundary is now ported beyond harness-only:
+    - `scripts/transfer_experiment_seed_paper.py` runs targeted
+      `evict_rust_featurizer(dataset)` + `gc.collect()` boundaries
+    - emits `Telemetry: post_rust_cleanup ...`; no global inference/subblocking cache clear
+20. L6 local artifact hygiene defaults now route key local generators to `scratch/` by default
+    (`export_name_counts_for_rust`, inventors subset/histogram/embedding scripts), with matching tests.
+21. Transfer-mini diagnostics now include explicit runtime toggles and per-trial timing telemetry:
+    - toggles: `--rust-cleanup-boundary`, `--force-python-paper-preprocess`
+    - stage telemetry: hyperopt trial duration summaries + parameter hashes + fitted tree counts
 
 ## Runtime Policy Spec
 
@@ -125,50 +139,50 @@ Use these concrete gates before promoting any Rust defaults further.
 Active benchmark baselines and promotion workflow are centralized in:
 `docs/rust/baselines.md`
 
-This plan keeps only the outcome summary:
+Current promoted snapshot (2026-02-27):
 
-1. Inference comparator baseline (`scratch/compare_investigate_20260224.json`):
-   - python: `96.410s`, `1.509 GB`
-   - rust: `53.480s`, `1.028 GB`
-   - delta vs python: `1.803x` speedup, `-31.88%` peak RSS, feature parity pass
-2. Maintained train/eval RSS gate baselines (`scratch/profile_transfer_mini_compact_cd_seed{1,2,3}_njobs4_20260224.json`):
-   - seed 1: python `5.507 GB` vs rust `5.628 GB` (`+2.2%`)
-   - seed 2: python `5.717 GB` vs rust `5.633 GB` (`-1.5%`)
-   - seed 3: python `5.594 GB` vs rust `5.651 GB` (`+1.0%`)
-   - gate interpretation: quality parity pass, latency pass, RSS pass (<= `+5%`)
-3. Big-block parity baseline:
-   - `scratch/big_block/compare_phase_split_10k_seed43_python_20260224.json`
-   - result: `cluster_equivalent=True`, partition diff `0/10000`.
+1. Inference comparator baseline:
+   - `scratch/baselines_20260227/compare_inspire_5k_20260227.json`
+   - python `18.724s` / `1.510 GB`, rust `4.734s` / `0.917 GB`
+   - speedup `3.955x`, RSS delta `-39.27%`, feature parity pass
+2. Transfer-mini full acceptance baseline:
+   - `scratch/baselines_20260227/profile_transfer_mini_full_20260227.json`
+   - workload_id `3291489010b58481a15d209d5c5bb3ed764af109709d4d6ffc4c1ed617a95128`
+   - python `304.639s` / `5.477 GB`, rust `159.928s` / `5.654 GB`
+   - quality parity (`B3 F1=0.960` both), speedup `1.905x`, RSS delta `+3.23%`
+3. Stress rebuild RSS-series baseline:
+   - `scratch/baselines_20260227/stress_rust_from_json_paths_aminer_6x_20260227.json`
+   - `6/6` success, `rss_growth_fraction=0.005168`, per-iteration RSS series emitted
+4. Largest-block canonical compare smoke:
+   - `scratch/baselines_20260227/largest_block_compare_smoke_200_20260227.json`
+   - `cluster_equivalent=True`, signature partition diff `0/200`
+   - python `375.726s` / `13.652 GB`, rust `326.999s` / `9.855 GB`
 
-Latest check snapshot (2026-02-27, L1 + P0):
+Transfer-mini smoke stays as sanity-only evidence:
+- `scratch/baselines_20260227/profile_transfer_mini_smoke_20260227.json`
+- workload_id `3f09cde4b4eb4ed4956f6b147fe0c68a82eebc550e7ad5c84cc0c58a43eb3ec2`
 
-1. L1 heavy stress gate passed:
-   - `scratch/stress_rust_from_json_paths_aminer.json`
-   - `from_json_paths` rebuild loop: `6/6` succeeded; no segfault/crash reproduced.
-2. Hot-path regression suite passed:
-   - `uv run pytest -q tests/test_rust_from_json_paths.py tests/test_feature_port_parity.py tests/test_regression_fixes.py tests/test_cluster_incremental.py`
-   - result: `56 passed, 1 skipped`.
-3. Largest-block post-P0 compare remained parity-clean and materially faster:
-   - `scratch/profile_largest_block_compare_post_p0.json`
-   - `cluster_equivalent=True`, signature partition diff `0/2586`
-   - ANDData build `197.020s -> 176.089s` (`-10.6%`)
-   - predict `740.024s -> 162.381s` (`4.56x`, `-78.1%`)
-   - total `937.112s -> 385.082s` (`2.43x`, `-58.9%`)
-   - peak RSS `13.602 GB -> 12.800 GB` (`-5.9%`)
+Latest verification-grade snapshot (2026-02-28; dirty tree, not promoted baseline):
+1. Transfer-mini full compare (`scratch/profile_transfer_mini_bundle1_4_20260228.json`):
+   - python `296.597s` / `5.491 GB`; rust `176.469s` / `4.794 GB`
+   - relative to python in the same run: rust is `1.68x` faster, `-0.697 GB` peak RSS (`-12.7%`)
+   - `post_rust_cleanup` snapshot present (`4.188 GB`), with `0.113 GB` RSS drop from `per_dataset_complete`
+2. Inference compare (`scratch/compare_bundle1_4_inspire5k_20260228.json`):
+   - python `19.494s` / `1.505 GB`; rust `4.694s` / `0.911 GB`
+   - speedup `4.153x`, RSS delta `-39.47%`, feature parity pass.
+3. Transfer-mini latency-variance diagnostics (`scratch/diagnostics/transfer_mini_diag_*_20260228.json`):
+   - default deferred-paper runs (`cleanup=1`) show stable peak RSS (`4.787-4.795 GB`) but wide latency spread
+     (`153.828s`, `172.326s`, `200.574s`) from LightGBM trial wall-time variance.
+   - hyperopt parameter hashes and fitted tree counts stay identical across runs
+     (`pairwise n_estimators_fit=2270`, `nameless n_estimators_fit=2098`), so this is runtime contention variance,
+     not hyperparameter/search drift.
+   - forcing Python paper preprocessing (`--force-python-paper-preprocess 1`) increases ANDData build time
+     (`~8.7s -> ~27.8-29.4s`), peak RSS (`~4.795 GB -> ~5.60-5.66 GB`), and total runtime (`+53.9s` to `+57.9s`
+     vs fastest default diagnostic run).
 
-Latest non-promoted check snapshot (2026-02-25, Phase 0 branch):
-
-1. Phase 0 fixed-workload telemetry gate passed:
-   - `scratch/big_block/phase0_memacc_rust_20260225_104213_0b3e877.log`
-   - `phase_split_phase_a prediction_error_ratio=0.700`, `underpredicted=False`.
-2. Inference comparator remained positive:
-   - `scratch/compare_phase0_memacc_20260225_104810_0b3e877.json`
-   - speedup `1.554x`, RSS reduction `38.75%`, parity pass.
-3. Maintained mini-transfer gate regressed (blocker for promotion):
-   - `scratch/profile_transfer_mini_phase0_memacc_20260225_105000_0b3e877.json`
-   - quality parity equal, but runtime `+87.2%` and peak RSS `+16.0%` vs Python.
-
-Historical compare logs are archived in `docs/archive/README.md` and are non-gating.
+Workload-ID gate behavior verified:
+1. Smoke vs full (`--mode gate`) fails with workload mismatch.
+2. Full vs full (`--mode gate`) passes with `violations: 0`.
 
 ## Unification Status (as implemented)
 
@@ -225,28 +239,37 @@ Intentionally divergent (by design):
 4. Deferred-field and contract suites:
    - `uv run pytest -q tests/test_rust_signature_preprocess.py tests/test_rust_from_dataset_contract.py tests/test_feature_port_parity.py`
 5. JSON-ingest policy/cache suites:
-   - `uv run pytest -q tests/test_rust_lifecycle.py tests/test_feature_port_json_ingest_name_counts.py tests/test_feature_port_cache.py tests/test_runtime_policy.py`
+   - `uv run pytest -q tests/test_rust_lifecycle.py tests/test_rust_native_ingest_version_gate.py tests/test_specter_pickle_contract.py tests/test_rust_sinonym_json_ingest.py tests/test_feature_port_cache.py tests/test_runtime_policy.py`
 6. Inference comparator gate:
-   - `uv run --no-project python scripts/rust_suite.py compare --dataset inspire --limit 5000 --pair-count 5000 --n-jobs 8 --require-non-dev-rust 0 --write-json scratch/compare_<change>.json`
-7. Maintained mini-transfer gate:
-   - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode compare --datasets kisti arnetminer zbmath --target kisti --n-jobs 8 --write-json scratch/profile_transfer_mini_<change>.json`
+   - `uv run --no-project python scripts/rust_suite.py compare --dataset inspire --limit 5000 --pair-count 5000 --n-jobs 4 --require-non-dev-rust 0 --require-rust-release 1 --write-json scratch/baselines_20260227/compare_inspire_5k_<change>.json`
+7. Maintained mini-transfer full acceptance baseline:
+   - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode compare --preset full --target kisti --n-jobs 4 --n-train-pairs 10000 --n-iter 5 --require-rust-release 1 --write-json scratch/baselines_20260227/profile_transfer_mini_full_<change>.json`
 8. Smoke mini-transfer gate:
-   - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode compare --datasets kisti --target kisti --n-jobs 2 --n-train-pairs 300 --n-iter 1 --write-json scratch/profile_transfer_mini_smoke_<change>.json`
+   - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode compare --preset smoke --target kisti --n-jobs 2 --n-train-pairs 300 --n-iter 1 --require-rust-release 1 --write-json scratch/baselines_20260227/profile_transfer_mini_smoke_<change>.json`
 9. API-skew and incremental/container risk regression slice:
-   - `uv run pytest -q tests/test_feature_port_cache.py tests/test_ingest_contract.py tests/test_cluster_incremental.py tests/test_profile_transfer_mini.py`
+   - `uv run pytest -q tests/test_feature_port_cache.py tests/test_ingest_contract.py tests/test_rust_native_ingest_version_gate.py tests/test_compare_python_vs_rust.py tests/test_cluster_incremental.py`
 10. L1/P0 hot-path verification slice:
    - `uv run pytest -q tests/test_rust_from_json_paths.py tests/test_feature_port_parity.py tests/test_regression_fixes.py tests/test_cluster_incremental.py`
-11. L1 heavy rebuild stress gate (opt-in):
-   - `S2AND_RUN_HEAVY_RUST_STRESS=1 uv run pytest -q tests/test_rust_from_json_paths.py::test_repeated_from_json_paths_aminer_opt_in`
-12. Largest-block post-P0 compare evidence:
-   - `uv run --no-project python scripts/rust_suite.py largest-block --mode compare --dataset aminer --block "j wang" --n-jobs 8 --write-json scratch/profile_largest_block_compare_post_p0.json --timeout-hours 4`
+11. Stress rebuild RSS-series baseline:
+   - `uv run --with psutil python scripts/rust_suite.py stress-rebuild --dataset aminer --build-path from_json_paths --repeats 6 --num-threads 1 --rss-sample-ms 50 --require-rust-release 1 --write-json scratch/baselines_20260227/stress_rust_from_json_paths_aminer_6x_<change>.json`
+12. Stress rebuild threshold enforcement check:
+   - `uv run --with psutil python scripts/rust_suite.py stress-rebuild --dataset aminer --build-path from_json_paths --repeats 2 --num-threads 1 --rss-sample-ms 50 --rss-growth-max-fraction 0.05 --require-rust-release 1 --write-json scratch/baselines_20260227/stress_rust_from_json_paths_aminer_2x_gate_<change>.json`
+13. Largest-block canonical compare smoke:
+    - `uv run --no-project python scripts/rust_suite.py largest-block --mode compare --dataset aminer --block "j wang" --n-jobs 4 --max-block-size 200 --timeout-hours 0.5 --require-rust-release 1 --write-json scratch/baselines_20260227/largest_block_compare_smoke_200_<change>.json`
+14. Transfer-mini latency diagnostics matrix (Rust single-backend):
+    - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode single --backend rust --preset full --target kisti --n-jobs 4 --n-train-pairs 10000 --n-iter 5 --require-rust-release 1 --run-label rust_default_diag --write-json scratch/diagnostics/transfer_mini_diag_default_<change>.json`
+    - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode single --backend rust --preset full --target kisti --n-jobs 4 --n-train-pairs 10000 --n-iter 5 --require-rust-release 1 --rust-cleanup-boundary 0 --run-label rust_no_cleanup_diag --write-json scratch/diagnostics/transfer_mini_diag_no_cleanup_<change>.json`
+    - `uv run --with psutil python scripts/rust_suite.py transfer-mini --mode single --backend rust --preset full --target kisti --n-jobs 4 --n-train-pairs 10000 --n-iter 5 --require-rust-release 1 --force-python-paper-preprocess 1 --run-label rust_force_py_papers_diag --write-json scratch/diagnostics/transfer_mini_diag_force_py_papers_<change>.json`
 
 ## Rollout
 
 1. Keep `auto` runtime semantics and dual-lane CI as required baseline.
 2. Current baselines:
-   - train/eval: three seeded compact-`CounterData` artifacts (`scratch/profile_transfer_mini_compact_cd_seed{1,2,3}_njobs4_20260224.json`)
-   - inference: `scratch/compare_investigate_20260224.json`
+   - train/eval acceptance: `scratch/baselines_20260227/profile_transfer_mini_full_20260227.json`
+   - train/eval sanity: `scratch/baselines_20260227/profile_transfer_mini_smoke_20260227.json`
+   - inference: `scratch/baselines_20260227/compare_inspire_5k_20260227.json`
+   - stress: `scratch/baselines_20260227/stress_rust_from_json_paths_aminer_6x_20260227.json`
+   - largest-block compare smoke: `scratch/baselines_20260227/largest_block_compare_smoke_200_20260227.json`
    - full baseline ownership, freshness rules, and historical archive pointers live in `docs/rust/baselines.md`.
 
 ## Artifact divergence

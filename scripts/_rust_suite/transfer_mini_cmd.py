@@ -25,9 +25,14 @@ Usage:
   # single backend (foreground, for debugging):
   uv run --no-project python scripts/rust_suite.py transfer-mini --mode single \\
       --backend rust --datasets kisti inspire inventors_s2and --target inventors_s2and --n-jobs 8
+
+Diagnostic toggles:
+  --rust-cleanup-boundary {0,1}
+  --force-python-paper-preprocess {0,1}
 """
 
 import argparse
+import gc
 import json
 import os
 import pickle
@@ -66,6 +71,7 @@ else:
 RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
 RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV = "S2AND_RUST_FORCE_PYTHON_PAPER_PREPROCESS"
 
 # Match transfer_experiment_internal.py defaults
 SPECTER_SUFFIX = "_specter.pickle"
@@ -170,6 +176,96 @@ def _effective_train_pairs_size(n_train_pairs: int, mode: str) -> int:
     raise ValueError(f"Unknown train_pairs_size_mode={mode!r}")
 
 
+def _trial_duration_seconds(book_time: Any, refresh_time: Any) -> float | None:
+    if book_time is None or refresh_time is None:
+        return None
+    try:
+        maybe_delta = refresh_time - book_time
+    except TypeError:
+        return None
+    if hasattr(maybe_delta, "total_seconds"):
+        seconds = float(maybe_delta.total_seconds())
+    elif isinstance(maybe_delta, int | float):
+        seconds = float(maybe_delta)
+    else:
+        return None
+    if seconds < 0:
+        return None
+    return seconds
+
+
+def _normalize_hyperopt_trial_vals(values: Any) -> dict[str, list[Any]]:
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[str, list[Any]] = {}
+    for key, raw_value in sorted(values.items(), key=lambda item: str(item[0])):
+        if isinstance(raw_value, list):
+            normalized[str(key)] = [
+                int(value) if hasattr(value, "is_integer") and value.is_integer() else value for value in raw_value
+            ]
+    return normalized
+
+
+def _summarize_hyperopt_trials(trials_obj: Any) -> dict[str, Any]:
+    trials = getattr(trials_obj, "trials", None)
+    if not isinstance(trials, list):
+        return {"available": False}
+
+    losses: list[float] = []
+    durations: list[float] = []
+    trial_param_hashes: list[str] = []
+
+    for trial in trials:
+        if not isinstance(trial, dict):
+            continue
+        result_payload = trial.get("result")
+        if isinstance(result_payload, dict):
+            loss_value = result_payload.get("loss")
+            if isinstance(loss_value, int | float) and not isinstance(loss_value, bool):
+                losses.append(float(loss_value))
+        duration_seconds = _trial_duration_seconds(trial.get("book_time"), trial.get("refresh_time"))
+        if duration_seconds is not None:
+            durations.append(duration_seconds)
+        misc_payload = trial.get("misc")
+        trial_vals = _normalize_hyperopt_trial_vals(misc_payload.get("vals") if isinstance(misc_payload, dict) else {})
+        if len(trial_vals) > 0:
+            trial_param_hashes.append(canonical_sha256(trial_vals))
+
+    summary: dict[str, Any] = {
+        "available": True,
+        "n_trials": int(len(trials)),
+    }
+    if len(losses) > 0:
+        summary["loss_min"] = round(min(losses), 6)
+        summary["loss_max"] = round(max(losses), 6)
+        summary["loss_mean"] = round(sum(losses) / len(losses), 6)
+    if len(durations) > 0:
+        summary["trial_seconds_total"] = round(sum(durations), 6)
+        summary["trial_seconds_mean"] = round(sum(durations) / len(durations), 6)
+        summary["trial_seconds"] = [round(value, 6) for value in durations]
+    if len(trial_param_hashes) > 0:
+        summary["trial_param_hashes"] = trial_param_hashes
+    return summary
+
+
+def _lgbm_fit_summary(modeler: Any) -> dict[str, Any]:
+    classifier = getattr(modeler, "classifier", None)
+    if classifier is None:
+        return {}
+    summary: dict[str, Any] = {}
+    best_iteration = getattr(classifier, "best_iteration_", None)
+    if isinstance(best_iteration, int):
+        summary["best_iteration"] = int(best_iteration)
+    n_estimators_fit = getattr(classifier, "n_estimators_", None)
+    if isinstance(n_estimators_fit, int):
+        summary["n_estimators_fit"] = int(n_estimators_fit)
+    else:
+        n_estimators = getattr(classifier, "n_estimators", None)
+        if isinstance(n_estimators, int):
+            summary["n_estimators"] = int(n_estimators)
+    return summary
+
+
 def _resolve_dataset_file(
     data_dir: str,
     dataset_name: str,
@@ -270,6 +366,8 @@ def _single_run(
     workload: dict[str, Any],
     workload_id: str,
     require_rust_release: bool,
+    rust_cleanup_boundary: bool,
+    force_python_paper_preprocess: bool,
 ) -> dict[str, Any]:
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
     os.environ["S2AND_BACKEND"] = backend
@@ -278,6 +376,10 @@ def _single_run(
     os.environ["S2AND_RUST_FEATURIZER_MAX_INMEM"] = "1"
     # Improve RSS peak capture inside Rust batch loops unless explicitly disabled.
     os.environ.setdefault("S2AND_RUST_BATCH_RSS_SAMPLER_MS", "5")
+    if force_python_paper_preprocess:
+        os.environ[RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV] = "1"
+    else:
+        os.environ.pop(RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV, None)
 
     rust_extension_identity: dict[str, Any] | None = None
     if backend == "rust":
@@ -425,6 +527,24 @@ def _single_run(
 
         stage_timings["per_dataset"] = per_dataset_timings
         _snapshot_stage_rss(stage_rss_gb, monitor, "per_dataset_complete")
+        stage_timings["rust_cleanup_boundary_enabled"] = bool(backend == "rust" and rust_cleanup_boundary)
+        if backend == "rust" and rust_cleanup_boundary:
+            try:
+                from s2and import feature_port as _feature_port
+
+                evicted = int(_feature_port.clear_rust_featurizer_cache())
+                print(f"  [{run_label}] Cleared Rust featurizer cache entries: {evicted}")
+                stage_timings["rust_cleanup_evicted_entries"] = evicted
+            except Exception as exc:
+                print(f"  [{run_label}] Rust featurizer cleanup skipped: {exc!r}")
+                stage_timings["rust_cleanup_evicted_entries"] = None
+            gc_collected = int(gc.collect())
+            stage_timings["rust_cleanup_gc_collected"] = gc_collected
+            _snapshot_stage_rss(stage_rss_gb, monitor, "post_rust_cleanup")
+            print(
+                f"  [{run_label}] Post-Rust cleanup RSS snapshot: "
+                f"{stage_rss_gb.get('post_rust_cleanup', 'n/a')} GB"
+            )
 
         # ----- union pairwise model -----
         print(f"  [{run_label}] Training union pairwise model...")
@@ -445,6 +565,8 @@ def _single_run(
         )
         union_classifier.fit(X_train_union, y_train_union, X_val_union, y_val_union)
         stage_timings["union_pairwise_fit_seconds"] = round(time.perf_counter() - t0, 3)
+        stage_timings["union_pairwise_hyperopt"] = _summarize_hyperopt_trials(union_classifier.hyperopt_trials_store)
+        stage_timings["union_pairwise_lgbm"] = _lgbm_fit_summary(union_classifier)
         _snapshot_stage_rss(stage_rss_gb, monitor, "union_pairwise_fit")
         print(f"  [{run_label}] Union pairwise fit in {_fmt(stage_timings['union_pairwise_fit_seconds'])}s")
 
@@ -456,6 +578,10 @@ def _single_run(
         )
         nameless_union_classifier.fit(nameless_X_train_union, y_train_union, nameless_X_val_union, y_val_union)
         stage_timings["union_nameless_pairwise_fit_seconds"] = round(time.perf_counter() - t0, 3)
+        stage_timings["union_nameless_pairwise_hyperopt"] = _summarize_hyperopt_trials(
+            nameless_union_classifier.hyperopt_trials_store
+        )
+        stage_timings["union_nameless_pairwise_lgbm"] = _lgbm_fit_summary(nameless_union_classifier)
         _snapshot_stage_rss(stage_rss_gb, monitor, "union_nameless_pairwise_fit")
         print(
             f"  [{run_label}] Union nameless pairwise fit in "
@@ -514,6 +640,7 @@ def _single_run(
             3,
         )
         stage_timings["union_distance_matrix_calls"] = int(distance_matrix_calls)
+        stage_timings["union_clusterer_hyperopt"] = _summarize_hyperopt_trials(union_clusterer.hyperopt_trials_store)
         _snapshot_stage_rss(stage_rss_gb, monitor, "union_clusterer_fit")
         print(f"  [{run_label}] Union clusterer fit in {_fmt(stage_timings['union_clusterer_fit_seconds'])}s")
         stage_timings["union_clusterer_best_params"] = union_clusterer.best_params
@@ -600,6 +727,10 @@ def _single_run(
         "cluster_macro": _triplet("Cluster Macro (P, R, F1)"),
         "stage_timings": stage_timings,
         "stage_rss_gb": stage_rss_gb,
+        "diagnostics": {
+            "rust_cleanup_boundary": bool(rust_cleanup_boundary),
+            "force_python_paper_preprocess": bool(force_python_paper_preprocess),
+        },
         "rust_extension_identity": rust_extension_identity,
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
     }
@@ -630,6 +761,8 @@ def _run_subprocess(
     train_pairs_size_mode: str,
     require_rust_release: int,
     run_label: str = "",
+    rust_cleanup_boundary: int = 1,
+    force_python_paper_preprocess: int = 0,
 ) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -654,6 +787,10 @@ def _run_subprocess(
         str(random_seed),
         "--require-rust-release",
         str(int(require_rust_release)),
+        "--rust-cleanup-boundary",
+        str(int(rust_cleanup_boundary)),
+        "--force-python-paper-preprocess",
+        str(int(force_python_paper_preprocess)),
         "--run-label",
         run_label or backend,
     ]
@@ -710,6 +847,8 @@ def _compare(args: argparse.Namespace, workload: dict[str, Any], workload_id: st
             random_seed=common["random_seed"],
             train_pairs_size_mode=common["train_pairs_size_mode"],
             require_rust_release=int(args.require_rust_release),
+            rust_cleanup_boundary=int(args.rust_cleanup_boundary),
+            force_python_paper_preprocess=int(args.force_python_paper_preprocess),
             run_label=config["run_label"],
         )
         results.append(result)
@@ -756,6 +895,7 @@ def _compare(args: argparse.Namespace, workload: dict[str, Any], workload_id: st
     rss_stages = [
         "name_counts_load",
         "per_dataset_complete",
+        "post_rust_cleanup",
         "union_pairwise_fit",
         "union_nameless_pairwise_fit",
         "union_clusterer_fit",
@@ -981,6 +1121,17 @@ def main() -> None:
     parser.add_argument("--random-seed", type=int, default=None, help="Override workload preset random seed.")
     parser.add_argument("--require-rust-release", type=int, choices=[0, 1], default=0)
     parser.add_argument("--run-label", default="")
+    parser.add_argument("--rust-cleanup-boundary", type=int, choices=[0, 1], default=1)
+    parser.add_argument(
+        "--force-python-paper-preprocess",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Diagnostic override: when set to 1, force Python paper preprocessing by "
+            f"setting {RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV}=1 in the child process."
+        ),
+    )
     parser.add_argument("--write-json", default="", help="Output JSON path (compare or single mode).")
     parser.add_argument("--baseline-json", default="", help="Required for --mode gate.")
     parser.add_argument("--current-json", default="", help="Required for --mode gate.")
@@ -1018,6 +1169,8 @@ def main() -> None:
             workload=workload,
             workload_id=workload_id,
             require_rust_release=bool(args.require_rust_release),
+            rust_cleanup_boundary=bool(args.rust_cleanup_boundary),
+            force_python_paper_preprocess=bool(args.force_python_paper_preprocess),
         )
         if args.write_json:
             out_path = Path(args.write_json)

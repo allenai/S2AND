@@ -1,6 +1,9 @@
 # Rust Artifact Divergence: Temporary Operating Mode and Deferred Unification
 
-Status date: 2026-02-25
+Status date: 2026-02-28
+
+See also:
+- Current execution bundles: `docs/work_plan.md` (Bundle 5: staged dual-read + converters + fixtures; defer large artifact regen while evidence is local-only).
 
 ## Why this doc exists
 Tracks artifact-level divergences between Python and Rust paths and the format migration plan.

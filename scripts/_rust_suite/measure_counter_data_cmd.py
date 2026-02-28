@@ -20,9 +20,12 @@ import os
 import tempfile
 import time
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import psutil
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _rss_gb() -> float:
@@ -94,7 +97,7 @@ def _load_featurizer(path: str) -> Any:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="kisti")
-    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--data-dir", default=str(_PROJECT_ROOT / "data"))
     parser.add_argument("--n-jobs", type=int, default=1)
     args = parser.parse_args()
 

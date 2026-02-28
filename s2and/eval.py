@@ -342,7 +342,7 @@ def facet_eval(
             firstname_f1[0].append(f1)
             _signature_dict["first name"] = 0
 
-        if len(signature.author_info_affiliations) > 0:
+        if signature.author_info_affiliations and len(signature.author_info_affiliations) > 0:
             affiliation_f1[1].append(f1)
             _signature_dict["affiliation"] = 1
         else:
@@ -377,7 +377,12 @@ def facet_eval(
             references_f1[0].append(f1)
             _signature_dict["references"] = 0
 
-        if len(signature.author_info_coauthors) > 0:
+        has_coauthors = (
+            len(signature.author_info_coauthors) > 0
+            if signature.author_info_coauthors is not None
+            else len(paper.authors) > 1
+        )
+        if has_coauthors:
             coauthors_f1[1].append(f1)
             _signature_dict["multiple_authors"] = 1
         else:

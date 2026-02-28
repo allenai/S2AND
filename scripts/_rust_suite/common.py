@@ -11,7 +11,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import psutil
+try:
+    import psutil
+except ModuleNotFoundError:
+    psutil = None  # type: ignore[assignment]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -166,10 +169,13 @@ class ProcessTreeRSSMonitor:
         self.interval_seconds = interval_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._process = psutil.Process()
+        self._process = psutil.Process() if psutil is not None else None
         self.peak_rss_bytes = 0
 
     def _tree_rss_bytes(self) -> int:
+        if psutil is None or self._process is None:
+            return RSSMonitor._fallback_rss_bytes()
+
         rss_total = 0
         processes = [self._process]
         try:
@@ -227,10 +233,26 @@ class RSSMonitor:
         self.interval_seconds = interval_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._process = psutil.Process()
+        self._process = psutil.Process() if psutil is not None else None
         self.peak_rss_bytes = 0
 
+    @staticmethod
+    def _fallback_rss_bytes() -> int:
+        """Best-effort RSS fallback when psutil is unavailable."""
+        try:
+            import resource
+
+            ru_maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            # Linux reports KB, macOS reports bytes.
+            if sys.platform.startswith("darwin"):
+                return ru_maxrss
+            return ru_maxrss * 1024
+        except Exception:
+            return 0
+
     def _rss_bytes(self) -> int:
+        if psutil is None or self._process is None:
+            return self._fallback_rss_bytes()
         return int(self._process.memory_info().rss)
 
     def sample_rss_bytes(self) -> int:

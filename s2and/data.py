@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import pickle
+import platform
 import re
 import tempfile
 import threading
@@ -26,6 +27,7 @@ from s2and.consts import (
 from s2and.file_cache import cached_path
 from s2and.mp import UniversalPool
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
+from s2and.rust_capabilities import detect_rust_runtime_capabilities
 from s2and.rust_lifecycle import build_rust_lifecycle_policy
 from s2and.sampling import random_sampling, sampling
 from s2and.text import (
@@ -344,13 +346,16 @@ class ANDData:
         self.clusters_path = clusters if isinstance(clusters, str) else None
         self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
+        rust_capabilities = detect_rust_runtime_capabilities()
         self.rust_lifecycle_policy = build_rust_lifecycle_policy(
             backend=self.runtime_context.resolved_backend,
             mode=mode,
             has_signatures_path=self.signatures_path is not None,
             has_papers_path=self.papers_path is not None,
             preprocess=preprocess,
+            compute_reference_features=compute_reference_features,
             use_rust=self.runtime_context.use_rust,
+            from_dataset_paper_preprocess_available=rust_capabilities.from_dataset_paper_preprocess_available,
             use_sinonym_overwrite=use_sinonym_overwrite,
         )
         defer_rust_json_ingest_write_for_sinonym = self._should_defer_rust_json_ingest_write_for_sinonym(
@@ -661,8 +666,8 @@ class ANDData:
 
         preprocess_papers_stage_start = time.perf_counter()
         if self.rust_lifecycle_policy.skip_python_paper_preprocess:
-            # Rust JSON ingest rebuilds paper preprocessing natively; avoid duplicate Python work.
-            logger.info("Rust JSON ingest active: skipping Python paper preprocessing")
+            # Rust paper preprocessing will fill missing fields in the build path; avoid duplicate Python work.
+            logger.info("Rust deferred paper preprocessing active: skipping Python paper preprocessing")
         else:
             logger.info("preprocessing papers")
             self.papers = preprocess_papers_parallel(
@@ -2429,7 +2434,8 @@ def preprocess_papers_parallel(
     Dict: the preprocessed papers dictionary
     """
     output: dict = {}
-    if n_jobs > 1:
+    use_pool_stage_1 = n_jobs > 1 and platform.system() == "Linux"
+    if use_pool_stage_1:
         # Use UniversalPool to replicate the original p.imap() streaming behavior
         with UniversalPool(processes=n_jobs) as p:  # type: ignore
             _max = len(papers_dict)
@@ -2462,18 +2468,9 @@ def preprocess_papers_parallel(
             )
             for key, value in output.items()
         ]
-        if n_jobs > 1:
-            # Use UniversalPool to replicate the original p.imap() streaming behavior
-            with UniversalPool(processes=n_jobs) as p:
-                _max = len(input_2)
-                with tqdm(total=_max, desc="Preprocessing papers 2/2") as pbar:
-                    for key, value in p.imap(preprocess_paper_2, input_2, 100):
-                        output[key] = value
-                        pbar.update()
-        else:
-            for item in tqdm(input_2, total=len(input_2), desc="Preprocessing papers 2/2"):
-                k, v = preprocess_paper_2(item)
-                output[k] = v
+        for item in tqdm(input_2, total=len(input_2), desc="Preprocessing papers 2/2"):
+            k, v = preprocess_paper_2(item)
+            output[k] = v
     elif preprocess and not compute_reference_features:
         # Ensure reference_details exists as empty counters to keep downstream code safe
         empty_tuple: tuple[Counter, Counter, Counter, Counter] = (

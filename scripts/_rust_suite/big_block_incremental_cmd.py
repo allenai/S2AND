@@ -23,6 +23,8 @@ else:
             sys.path.insert(0, str(_SCRIPTS_DIR))
         from _rust_suite.common import ProcessTreeRSSMonitor, collect_rust_extension_identity
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 RESULT_JSON_START = "===S2AND_BIG_BLOCK_RESULT_START==="
 RESULT_JSON_END = "===S2AND_BIG_BLOCK_RESULT_END==="
 DEFAULT_TOTAL_RAM_BYTES = 32 * 1024 * 1024 * 1024
@@ -545,7 +547,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=["single", "compare_phase_split"], default="compare_phase_split")
     parser.add_argument("--backend", choices=["python", "rust", "auto"], default="rust")
-    parser.add_argument("--subset-dir", default="scratch/inventors_topblock_15k")
+    parser.add_argument("--subset-dir", default=str(_PROJECT_ROOT / "scratch" / "inventors_topblock_15k"))
     parser.add_argument(
         "--target-block",
         default="",
@@ -563,7 +565,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TOTAL_RAM_BYTES,
         help="RAM budget for phase-split Phase A chunking.",
     )
-    parser.add_argument("--model-path", default="data/production_model_v1.1.pickle")
+    parser.add_argument("--model-path", default=str(_PROJECT_ROOT / "data" / "production_model_v1.1.pickle"))
     parser.add_argument(
         "--emit-signature-map",
         type=int,

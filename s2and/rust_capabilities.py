@@ -23,6 +23,7 @@ _CORE_REQUIRED_FEATURIZER_MARKERS = (
 class RustRuntimeCapabilities:
     extension_importable: bool
     core_runtime_available: bool
+    from_dataset_paper_preprocess_available: bool
     reason: str
 
 
@@ -98,6 +99,7 @@ def detect_rust_runtime_capabilities(extension_module: Any | None = None) -> Rus
         return RustRuntimeCapabilities(
             extension_importable=False,
             core_runtime_available=False,
+            from_dataset_paper_preprocess_available=False,
             reason="rust_extension_unavailable",
         )
 
@@ -106,6 +108,7 @@ def detect_rust_runtime_capabilities(extension_module: Any | None = None) -> Rus
         return RustRuntimeCapabilities(
             extension_importable=True,
             core_runtime_available=False,
+            from_dataset_paper_preprocess_available=False,
             reason="rust_featurizer_missing",
         )
 
@@ -131,8 +134,18 @@ def detect_rust_runtime_capabilities(extension_module: Any | None = None) -> Rus
         else:
             reason = "rust_core_available"
 
+    from_dataset_paper_preprocess_available = bool(
+        core_runtime_available
+        and getattr(
+            rust_featurizer_cls,
+            "SUPPORTS_FROM_DATASET_PAPER_PREPROCESS",
+            False,
+        )
+    )
+
     return RustRuntimeCapabilities(
         extension_importable=True,
         core_runtime_available=core_runtime_available,
+        from_dataset_paper_preprocess_available=from_dataset_paper_preprocess_available,
         reason=reason,
     )

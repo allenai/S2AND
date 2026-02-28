@@ -153,8 +153,7 @@ def test_transform_signature_file_handles_empty_email_field(tmp_path):
     ("script_path", "module_name"),
     [
         ("scripts/transfer_experiment_seed_paper.py", "transfer_seed_regression"),
-        ("scripts/internal/transfer_experiment_internal.py", "transfer_internal_regression"),
-        ("scripts/custom_block_transfer_experiment_seed_paper.py", "transfer_custom_regression"),
+        ("scripts/archive/transfer_experiment_internal.py", "transfer_internal_regression"),
     ],
 )
 def test_transfer_script_facet_helpers_handle_empty_groups(script_path, module_name):
@@ -303,6 +302,89 @@ def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
     helper = clusterer.distance_matrix_helper({"b": ["s1", "s2"]}, dataset, partial_supervision={})
     next(helper)
 
+    assert captured["featurizer_use_cache"] is False
+    assert captured["batch_use_cache"] is False
+    assert captured["batch_calls"] == 1
+    assert captured["fallback_calls"] == 0
+
+
+def test_make_distance_matrices_rust_blockwise_uses_indexed_constraint_api(monkeypatch):
+    monkeypatch.setenv("S2AND_BACKEND", "rust")
+    dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set())
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    clusterer = Clusterer(
+        featurizer_info=featurizer_info,
+        classifier=None,
+        n_jobs=1,
+        use_cache=False,
+        use_default_constraints_as_supervision=True,
+        batch_size=2,
+    )
+
+    class _FakeFeaturizer:
+        def signature_ids(self):
+            return ["s1", "s2"]
+
+        def get_constraints_matrix_indexed(self, *_args, **_kwargs):
+            return [None]
+
+    captured = {
+        "featurizer_use_cache": None,
+        "batch_use_cache": None,
+        "batch_calls": 0,
+        "fallback_calls": 0,
+    }
+
+    monkeypatch.setattr(model_module, "_use_rust_constraints", lambda runtime_context=None: True)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        model_module.Clusterer,
+        "distance_matrix_helper",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy helper path should not be called")),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_get_rust_featurizer",
+        lambda _dataset, runtime_context=None, use_cache=False: captured.__setitem__("featurizer_use_cache", use_cache)
+        or _FakeFeaturizer(),
+    )
+
+    def fake_get_constraints_matrix_indexed_rust(*args, use_cache=False, **kwargs):
+        del args, kwargs
+        captured["batch_calls"] += 1
+        captured["batch_use_cache"] = use_cache
+        return [0.0]
+
+    def fake_get_constraint_rust(*args, **kwargs):
+        del args, kwargs
+        captured["fallback_calls"] += 1
+        return None
+
+    def fake_many_pairs_featurize(signature_pairs, *_args, **_kwargs):
+        labels = np.asarray([float(pair[2]) for pair in signature_pairs], dtype=np.float64)
+        features = np.zeros((len(signature_pairs), 1), dtype=np.float64)
+        return features, labels, None
+
+    def fake_predict_and_combine(
+        _classifier,
+        _nameless_classifier,
+        _features,
+        labels,
+        _nameless_features,
+        _batch_label,
+        _rust_failure_counts,
+        runtime_context=None,
+    ):
+        del runtime_context
+        return np.asarray(labels + model_module.LARGE_INTEGER, dtype=np.float64), 0.0
+
+    monkeypatch.setattr(model_module, "get_constraints_matrix_indexed_rust", fake_get_constraints_matrix_indexed_rust)
+    monkeypatch.setattr(model_module, "get_constraint_rust", fake_get_constraint_rust)
+    monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
+    monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
+
+    output = clusterer.make_distance_matrices({"b": ["s1", "s2"]}, dataset, partial_supervision={})
+    assert float(output["b"][0]) == pytest.approx(0.0, abs=0.0)
     assert captured["featurizer_use_cache"] is False
     assert captured["batch_use_cache"] is False
     assert captured["batch_calls"] == 1

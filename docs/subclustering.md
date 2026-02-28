@@ -6,7 +6,7 @@ into smaller subproblems so memory stays bounded, while making the semantic trad
 Status: phase-split incremental subclustering promoted to default (2026-02-24).
 
 Related docs:
-- `docs/memory/stage_memory_estimates.md` (memory telemetry + predictors used by guards)
+- `docs/stage_memory_estimates.md` (memory telemetry + predictors used by guards)
 - `docs/rust/roadmap.md` (performance work that interacts with subclustering)
 
 ## What “subclustering” means here

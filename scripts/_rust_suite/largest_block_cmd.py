@@ -70,7 +70,7 @@ else:
 RESULT_JSON_START = "===S2AND_LARGEST_BLOCK_RESULT_START==="
 RESULT_JSON_END = "===S2AND_LARGEST_BLOCK_RESULT_END==="
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_MODEL_PATH = str(DATA_DIR / "production_model_v1.1.pickle")
 

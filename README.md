@@ -149,6 +149,10 @@ otherwise it resolves to Python.
 
 Install contract:
 
+- `uv pip install s2and`: Python-only runtime.
+- `uv pip install "s2and[rust]"`: Rust-enabled runtime when the extension is importable and core-capable.
+- Full runtime contract + verification commands: `docs/rust/runtime.md`.
+
 
 In `rust` backend mode, migrated Rust stages fail fast on Rust-stage errors (no silent Python rescue). In `auto`
 mode, fallback only occurs during backend resolution; runtime Rust-stage failures still fail fast.
@@ -188,7 +192,7 @@ Notes:
 Name-count artifact exporter for JSON ingest:
 
 ```bash
-uv run --no-project python scripts/export_name_counts_for_rust.py --output data/name_counts_rust.json
+uv run --no-project python scripts/export_name_counts_for_rust.py --output scratch/name_counts_rust.json
 ```
 
 ## Cache policy

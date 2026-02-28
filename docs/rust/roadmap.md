@@ -1,16 +1,63 @@
 # Rust Ideas Frontier
 
-Status date: 2026-02-27
+Status date: 2026-02-28
+
+Execution bundles / where to start: `docs/work_plan.md`.
+
 Latest updates:
-- 2026-02-27: L1 stress gate landed with fast default + opt-in heavy AMiner loop. Heavy `from_json_paths` stress run passed `6/6` with no crash (`scratch/stress_rust_from_json_paths_aminer.json`).
-- 2026-02-27: P0 landed across all hot paths. Rust now exposes `get_constraints_matrix` and `get_constraints_matrix_indexed`, model paths batch unresolved constraints, and telemetry reports `constraint_batch` API mode/call counts. Post-P0 compare (`scratch/profile_largest_block_compare_post_p0.json`): predict `740.024s -> 162.381s` (`4.56x`), total `937.112s -> 385.082s` (`2.43x`), peak RSS `13.602 GB -> 12.800 GB` (`-5.9%`), partition diff `0/2586`.
+- 2026-02-28: Work bundles + "where to start" pointers captured in `docs/work_plan.md`.
+- 2026-02-28: Transfer-mini latency diagnostics added (cleanup/preprocess toggles + per-trial telemetry).
+  Artifacts: `scratch/diagnostics/transfer_mini_diag_{default,default_r2,default_r3,no_cleanup,force_py_papers,force_py_papers_no_cleanup}_20260228.json`.
+  Readout: peak RSS is stable in deferred-paper default runs (`~4.79 GB`) but LightGBM stages show high single-run wall-time variance; hyperopt parameter hashes and fitted tree counts are unchanged run-to-run.
+- 2026-02-28: L1b production training-path port landed with targeted cleanup:
+  `scripts/transfer_experiment_seed_paper.py` now runs
+  per-dataset `evict_rust_featurizer(dataset)` + `gc.collect()` boundaries
+  with `Telemetry: post_rust_cleanup ...` logging (no global inference-path clear).
+- 2026-02-27: Session execution notes captured for L1b/P1/P2 with benchmark artifacts.
+  L1b cleanup boundary first landed in benchmark harness
+  (`scripts/_rust_suite/transfer_mini_cmd.py`) and was later ported to
+  production training scripts on 2026-02-28.
+  Median of 3 Rust-only `transfer-mini --preset full` runs improved from
+  `203.833s` to `183.615s` (`-9.92%`) with pairwise stage medians:
+  `union_pairwise_fit 69.741s -> 61.591s` and
+  `union_nameless_pairwise_fit 50.010s -> 33.132s`; cleanup snapshot shows
+  `per_dataset_complete 5.133 GB -> post_rust_cleanup 5.037 GB` (`-0.096 GB`).
+  Artifacts:
+  `scratch/baseline_transfer_mini_rust_run{1,2,3}_b9315f7_20260227_142343.json`,
+  `scratch/after_l1b_transfer_mini_rust_run{1,2,3}_b9315f7_20260227_144537.json`.
+  Important caveat: global cache clear can hurt large inference/subblocking and
+  mixed predict workflows by forcing featurizer rebuild churn; if ported to
+  production, prefer training-only targeted per-dataset eviction + GC at the
+  Rust->LightGBM boundary (do not clear globally in inference paths).
+- 2026-02-27: P1 (3a) landed in Rust for indexed constraints hot path.
+  `get_constraints_matrix_indexed` now validates index bounds once, builds a
+  one-time index-native lookup, and uses that lookup in the parallel loop
+  (removes repeated per-pair string/hash lookups in this path).
+  File: `s2and_rust/src/lib.rs` (`get_constraints_matrix_indexed`).
+  Verification:
+  `uv run pytest -q tests/test_feature_port_parity.py tests/test_rust_from_json_paths.py`
+  => `25 passed, 1 skipped`.
+  Compare artifact:
+  `scratch/after_p1a_compare_b9315f7_20260227_145518.json`.
+  Transfer compare artifact:
+  `scratch/after_p1a_transfer_mini_b9315f7_20260227_145640.json`.
+  Note: P1 (3b) full Vec storage refactor remains ask-first and was not started.
+- 2026-02-27: Training-mode deferred paper preprocessing into Rust was not newly
+  profiled/landed as part of this session execution plan. Keep the contract-test
+  and memory-risk controls in `docs/rust/training_preprocessing_plan.md` as the
+  source of truth before declaring this item complete.
+- 2026-02-27: P2 marked implemented. Rust stores per-paper `specter_norm` and
+  uses norm-aware cosine with compatibility fallback for older caches that lack
+  precomputed norms.
+- 2026-02-27: L1 stress gate landed with fast default + opt-in heavy AMiner loop. Heavy `from_json_paths` stress run passed `6/6` with no crash (`scratch/baselines_20260227/stress_rust_from_json_paths_aminer_6x_20260227.json`).
+- 2026-02-27: P0 landed across all hot paths. Rust now exposes `get_constraints_matrix` and `get_constraints_matrix_indexed`, model paths batch unresolved constraints, and telemetry reports `constraint_batch` API mode/call counts. Latest canonical largest-block compare smoke (`scratch/baselines_20260227/largest_block_compare_smoke_200_20260227.json`): predict `4.331s -> 1.069s` (`4.05x`), total `375.726s -> 326.999s` (`1.15x`), peak RSS `13.652 GB -> 9.855 GB` (`-27.8%`), partition diff `0/200`.
 - 2026-02-27: Phase-split incremental now surfaces Phase A accumulator overflow explicitly: return field
   `phase_a_accumulator_overflow_early_stop` + `Telemetry: phase_split_phase_a_overflow ...` log line.
 - 2026-02-27: Rust batch startup fixed-overhead calibration now page-touches probe allocations and is only adopted when it
   increases conservatism (never reduces configured fixed overhead used for chunk planning).
 - 2026-02-27: Windows RAM/RSS detection now has WinAPI fallbacks (no `psutil` required) for memory budgeting.
 - 2026-02-26: L5 landed. Rust featurizer disk cache now keys and validates on artifact metadata (stale/mismatched metadata is treated as cache miss).
-- 2026-02-26: Memory prediction P2–P4 landed (see `docs/memory/stage_memory_estimates.md`); Phase A accumulator default is now calibrated (`INCREMENTAL_ACCUMULATOR_ENTRY_BYTES=200`).
+- 2026-02-26: Memory prediction P2–P4 landed (see `docs/stage_memory_estimates.md`); Phase A accumulator default is now calibrated (`INCREMENTAL_ACCUMULATOR_ENTRY_BYTES=200`).
 - 2026-02-26: Memory-model follow-up landed: Phase A pair-buffer bytes are modeled, Rust batch persistent-row overhead is calibrated, and the 14,995-signature gate is now `underpredicted=False` for both Phase A and Rust batch telemetry.
 - 2026-02-26: Added startup 3-probe machine-local fixed-overhead calibration for Rust batch planning (one-time per process; feeds `fixed_overhead_bytes` in chunk planning).
 - 2026-02-25: L0, L3, L4 implemented (Python-side reuse + seed-sync dedupe + persistent warm).
@@ -33,9 +80,9 @@ Related references:
 - `docs/rust/profiling/2026-02-26.md`
 - `docs/subclustering.md`
 - `docs/rust/baselines.md`
-- `docs/memory/stage_memory_estimates.md`
+- `docs/stage_memory_estimates.md`
 
-See also: `docs/memory/stage_memory_estimates.md` has the integrated phasing plan that sequences lifecycle work
+See also: `docs/stage_memory_estimates.md` has the integrated phasing plan that sequences lifecycle work
 with memory-telemetry changes.
 
 ## Priority Opportunities
@@ -91,20 +138,24 @@ Expected impact:
 Risk:
 - Medium; needs careful parity validation and cache-version bump.
 
+Status:
+- 3a implemented (2026-02-27): `get_constraints_matrix_indexed` now uses
+  index-bound validation + one-time lookup build + lookup-only parallel loop.
+- 3a is low-risk and landed with parity tests passing.
+- 3b (full Vec-backed internal storage refactor) remains optional/ask-first and
+  is not implemented in this session.
+
 ### P2: Precompute SPECTER norms (or normalized vectors)
 
-Problem:
-- Cosine similarity currently recomputes both norms for each pair.
-
-Idea:
-- Precompute and store per-paper norm once (or store normalized embedding vectors).
-
-Expected impact:
-- Material speedup for embedding-heavy workloads.
-- Memory tradeoff is small (one `f32` norm per paper, or neutral if vectors are already stored).
-
-Risk:
-- Low.
+Status:
+- Implemented (2026-02-27).
+- `PaperData` now stores `specter_norm: Option<f64>` (`s2and_rust/src/lib.rs:117`).
+- SPECTER cosine uses precomputed norms when present via
+  `cosine_sim_with_norms(...)` (`s2and_rust/src/lib.rs:1820`, callsite at
+  `s2and_rust/src/lib.rs:2218`).
+- Backward-compat fallback remains in place for artifacts without norms:
+  `cosine_sim_vec_f32(...)` (`s2and_rust/src/lib.rs:1801`), so older `.bin`
+  caches can still load but run the slower path until rebuilt.
 
 ### P3: Reduce matrix-featurization fixed overhead
 
@@ -122,6 +173,17 @@ Expected impact:
 Risk:
 - Low to medium; guard with debug checks and tests.
 
+Status:
+- Implemented (2026-02-28, Bundle 3).
+- `cached_signature_id_order: OnceLock<Vec<String>>` and
+  `cached_full_feature_count: OnceLock<usize>` in `s2and_rust/src/lib.rs`
+  cache immutable ID order and full feature count per featurizer instance.
+- `signature_id_order()` computes and caches sorted IDs on first call;
+  subsequent calls return the cached slice with zero allocation.
+- Parity gates: `uv run pytest -q tests/test_feature_port_parity.py tests/test_rust_from_json_paths.py`
+  => `25 passed, 1 skipped`.
+- Runtime evidence: `scratch/profile_transfer_mini_bundle1_4_20260228.json`.
+
 ### P4: Counter kernel tuning (`counter_jaccard_data`)
 
 Problem:
@@ -137,6 +199,18 @@ Expected impact:
 
 Risk:
 - Low.
+
+Status:
+- Implemented (2026-02-28, Bundle 3).
+- `counter_jaccard_data` (`s2and_rust/src/lib.rs:1505`) now uses:
+  - **Two-pointer merge** when `large.len() < small.len() * 4` (similarly sized vectors).
+  - **Binary-search** fallback when one vector is much larger (skewed sizes).
+- Threshold heuristic (`4×`) avoids the merge path when binary search would
+  skip most of the larger vector.
+- Parity gates: `uv run pytest -q tests/test_feature_port_parity.py tests/test_rust_from_json_paths.py`
+  => `25 passed, 1 skipped`.
+- Runtime evidence: `scratch/profile_transfer_mini_bundle1_4_20260228.json`,
+  `scratch/compare_bundle1_4_inspire5k_20260228.json`.
 
 ## 100k+ Scale Memory + Speed Ideas
 
@@ -240,7 +314,7 @@ Status:
 - Added tests:
   `tests/test_rust_from_json_paths.py` (fast default smoke + opt-in heavy AMiner).
 - Heavy opt-in gate command:
-  `uv run --no-project python scripts/rust_suite.py stress-rebuild --dataset aminer --build-path from_json_paths --repeats 6 --num-threads 1 --write-json scratch/stress_rust_from_json_paths_aminer.json`
+  `uv run --with psutil python scripts/rust_suite.py stress-rebuild --dataset aminer --build-path from_json_paths --repeats 6 --num-threads 1 --rss-sample-ms 50 --require-rust-release 1 --write-json scratch/baselines_20260227/stress_rust_from_json_paths_aminer_6x_20260227.json`
   passed `6/6` (no crash reproduced).
 
 ### L1b: Rust allocation residue degrades subsequent Python-only stages
@@ -287,8 +361,16 @@ Risk:
   shutdown hook).
 
 Status:
-- Reprofile after L0/L3/L4 to confirm whether LightGBM slowdown remains; if yes,
-  implement explicit release + `gc.collect()` at the Rust→Python-only boundary.
+- Harness boundary implemented (2026-02-27) in
+  `scripts/_rust_suite/transfer_mini_cmd.py`:
+  clear Rust featurizer cache references, call `gc.collect()`, and record
+  `post_rust_cleanup` RSS snapshot before LightGBM stages.
+- Verified in `transfer-mini` artifacts (see latest-updates bullets above).
+- Production training-path port landed (2026-02-28):
+  `scripts/transfer_experiment_seed_paper.py` now applies targeted
+  per-dataset eviction + GC boundaries (`Telemetry: post_rust_cleanup ...`).
+- Keep guardrail: avoid global cache clear in production inference/subblocking
+  paths where rebuild churn can dominate and hurt latency.
 
 ### L2: Move featurizer disk save outside the cache lock
 
@@ -406,7 +488,7 @@ Status:
 - Supporting artifacts:
   `scratch/compare_l5_mem_tune_final_20260226.json`,
   `scratch/profile_rust_featurizer_reuse_l5_mem_tune_final_20260226.json`,
-  `scratch/profile_transfer_mini_l5_mem_tune_final_20260226.json`.
+  `scratch/baselines_20260227/profile_transfer_mini_full_20260227.json`.
 
 ### L6: Keep large Rust ingest artifacts out of the repo by default
 
@@ -500,12 +582,12 @@ Recommended execution order (giant-block / subblocked focus):
 4. L1 (stress gate + repeated-build segfault triage/fix) — correctness/robustness before deep optimization [done 2026-02-27]
 5. L2 (save outside lock) — remove avoidable lock contention [done 2026-02-26]
 6. P0 (batch constraints across hot paths) — eliminate per-pair Python/FFI constraint overhead [done 2026-02-27]; keep A1 as optional follow-up if generator overhead remains dominant
-7. P3 (reduce matrix-featurization fixed overhead) — high leverage when many batches/subblocks
-8. P2 (precompute SPECTER norms) — cheap per-pair win if embeddings are hot
-9. P1 + P4 (per-pair micro-optimizations) — only after the above
+7. P3 (reduce matrix-featurization fixed overhead) — high leverage when many batches/subblocks [done 2026-02-28]
+8. P2 (precompute SPECTER norms) — cheap per-pair win if embeddings are hot [done 2026-02-27]
+9. P1 (3a) + P4 (per-pair micro-optimizations) — only after the above [done 2026-02-28]; P1 (3b) full Vec refactor remains ask-first
 10. L5 (disk cache identity + validation) — enable safe cross-run reuse [done 2026-02-26]
 11. A0 (fused Rust pipeline) — long-term architectural target
-12. L6 (artifact hygiene) — reduce repo churn and accidental giant commits
+12. L6 (artifact hygiene) — reduce repo churn and accidental giant commits [done 2026-02-28]
 
 If you need **better-than-subblock-local semantics** at large `U` (phase-split incremental / sparse modes):
 

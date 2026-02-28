@@ -114,7 +114,7 @@ def load_pickle_with_verified_label_encoder_compat(
             refreshed_count = _refresh_compatible_label_encoders(loaded)
             if refreshed_count >= len(label_encoder_warnings):
                 suppressed_warning_ids = {id(warning_message) for warning_message in label_encoder_warnings}
-                logger.info(
+                logger.debug(
                     "Suppressed %d verified-safe LabelEncoder sklearn version warning(s).",
                     len(label_encoder_warnings),
                 )

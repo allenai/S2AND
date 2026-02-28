@@ -190,9 +190,7 @@ def _signature_ngrams_one(pair: tuple[str, str]) -> tuple[Counter, Counter]:
 
     coauthor_text, affiliation_text = pair
     coauthor_counter = get_text_ngrams(coauthor_text, stopwords=None, use_bigrams=True) if coauthor_text else Counter()
-    affiliation_counter = (
-        get_text_ngrams_words(affiliation_text, stopwords=set()) if affiliation_text else Counter()
-    )
+    affiliation_counter = get_text_ngrams_words(affiliation_text, stopwords=set()) if affiliation_text else Counter()
     return coauthor_counter, affiliation_counter
 
 
@@ -255,8 +253,9 @@ def _bench_phase(
     run_once: Callable[[bool | None], tuple[float, float, int]],
     n_jobs: int,
     rounds: int,
+    configs: list[tuple[str, bool | None]] | None = None,
 ) -> None:
-    configs: list[tuple[str, bool | None]] = [
+    resolved_configs = configs or [
         ("serial", None),
         (f"threads x{n_jobs}", True),
         (f"processes x{n_jobs}", False),
@@ -267,7 +266,7 @@ def _bench_phase(
     print("=" * 80)
     print(phase_name)
     print("=" * 80)
-    for label, use_threads in configs:
+    for label, use_threads in resolved_configs:
         rows: list[dict[str, float]] = []
         print(f"--- {label} ---")
         for r in range(rounds):
@@ -300,6 +299,7 @@ def _bench_signatures_preprocess(
     n_jobs: int,
     rounds: int,
     ngram_chunk_size: int,
+    show_breakdown: bool = False,
 ) -> None:
     import s2and.data as data_mod
     from s2and.data import ANDData
@@ -326,10 +326,31 @@ def _bench_signatures_preprocess(
     def _run_serial() -> tuple[float, float, int]:
         signatures = dict(base_signatures)
         ds = _make_ds(signatures)
+        ngram_time = 0.0
+        ngram_calls = 0
+        ngram_items = 0
+        orig_batch = data_mod._python_signature_ngrams_batch
+
+        def _timed_batch(coauthor_texts: list[str], affiliation_texts: list[str]):
+            nonlocal ngram_time, ngram_calls, ngram_items
+            t_ng = time.perf_counter()
+            res = orig_batch(coauthor_texts, affiliation_texts)
+            ngram_time += time.perf_counter() - t_ng
+            ngram_calls += 1
+            ngram_items += len(coauthor_texts)
+            return res
+
         t0 = time.perf_counter()
-        with _patch_attr(data_mod, "tqdm", _tqdm_wrapper(data_mod.tqdm)):
-            ds.preprocess_signatures(load_name_counts=False)
+        with _patch_attr(data_mod, "_python_signature_ngrams_batch", _timed_batch):
+            with _patch_attr(data_mod, "tqdm", _tqdm_wrapper(data_mod.tqdm)):
+                ds.preprocess_signatures(load_name_counts=False)
         work = time.perf_counter() - t0
+        if show_breakdown:
+            frac = (ngram_time / work * 100) if work > 0 else 0.0
+            print(
+                f"    breakdown: ngram_batch={_fmt(ngram_time)} ({frac:.1f}%) calls={ngram_calls} items={ngram_items}",
+                flush=True,
+            )
         return 0.0, work, len(signatures)
 
     def _run_pool(use_threads: bool) -> tuple[float, float, int]:
@@ -340,7 +361,13 @@ def _bench_signatures_preprocess(
         pool = UniversalPool(processes=n_jobs, use_threads=use_threads)
         pool_create = time.perf_counter() - t_pool0
 
+        ngram_time = 0.0
+        ngram_calls = 0
+        ngram_items = 0
+
         def _batch_parallel(coauthor_texts: list[str], affiliation_texts: list[str]):
+            nonlocal ngram_time, ngram_calls, ngram_items
+            t_ng = time.perf_counter()
             pairs = list(zip(coauthor_texts, affiliation_texts, strict=True))
             results = list(pool.imap(_signature_ngrams_one, pairs, ngram_chunk_size))
             coauthor_counters = []
@@ -348,6 +375,9 @@ def _bench_signatures_preprocess(
             for co_ctr, aff_ctr in results:
                 coauthor_counters.append(co_ctr)
                 affiliation_counters.append(aff_ctr)
+            ngram_time += time.perf_counter() - t_ng
+            ngram_calls += 1
+            ngram_items += len(coauthor_texts)
             return coauthor_counters, affiliation_counters
 
         with pool:
@@ -357,6 +387,12 @@ def _bench_signatures_preprocess(
                     ds.preprocess_signatures(load_name_counts=False)
                     work = time.perf_counter() - t1
 
+        if show_breakdown:
+            frac = (ngram_time / work * 100) if work > 0 else 0.0
+            print(
+                f"    breakdown: ngram_batch={_fmt(ngram_time)} ({frac:.1f}%) calls={ngram_calls} items={ngram_items}",
+                flush=True,
+            )
         return pool_create, work, len(signatures)
 
     def run_once(use_threads: bool | None) -> tuple[float, float, int]:
@@ -390,6 +426,11 @@ def main() -> None:
         type=int,
         default=1000,
         help="Chunk size for signature ngram imap (threads/processes backends only)",
+    )
+    parser.add_argument(
+        "--signature-breakdown",
+        action="store_true",
+        help="Print a time breakdown for signature preprocessing n-gram computation per config",
     )
     parser.add_argument(
         "--backend",
@@ -437,17 +478,21 @@ def main() -> None:
 
     paper1_func = partial(preprocess_paper_1, preprocess=True)
 
-    # Cache a serial preprocessed papers dict for later phases (paper 2/2 and signature coauthors)
-    print("Precomputing papers 1/2 (serial) once for downstream phases...")
-    t0 = time.perf_counter()
-    papers_preprocessed: dict[str, Any] = {}
-    for item in paper_items:
-        k, v = paper1_func(item)
-        papers_preprocessed[k] = v
-    precompute_paper1 = time.perf_counter() - t0
-    print(f"  done: {_fmt(precompute_paper1)} ({len(papers_preprocessed):,} papers)", flush=True)
+    need_papers_preprocessed = not args.skip_paper2 or not args.skip_signatures
+    papers_preprocessed: dict[str, Any] | None = None
 
     def run_paper1(use_threads: bool | None) -> tuple[float, float, int]:
+        nonlocal papers_preprocessed
+        if use_threads is None and need_papers_preprocessed and papers_preprocessed is None:
+            t0 = time.perf_counter()
+            out: dict[str, Any] = {}
+            for item in paper_items:
+                k, v = paper1_func(item)
+                out[k] = v
+            elapsed = time.perf_counter() - t0
+            papers_preprocessed = out
+            return 0.0, elapsed, len(out)
+
         return _run_paper_stage(
             label="papers 1/2",
             items=paper_items,
@@ -462,14 +507,22 @@ def main() -> None:
         run_once=run_paper1,
         n_jobs=args.n_jobs,
         rounds=args.rounds,
+        configs=[
+            (f"threads x{args.n_jobs}", True),
+            (f"processes x{args.n_jobs}", False),
+            ("serial", None),
+        ],
     )
+
+    if need_papers_preprocessed and papers_preprocessed is None:
+        raise RuntimeError("Expected papers_preprocessed to be materialized during serial papers 1/2 run.")
 
     # --- Papers 2/2 (reference_details) ---
     if not args.skip_paper2:
         print()
         print("Building papers 2/2 input (reference-details)...", flush=True)
         t_build0 = time.perf_counter()
-        input_2 = _build_reference_inputs(papers=papers_preprocessed)
+        input_2 = _build_reference_inputs(papers=papers_preprocessed or {})
         build_input_2 = time.perf_counter() - t_build0
         print(f"  input_2: {_fmt(build_input_2)} ({len(input_2):,} items)", flush=True)
 
@@ -494,10 +547,11 @@ def main() -> None:
     if not args.skip_signatures:
         _bench_signatures_preprocess(
             base_signatures=base_signatures,
-            papers=papers_preprocessed,
+            papers=papers_preprocessed or {},
             n_jobs=args.n_jobs,
             rounds=args.rounds,
             ngram_chunk_size=args.signature_ngram_chunk_size,
+            show_breakdown=args.signature_breakdown,
         )
 
 

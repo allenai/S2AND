@@ -33,7 +33,7 @@ if not os.path.exists(FASTTEXT_PATH):
     FASTTEXT_PATH = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/lid.176.bin"
 
 # feature caching related consts
-CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and")))
+CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and"))).resolve()
 """
 Incrementation history
 1 - initial version

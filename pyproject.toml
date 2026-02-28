@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68,<81", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -21,6 +21,7 @@ dependencies = [
   "requests>=2.28,<3",
   "urllib3>=2.6.3",
   "hyperopt==0.2.7",
+  "setuptools>=68,<81",  # pin: hyperopt uses deprecated pkg_resources, removed in 81
   "pandas>=1.5,<2.2",
   "lightgbm==4.6.0",
   "fastcluster>=1.2.6,<2",

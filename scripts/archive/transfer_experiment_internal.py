@@ -75,6 +75,26 @@ N_ITER = 50
 PREPROCESS = True
 
 
+def _ordered_unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def _should_stream_union_training(
+    union_models: bool,
+    individual_models: bool,
+    leave_self_out_for_union: bool,
+    union_datasets_to_train: set[tuple[str, ...]],
+) -> bool:
+    return union_models and not individual_models and not leave_self_out_for_union and len(union_datasets_to_train) == 1
+
+
 def transfer_helper(
     source_dataset,
     target_dataset,
@@ -566,9 +586,9 @@ def main(
         pairwise_search_space = {}
 
     if UNION_MODELS:
-        DATASETS_TO_TRAIN = set(SOURCE_DATASET_NAMES).union(set(TARGET_DATASET_NAMES)).union(set(DATASETS_FOR_UNION))
+        DATASETS_TO_TRAIN = _ordered_unique(SOURCE_DATASET_NAMES + TARGET_DATASET_NAMES + DATASETS_FOR_UNION)
     else:
-        DATASETS_TO_TRAIN = set(SOURCE_DATASET_NAMES).union(set(TARGET_DATASET_NAMES))
+        DATASETS_TO_TRAIN = _ordered_unique(SOURCE_DATASET_NAMES + TARGET_DATASET_NAMES)
 
     if LEAVE_SELF_OUT_FOR_UNION:
         UNION_DATASETS_TO_TRAIN = set()
@@ -593,6 +613,40 @@ def main(
         "last_first_initial_dict": last_first_initial_dict,
     }
     logger.info("loaded name counts")
+
+    stream_union_training = _should_stream_union_training(
+        UNION_MODELS,
+        INDIVIDUAL_MODELS,
+        LEAVE_SELF_OUT_FOR_UNION,
+        UNION_DATASETS_TO_TRAIN,
+    )
+    stream_union_dataset_tuple: tuple[str, ...] | None = None
+    stream_union_dataset_set: set[str] = set()
+    stream_union_seen_datasets: set[str] = set()
+    stream_union_anddata_by_name: dict[str, ANDData] = {}
+    stream_union_train_capacity = 0
+    stream_union_val_capacity = 0
+    stream_union_train_cursor = 0
+    stream_union_val_cursor = 0
+    stream_union_X_train: np.ndarray | None = None
+    stream_union_y_train: np.ndarray | None = None
+    stream_union_nameless_X_train: np.ndarray | None = None
+    stream_union_X_val: np.ndarray | None = None
+    stream_union_y_val: np.ndarray | None = None
+    stream_union_nameless_X_val: np.ndarray | None = None
+    if stream_union_training:
+        stream_union_dataset_tuple = tuple(DATASETS_FOR_UNION)
+        stream_union_dataset_set = set(stream_union_dataset_tuple)
+        stream_union_train_capacity = len(stream_union_dataset_tuple) * N_TRAIN_PAIRS_SIZE
+        stream_union_val_capacity = (
+            len([dataset_name for dataset_name in stream_union_dataset_tuple if dataset_name not in {"augmented"}])
+            * N_VAL_TEST_SIZE
+        )
+        logger.info(
+            "streaming union accumulation enabled for single union tuple; train_capacity=%d val_capacity=%d",
+            stream_union_train_capacity,
+            stream_union_val_capacity,
+        )
 
     datasets: dict[str, Any] = {}
     for dataset_name in tqdm(DATASETS_TO_TRAIN, desc="Processing datasets and fitting base models"):
@@ -659,6 +713,66 @@ def main(
         X_test, y_test, nameless_X_test = test
         logger.info(f"dataset {dataset_name} featurized")
 
+        if stream_union_training and dataset_name in stream_union_dataset_set:
+            if stream_union_X_train is None:
+                stream_union_X_train = np.empty((stream_union_train_capacity, X_train.shape[1]), dtype=X_train.dtype)
+                stream_union_y_train = np.empty(stream_union_train_capacity, dtype=y_train.dtype)
+                stream_union_X_val = np.empty((stream_union_val_capacity, X_val.shape[1]), dtype=X_val.dtype)
+                stream_union_y_val = np.empty(stream_union_val_capacity, dtype=y_val.dtype)
+                if USE_NAMELESS_MODEL:
+                    if nameless_X_train is None or nameless_X_val is None:
+                        raise RuntimeError(
+                            "Nameless features are unavailable while USE_NAMELESS_MODEL is enabled "
+                            f"(dataset={dataset_name})"
+                        )
+                    stream_union_nameless_X_train = np.empty(
+                        (stream_union_train_capacity, nameless_X_train.shape[1]), dtype=nameless_X_train.dtype
+                    )
+                    stream_union_nameless_X_val = np.empty(
+                        (stream_union_val_capacity, nameless_X_val.shape[1]), dtype=nameless_X_val.dtype
+                    )
+
+            train_rows = len(y_train)
+            train_end = stream_union_train_cursor + train_rows
+            if train_end > stream_union_train_capacity:
+                raise RuntimeError(
+                    "Streaming union train accumulation exceeded configured capacity "
+                    f"(dataset={dataset_name} rows={train_rows} end={train_end} capacity={stream_union_train_capacity})"
+                )
+            stream_union_X_train[stream_union_train_cursor:train_end, :] = X_train
+            assert stream_union_y_train is not None
+            stream_union_y_train[stream_union_train_cursor:train_end] = y_train
+            if USE_NAMELESS_MODEL:
+                if stream_union_nameless_X_train is None or nameless_X_train is None:
+                    raise RuntimeError(
+                        "Nameless union train accumulation is unavailable while USE_NAMELESS_MODEL is enabled"
+                    )
+                stream_union_nameless_X_train[stream_union_train_cursor:train_end, :] = nameless_X_train
+            stream_union_train_cursor = train_end
+
+            if dataset_name not in {"augmented"}:
+                val_rows = len(y_val)
+                val_end = stream_union_val_cursor + val_rows
+                if val_end > stream_union_val_capacity:
+                    raise RuntimeError(
+                        "Streaming union val accumulation exceeded configured capacity "
+                        f"(dataset={dataset_name} rows={val_rows} end={val_end} capacity={stream_union_val_capacity})"
+                    )
+                assert stream_union_X_val is not None and stream_union_y_val is not None
+                stream_union_X_val[stream_union_val_cursor:val_end, :] = X_val
+                stream_union_y_val[stream_union_val_cursor:val_end] = y_val
+                if USE_NAMELESS_MODEL:
+                    if stream_union_nameless_X_val is None or nameless_X_val is None:
+                        raise RuntimeError(
+                            "Nameless union val accumulation is unavailable while USE_NAMELESS_MODEL is enabled"
+                        )
+                    stream_union_nameless_X_val[stream_union_val_cursor:val_end, :] = nameless_X_val
+                stream_union_val_cursor = val_end
+
+            stream_union_seen_datasets.add(dataset_name)
+            if dataset_name not in PAIRWISE_ONLY_DATASETS:
+                stream_union_anddata_by_name[dataset_name] = anddata
+
         pairwise_modeler: PairwiseModeler | None = None
         nameless_pairwise_modeler = None
         cluster: Clusterer | None = None
@@ -670,6 +784,7 @@ def main(
                 search_space=pairwise_search_space,
                 monotone_constraints=MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                 random_state=random_seed,
+                n_jobs=N_JOBS,
             )
             pairwise_modeler.fit(X_train, y_train, X_val, y_val)
             logger.info(f"pairwise fit for {dataset_name}")
@@ -682,6 +797,7 @@ def main(
                     search_space=pairwise_search_space,
                     monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                     random_state=random_seed,
+                    n_jobs=N_JOBS,
                 )
                 nameless_pairwise_modeler.fit(nameless_X_train, y_train, nameless_X_val, y_val)
                 logger.info(f"nameless pairwise fit for {dataset_name}")
@@ -712,61 +828,114 @@ def main(
                 logger.info(f"clusterer fit for {dataset_name}")
                 logger.info(f"{dataset_name} best clustering parameters: " + str(cluster.best_params))
 
-        dataset: dict[str, Any] = {}
-        dataset["anddata"] = anddata
-        dataset["X_train"] = X_train
-        dataset["y_train"] = y_train
-        dataset["X_val"] = X_val
-        dataset["y_val"] = y_val
-        dataset["X_test"] = X_test
-        dataset["y_test"] = y_test
-        dataset["pairwise_modeler"] = pairwise_modeler
-        dataset["nameless_X_train"] = nameless_X_train
-        dataset["nameless_X_val"] = nameless_X_val
-        dataset["nameless_X_test"] = nameless_X_test
-        dataset["nameless_pairwise_modeler"] = nameless_pairwise_modeler
-        dataset["clusterer"] = cluster
-        dataset["name"] = anddata.name
-        datasets[dataset_name] = dataset
+        # In stream-union mode we avoid retaining all per-dataset train/val arrays
+        # and keep only target datasets for evaluation.
+        if INDIVIDUAL_MODELS or not stream_union_training:
+            dataset: dict[str, Any] = {}
+            dataset["anddata"] = anddata
+            dataset["X_train"] = X_train
+            dataset["y_train"] = y_train
+            dataset["X_val"] = X_val
+            dataset["y_val"] = y_val
+            dataset["X_test"] = X_test
+            dataset["y_test"] = y_test
+            dataset["pairwise_modeler"] = pairwise_modeler
+            dataset["nameless_X_train"] = nameless_X_train
+            dataset["nameless_X_val"] = nameless_X_val
+            dataset["nameless_X_test"] = nameless_X_test
+            dataset["nameless_pairwise_modeler"] = nameless_pairwise_modeler
+            dataset["clusterer"] = cluster
+            dataset["name"] = anddata.name
+            datasets[dataset_name] = dataset
+        elif dataset_name in TARGET_DATASET_NAMES:
+            target_dataset: dict[str, Any] = {}
+            target_dataset["anddata"] = anddata
+            target_dataset["X_test"] = X_test
+            target_dataset["y_test"] = y_test
+            target_dataset["nameless_X_test"] = nameless_X_test
+            target_dataset["name"] = anddata.name
+            datasets[dataset_name] = target_dataset
+
+    if stream_union_training and stream_union_dataset_tuple is not None:
+        missing_stream_union_datasets = set(stream_union_dataset_tuple) - stream_union_seen_datasets
+        if missing_stream_union_datasets:
+            raise RuntimeError(
+                "Streaming union accumulation missed expected datasets: "
+                f"{sorted(missing_stream_union_datasets)}"
+            )
 
     if UNION_MODELS:
         unions = {}
         for dataset_name_tuple in tqdm(UNION_DATASETS_TO_TRAIN, desc="Fitting union models..."):
             logger.info("")
             logger.info("loading dataset for " + str(dataset_name_tuple))
-            anddatas = [
-                datasets[dataset_name]["anddata"]
-                for dataset_name in dataset_name_tuple
-                if dataset_name not in PAIRWISE_ONLY_DATASETS
-            ]
+            is_stream_union_tuple = (
+                stream_union_training
+                and stream_union_dataset_tuple is not None
+                and dataset_name_tuple == stream_union_dataset_tuple
+            )
+            if is_stream_union_tuple:
+                if (
+                    stream_union_X_train is None
+                    or stream_union_y_train is None
+                    or stream_union_X_val is None
+                    or stream_union_y_val is None
+                ):
+                    raise RuntimeError("Streaming union arrays are not initialized")
 
-            X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in dataset_name_tuple])
-            y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in dataset_name_tuple])
-            X_val = np.vstack(
-                [
-                    datasets[dataset_name]["X_val"]
+                anddatas = [
+                    stream_union_anddata_by_name[dataset_name]
                     for dataset_name in dataset_name_tuple
-                    if dataset_name not in {"augmented"}
+                    if dataset_name not in PAIRWISE_ONLY_DATASETS
                 ]
-            )
-            y_val = np.hstack(
-                [
-                    datasets[dataset_name]["y_val"]
+                X_train = stream_union_X_train[:stream_union_train_cursor, :]
+                y_train = stream_union_y_train[:stream_union_train_cursor]
+                X_val = stream_union_X_val[:stream_union_val_cursor, :]
+                y_val = stream_union_y_val[:stream_union_val_cursor]
+                nameless_X_train = (
+                    stream_union_nameless_X_train[:stream_union_train_cursor, :]
+                    if stream_union_nameless_X_train is not None
+                    else None
+                )
+                nameless_X_val = (
+                    stream_union_nameless_X_val[:stream_union_val_cursor, :]
+                    if stream_union_nameless_X_val is not None
+                    else None
+                )
+            else:
+                anddatas = [
+                    datasets[dataset_name]["anddata"]
                     for dataset_name in dataset_name_tuple
-                    if dataset_name not in {"augmented"}
+                    if dataset_name not in PAIRWISE_ONLY_DATASETS
                 ]
-            )
 
-            nameless_X_train = np.vstack(
-                [datasets[dataset_name]["nameless_X_train"] for dataset_name in dataset_name_tuple]
-            )
-            nameless_X_val = np.vstack(
-                [
-                    datasets[dataset_name]["nameless_X_val"]
-                    for dataset_name in dataset_name_tuple
-                    if dataset_name not in {"augmented"}
-                ]
-            )
+                X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in dataset_name_tuple])
+                y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in dataset_name_tuple])
+                X_val = np.vstack(
+                    [
+                        datasets[dataset_name]["X_val"]
+                        for dataset_name in dataset_name_tuple
+                        if dataset_name not in {"augmented"}
+                    ]
+                )
+                y_val = np.hstack(
+                    [
+                        datasets[dataset_name]["y_val"]
+                        for dataset_name in dataset_name_tuple
+                        if dataset_name not in {"augmented"}
+                    ]
+                )
+
+                nameless_X_train = np.vstack(
+                    [datasets[dataset_name]["nameless_X_train"] for dataset_name in dataset_name_tuple]
+                )
+                nameless_X_val = np.vstack(
+                    [
+                        datasets[dataset_name]["nameless_X_val"]
+                        for dataset_name in dataset_name_tuple
+                        if dataset_name not in {"augmented"}
+                    ]
+                )
             logger.info("dataset loaded for " + str(dataset_name_tuple))
 
             logger.info("fitting pairwise for " + str(dataset_name_tuple))
@@ -776,12 +945,18 @@ def main(
                 search_space=pairwise_search_space,
                 monotone_constraints=MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                 random_state=random_seed,
+                n_jobs=N_JOBS,
             )
             union_classifier.fit(X_train, y_train, X_val, y_val)
             logger.info("pairwise fit for " + str(dataset_name_tuple))
 
             nameless_union_classifier = None
             if USE_NAMELESS_MODEL:
+                if nameless_X_train is None or nameless_X_val is None:
+                    raise RuntimeError(
+                        "Nameless union features are unavailable while USE_NAMELESS_MODEL is enabled "
+                        f"(dataset tuple={dataset_name_tuple})"
+                    )
                 logger.info("nameless fitting pairwise for " + str(dataset_name_tuple))
                 nameless_union_classifier = PairwiseModeler(
                     n_iter=N_ITER,
@@ -789,6 +964,7 @@ def main(
                     search_space=pairwise_search_space,
                     monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,
                     random_state=random_seed,
+                    n_jobs=N_JOBS,
                 )
                 nameless_union_classifier.fit(nameless_X_train, y_train, nameless_X_val, y_val)
                 logger.info("nameless pairwise fit for " + str(dataset_name_tuple))
@@ -826,6 +1002,15 @@ def main(
             models["clusterer"] = union_clusterer
             models["name"] = "union__" + "_".join(dataset_name_tuple)
             unions[dataset_name_tuple] = models
+
+            if is_stream_union_tuple:
+                stream_union_X_train = None
+                stream_union_y_train = None
+                stream_union_nameless_X_train = None
+                stream_union_X_val = None
+                stream_union_y_val = None
+                stream_union_nameless_X_val = None
+                stream_union_anddata_by_name.clear()
 
     logger.info("")
     logger.info("making evaluation grids")

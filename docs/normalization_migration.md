@@ -1,4 +1,10 @@
-Normalization Unification Migration Plan
+# Normalization Unification Migration Plan
+
+Work plan pointers (2026-02-28)
+- This is tracked as **Bundle 6** in `docs/work_plan.md`.
+- Phase 1 (policy + canonical example table + pytest invariants) can start immediately.
+- Phase 2 (implementation) is easier after Bundle 5 (artifact format unification) so Phase 3 artifact
+  regeneration goes straight to MessagePack/Safetensors instead of regenerating twice.
 
 Status
 - Draft updated from issue notes through August 31, 2025.

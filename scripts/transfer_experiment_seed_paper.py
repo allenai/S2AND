@@ -17,6 +17,7 @@ os.environ["OMP_NUM_THREADS"] = "8"
 
 import argparse
 import copy
+import gc
 import logging
 import pickle
 from collections import defaultdict
@@ -33,6 +34,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
+from s2and import feature_port
 from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
 from s2and.data import ANDData
 from s2and.eval import cluster_eval, facet_eval, pairwise_eval
@@ -53,6 +55,24 @@ BLOCK_TYPE = "s2"
 N_VAL_TEST_SIZE = 10000
 N_ITER = 25
 PREPROCESS = True
+
+
+def _cleanup_rust_featurizers(anddata_list: list[ANDData], stage: str) -> None:
+    rust_datasets = [dataset for dataset in anddata_list if dataset.runtime_context.use_rust]
+    if not rust_datasets:
+        return
+
+    evicted = 0
+    for dataset in rust_datasets:
+        evicted += int(feature_port.evict_rust_featurizer(dataset))
+    collected = gc.collect()
+    logger.info(
+        "Telemetry: post_rust_cleanup stage=%s datasets=%d evicted=%d gc_collected=%d",
+        stage,
+        len(rust_datasets),
+        evicted,
+        int(collected),
+    )
 
 
 def transfer_helper(
@@ -631,6 +651,7 @@ def main(
         assert test is not None
         X_test, y_test, nameless_X_test = test
         logger.info(f"dataset {dataset_name} featurized")
+        _cleanup_rust_featurizers([anddata], stage=f"{dataset_name}_before_pairwise")
 
         pairwise_modeler: PairwiseModeler | None = None
         nameless_pairwise_modeler = None
@@ -701,6 +722,11 @@ def main(
         dataset["clusterer"] = cluster
         dataset["name"] = anddata.name
         datasets[dataset_name] = dataset
+
+    _cleanup_rust_featurizers(
+        [dataset_row["anddata"] for dataset_row in datasets.values()],
+        stage="before_union_pairwise",
+    )
 
     if UNION_MODELS:
         unions = {}

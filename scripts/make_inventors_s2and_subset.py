@@ -24,6 +24,7 @@ import ijson
 import numpy as np
 from sklearn.model_selection import train_test_split
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SIGNATURE_LOG_INTERVAL = 500_000
 CLUSTER_LOG_INTERVAL = 250_000
 PAPER_LOG_INTERVAL = 500_000
@@ -31,8 +32,8 @@ PAPER_LOG_INTERVAL = 500_000
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, default=Path("data/inventors"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/inventors_s2and"))
+    parser.add_argument("--input-dir", type=Path, default=_PROJECT_ROOT / "data" / "inventors")
+    parser.add_argument("--output-dir", type=Path, default=_PROJECT_ROOT / "scratch" / "inventors_s2and")
     parser.add_argument(
         "--output-prefix",
         type=str,

@@ -847,6 +847,49 @@ def get_constraints_matrix_indexed_rust(
     )
 
 
+def get_constraints_block_upper_triangle_indexed_rust(
+    dataset: ANDData,
+    block_signature_indices: list[int],
+    start_offset: int = 0,
+    max_pairs: int | None = None,
+    low_value: float = 0.0,
+    high_value: float = LARGE_DISTANCE,
+    dont_merge_cluster_seeds: bool = True,
+    incremental_dont_use_cluster_seeds: bool = False,
+    num_threads: int | None = None,
+    featurizer: Any | None = None,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+) -> tuple[list[int], list[int], list[float | None]]:
+    if s2and_rust is None:
+        raise RuntimeError(_RUST_BUILD_ERROR)
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+
+    method = getattr(featurizer, "get_constraints_block_upper_triangle_indexed", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.get_constraints_block_upper_triangle_indexed is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+
+    left_indices, right_indices, values = method(
+        block_signature_indices,
+        start_offset,
+        max_pairs,
+        low_value,
+        high_value,
+        dont_merge_cluster_seeds,
+        incremental_dont_use_cluster_seeds,
+        num_threads,
+    )
+    return (
+        [int(value) for value in left_indices],
+        [int(value) for value in right_indices],
+        list(values),
+    )
+
+
 def featurize_pair_rust(
     dataset: ANDData,
     sig_id_1: str,
@@ -872,6 +915,39 @@ def build_pair_feature_matrix_rust(
         raise RuntimeError("RustFeaturizer.featurize_pairs_matrix is unavailable in the loaded extension")
     matrix = featurizer.featurize_pairs_matrix(
         pairs,
+        selected_indices,
+        num_threads,
+        nan_value,
+    )
+    return np.asarray(matrix, dtype=np.float64)
+
+
+def build_block_upper_triangle_feature_matrix_indexed_rust(
+    dataset: ANDData,
+    block_signature_indices: list[int],
+    start_offset: int = 0,
+    max_pairs: int | None = None,
+    selected_indices: list[int] | None = None,
+    num_threads: int | None = None,
+    nan_value: float = np.nan,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+    featurizer: Any | None = None,
+) -> np.ndarray:
+    if s2and_rust is None:
+        raise RuntimeError(_RUST_BUILD_ERROR)
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+    method = getattr(featurizer, "featurize_block_upper_triangle_matrix_indexed", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.featurize_block_upper_triangle_matrix_indexed is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+    matrix = method(
+        block_signature_indices,
+        start_offset,
+        max_pairs,
         selected_indices,
         num_threads,
         nan_value,

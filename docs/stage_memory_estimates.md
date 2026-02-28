@@ -92,6 +92,8 @@ Status update (2026-02-25):
 - L0 is now implemented in code (Rust featurizer reuse decoupled from Python pair-feature caching).
   Transfer-mini was later reprofiled (`scratch/profile_transfer_mini_l5_mem_tune_final_20260226.json`)
   and no longer shows the pre-L0 “from_dataset inside stage window” pattern.
+  Latest maintained full-workload baseline is
+  `scratch/baselines_20260227/profile_transfer_mini_full_20260227.json`.
 
 Status update (2026-02-26):
 - P2–P4 landed for memory prediction: `many_pairs_featurize` now allocates only selected columns (plus optional nameless)
@@ -323,6 +325,24 @@ Implementation:
   `predicted_peak_delta_bytes`, `chunk_features_peak_bytes`, and `accumulator_entry_bytes`.
 
 This can be per-platform (Windows/Linux) or per-runtime (PyPy/CPython), since object overhead differs.
+
+Calibration broadening (Bundle 4, 2026-02-28):
+- Phase A calibration on 3 additional workload shapes (plus 1 legacy-overhead outlier):
+  - `shape_4000_l5_pairbuffix` → recommended `163` bytes/entry
+  - `shape_10000_p2p4` → recommended `192` bytes/entry
+  - `shape_14995_l5_pairbuffix` → recommended `151` bytes/entry
+  - `shape_4000_l5_overhead` → recommended `461` bytes/entry (legacy-overhead outlier; keep as historical reference)
+- Rust batch calibration on 3 shapes:
+  - `shape_4000_l5_overhead` → recommended `37` bytes/row
+  - `shape_4000_l5_pairbuffix` → recommended `37` bytes/row
+  - `shape_14995_l5_pairbuffix` → recommended `49` bytes/row
+- Promoted defaults (2026-02-28):
+  - `INCREMENTAL_ACCUMULATOR_ENTRY_BYTES=200` (kept; P95 ~192, already within ~4% margin)
+  - `RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES=52` (tightened from 64; P95=49, +6% margin)
+  - `PHASE_A_PAIR_BUFFER_ENTRY_BYTES=80` (kept; not recalibrated in this bundle)
+- Artifacts: `scratch/calibrate_phase_a_shape_*_20260228.json`,
+  `scratch/calibrate_rust_batch_shape_*_20260228.json`.
+- See also: `docs/work_plan.md` Bundle 4.
 
 **Risks / gotchas:**
 

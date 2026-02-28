@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from s2and.rust_lifecycle import PYTHON_ONLY_POLICY, RustLifecyclePolicy, build_rust_lifecycle_policy
+from s2and.rust_lifecycle import (
+    FORCE_PYTHON_PAPER_PREPROCESS_ENV,
+    PYTHON_ONLY_POLICY,
+    RustLifecyclePolicy,
+    build_rust_lifecycle_policy,
+)
 
 
 def test_python_backend_always_returns_python_only_policy():
@@ -54,6 +59,82 @@ def test_rust_inference_without_paths_does_not_skip_python_paper_preprocess():
     )
     assert policy.rust_build_path == "from_dataset"
     assert policy.skip_python_paper_preprocess is False
+
+
+def test_rust_training_from_dataset_skips_python_paper_preprocess_when_capability_present():
+    policy = build_rust_lifecycle_policy(
+        backend="rust",
+        mode="train",
+        has_signatures_path=False,
+        has_papers_path=False,
+        preprocess=True,
+        compute_reference_features=False,
+        use_rust=True,
+        from_dataset_paper_preprocess_available=True,
+    )
+    assert policy.rust_build_path == "from_dataset"
+    assert policy.skip_python_paper_preprocess is True
+
+
+def test_rust_training_from_dataset_does_not_skip_with_reference_features():
+    policy = build_rust_lifecycle_policy(
+        backend="rust",
+        mode="train",
+        has_signatures_path=False,
+        has_papers_path=False,
+        preprocess=True,
+        compute_reference_features=True,
+        use_rust=True,
+        from_dataset_paper_preprocess_available=True,
+    )
+    assert policy.rust_build_path == "from_dataset"
+    assert policy.skip_python_paper_preprocess is False
+
+
+def test_rust_training_from_dataset_does_not_skip_without_capability():
+    policy = build_rust_lifecycle_policy(
+        backend="rust",
+        mode="train",
+        has_signatures_path=False,
+        has_papers_path=False,
+        preprocess=True,
+        compute_reference_features=False,
+        use_rust=True,
+        from_dataset_paper_preprocess_available=False,
+    )
+    assert policy.rust_build_path == "from_dataset"
+    assert policy.skip_python_paper_preprocess is False
+
+
+def test_force_python_paper_preprocess_env_disables_skip(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(FORCE_PYTHON_PAPER_PREPROCESS_ENV, "1")
+    policy = build_rust_lifecycle_policy(
+        backend="rust",
+        mode="train",
+        has_signatures_path=False,
+        has_papers_path=False,
+        preprocess=True,
+        compute_reference_features=False,
+        use_rust=True,
+        from_dataset_paper_preprocess_available=True,
+    )
+    assert policy.rust_build_path == "from_dataset"
+    assert policy.skip_python_paper_preprocess is False
+
+
+def test_force_python_paper_preprocess_env_invalid_value_raises(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(FORCE_PYTHON_PAPER_PREPROCESS_ENV, "maybe")
+    with pytest.raises(ValueError, match="Invalid"):
+        build_rust_lifecycle_policy(
+            backend="rust",
+            mode="train",
+            has_signatures_path=False,
+            has_papers_path=False,
+            preprocess=True,
+            compute_reference_features=False,
+            use_rust=True,
+            from_dataset_paper_preprocess_available=True,
+        )
 
 
 def test_rust_inference_with_sinonym_overwrite_keeps_from_json_paths():

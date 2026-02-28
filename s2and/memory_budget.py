@@ -11,13 +11,15 @@ AUTODETECT_RAM_SAFETY_FACTOR = 0.8
 DEFAULT_SAFETY_MARGIN_FRACTION = 0.10
 # Approximate bytes/entry for Phase A's `signature_to_cluster_sum_count` accumulator.
 # Calibrated on big-block telemetry (Feb 2026); tune via `scripts/rust_suite.py calibrate-phase-a`.
+# Bundle 4 calibration (4 workload shapes): P95 ~192; 200 provides ~4% margin.
 INCREMENTAL_ACCUMULATOR_ENTRY_BYTES = 200
 
 # Rust batch featurization defaults (override via S2AND_RUST_BATCH_* env vars).
 RUST_BATCH_BASE_CHUNK_PAIRS = 10_000
 RUST_BATCH_STAGE_BUDGET_FRACTION = 0.25
 RUST_BATCH_ROW_OVERHEAD_BYTES = 128
-RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES = 64
+# Bundle 4 calibration (4 workload shapes: 37, 37, 49, 49 bytes/row); P95 = 49; 52 provides ~6% margin.
+RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES = 52
 RUST_BATCH_FIXED_OVERHEAD_BYTES = 16 * (1 << 20)
 PHASE_A_FIXED_OVERHEAD_BYTES = 2 * (1 << 20)
 PHASE_A_PAIR_BUFFER_ENTRY_BYTES = 80

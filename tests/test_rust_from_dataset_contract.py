@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import os
 from collections import Counter, namedtuple
@@ -7,7 +8,7 @@ from collections import Counter, namedtuple
 import pytest
 
 import s2and.featurizer as featurizer_mod
-from s2and.data import ANDData, NameCounts
+from s2and.data import ANDData, Author, NameCounts
 from s2and.featurizer import _single_pair_featurize
 
 
@@ -71,7 +72,7 @@ def _build_minimal_dataset(name: str) -> ANDData:
     papers = {
         "1": {
             "paper_id": 1,
-            "title": "Paper One",
+            "title": "This paper presents a method for author disambiguation in digital libraries.",
             "abstract": "A",
             "authors": [
                 {"author_name": "Alice Smith", "position": 0},
@@ -84,7 +85,10 @@ def _build_minimal_dataset(name: str) -> ANDData:
         },
         "2": {
             "paper_id": 2,
-            "title": "Paper Two",
+            "title": (
+                "Cet article presente une methode pour la desambiguation des auteurs dans les "
+                "bibliotheques numeriques."
+            ),
             "abstract": "B",
             "authors": [
                 {"author_name": "Alice Smith", "position": 0},
@@ -98,30 +102,38 @@ def _build_minimal_dataset(name: str) -> ANDData:
     }
     clusters = {"c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1}}
 
-    return ANDData(
-        signatures=signatures,
-        papers=papers,
-        name=name,
-        mode="train",
-        specter_embeddings=None,
-        clusters=clusters,
-        cluster_seeds=None,
-        block_type="s2",
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=10,
-        val_pairs_size=10,
-        test_pairs_size=10,
-        n_jobs=1,
-        load_name_counts=False,
-        preprocess=True,
-        random_seed=42,
-        name_tuples="filtered",
-        use_orcid_id=True,
-        use_sinonym_overwrite=False,
-        compute_reference_features=False,
-    )
+    prior_backend = os.environ.get("S2AND_BACKEND")
+    os.environ["S2AND_BACKEND"] = "python"
+    try:
+        return ANDData(
+            signatures=signatures,
+            papers=papers,
+            name=name,
+            mode="train",
+            specter_embeddings=None,
+            clusters=clusters,
+            cluster_seeds=None,
+            block_type="s2",
+            train_pairs=None,
+            val_pairs=None,
+            test_pairs=None,
+            train_pairs_size=10,
+            val_pairs_size=10,
+            test_pairs_size=10,
+            n_jobs=1,
+            load_name_counts=False,
+            preprocess=True,
+            random_seed=42,
+            name_tuples="filtered",
+            use_orcid_id=True,
+            use_sinonym_overwrite=False,
+            compute_reference_features=False,
+        )
+    finally:
+        if prior_backend is None:
+            os.environ.pop("S2AND_BACKEND", None)
+        else:
+            os.environ["S2AND_BACKEND"] = prior_backend
 
 
 @pytest.fixture(autouse=True)
@@ -174,6 +186,53 @@ def test_from_dataset_fastpath_parity_for_field_sensitive_values():
     assert len(python_features) == len(rust_features)
     for idx, (ref_val, got_val) in enumerate(zip(python_features, rust_features, strict=False)):
         assert _equalish(ref_val, got_val), f"Mismatch idx={idx}: ref={ref_val} got={got_val}"
+
+
+def test_from_dataset_raw_papers_match_preprocessed_for_language_and_coauthors():
+    dataset_preprocessed = _build_minimal_dataset("rust_contract_raw_vs_preprocessed")
+    for signature_id in ("s1", "s2"):
+        dataset_preprocessed.signatures[signature_id] = dataset_preprocessed.signatures[signature_id]._replace(
+            author_info_coauthors=None,
+            author_info_coauthor_blocks=None,
+            author_info_coauthor_n_grams=None,
+        )
+
+    rust_preprocessed = s2and_rust.RustFeaturizer.from_dataset(dataset_preprocessed, 0.0, 10000.0, 1)
+    expected_features = rust_preprocessed.featurize_pair("s1", "s2")
+    expected_constraint = rust_preprocessed.get_constraint("s1", "s2")
+
+    dataset_raw = copy.deepcopy(dataset_preprocessed)
+    dataset_raw.preprocess = True
+    dataset_raw.papers["1"] = dataset_raw.papers["1"]._replace(
+        title="This paper presents a method for author disambiguation in digital libraries.",
+        authors=[Author(author_name="Alice Smith", position=0), Author(author_name="Bob Jones", position=1)],
+        predicted_language=None,
+        is_reliable=None,
+        title_ngrams_words=None,
+        title_ngrams_chars=None,
+        venue_ngrams=None,
+        journal_ngrams=None,
+    )
+    dataset_raw.papers["2"] = dataset_raw.papers["2"]._replace(
+        title="Cet article presente une methode pour la desambiguation des auteurs dans les bibliotheques numeriques.",
+        authors=[Author(author_name="Alice Smith", position=0), Author(author_name="Carol Lee", position=1)],
+        predicted_language=None,
+        is_reliable=None,
+        title_ngrams_words=None,
+        title_ngrams_chars=None,
+        venue_ngrams=None,
+        journal_ngrams=None,
+    )
+
+    rust_raw = s2and_rust.RustFeaturizer.from_dataset(dataset_raw, 0.0, 10000.0, 1)
+    observed_features = rust_raw.featurize_pair("s1", "s2")
+    observed_constraint = rust_raw.get_constraint("s1", "s2")
+
+    assert len(expected_features) == len(observed_features)
+    for idx, (expected, observed) in enumerate(zip(expected_features, observed_features, strict=False)):
+        assert _equalish(expected, observed), f"Mismatch idx={idx}: expected={expected} observed={observed}"
+    assert _equalish(expected_constraint, observed_constraint)
+    assert not math.isnan(float(expected_constraint))
 
 
 def test_from_dataset_rejects_namedtuple_field_order_mismatch():

@@ -28,13 +28,14 @@ import ijson
 import matplotlib.pyplot as plt
 import numpy as np
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CLUSTER_LOG_INTERVAL = 250_000
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--clusters-path", type=Path, default=Path("data/inventors/clusters.json"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/inventors"))
+    parser.add_argument("--clusters-path", type=Path, default=_PROJECT_ROOT / "data" / "inventors" / "clusters.json")
+    parser.add_argument("--output-dir", type=Path, default=_PROJECT_ROOT / "scratch" / "inventors")
     parser.add_argument("--train-size", type=int, default=500)
     parser.add_argument("--test-size", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)

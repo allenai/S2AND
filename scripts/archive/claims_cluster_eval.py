@@ -1,3 +1,9 @@
+"""
+This script is for evaluating a model on the Semantic Scholar corrections data.
+It clusters each block for which we have pairwise corrections data (and the data is already
+pulled from Semantic Scholar for), and runs clustering and prints metrics out
+"""
+
 # ruff: noqa: E402
 
 import json
@@ -33,11 +39,7 @@ BLOCK_DATASETS_DIR = os.path.join(DATA_DIR, "block_datasets")
 
 
 def main(model_path: str, n_jobs: int = 20, use_constraints: bool = True):
-    """
-    This script is for evaluating a model on the Semantic Scholar corrections data.
-    It clusters each block for which we have pairwise corrections data (and the data is already
-    pulled from Semantic Scholar for), and runs clustering and prints metrics out
-    """
+
     with open(os.path.join(DATA_DIR, "claims_pairs_remapped.json")) as _json_file:
         claims_pairs = json.load(_json_file)
     logger.info("Claims pairs loaded")

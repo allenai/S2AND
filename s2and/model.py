@@ -7,14 +7,18 @@ import math
 import time
 import warnings
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal
 
 import lightgbm as lgb
 import numpy as np
 from fastcluster import linkage
-from hyperopt import Trials, fmin, hp, space_eval, tpe
-from hyperopt.pyll import scope
+
+# hyperopt uses deprecated pkg_resources internally (unfixed upstream as of 0.2.7)
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+from hyperopt import Trials, fmin, hp, space_eval, tpe  # noqa: E402
+from hyperopt.pyll import scope  # noqa: E402
 from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.exceptions import EfficiencyWarning
@@ -27,7 +31,9 @@ from s2and.data import ANDData
 from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_featurizer,
+    build_block_upper_triangle_feature_matrix_indexed_rust,
     get_constraint_rust,
+    get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
     update_rust_cluster_seeds,
 )
@@ -83,10 +89,45 @@ def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None)
 
 def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
     """Count the number of feature indices selected by features_to_use."""
+    return len(_selected_feature_indices(featurizer_info))
+
+
+def _selected_feature_indices(featurizer_info: FeaturizationInfo) -> list[int]:
     indices: set[int] = set()
     for feature_name in featurizer_info.features_to_use:
         indices.update(featurizer_info.feature_group_to_index[feature_name])
-    return len(indices)
+    return sorted(indices)
+
+
+def _condensed_pair_index(block_size: int, left: int, right: int) -> int:
+    if left >= right:
+        raise ValueError(f"Expected left < right; got left={left} right={right}")
+    return int(block_size * left - (left * (left + 1) // 2) + (right - left - 1))
+
+
+def _build_partial_supervision_offset_maps_for_block(
+    signatures: list[str],
+    partial_supervision: dict[tuple[str, str], int | float],
+) -> tuple[dict[int, float], dict[int, float]]:
+    if not partial_supervision:
+        return {}, {}
+    signature_to_local_idx = {signature: idx for idx, signature in enumerate(signatures)}
+    block_size = len(signatures)
+    direct_overrides: dict[int, float] = {}
+    reverse_overrides: dict[int, float] = {}
+    for (sig_id_1, sig_id_2), value in partial_supervision.items():
+        left = signature_to_local_idx.get(sig_id_1)
+        right = signature_to_local_idx.get(sig_id_2)
+        if left is None or right is None or left == right:
+            continue
+        adjusted = float(value - LARGE_INTEGER)
+        if left < right:
+            offset = _condensed_pair_index(block_size, left, right)
+            direct_overrides[offset] = adjusted
+        else:
+            offset = _condensed_pair_index(block_size, right, left)
+            reverse_overrides[offset] = adjusted
+    return direct_overrides, reverse_overrides
 
 
 def _compute_incremental_memory_limits(
@@ -149,7 +190,9 @@ def _predict_class0_with_runtime(
         return np.asarray([], dtype=np.float64), 0.0, "none"
 
     python_start = time.perf_counter()
-    predictions = classifier.predict_proba(features_2d)[:, 0]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="X does not have valid feature names")
+        predictions = classifier.predict_proba(features_2d)[:, 0]
     return predictions, time.perf_counter() - python_start, "python"
 
 
@@ -557,6 +600,26 @@ def _resolve_constraint_labels_batch(
     return labels, telemetry
 
 
+@dataclass(frozen=True)
+class _DistanceMatrixChunk:
+    block_key: str
+    block_size: int
+    start_offset: int
+    index_i: np.ndarray
+    index_j: np.ndarray
+    pair_ids: list[tuple[str, str]] | None
+    labels: np.ndarray
+    block_signature_indices: list[int] | None = None
+
+    def signature_pairs(self) -> list[tuple[str, str, float]]:
+        if self.pair_ids is None:
+            raise RuntimeError("signature_pairs requested for fused Rust chunk without explicit pair ids")
+        return [
+            (sig_id_1, sig_id_2, float(label))
+            for (sig_id_1, sig_id_2), label in zip(self.pair_ids, self.labels, strict=False)
+        ]
+
+
 class Clusterer:
     """
     A wrapper for learning a clusterer
@@ -823,6 +886,351 @@ class Clusterer:
             runtime_context.run_id,
         )
 
+    def _distance_matrix_chunk_helper_rust(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        partial_supervision: dict[tuple[str, str], int | float],
+        incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: RuntimeContext | None = None,
+    ):
+        if runtime_context is None:
+            runtime_context = build_runtime_context("constraints")
+        if not stage_uses_rust(runtime_context, "model_predict"):
+            raise ValueError("Rust chunk helper is only valid when runtime_context resolves to rust backend")
+
+        rust_featurizer: object | None = None
+        use_rust_constraints: bool | None = None
+        if self.use_default_constraints_as_supervision:
+            use_rust_constraints = _use_rust_constraints(runtime_context)
+            if use_rust_constraints:
+                try:
+                    rust_featurizer = _get_rust_featurizer(
+                        dataset,
+                        runtime_context=runtime_context,
+                        use_cache=self.use_cache,
+                    )
+                except Exception as exc:  # pragma: no cover - native extension optional
+                    if stage_uses_rust(runtime_context, "constraints"):
+                        raise RuntimeError(
+                            "Rust constraint stage requested but Rust featurizer init failed "
+                            f"(run_id={runtime_context.run_id} error={exc})"
+                        ) from exc
+                    use_rust_constraints = False
+                    logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
+        constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
+        signature_index_by_id: dict[str, int] | None = None
+        if constraint_api_mode == "indexed" and rust_featurizer is not None:
+            try:
+                signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
+            except Exception as exc:  # pragma: no cover - native extension optional
+                if stage_uses_rust(runtime_context, "constraints"):
+                    raise RuntimeError(
+                        "Rust indexed constraint setup failed in strict rust backend "
+                        f"(run_id={runtime_context.run_id} error={exc})"
+                    ) from exc
+                logger.warning(
+                    "Rust indexed constraint setup failed; disabling Rust constraints and falling back to Python: %s",
+                    exc,
+                )
+                use_rust_constraints = False
+                rust_featurizer = None
+                constraint_api_mode = "python"
+
+        telemetry_total_pairs = 0
+        telemetry_partial_hits = 0
+        telemetry_unresolved_pairs = 0
+        telemetry_rust_batch_calls = 0
+        telemetry_elapsed_seconds = 0.0
+        telemetry_api_modes: set[str] = set()
+        pair_chunk_size = max(1, int(self.batch_size))
+        used_fused_path = False
+        use_fused_block_api = bool(
+            self.use_default_constraints_as_supervision
+            and not self.use_cache
+            and constraint_api_mode == "indexed"
+            and rust_featurizer is not None
+            and signature_index_by_id is not None
+            and hasattr(rust_featurizer, "get_constraints_block_upper_triangle_indexed")
+            and hasattr(rust_featurizer, "featurize_block_upper_triangle_matrix_indexed")
+        )
+
+        for block_key, signatures in block_dict.items():
+            block_size = len(signatures)
+            if block_size <= 1:
+                continue
+            block_pair_count = int(block_size * (block_size - 1) / 2)
+            if use_fused_block_api and signature_index_by_id is not None and rust_featurizer is not None:
+                block_signature_indices = [int(signature_index_by_id[signature]) for signature in signatures]
+                direct_overrides, reverse_overrides = _build_partial_supervision_offset_maps_for_block(
+                    signatures,
+                    partial_supervision,
+                )
+                offset = 0
+                while offset < block_pair_count:
+                    chunk_pair_count = int(min(pair_chunk_size, block_pair_count - offset))
+                    constraint_start = time.perf_counter()
+                    try:
+                        local_i, local_j, values = get_constraints_block_upper_triangle_indexed_rust(
+                            dataset,
+                            block_signature_indices,
+                            start_offset=offset,
+                            max_pairs=chunk_pair_count,
+                            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                            num_threads=self.n_jobs,
+                            featurizer=rust_featurizer,
+                            runtime_context=runtime_context,
+                            use_cache=self.use_cache,
+                        )
+                    except Exception as exc:
+                        if stage_uses_rust(runtime_context, "constraints"):
+                            raise RuntimeError(
+                                "Rust fused block constraint evaluation failed in strict rust backend "
+                                f"(block={block_key} start_offset={offset} pairs={chunk_pair_count} "
+                                f"run_id={runtime_context.run_id} error={exc})"
+                            ) from exc
+                        logger.warning(
+                            "Rust fused block constraint evaluation failed; falling back to non-fused chunk path: %s",
+                            exc,
+                        )
+                        use_fused_block_api = False
+                        break
+                    constraint_elapsed = float(time.perf_counter() - constraint_start)
+                    if len(local_i) != chunk_pair_count or len(local_j) != chunk_pair_count:
+                        raise RuntimeError(
+                            "Rust fused block constraint API returned mismatched index lengths: "
+                            f"expected={chunk_pair_count} left={len(local_i)} right={len(local_j)}"
+                        )
+                    if len(values) != chunk_pair_count:
+                        raise RuntimeError(
+                            "Rust fused block constraint API returned mismatched constraint length: "
+                            f"expected={chunk_pair_count} got={len(values)}"
+                        )
+
+                    labels = np.full(chunk_pair_count, np.nan, dtype=np.float64)
+                    partial_hits_chunk = 0
+                    unresolved_chunk = 0
+                    for row_offset in range(chunk_pair_count):
+                        pair_offset = offset + row_offset
+                        override = direct_overrides.get(pair_offset)
+                        if override is None:
+                            override = reverse_overrides.get(pair_offset)
+                        if override is not None:
+                            labels[row_offset] = float(override)
+                            partial_hits_chunk += 1
+                            continue
+                        unresolved_chunk += 1
+                        value = values[row_offset]
+                        if value is not None:
+                            labels[row_offset] = float(value - LARGE_INTEGER)
+
+                    telemetry_total_pairs += int(chunk_pair_count)
+                    telemetry_partial_hits += int(partial_hits_chunk)
+                    telemetry_unresolved_pairs += int(unresolved_chunk)
+                    telemetry_elapsed_seconds += float(constraint_elapsed)
+                    telemetry_api_modes.add("indexed_fused")
+                    if unresolved_chunk > 0:
+                        telemetry_rust_batch_calls += 1
+                    used_fused_path = True
+
+                    yield _DistanceMatrixChunk(
+                        block_key=block_key,
+                        block_size=block_size,
+                        start_offset=offset,
+                        index_i=np.asarray(local_i, dtype=np.intp),
+                        index_j=np.asarray(local_j, dtype=np.intp),
+                        pair_ids=None,
+                        labels=labels,
+                        block_signature_indices=block_signature_indices,
+                    )
+                    offset += chunk_pair_count
+                if not use_fused_block_api:
+                    # Fused path disabled after runtime failure; continue with fallback for this and later blocks.
+                    tri_i, tri_j = np.triu_indices(block_size, k=1)
+                    offset = 0
+                    while offset < block_pair_count:
+                        end = min(offset + pair_chunk_size, block_pair_count)
+                        i_chunk = tri_i[offset:end]
+                        j_chunk = tri_j[offset:end]
+                        pair_batch_ids = [
+                            (signatures[int(left)], signatures[int(right)])
+                            for left, right in zip(i_chunk, j_chunk, strict=False)
+                        ]
+                        labels, batch_telemetry = _resolve_constraint_labels_batch(
+                            dataset,
+                            pair_batch_ids,
+                            partial_supervision=partial_supervision,
+                            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+                            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                            rust_featurizer=rust_featurizer,
+                            use_rust_constraints=use_rust_constraints,
+                            runtime_context=runtime_context,
+                            use_cache=self.use_cache,
+                            num_threads=self.n_jobs,
+                            constraint_api_mode=constraint_api_mode,
+                            signature_index_by_id=signature_index_by_id,
+                        )
+                        telemetry_total_pairs += int(batch_telemetry["total_pairs"])
+                        telemetry_partial_hits += int(batch_telemetry["partial_supervision_hits"])
+                        telemetry_unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
+                        telemetry_rust_batch_calls += int(batch_telemetry["rust_batch_call_count"])
+                        telemetry_elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
+                        telemetry_api_modes.add(str(batch_telemetry["api_mode"]))
+                        yield _DistanceMatrixChunk(
+                            block_key=block_key,
+                            block_size=block_size,
+                            start_offset=offset,
+                            index_i=i_chunk,
+                            index_j=j_chunk,
+                            pair_ids=pair_batch_ids,
+                            labels=np.asarray(labels, dtype=np.float64),
+                        )
+                        offset = end
+            else:
+                tri_i, tri_j = np.triu_indices(block_size, k=1)
+                offset = 0
+                while offset < block_pair_count:
+                    end = min(offset + pair_chunk_size, block_pair_count)
+                    i_chunk = tri_i[offset:end]
+                    j_chunk = tri_j[offset:end]
+                    pair_batch_ids = [
+                        (signatures[int(left)], signatures[int(right)])
+                        for left, right in zip(i_chunk, j_chunk, strict=False)
+                    ]
+
+                    labels, batch_telemetry = _resolve_constraint_labels_batch(
+                        dataset,
+                        pair_batch_ids,
+                        partial_supervision=partial_supervision,
+                        use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                        rust_featurizer=rust_featurizer,
+                        use_rust_constraints=use_rust_constraints,
+                        runtime_context=runtime_context,
+                        use_cache=self.use_cache,
+                        num_threads=self.n_jobs,
+                        constraint_api_mode=constraint_api_mode,
+                        signature_index_by_id=signature_index_by_id,
+                    )
+                    telemetry_total_pairs += int(batch_telemetry["total_pairs"])
+                    telemetry_partial_hits += int(batch_telemetry["partial_supervision_hits"])
+                    telemetry_unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
+                    telemetry_rust_batch_calls += int(batch_telemetry["rust_batch_call_count"])
+                    telemetry_elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
+                    telemetry_api_modes.add(str(batch_telemetry["api_mode"]))
+
+                    yield _DistanceMatrixChunk(
+                        block_key=block_key,
+                        block_size=block_size,
+                        start_offset=offset,
+                        index_i=i_chunk,
+                        index_j=j_chunk,
+                        pair_ids=pair_batch_ids,
+                        labels=np.asarray(labels, dtype=np.float64),
+                    )
+                    offset = end
+
+        logger.info(
+            "Telemetry: constraint_batch stage=distance_matrix total_pairs=%d partial_supervision_hits=%d "
+            "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f path=%s run_id=%s",
+            telemetry_total_pairs,
+            telemetry_partial_hits,
+            telemetry_unresolved_pairs,
+            telemetry_rust_batch_calls,
+            ",".join(sorted(telemetry_api_modes)) if telemetry_api_modes else "none",
+            telemetry_elapsed_seconds,
+            "chunked_rust_fused" if used_fused_path else "chunked_rust",
+            runtime_context.run_id,
+        )
+
+    def _predict_distance_matrix_chunk(
+        self,
+        chunk: _DistanceMatrixChunk,
+        dataset: ANDData,
+        rust_failure_counts: dict[str, int],
+        runtime_context: RuntimeContext,
+        batch_label: int | str,
+    ) -> tuple[np.ndarray, float]:
+        if chunk.block_signature_indices is not None and chunk.pair_ids is None:
+            if self.use_cache:
+                raise RuntimeError("Fused Rust chunk path does not support use_cache=True")
+            try:
+                rust_featurizer = _get_rust_featurizer(
+                    dataset,
+                    runtime_context=runtime_context,
+                    use_cache=self.use_cache,
+                )
+                selected_indices = _selected_feature_indices(self.featurizer_info)
+                batch_features = build_block_upper_triangle_feature_matrix_indexed_rust(
+                    dataset,
+                    chunk.block_signature_indices,
+                    start_offset=int(chunk.start_offset),
+                    max_pairs=int(len(chunk.labels)),
+                    selected_indices=selected_indices,
+                    num_threads=self.n_jobs,
+                    nan_value=np.nan,
+                    runtime_context=runtime_context,
+                    use_cache=self.use_cache,
+                    featurizer=rust_featurizer,
+                )
+                batch_labels = np.asarray(chunk.labels, dtype=np.float64)
+                batch_nameless_features: np.ndarray | None = None
+                if self.nameless_classifier is not None and self.nameless_featurizer_info is not None:
+                    nameless_selected_indices = _selected_feature_indices(self.nameless_featurizer_info)
+                    batch_nameless_features = build_block_upper_triangle_feature_matrix_indexed_rust(
+                        dataset,
+                        chunk.block_signature_indices,
+                        start_offset=int(chunk.start_offset),
+                        max_pairs=int(len(chunk.labels)),
+                        selected_indices=nameless_selected_indices,
+                        num_threads=self.n_jobs,
+                        nan_value=np.nan,
+                        runtime_context=runtime_context,
+                        use_cache=self.use_cache,
+                        featurizer=rust_featurizer,
+                    )
+            except Exception as exc:
+                if stage_uses_rust(runtime_context, "pair_featurization"):
+                    raise RuntimeError(
+                        "Rust fused block featurization failed in strict rust backend "
+                        f"(block={chunk.block_key} start_offset={chunk.start_offset} pairs={len(chunk.labels)} "
+                        f"run_id={runtime_context.run_id} error={exc})"
+                    ) from exc
+                raise
+            expected_rows = int(len(chunk.labels))
+        else:
+            signature_pairs = chunk.signature_pairs()
+            batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
+                signature_pairs,
+                dataset,
+                self.featurizer_info,
+                self.n_jobs,
+                use_cache=self.use_cache,
+                chunk_size=DEFAULT_CHUNK_SIZE,
+                nameless_featurizer_info=self.nameless_featurizer_info,
+                runtime_context=runtime_context,
+            )
+            expected_rows = int(len(signature_pairs))
+        batch_predictions, batch_seconds = _predict_and_combine(
+            self.classifier,
+            self.nameless_classifier,
+            batch_features,
+            batch_labels,
+            batch_nameless_features,
+            batch_label,
+            rust_failure_counts,
+            runtime_context=runtime_context,
+        )
+        if int(batch_predictions.shape[0]) != expected_rows:
+            raise RuntimeError(
+                "Distance-matrix chunk prediction size mismatch: "
+                f"expected={expected_rows} got={batch_predictions.shape[0]}"
+            )
+        return np.asarray(batch_predictions, dtype=np.float64), float(batch_seconds)
+
     def make_distance_matrices(
         self,
         block_dict: dict[str, list[str]],
@@ -864,97 +1272,140 @@ class Clusterer:
         # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
         num_pairs = 0
+        use_rust_blockwise = stage_uses_rust(runtime_context, "model_predict")
+        fastcluster_dtype = np.float64 if use_rust_blockwise else np.float16
         for block_key, signatures in block_dict.items():
             block_size = len(signatures)
             num_pairs += int(block_size * (block_size - 1) / 2)
             if isinstance(self.cluster_model, FastCluster):
                 # flattened pdist style
-                pairwise_proba = np.zeros(int(block_size * (block_size - 1) / 2), dtype=np.float16)
+                pairwise_proba = np.zeros(int(block_size * (block_size - 1) / 2), dtype=fastcluster_dtype)
             else:
                 pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
             pairwise_probas[block_key] = pairwise_proba
 
         logger.info(f"Pairwise probas initialized with {num_pairs} elements, starting making all pairs")
 
-        # featurize and predict in batches
-        helper_output = self.distance_matrix_helper(
-            block_dict,
-            dataset,
-            partial_supervision,
-            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            runtime_context=runtime_context,
-        )
-
-        prev_block_key = ""
-        batch_num = 0
-        num_batches = math.ceil(num_pairs / self.batch_size)
         model_predict_seconds = 0.0
         rust_failure_counts: dict[str, int] = {"main": 0, "nameless": 0}
-        while True:
-            logger.info(f"Featurizing batch {batch_num}/{num_batches}")
-            count = 0
-            pairs = []
-            indices = []
-            blocks = []
-            # iterate over a batch_size number of pairs
-            for item in helper_output:
-                pairs.append(item[0])
-                indices.append(item[1])
-                blocks.append(item[2])
-                count += 1
-                if count == self.batch_size:
+        if use_rust_blockwise:
+            chunk_count = 0
+            helper_output = self._distance_matrix_chunk_helper_rust(
+                block_dict,
+                dataset,
+                partial_supervision,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                runtime_context=runtime_context,
+            )
+            for chunk in helper_output:
+                batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
+                    chunk,
+                    dataset,
+                    rust_failure_counts,
+                    runtime_context,
+                    batch_label=f"chunk_{chunk_count}",
+                )
+                model_predict_seconds += batch_seconds
+                expected = int(len(chunk.labels))
+                if int(batch_predictions.shape[0]) != int(expected):
+                    raise RuntimeError(
+                        "Distance-matrix batch prediction count mismatch: "
+                        f"expected={expected} got={batch_predictions.shape[0]}"
+                    )
+                pairwise_proba = pairwise_probas[chunk.block_key]
+                if isinstance(self.cluster_model, FastCluster):
+                    start = int(chunk.start_offset)
+                    end = start + expected
+                    pairwise_proba[start:end] = np.asarray(batch_predictions, dtype=np.float64)
+                else:
+                    pairwise_proba[chunk.index_i, chunk.index_j] = np.asarray(
+                        batch_predictions,
+                        dtype=pairwise_proba.dtype,
+                    )
+                chunk_count += 1
+            logger.info(
+                "Telemetry: distance_matrix_chunking backend=rust chunks=%d run_id=%s",
+                chunk_count,
+                runtime_context.run_id,
+            )
+        else:
+            # featurize and predict in batches
+            helper_output = self.distance_matrix_helper(
+                block_dict,
+                dataset,
+                partial_supervision,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                runtime_context=runtime_context,
+            )
+
+            prev_block_key = ""
+            batch_num = 0
+            num_batches = math.ceil(num_pairs / self.batch_size)
+            while True:
+                logger.info(f"Featurizing batch {batch_num}/{num_batches}")
+                count = 0
+                pairs = []
+                indices = []
+                blocks = []
+                # iterate over a batch_size number of pairs
+                for item in helper_output:
+                    pairs.append(item[0])
+                    indices.append(item[1])
+                    blocks.append(item[2])
+                    count += 1
+                    if count == self.batch_size:
+                        break
+
+                if len(pairs) == 0:
                     break
 
-            if len(pairs) == 0:
-                break
+                batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
+                    pairs,
+                    dataset,
+                    self.featurizer_info,
+                    self.n_jobs,
+                    use_cache=self.use_cache,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                    nameless_featurizer_info=self.nameless_featurizer_info,
+                    runtime_context=runtime_context,
+                )
+                batch_predictions, batch_seconds = _predict_and_combine(
+                    self.classifier,
+                    self.nameless_classifier,
+                    batch_features,
+                    batch_labels,
+                    batch_nameless_features,
+                    batch_num,
+                    rust_failure_counts,
+                    runtime_context=runtime_context,
+                )
+                model_predict_seconds += batch_seconds
 
-            batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
-                pairs,
-                dataset,
-                self.featurizer_info,
-                self.n_jobs,
-                use_cache=self.use_cache,
-                chunk_size=DEFAULT_CHUNK_SIZE,
-                nameless_featurizer_info=self.nameless_featurizer_info,
-                runtime_context=runtime_context,
-            )
-            batch_predictions, batch_seconds = _predict_and_combine(
-                self.classifier,
-                self.nameless_classifier,
-                batch_features,
-                batch_labels,
-                batch_nameless_features,
-                batch_num,
-                rust_failure_counts,
-                runtime_context=runtime_context,
-            )
-            model_predict_seconds += batch_seconds
+                for within_batch_index, prediction in tqdm(
+                    enumerate(batch_predictions),
+                    total=len(batch_predictions),
+                    desc="Writing matrices",
+                    disable=disable_tqdm,
+                ):
+                    block_key = blocks[within_batch_index]
+                    if block_key != prev_block_key:
+                        block_key_start_index = blocks.index(block_key) + (batch_num * self.batch_size)
+                        pairwise_proba = pairwise_probas[block_key]
 
-            for within_batch_index, prediction in tqdm(
-                enumerate(batch_predictions),
-                total=len(batch_predictions),
-                desc="Writing matrices",
-                disable=disable_tqdm,
-            ):
-                block_key = blocks[within_batch_index]
-                if block_key != prev_block_key:
-                    block_key_start_index = blocks.index(block_key) + (batch_num * self.batch_size)
-                    pairwise_proba = pairwise_probas[block_key]
+                    if isinstance(self.cluster_model, FastCluster):
+                        index = (batch_num * self.batch_size + within_batch_index) - block_key_start_index
 
-                if isinstance(self.cluster_model, FastCluster):
-                    index = (batch_num * self.batch_size + within_batch_index) - block_key_start_index
+                        pairwise_proba[index] = prediction
+                    else:
+                        i, j = indices[within_batch_index]
+                        pairwise_proba[i, j] = prediction
 
-                    pairwise_proba[index] = prediction
-                else:
-                    i, j = indices[within_batch_index]
-                    pairwise_proba[i, j] = prediction
+                    prev_block_key = block_key
 
-                prev_block_key = block_key
+                if count < self.batch_size:
+                    break
 
-            if count < self.batch_size:
-                break
-
-            batch_num += 1
+                batch_num += 1
 
         if not isinstance(self.cluster_model, FastCluster):
             for pairwise_proba in pairwise_probas.values():
@@ -1468,65 +1919,24 @@ class Clusterer:
         _ensure_lightgbm_fitted(self.classifier)
         _ensure_lightgbm_fitted(self.nameless_classifier)
 
-        helper_output = self.distance_matrix_helper(
-            block_dict,
-            dataset,
-            partial_supervision,
-            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            runtime_context=runtime_context,
-        )
-
         prev_block_key = ""
         pairwise_proba: np.ndarray | None = None
-        block_pair_index = 0
-        seen_block_keys: set = set()
-        batch_num = 0
+        seen_block_keys: set[str] = set()
         num_pairs = sum(len(sigs) * (len(sigs) - 1) // 2 for sigs in block_dict.values())
-        num_batches = math.ceil(num_pairs / self.batch_size) if num_pairs > 0 else 0
         model_predict_seconds = 0.0
         rust_failure_counts: dict[str, int] = {"main": 0, "nameless": 0}
-
-        while True:
-            logger.info(f"Featurizing batch {batch_num}/{num_batches}")
-            count = 0
-            pairs: list = []
-            indices: list = []
-            blocks: list = []
-            for item in helper_output:
-                pairs.append(item[0])
-                indices.append(item[1])
-                blocks.append(item[2])
-                count += 1
-                if count == self.batch_size:
-                    break
-
-            if len(pairs) == 0:
-                break
-
-            batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
-                pairs,
+        use_rust_blockwise = stage_uses_rust(runtime_context, "model_predict")
+        if use_rust_blockwise:
+            chunk_count = 0
+            helper_output = self._distance_matrix_chunk_helper_rust(
+                block_dict,
                 dataset,
-                self.featurizer_info,
-                self.n_jobs,
-                use_cache=self.use_cache,
-                chunk_size=DEFAULT_CHUNK_SIZE,
-                nameless_featurizer_info=self.nameless_featurizer_info,
+                partial_supervision,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
             )
-            batch_predictions, batch_seconds = _predict_and_combine(
-                self.classifier,
-                self.nameless_classifier,
-                batch_features,
-                batch_labels,
-                batch_nameless_features,
-                batch_num,
-                rust_failure_counts,
-                runtime_context=runtime_context,
-            )
-            model_predict_seconds += batch_seconds
-
-            for within_batch_index, prediction in enumerate(batch_predictions):
-                block_key = blocks[within_batch_index]
+            for chunk in helper_output:
+                block_key = chunk.block_key
                 if block_key != prev_block_key:
                     # cluster the completed block
                     if prev_block_key != "" and pairwise_proba is not None:
@@ -1546,26 +1956,133 @@ class Clusterer:
 
                     # allocate new block's matrix
                     seen_block_keys.add(block_key)
-                    block_size = len(block_dict[block_key])
                     if isinstance(self.cluster_model, FastCluster):
-                        pairwise_proba = np.zeros(block_size * (block_size - 1) // 2, dtype=fastcluster_fused_dtype)
+                        pairwise_proba = np.zeros(
+                            chunk.block_size * (chunk.block_size - 1) // 2,
+                            dtype=fastcluster_fused_dtype,
+                        )
                     else:
-                        pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
-                    block_pair_index = 0
+                        pairwise_proba = np.zeros((chunk.block_size, chunk.block_size), dtype=np.float16)
 
+                batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
+                    chunk,
+                    dataset,
+                    rust_failure_counts,
+                    runtime_context,
+                    batch_label=f"chunk_{chunk_count}",
+                )
+                model_predict_seconds += batch_seconds
+                assert pairwise_proba is not None
                 if isinstance(self.cluster_model, FastCluster):
-                    assert pairwise_proba is not None
-                    pairwise_proba[block_pair_index] = prediction
+                    start = int(chunk.start_offset)
+                    end = start + int(len(chunk.labels))
+                    pairwise_proba[start:end] = np.asarray(batch_predictions, dtype=pairwise_proba.dtype)
                 else:
-                    assert pairwise_proba is not None
-                    i, j = indices[within_batch_index]
-                    pairwise_proba[i, j] = prediction
-                block_pair_index += 1
+                    pairwise_proba[chunk.index_i, chunk.index_j] = np.asarray(
+                        batch_predictions,
+                        dtype=pairwise_proba.dtype,
+                    )
                 prev_block_key = block_key
+                chunk_count += 1
+            logger.info(
+                "Telemetry: distance_matrix_chunking backend=rust chunks=%d run_id=%s",
+                chunk_count,
+                runtime_context.run_id,
+            )
+        else:
+            helper_output = self.distance_matrix_helper(
+                block_dict,
+                dataset,
+                partial_supervision,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                runtime_context=runtime_context,
+            )
+            batch_num = 0
+            num_batches = math.ceil(num_pairs / self.batch_size) if num_pairs > 0 else 0
+            block_pair_index = 0
+            while True:
+                logger.info(f"Featurizing batch {batch_num}/{num_batches}")
+                count = 0
+                pairs: list = []
+                indices: list = []
+                blocks: list = []
+                for item in helper_output:
+                    pairs.append(item[0])
+                    indices.append(item[1])
+                    blocks.append(item[2])
+                    count += 1
+                    if count == self.batch_size:
+                        break
 
-            if count < self.batch_size:
-                break
-            batch_num += 1
+                if len(pairs) == 0:
+                    break
+
+                batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
+                    pairs,
+                    dataset,
+                    self.featurizer_info,
+                    self.n_jobs,
+                    use_cache=self.use_cache,
+                    chunk_size=DEFAULT_CHUNK_SIZE,
+                    nameless_featurizer_info=self.nameless_featurizer_info,
+                    runtime_context=runtime_context,
+                )
+                batch_predictions, batch_seconds = _predict_and_combine(
+                    self.classifier,
+                    self.nameless_classifier,
+                    batch_features,
+                    batch_labels,
+                    batch_nameless_features,
+                    batch_num,
+                    rust_failure_counts,
+                    runtime_context=runtime_context,
+                )
+                model_predict_seconds += batch_seconds
+
+                for within_batch_index, prediction in enumerate(batch_predictions):
+                    block_key = blocks[within_batch_index]
+                    if block_key != prev_block_key:
+                        # cluster the completed block
+                        if prev_block_key != "" and pairwise_proba is not None:
+                            if not isinstance(self.cluster_model, FastCluster):
+                                pairwise_proba += pairwise_proba.T
+                                np.fill_diagonal(pairwise_proba, 0)
+                            labels = self._cluster_one_block(
+                                block_dict[prev_block_key],
+                                pairwise_proba,
+                                effective_cluster_model_params,
+                                dataset,
+                                all_disallow_signature_ids,
+                            )
+                            for signature, label in zip(block_dict[prev_block_key], labels, strict=False):
+                                pred_clusters[prev_block_key + "_" + str(label)].append(signature)
+                            del pairwise_proba
+
+                        # allocate new block's matrix
+                        seen_block_keys.add(block_key)
+                        block_size = len(block_dict[block_key])
+                        if isinstance(self.cluster_model, FastCluster):
+                            pairwise_proba = np.zeros(
+                                block_size * (block_size - 1) // 2,
+                                dtype=fastcluster_fused_dtype,
+                            )
+                        else:
+                            pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
+                        block_pair_index = 0
+
+                    if isinstance(self.cluster_model, FastCluster):
+                        assert pairwise_proba is not None
+                        pairwise_proba[block_pair_index] = prediction
+                    else:
+                        assert pairwise_proba is not None
+                        i, j = indices[within_batch_index]
+                        pairwise_proba[i, j] = prediction
+                    block_pair_index += 1
+                    prev_block_key = block_key
+
+                if count < self.batch_size:
+                    break
+                batch_num += 1
 
         # cluster the final block
         if prev_block_key != "" and pairwise_proba is not None:
@@ -2948,7 +3465,9 @@ class PairwiseModeler:
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self.classifier is not None, "You need to call fit first"
-        return self.classifier.predict_proba(X)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="X does not have valid feature names")
+            return self.classifier.predict_proba(X)
 
 
 def intify(x):
@@ -3164,7 +3683,9 @@ class VotingClassifier:
 
     def _collect_probas(self, X):
         """Collect results from clf.predict calls."""
-        return np.asarray([clf.predict_proba(X) for clf in self.estimators])
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="X does not have valid feature names")
+            return np.asarray([clf.predict_proba(X) for clf in self.estimators])
 
     def predict_proba(self, X):
         """
@@ -3212,4 +3733,6 @@ class VotingClassifier:
 
     def _predict(self, X):
         """Collect results from clf.predict calls."""
-        return np.asarray([clf.predict(X) for clf in self.estimators]).T
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="X does not have valid feature names")
+            return np.asarray([clf.predict(X) for clf in self.estimators]).T

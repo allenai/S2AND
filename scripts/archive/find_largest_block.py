@@ -9,7 +9,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 # Datasets that have standard {name}_signatures.json files
 DATASET_NAMES = [

@@ -139,3 +139,43 @@ def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
     blocked = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert blocked.core_runtime_available is False
     assert blocked.reason.startswith("rust_version_unparseable:")
+
+
+def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_marker():
+    class RustFeaturizer:
+        SUPPORTS_FROM_DATASET_PAPER_PREPROCESS = True
+
+        @staticmethod
+        def from_dataset(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def from_json_paths(*args, **kwargs):
+            return None
+
+        def signature_ids(self):
+            return []
+
+        def get_constraint(self, *args, **kwargs):
+            return None
+
+        def get_constraints_matrix(self, *args, **kwargs):
+            return []
+
+        def get_constraints_matrix_indexed(self, *args, **kwargs):
+            return []
+
+        def featurize_pairs_matrix_indexed(self, *args, **kwargs):
+            return None
+
+        def update_signature_name_counts(self, *args, **kwargs):
+            return 0
+
+    class Module:
+        __version__ = "0.31.0"
+
+    Module.RustFeaturizer = RustFeaturizer
+
+    capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
+    assert capabilities.core_runtime_available is True
+    assert capabilities.from_dataset_paper_preprocess_available is True

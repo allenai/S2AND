@@ -23,8 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        default=str(Path(PROJECT_ROOT_PATH) / "data" / "name_counts_rust.json"),
-        help="Path to output JSON artifact for Rust from_json_paths ingest.",
+        default=str(Path(PROJECT_ROOT_PATH) / "scratch" / "name_counts_rust.json"),
+        help=(
+            "Path to output JSON artifact for Rust from_json_paths ingest "
+            "(use --output data/... explicitly if desired)."
+        ),
     )
     parser.add_argument(
         "--normalization-version",

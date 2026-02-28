@@ -1,6 +1,6 @@
 """
 Generate SPECTER embeddings for papers referenced by
-`data/inventors_s2and/inventors_s2and_signatures.json`.
+`scratch/inventors_s2and/inventors_s2and_signatures.json`.
 
 Outputs:
 - `inventors_s2and_specter.pickle`: embeddings from `allenai/specter`
@@ -13,10 +13,10 @@ Pickle format matches S2AND expectations: `(X, keys)`, where
 Example:
 uv run --with torch --with transformers --with adapters \
   python scripts/generate_inventors_hf_specter_embeddings.py \
-  --signatures-path data/inventors_s2and/inventors_s2and_signatures.json \
-  --papers-path data/inventors_s2and/inventors_s2and_papers.json \
-  --output-specter-path data/inventors_s2and/inventors_s2and_specter.pickle \
-  --output-specter2-path data/inventors_s2and/inventors_s2and_specter2.pkl \
+  --signatures-path scratch/inventors_s2and/inventors_s2and_signatures.json \
+  --papers-path scratch/inventors_s2and/inventors_s2and_papers.json \
+  --output-specter-path scratch/inventors_s2and/inventors_s2and_specter.pickle \
+  --output-specter2-path scratch/inventors_s2and/inventors_s2and_specter2.pkl \
   --limit 20105 --batch-size 16
 """
 
@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOGGER = logging.getLogger("specter_embeddings")
 
 
@@ -50,25 +51,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--signatures-path",
         type=Path,
-        default=Path("data/inventors_s2and/inventors_s2and_signatures.json"),
+        default=_PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_signatures.json",
         help="Path to signatures.json dictionary keyed by signature id; paper ids are collected from this file.",
     )
     parser.add_argument(
         "--papers-path",
         type=Path,
-        default=Path("data/inventors_s2and/inventors_s2and_papers.json"),
+        default=_PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_papers.json",
         help="Path to papers.json dictionary keyed by paper id.",
     )
     parser.add_argument(
         "--output-specter-path",
         type=Path,
-        default=Path("data/inventors_s2and/inventors_s2and_specter.pickle"),
+        default=_PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_specter.pickle",
         help="Output path for allenai/specter embeddings.",
     )
     parser.add_argument(
         "--output-specter2-path",
         type=Path,
-        default=Path("data/inventors_s2and/inventors_s2and_specter2.pkl"),
+        default=_PROJECT_ROOT / "scratch" / "inventors_s2and" / "inventors_s2and_specter2.pkl",
         help="Output path for allenai/specter2 proximity embeddings.",
     )
     parser.add_argument(

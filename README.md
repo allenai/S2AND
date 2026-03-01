@@ -39,21 +39,23 @@ source .venv/bin/activate
 .venv\Scripts\activate.bat
 ```
 
-3. Install project dependencies (dev extras):
+3. Runtime install (end users, pick one):
 
 ```bash
-# recommended: when the extension is available, default runtime uses Rust on beneficial stages.
-uv pip install "s2and[rust]"
 # default runtime is Python (`auto` resolves to Python).
 uv pip install s2and
+# optional: Rust-enabled runtime when extension wheels are available.
+uv pip install "s2and[rust]"
 ```
+
+4. Developer install (repo checkout):
 
 ```bash
 # prefer uv --active so uv uses your activated environment
 uv sync --active --extra dev
 ```
 
-4. (Recommended) Build/install the Rust extension into the active venv:
+5. (Recommended) Build/install the Rust extension into the active venv:
 
 ```bash
 # requires Rust toolchain on PATH (rustc/cargo)
@@ -156,11 +158,6 @@ Install contract:
 
 In `rust` backend mode, migrated Rust stages fail fast on Rust-stage errors (no silent Python rescue). In `auto`
 mode, fallback only occurs during backend resolution; runtime Rust-stage failures still fail fast.
-
-Install the Rust extension from wheels (when available):
-```bash
-uv pip install "s2and[rust]"
-```
 
 Stable runtime controls:
 - `S2AND_BACKEND=python|rust|auto` to select runtime backend.
@@ -268,8 +265,8 @@ Here's how to do all that:
 
 ```python
 from s2and.model import PairwiseModeler
-from s2and.featurizer import FeaturizationInfo
-from s2and.eval import pairwise_eval
+from s2and.featurizer import FeaturizationInfo, featurize
+from s2and.eval import cluster_eval, pairwise_eval
 
 featurization_info = FeaturizationInfo()
 # the cache will make it faster to train multiple times - it stores the features on disk for you

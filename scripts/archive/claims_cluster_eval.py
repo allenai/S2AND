@@ -39,7 +39,6 @@ BLOCK_DATASETS_DIR = os.path.join(DATA_DIR, "block_datasets")
 
 
 def main(model_path: str, n_jobs: int = 20, use_constraints: bool = True):
-
     with open(os.path.join(DATA_DIR, "claims_pairs_remapped.json")) as _json_file:
         claims_pairs = json.load(_json_file)
     logger.info("Claims pairs loaded")

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger("s2and")
 
@@ -38,6 +39,96 @@ class MemorySnapshot:
     available_bytes: int
     # What fraction of total_ram_bytes is actually usable after subtracting RSS and safety margin.
     effective_available_fraction: float
+
+
+@dataclass(frozen=True)
+class _MappingDataclass(Mapping[str, Any]):
+    """Dataclass payload with read-only dict-like access for compatibility."""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {key: getattr(self, key) for key in self.__dataclass_fields__}
+
+    def __getitem__(self, key: str) -> Any:
+        return self.as_dict()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.__dataclass_fields__)
+
+    def __len__(self) -> int:
+        return len(self.__dataclass_fields__)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.as_dict().get(key, default)
+
+
+@dataclass(frozen=True)
+class IncrementalPhaseSplitLimits(_MappingDataclass):
+    total_ram_bytes: int
+    total_ram_source: str
+    current_rss_bytes: int
+    current_rss_source: str
+    available_bytes: int
+    effective_available_fraction: float
+    safety_margin_bytes: int
+    chunk_budget_bytes: int
+    accumulator_budget_bytes: int
+    bytes_per_pair: int
+    derived_chunk_pairs: int
+    chunk_pairs: int
+    max_chunk_pairs: int
+    accumulator_entry_bytes: int
+    accumulator_warn: int
+    accumulator_max: int
+
+
+@dataclass(frozen=True)
+class RustBatchChunkPlan(_MappingDataclass):
+    total_ram_bytes: int
+    total_ram_source: str
+    current_rss_bytes: int
+    current_rss_source: str
+    available_bytes: int
+    effective_available_fraction: float
+    safety_margin_bytes: int
+    stage_budget_fraction: float
+    stage_budget_bytes: int
+    base_chunk_pairs: int
+    row_overhead_bytes: int
+    persistent_row_overhead_bytes: int
+    fixed_overhead_bytes: int
+    bytes_per_pair_row: int
+    derived_chunk_pairs: int
+    chunk_pairs: int
+    total_rows: int
+    full_feature_count: int
+    selected_feature_count: int
+    nameless_feature_count: int
+    predicted_chunk_bytes: int
+    predicted_features_matrix_bytes: int
+    predicted_labels_bytes: int
+    predicted_persistent_row_overhead_bytes: int
+    predicted_fixed_overhead_bytes: int
+    predicted_selected_features_bytes: int
+    predicted_nameless_features_bytes: int
+    predicted_stage_peak_delta_bytes: int
+    predicted_stage_peak_rss_bytes: int
+    predicted_stage_peak_bytes: int
+
+
+@dataclass(frozen=True)
+class PredictionAccuracySummary(_MappingDataclass):
+    stage_name: str
+    prediction_contract_version: str
+    predicted_peak_delta_bytes: int
+    predicted_peak_rss_bytes: int
+    predicted_bytes: int
+    rss_before_bytes: int
+    rss_peak_bytes: int
+    rss_after_bytes: int
+    observed_peak_delta_bytes: int
+    observed_end_delta_bytes: int
+    prediction_error_ratio: float
+    underpredicted: bool
 
 
 def _env_int(name: str, *, default: int, min_value: int) -> int:
@@ -382,7 +473,7 @@ def compute_incremental_phase_split_limits(
     detect_cgroup_fn: Callable[[], tuple[int | None, str]] | None = None,
     detect_total_fn: Callable[[], tuple[int | None, str]] | None = None,
     current_rss_fn: Callable[[int], tuple[int, str]] | None = None,
-) -> dict[str, int | str | float]:
+) -> IncrementalPhaseSplitLimits:
     snapshot = memory_snapshot_for_stage(
         total_ram_bytes=total_ram_bytes,
         safety_margin_fraction=safety_margin_fraction,
@@ -422,24 +513,24 @@ def compute_incremental_phase_split_limits(
 
     accumulator_warn = max(1, accumulator_budget_bytes // accumulator_entry_bytes // 5)
     accumulator_max = max(accumulator_warn + 1, accumulator_budget_bytes // accumulator_entry_bytes)
-    return {
-        "total_ram_bytes": snapshot.total_ram_bytes,
-        "total_ram_source": snapshot.total_ram_source,
-        "current_rss_bytes": snapshot.current_rss_bytes,
-        "current_rss_source": snapshot.current_rss_source,
-        "available_bytes": snapshot.available_bytes,
-        "effective_available_fraction": snapshot.effective_available_fraction,
-        "safety_margin_bytes": snapshot.safety_margin_bytes,
-        "chunk_budget_bytes": chunk_budget_bytes,
-        "accumulator_budget_bytes": accumulator_budget_bytes,
-        "bytes_per_pair": bytes_per_pair,
-        "derived_chunk_pairs": derived_chunk_pairs,
-        "chunk_pairs": chunk_pairs,
-        "max_chunk_pairs": int(max_pairs),
-        "accumulator_entry_bytes": int(accumulator_entry_bytes),
-        "accumulator_warn": accumulator_warn,
-        "accumulator_max": accumulator_max,
-    }
+    return IncrementalPhaseSplitLimits(
+        total_ram_bytes=snapshot.total_ram_bytes,
+        total_ram_source=snapshot.total_ram_source,
+        current_rss_bytes=snapshot.current_rss_bytes,
+        current_rss_source=snapshot.current_rss_source,
+        available_bytes=snapshot.available_bytes,
+        effective_available_fraction=snapshot.effective_available_fraction,
+        safety_margin_bytes=snapshot.safety_margin_bytes,
+        chunk_budget_bytes=chunk_budget_bytes,
+        accumulator_budget_bytes=accumulator_budget_bytes,
+        bytes_per_pair=bytes_per_pair,
+        derived_chunk_pairs=derived_chunk_pairs,
+        chunk_pairs=chunk_pairs,
+        max_chunk_pairs=int(max_pairs),
+        accumulator_entry_bytes=int(accumulator_entry_bytes),
+        accumulator_warn=accumulator_warn,
+        accumulator_max=accumulator_max,
+    )
 
 
 def compute_rust_batch_chunk_plan(
@@ -459,7 +550,7 @@ def compute_rust_batch_chunk_plan(
     detect_cgroup_fn: Callable[[], tuple[int | None, str]] | None = None,
     detect_total_fn: Callable[[], tuple[int | None, str]] | None = None,
     current_rss_fn: Callable[[int], tuple[int, str]] | None = None,
-) -> dict[str, int | str | float]:
+) -> RustBatchChunkPlan:
     resolved = resolve_rust_batch_prediction_params()
     if base_chunk_pairs is None:
         base_chunk_pairs = int(resolved["base_chunk_pairs"])
@@ -500,9 +591,6 @@ def compute_rust_batch_chunk_plan(
     predicted_selected_features_bytes = int(bounded_total_rows) * int(selected_feature_count_bounded * 8)
     predicted_nameless_features_bytes = int(bounded_total_rows) * int(nameless_feature_count_bounded * 8)
     predicted_features_matrix_bytes = int(predicted_selected_features_bytes) + int(predicted_nameless_features_bytes)
-    # many_pairs_featurize now allocates only selected columns (plus optional nameless columns)
-    # and does not materialize full-matrix + slice copies anymore.
-    predicted_slice_peak_bytes = 0
     predicted_labels_bytes = int(bounded_total_rows) * 8
     predicted_persistent_row_overhead_bytes = int(bounded_total_rows) * max(0, int(persistent_row_overhead_bytes))
     predicted_fixed_overhead_bytes = max(0, int(fixed_overhead_bytes))
@@ -514,40 +602,39 @@ def compute_rust_batch_chunk_plan(
         + predicted_fixed_overhead_bytes
     )
     predicted_stage_peak_rss_bytes = int(snapshot.current_rss_bytes) + int(predicted_stage_peak_delta_bytes)
-    return {
-        "total_ram_bytes": snapshot.total_ram_bytes,
-        "total_ram_source": snapshot.total_ram_source,
-        "current_rss_bytes": snapshot.current_rss_bytes,
-        "current_rss_source": snapshot.current_rss_source,
-        "available_bytes": snapshot.available_bytes,
-        "effective_available_fraction": snapshot.effective_available_fraction,
-        "safety_margin_bytes": snapshot.safety_margin_bytes,
-        "stage_budget_fraction": float(stage_budget_fraction),
-        "stage_budget_bytes": int(stage_budget_bytes),
-        "base_chunk_pairs": int(bounded_base_chunk_pairs),
-        "row_overhead_bytes": int(max(0, int(row_overhead_bytes))),
-        "persistent_row_overhead_bytes": int(max(0, int(persistent_row_overhead_bytes))),
-        "fixed_overhead_bytes": int(predicted_fixed_overhead_bytes),
-        "bytes_per_pair_row": int(bytes_per_pair_row),
-        "derived_chunk_pairs": int(derived_chunk_pairs),
-        "chunk_pairs": int(chunk_pairs),
-        "total_rows": int(bounded_total_rows),
-        "full_feature_count": int(full_feature_count),
-        "selected_feature_count": int(selected_feature_count_bounded),
-        "nameless_feature_count": int(nameless_feature_count_bounded),
-        "predicted_chunk_bytes": int(predicted_chunk_bytes),
-        "predicted_features_matrix_bytes": int(predicted_features_matrix_bytes),
-        "predicted_labels_bytes": int(predicted_labels_bytes),
-        "predicted_persistent_row_overhead_bytes": int(predicted_persistent_row_overhead_bytes),
-        "predicted_fixed_overhead_bytes": int(predicted_fixed_overhead_bytes),
-        "predicted_selected_features_bytes": int(predicted_selected_features_bytes),
-        "predicted_nameless_features_bytes": int(predicted_nameless_features_bytes),
-        "predicted_slice_peak_bytes": int(predicted_slice_peak_bytes),
-        "predicted_stage_peak_delta_bytes": int(predicted_stage_peak_delta_bytes),
-        "predicted_stage_peak_rss_bytes": int(predicted_stage_peak_rss_bytes),
+    return RustBatchChunkPlan(
+        total_ram_bytes=snapshot.total_ram_bytes,
+        total_ram_source=snapshot.total_ram_source,
+        current_rss_bytes=snapshot.current_rss_bytes,
+        current_rss_source=snapshot.current_rss_source,
+        available_bytes=snapshot.available_bytes,
+        effective_available_fraction=snapshot.effective_available_fraction,
+        safety_margin_bytes=snapshot.safety_margin_bytes,
+        stage_budget_fraction=float(stage_budget_fraction),
+        stage_budget_bytes=int(stage_budget_bytes),
+        base_chunk_pairs=int(bounded_base_chunk_pairs),
+        row_overhead_bytes=int(max(0, int(row_overhead_bytes))),
+        persistent_row_overhead_bytes=int(max(0, int(persistent_row_overhead_bytes))),
+        fixed_overhead_bytes=int(predicted_fixed_overhead_bytes),
+        bytes_per_pair_row=int(bytes_per_pair_row),
+        derived_chunk_pairs=int(derived_chunk_pairs),
+        chunk_pairs=int(chunk_pairs),
+        total_rows=int(bounded_total_rows),
+        full_feature_count=int(full_feature_count),
+        selected_feature_count=int(selected_feature_count_bounded),
+        nameless_feature_count=int(nameless_feature_count_bounded),
+        predicted_chunk_bytes=int(predicted_chunk_bytes),
+        predicted_features_matrix_bytes=int(predicted_features_matrix_bytes),
+        predicted_labels_bytes=int(predicted_labels_bytes),
+        predicted_persistent_row_overhead_bytes=int(predicted_persistent_row_overhead_bytes),
+        predicted_fixed_overhead_bytes=int(predicted_fixed_overhead_bytes),
+        predicted_selected_features_bytes=int(predicted_selected_features_bytes),
+        predicted_nameless_features_bytes=int(predicted_nameless_features_bytes),
+        predicted_stage_peak_delta_bytes=int(predicted_stage_peak_delta_bytes),
+        predicted_stage_peak_rss_bytes=int(predicted_stage_peak_rss_bytes),
         # Backward-compatible alias; prefer predicted_stage_peak_delta_bytes.
-        "predicted_stage_peak_bytes": int(predicted_stage_peak_delta_bytes),
-    }
+        predicted_stage_peak_bytes=int(predicted_stage_peak_delta_bytes),
+    )
 
 
 def summarize_prediction_accuracy(
@@ -558,7 +645,7 @@ def summarize_prediction_accuracy(
     rss_before_bytes: int,
     rss_peak_bytes: int,
     rss_after_bytes: int,
-) -> dict[str, str | int | float | bool]:
+) -> PredictionAccuracySummary:
     predicted_delta = predicted_peak_delta_bytes if predicted_peak_delta_bytes is not None else predicted_bytes
     if predicted_delta is None:
         raise ValueError("Either predicted_peak_delta_bytes or predicted_bytes must be provided.")
@@ -571,18 +658,18 @@ def summarize_prediction_accuracy(
     observed_end_delta_bytes = max(0, bounded_after - bounded_before)
     predicted_peak_rss_bytes = bounded_before + bounded_predicted_delta
     prediction_error_ratio = float(observed_peak_delta_bytes) / float(bounded_predicted_delta)
-    return {
-        "stage_name": stage_name,
-        "prediction_contract_version": "delta_v1",
-        "predicted_peak_delta_bytes": bounded_predicted_delta,
-        "predicted_peak_rss_bytes": predicted_peak_rss_bytes,
+    return PredictionAccuracySummary(
+        stage_name=stage_name,
+        prediction_contract_version="delta_v1",
+        predicted_peak_delta_bytes=bounded_predicted_delta,
+        predicted_peak_rss_bytes=predicted_peak_rss_bytes,
         # Backward-compatible alias; prefer predicted_peak_delta_bytes.
-        "predicted_bytes": bounded_predicted_delta,
-        "rss_before_bytes": bounded_before,
-        "rss_peak_bytes": bounded_peak,
-        "rss_after_bytes": bounded_after,
-        "observed_peak_delta_bytes": observed_peak_delta_bytes,
-        "observed_end_delta_bytes": observed_end_delta_bytes,
-        "prediction_error_ratio": prediction_error_ratio,
-        "underpredicted": bool(observed_peak_delta_bytes > bounded_predicted_delta),
-    }
+        predicted_bytes=bounded_predicted_delta,
+        rss_before_bytes=bounded_before,
+        rss_peak_bytes=bounded_peak,
+        rss_after_bytes=bounded_after,
+        observed_peak_delta_bytes=observed_peak_delta_bytes,
+        observed_end_delta_bytes=observed_end_delta_bytes,
+        prediction_error_ratio=prediction_error_ratio,
+        underpredicted=bool(observed_peak_delta_bytes > bounded_predicted_delta),
+    )

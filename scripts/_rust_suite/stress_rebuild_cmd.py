@@ -4,37 +4,17 @@ import argparse
 import gc
 import json
 import os
-import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import (
-        ProcessTreeRSSMonitor,
-        build_run_metadata,
-        collect_rust_extension_identity,
-        compute_rss_growth_fraction,
-    )
-else:
-    try:
-        from _rust_suite.common import (
-            ProcessTreeRSSMonitor,
-            build_run_metadata,
-            collect_rust_extension_identity,
-            compute_rss_growth_fraction,
-        )
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import (
-            ProcessTreeRSSMonitor,
-            build_run_metadata,
-            collect_rust_extension_identity,
-            compute_rss_growth_fraction,
-        )
+from _rust_suite.common import (
+    ProcessTreeRSSMonitor,
+    build_run_metadata,
+    collect_rust_extension_identity,
+    compute_rss_growth_fraction,
+)
 
 
 def _import_rust_module() -> Any:

@@ -163,7 +163,7 @@ Promoted defaults (2026-02-28):
 
 
 
-## Next Up: A1 Batch-Oriented Distance Matrices (Rust-path optimization; keep Python path)
+## A1 Batch-Oriented Distance Matrices (Rust-path optimization; keep Python path)
 
 Owner: Codex
 
@@ -340,6 +340,113 @@ Notes:
 - Phase 1 (policy + canonical example table + pytest invariants) can start immediately.
 - Phase 2 (implementation) is easier after Bundle 5 so Phase 3 artifact regeneration goes straight to
   the target formats (MessagePack/Safetensors) instead of regenerating twice.
+
+## Bundle 7: Giant-Block Subblocking Throughput + Phase-A Chunk Tuning (Proposal)
+
+Owner: TBD
+
+Status: **Track B complete (2026-02-28). Track A not started.**
+
+Goal: reduce latency for single-block large-scale inference (100k-600k signatures) in subblocking mode while
+preserving bounded-memory operation and explicit quality/semantics controls (`phase_b_mode`).
+
+Scope (two coordinated tracks):
+1. Subblock orchestration and lifecycle overhead reduction.
+2. Phase-A chunk/memory tuning and parameterized throughput sweep.
+
+Track A - orchestration/lifecycle scope:
+- Process subblocks in deterministic cohorts using a pair-budget target, not strictly one-by-one.
+- Hoist Phase A backend initialization and indexed signature map construction out of per-subblock loops.
+- Replace full seed-sync-on-every-subblock with deterministic delta sync (or sync-every-N-subblocks) with parity gates.
+- Remove expensive `deepcopy` patterns in hot subblock loops where object ownership allows safe shallow/structured copies.
+- Determinism/aliasing contract: keep subblock iteration order stable, apply seed deltas in a deterministic order, and add
+  a parity gate (`cluster_membership_digest` match in compare mode) before accepting any lifecycle changes.
+
+Track B - chunk/memory tuning scope:
+- Always pass explicit `total_ram_bytes` for giant-block/subblocked runs.
+- Sweep `S2AND_PHASE_A_MAX_CHUNK_PAIRS` on representative 10k/15k subsets (`250k`, `500k`, `1M`, `2M`).
+- Before sweeping, ensure the harness emits Phase A gate metrics in machine-readable JSON (avoid log-scraping):
+  - plumb `phase_a_accumulator_overflow_early_stop` and an aggregated `phase_a_adaptive_halvings_max` (max across subblocks)
+    through `predict_incremental(...)` results and `scripts/_rust_suite/big_block_incremental_cmd.py` single-run JSON output.
+- Select the largest setting that satisfies all required gates (as recorded in JSON):
+  - `phase_a_adaptive_halvings_max == 0`
+  - `phase_a_accumulator_overflow_early_stop == false`
+  - acceptable `phase_b_mode` (`exact` when parity is required)
+  - best wall time among compliant settings
+- If no setting is stable/fast enough, expose/tune `chunk_budget_fraction` and `accumulator_budget_fraction`
+  as runtime knobs (currently code-level defaults in `memory_budget.py`).
+
+Start here:
+- `s2and/model.py`:
+  - subblocked predict orchestration (`predict(...)` with `batching_threshold`)
+  - phase-split incremental path (`_predict_incremental_phase_split`, `_phase_a_seed_distances`)
+  - seed sync path (`_sync_rust_cluster_seeds`)
+- `s2and/memory_budget.py`:
+  - `compute_incremental_phase_split_limits(...)`
+- `scripts/_rust_suite/big_block_incremental_cmd.py`:
+  - sweep harness, compare outputs, and artifact emission
+- Context docs:
+  - `docs/subclustering.md`
+  - `docs/stage_memory_estimates.md`
+  - `docs/rust/roadmap.md`
+
+Validation (must-have):
+- Perf runs must use a **release** Rust extension build (or published wheel):
+  - Build once: `uv run --with maturin maturin develop --release -m s2and_rust/Cargo.toml`
+  - For sweeps, pass `--require-rust-release 1` so accidental debug builds don't pollute latency results.
+- Keep canonical compare mode for parity-sensitive checks:
+  - `uv run --no-project python scripts/rust_suite.py big-block-incremental --mode compare_phase_split --backend rust --subset-dir scratch/inventors_topblock_15k --total-signatures 10000 --seed-signatures 7500 --seed-cluster-count 1200 --batching-threshold 7500 --n-jobs 8 --total-ram-bytes 34359738368 --write-json scratch/big_block/compare_phase_split_bundle7_10k.json --require-rust-release 1 --full-run`
+- Chunk-pairs sweep (PowerShell example loop; one JSON per candidate):
+  - `$env:S2AND_PHASE_A_MAX_CHUNK_PAIRS='250000'; uv run --no-project python scripts/rust_suite.py big-block-incremental --mode single --backend rust --subset-dir scratch/inventors_topblock_15k --total-signatures 14995 --seed-signatures 11245 --seed-cluster-count 1800 --batching-threshold 7500 --n-jobs 4 --total-ram-bytes 34359738368 --single-write-json scratch/big_block/bundle7_chunkpairs_250k_14995.json --require-rust-release 1 --full-run`
+  - `$env:S2AND_PHASE_A_MAX_CHUNK_PAIRS='500000'; uv run --no-project python scripts/rust_suite.py big-block-incremental --mode single --backend rust --subset-dir scratch/inventors_topblock_15k --total-signatures 14995 --seed-signatures 11245 --seed-cluster-count 1800 --batching-threshold 7500 --n-jobs 4 --total-ram-bytes 34359738368 --single-write-json scratch/big_block/bundle7_chunkpairs_500k_14995.json --require-rust-release 1 --full-run`
+  - `$env:S2AND_PHASE_A_MAX_CHUNK_PAIRS='1000000'; uv run --no-project python scripts/rust_suite.py big-block-incremental --mode single --backend rust --subset-dir scratch/inventors_topblock_15k --total-signatures 14995 --seed-signatures 11245 --seed-cluster-count 1800 --batching-threshold 7500 --n-jobs 4 --total-ram-bytes 34359738368 --single-write-json scratch/big_block/bundle7_chunkpairs_1m_14995.json --require-rust-release 1 --full-run`
+  - `$env:S2AND_PHASE_A_MAX_CHUNK_PAIRS='2000000'; uv run --no-project python scripts/rust_suite.py big-block-incremental --mode single --backend rust --subset-dir scratch/inventors_topblock_15k --total-signatures 14995 --seed-signatures 11245 --seed-cluster-count 1800 --batching-threshold 7500 --n-jobs 4 --total-ram-bytes 34359738368 --single-write-json scratch/big_block/bundle7_chunkpairs_2m_14995.json --require-rust-release 1 --full-run`
+- Orchestration overhead check: add a second benchmark configuration that intentionally yields **many subblocks**
+  (e.g., expose a `subblocking_maximum_size` knob for `make_subblocks(...)`, or choose a block known to split heavily),
+  and record `subblock_count` + total overhead time separately from model/constraint runtime.
+- Decision artifact:
+  - Record selected setting + rejected settings with gate reasons in a summary JSON under `scratch/big_block/`.
+  - Include run metadata so the decision is reproducible: git SHA, `rust_extension_identity`, `n_jobs`, `total_ram_bytes`,
+    resolved `chunk_pairs` + budgets, `phase_b_mode`, peak RSS, wall time, and the Phase A gate metrics.
+
+### Track B Results (2026-02-28)
+
+Code changes (prerequisite for machine-readable gate metrics):
+- `s2and/model.py`: plumbed `phase_a_adaptive_halvings_max` (max across subblocks) through
+  `_predict_incremental_phase_split()` → `_build_incremental_result()`.
+- `scripts/_rust_suite/big_block_incremental_cmd.py`: surfaced both `phase_a_accumulator_overflow_early_stop`
+  and `phase_a_adaptive_halvings_max` in single-run JSON output.
+
+Sweep configuration:
+- Block: `j kim` (14995 signatures, 4 subblocks avg 3749 sigs each)
+- Subset: `scratch/inventors_topblock_15k`
+- Params: `--seed-signatures 11245 --seed-cluster-count 1800 --batching-threshold 7500 --n-jobs 4 --total-ram-bytes 34359738368`
+- Rust extension: release build, crate v0.31.0, `debug_assertions=false`
+- Machine: 32 GB RAM, Windows 10 Pro
+
+Results:
+
+| chunk_pairs | predict_s | total_s | peak_rss_gb | halvings_max | overflow | phase_b | digest |
+|-------------|-----------|---------|-------------|--------------|----------|---------|--------|
+| 250k | 1615.4 | 1620.9 | 2.590 | 0 | false | exact | 260096cc… |
+| 500k (default) | 1524.7 | 1530.7 | 2.539 | 0 | false | exact | 260096cc… |
+| **1M (selected)** | **1455.0** | **1459.9** | **2.379** | 0 | false | exact | 260096cc… |
+| 2M | 1613.0 | 1617.7 | 2.670 | 0 | false | exact | 260096cc… |
+
+All four settings pass every gate (`halvings_max==0`, `overflow==false`, `phase_b==exact`).
+All produce identical `cluster_membership_digest` — bit-for-bit clustering parity confirmed.
+
+Selected setting: **`S2AND_PHASE_A_MAX_CHUNK_PAIRS=1_000_000`**
+- 10.5% wall-time improvement over the current 500k default (1455s vs 1525s).
+- Lowest peak RSS of all candidates (2.38 GB vs 2.54 GB at 500k).
+- 2M regresses because per-chunk model prediction time (~32s/chunk) exceeds the savings from fewer chunks.
+- Sweet spot: 1M processes Phase A in 7 chunks (vs 13 at 500k) with ~17s/chunk prediction.
+
+JSON artifacts: `scratch/big_block/bundle7_chunkpairs_{250k,500k,1m,2m}_14995.json`
+
+Next steps:
+- Change the default from 500k → 1M in `memory_budget.py` (or promote to a config knob).
+- Track A orchestration work (lifecycle overhead, seed sync, deepcopy) remains available for further gains.
 
 ## The Rest
 - A0 (fully fused Rust pipeline): high effort; revisit after the A1 batch/block distance-matrix pipeline lands.

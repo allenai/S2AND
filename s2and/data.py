@@ -26,8 +26,12 @@ from s2and.consts import (
 )
 from s2and.file_cache import cached_path
 from s2and.mp import UniversalPool
-from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
-from s2and.rust_capabilities import detect_rust_runtime_capabilities
+from s2and.runtime import (
+    RuntimeContext,
+    build_runtime_context,
+    detect_rust_runtime_capabilities,
+    stage_uses_rust,
+)
 from s2and.rust_lifecycle import build_rust_lifecycle_policy
 from s2and.sampling import random_sampling, sampling
 from s2and.text import (
@@ -102,10 +106,10 @@ def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str
     return _NAME_COUNTS_CACHE  # type: ignore[return-value]
 
 
-def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> tuple[bool, bool, bool]:
+def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> bool:
     use_rust_backend = stage_uses_rust(runtime_context, "ingest_preprocess")
     if not use_rust_backend:
-        return False, False, False
+        return False
 
     rust_module_available = False
     try:
@@ -121,21 +125,7 @@ def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> t
             f"(run_id={runtime_context.run_id})"
         )
 
-    return True, True, True
-
-
-def _prefilter_affiliation_text(affiliations: list[str]) -> str:
-    if not affiliations:
-        return ""
-    tokens = [word for word in " ".join(affiliations).split() if word not in AFFILIATIONS_STOP_WORDS and len(word) > 1]
-    return " ".join(tokens)
-
-
-def _signature_has_materialized_name_counts(signature: "Signature") -> bool:
-    counts = signature.author_info_name_counts
-    if counts is None:
-        return False
-    return any(value is not None for value in counts)
+    return True
 
 
 def _ordered_coauthors_for_signature(signature: "Signature", papers: dict[str, "Paper"]) -> list[str]:
@@ -154,9 +144,30 @@ def _python_signature_ngrams_batch(
         get_text_ngrams(text, stopwords=None, use_bigrams=True) if text else Counter() for text in coauthor_texts
     ]
     affiliation_counters = [
-        get_text_ngrams_words(text, stopwords=set()) if text else Counter() for text in affiliation_texts
+        get_text_ngrams_words(text, stopwords=AFFILIATIONS_STOP_WORDS) if text else Counter()
+        for text in affiliation_texts
     ]
     return coauthor_counters, affiliation_counters
+
+
+def _assemble_full_name(parts: list[str | None]) -> str:
+    return " ".join([part.strip() for part in parts if part is not None and len(part) != 0]).strip()
+
+
+def _build_signature_ngram_texts(
+    *,
+    coauthors: list[str],
+    affiliations: list[str],
+    normalize_coauthors: bool,
+    normalize_affiliations: bool,
+) -> tuple[str, str]:
+    coauthor_values = [normalize_text(coauthor) for coauthor in coauthors] if normalize_coauthors else coauthors
+    affiliation_values = (
+        [normalize_text(affiliation) for affiliation in affiliations] if normalize_affiliations else affiliations
+    )
+    coauthor_text = " ".join(coauthor_values) if len(coauthor_values) > 0 else ""
+    affiliation_text = " ".join(affiliation_values)
+    return coauthor_text, affiliation_text
 
 
 class NameCounts(NamedTuple):
@@ -176,8 +187,8 @@ class Signature(NamedTuple):
     author_info_suffix_normalized: str | None
     author_info_suffix: str | None
     author_info_first_normalized: str | None
-    author_info_coauthors: list[str] | None
-    author_info_coauthor_blocks: list[str] | None
+    author_info_coauthors: set[str] | None
+    author_info_coauthor_blocks: set[str] | None
     author_info_full_name: str | None
     author_info_affiliations: list[str]
     author_info_affiliations_n_grams: Counter | None
@@ -385,10 +396,10 @@ class ANDData:
         signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
         raw_signatures = self.maybe_load_json(signatures)
-        raw_signatures_for_json = dict(raw_signatures)
-        self.signatures = raw_signatures
+        raw_signatures_for_json: dict[Any, Any] | None = None
+        self.signatures = {}
         # convert dictionary to namedtuples for memory reduction
-        for signature_id, signature in self.signatures.items():
+        for signature_id, signature in raw_signatures.items():
             self.signatures[signature_id] = Signature(
                 author_info_first=signature["author_info"]["first"],
                 author_info_first_normalized_without_apostrophe=None,
@@ -426,7 +437,7 @@ class ANDData:
                 signature_id=signature["signature_id"],
             )
         logger.info("loaded signatures")
-        logger.info(
+        logger.debug(
             "Telemetry stage: stage=anddata_ingest_signatures seconds=%.3f signatures=%d",
             time.perf_counter() - signatures_stage_start,
             len(self.signatures),
@@ -449,6 +460,8 @@ class ANDData:
             and len(filtered_papers) < len(raw_papers)
             and not defer_rust_json_ingest_write_for_sinonym
         ):
+            if raw_signatures_for_json is None:
+                raw_signatures_for_json = dict(raw_signatures)
             self._materialize_rust_json_ingest_filtered_payload(
                 raw_signatures_for_json=raw_signatures_for_json,
                 filtered_papers_for_json=filtered_papers,
@@ -483,7 +496,7 @@ class ANDData:
                 paper_id=paper["paper_id"],
             )
         logger.info(f"loaded papers subset: {len(self.papers)}/{len(raw_papers)} relevant")
-        logger.info(
+        logger.debug(
             "Telemetry stage: stage=anddata_ingest_papers seconds=%.3f retained_papers=%d source_papers=%d",
             time.perf_counter() - papers_stage_start,
             len(self.papers),
@@ -518,6 +531,8 @@ class ANDData:
             )
             logger.info(f"Sinonym overwrote {paper_overwrite_count} paper author name(s)")
             if defer_rust_json_ingest_write_for_sinonym:
+                if raw_signatures_for_json is None:
+                    raw_signatures_for_json = dict(raw_signatures)
                 self._sync_in_memory_names_to_rust_json_payload(
                     raw_signatures_for_json=raw_signatures_for_json,
                     filtered_papers_for_json=filtered_papers,
@@ -677,7 +692,7 @@ class ANDData:
                 compute_reference_features=self.compute_reference_features,
             )
             logger.info("preprocessed papers")
-        logger.info(
+        logger.debug(
             "Telemetry stage: stage=anddata_preprocess_papers seconds=%.3f papers=%d",
             time.perf_counter() - preprocess_papers_stage_start,
             len(self.papers),
@@ -687,12 +702,12 @@ class ANDData:
         logger.info("preprocessing signatures")
         self.preprocess_signatures(name_counts_loaded)
         logger.info("preprocessed signatures")
-        logger.info(
+        logger.debug(
             "Telemetry stage: stage=anddata_preprocess_signatures seconds=%.3f signatures=%d",
             time.perf_counter() - preprocess_signatures_stage_start,
             len(self.signatures),
         )
-        logger.info(
+        logger.debug(
             "Telemetry stage: stage=anddata_total_init seconds=%.3f",
             time.perf_counter() - init_start,
         )
@@ -838,7 +853,7 @@ class ANDData:
         last_for_counts = _canonicalize_last_for_counts(signature.author_info_last, counts_last_normalized)
 
         first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
-        first_initial = first_for_counts if len(first_for_counts) > 0 else ""
+        first_initial = first_for_counts[0] if first_for_counts else ""
         last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
 
         return NameCounts(
@@ -864,9 +879,9 @@ class ANDData:
         nothing, modifies self.signatures
         """
         runtime_context = self.runtime_context
-        use_rust_backend, use_rust_featurizer, rust_module_available = _signature_preprocess_backend_decision(
-            runtime_context
-        )
+        use_rust_backend = _signature_preprocess_backend_decision(runtime_context)
+        use_rust_featurizer = use_rust_backend
+        rust_module_available = use_rust_backend
         defer_signature_ngrams_to_rust = self.rust_lifecycle_policy.defer_signature_ngrams_to_rust
         defer_signature_fields_to_rust = self.rust_lifecycle_policy.defer_signature_fields_to_rust
         logger.info(
@@ -932,15 +947,14 @@ class ANDData:
                             coauthor_set = None
                             coauthor_blocks = None
                             if full_name is None:
-                                full_name_parts = [
-                                    signature.author_info_first,
-                                    signature.author_info_middle,
-                                    signature.author_info_last,
-                                    signature.author_info_suffix,
-                                ]
-                                full_name = " ".join(
-                                    [part.strip() for part in full_name_parts if part is not None and len(part) != 0]
-                                ).strip()
+                                full_name = _assemble_full_name(
+                                    [
+                                        signature.author_info_first,
+                                        signature.author_info_middle,
+                                        signature.author_info_last,
+                                        signature.author_info_suffix,
+                                    ]
+                                )
                         else:
                             # our normalization scheme is to normalize first and middle separately,
                             # join them, then take the first token of the combined join
@@ -966,8 +980,12 @@ class ANDData:
                                 normalize_text(affiliation) for affiliation in signature.author_info_affiliations
                             ]
                             if not defer_signature_ngrams_to_rust:
-                                coauthor_text = " ".join(coauthors) if coauthors is not None else ""
-                                affiliation_text = _prefilter_affiliation_text(affiliations)
+                                coauthor_text, affiliation_text = _build_signature_ngram_texts(
+                                    coauthors=coauthors or [],
+                                    affiliations=affiliations,
+                                    normalize_coauthors=False,
+                                    normalize_affiliations=False,
+                                )
 
                         if load_name_counts:
                             counts = self._compute_signature_name_counts(
@@ -981,15 +999,14 @@ class ANDData:
                             counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
 
                         if not defer_signature_fields_to_rust:
-                            full_name_parts = [
-                                stored_first_without_apostrophe or signature.author_info_first,
-                                stored_middle_without_apostrophe or signature.author_info_middle,
-                                stored_last_normalized or signature.author_info_last,
-                                stored_suffix_normalized or signature.author_info_suffix,
-                            ]
-                            full_name = " ".join(
-                                [part.strip() for part in full_name_parts if part is not None and len(part) != 0]
-                            ).strip()
+                            full_name = _assemble_full_name(
+                                [
+                                    stored_first_without_apostrophe or signature.author_info_first,
+                                    stored_middle_without_apostrophe or signature.author_info_middle,
+                                    stored_last_normalized or signature.author_info_last,
+                                    stored_suffix_normalized or signature.author_info_suffix,
+                                ]
+                            )
 
                             # we need a regex to extract the 16 digits, keeping in mind the last digit could be X
                             if signature.author_info_orcid is not None:
@@ -1088,11 +1105,15 @@ class ANDData:
                         continue
 
                     coauthors = _ordered_coauthors_for_signature(signature, self.papers)
-                    coauthor_text = " ".join(coauthors) if len(coauthors) > 0 else ""
-                    normalized_affiliations = [
-                        normalize_text(affiliation) for affiliation in list(signature.author_info_affiliations or [])
-                    ]
-                    affiliation_text = _prefilter_affiliation_text(normalized_affiliations)
+                    normalized_affiliations = list(signature.author_info_affiliations or [])
+                    # `get_text_ngrams_words` performs stopword and single-character filtering.
+                    # Keep this normalization path idempotent as a safe fallback for deferred Rust paths.
+                    coauthor_text, affiliation_text = _build_signature_ngram_texts(
+                        coauthors=coauthors,
+                        affiliations=normalized_affiliations,
+                        normalize_coauthors=True,
+                        normalize_affiliations=True,
+                    )
 
                     pending_signature_ids.append(signature_id)
                     batch_coauthor_texts.append(coauthor_text)

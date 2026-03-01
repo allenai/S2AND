@@ -3,7 +3,6 @@ from typing import Any
 
 import lightgbm as lgb
 import numpy as np
-import pytest
 
 import s2and.model as model_module
 from s2and.data import ANDData
@@ -259,24 +258,6 @@ def test_predict_incremental_batch_constraint_path_parity(monkeypatch):
     assert calls["batch"] > 0
 
 
-def test_predict_incremental_phase_split_budget_guard(monkeypatch):
-    block = ["3", "4", "5", "6", "7", "8"]
-    clusterer, dataset = _build_dummy_clusterer_and_dataset()
-    monkeypatch.setattr(
-        model_module,
-        "_compute_incremental_memory_limits",
-        lambda *_args, **_kwargs: _mock_incremental_limits(
-            chunk_pairs=3,
-            accumulator_budget_bytes=1,
-            chunk_budget_bytes=1,
-        ),
-    )
-
-    result = clusterer.predict_incremental(block, dataset, batching_threshold=3)
-    assert result["phase_b_mode"] == "subblock_local"
-    assert int(result["phase_b_required_bytes"]) > int(result["phase_b_budget_bytes"])
-
-
 def test_predict_incremental_phase_split_budget_approx_fallback(monkeypatch):
     block = ["3", "4", "5", "6", "7", "8"]
     clusterer, dataset = _build_dummy_clusterer_and_dataset()
@@ -358,44 +339,6 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(monkeypatch)
 
     clusterer.predict({"block": block_signatures}, dataset, batching_threshold=3)
     assert observed_order == ["block|subblock=alpha", "block|subblock=zeta"]
-
-
-def test_ram_arg_overrides_autodetect(monkeypatch):
-    monkeypatch.setattr(model_module, "_detect_cgroup_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
-    monkeypatch.setattr(model_module, "_detect_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
-    resolved, source = model_module._resolve_total_ram_bytes_for_incremental(total_ram_bytes=1024)
-    assert resolved == 1024
-    assert source == "arg"
-
-
-def test_ram_cgroup_detection_uses_80pct(monkeypatch):
-    monkeypatch.setattr(model_module, "_detect_cgroup_total_ram_bytes_best_effort", lambda: (10_000, "cgroup:test"))
-    monkeypatch.setattr(model_module, "_detect_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
-    resolved, source = model_module._resolve_total_ram_bytes_for_incremental()
-    assert resolved == 8000
-    assert source == "cgroup:test_80pct"
-
-
-def test_ram_host_detection_uses_80pct(monkeypatch):
-    monkeypatch.setattr(model_module, "_detect_cgroup_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
-    monkeypatch.setattr(model_module, "_detect_total_ram_bytes_best_effort", lambda: (20_000, "psutil.virtual_memory"))
-    resolved, source = model_module._resolve_total_ram_bytes_for_incremental()
-    assert resolved == 16_000
-    assert source == "psutil.virtual_memory_80pct"
-
-
-def test_ram_detection_failure_raises(monkeypatch):
-    monkeypatch.setattr(model_module, "_detect_cgroup_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
-    monkeypatch.setattr(model_module, "_detect_total_ram_bytes_best_effort", lambda: (None, "unavailable"))
-    with pytest.raises(RuntimeError, match="Unable to determine total RAM"):
-        model_module._resolve_total_ram_bytes_for_incremental()
-
-
-def test_ram_arg_precedence_over_cgroup(monkeypatch):
-    monkeypatch.setattr(model_module, "_detect_cgroup_total_ram_bytes_best_effort", lambda: (10_000, "cgroup:test"))
-    resolved, source = model_module._resolve_total_ram_bytes_for_incremental(total_ram_bytes=4000)
-    assert resolved == 4000
-    assert source == "arg"
 
 
 def test_phase_a_memory_prediction_logged_and_bounded(caplog):

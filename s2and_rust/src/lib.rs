@@ -9,7 +9,6 @@ use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::f64;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
@@ -31,9 +30,6 @@ const DROPPED_AFFIXES: [&str; 48] = [
 fn is_dropped_affix(token: &str) -> bool {
     DROPPED_AFFIXES.contains(&token)
 }
-
-// (LightGBM scorer/trainer removed — model_scoring and model_training stages
-// are Python-only; the Rust C-API wrapper never justified its latency overhead.)
 
 #[derive(Clone, Serialize, Deserialize)]
 struct CounterData {
@@ -132,8 +128,6 @@ struct RustFeaturizer {
     cluster_seed_disallow_value: f64,
     #[serde(skip)]
     cached_signature_id_order: OnceLock<Vec<String>>,
-    #[serde(skip)]
-    cached_full_feature_count: OnceLock<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -349,6 +343,14 @@ fn extract_set_str(obj: &Bound<'_, PyAny>) -> PyResult<Option<HashSet<String>>> 
     }
 }
 
+fn canonical_signature_pair(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
+}
+
 fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)>> {
     if obj.is_none() {
         return Ok(HashSet::new());
@@ -357,7 +359,7 @@ fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)
     for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
-        out.insert((a, b));
+        out.insert(canonical_signature_pair(&a, &b));
     }
     Ok(out)
 }
@@ -794,58 +796,26 @@ fn extract_orcid_from_source_id(source_id: &str) -> Option<String> {
     }
     for start in 0..chars.len() {
         let mut idx = start;
-        let mut compact: Vec<char> = Vec::with_capacity(16);
+        let mut compact = String::with_capacity(16);
+        let mut valid = true;
 
-        for _ in 0..4 {
-            if idx >= chars.len() || !chars[idx].is_ascii_digit() {
+        for (group_idx, group_len) in [4usize, 4, 4, 3].iter().enumerate() {
+            for _ in 0..*group_len {
+                if idx >= chars.len() || !chars[idx].is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+                compact.push(chars[idx]);
+                idx += 1;
+            }
+            if !valid {
                 break;
             }
-            compact.push(chars[idx]);
-            idx += 1;
-        }
-        if compact.len() != 4 {
-            continue;
-        }
-        if idx < chars.len() && chars[idx] == '-' {
-            idx += 1;
-        }
-
-        for _ in 0..4 {
-            if idx >= chars.len() || !chars[idx].is_ascii_digit() {
-                break;
+            if group_idx < 3 && idx < chars.len() && chars[idx] == '-' {
+                idx += 1;
             }
-            compact.push(chars[idx]);
-            idx += 1;
         }
-        if compact.len() != 8 {
-            continue;
-        }
-        if idx < chars.len() && chars[idx] == '-' {
-            idx += 1;
-        }
-
-        for _ in 0..4 {
-            if idx >= chars.len() || !chars[idx].is_ascii_digit() {
-                break;
-            }
-            compact.push(chars[idx]);
-            idx += 1;
-        }
-        if compact.len() != 12 {
-            continue;
-        }
-        if idx < chars.len() && chars[idx] == '-' {
-            idx += 1;
-        }
-
-        for _ in 0..3 {
-            if idx >= chars.len() || !chars[idx].is_ascii_digit() {
-                break;
-            }
-            compact.push(chars[idx]);
-            idx += 1;
-        }
-        if compact.len() != 15 {
+        if !valid {
             continue;
         }
         if idx >= chars.len() {
@@ -856,9 +826,7 @@ fn extract_orcid_from_source_id(source_id: &str) -> Option<String> {
             continue;
         }
         compact.push(last);
-
-        let normalized: String = compact.iter().collect();
-        return Some(normalized);
+        return Some(compact);
     }
     None
 }
@@ -925,7 +893,8 @@ fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
         return Ok(None);
     }
     if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
-        let slice = unsafe { arr.as_slice()? };
+        let readonly = arr.readonly();
+        let slice = readonly.as_slice()?;
         let all_zero = slice.iter().all(|v| *v == 0.0);
         if all_zero {
             return Ok(None);
@@ -933,7 +902,8 @@ fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
         return Ok(Some(slice.to_vec()));
     }
     if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
-        let slice = unsafe { arr.as_slice()? };
+        let readonly = arr.readonly();
+        let slice = readonly.as_slice()?;
         let all_zero = slice.iter().all(|v| *v == 0.0);
         if all_zero {
             return Ok(None);
@@ -1274,11 +1244,11 @@ fn build_name_counts_data_from_artifact(
     let first_last_key = format!("{} {}", first_for_counts, last_for_counts)
         .trim()
         .to_string();
-    let first_initial = if first_for_counts.is_empty() {
-        ""
-    } else {
-        first_for_counts.as_str()
-    };
+    let first_initial = first_for_counts
+        .chars()
+        .next()
+        .map(|ch| ch.to_string())
+        .unwrap_or_default();
     let last_first_initial_key = format!("{} {}", last_for_counts, first_initial)
         .trim()
         .to_string();
@@ -1555,11 +1525,9 @@ fn counter_jaccard_data(
     counter2: &Option<CounterData>,
     denom_max: f64,
 ) -> f64 {
-    if counter1.is_none() || counter2.is_none() {
+    let (Some(c1), Some(c2)) = (counter1.as_ref(), counter2.as_ref()) else {
         return f64::NAN;
-    }
-    let c1 = counter1.as_ref().unwrap();
-    let c2 = counter2.as_ref().unwrap();
+    };
     if c1.entries.is_empty() || c2.entries.is_empty() {
         return f64::NAN;
     }
@@ -1613,11 +1581,9 @@ fn set_jaccard_data<T: Eq + std::hash::Hash>(
     set1: &Option<HashSet<T>>,
     set2: &Option<HashSet<T>>,
 ) -> f64 {
-    if set1.is_none() || set2.is_none() {
+    let (Some(s1), Some(s2)) = (set1.as_ref(), set2.as_ref()) else {
         return f64::NAN;
-    }
-    let s1 = set1.as_ref().unwrap();
-    let s2 = set2.as_ref().unwrap();
+    };
     if s1.is_empty() || s2.is_empty() {
         return f64::NAN;
     }
@@ -1665,11 +1631,9 @@ fn compute_name_counts_data(
     counts1: &Option<NameCountsData>,
     counts2: &Option<NameCountsData>,
 ) -> [f64; 6] {
-    if counts1.is_none() || counts2.is_none() {
+    let (Some(c1), Some(c2)) = (counts1.as_ref(), counts2.as_ref()) else {
         return [f64::NAN; 6];
-    }
-    let c1 = counts1.as_ref().unwrap();
-    let c2 = counts2.as_ref().unwrap();
+    };
     let min_first = nanmin(c1.first, c2.first);
     let min_first_last = nanmin(c1.first_last, c2.first_last);
     let min_last = nanmin(c1.last, c2.last);
@@ -1687,11 +1651,9 @@ fn compute_name_counts_data(
 }
 
 fn first_names_equal(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
-    if name1.is_none() || name2.is_none() {
+    let (Some(n1), Some(n2)) = (name1, name2) else {
         return Ok(f64::NAN);
-    }
-    let n1 = name1.unwrap();
-    let n2 = name2.unwrap();
+    };
     if py_len(n1) == 0 || py_len(n2) == 0 {
         return Ok(f64::NAN);
     }
@@ -1732,11 +1694,9 @@ fn middle_initials_overlap(name1: Option<&str>, name2: Option<&str>) -> PyResult
 }
 
 fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
-    if name1.is_none() || name2.is_none() {
+    let (Some(n1), Some(n2)) = (name1, name2) else {
         return Ok(f64::NAN);
-    }
-    let n1 = name1.unwrap();
-    let n2 = name2.unwrap();
+    };
     if py_len(n1) == 0 || py_len(n2) == 0 {
         return Ok(f64::NAN);
     }
@@ -1804,11 +1764,9 @@ fn email_parts(email: &str) -> (String, String) {
 }
 
 fn email_prefix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f64> {
-    if email1.is_none() || email2.is_none() {
+    let (Some(e1), Some(e2)) = (email1, email2) else {
         return Ok(f64::NAN);
-    }
-    let e1 = email1.unwrap();
-    let e2 = email2.unwrap();
+    };
     if py_len(e1) == 0 || py_len(e2) == 0 {
         return Ok(f64::NAN);
     }
@@ -1818,11 +1776,9 @@ fn email_prefix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f6
 }
 
 fn email_suffix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f64> {
-    if email1.is_none() || email2.is_none() {
+    let (Some(e1), Some(e2)) = (email1, email2) else {
         return Ok(f64::NAN);
-    }
-    let e1 = email1.unwrap();
-    let e2 = email2.unwrap();
+    };
     if py_len(e1) == 0 || py_len(e2) == 0 {
         return Ok(f64::NAN);
     }
@@ -1832,11 +1788,11 @@ fn email_suffix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f6
 }
 
 fn year_diff(year1: Option<i64>, year2: Option<i64>) -> PyResult<f64> {
-    if year1.is_none() || year2.is_none() {
+    let (Some(y1_raw), Some(y2_raw)) = (year1, year2) else {
         return Ok(f64::NAN);
-    }
-    let y1 = year1.unwrap() as f64;
-    let y2 = year2.unwrap() as f64;
+    };
+    let y1 = y1_raw as f64;
+    let y2 = y2_raw as f64;
     let diff = (y1 - y2).abs();
     Ok(diff.min(50.0))
 }
@@ -2118,6 +2074,7 @@ const SIG_IDX_ORCID: usize = 16;
 const SIG_IDX_NAME_COUNTS: usize = 17;
 const SIG_IDX_POSITION: usize = 18;
 const SIG_IDX_PAPER_ID: usize = 23;
+const FULL_FEATURE_COUNT: usize = 39;
 const SIGNATURE_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 13] = [
     (
         SIG_IDX_FIRST_NORMALIZED_NO_APOSTROPHE,
@@ -2150,74 +2107,80 @@ impl RustFeaturizer {
         s2: &SignatureData,
         p1: &PaperData,
         p2: &PaperData,
-    ) -> Vec<f64> {
-        let mut feats: Vec<f64> = Vec::with_capacity(39);
+    ) -> [f64; FULL_FEATURE_COUNT] {
+        let mut feats = [f64::NAN; FULL_FEATURE_COUNT];
+        let mut feat_i: usize = 0;
+        macro_rules! push_feat {
+            ($value:expr) => {{
+                feats[feat_i] = $value;
+                feat_i += 1;
+            }};
+        }
+
         let first1 = s1.first.as_deref();
         let first2 = s2.first.as_deref();
         let middle1 = s1.middle.as_deref();
         let middle2 = s2.middle.as_deref();
 
-        feats.push(first_names_equal(first1, first2).unwrap_or(f64::NAN));
-        feats.push(middle_initials_overlap(middle1, middle2).unwrap_or(f64::NAN));
-        feats.push(middle_names_equal(middle1, middle2).unwrap_or(f64::NAN));
-        feats.push(middle_one_missing(middle1, middle2).unwrap_or(f64::NAN));
-        feats.push(single_char_first(first1, first2).unwrap_or(f64::NAN));
-        feats.push(single_char_middle(middle1, middle2).unwrap_or(f64::NAN));
+        push_feat!(first_names_equal(first1, first2).unwrap_or(f64::NAN));
+        push_feat!(middle_initials_overlap(middle1, middle2).unwrap_or(f64::NAN));
+        push_feat!(middle_names_equal(middle1, middle2).unwrap_or(f64::NAN));
+        push_feat!(middle_one_missing(middle1, middle2).unwrap_or(f64::NAN));
+        push_feat!(single_char_first(first1, first2).unwrap_or(f64::NAN));
+        push_feat!(single_char_middle(middle1, middle2).unwrap_or(f64::NAN));
 
-        feats.push(counter_jaccard_data(
+        push_feat!(counter_jaccard_data(
             &s1.affiliations,
             &s2.affiliations,
             f64::INFINITY,
         ));
 
-        feats
-            .push(email_prefix_equal(s1.email.as_deref(), s2.email.as_deref()).unwrap_or(f64::NAN));
-        feats
-            .push(email_suffix_equal(s1.email.as_deref(), s2.email.as_deref()).unwrap_or(f64::NAN));
+        push_feat!(email_prefix_equal(s1.email.as_deref(), s2.email.as_deref()).unwrap_or(f64::NAN));
+        push_feat!(email_suffix_equal(s1.email.as_deref(), s2.email.as_deref()).unwrap_or(f64::NAN));
 
-        feats.push(set_jaccard_data(&s1.coauthor_blocks, &s2.coauthor_blocks));
-        feats.push(counter_jaccard_data(
+        push_feat!(set_jaccard_data(&s1.coauthor_blocks, &s2.coauthor_blocks));
+        push_feat!(counter_jaccard_data(
             &s1.coauthor_ngrams,
             &s2.coauthor_ngrams,
             5000.0,
         ));
-        feats.push(set_jaccard_data(&s1.coauthors, &s2.coauthors));
+        push_feat!(set_jaccard_data(&s1.coauthors, &s2.coauthors));
 
-        feats.push(counter_jaccard_data(
+        push_feat!(counter_jaccard_data(
             &p1.venue_ngrams,
             &p2.venue_ngrams,
             f64::INFINITY,
         ));
-        feats.push(year_diff(p1.year, p2.year).unwrap_or(f64::NAN));
+        push_feat!(year_diff(p1.year, p2.year).unwrap_or(f64::NAN));
 
-        feats.push(counter_jaccard_data(
+        push_feat!(counter_jaccard_data(
             &p1.title_words,
             &p2.title_words,
             f64::INFINITY,
         ));
-        feats.push(counter_jaccard_data(
+        push_feat!(counter_jaccard_data(
             &p1.title_chars,
             &p2.title_chars,
             f64::INFINITY,
         ));
 
         if self.compute_reference_features && p1.ref_details_present && p2.ref_details_present {
-            feats.push(counter_jaccard_data(
+            push_feat!(counter_jaccard_data(
                 &p1.ref_authors,
                 &p2.ref_authors,
                 5000.0,
             ));
-            feats.push(counter_jaccard_data(
+            push_feat!(counter_jaccard_data(
                 &p1.ref_titles,
                 &p2.ref_titles,
                 f64::INFINITY,
             ));
-            feats.push(counter_jaccard_data(
+            push_feat!(counter_jaccard_data(
                 &p1.ref_venues,
                 &p2.ref_venues,
                 f64::INFINITY,
             ));
-            feats.push(counter_jaccard_data(
+            push_feat!(counter_jaccard_data(
                 &p1.ref_blocks,
                 &p2.ref_blocks,
                 f64::INFINITY,
@@ -2228,10 +2191,12 @@ impl RustFeaturizer {
                 } else {
                     0.0
                 };
-            feats.push(self_cite);
-            feats.push(refs_jaccard(&p1.references, &p2.references));
+            push_feat!(self_cite);
+            push_feat!(refs_jaccard(&p1.references, &p2.references));
         } else {
-            feats.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
+            for _ in 0..6 {
+                push_feat!(f64::NAN);
+            }
         }
 
         let english_or_unknown_count = {
@@ -2249,9 +2214,9 @@ impl RustFeaturizer {
             count
         };
 
-        feats.push(position_diff(s1.position, s2.position).unwrap_or(f64::NAN));
-        feats.push((p1.has_abstract as i64 + p2.has_abstract as i64) as f64);
-        feats.push(english_or_unknown_count as f64);
+        push_feat!(position_diff(s1.position, s2.position).unwrap_or(f64::NAN));
+        push_feat!((p1.has_abstract as i64 + p2.has_abstract as i64) as f64);
+        push_feat!(english_or_unknown_count as f64);
         let same_lang = match (
             p1.predicted_language.as_deref(),
             p2.predicted_language.as_deref(),
@@ -2260,11 +2225,13 @@ impl RustFeaturizer {
             (Some(a), Some(b)) => a == b,
             _ => false,
         };
-        feats.push(if same_lang { 1.0 } else { 0.0 });
-        feats.push((p1.is_reliable as i64 + p2.is_reliable as i64) as f64);
+        push_feat!(if same_lang { 1.0 } else { 0.0 });
+        push_feat!((p1.is_reliable as i64 + p2.is_reliable as i64) as f64);
 
         let counts = compute_name_counts_data(&s1.name_counts, &s2.name_counts);
-        feats.extend_from_slice(&counts);
+        for value in counts.iter() {
+            push_feat!(*value);
+        }
 
         let specter_sim =
             if english_or_unknown_count == 2 && p1.specter.is_some() && p2.specter.is_some() {
@@ -2280,17 +2247,20 @@ impl RustFeaturizer {
             } else {
                 f64::NAN
             };
-        feats.push(specter_sim);
+        push_feat!(specter_sim);
 
-        feats.push(counter_jaccard_data(
+        push_feat!(counter_jaccard_data(
             &p1.journal_ngrams,
             &p2.journal_ngrams,
             f64::INFINITY,
         ));
 
         let advanced = name_text_features(s1.adv_name.as_deref(), s2.adv_name.as_deref());
-        feats.extend_from_slice(&advanced);
+        for value in advanced.iter() {
+            push_feat!(*value);
+        }
 
+        debug_assert_eq!(feat_i, FULL_FEATURE_COUNT);
         feats
     }
 
@@ -2307,15 +2277,8 @@ impl RustFeaturizer {
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
     ) -> Option<f64> {
-        let sig1 = sig_id1.to_string();
-        let sig2 = sig_id2.to_string();
-        if self
-            .cluster_seeds_disallow
-            .contains(&(sig1.clone(), sig2.clone()))
-            || self
-                .cluster_seeds_disallow
-                .contains(&(sig2.clone(), sig1.clone()))
-        {
+        let canonical_pair = canonical_signature_pair(sig_id1, sig_id2);
+        if self.cluster_seeds_disallow.contains(&canonical_pair) {
             return Some(self.cluster_seed_disallow_value);
         }
 
@@ -2540,7 +2503,7 @@ impl RustFeaturizer {
     }
 
     fn full_feature_count(&self) -> usize {
-        *self.cached_full_feature_count.get_or_init(|| 39usize)
+        FULL_FEATURE_COUNT
     }
 }
 
@@ -3253,7 +3216,6 @@ impl RustFeaturizer {
             cluster_seed_require_value,
             cluster_seed_disallow_value,
             cached_signature_id_order: OnceLock::new(),
-            cached_full_feature_count: OnceLock::new(),
         })
     }
 
@@ -3264,7 +3226,7 @@ impl RustFeaturizer {
             papers_path,
             clusters_path = None,
             cluster_seeds_path = None,
-            specter_embeddings_path = None,
+            specter_embeddings = None,
             name_tuples_path = None,
             name_counts_path = None,
             preprocess = true,
@@ -3282,7 +3244,7 @@ impl RustFeaturizer {
         papers_path: &str,
         clusters_path: Option<&str>,
         cluster_seeds_path: Option<&str>,
-        specter_embeddings_path: Option<&str>,
+        specter_embeddings: Option<&Bound<'_, PyAny>>,
         name_tuples_path: Option<&str>,
         name_counts_path: Option<&str>,
         preprocess: bool,
@@ -3794,8 +3756,21 @@ impl RustFeaturizer {
         signature_ids.sort_unstable();
         let signature_preprocess_seconds = signature_preprocess_start.elapsed().as_secs_f64();
 
-        let specter_dict = match specter_embeddings_path {
-            Some(path) => load_pickle_dict(py, path)?,
+        let specter_dict = match specter_embeddings {
+            Some(obj) => {
+                if let Ok(path) = obj.extract::<&str>() {
+                    load_pickle_dict(py, path)?
+                } else if let Ok(dict) = obj.downcast::<PyDict>() {
+                    Some(dict.clone())
+                } else if obj.is_none() {
+                    None
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                        "specter_embeddings must be str, dict, or None; got {}",
+                        obj.get_type().name()?
+                    )));
+                }
+            }
             None => None,
         };
 
@@ -3980,7 +3955,7 @@ impl RustFeaturizer {
                     };
                     if constraint == "disallow" {
                         cluster_seeds_disallow
-                            .insert((signature_id_a.clone(), signature_id_b.clone()));
+                            .insert(canonical_signature_pair(signature_id_a, signature_id_b));
                     } else if constraint == "require" {
                         if !root_added {
                             cluster_seeds_require
@@ -4021,7 +3996,6 @@ impl RustFeaturizer {
             cluster_seed_require_value,
             cluster_seed_disallow_value,
             cached_signature_id_order: OnceLock::new(),
-            cached_full_feature_count: OnceLock::new(),
         })
     }
 
@@ -4255,7 +4229,8 @@ impl RustFeaturizer {
             block_lookup.push((signature_id, signature, paper));
         }
 
-        let local_pairs = upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        let local_pairs =
+            upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
         if local_pairs.is_empty() {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
@@ -4306,7 +4281,7 @@ impl RustFeaturizer {
             .papers
             .get(&s2.paper_id)
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(s2.paper_id.to_string()))?;
-        Ok(self.featurize_pair_data(s1, s2, p1, p2))
+        Ok(self.featurize_pair_data(s1, s2, p1, p2).to_vec())
     }
 
     #[pyo3(signature = (pairs, num_threads = None))]
@@ -4345,7 +4320,7 @@ impl RustFeaturizer {
                         let s2 = self.signatures.get(sig_id2).unwrap();
                         let p1 = self.papers.get(&s1.paper_id).unwrap();
                         let p2 = self.papers.get(&s2.paper_id).unwrap();
-                        self.featurize_pair_data(s1, s2, p1, p2)
+                        self.featurize_pair_data(s1, s2, p1, p2).to_vec()
                     })
                     .collect::<Vec<_>>()
             };
@@ -4634,7 +4609,8 @@ impl RustFeaturizer {
             block_lookup.push((signature, paper));
         }
 
-        let local_pairs = upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
+        let local_pairs =
+            upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
         let row_count = local_pairs.len();
         if row_count == 0 {
             let empty = numpy::ndarray::Array2::<f64>::zeros((0, 0));

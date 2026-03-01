@@ -19,56 +19,13 @@ from s2and.feature_port import (
     update_rust_cluster_seeds,
 )
 from s2and.featurizer import _single_pair_featurize
+from tests.conftest import equalish, import_s2and_rust
 
-
-def _has_rust_featurizer_api(module):
-    rust_featurizer = getattr(module, "RustFeaturizer", None)
-    return rust_featurizer is not None and hasattr(rust_featurizer, "from_dataset")
-
-
-def _import_s2and_rust():
-    try:
-        import s2and_rust
-
-        if _has_rust_featurizer_api(s2and_rust):
-            return True, None
-        raise AttributeError("s2and_rust imported, but RustFeaturizer is unavailable")
-    except Exception as e:
-        # If local source shadowed the installed extension, retry from site-packages.
-        try:
-            import importlib
-            import importlib.util
-            import sys
-            from importlib.machinery import PathFinder
-
-            sys.modules.pop("s2and_rust", None)
-            sys.modules.pop("s2and_rust.s2and_rust", None)
-            site_paths = [p for p in sys.path if "site-packages" in p]
-            spec = PathFinder.find_spec("s2and_rust", site_paths)
-            if spec is None or spec.loader is None:
-                raise e
-            module = importlib.util.module_from_spec(spec)
-            sys.modules["s2and_rust"] = module
-            spec.loader.exec_module(module)
-            if not _has_rust_featurizer_api(module):
-                raise AttributeError("s2and_rust imported from site-packages, but RustFeaturizer is unavailable")
-            return True, None
-        except Exception as e2:
-            return False, e2
-
-
-HAS_RUST, _RUST_IMPORT_ERROR = _import_s2and_rust()
+HAS_RUST, _rust_import_payload = import_s2and_rust(required_method="from_dataset", prefer_site_packages=True)
+_RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
 print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
 if not HAS_RUST:
     pytest.skip(f"s2and_rust extension not built/installed: {_RUST_IMPORT_ERROR}", allow_module_level=True)
-
-
-def _equalish(a, b, rel_tol=1e-6, abs_tol=1e-3):
-    a_val = float(a)
-    b_val = float(b)
-    if math.isnan(a_val) and math.isnan(b_val):
-        return True
-    return math.isclose(a_val, b_val, rel_tol=rel_tol, abs_tol=abs_tol)
 
 
 def _paper_for_sig(dataset, sig_id):
@@ -376,7 +333,7 @@ def test_featurize_pair_rust_parity(dataset, sample_pairs):
         rust_features = featurize_pair_rust(dataset, s1, s2)
         assert len(ref_features) == len(rust_features)
         for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-            assert _equalish(ref_val, got_val), (
+            assert equalish(ref_val, got_val), (
                 f"Featurize pair mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
             )
 
@@ -398,7 +355,7 @@ def test_featurize_pair_rust_parity_with_deferred_signature_ngrams(dataset, samp
         rust_features = featurize_pair_rust(ds_rust, s1, s2)
         assert len(ref_features) == len(rust_features)
         for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-            assert _equalish(ref_val, got_val), (
+            assert equalish(ref_val, got_val), (
                 f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
             )
 
@@ -532,7 +489,7 @@ def test_featurize_pairs_rust_batch_parity(dataset, sample_pairs):
         ref_vec, _ = _single_pair_featurize((s1, s2))
         assert len(ref_vec) == len(rust_vec)
         for idx, (ref_val, got_val) in enumerate(zip(ref_vec, rust_vec, strict=False)):
-            assert _equalish(ref_val, got_val), (
+            assert equalish(ref_val, got_val), (
                 f"Batch featurize mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
             )
 
@@ -551,7 +508,7 @@ def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
     # Ensure reference branch executed in Python (self-citation is computed even with empty refs)
     assert not math.isnan(ref_features[20])
     for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-        assert _equalish(
+        assert equalish(
             ref_val, got_val
         ), f"Reference-empty mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 
@@ -567,7 +524,7 @@ def test_featurize_pair_rust_parity_reference_details_nonempty(dataset_with_refs
     rust_features = featurize_pair_rust(dataset_with_refs, s1, s2)
     assert not math.isnan(ref_features[16]), "Reference author overlap should be computed for non-empty counters"
     for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-        assert _equalish(
+        assert equalish(
             ref_val, got_val
         ), f"Reference-nonempty mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 
@@ -589,7 +546,7 @@ def test_featurize_pair_rust_parity_missing_email(dataset):
     rust_features = featurize_pair_rust(dataset, s1, s2)
     assert math.isnan(ref_features[7]) and math.isnan(ref_features[8])
     for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-        assert _equalish(
+        assert equalish(
             ref_val, got_val
         ), f"Missing-email mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 
@@ -609,7 +566,7 @@ def test_featurize_pair_rust_parity_specter_present(dataset):
     rust_features = featurize_pair_rust(dataset, s1, s2)
     assert not math.isnan(ref_features[33])
     for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-        assert _equalish(
+        assert equalish(
             ref_val, got_val
         ), f"Specter-present mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 
@@ -630,7 +587,7 @@ def test_featurize_pair_rust_parity_specter_absent(dataset):
     rust_features = featurize_pair_rust(dataset, s1, s2)
     assert math.isnan(ref_features[33])
     for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
-        assert _equalish(
+        assert equalish(
             ref_val, got_val
         ), f"Specter-absent mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 

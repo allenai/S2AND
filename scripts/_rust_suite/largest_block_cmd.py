@@ -39,7 +39,6 @@ from __future__ import annotations
 import argparse
 import cProfile
 import datetime
-import hashlib
 import io
 import json
 import os
@@ -50,22 +49,20 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import (
-        ProcessTreeRSSMonitor,
-        build_run_metadata,
-        collect_rust_extension_identity,
-    )
-else:
-    try:
-        from _rust_suite.common import ProcessTreeRSSMonitor, build_run_metadata, collect_rust_extension_identity
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import ProcessTreeRSSMonitor, build_run_metadata, collect_rust_extension_identity
+from _rust_suite.common import (
+    ProcessTreeRSSMonitor,
+    build_run_metadata,
+    collect_rust_extension_identity,
+    extract_marked_json_payload,
+)
+from _rust_suite.common import (
+    cluster_membership_digest as _cluster_membership_digest,
+)
+from _rust_suite.common import (
+    signature_to_cluster_fingerprint_map as _signature_to_cluster_fingerprint_map,
+)
 
 RESULT_JSON_START = "===S2AND_LARGEST_BLOCK_RESULT_START==="
 RESULT_JSON_END = "===S2AND_LARGEST_BLOCK_RESULT_END==="
@@ -88,22 +85,6 @@ DATASET_CANDIDATES = [
     "qian",
     "zbmath",
 ]
-
-
-def _cluster_membership_digest(cluster_to_signatures: dict[str, list[str]]) -> str:
-    sorted_clusters = sorted([sorted(signatures) for signatures in cluster_to_signatures.values() if signatures])
-    payload = json.dumps(sorted_clusters, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _signature_to_cluster_fingerprint_map(cluster_to_signatures: dict[str, list[str]]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for signatures in cluster_to_signatures.values():
-        members = sorted(signatures)
-        fingerprint = hashlib.sha1("|".join(members).encode("utf-8")).hexdigest()
-        for signature_id in members:
-            mapping[signature_id] = fingerprint
-    return mapping
 
 
 def _pair_count_with_singleton_fix(cluster_size: int) -> int:
@@ -572,18 +553,6 @@ def _run_single(
 # ---------------------------------------------------------------------------
 
 
-def _extract_json_payload(stdout_text: str) -> dict[str, Any]:
-    start = stdout_text.find(RESULT_JSON_START)
-    end = stdout_text.find(RESULT_JSON_END)
-    if start < 0 or end < 0 or end <= start:
-        raise RuntimeError(
-            "Failed to parse result JSON markers from subprocess output.\n"
-            f"STDOUT (last 2000 chars):\n{stdout_text[-2000:]}"
-        )
-    payload_text = stdout_text[start + len(RESULT_JSON_START) : end].strip()
-    return json.loads(payload_text)
-
-
 def _run_single_subprocess(
     backend: str,
     dataset_name: str,
@@ -602,9 +571,11 @@ def _run_single_subprocess(
     require_rust_release: bool,
 ) -> dict[str, Any]:
     """Run a single backend in a subprocess (isolation for RSS measurement)."""
+    rust_suite_path = PROJECT_ROOT / "scripts" / "rust_suite.py"
     cmd = [
         sys.executable,
-        str(Path(__file__).resolve()),
+        str(rust_suite_path),
+        "largest-block",
         "--mode",
         "single",
         "--backend",
@@ -686,7 +657,12 @@ def _run_single_subprocess(
             f"STDOUT:\n{completed.stdout[-3000:]}\nSTDERR:\n{completed.stderr[-3000:]}"
         )
 
-    return _extract_json_payload(completed.stdout)
+    return extract_marked_json_payload(
+        completed.stdout,
+        RESULT_JSON_START,
+        RESULT_JSON_END,
+        error_tail_chars=2000,
+    )
 
 
 def _compare_runs(args: argparse.Namespace) -> None:

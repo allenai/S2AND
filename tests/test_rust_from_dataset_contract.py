@@ -10,29 +10,11 @@ import pytest
 import s2and.featurizer as featurizer_mod
 from s2and.data import ANDData, Author, NameCounts
 from s2and.featurizer import _single_pair_featurize
+from tests.conftest import equalish, import_s2and_rust
 
-
-def _import_s2and_rust():
-    try:
-        import s2and_rust
-
-        rust_featurizer = getattr(s2and_rust, "RustFeaturizer", None)
-        if rust_featurizer is None or not hasattr(rust_featurizer, "from_dataset"):
-            return False, None
-        return True, s2and_rust
-    except Exception:
-        return False, None
-
-
-HAS_RUST, s2and_rust = _import_s2and_rust()
+HAS_RUST, s2and_rust = import_s2and_rust(required_method="from_dataset")
 if not HAS_RUST:
     pytest.skip("s2and_rust RustFeaturizer.from_dataset is unavailable", allow_module_level=True)
-
-
-def _equalish(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-3) -> bool:
-    if math.isnan(float(a)) and math.isnan(float(b)):
-        return True
-    return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
 
 
 def _build_minimal_dataset(name: str) -> ANDData:
@@ -185,7 +167,7 @@ def test_from_dataset_fastpath_parity_for_field_sensitive_values():
     assert python_features[journal_idx] == pytest.approx(0.0)
     assert len(python_features) == len(rust_features)
     for idx, (ref_val, got_val) in enumerate(zip(python_features, rust_features, strict=False)):
-        assert _equalish(ref_val, got_val), f"Mismatch idx={idx}: ref={ref_val} got={got_val}"
+        assert equalish(ref_val, got_val), f"Mismatch idx={idx}: ref={ref_val} got={got_val}"
 
 
 def test_from_dataset_raw_papers_match_preprocessed_for_language_and_coauthors():
@@ -230,8 +212,8 @@ def test_from_dataset_raw_papers_match_preprocessed_for_language_and_coauthors()
 
     assert len(expected_features) == len(observed_features)
     for idx, (expected, observed) in enumerate(zip(expected_features, observed_features, strict=False)):
-        assert _equalish(expected, observed), f"Mismatch idx={idx}: expected={expected} observed={observed}"
-    assert _equalish(expected_constraint, observed_constraint)
+        assert equalish(expected, observed), f"Mismatch idx={idx}: expected={expected} observed={observed}"
+    assert equalish(expected_constraint, observed_constraint)
     assert not math.isnan(float(expected_constraint))
 
 

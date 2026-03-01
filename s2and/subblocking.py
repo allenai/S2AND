@@ -401,7 +401,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 small_enough_pairs_counts.append((pair, 1e5 + score))
             # the other option is that the names are different but we have counts
             else:
-                # TODO(s2and): Temporary compatibility tweak for hyphen-preserving first names.
+                # Temporary compatibility tweak for hyphen-preserving first names.
                 # The ORCID-derived first_k_letter_counts were generated with legacy normalization.
                 # To preserve utility without regenerating, probe counts using token before first space.
                 # Consider removing this once counts are regenerated with new logic.

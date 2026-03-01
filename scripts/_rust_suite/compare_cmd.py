@@ -6,24 +6,15 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import (
-        ProcessTreeRSSMonitor,
-        build_run_metadata,
-        collect_rust_extension_identity,
-    )
-else:
-    try:
-        from _rust_suite.common import ProcessTreeRSSMonitor, build_run_metadata, collect_rust_extension_identity
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import ProcessTreeRSSMonitor, build_run_metadata, collect_rust_extension_identity
+from _rust_suite.common import (
+    ProcessTreeRSSMonitor,
+    build_run_metadata,
+    collect_rust_extension_identity,
+    extract_marked_json_payload,
+)
 
 RESULT_JSON_START = "===S2AND_COMPARE_RESULT_START==="
 RESULT_JSON_END = "===S2AND_COMPARE_RESULT_END==="
@@ -243,12 +234,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _extract_single_result(stdout_text: str) -> dict[str, Any]:
-    start = stdout_text.find(RESULT_JSON_START)
-    end = stdout_text.find(RESULT_JSON_END)
-    if start < 0 or end < 0 or end <= start:
-        raise RuntimeError("Could not find single-run JSON markers in subprocess output")
-    payload = stdout_text[start + len(RESULT_JSON_START) : end].strip()
-    return json.loads(payload)
+    return extract_marked_json_payload(stdout_text, RESULT_JSON_START, RESULT_JSON_END)
 
 
 def _language_feature_indices(feature_names: list[str]) -> list[int]:

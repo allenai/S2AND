@@ -860,8 +860,7 @@ def main(
         missing_stream_union_datasets = set(stream_union_dataset_tuple) - stream_union_seen_datasets
         if missing_stream_union_datasets:
             raise RuntimeError(
-                "Streaming union accumulation missed expected datasets: "
-                f"{sorted(missing_stream_union_datasets)}"
+                "Streaming union accumulation missed expected datasets: " f"{sorted(missing_stream_union_datasets)}"
             )
 
     if UNION_MODELS:

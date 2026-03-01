@@ -8,18 +8,7 @@ import pytest
 
 from s2and.consts import PROJECT_ROOT_PATH
 from s2and.data import ANDData
-
-
-def _import_s2and_rust():
-    try:
-        import s2and_rust
-
-        rust_featurizer = getattr(s2and_rust, "RustFeaturizer", None)
-        if rust_featurizer is None or not hasattr(rust_featurizer, "from_json_paths"):
-            return None
-        return s2and_rust
-    except Exception:
-        return None
+from tests.conftest import import_s2and_rust
 
 
 def test_python_maybe_load_specter_accepts_dict_payload():
@@ -44,8 +33,8 @@ def test_python_maybe_load_specter_accepts_tuple_payload(tmp_path):
 
 
 def test_rust_from_json_paths_accepts_tuple_specter_pickle(tmp_path):
-    s2and_rust = _import_s2and_rust()
-    if s2and_rust is None:
+    has_rust, s2and_rust = import_s2and_rust(required_method="from_json_paths")
+    if not has_rust:
         pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable")
 
     signatures_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "signatures.json")
@@ -65,6 +54,39 @@ def test_rust_from_json_paths_accepts_tuple_specter_pickle(tmp_path):
         clusters_path,
         cluster_seeds_path,
         str(specter_path),
+        None,
+        None,
+        True,
+        False,
+        0.0,
+        10000.0,
+        1,
+    )
+    features = rust_featurizer.featurize_pair("0", "1")
+    assert isinstance(features, list)
+    assert len(features) > 0
+
+
+def test_rust_from_json_paths_accepts_dict_specter():
+    has_rust, s2and_rust = import_s2and_rust(required_method="from_json_paths")
+    if not has_rust:
+        pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable")
+
+    signatures_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "signatures.json")
+    papers_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "papers.json")
+    clusters_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "clusters.json")
+    cluster_seeds_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "cluster_seeds.json")
+
+    keys = ["53235312", "27077319", "19901392", "21094749", "38029096", "1", "2"]
+    matrix = np.random.RandomState(7).normal(size=(len(keys), 8)).astype(np.float32)
+    specter_dict = {k: matrix[i] for i, k in enumerate(keys)}
+
+    rust_featurizer = s2and_rust.RustFeaturizer.from_json_paths(
+        signatures_path,
+        papers_path,
+        clusters_path,
+        cluster_seeds_path,
+        specter_dict,
         None,
         None,
         True,

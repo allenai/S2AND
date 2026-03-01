@@ -4,7 +4,7 @@ Run CI steps locally using the ACTIVE virtual environment.
 
 Order (matches your CI):
   1) uv sync --extra dev [--frozen if uv.lock exists]  (ACTIVE venv)
-  2) ruff format checks via uvx --from ruff==0.6.9 ...
+  2) ruff lint + format checks via uvx --from ruff==0.6.9 ...
   3) ty checks with tuned migration rules via uvx --from ty==0.0.18 ...
   4) pytest tests/ with coverage and PYTHONPATH=.
 
@@ -106,6 +106,19 @@ def run_ruff_format_check_on(paths: list[str]) -> None:
     run([sys.executable, "-m", "ruff", "format", "--check", *paths])
 
 
+def run_ruff_check_on(paths: list[str]) -> None:
+    uvx = uvx_exe()
+    if uvx:
+        run(uvx + ["--from", "ruff==0.6.9", "ruff", "check", *paths])
+        return
+    try:
+        run(uv_exe() + ["run", "--active", "ruff", "check", *paths])
+        return
+    except subprocess.CalledProcessError:
+        pass
+    run([sys.executable, "-m", "ruff", "check", *paths])
+
+
 def run_ty_check_on(paths: list[str], *, script_mode: bool = False) -> None:
     ignore_rules = list(TY_BASE_IGNORES)
     if script_mode:
@@ -136,9 +149,13 @@ def main() -> None:
 
     # 1.5) Build Rust extension (required for parity tests)
     ensure_rust_on_path()
-    run(uv_exe() + ["run", "--active", "--no-project", "maturin", "develop", "-m", "s2and_rust/Cargo.toml"])
+    run(
+        uv_exe()
+        + ["run", "--active", "--no-project", "--with", "maturin", "maturin", "develop", "-m", "s2and_rust/Cargo.toml"]
+    )
 
-    # 2) Ruff format checks (same targets/flags as CI)
+    # 2) Ruff checks (same targets/flags as CI)
+    run_ruff_check_on(["s2and", "scripts", "tests"])
     run_ruff_format_check_on(["s2and"])
     script_files = sorted((REPO / "scripts").glob("*.py"))
     if script_files:

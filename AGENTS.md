@@ -82,7 +82,7 @@ rg --files s2and scripts tests docs --hidden --glob '!**/.venv/**'
 - Single test: `uv run pytest -q path/to/test_file.py::test_name`
 - Lint: `uv run ruff check .`
 - Format: `uv run ruff format .`
-- Typecheck (if configured): `uv run ty ...` or `uv run pyright ...`
+- Typecheck (if configured): `uv run ty ...`
 
 ## Repository Hygiene
 - Keep changes small and reviewable.

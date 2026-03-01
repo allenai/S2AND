@@ -1,21 +1,11 @@
 import argparse
 import json
 import os
-import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import RSSMonitor, collect_rust_extension_identity
-else:
-    try:
-        from _rust_suite.common import RSSMonitor, collect_rust_extension_identity
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import RSSMonitor, collect_rust_extension_identity
+from _rust_suite.common import RSSMonitor, collect_rust_extension_identity
 
 
 def _build_data_paths(project_root: str, dataset_name: str) -> dict[str, str]:

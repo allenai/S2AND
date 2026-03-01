@@ -400,6 +400,19 @@ def test_claims_eval_skips_distance_dump_when_predict_returns_none():
         assert output["total"] == 1
 
 
+def test_claims_eval_handles_none_affiliations():
+    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists=None)
+    dataset.signatures["p1___0"].author_info_affiliations = None
+    output = claims_eval(
+        dataset=dataset,
+        clusterer=clusterer,
+        claims_pairs=claims_pairs,
+        directory_for_caching=None,
+        optional_name="unit",
+    )
+    assert output["total"] == 1
+
+
 def test_claims_eval_writes_distance_dump_when_available():
     dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists={"blk": np.array([0.5])})
     with tempfile.TemporaryDirectory() as td:

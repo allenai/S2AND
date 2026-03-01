@@ -75,8 +75,9 @@ def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
         _batch_label,
         _rust_failure_counts,
         runtime_context=None,
+        **_kwargs,
     ):
-        del runtime_context
+        del runtime_context, _kwargs
         return np.asarray(labels + LARGE_INTEGER, dtype=np.float64), 0.0
 
     monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
@@ -125,8 +126,9 @@ def test_make_distance_matrices_rust_blockwise_square_matrix(monkeypatch):
         _batch_label,
         _rust_failure_counts,
         runtime_context=None,
+        **_kwargs,
     ):
-        del runtime_context
+        del runtime_context, _kwargs
         return np.asarray(labels + LARGE_INTEGER, dtype=np.float64), 0.0
 
     monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
@@ -227,8 +229,9 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
         _batch_label,
         _rust_failure_counts,
         runtime_context=None,
+        **_kwargs,
     ):
-        del labels, runtime_context
+        del labels, runtime_context, _kwargs
         return np.asarray(features[:, 0], dtype=np.float64), 0.0
 
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)

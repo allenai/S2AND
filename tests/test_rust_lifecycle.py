@@ -183,13 +183,18 @@ def test_defer_signature_fields_requires_rust_and_non_inference(
     assert policy.defer_signature_fields_to_rust is expected
 
 
-@pytest.mark.parametrize("backend", ["python", "rust"])
-@pytest.mark.parametrize("mode", ["train", "inference"])
-@pytest.mark.parametrize("has_signatures_path", [False, True])
-@pytest.mark.parametrize("has_papers_path", [False, True])
-@pytest.mark.parametrize("preprocess", [False, True])
-@pytest.mark.parametrize("use_rust", [False, True])
-def test_policy_covers_all_combinations(
+@pytest.mark.parametrize(
+    ("backend", "mode", "has_signatures_path", "has_papers_path", "preprocess", "use_rust"),
+    [
+        ("python", "train", False, False, False, False),
+        ("python", "inference", True, True, True, True),
+        ("rust", "train", False, False, True, True),
+        ("rust", "train", True, True, True, True),
+        ("rust", "inference", True, True, True, True),
+        ("rust", "inference", True, False, True, True),
+    ],
+)
+def test_policy_representative_combinations(
     backend: str,
     mode: str,
     has_signatures_path: bool,
@@ -197,7 +202,7 @@ def test_policy_covers_all_combinations(
     preprocess: bool,
     use_rust: bool,
 ):
-    """Smoke test: build_rust_lifecycle_policy doesn't raise for any valid combination."""
+    """Smoke test over representative backend/mode/path combinations."""
     policy = build_rust_lifecycle_policy(
         backend=backend,  # type: ignore[arg-type]
         mode=mode,

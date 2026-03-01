@@ -139,46 +139,8 @@ Use these concrete gates before promoting any Rust defaults further.
 Active benchmark baselines and promotion workflow are centralized in:
 `docs/rust/baselines.md`
 
-Current promoted snapshot (2026-02-27):
-
-1. Inference comparator baseline:
-   - `scratch/baselines_20260227/compare_inspire_5k_20260227.json`
-   - python `18.724s` / `1.510 GB`, rust `4.734s` / `0.917 GB`
-   - speedup `3.955x`, RSS delta `-39.27%`, feature parity pass
-2. Transfer-mini full acceptance baseline:
-   - `scratch/baselines_20260227/profile_transfer_mini_full_20260227.json`
-   - workload_id `3291489010b58481a15d209d5c5bb3ed764af109709d4d6ffc4c1ed617a95128`
-   - python `304.639s` / `5.477 GB`, rust `159.928s` / `5.654 GB`
-   - quality parity (`B3 F1=0.960` both), speedup `1.905x`, RSS delta `+3.23%`
-3. Stress rebuild RSS-series baseline:
-   - `scratch/baselines_20260227/stress_rust_from_json_paths_aminer_6x_20260227.json`
-   - `6/6` success, `rss_growth_fraction=0.005168`, per-iteration RSS series emitted
-4. Largest-block canonical compare smoke:
-   - `scratch/baselines_20260227/largest_block_compare_smoke_200_20260227.json`
-   - `cluster_equivalent=True`, signature partition diff `0/200`
-   - python `375.726s` / `13.652 GB`, rust `326.999s` / `9.855 GB`
-
-Transfer-mini smoke stays as sanity-only evidence:
-- `scratch/baselines_20260227/profile_transfer_mini_smoke_20260227.json`
-- workload_id `3f09cde4b4eb4ed4956f6b147fe0c68a82eebc550e7ad5c84cc0c58a43eb3ec2`
-
-Latest verification-grade snapshot (2026-02-28; dirty tree, not promoted baseline):
-1. Transfer-mini full compare (`scratch/profile_transfer_mini_bundle1_4_20260228.json`):
-   - python `296.597s` / `5.491 GB`; rust `176.469s` / `4.794 GB`
-   - relative to python in the same run: rust is `1.68x` faster, `-0.697 GB` peak RSS (`-12.7%`)
-   - `post_rust_cleanup` snapshot present (`4.188 GB`), with `0.113 GB` RSS drop from `per_dataset_complete`
-2. Inference compare (`scratch/compare_bundle1_4_inspire5k_20260228.json`):
-   - python `19.494s` / `1.505 GB`; rust `4.694s` / `0.911 GB`
-   - speedup `4.153x`, RSS delta `-39.47%`, feature parity pass.
-3. Transfer-mini latency-variance diagnostics (`scratch/diagnostics/transfer_mini_diag_*_20260228.json`):
-   - default deferred-paper runs (`cleanup=1`) show stable peak RSS (`4.787-4.795 GB`) but wide latency spread
-     (`153.828s`, `172.326s`, `200.574s`) from LightGBM trial wall-time variance.
-   - hyperopt parameter hashes and fitted tree counts stay identical across runs
-     (`pairwise n_estimators_fit=2270`, `nameless n_estimators_fit=2098`), so this is runtime contention variance,
-     not hyperparameter/search drift.
-   - forcing Python paper preprocessing (`--force-python-paper-preprocess 1`) increases ANDData build time
-     (`~8.7s -> ~27.8-29.4s`), peak RSS (`~4.795 GB -> ~5.60-5.66 GB`), and total runtime (`+53.9s` to `+57.9s`
-     vs fastest default diagnostic run).
+For active promoted baselines and latest verification snapshots, see:
+`docs/rust/baselines.md`.
 
 Workload-ID gate behavior verified:
 1. Smoke vs full (`--mode gate`) fails with workload mismatch.

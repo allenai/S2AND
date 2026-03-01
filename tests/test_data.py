@@ -240,3 +240,36 @@ class TestData(unittest.TestCase):
                 assert (
                     paper_single.title_ngrams_words == paper_multi.title_ngrams_words
                 ), f"Title ngrams mismatch for paper {paper_id}"
+
+
+def test_compute_signature_name_counts_uses_single_character_initial():
+    load_name_counts = {
+        "first_dict": {},
+        "last_dict": {"smith": 11},
+        "first_last_dict": {},
+        "last_first_initial_dict": {"smith m": 17},
+    }
+    dataset = ANDData(
+        "tests/dummy/signatures.json",
+        "tests/dummy/papers.json",
+        name="dummy_name_counts_initial",
+        mode="inference",
+        load_name_counts=load_name_counts,
+        preprocess=False,
+    )
+    signature = next(iter(dataset.signatures.values()))._replace(
+        author_info_first="Michael",
+        author_info_middle="",
+        author_info_last="Smith",
+        author_info_first_normalized_without_apostrophe="michael",
+        author_info_middle_normalized_without_apostrophe="",
+        author_info_last_normalized="smith",
+    )
+    counts = dataset._compute_signature_name_counts(
+        signature,
+        first_raw="Michael",
+        middle_raw="",
+        first_without_apostrophe="michael",
+        last_normalized="smith",
+    )
+    assert counts.last_first_initial == 17

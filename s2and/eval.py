@@ -886,7 +886,7 @@ def claims_eval(
     for block_signatures in blocks.values():
         for signature_id in block_signatures:
             signature_info = dataset.signatures[signature_id]
-            signature_affiliations_by_id[signature_id] = list(signature_info.author_info_affiliations)
+            signature_affiliations_by_id[signature_id] = list(signature_info.author_info_affiliations or [])
             paper_id, _ = signature_id.split("___")
             if paper_id not in paper_metadata_by_id:
                 paper = dataset.papers[paper_id]

@@ -8,18 +8,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import RSSMonitor, build_run_metadata, collect_rust_extension_identity
-else:
-    try:
-        from _rust_suite.common import RSSMonitor, build_run_metadata, collect_rust_extension_identity
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import RSSMonitor, build_run_metadata, collect_rust_extension_identity
+from _rust_suite.common import (
+    RSSMonitor,
+    build_run_metadata,
+    collect_rust_extension_identity,
+    extract_marked_json_payload,
+)
 
 RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
 RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
@@ -36,15 +32,6 @@ def _as_triplet(metrics: dict[str, Any], key: str) -> tuple[float, float, float]
 
 def _fmt_triplet(values: tuple[float, float, float]) -> str:
     return f"({values[0]:.3f}, {values[1]:.3f}, {values[2]:.3f})"
-
-
-def _extract_json_payload(stdout_text: str) -> dict[str, Any]:
-    start = stdout_text.find(RESULT_JSON_START)
-    end = stdout_text.find(RESULT_JSON_END)
-    if start < 0 or end < 0 or end <= start:
-        raise RuntimeError("Failed to parse result JSON markers from subprocess output")
-    payload_text = stdout_text[start + len(RESULT_JSON_START) : end].strip()
-    return json.loads(payload_text)
 
 
 def _resolve_path(project_root: str, maybe_relative_path: str) -> str:
@@ -246,7 +233,7 @@ def _run_single_subprocess(
     if run_label:
         cmd.extend(["--run-label", run_label])
     completed = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return _extract_json_payload(completed.stdout)
+    return extract_marked_json_payload(completed.stdout, RESULT_JSON_START, RESULT_JSON_END)
 
 
 def _compare_runs(args: argparse.Namespace) -> None:

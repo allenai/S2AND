@@ -6,8 +6,8 @@ import numpy as np
 
 import s2and.featurizer as featurizer_mod
 from s2and import feature_port, memory_budget
-from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from tests.conftest import build_dummy_dataset
 
 
 def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> dict[str, int | str | float]:
@@ -31,16 +31,6 @@ def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> dict[str, int | str 
         "predicted_features_matrix_bytes": int(predicted_features_matrix_bytes),
         "predicted_stage_peak_bytes": int(predicted_chunk_bytes + predicted_features_matrix_bytes),
     }
-
-
-def _build_dummy_dataset(name: str) -> ANDData:
-    return ANDData(
-        "tests/dummy/signatures.json",
-        "tests/dummy/papers.json",
-        clusters="tests/dummy/clusters.json",
-        name=name,
-        load_name_counts=True,
-    )
 
 
 def _build_pairs(count: int) -> list[tuple[str, str, float]]:
@@ -68,7 +58,7 @@ def test_rust_batch_probe_row_counts_uses_three_probes():
 
 
 def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
-    dataset = _build_dummy_dataset("dummy_rust_chunking_calibrated_fixed")
+    dataset = build_dummy_dataset("dummy_rust_chunking_calibrated_fixed", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = _build_pairs(5)
     captured_fixed: list[int] = []
@@ -123,7 +113,7 @@ def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
 
 
 def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
-    dataset = _build_dummy_dataset("dummy_rust_chunking")
+    dataset = build_dummy_dataset("dummy_rust_chunking", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
 
     call_sizes = []
@@ -167,7 +157,7 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
 
 
 def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
-    dataset = _build_dummy_dataset("dummy_rust_chunking_indexed")
+    dataset = build_dummy_dataset("dummy_rust_chunking_indexed", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
 
     indexed_call_sizes = []
@@ -217,13 +207,20 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
 
     assert indexed_call_sizes == [2, 2, 1]
     assert selected_indices_seen
-    assert selected_indices_seen[0] == [13, 22, 23, 24, 25, 26]
+    expected_indices = sorted(
+        {
+            idx
+            for feature_group in featurizer_info.features_to_use
+            for idx in featurizer_info.feature_group_to_index[feature_group]
+        }
+    )
+    assert selected_indices_seen[0] == expected_indices
     assert features.shape[0] == len(pairs)
     assert labels.shape[0] == len(pairs)
 
 
 def test_rust_batch_forwards_use_cache_flag(monkeypatch):
-    dataset = _build_dummy_dataset("dummy_rust_chunking_use_cache_forward")
+    dataset = build_dummy_dataset("dummy_rust_chunking_use_cache_forward", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     forwarded_use_cache: list[bool | None] = []
 
@@ -264,7 +261,7 @@ def test_rust_batch_forwards_use_cache_flag(monkeypatch):
 
 
 def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch, caplog):
-    dataset = _build_dummy_dataset("dummy_rust_chunking_prediction")
+    dataset = build_dummy_dataset("dummy_rust_chunking_prediction", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = _build_pairs(12_000)
 

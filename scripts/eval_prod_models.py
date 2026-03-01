@@ -28,7 +28,12 @@ parser.add_argument(
     default="inventors_s2and",
     help="Which dataset(s) to evaluate on (default: inventors_s2and)",
 )
-parser.add_argument("--seed", type=int, default=1, help="Random seed (default: 1, matches transfer_experiment_internal)")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=1,
+    help="Random seed (default: 1, matches transfer_experiment_internal)",
+)
 parser.add_argument("--n_jobs", type=int, default=4, help="Number of parallel jobs (default: 4)")
 parser.add_argument("--train", action="store_true", help="Retrain models from scratch instead of loading prod pickles")
 args = parser.parse_args()
@@ -133,9 +138,7 @@ for specter_suffix in specter_suffixes:
         signatures_path = resolve_dataset_file(
             data_original, dataset_name, f"{dataset_name}_signatures.json", "signatures.json"
         )
-        papers_path = resolve_dataset_file(
-            data_original, dataset_name, f"{dataset_name}_papers.json", "papers.json"
-        )
+        papers_path = resolve_dataset_file(data_original, dataset_name, f"{dataset_name}_papers.json", "papers.json")
         clusters_path = resolve_dataset_file(
             data_original, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"
         )

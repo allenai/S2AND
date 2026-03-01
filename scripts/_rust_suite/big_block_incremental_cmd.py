@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import random
@@ -10,18 +9,19 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import ProcessTreeRSSMonitor, collect_rust_extension_identity
-else:
-    try:
-        from _rust_suite.common import ProcessTreeRSSMonitor, collect_rust_extension_identity
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import ProcessTreeRSSMonitor, collect_rust_extension_identity
+from _rust_suite.common import (
+    ProcessTreeRSSMonitor,
+    collect_rust_extension_identity,
+    extract_marked_json_payload,
+)
+from _rust_suite.common import (
+    cluster_membership_digest as _cluster_membership_digest,
+)
+from _rust_suite.common import (
+    signature_to_cluster_fingerprint_map as _signature_to_cluster_fingerprint_map,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -180,12 +180,6 @@ def _build_cluster_seeds(seed_signature_ids: list[str], seed_cluster_count: int)
     return cluster_seeds
 
 
-def _cluster_membership_digest(cluster_to_signatures: dict[str, list[str]]) -> str:
-    sorted_clusters = sorted([sorted(signatures) for signatures in cluster_to_signatures.values() if signatures])
-    payload = json.dumps(sorted_clusters, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def _cluster_size_summary(cluster_to_signatures: dict[str, list[str]]) -> dict[str, Any]:
     sizes = sorted((len(signatures) for signatures in cluster_to_signatures.values()), reverse=True)
     return {
@@ -194,16 +188,6 @@ def _cluster_size_summary(cluster_to_signatures: dict[str, list[str]]) -> dict[s
         "max_cluster_size": int(sizes[0]) if sizes else 0,
         "min_cluster_size": int(sizes[-1]) if sizes else 0,
     }
-
-
-def _signature_to_cluster_fingerprint_map(cluster_to_signatures: dict[str, list[str]]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for signatures in cluster_to_signatures.values():
-        members = sorted(signatures)
-        fingerprint = hashlib.sha1("|".join(members).encode("utf-8")).hexdigest()
-        for signature_id in members:
-            mapping[signature_id] = fingerprint
-    return mapping
 
 
 def _set_runtime_env(
@@ -236,14 +220,15 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def _run_single(args: argparse.Namespace) -> dict[str, Any]:
-    from s2and import model as model_module
-    from s2and.data import ANDData
-    from s2and.serialization import load_pickle_with_verified_label_encoder_compat
-
     _set_runtime_env(
         backend=args.backend,
         n_jobs=int(args.n_jobs),
     )
+
+    from s2and import model as model_module
+    from s2and.data import ANDData
+    from s2and.serialization import load_pickle_with_verified_label_encoder_compat
+
     rust_extension_identity: dict[str, Any] | None = None
     if args.backend in {"rust", "auto"}:
         rust_extension_identity = collect_rust_extension_identity(
@@ -358,6 +343,10 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
         "phase_b_mode": str(incremental_result["phase_b_mode"]),
         "phase_b_budget_bytes": int(incremental_result["phase_b_budget_bytes"]),
         "phase_b_required_bytes": int(incremental_result["phase_b_required_bytes"]),
+        "phase_a_accumulator_overflow_early_stop": bool(
+            incremental_result.get("phase_a_accumulator_overflow_early_stop", False)
+        ),
+        "phase_a_adaptive_halvings_max": int(incremental_result.get("phase_a_adaptive_halvings_max", 0)),
         "rust_extension_identity": rust_extension_identity,
     }
     if int(args.emit_signature_map) == 1:
@@ -372,12 +361,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _extract_single_result(stdout_text: str) -> dict[str, Any]:
-    start = stdout_text.find(RESULT_JSON_START)
-    end = stdout_text.find(RESULT_JSON_END)
-    if start < 0 or end < 0 or end <= start:
-        raise RuntimeError("Could not find single-run JSON markers in subprocess output")
-    payload = stdout_text[start + len(RESULT_JSON_START) : end].strip()
-    return json.loads(payload)
+    return extract_marked_json_payload(stdout_text, RESULT_JSON_START, RESULT_JSON_END)
 
 
 def _run_subprocess_single(

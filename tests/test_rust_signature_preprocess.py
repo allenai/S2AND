@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import random
 from contextlib import contextmanager
@@ -9,10 +8,10 @@ import pytest
 
 import s2and.featurizer as featurizer_mod
 from s2and import feature_port
-from s2and.data import ANDData
 from s2and.featurizer import _single_pair_featurize
 from s2and.subblocking import make_subblocks
 from s2and.text import AFFILIATIONS_STOP_WORDS, get_text_ngrams, get_text_ngrams_words
+from tests.conftest import build_dummy_dataset, equalish
 
 if not feature_port.rust_signature_preprocess_available():
     pytest.skip("s2and_rust signature preprocessing API is unavailable", allow_module_level=True)
@@ -39,20 +38,6 @@ def _prefilter_affiliation_text(text: str) -> str:
     return " ".join(tokens)
 
 
-def _build_dummy_dataset(name: str, *, mode: str = "train", load_name_counts=False) -> ANDData:
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
-    return ANDData(
-        "tests/dummy/signatures.json",
-        "tests/dummy/papers.json",
-        clusters="tests/dummy/clusters.json",
-        name=name,
-        mode=mode,
-        load_name_counts=load_name_counts,
-        preprocess=True,
-        n_jobs=1,
-    )
-
-
 def _signature_scalar_fields(signature) -> dict[str, object]:
     return {
         "author_info_first_normalized": signature.author_info_first_normalized,
@@ -65,12 +50,6 @@ def _signature_scalar_fields(signature) -> dict[str, object]:
         "author_info_name_counts": signature.author_info_name_counts,
         "author_info_orcid": signature.author_info_orcid,
     }
-
-
-def _equalish(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-3) -> bool:
-    if math.isnan(float(a)) and math.isnan(float(b)):
-        return True
-    return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
 
 
 def _sample_pairs(signature_ids: list[str], limit: int = 8) -> list[tuple[str, str]]:
@@ -114,9 +93,9 @@ def test_signature_ngrams_batch_rust_parity(coauthor_text: str, affiliation_text
 
 def test_signature_preprocess_dataset_rust_defers_signature_fields():
     with _temporary_env("S2AND_BACKEND", "python"):
-        dataset_python = _build_dummy_dataset("dummy_signature_preprocess_python")
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_python")
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = _build_dummy_dataset("dummy_signature_preprocess_rust")
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_rust")
 
     assert set(dataset_python.signatures.keys()) == set(dataset_rust.signatures.keys())
     for signature_id in dataset_python.signatures:
@@ -134,9 +113,9 @@ def test_signature_preprocess_dataset_rust_defers_signature_fields():
 
 def test_signature_preprocess_pair_features_and_constraints_parity_with_deferred_signature_fields():
     with _temporary_env("S2AND_BACKEND", "python"):
-        dataset_python = _build_dummy_dataset("dummy_signature_preprocess_materialize_python")
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python")
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = _build_dummy_dataset("dummy_signature_preprocess_materialize_rust")
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust")
 
     featurizer_mod.global_dataset = dataset_python  # type: ignore
     signature_ids = list(dataset_python.signatures.keys())
@@ -148,7 +127,7 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_deferred
         rust_features = feature_port.featurize_pair_rust(dataset_rust, s1, s2)
         assert len(python_features) == len(rust_features)
         for idx, (python_value, rust_value) in enumerate(zip(python_features, rust_features, strict=False)):
-            assert _equalish(python_value, rust_value), (
+            assert equalish(python_value, rust_value), (
                 f"Feature mismatch for pair ({s1}, {s2}) at idx={idx}: " f"python={python_value} rust={rust_value}"
             )
 
@@ -162,9 +141,9 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_deferred
 
 def test_signature_preprocess_lazy_materialization_ngrams_match_python():
     with _temporary_env("S2AND_BACKEND", "python"):
-        dataset_python = _build_dummy_dataset("dummy_signature_preprocess_materialize_python_ngrams")
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python_ngrams")
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = _build_dummy_dataset("dummy_signature_preprocess_materialize_rust_ngrams")
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust_ngrams")
     dataset_rust.materialize_signature_ngrams_python()
 
     for signature_id in dataset_python.signatures:
@@ -176,7 +155,7 @@ def test_signature_preprocess_lazy_materialization_ngrams_match_python():
 
 def test_subblocking_handles_missing_signature_affiliation_ngrams():
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = _build_dummy_dataset("dummy_signature_preprocess_subblocking_rust")
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust")
     signature_ids = list(dataset_rust.signatures.keys())
     output = make_subblocks(signature_ids, dataset_rust, maximum_size=2)
     assert sum(len(subblock) for subblock in output.values()) == len(signature_ids)
@@ -184,9 +163,9 @@ def test_subblocking_handles_missing_signature_affiliation_ngrams():
 
 def test_subblocking_membership_parity_python_vs_rust():
     with _temporary_env("S2AND_BACKEND", "python"):
-        dataset_python = _build_dummy_dataset("dummy_signature_preprocess_subblocking_python")
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_subblocking_python")
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = _build_dummy_dataset("dummy_signature_preprocess_subblocking_rust_parity")
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust_parity")
 
     signature_ids = list(dataset_python.signatures.keys())
     random.seed(12345)
@@ -202,16 +181,20 @@ def test_subblocking_membership_parity_python_vs_rust():
 def test_signature_preprocess_backend_decision_logged(caplog):
     with _temporary_env("S2AND_BACKEND", "rust"):
         with caplog.at_level(logging.INFO, logger="s2and"):
-            _build_dummy_dataset("dummy_signature_preprocess_backend_log")
+            build_dummy_dataset("dummy_signature_preprocess_backend_log")
 
     assert any("Signature preprocessing backend decision:" in record.message for record in caplog.records)
 
 
 def test_rust_json_ingest_uses_minimal_python_paper_preprocess():
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_train = _build_dummy_dataset("dummy_signature_preprocess_full_papers", mode="train")
+        dataset_train = build_dummy_dataset(
+            "dummy_signature_preprocess_full_papers",
+            mode="train",
+            compute_reference_features=True,
+        )
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_inference = _build_dummy_dataset("dummy_signature_preprocess_minimal_papers", mode="inference")
+        dataset_inference = build_dummy_dataset("dummy_signature_preprocess_minimal_papers", mode="inference")
 
     paper_id = next(iter(dataset_train.papers.keys()))
     train_paper = dataset_train.papers[paper_id]

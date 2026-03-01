@@ -89,7 +89,7 @@ def _call_from_json_paths(
         paper_path,
         None,  # clusters_path
         None,  # cluster_seeds_path
-        None,  # specter_embeddings_path
+        None,  # specter_embeddings
         None,  # name_tuples_path
         name_counts_path,
         True,  # preprocess

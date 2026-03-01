@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+
+logger = logging.getLogger("s2and")
 
 
 def parse_kv_tokens(line: str) -> dict[str, str]:
@@ -60,6 +63,8 @@ def iter_log_records(lines: Iterable[str]) -> Iterator[str]:
 @dataclass(frozen=True)
 class PhaseASample:
     accumulator_entries_peak: int
+    accumulator_entries_peak_parsed: int | None
+    accumulator_entries_peak_inferred: int | None
     chunk_features_peak_bytes: int
     phase_a_pair_buffer_peak_bytes: int
     phase_a_fixed_overhead_bytes: int
@@ -88,15 +93,16 @@ def extract_phase_a_sample(line: str) -> PhaseASample | None:
 
         # Prefer the per-sample peak, since the aggregated Phase A telemetry can also
         # include a global peak that doesn't correspond to the predicted/observed deltas.
-        accumulator_entries_peak: int | None = None
+        accumulator_entries_peak_parsed: int | None = None
         if "accumulator_entries_peak_sample" in kv:
-            accumulator_entries_peak = int(kv["accumulator_entries_peak_sample"])
+            accumulator_entries_peak_parsed = int(kv["accumulator_entries_peak_sample"])
         elif "accumulator_entries_peak" in kv:
-            accumulator_entries_peak = int(kv["accumulator_entries_peak"])
+            accumulator_entries_peak_parsed = int(kv["accumulator_entries_peak"])
 
         # Backward compatibility for older logs: infer the per-sample entry count from
         # the prediction formula when available.
-        if accumulator_entries_peak is not None and "accumulator_entries_peak_sample" not in kv:
+        accumulator_entries_peak_inferred: int | None = None
+        if "accumulator_entries_peak_sample" not in kv:
             predicted_raw = kv.get("predicted_peak_delta_bytes")
             entry_bytes_raw = kv.get("accumulator_entry_bytes")
             if predicted_raw is not None and entry_bytes_raw is not None:
@@ -108,10 +114,26 @@ def extract_phase_a_sample(line: str) -> PhaseASample | None:
                 if accumulator_entry_bytes > 0 and residual > 0 and residual % accumulator_entry_bytes == 0:
                     inferred_entries = residual // accumulator_entry_bytes
                     if inferred_entries > 0:
-                        accumulator_entries_peak = int(inferred_entries)
+                        accumulator_entries_peak_inferred = int(inferred_entries)
+
+        accumulator_entries_peak = accumulator_entries_peak_parsed
+        if "accumulator_entries_peak_sample" not in kv and accumulator_entries_peak_inferred is not None:
+            if (
+                accumulator_entries_peak_parsed is None
+                or accumulator_entries_peak_parsed == accumulator_entries_peak_inferred
+            ):
+                accumulator_entries_peak = accumulator_entries_peak_inferred
+            else:
+                logger.warning(
+                    "Phase-A accumulator peak mismatch in calibration parse: parsed=%d inferred=%d; keeping parsed",
+                    accumulator_entries_peak_parsed,
+                    accumulator_entries_peak_inferred,
+                )
 
         return PhaseASample(
             accumulator_entries_peak=int(accumulator_entries_peak or 0),
+            accumulator_entries_peak_parsed=accumulator_entries_peak_parsed,
+            accumulator_entries_peak_inferred=accumulator_entries_peak_inferred,
             chunk_features_peak_bytes=int(chunk_features_peak_bytes),
             phase_a_pair_buffer_peak_bytes=int(phase_a_pair_buffer_peak_bytes),
             phase_a_fixed_overhead_bytes=int(phase_a_fixed_overhead_bytes),

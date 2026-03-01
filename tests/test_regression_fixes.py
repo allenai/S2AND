@@ -374,8 +374,9 @@ def test_make_distance_matrices_rust_blockwise_uses_indexed_constraint_api(monke
         _batch_label,
         _rust_failure_counts,
         runtime_context=None,
+        **_kwargs,
     ):
-        del runtime_context
+        del runtime_context, _kwargs
         return np.asarray(labels + model_module.LARGE_INTEGER, dtype=np.float64), 0.0
 
     monkeypatch.setattr(model_module, "get_constraints_matrix_indexed_rust", fake_get_constraints_matrix_indexed_rust)

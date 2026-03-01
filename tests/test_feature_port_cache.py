@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import pytest
 
@@ -205,6 +207,100 @@ def test_disk_cache_save_runs_outside_global_cache_lock(monkeypatch):
     feature_port._get_rust_featurizer(dataset, use_cache=True)
 
     assert len(save_calls) == 1
+
+
+def test_concurrent_builds_for_distinct_datasets_do_not_serialize(monkeypatch):
+    d1 = DummyDataset("parallel_d1", mode="train")
+    d2 = DummyDataset("parallel_d2", mode="train")
+    ready = threading.Event()
+    build_windows: dict[str, tuple[float, float]] = {}
+    window_lock = threading.Lock()
+
+    def _build_stub(dataset, *, requested_build_path):
+        ready.wait(timeout=2)
+        build_start = time.perf_counter()
+        time.sleep(0.25)
+        build_end = time.perf_counter()
+        with window_lock:
+            build_windows[dataset.name] = (build_start, build_end)
+        return (
+            DummyRustFeaturizer(dataset.name),
+            requested_build_path,
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+            1,
+            0.25,
+        )
+
+    monkeypatch.setattr(
+        feature_port,
+        "_build_rust_featurizer_with_retry_for_missing_signature_ngrams",
+        _build_stub,
+    )
+
+    errors: list[Exception] = []
+
+    def _worker(dataset):
+        try:
+            feature_port._get_rust_featurizer(dataset, use_cache=False)
+        except Exception as exc:  # pragma: no cover - assertion guard
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_worker, args=(d1,))
+    t2 = threading.Thread(target=_worker, args=(d2,))
+    t1.start()
+    t2.start()
+    ready.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert errors == []
+    assert len(build_windows) == 2
+    latest_start = max(window[0] for window in build_windows.values())
+    earliest_end = min(window[1] for window in build_windows.values())
+    assert latest_start < earliest_end
+
+
+def test_concurrent_builds_for_same_dataset_share_single_inflight_build(monkeypatch):
+    dataset = DummyDataset("parallel_same_dataset", mode="train")
+    ready = threading.Event()
+    build_calls = {"count": 0}
+
+    def _build_stub(dataset_arg, *, requested_build_path):
+        build_calls["count"] += 1
+        ready.wait(timeout=2)
+        time.sleep(0.25)
+        return (
+            DummyRustFeaturizer(dataset_arg.name),
+            requested_build_path,
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+            1,
+            0.25,
+        )
+
+    monkeypatch.setattr(
+        feature_port,
+        "_build_rust_featurizer_with_retry_for_missing_signature_ngrams",
+        _build_stub,
+    )
+
+    errors: list[Exception] = []
+
+    def _worker():
+        try:
+            feature_port._get_rust_featurizer(dataset, use_cache=False)
+        except Exception as exc:  # pragma: no cover - assertion guard
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    t2.start()
+    ready.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert errors == []
+    assert build_calls["count"] == 1
 
 
 def test_disk_cache_metadata_mismatch_skips_load(monkeypatch, tmp_path):

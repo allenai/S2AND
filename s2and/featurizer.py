@@ -25,6 +25,7 @@ from s2and.consts import (
     NUMPY_NAN,
 )
 from s2and.data import ANDData
+from s2and.env import parse_bool_env
 from s2and.mp import UniversalPool
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.text import (
@@ -144,11 +145,7 @@ def _rust_batch_chunk_plan(
 
 
 def _env_bool(name: str, *, default: bool) -> bool:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return bool(default)
-    normalized = raw_value.strip().lower()
-    return normalized not in {"0", "false", "no", "off", ""}
+    return parse_bool_env(name, default=default)
 
 
 def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_total_pairs: int) -> list[int]:
@@ -389,6 +386,136 @@ def _log_featurization_backend_decision(
         logger.info("Featurization backend notes: %s", "; ".join(notes))
 
 
+def _contiguous_index_slice(indices: list[int]) -> slice | None:
+    if not indices:
+        return None
+    start = int(indices[0])
+    for offset, index in enumerate(indices):
+        if int(index) != start + offset:
+            return None
+    return slice(start, start + len(indices))
+
+
+def _scatter_rust_feature_row(
+    *,
+    feature_output: np.ndarray,
+    output_index: int,
+    features: np.ndarray,
+    nameless_features: np.ndarray | None,
+    coauthor_similarity_values: np.ndarray | None,
+    identity_selected_indices: bool,
+    indices_to_use: list[int],
+    nameless_indices_to_use: list[int],
+    selected_positions: list[int],
+    nameless_positions: list[int],
+    coauthor_similarity_index: int | None,
+    coauthor_position: int | None,
+    rust_chunk_is_full: bool,
+) -> None:
+    if rust_chunk_is_full:
+        if identity_selected_indices:
+            features[output_index, :] = feature_output
+        else:
+            features[output_index, :] = feature_output[indices_to_use]
+        if nameless_features is not None:
+            nameless_features[output_index, :] = feature_output[nameless_indices_to_use]
+        if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
+            coauthor_similarity_values[output_index] = feature_output[coauthor_similarity_index]
+        return
+
+    features[output_index, :] = feature_output[selected_positions]
+    if nameless_features is not None:
+        nameless_features[output_index, :] = feature_output[nameless_positions]
+    if (
+        coauthor_similarity_values is not None
+        and coauthor_similarity_index is not None
+        and coauthor_position is not None
+    ):
+        coauthor_similarity_values[output_index] = feature_output[coauthor_position]
+
+
+def _scatter_chunk_to_output(
+    *,
+    rust_features_chunk: np.ndarray,
+    chunk_indices: list[int],
+    features: np.ndarray,
+    nameless_features: np.ndarray | None,
+    coauthor_similarity_values: np.ndarray | None,
+    identity_selected_indices: bool,
+    indices_to_use: list[int],
+    nameless_indices_to_use: list[int],
+    selected_positions: list[int],
+    nameless_positions: list[int],
+    coauthor_similarity_index: int | None,
+    coauthor_position: int | None,
+    rust_chunk_is_full: bool,
+) -> None:
+    chunk_slice = _contiguous_index_slice(chunk_indices)
+    if chunk_slice is not None:
+        if rust_chunk_is_full:
+            if identity_selected_indices:
+                features[chunk_slice, :] = rust_features_chunk
+            else:
+                np.take(
+                    rust_features_chunk,
+                    indices_to_use,
+                    axis=1,
+                    out=features[chunk_slice, :],
+                )
+            if nameless_features is not None:
+                np.take(
+                    rust_features_chunk,
+                    nameless_indices_to_use,
+                    axis=1,
+                    out=nameless_features[chunk_slice, :],
+                )
+            if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
+                coauthor_similarity_values[chunk_slice] = rust_features_chunk[:, coauthor_similarity_index]
+            return
+
+        np.take(
+            rust_features_chunk,
+            selected_positions,
+            axis=1,
+            out=features[chunk_slice, :],
+        )
+        if nameless_features is not None:
+            np.take(
+                rust_features_chunk,
+                nameless_positions,
+                axis=1,
+                out=nameless_features[chunk_slice, :],
+            )
+        if (
+            coauthor_similarity_values is not None
+            and coauthor_similarity_index is not None
+            and coauthor_position is not None
+        ):
+            coauthor_similarity_values[chunk_slice] = rust_features_chunk[:, coauthor_position]
+        return
+
+    if rust_chunk_is_full:
+        if identity_selected_indices:
+            features[chunk_indices, :] = rust_features_chunk
+        else:
+            features[chunk_indices, :] = rust_features_chunk[:, indices_to_use]
+        if nameless_features is not None:
+            nameless_features[chunk_indices, :] = rust_features_chunk[:, nameless_indices_to_use]
+        if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
+            coauthor_similarity_values[chunk_indices] = rust_features_chunk[:, coauthor_similarity_index]
+        return
+
+    features[chunk_indices, :] = rust_features_chunk[:, selected_positions]
+    if nameless_features is not None:
+        nameless_features[chunk_indices, :] = rust_features_chunk[:, nameless_positions]
+    if (
+        coauthor_similarity_values is not None
+        and coauthor_similarity_index is not None
+        and coauthor_position is not None
+    ):
+        coauthor_similarity_values[chunk_indices] = rust_features_chunk[:, coauthor_position]
+
+
 # ── constants for cache writes ───────────────────────────
 INCREMENTAL_WRITE_THRESHOLD = 1000  # only write incrementally if we have at least this many new features
 BACKGROUND_WRITE_INTERVAL = 30  # seconds between background writes
@@ -415,7 +542,14 @@ class BackgroundCacheWriter:
 
     def queue_write(self, featurizer_info, cached_features, dataset_name):
         """Queue a cache write operation"""
-        self.write_queue.put((featurizer_info, cached_features.copy(), dataset_name))
+        new_features = dict(cached_features.get("__new_features__", {}))
+        if len(new_features) == 0:
+            return
+        payload = {
+            "features_to_use": list(cached_features.get("features_to_use", [])),
+            "__new_features__": new_features,
+        }
+        self.write_queue.put((featurizer_info, payload, dataset_name))
 
     def _writer_worker(self):
         """Background worker that processes write queue"""
@@ -1493,121 +1627,37 @@ def many_pairs_featurize(
                                     cached_features["features"][cache_key] = feature_output_cached
                                     cached_features["__new_features__"][cache_key] = feature_output_cached
                                     new_features_count += 1
-
-                                    if rust_chunk_is_full:
-                                        if identity_selected_indices:
-                                            features[index, :] = feature_output
-                                        else:
-                                            features[index, :] = feature_output[indices_to_use]
-                                        if nameless_features is not None:
-                                            nameless_features[index, :] = feature_output[nameless_indices_to_use]
-                                        if (
-                                            coauthor_similarity_values is not None
-                                            and coauthor_similarity_index is not None
-                                        ):
-                                            coauthor_similarity_values[index] = feature_output[
-                                                coauthor_similarity_index
-                                            ]
-                                    else:
-                                        features[index, :] = feature_output[selected_positions]
-                                        if nameless_features is not None:
-                                            nameless_features[index, :] = feature_output[nameless_positions]
-                                        if (
-                                            coauthor_similarity_values is not None
-                                            and coauthor_similarity_index is not None
-                                            and coauthor_position is not None
-                                        ):
-                                            coauthor_similarity_values[index] = feature_output[coauthor_position]
+                                    _scatter_rust_feature_row(
+                                        feature_output=feature_output,
+                                        output_index=int(index),
+                                        features=features,
+                                        nameless_features=nameless_features,
+                                        coauthor_similarity_values=coauthor_similarity_values,
+                                        identity_selected_indices=identity_selected_indices,
+                                        indices_to_use=indices_to_use,
+                                        nameless_indices_to_use=nameless_indices_to_use,
+                                        selected_positions=selected_positions,
+                                        nameless_positions=nameless_positions,
+                                        coauthor_similarity_index=coauthor_similarity_index,
+                                        coauthor_position=coauthor_position,
+                                        rust_chunk_is_full=rust_chunk_is_full,
+                                    )
                             else:
-                                chunk_slice: slice | None = None
-                                if chunk_indices:
-                                    chunk_start = int(chunk_indices[0])
-                                    contiguous = True
-                                    for offset, index in enumerate(chunk_indices):
-                                        if int(index) != chunk_start + offset:
-                                            contiguous = False
-                                            break
-                                    if contiguous:
-                                        chunk_slice = slice(chunk_start, chunk_start + len(chunk_indices))
-
-                                if chunk_slice is not None:
-                                    if rust_chunk_is_full:
-                                        if identity_selected_indices:
-                                            features[chunk_slice, :] = rust_features_chunk
-                                        else:
-                                            np.take(
-                                                rust_features_chunk,
-                                                indices_to_use,
-                                                axis=1,
-                                                out=features[chunk_slice, :],
-                                            )
-                                        if nameless_features is not None:
-                                            np.take(
-                                                rust_features_chunk,
-                                                nameless_indices_to_use,
-                                                axis=1,
-                                                out=nameless_features[chunk_slice, :],
-                                            )
-                                        if (
-                                            coauthor_similarity_values is not None
-                                            and coauthor_similarity_index is not None
-                                        ):
-                                            coauthor_similarity_values[chunk_slice] = rust_features_chunk[
-                                                :, coauthor_similarity_index
-                                            ]
-                                    else:
-                                        np.take(
-                                            rust_features_chunk,
-                                            selected_positions,
-                                            axis=1,
-                                            out=features[chunk_slice, :],
-                                        )
-                                        if nameless_features is not None:
-                                            np.take(
-                                                rust_features_chunk,
-                                                nameless_positions,
-                                                axis=1,
-                                                out=nameless_features[chunk_slice, :],
-                                            )
-                                        if (
-                                            coauthor_similarity_values is not None
-                                            and coauthor_similarity_index is not None
-                                            and coauthor_position is not None
-                                        ):
-                                            coauthor_similarity_values[chunk_slice] = rust_features_chunk[
-                                                :, coauthor_position
-                                            ]
-                                else:
-                                    if rust_chunk_is_full:
-                                        if identity_selected_indices:
-                                            features[chunk_indices, :] = rust_features_chunk
-                                        else:
-                                            features[chunk_indices, :] = rust_features_chunk[:, indices_to_use]
-                                        if nameless_features is not None:
-                                            nameless_features[chunk_indices, :] = rust_features_chunk[
-                                                :, nameless_indices_to_use
-                                            ]
-                                        if (
-                                            coauthor_similarity_values is not None
-                                            and coauthor_similarity_index is not None
-                                        ):
-                                            coauthor_similarity_values[chunk_indices] = rust_features_chunk[
-                                                :, coauthor_similarity_index
-                                            ]
-                                    else:
-                                        features[chunk_indices, :] = rust_features_chunk[:, selected_positions]
-                                        if nameless_features is not None:
-                                            nameless_features[chunk_indices, :] = rust_features_chunk[
-                                                :, nameless_positions
-                                            ]
-                                        if (
-                                            coauthor_similarity_values is not None
-                                            and coauthor_similarity_index is not None
-                                            and coauthor_position is not None
-                                        ):
-                                            coauthor_similarity_values[chunk_indices] = rust_features_chunk[
-                                                :, coauthor_position
-                                            ]
+                                _scatter_chunk_to_output(
+                                    rust_features_chunk=rust_features_chunk,
+                                    chunk_indices=chunk_indices,
+                                    features=features,
+                                    nameless_features=nameless_features,
+                                    coauthor_similarity_values=coauthor_similarity_values,
+                                    identity_selected_indices=identity_selected_indices,
+                                    indices_to_use=indices_to_use,
+                                    nameless_indices_to_use=nameless_indices_to_use,
+                                    selected_positions=selected_positions,
+                                    nameless_positions=nameless_positions,
+                                    coauthor_similarity_index=coauthor_similarity_index,
+                                    coauthor_position=coauthor_position,
+                                    rust_chunk_is_full=rust_chunk_is_full,
+                                )
                             _sample_rust_batch_rss_peak()
                             # Adaptive halving: if observed RSS delta significantly exceeds
                             # the predicted stage peak, halve target_chunk_size (up to 3 times).
@@ -1731,6 +1781,9 @@ def many_pairs_featurize(
     _sample_rust_batch_rss_peak()
 
     # Always write any remaining new features at the end
+    if use_cache and cache_changed:
+        _background_writer.stop()
+
     if use_cache and cache_changed and len(cached_features.get("__new_features__", {})) > 0:
         new_features_in_buffer = len(cached_features["__new_features__"])
         logger.info(f"Writing final {new_features_in_buffer} new features to cache")

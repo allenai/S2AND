@@ -20,8 +20,7 @@ dependencies = [
   "text-unidecode==1.3",
   "requests>=2.28,<3",
   "urllib3>=2.6.3",
-  "hyperopt==0.2.7",
-  "setuptools>=68,<81",  # pin: hyperopt uses deprecated pkg_resources, removed in 81
+  "hyperopt",
   "pandas>=1.5,<2.2",
   "lightgbm==4.6.0",
   "fastcluster>=1.2.6,<2",
@@ -37,8 +36,6 @@ dependencies = [
   "pyasn1>=0.6.2",
   "shap",
   "sinonym>=0.2.2",
-  # Backport only for older Pythons; not needed on 3.11+
-  'importlib-metadata>=4.13; python_version < "3.10"',
 ]
 
 [project.optional-dependencies]
@@ -81,6 +78,7 @@ ignore = []
 
 [tool.uv.sources]
 s2and-rust = { path = "s2and_rust" }
+hyperopt = { git = "https://github.com/hyperopt/hyperopt.git", rev = "c49ad148201c81c6ad1b43730ef4d0912734aa37" }
 
 [dependency-groups]
 dev = [
@@ -109,7 +107,6 @@ dev = [
 # "orjson",
 # "shap",
 # "sinonym",
-# 'importlib-metadata==4.13.0; python_version < "3.10"',
 # "click>=7.1.2",
 #
 # And dev tools (old pins):

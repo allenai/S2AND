@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import json
 import os
 import subprocess
 import sys
@@ -22,10 +21,12 @@ if TYPE_CHECKING:
     from scripts._rust_suite.common import ProcessTreeRSSMonitor as CommonProcessTreeRSSMonitor
     from scripts._rust_suite.common import RSSMonitor as CommonRSSMonitor
     from scripts._rust_suite.common import build_run_metadata as common_build_run_metadata
+    from scripts._rust_suite.common import extract_marked_json_payload as common_extract_marked_json_payload
 else:
     from _rust_suite.common import ProcessTreeRSSMonitor as CommonProcessTreeRSSMonitor
     from _rust_suite.common import RSSMonitor as CommonRSSMonitor
     from _rust_suite.common import build_run_metadata as common_build_run_metadata
+    from _rust_suite.common import extract_marked_json_payload as common_extract_marked_json_payload
 
 RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
 RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
@@ -45,7 +46,6 @@ _MODULE_IMPORTS = {
 
 _MODULE_CACHE: dict[str, ModuleType] = {}
 _ACTIVE_CANONICAL_ARGV: list[str] | None = None
-_ACTIVE_CANONICAL_COMMAND: str | None = None
 
 
 def _build_run_metadata() -> dict[str, Any]:
@@ -73,137 +73,9 @@ def _load_internal_module(module_key: str) -> ModuleType:
     return module
 
 
-def _extract_marked_json_payload(stdout_text: str, start_marker: str, end_marker: str) -> dict[str, Any]:
-    start = stdout_text.find(start_marker)
-    end = stdout_text.find(end_marker)
-    if start < 0 or end < 0 or end <= start:
-        raise RuntimeError("Failed to parse result JSON markers from subprocess output")
-    payload_text = stdout_text[start + len(start_marker) : end].strip()
-    return json.loads(payload_text)
-
-
 def _run_marked_subprocess(cmd: list[str], start_marker: str, end_marker: str) -> dict[str, Any]:
     completed = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return _extract_marked_json_payload(completed.stdout, start_marker, end_marker)
-
-
-# ---------------------------------------------------------------------------
-# Helper exports used by tests
-# ---------------------------------------------------------------------------
-
-
-def _language_feature_indices(feature_names: list[str]) -> list[int]:
-    return _load_internal_module("compare")._language_feature_indices(feature_names)
-
-
-def _compute_feature_parity(
-    python_features,
-    rust_features,
-    feature_names: list[str],
-    *,
-    non_language_rtol: float,
-    non_language_atol: float,
-    language_max_mismatch_fraction: float,
-):
-    return _load_internal_module("compare")._compute_feature_parity(
-        python_features,
-        rust_features,
-        feature_names,
-        non_language_rtol=non_language_rtol,
-        non_language_atol=non_language_atol,
-        language_max_mismatch_fraction=language_max_mismatch_fraction,
-    )
-
-
-def _load_dataset_inputs(
-    dataset: str,
-    limit: int | None,
-    project_root: str,
-    *,
-    force_paths: bool = False,
-):
-    return _load_internal_module("compare")._load_dataset_inputs(
-        dataset,
-        limit,
-        project_root,
-        force_paths=force_paths,
-    )
-
-
-def _effective_train_pairs_size(n_train_pairs: int, mode: str) -> int:
-    return _load_internal_module("transfer_mini")._effective_train_pairs_size(n_train_pairs, mode)
-
-
-def _build_workload(
-    *,
-    datasets: list[str],
-    target: str,
-    n_jobs: int,
-    n_train_pairs: int,
-    n_iter: int,
-    random_seed: int,
-    train_pairs_size_mode: str,
-) -> dict[str, Any]:
-    return _load_internal_module("transfer_mini")._build_workload(
-        datasets=datasets,
-        target=target,
-        n_jobs=n_jobs,
-        n_train_pairs=n_train_pairs,
-        n_iter=n_iter,
-        random_seed=random_seed,
-        train_pairs_size_mode=train_pairs_size_mode,
-    )
-
-
-def _workload_id(workload: dict[str, Any]) -> str:
-    return _load_internal_module("transfer_mini")._workload_id(workload)
-
-
-def _resolve_dataset_file(
-    data_dir: str,
-    dataset_name: str,
-    candidates: list[str],
-    *,
-    required: bool = True,
-) -> str | None:
-    return _load_internal_module("transfer_mini")._resolve_dataset_file(
-        data_dir,
-        dataset_name,
-        candidates,
-        required=required,
-    )
-
-
-def _build_anddata_kwargs(
-    *,
-    data_dir: str,
-    dataset_name: str,
-    n_jobs: int,
-    random_seed: int,
-    n_train_pairs: int,
-    n_val_test_size: int,
-    name_counts: dict[str, Any],
-    train_pairs_size_mode: str,
-) -> dict[str, Any]:
-    return _load_internal_module("transfer_mini")._build_anddata_kwargs(
-        data_dir=data_dir,
-        dataset_name=dataset_name,
-        n_jobs=n_jobs,
-        random_seed=random_seed,
-        n_train_pairs=n_train_pairs,
-        n_val_test_size=n_val_test_size,
-        name_counts=name_counts,
-        train_pairs_size_mode=train_pairs_size_mode,
-    )
-
-
-def _build_data_paths(project_root: str, dataset_name: str, data_root: str, specter_file: str) -> dict[str, str]:
-    return _load_internal_module("prod_inference")._build_data_paths(
-        project_root,
-        dataset_name,
-        data_root,
-        specter_file,
-    )
+    return common_extract_marked_json_payload(completed.stdout, start_marker, end_marker)
 
 
 def _single_run(
@@ -294,49 +166,41 @@ def _run_single_subprocess(
     )
 
 
-def _cluster_membership_digest(cluster_to_signatures: dict[str, list[str]]) -> str:
-    return _load_internal_module("largest_block")._cluster_membership_digest(cluster_to_signatures)
+# ---------------------------------------------------------------------------
+# Helper exports used by tests
+# ---------------------------------------------------------------------------
+
+_PROXY_EXPORTS: dict[str, tuple[str, str]] = {
+    "_language_feature_indices": ("compare", "_language_feature_indices"),
+    "_compute_feature_parity": ("compare", "_compute_feature_parity"),
+    "_load_dataset_inputs": ("compare", "_load_dataset_inputs"),
+    "_effective_train_pairs_size": ("transfer_mini", "_effective_train_pairs_size"),
+    "_build_workload": ("transfer_mini", "_build_workload"),
+    "_workload_id": ("transfer_mini", "_workload_id"),
+    "_resolve_dataset_file": ("transfer_mini", "_resolve_dataset_file"),
+    "_build_anddata_kwargs": ("transfer_mini", "_build_anddata_kwargs"),
+    "_build_data_paths": ("prod_inference", "_build_data_paths"),
+    "_cluster_membership_digest": ("largest_block", "_cluster_membership_digest"),
+    "_signature_to_cluster_fingerprint_map": ("largest_block", "_signature_to_cluster_fingerprint_map"),
+    "_pairwise_precision_recall_fscore_with_singleton_fix": (
+        "largest_block",
+        "_pairwise_precision_recall_fscore_with_singleton_fix",
+    ),
+    "_effective_seed_cluster_count": ("big_block_incremental", "_effective_seed_cluster_count"),
+    "_build_cluster_seeds": ("big_block_incremental", "_build_cluster_seeds"),
+    "_paper_has_block_safe_author_names": ("big_block_incremental", "_paper_has_block_safe_author_names"),
+    "_validate_args": ("big_block_incremental", "_validate_args"),
+    "run_rebuild_stress": ("stress_rebuild", "run_rebuild_stress"),
+    "_rss_growth_fraction": ("stress_rebuild", "_rss_growth_fraction"),
+}
 
 
-def _signature_to_cluster_fingerprint_map(cluster_to_signatures: dict[str, list[str]]) -> dict[str, str]:
-    return _load_internal_module("largest_block")._signature_to_cluster_fingerprint_map(cluster_to_signatures)
-
-
-def _pairwise_precision_recall_fscore_with_singleton_fix(
-    true_clusters: dict[str, list[str]],
-    pred_clusters: dict[str, list[str]],
-) -> tuple[float, float, float]:
-    return _load_internal_module("largest_block")._pairwise_precision_recall_fscore_with_singleton_fix(
-        true_clusters,
-        pred_clusters,
-    )
-
-
-def _effective_seed_cluster_count(seed_signature_count: int, requested_seed_clusters: int) -> int:
-    return _load_internal_module("big_block_incremental")._effective_seed_cluster_count(
-        seed_signature_count,
-        requested_seed_clusters,
-    )
-
-
-def _build_cluster_seeds(seed_signature_ids: list[str], seed_cluster_count: int) -> dict[str, dict[str, str]]:
-    return _load_internal_module("big_block_incremental")._build_cluster_seeds(seed_signature_ids, seed_cluster_count)
-
-
-def _paper_has_block_safe_author_names(paper_payload: dict[str, Any]) -> bool:
-    return _load_internal_module("big_block_incremental")._paper_has_block_safe_author_names(paper_payload)
-
-
-def _validate_args(args: argparse.Namespace) -> None:
-    return _load_internal_module("big_block_incremental")._validate_args(args)
-
-
-def run_rebuild_stress(**kwargs: Any) -> dict[str, Any]:
-    return _load_internal_module("stress_rebuild").run_rebuild_stress(**kwargs)
-
-
-def _rss_growth_fraction(rss_peak_gb_by_iteration: list[float]) -> float | None:
-    return _load_internal_module("stress_rebuild")._rss_growth_fraction(rss_peak_gb_by_iteration)
+def __getattr__(name: str) -> Any:
+    target = _PROXY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_key, attribute_name = target
+    return getattr(_load_internal_module(module_key), attribute_name)
 
 
 _COMMANDS = {
@@ -411,10 +275,9 @@ def _dispatch(command: str, forwarded_args: list[str]) -> int:
     command_spec = _COMMANDS[command]
     module = _load_internal_module(command_spec["module"])
 
-    global _ACTIVE_CANONICAL_ARGV, _ACTIVE_CANONICAL_COMMAND
+    global _ACTIVE_CANONICAL_ARGV
     previous_argv = list(sys.argv)
     _ACTIVE_CANONICAL_ARGV = [str(Path(__file__).resolve()), command, *forwarded_args]
-    _ACTIVE_CANONICAL_COMMAND = command
 
     try:
         if command_spec["main_kind"] == "argv":
@@ -426,7 +289,6 @@ def _dispatch(command: str, forwarded_args: list[str]) -> int:
     finally:
         sys.argv = previous_argv
         _ACTIVE_CANONICAL_ARGV = None
-        _ACTIVE_CANONICAL_COMMAND = None
 
 
 def main(argv: list[str] | None = None) -> int:

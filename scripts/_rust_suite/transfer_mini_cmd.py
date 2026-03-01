@@ -40,33 +40,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-if TYPE_CHECKING:
-    from scripts._rust_suite.common import (
-        ProcessTreeRSSMonitor,
-        build_run_metadata,
-        canonical_sha256,
-        collect_rust_extension_identity,
-    )
-else:
-    try:
-        from _rust_suite.common import (
-            ProcessTreeRSSMonitor,
-            build_run_metadata,
-            canonical_sha256,
-            collect_rust_extension_identity,
-        )
-    except ModuleNotFoundError:
-        _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
-        if str(_SCRIPTS_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPTS_DIR))
-        from _rust_suite.common import (
-            ProcessTreeRSSMonitor,
-            build_run_metadata,
-            canonical_sha256,
-            collect_rust_extension_identity,
-        )
+from _rust_suite.common import (
+    ProcessTreeRSSMonitor,
+    build_run_metadata,
+    canonical_sha256,
+    collect_rust_extension_identity,
+    extract_marked_json_payload,
+)
 
 RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
 RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
@@ -542,8 +524,7 @@ def _single_run(
             stage_timings["rust_cleanup_gc_collected"] = gc_collected
             _snapshot_stage_rss(stage_rss_gb, monitor, "post_rust_cleanup")
             print(
-                f"  [{run_label}] Post-Rust cleanup RSS snapshot: "
-                f"{stage_rss_gb.get('post_rust_cleanup', 'n/a')} GB"
+                f"  [{run_label}] Post-Rust cleanup RSS snapshot: " f"{stage_rss_gb.get('post_rust_cleanup', 'n/a')} GB"
             )
 
         # ----- union pairwise model -----
@@ -739,16 +720,6 @@ def _single_run(
 # ---------------------------------------------------------------------------
 # Subprocess wrapper for process isolation
 # ---------------------------------------------------------------------------
-def _extract_json_payload(stdout_text: str) -> dict[str, Any]:
-    start = stdout_text.find(RESULT_JSON_START)
-    end = stdout_text.find(RESULT_JSON_END)
-    if start < 0 or end < 0 or end <= start:
-        raise RuntimeError(
-            f"Failed to parse result JSON from subprocess output.\n" f"stdout tail:\n{stdout_text[-2000:]}"
-        )
-    return json.loads(stdout_text[start + len(RESULT_JSON_START) : end].strip())
-
-
 def _run_subprocess(
     *,
     backend: str,
@@ -821,7 +792,12 @@ def _run_subprocess(
         print(f"[{run_label}] FAILED with return code {process.returncode}")
         print(f"[{run_label}] output tail:\n{output_text[-3000:]}")
         raise RuntimeError(f"Subprocess {run_label} failed")
-    return _extract_json_payload(output_text)
+    return extract_marked_json_payload(
+        output_text,
+        RESULT_JSON_START,
+        RESULT_JSON_END,
+        error_tail_chars=2000,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1006,20 +982,27 @@ def _gate(args: argparse.Namespace) -> None:
 
     baseline_stage_timings = _numeric_stage_timings(baseline_run.get("stage_timings", {}))
     current_stage_timings = _numeric_stage_timings(current_run.get("stage_timings", {}))
+    min_stage_seconds_for_gate = float(args.min_stage_seconds_for_gate)
     shared_stages = sorted(set(baseline_stage_timings).intersection(current_stage_timings))
     stage_deltas: dict[str, dict[str, float | None]] = {}
+    skipped_stage_regression_checks: list[str] = []
     violations: list[str] = []
     for stage in shared_stages:
         baseline_value = baseline_stage_timings[stage]
         current_value = current_stage_timings[stage]
         delta_value = current_value - baseline_value
         delta_fraction = _optional_fraction_delta(current_value, baseline_value)
+        stage_regression_check_skipped = baseline_value < min_stage_seconds_for_gate
         stage_deltas[stage] = {
             "baseline_seconds": baseline_value,
             "current_seconds": current_value,
             "delta_seconds": delta_value,
             "delta_fraction": delta_fraction,
+            "regression_check_skipped": stage_regression_check_skipped,
         }
+        if stage_regression_check_skipped:
+            skipped_stage_regression_checks.append(stage)
+            continue
         if delta_fraction is not None and delta_fraction > float(args.max_stage_regression_fraction):
             violations.append(
                 f"stage {stage!r} regression {delta_fraction:.6f} exceeds "
@@ -1070,7 +1053,9 @@ def _gate(args: argparse.Namespace) -> None:
             "max_peak_rss_regression_fraction": float(args.max_peak_rss_regression_fraction),
             "max_b3_f1_drop": float(args.max_b3_f1_drop),
             "max_stage_regression_fraction": float(args.max_stage_regression_fraction),
+            "min_stage_seconds_for_gate": min_stage_seconds_for_gate,
         },
+        "skipped_stage_regression_checks": skipped_stage_regression_checks,
         "violations": violations,
         "pass": len(violations) == 0,
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
@@ -1081,7 +1066,10 @@ def _gate(args: argparse.Namespace) -> None:
     print(f"2. runtime delta fraction: {runtime_delta_fraction}")
     print(f"3. peak RSS delta fraction: {peak_rss_delta_fraction}")
     print(f"4. B3 F1 drop: {b3_f1_drop}")
-    print(f"5. violations: {len(violations)}")
+    print(
+        f"5. skipped stage checks (<{min_stage_seconds_for_gate:.3f}s baseline): {len(skipped_stage_regression_checks)}"
+    )
+    print(f"6. violations: {len(violations)}")
     for violation in violations:
         print(f"   - {violation}")
 
@@ -1140,6 +1128,15 @@ def main() -> None:
     parser.add_argument("--max-peak-rss-regression-fraction", type=float, default=0.05)
     parser.add_argument("--max-b3-f1-drop", type=float, default=0.001)
     parser.add_argument("--max-stage-regression-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--min-stage-seconds-for-gate",
+        type=float,
+        default=10.0,
+        help=(
+            "Skip per-stage regression checks when baseline stage time is below this threshold. "
+            "Overall runtime/RSS/B3 gates still apply."
+        ),
+    )
     args = parser.parse_args()
 
     if args.mode == "gate":

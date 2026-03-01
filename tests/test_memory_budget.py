@@ -73,8 +73,9 @@ def test_compute_incremental_limits_uses_available_bytes():
     # 10% safety margin on total_ram_bytes=1_000_000 => 100_000
     # available = 1_000_000 - 200_000 - 100_000 = 700_000
     assert int(limits["available_bytes"]) == 700_000
-    assert int(limits["chunk_budget_bytes"]) == int(0.60 * 700_000)
-    assert int(limits["accumulator_budget_bytes"]) == int(0.20 * 700_000)
+    assert 0 < int(limits["accumulator_budget_bytes"]) < int(limits["available_bytes"])
+    assert int(limits["accumulator_budget_bytes"]) < int(limits["chunk_budget_bytes"])
+    assert int(limits["chunk_budget_bytes"]) < int(limits["available_bytes"])
     assert int(limits["chunk_pairs"]) >= 1
 
 

@@ -7,18 +7,15 @@ import math
 import time
 import warnings
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
 import lightgbm as lgb
 import numpy as np
 from fastcluster import linkage
-
-# hyperopt uses deprecated pkg_resources internally (unfixed upstream as of 0.2.7)
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
-from hyperopt import Trials, fmin, hp, space_eval, tpe  # noqa: E402
-from hyperopt.pyll import scope  # noqa: E402
+from hyperopt import Trials, fmin, hp, space_eval, tpe
+from hyperopt.pyll import scope
 from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.exceptions import EfficiencyWarning
@@ -53,6 +50,7 @@ def _build_incremental_result(
     phase_b_budget_bytes: int,
     phase_b_required_bytes: int,
     phase_a_accumulator_overflow_early_stop: bool = False,
+    phase_a_adaptive_halvings_max: int = 0,
 ) -> dict[str, Any]:
     return {
         "clusters": clusters,
@@ -60,11 +58,8 @@ def _build_incremental_result(
         "phase_b_budget_bytes": int(phase_b_budget_bytes),
         "phase_b_required_bytes": int(phase_b_required_bytes),
         "phase_a_accumulator_overflow_early_stop": bool(phase_a_accumulator_overflow_early_stop),
+        "phase_a_adaptive_halvings_max": int(phase_a_adaptive_halvings_max),
     }
-
-
-def _validate_positive_total_ram_bytes(total_ram_bytes: int, *, source: str) -> int:
-    return memory_budget.validate_positive_total_ram_bytes(total_ram_bytes, source=source)
 
 
 def _detect_total_ram_bytes_best_effort() -> tuple[int | None, str]:
@@ -178,12 +173,48 @@ def _ensure_lightgbm_fitted(clf: Any) -> None:
             clf.n_features_in_ = n_feat
 
 
+def _propagate_n_jobs(estimator: Any, n_jobs: int) -> None:
+    """Best-effort propagation of `n_jobs` into estimators/wrappers.
+
+    Keeps S2AND's `Clusterer.n_jobs` as the single knob for both Rust `num_threads` and
+    Python model inference thread pools (LightGBM/OpenMP, sklearn estimators, etc.).
+    """
+    if estimator is None:
+        return
+
+    inner = getattr(estimator, "classifier", None)
+    if inner is not None and inner is not estimator:
+        _propagate_n_jobs(inner, n_jobs)
+
+    for attr in ("estimators", "estimators_"):
+        children = getattr(estimator, attr, None)
+        if not isinstance(children, list | tuple):
+            continue
+        for child in children:
+            if isinstance(child, tuple) and len(child) == 2:
+                _propagate_n_jobs(child[1], n_jobs)
+            else:
+                _propagate_n_jobs(child, n_jobs)
+
+    set_params = getattr(estimator, "set_params", None)
+    if callable(set_params):
+        try:
+            set_params(n_jobs=int(n_jobs))
+        except (TypeError, ValueError):
+            pass
+
+    if hasattr(estimator, "n_jobs"):
+        try:
+            estimator.n_jobs = int(n_jobs)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+
 def _predict_class0_with_runtime(
     classifier: Any,
     features: np.ndarray,
-    model_role: str,
-    rust_failure_counts: dict[str, int],
-    runtime_context: RuntimeContext | None = None,
+    *,
+    num_threads: int | None = None,
 ) -> tuple[np.ndarray, float, str]:
     features_2d = np.asarray(features, dtype=np.float64, order="C")
     if features_2d.size == 0:
@@ -192,7 +223,16 @@ def _predict_class0_with_runtime(
     python_start = time.perf_counter()
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="X does not have valid feature names")
-        predictions = classifier.predict_proba(features_2d)[:, 0]
+        if num_threads is not None:
+            try:
+                predictions = classifier.predict_proba(features_2d, num_threads=int(num_threads))[:, 0]
+            except TypeError as exc:
+                message = str(exc).lower()
+                if "unexpected keyword" not in message and "unexpected argument" not in message:
+                    raise
+                predictions = classifier.predict_proba(features_2d)[:, 0]
+        else:
+            predictions = classifier.predict_proba(features_2d)[:, 0]
     return predictions, time.perf_counter() - python_start, "python"
 
 
@@ -204,6 +244,8 @@ def _predict_and_combine(
     nameless_features: np.ndarray | None,
     batch_label: int | str,
     rust_failure_counts: dict[str, int],
+    *,
+    num_threads: int | None = None,
     runtime_context: RuntimeContext | None = None,
 ) -> tuple[np.ndarray, float]:
     """Predict with main (and optional nameless) classifier, log telemetry, return (predictions, seconds)."""
@@ -216,6 +258,41 @@ def _predict_and_combine(
     predicted_rows = int(np.count_nonzero(predict_flag))
     predictions = np.zeros(row_count)
     seconds = 0.0
+
+    def _predict_rows(
+        main_matrix: np.ndarray,
+        nameless_matrix: np.ndarray | None,
+        *,
+        row_total: int,
+    ) -> tuple[np.ndarray, float]:
+        main_pred, main_sec, main_backend = _predict_class0_with_runtime(
+            classifier, main_matrix, num_threads=num_threads
+        )
+        if nameless_classifier is not None:
+            if nameless_matrix is None:
+                raise RuntimeError("nameless_classifier is configured but nameless feature matrix is missing")
+            nl_pred, nl_sec, nl_backend = _predict_class0_with_runtime(
+                nameless_classifier, nameless_matrix, num_threads=num_threads
+            )
+            logger.info(
+                "Telemetry: model_predict batch=%s main=%s nameless=%s main_s=%.3f nl_s=%.3f rows=%d",
+                batch_label,
+                main_backend,
+                nl_backend,
+                main_sec,
+                nl_sec,
+                row_total,
+            )
+            return (main_pred + nl_pred) / 2, main_sec + nl_sec
+
+        logger.info(
+            "Telemetry: model_predict batch=%s main=%s main_s=%.3f rows=%d",
+            batch_label,
+            main_backend,
+            main_sec,
+            row_total,
+        )
+        return main_pred, main_sec
 
     # Boolean indexing creates a large temporary copy (often comparable to the full
     # features matrix) when most rows are predicted. Avoid that peak by predicting
@@ -235,80 +312,23 @@ def _predict_and_combine(
 
     if predicted_rows > 0:
         if predict_on_full_matrix:
-            main_pred, main_sec, main_be = _predict_class0_with_runtime(
-                classifier,
+            combined_predictions, batch_seconds = _predict_rows(
                 features,
-                "main",
-                rust_failure_counts,
-                runtime_context=runtime_context,
+                nameless_features,
+                row_total=predicted_rows,
             )
-            if nameless_classifier is not None:
-                nl_pred, nl_sec, nl_be = _predict_class0_with_runtime(
-                    nameless_classifier,
-                    nameless_features,  # type: ignore[arg-type]
-                    "nameless",
-                    rust_failure_counts,
-                    runtime_context=runtime_context,
-                )
-                seconds += main_sec + nl_sec
-                logger.info(
-                    "Telemetry: model_predict batch=%s main=%s nameless=%s main_s=%.3f nl_s=%.3f rows=%d",
-                    batch_label,
-                    main_be,
-                    nl_be,
-                    main_sec,
-                    nl_sec,
-                    predicted_rows,
-                )
-                predictions[:] = (main_pred + nl_pred) / 2
-            else:
-                seconds += main_sec
-                logger.info(
-                    "Telemetry: model_predict batch=%s main=%s main_s=%.3f rows=%d",
-                    batch_label,
-                    main_be,
-                    main_sec,
-                    predicted_rows,
-                )
-                predictions[:] = main_pred
+            predictions[:] = combined_predictions
+            seconds += batch_seconds
         else:
             predict_features = features[predict_flag, :]
-            main_pred, main_sec, main_be = _predict_class0_with_runtime(
-                classifier,
+            predict_nameless_features = nameless_features[predict_flag, :] if nameless_features is not None else None
+            combined_predictions, batch_seconds = _predict_rows(
                 predict_features,
-                "main",
-                rust_failure_counts,
-                runtime_context=runtime_context,
+                predict_nameless_features,
+                row_total=predicted_rows,
             )
-            if nameless_classifier is not None:
-                nl_pred, nl_sec, nl_be = _predict_class0_with_runtime(
-                    nameless_classifier,
-                    nameless_features[predict_flag, :],  # type: ignore[index]
-                    "nameless",
-                    rust_failure_counts,
-                    runtime_context=runtime_context,
-                )
-                seconds += main_sec + nl_sec
-                logger.info(
-                    "Telemetry: model_predict batch=%s main=%s nameless=%s main_s=%.3f nl_s=%.3f rows=%d",
-                    batch_label,
-                    main_be,
-                    nl_be,
-                    main_sec,
-                    nl_sec,
-                    predicted_rows,
-                )
-                predictions[predict_flag] = (main_pred + nl_pred) / 2
-            else:
-                seconds += main_sec
-                logger.info(
-                    "Telemetry: model_predict batch=%s main=%s main_s=%.3f rows=%d",
-                    batch_label,
-                    main_be,
-                    main_sec,
-                    predicted_rows,
-                )
-                predictions[predict_flag] = main_pred
+            predictions[predict_flag] = combined_predictions
+            seconds += batch_seconds
 
     if np.any(not_predict_flag):
         predictions[not_predict_flag] = labels[not_predict_flag] + LARGE_INTEGER
@@ -497,6 +517,47 @@ def _build_signature_index_by_id(rust_featurizer: object) -> dict[str, int]:
     return {str(sig_id): idx for idx, sig_id in enumerate(signature_ids)}
 
 
+def _build_incremental_constraint_backend(
+    dataset: ANDData,
+    *,
+    use_default_constraints_as_supervision: bool,
+    runtime_context: RuntimeContext,
+    use_cache: bool = False,
+) -> _IncrementalConstraintBackend:
+    """Build Phase A constraint backend state once for reuse across subblocks."""
+    rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
+        dataset,
+        use_default_constraints_as_supervision=use_default_constraints_as_supervision,
+        runtime_context=runtime_context,
+        use_cache=use_cache,
+    )
+    constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
+    signature_index_by_id: dict[str, int] | None = None
+    if constraint_api_mode == "indexed" and rust_featurizer is not None:
+        try:
+            signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
+        except Exception as exc:  # pragma: no cover - native extension optional
+            if stage_uses_rust(runtime_context, "constraints"):
+                raise RuntimeError(
+                    "Rust indexed constraint setup failed in strict rust backend "
+                    f"(run_id={runtime_context.run_id} error={exc})"
+                ) from exc
+            logger.warning(
+                "Rust indexed constraint setup failed in phase A; disabling Rust constraints and falling back "
+                "to Python: %s",
+                exc,
+            )
+            use_rust_constraints = False
+            rust_featurizer = None
+            constraint_api_mode = "python"
+    return _IncrementalConstraintBackend(
+        rust_featurizer=rust_featurizer,
+        use_rust_constraints=use_rust_constraints,
+        constraint_api_mode=constraint_api_mode,
+        signature_index_by_id=signature_index_by_id,
+    )
+
+
 def _resolve_constraint_labels_batch(
     dataset: ANDData,
     pair_ids: list[tuple[str, str]],
@@ -620,6 +681,42 @@ class _DistanceMatrixChunk:
         ]
 
 
+@dataclass
+class _ConstraintTelemetryAccumulator:
+    total_pairs: int = 0
+    partial_supervision_hits: int = 0
+    unresolved_pairs: int = 0
+    rust_batch_call_count: int = 0
+    elapsed_seconds: float = 0.0
+    api_modes: set[str] = field(default_factory=set)
+
+    @property
+    def api_mode_summary(self) -> str:
+        return ",".join(sorted(self.api_modes)) if self.api_modes else "none"
+
+
+def _accumulate_constraint_telemetry(
+    accumulator: _ConstraintTelemetryAccumulator,
+    batch_telemetry: dict[str, int | float | str],
+) -> None:
+    accumulator.total_pairs += int(batch_telemetry["total_pairs"])
+    accumulator.partial_supervision_hits += int(batch_telemetry["partial_supervision_hits"])
+    accumulator.unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
+    accumulator.rust_batch_call_count += int(batch_telemetry["rust_batch_call_count"])
+    accumulator.elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
+    accumulator.api_modes.add(str(batch_telemetry["api_mode"]))
+
+
+@dataclass(frozen=True)
+class _IncrementalConstraintBackend:
+    """Pre-computed Phase A constraint backend state, invariant across subblocks."""
+
+    rust_featurizer: object | None
+    use_rust_constraints: bool | None
+    constraint_api_mode: str
+    signature_index_by_id: dict[str, int] | None
+
+
 class Clusterer:
     """
     A wrapper for learning a clusterer
@@ -684,6 +781,7 @@ class Clusterer:
         self.nameless_classifier = copy.deepcopy(nameless_classifier)
         self.val_blocks_size = val_blocks_size
         self.n_iter = n_iter
+        self._n_jobs = 1
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.use_cache = use_cache
@@ -702,6 +800,17 @@ class Clusterer:
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
         self.batch_size = batch_size
+
+    @property
+    def n_jobs(self) -> int:
+        return int(getattr(self, "_n_jobs", 1))
+
+    @n_jobs.setter
+    def n_jobs(self, value: int) -> None:
+        n_jobs = max(1, int(value))
+        self._n_jobs = n_jobs
+        _propagate_n_jobs(getattr(self, "classifier", None), n_jobs)
+        _propagate_n_jobs(getattr(self, "nameless_classifier", None), n_jobs)
 
     @staticmethod
     def filter_blocks(block_dict: dict[str, list[str]], num_to_keep: int | None = None) -> dict[str, list[str]]:
@@ -760,50 +869,18 @@ class Clusterer:
         """
         if runtime_context is None:
             runtime_context = build_runtime_context("constraints")
-        rust_featurizer: object | None = None
-        use_rust_constraints: bool | None = None
-        if self.use_default_constraints_as_supervision:
-            use_rust_constraints = _use_rust_constraints(runtime_context)
-            if use_rust_constraints:
-                try:
-                    rust_featurizer = _get_rust_featurizer(
-                        dataset,
-                        runtime_context=runtime_context,
-                        use_cache=self.use_cache,
-                    )
-                except Exception as exc:  # pragma: no cover - native extension optional
-                    if stage_uses_rust(runtime_context, "constraints"):
-                        raise RuntimeError(
-                            "Rust constraint stage requested but Rust featurizer init failed "
-                            f"(run_id={runtime_context.run_id} error={exc})"
-                        ) from exc
-                    use_rust_constraints = False
-                    logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
-        constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
-        signature_index_by_id: dict[str, int] | None = None
-        if constraint_api_mode == "indexed" and rust_featurizer is not None:
-            try:
-                signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
-            except Exception as exc:  # pragma: no cover - native extension optional
-                if stage_uses_rust(runtime_context, "constraints"):
-                    raise RuntimeError(
-                        "Rust indexed constraint setup failed in strict rust backend "
-                        f"(run_id={runtime_context.run_id} error={exc})"
-                    ) from exc
-                logger.warning(
-                    "Rust indexed constraint setup failed; disabling Rust constraints and falling back to Python: %s",
-                    exc,
-                )
-                use_rust_constraints = False
-                rust_featurizer = None
-                constraint_api_mode = "python"
+        constraint_backend = _build_incremental_constraint_backend(
+            dataset,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+        )
+        rust_featurizer = constraint_backend.rust_featurizer
+        use_rust_constraints = constraint_backend.use_rust_constraints
+        constraint_api_mode = constraint_backend.constraint_api_mode
+        signature_index_by_id = constraint_backend.signature_index_by_id
 
-        telemetry_total_pairs = 0
-        telemetry_partial_hits = 0
-        telemetry_unresolved_pairs = 0
-        telemetry_rust_batch_calls = 0
-        telemetry_elapsed_seconds = 0.0
-        telemetry_api_modes: set[str] = set()
+        telemetry = _ConstraintTelemetryAccumulator()
         pair_chunk_size = max(1, int(self.batch_size))
 
         for block_key, signatures in block_dict.items():
@@ -828,12 +905,7 @@ class Clusterer:
                         constraint_api_mode=constraint_api_mode,
                         signature_index_by_id=signature_index_by_id,
                     )
-                    telemetry_total_pairs += int(batch_telemetry["total_pairs"])
-                    telemetry_partial_hits += int(batch_telemetry["partial_supervision_hits"])
-                    telemetry_unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
-                    telemetry_rust_batch_calls += int(batch_telemetry["rust_batch_call_count"])
-                    telemetry_elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
-                    telemetry_api_modes.add(str(batch_telemetry["api_mode"]))
+                    _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                     for (sig_id_1, sig_id_2), label, (left, right) in zip(
                         pair_batch_ids,
                         labels,
@@ -860,12 +932,7 @@ class Clusterer:
                     constraint_api_mode=constraint_api_mode,
                     signature_index_by_id=signature_index_by_id,
                 )
-                telemetry_total_pairs += int(batch_telemetry["total_pairs"])
-                telemetry_partial_hits += int(batch_telemetry["partial_supervision_hits"])
-                telemetry_unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
-                telemetry_rust_batch_calls += int(batch_telemetry["rust_batch_call_count"])
-                telemetry_elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
-                telemetry_api_modes.add(str(batch_telemetry["api_mode"]))
+                _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                 for (sig_id_1, sig_id_2), label, (left, right) in zip(
                     pair_batch_ids,
                     labels,
@@ -877,12 +944,12 @@ class Clusterer:
         logger.info(
             "Telemetry: constraint_batch stage=distance_matrix total_pairs=%d partial_supervision_hits=%d "
             "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f run_id=%s",
-            telemetry_total_pairs,
-            telemetry_partial_hits,
-            telemetry_unresolved_pairs,
-            telemetry_rust_batch_calls,
-            ",".join(sorted(telemetry_api_modes)) if telemetry_api_modes else "none",
-            telemetry_elapsed_seconds,
+            telemetry.total_pairs,
+            telemetry.partial_supervision_hits,
+            telemetry.unresolved_pairs,
+            telemetry.rust_batch_call_count,
+            telemetry.api_mode_summary,
+            telemetry.elapsed_seconds,
             runtime_context.run_id,
         )
 
@@ -899,50 +966,18 @@ class Clusterer:
         if not stage_uses_rust(runtime_context, "model_predict"):
             raise ValueError("Rust chunk helper is only valid when runtime_context resolves to rust backend")
 
-        rust_featurizer: object | None = None
-        use_rust_constraints: bool | None = None
-        if self.use_default_constraints_as_supervision:
-            use_rust_constraints = _use_rust_constraints(runtime_context)
-            if use_rust_constraints:
-                try:
-                    rust_featurizer = _get_rust_featurizer(
-                        dataset,
-                        runtime_context=runtime_context,
-                        use_cache=self.use_cache,
-                    )
-                except Exception as exc:  # pragma: no cover - native extension optional
-                    if stage_uses_rust(runtime_context, "constraints"):
-                        raise RuntimeError(
-                            "Rust constraint stage requested but Rust featurizer init failed "
-                            f"(run_id={runtime_context.run_id} error={exc})"
-                        ) from exc
-                    use_rust_constraints = False
-                    logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
-        constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
-        signature_index_by_id: dict[str, int] | None = None
-        if constraint_api_mode == "indexed" and rust_featurizer is not None:
-            try:
-                signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
-            except Exception as exc:  # pragma: no cover - native extension optional
-                if stage_uses_rust(runtime_context, "constraints"):
-                    raise RuntimeError(
-                        "Rust indexed constraint setup failed in strict rust backend "
-                        f"(run_id={runtime_context.run_id} error={exc})"
-                    ) from exc
-                logger.warning(
-                    "Rust indexed constraint setup failed; disabling Rust constraints and falling back to Python: %s",
-                    exc,
-                )
-                use_rust_constraints = False
-                rust_featurizer = None
-                constraint_api_mode = "python"
+        constraint_backend = _build_incremental_constraint_backend(
+            dataset,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+        )
+        rust_featurizer = constraint_backend.rust_featurizer
+        use_rust_constraints = constraint_backend.use_rust_constraints
+        constraint_api_mode = constraint_backend.constraint_api_mode
+        signature_index_by_id = constraint_backend.signature_index_by_id
 
-        telemetry_total_pairs = 0
-        telemetry_partial_hits = 0
-        telemetry_unresolved_pairs = 0
-        telemetry_rust_batch_calls = 0
-        telemetry_elapsed_seconds = 0.0
-        telemetry_api_modes: set[str] = set()
+        telemetry = _ConstraintTelemetryAccumulator()
         pair_chunk_size = max(1, int(self.batch_size))
         used_fused_path = False
         use_fused_block_api = bool(
@@ -1025,13 +1060,13 @@ class Clusterer:
                         if value is not None:
                             labels[row_offset] = float(value - LARGE_INTEGER)
 
-                    telemetry_total_pairs += int(chunk_pair_count)
-                    telemetry_partial_hits += int(partial_hits_chunk)
-                    telemetry_unresolved_pairs += int(unresolved_chunk)
-                    telemetry_elapsed_seconds += float(constraint_elapsed)
-                    telemetry_api_modes.add("indexed_fused")
+                    telemetry.total_pairs += int(chunk_pair_count)
+                    telemetry.partial_supervision_hits += int(partial_hits_chunk)
+                    telemetry.unresolved_pairs += int(unresolved_chunk)
+                    telemetry.elapsed_seconds += float(constraint_elapsed)
+                    telemetry.api_modes.add("indexed_fused")
                     if unresolved_chunk > 0:
-                        telemetry_rust_batch_calls += 1
+                        telemetry.rust_batch_call_count += 1
                     used_fused_path = True
 
                     yield _DistanceMatrixChunk(
@@ -1072,12 +1107,7 @@ class Clusterer:
                             constraint_api_mode=constraint_api_mode,
                             signature_index_by_id=signature_index_by_id,
                         )
-                        telemetry_total_pairs += int(batch_telemetry["total_pairs"])
-                        telemetry_partial_hits += int(batch_telemetry["partial_supervision_hits"])
-                        telemetry_unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
-                        telemetry_rust_batch_calls += int(batch_telemetry["rust_batch_call_count"])
-                        telemetry_elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
-                        telemetry_api_modes.add(str(batch_telemetry["api_mode"]))
+                        _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                         yield _DistanceMatrixChunk(
                             block_key=block_key,
                             block_size=block_size,
@@ -1115,12 +1145,7 @@ class Clusterer:
                         constraint_api_mode=constraint_api_mode,
                         signature_index_by_id=signature_index_by_id,
                     )
-                    telemetry_total_pairs += int(batch_telemetry["total_pairs"])
-                    telemetry_partial_hits += int(batch_telemetry["partial_supervision_hits"])
-                    telemetry_unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
-                    telemetry_rust_batch_calls += int(batch_telemetry["rust_batch_call_count"])
-                    telemetry_elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
-                    telemetry_api_modes.add(str(batch_telemetry["api_mode"]))
+                    _accumulate_constraint_telemetry(telemetry, batch_telemetry)
 
                     yield _DistanceMatrixChunk(
                         block_key=block_key,
@@ -1136,12 +1161,12 @@ class Clusterer:
         logger.info(
             "Telemetry: constraint_batch stage=distance_matrix total_pairs=%d partial_supervision_hits=%d "
             "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f path=%s run_id=%s",
-            telemetry_total_pairs,
-            telemetry_partial_hits,
-            telemetry_unresolved_pairs,
-            telemetry_rust_batch_calls,
-            ",".join(sorted(telemetry_api_modes)) if telemetry_api_modes else "none",
-            telemetry_elapsed_seconds,
+            telemetry.total_pairs,
+            telemetry.partial_supervision_hits,
+            telemetry.unresolved_pairs,
+            telemetry.rust_batch_call_count,
+            telemetry.api_mode_summary,
+            telemetry.elapsed_seconds,
             "chunked_rust_fused" if used_fused_path else "chunked_rust",
             runtime_context.run_id,
         )
@@ -1222,6 +1247,7 @@ class Clusterer:
             batch_nameless_features,
             batch_label,
             rust_failure_counts,
+            num_threads=self.n_jobs,
             runtime_context=runtime_context,
         )
         if int(batch_predictions.shape[0]) != expected_rows:
@@ -1377,6 +1403,7 @@ class Clusterer:
                     batch_nameless_features,
                     batch_num,
                     rust_failure_counts,
+                    num_threads=self.n_jobs,
                     runtime_context=runtime_context,
                 )
                 model_predict_seconds += batch_seconds
@@ -1717,11 +1744,13 @@ class Clusterer:
                     # this is the number of signatures already assigned
                     N = len(dataset.cluster_seeds_require)
                     actual_memory_usage = len(block_signatures) * N
-                    print(
-                        f"N_seeds = {N}",
-                        f"N_signatures = {len(block_signatures)}",
-                        f"desired_memory_use: {desired_memory_use}",
-                        f"actual_memory_usage: {actual_memory_usage}",
+                    logger.debug(
+                        "Incremental batching memory probe: "
+                        "n_seeds=%d n_signatures=%d desired_memory_use=%d actual_memory_usage=%d",
+                        N,
+                        len(block_signatures),
+                        int(desired_memory_use),
+                        int(actual_memory_usage),
                     )
                     if N <= 0:
                         loop_batching_threshold = None  # type: ignore
@@ -2035,6 +2064,7 @@ class Clusterer:
                     batch_nameless_features,
                     batch_num,
                     rust_failure_counts,
+                    num_threads=self.n_jobs,
                     runtime_context=runtime_context,
                 )
                 model_predict_seconds += batch_seconds
@@ -2171,44 +2201,32 @@ class Clusterer:
         chunk_limits: dict[str, int | str | float] | None,
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
+        constraint_backend: _IncrementalConstraintBackend | None = None,
     ) -> dict[str, Any]:
         if chunk_pairs <= 0:
             raise ValueError("chunk_pairs must be positive")
 
         pair_buffer: list[tuple[str, str, float]] = []
         pair_id_buffer: list[tuple[str, str]] = []
-        rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
-            dataset,
-            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-            runtime_context=runtime_context,
-            use_cache=self.use_cache,
-        )
-        constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
-        signature_index_by_id: dict[str, int] | None = None
-        if constraint_api_mode == "indexed" and rust_featurizer is not None:
-            try:
-                signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
-            except Exception as exc:  # pragma: no cover - native extension optional
-                if stage_uses_rust(runtime_context, "constraints"):
-                    raise RuntimeError(
-                        "Rust indexed constraint setup failed in strict rust backend "
-                        f"(run_id={runtime_context.run_id} error={exc})"
-                    ) from exc
-                logger.warning(
-                    "Rust indexed constraint setup failed in phase A; disabling Rust constraints and falling back "
-                    "to Python: %s",
-                    exc,
-                )
-                use_rust_constraints = False
-                rust_featurizer = None
-                constraint_api_mode = "python"
+        if constraint_backend is not None:
+            rust_featurizer = constraint_backend.rust_featurizer
+            use_rust_constraints = constraint_backend.use_rust_constraints
+            constraint_api_mode = constraint_backend.constraint_api_mode
+            signature_index_by_id = constraint_backend.signature_index_by_id
+        else:
+            _backend = _build_incremental_constraint_backend(
+                dataset,
+                use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+                runtime_context=runtime_context,
+                use_cache=self.use_cache,
+            )
+            rust_featurizer = _backend.rust_featurizer
+            use_rust_constraints = _backend.use_rust_constraints
+            constraint_api_mode = _backend.constraint_api_mode
+            signature_index_by_id = _backend.signature_index_by_id
         constraint_pairs_total = 0
         constraint_chunks_total = 0
-        constraint_partial_hits_total = 0
-        constraint_unresolved_total = 0
-        constraint_rust_batch_calls_total = 0
-        constraint_batch_seconds_total = 0.0
-        constraint_api_modes: set[str] = set()
+        constraint_telemetry = _ConstraintTelemetryAccumulator()
         model_predict_total_seconds = 0.0
         accumulator_warned = False
         accumulator_overflow_early_stop = False
@@ -2272,6 +2290,7 @@ class Clusterer:
                 chunk_nameless_features,
                 f"phase_a_chunk_{constraint_chunks_total + 1}",
                 rust_failure_counts,
+                num_threads=self.n_jobs,
                 runtime_context=runtime_context,
             )
             model_predict_total_seconds += chunk_model_seconds
@@ -2397,11 +2416,7 @@ class Clusterer:
                         constraint_api_mode=constraint_api_mode,
                         signature_index_by_id=signature_index_by_id,
                     )
-                    constraint_partial_hits_total += int(batch_telemetry["partial_supervision_hits"])
-                    constraint_unresolved_total += int(batch_telemetry["unresolved_pairs"])
-                    constraint_rust_batch_calls_total += int(batch_telemetry["rust_batch_call_count"])
-                    constraint_batch_seconds_total += float(batch_telemetry["elapsed_seconds"])
-                    constraint_api_modes.add(str(batch_telemetry["api_mode"]))
+                    _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
                     pair_buffer = [
                         (sig_id_1, sig_id_2, label)
                         for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=False)
@@ -2428,11 +2443,7 @@ class Clusterer:
                 constraint_api_mode=constraint_api_mode,
                 signature_index_by_id=signature_index_by_id,
             )
-            constraint_partial_hits_total += int(batch_telemetry["partial_supervision_hits"])
-            constraint_unresolved_total += int(batch_telemetry["unresolved_pairs"])
-            constraint_rust_batch_calls_total += int(batch_telemetry["rust_batch_call_count"])
-            constraint_batch_seconds_total += float(batch_telemetry["elapsed_seconds"])
-            constraint_api_modes.add(str(batch_telemetry["api_mode"]))
+            _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
             pair_buffer = [
                 (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=False)
             ]
@@ -2462,22 +2473,22 @@ class Clusterer:
             "Telemetry: constraint_batch stage=phase_a_seed_distances total_pairs=%d partial_supervision_hits=%d "
             "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f run_id=%s",
             int(constraint_pairs_total),
-            int(constraint_partial_hits_total),
-            int(constraint_unresolved_total),
-            int(constraint_rust_batch_calls_total),
-            ",".join(sorted(constraint_api_modes)) if constraint_api_modes else "none",
-            float(constraint_batch_seconds_total),
+            int(constraint_telemetry.partial_supervision_hits),
+            int(constraint_telemetry.unresolved_pairs),
+            int(constraint_telemetry.rust_batch_call_count),
+            constraint_telemetry.api_mode_summary,
+            float(constraint_telemetry.elapsed_seconds),
             runtime_context.run_id,
         )
 
         return {
             "constraint_pairs_total": int(constraint_pairs_total),
             "constraint_chunks_total": int(constraint_chunks_total),
-            "constraint_partial_supervision_hits": int(constraint_partial_hits_total),
-            "constraint_unresolved_pairs": int(constraint_unresolved_total),
-            "constraint_rust_batch_calls": int(constraint_rust_batch_calls_total),
-            "constraint_batch_api_mode": ",".join(sorted(constraint_api_modes)) if constraint_api_modes else "none",
-            "constraint_batch_seconds": float(constraint_batch_seconds_total),
+            "constraint_partial_supervision_hits": int(constraint_telemetry.partial_supervision_hits),
+            "constraint_unresolved_pairs": int(constraint_telemetry.unresolved_pairs),
+            "constraint_rust_batch_calls": int(constraint_telemetry.rust_batch_call_count),
+            "constraint_batch_api_mode": constraint_telemetry.api_mode_summary,
+            "constraint_batch_seconds": float(constraint_telemetry.elapsed_seconds),
             "accumulator_entries_peak": int(accumulator_entries_peak),
             "model_predict_seconds": float(model_predict_total_seconds),
             "phase_a_prediction_contract_version": str(phase_a_prediction["prediction_contract_version"]),
@@ -2649,9 +2660,8 @@ class Clusterer:
         runtime_context: RuntimeContext,
     ) -> dict[str, list[str]]:
         del all_unassigned  # fallback is intentionally subblock-local in Phase B/C/D
-        cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
-        original_seed_sigs = set(cluster_seeds_require_original.keys())
-        original_cluster_ids = set(str(cid) for cid in cluster_seeds_require_original.values())
+        original_seed_sigs = set(dataset.cluster_seeds_require.keys())
+        original_cluster_ids = set(str(cid) for cid in dataset.cluster_seeds_require.values())
         predict_times: dict[str, float] = {}
         merged_sig_to_cluster: dict[str, int | str] = {}
         next_new_cluster_id = _next_unused_cluster_id({}, int(dataset.max_seed_cluster_id or 0))
@@ -2693,7 +2703,7 @@ class Clusterer:
                         merged_sig_to_cluster[sig] = local_new_id_remap[cluster_id_str]
 
         pred_clusters_final: dict[str, list[str]] = defaultdict(list)
-        for sig_id, cluster_id in cluster_seeds_require_original.items():
+        for sig_id, cluster_id in dataset.cluster_seeds_require.items():
             pred_clusters_final[str(cluster_id)].append(sig_id)
         for sig_id, cluster_id in merged_sig_to_cluster.items():
             pred_clusters_final[str(cluster_id)].append(sig_id)
@@ -2732,9 +2742,8 @@ class Clusterer:
         total_ram_bytes: int | None = None,
     ) -> dict[str, Any]:
         logger.info("Phase-split incremental enabled")
-        cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
         all_unassigned = [
-            signature_id for signature_id in block_signatures if signature_id not in cluster_seeds_require_original
+            signature_id for signature_id in block_signatures if signature_id not in dataset.cluster_seeds_require
         ]
 
         cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = self._build_incremental_seed_setup(
@@ -2796,6 +2805,14 @@ class Clusterer:
         accumulator_runtime_calibrated = False
         phase_a_accumulator_overflow_early_stop = False
         phase_a_overflow_subblocks = 0
+        phase_a_adaptive_halvings_max = 0
+
+        constraint_backend = _build_incremental_constraint_backend(
+            dataset,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+        )
 
         for subblock_signatures in subblocks.values():
             subblock_unassigned = [
@@ -2813,10 +2830,15 @@ class Clusterer:
                 chunk_limits,
                 runtime_context,
                 total_ram_bytes=int(chunk_limits["total_ram_bytes"]),
+                constraint_backend=constraint_backend,
             )
             if bool(phase_a_telemetry.get("phase_a_accumulator_overflow_early_stop", False)):
                 phase_a_accumulator_overflow_early_stop = True
                 phase_a_overflow_subblocks += 1
+            phase_a_adaptive_halvings_max = max(
+                phase_a_adaptive_halvings_max,
+                int(phase_a_telemetry.get("phase_a_adaptive_halvings", 0)),
+            )
             phase_a_pairs_total += int(phase_a_telemetry["constraint_pairs_total"])
             phase_a_chunks_total += int(phase_a_telemetry["constraint_chunks_total"])
             phase_a_accumulator_peak = max(phase_a_accumulator_peak, int(phase_a_telemetry["accumulator_entries_peak"]))
@@ -2980,6 +3002,7 @@ class Clusterer:
                 phase_b_budget_bytes=phase_b_budget_bytes,
                 phase_b_required_bytes=recluster_bytes,
                 phase_a_accumulator_overflow_early_stop=phase_a_accumulator_overflow_early_stop,
+                phase_a_adaptive_halvings_max=phase_a_adaptive_halvings_max,
             )
 
         exact_clusters = self._run_incremental_phases_bcd(
@@ -3004,6 +3027,7 @@ class Clusterer:
             phase_b_budget_bytes=phase_b_budget_bytes,
             phase_b_required_bytes=recluster_bytes,
             phase_a_accumulator_overflow_early_stop=phase_a_accumulator_overflow_early_stop,
+            phase_a_adaptive_halvings_max=phase_a_adaptive_halvings_max,
         )
 
     def predict_incremental(
@@ -3160,41 +3184,22 @@ class Clusterer:
         logger.info("Getting name constraints")
         all_pairs: list[tuple[str, str, float]] = []
         unassigned_signature_ids: list[str] = []
-        rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
+        constraint_backend = _build_incremental_constraint_backend(
             dataset,
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             use_cache=self.use_cache,
         )
-        constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
-        signature_index_by_id: dict[str, int] | None = None
-        if constraint_api_mode == "indexed" and rust_featurizer is not None:
-            try:
-                signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
-            except Exception as exc:  # pragma: no cover - native extension optional
-                if stage_uses_rust(runtime_context, "constraints"):
-                    raise RuntimeError(
-                        "Rust indexed constraint setup failed in strict rust backend "
-                        f"(run_id={runtime_context.run_id} error={exc})"
-                    ) from exc
-                logger.warning(
-                    "Rust indexed constraint setup failed in incremental helper; disabling Rust constraints and "
-                    "falling back to Python: %s",
-                    exc,
-                )
-                use_rust_constraints = False
-                rust_featurizer = None
-                constraint_api_mode = "python"
+        rust_featurizer = constraint_backend.rust_featurizer
+        use_rust_constraints = constraint_backend.use_rust_constraints
+        constraint_api_mode = constraint_backend.constraint_api_mode
+        signature_index_by_id = constraint_backend.signature_index_by_id
         signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]] = defaultdict(
             lambda: defaultdict(lambda: (0.0, 0))
         )
         assigned_signature_ids: list[str] = list(cluster_seeds_require.keys())
         pair_chunk_size = max(1, int(self.batch_size))
-        constraint_partial_hits_total = 0
-        constraint_unresolved_total = 0
-        constraint_rust_batch_calls_total = 0
-        constraint_batch_seconds_total = 0.0
-        constraint_api_modes: set[str] = set()
+        constraint_telemetry = _ConstraintTelemetryAccumulator()
 
         def _update_signature_cluster_average(unassigned_signature: str, cluster_id: int | str, dist: float) -> None:
             previous_average, previous_count = signature_to_cluster_to_average_dist[unassigned_signature][cluster_id]
@@ -3228,11 +3233,7 @@ class Clusterer:
                         constraint_api_mode=constraint_api_mode,
                         signature_index_by_id=signature_index_by_id,
                     )
-                    constraint_partial_hits_total += int(batch_telemetry["partial_supervision_hits"])
-                    constraint_unresolved_total += int(batch_telemetry["unresolved_pairs"])
-                    constraint_rust_batch_calls_total += int(batch_telemetry["rust_batch_call_count"])
-                    constraint_batch_seconds_total += float(batch_telemetry["elapsed_seconds"])
-                    constraint_api_modes.add(str(batch_telemetry["api_mode"]))
+                    _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
                     all_pairs.extend(
                         (sig_id_1, sig_id_2, label)
                         for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=False)
@@ -3255,11 +3256,7 @@ class Clusterer:
                 constraint_api_mode=constraint_api_mode,
                 signature_index_by_id=signature_index_by_id,
             )
-            constraint_partial_hits_total += int(batch_telemetry["partial_supervision_hits"])
-            constraint_unresolved_total += int(batch_telemetry["unresolved_pairs"])
-            constraint_rust_batch_calls_total += int(batch_telemetry["rust_batch_call_count"])
-            constraint_batch_seconds_total += float(batch_telemetry["elapsed_seconds"])
-            constraint_api_modes.add(str(batch_telemetry["api_mode"]))
+            _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
             all_pairs.extend(
                 (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=False)
             )
@@ -3267,12 +3264,12 @@ class Clusterer:
         logger.info(
             "Telemetry: constraint_batch stage=predict_incremental_helper total_pairs=%d partial_supervision_hits=%d "
             "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f run_id=%s",
-            len(all_pairs),
-            constraint_partial_hits_total,
-            constraint_unresolved_total,
-            constraint_rust_batch_calls_total,
-            ",".join(sorted(constraint_api_modes)) if constraint_api_modes else "none",
-            constraint_batch_seconds_total,
+            constraint_telemetry.total_pairs,
+            constraint_telemetry.partial_supervision_hits,
+            constraint_telemetry.unresolved_pairs,
+            constraint_telemetry.rust_batch_call_count,
+            constraint_telemetry.api_mode_summary,
+            constraint_telemetry.elapsed_seconds,
             runtime_context.run_id,
         )
 
@@ -3299,6 +3296,7 @@ class Clusterer:
             batch_nameless_features,
             "incremental",
             rust_failure_counts,
+            num_threads=self.n_jobs,
             runtime_context=runtime_context,
         )
         logger.info("Telemetry: model_predict_total seconds=%.3f blocks=1", model_predict_seconds)

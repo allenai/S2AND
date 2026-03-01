@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import math
 import os
 import random
 from collections import defaultdict
@@ -12,21 +11,9 @@ import pytest
 from s2and.consts import PROJECT_ROOT_PATH
 from s2and.data import ANDData, NameCounts
 from s2and.featurizer import FeaturizationInfo
+from tests.conftest import equalish, import_s2and_rust
 
-
-def _import_s2and_rust():
-    try:
-        import s2and_rust
-
-        rust_featurizer = getattr(s2and_rust, "RustFeaturizer", None)
-        if rust_featurizer is None or not hasattr(rust_featurizer, "from_json_paths"):
-            return False, None
-        return True, s2and_rust
-    except Exception:
-        return False, None
-
-
-HAS_FROM_JSON_PATHS, s2and_rust = _import_s2and_rust()
+HAS_FROM_JSON_PATHS, s2and_rust = import_s2and_rust(required_method="from_json_paths")
 if not HAS_FROM_JSON_PATHS:
     pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable", allow_module_level=True)
 
@@ -65,12 +52,6 @@ def _force_python_backend(monkeypatch):
     """Ensure all tests run with the Python backend and skip fastText."""
     monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
-
-
-def _equalish(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-3) -> bool:
-    if math.isnan(float(a)) and math.isnan(float(b)):
-        return True
-    return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
 
 
 def _load_dataset_from_dir(data_dir: str, name: str, *, compute_reference_features: bool) -> ANDData:
@@ -125,7 +106,7 @@ def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bo
         papers_path,
         clusters_path,
         cluster_seeds_path_arg,
-        None,  # specter_embeddings_path
+        None,  # specter_embeddings
         None,  # name_tuples_path
         None,  # name_counts_path
         True,  # preprocess
@@ -148,7 +129,7 @@ def test_from_json_paths_feature_parity_vs_from_dataset_dummy():
         got_features = rust_from_json.featurize_pair(s1, s2)
         assert len(ref_features) == len(got_features)
         for idx, (ref, got) in enumerate(zip(ref_features, got_features, strict=False)):
-            assert _equalish(ref, got), f"Mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
+            assert equalish(ref, got), f"Mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
 
 
 def test_from_json_paths_constraint_parity_vs_from_dataset_dummy():
@@ -200,7 +181,7 @@ def test_from_json_paths_reference_feature_parity_vs_from_dataset_qian():
         for idx, (ref, got) in enumerate(zip(ref_features, got_features, strict=False)):
             if idx not in reference_feature_indices:
                 continue
-            assert _equalish(ref, got), f"Reference mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
+            assert equalish(ref, got), f"Reference mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
 
 
 def test_from_json_paths_emits_telemetry_payload_dummy():
@@ -266,7 +247,7 @@ def test_from_json_paths_signature_name_counts_overlay_parity_dummy():
         for idx in name_count_indices:
             ref_val = ref_features[idx]
             got_val = got_features[idx]
-            assert _equalish(
+            assert equalish(
                 ref_val, got_val
             ), f"Name-count mismatch idx={idx} pair=({s1},{s2}) ref={ref_val} got={got_val}"
 

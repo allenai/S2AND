@@ -81,6 +81,42 @@ def canonical_sha256(payload: Any) -> str:
     return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
 
 
+def extract_marked_json_payload(
+    stdout_text: str,
+    start_marker: str,
+    end_marker: str,
+    *,
+    error_tail_chars: int = 0,
+) -> dict[str, Any]:
+    start = stdout_text.find(start_marker)
+    end = stdout_text.find(end_marker)
+    if start < 0 or end < 0 or end <= start:
+        if error_tail_chars > 0:
+            tail = stdout_text[-int(error_tail_chars) :]
+            raise RuntimeError(
+                "Failed to parse result JSON markers from subprocess output.\n"
+                f"STDOUT (last {int(error_tail_chars)} chars):\n{tail}"
+            )
+        raise RuntimeError("Failed to parse result JSON markers from subprocess output")
+    payload_text = stdout_text[start + len(start_marker) : end].strip()
+    return json.loads(payload_text)
+
+
+def cluster_membership_digest(cluster_to_signatures: dict[str, list[str]]) -> str:
+    sorted_clusters = sorted([sorted(signatures) for signatures in cluster_to_signatures.values() if signatures])
+    return canonical_sha256(sorted_clusters)
+
+
+def signature_to_cluster_fingerprint_map(cluster_to_signatures: dict[str, list[str]]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for signatures in cluster_to_signatures.values():
+        members = sorted(signatures)
+        fingerprint = hashlib.sha1("|".join(members).encode("utf-8")).hexdigest()
+        for signature_id in members:
+            mapping[signature_id] = fingerprint
+    return mapping
+
+
 def compute_file_sha256(path: str | Path) -> str:
     hasher = hashlib.sha256()
     with Path(path).open("rb") as infile:

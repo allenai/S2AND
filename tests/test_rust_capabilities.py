@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import s2and.rust_capabilities as rust_capabilities
 
 
@@ -179,3 +181,16 @@ def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_ma
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert capabilities.core_runtime_available is True
     assert capabilities.from_dataset_paper_preprocess_available is True
+
+
+def test_rust_get_build_info_contract():
+    s2and_rust = pytest.importorskip("s2and_rust")
+
+    get_build_info = getattr(s2and_rust, "get_build_info", None)
+    if not callable(get_build_info):
+        return
+
+    info = get_build_info()
+    assert isinstance(info, dict)
+    for key in ("crate_version", "profile", "debug_assertions", "opt_level", "target"):
+        assert key in info

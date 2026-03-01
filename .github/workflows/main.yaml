@@ -27,6 +27,8 @@ jobs:
           key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       # Style checks via uvx (no env creation needed, blazing fast)
+      - name: ruff check
+        run: uvx --from ruff==0.6.9 ruff check s2and scripts tests
       - name: ruff format (s2and/)
         run: uvx --from ruff==0.6.9 ruff format --check s2and
       - name: ruff format (scripts/*.py)
@@ -109,7 +111,7 @@ jobs:
       # Build/install Rust extension for parity tests
       - name: Build Rust extension
         if: matrix.lane == 'rust-enabled'
-        run: uv run maturin develop -m s2and_rust/Cargo.toml
+        run: uv run --with maturin maturin develop -m s2and_rust/Cargo.toml
 
       - name: Rust parity guardrail: feature parity
         if: matrix.lane == 'rust-enabled'

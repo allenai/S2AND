@@ -323,15 +323,6 @@ wheels = [
 ]
 
 [[package]]
-name = "future"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a7/b2/4140c69c6a66432916b26158687e821ba631a4c9273c474343badf84d3ba/future-1.0.0.tar.gz", hash = "sha256:bd2968309307861edae1458a4f8a4f3598c03be43b97521076aebf5d94c07b05", size = 1228490, upload-time = "2024-02-21T11:52:38.461Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/71/ae30dadffc90b9006d77af76b393cb9dfbfc9629f339fc1574a1c52e6806/future-1.0.0-py3-none-any.whl", hash = "sha256:929292d34f5872e70396626ef385ec22355a1fae8ad29e1a734c3e43f9fbc216", size = 491326, upload-time = "2024-02-21T11:52:35.956Z" },
-]
-
-[[package]]
 name = "genieclust"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -357,21 +348,14 @@ wheels = [
 
 [[package]]
 name = "hyperopt"
-version = "0.2.7"
-source = { registry = "https://pypi.org/simple" }
+version = "0.3.0"
+source = { git = "https://github.com/hyperopt/hyperopt.git?rev=c49ad148201c81c6ad1b43730ef4d0912734aa37#c49ad148201c81c6ad1b43730ef4d0912734aa37" }
 dependencies = [
     { name = "cloudpickle" },
-    { name = "future" },
     { name = "networkx" },
     { name = "numpy" },
-    { name = "py4j" },
     { name = "scipy" },
-    { name = "six" },
     { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/58/75/0c4712e3f3a21c910778b8f9f4622601a823cefcae24181467674a0352f9/hyperopt-0.2.7.tar.gz", hash = "sha256:1bf89ae58050bbd32c7307199046117feee245c2fd9ab6255c7308522b7ca149", size = 1308240, upload-time = "2021-11-17T10:05:51.386Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b6/cd/5b3334d39276067f54618ce0d0b48ed69d91352fbf137468c7095170d0e5/hyperopt-0.2.7-py2.py3-none-any.whl", hash = "sha256:f3046d91fe4167dbf104365016596856b2524a609d22f047a066fc1ac796427c", size = 1583421, upload-time = "2021-11-17T10:05:44.265Z" },
 ]
 
 [[package]]
@@ -876,15 +860,6 @@ wheels = [
 ]
 
 [[package]]
-name = "py4j"
-version = "0.10.9.9"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/38/31/0b210511177070c8d5d3059556194352e5753602fa64b85b7ab81ec1a009/py4j-0.10.9.9.tar.gz", hash = "sha256:f694cad19efa5bd1dee4f3e5270eb406613c974394035e5bfc4ec1aba870b879", size = 761089, upload-time = "2025-01-15T03:53:18.624Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/db/ea0203e495be491c85af87b66e37acfd3bf756fd985f87e46fc5e3bf022c/py4j-0.10.9.9-py2.py3-none-any.whl", hash = "sha256:c7c26e4158defb37b0bb124933163641a2ff6e3a3913f7811b0ddbe07ed61533", size = 203008, upload-time = "2025-01-15T03:53:15.648Z" },
-]
-
-[[package]]
 name = "pyasn1"
 version = "0.6.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1160,7 +1135,6 @@ dependencies = [
     { name = "requests" },
     { name = "scikit-learn" },
     { name = "seaborn" },
-    { name = "setuptools" },
     { name = "shap" },
     { name = "sinonym" },
     { name = "strsimpy" },
@@ -1195,8 +1169,7 @@ requires-dist = [
     { name = "fasttext-wheel", specifier = ">=0.9.2" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "genieclust", specifier = ">=1.1.4,<2" },
-    { name = "hyperopt", specifier = "==0.2.7" },
-    { name = "importlib-metadata", marker = "python_full_version < '3.10'", specifier = ">=4.13" },
+    { name = "hyperopt", git = "https://github.com/hyperopt/hyperopt.git?rev=c49ad148201c81c6ad1b43730ef4d0912734aa37" },
     { name = "ipykernel", marker = "extra == 'dev'" },
     { name = "jellyfish", specifier = ">=0.9,<2" },
     { name = "lightgbm", specifier = "==4.6.0" },
@@ -1213,7 +1186,6 @@ requires-dist = [
     { name = "s2and-rust", marker = "extra == 'rust'", directory = "s2and_rust" },
     { name = "scikit-learn", specifier = "==1.7.1" },
     { name = "seaborn", specifier = ">=0.12,<0.14" },
-    { name = "setuptools", specifier = ">=68,<81" },
     { name = "shap" },
     { name = "sinonym", specifier = ">=0.2.2" },
     { name = "strsimpy", specifier = ">=0.2,<0.3" },

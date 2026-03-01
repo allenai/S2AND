@@ -49,7 +49,9 @@ class _MappingDataclass(Mapping[str, Any]):
         return {key: getattr(self, key) for key in self.__dataclass_fields__}
 
     def __getitem__(self, key: str) -> Any:
-        return self.as_dict()[key]
+        if key not in self.__dataclass_fields__:
+            raise KeyError(key)
+        return getattr(self, key)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.__dataclass_fields__)
@@ -58,7 +60,9 @@ class _MappingDataclass(Mapping[str, Any]):
         return len(self.__dataclass_fields__)
 
     def get(self, key: str, default: Any = None) -> Any:
-        return self.as_dict().get(key, default)
+        if key not in self.__dataclass_fields__:
+            return default
+        return getattr(self, key)
 
 
 @dataclass(frozen=True)
@@ -399,6 +403,12 @@ def resolve_total_ram_bytes(
     detect_total_fn: Callable[[], tuple[int | None, str]] | None = None,
     autodetect_safety_factor: float = AUTODETECT_RAM_SAFETY_FACTOR,
 ) -> tuple[int, str]:
+    def _safety_factor_suffix(factor: float) -> str:
+        percent_value = float(factor) * 100.0
+        if float(percent_value).is_integer():
+            return f"{int(percent_value)}pct"
+        return f"{percent_value:g}pct"
+
     if total_ram_bytes is not None:
         return validate_positive_total_ram_bytes(total_ram_bytes, source="arg"), "arg"
 
@@ -408,13 +418,13 @@ def resolve_total_ram_bytes(
     cgroup_limit_bytes, cgroup_source = detect_cgroup()
     if cgroup_limit_bytes is not None:
         capped_cgroup = max(1, int(float(cgroup_limit_bytes) * autodetect_safety_factor))
-        return capped_cgroup, f"{cgroup_source}_80pct"
+        return capped_cgroup, f"{cgroup_source}_{_safety_factor_suffix(autodetect_safety_factor)}"
 
     detected, source = detect_total()
     if detected is None:
         raise RuntimeError("Unable to determine total RAM for chunked incremental; pass total_ram_bytes explicitly.")
     capped_detected = max(1, int(float(detected) * autodetect_safety_factor))
-    return capped_detected, f"{source}_80pct"
+    return capped_detected, f"{source}_{_safety_factor_suffix(autodetect_safety_factor)}"
 
 
 def memory_snapshot_for_stage(

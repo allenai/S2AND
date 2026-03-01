@@ -47,6 +47,8 @@ dev = [
   "ty==0.0.18",
   # Linters/formatters
   "ruff==0.6.9",
+  # Local Rust extension build tooling
+  "maturin>=1.12.4",
   # CLI helpers used in some repos
   "click>=8,<9",
   "ipykernel",
@@ -79,11 +81,6 @@ ignore = []
 [tool.uv.sources]
 s2and-rust = { path = "s2and_rust" }
 hyperopt = { git = "https://github.com/hyperopt/hyperopt.git", rev = "c49ad148201c81c6ad1b43730ef4d0912734aa37" }
-
-[dependency-groups]
-dev = [
-    "maturin>=1.12.4",
-]
 
 # ------------------------
 # If you must replicate the *exact* legacy pins you sent, use this block instead

@@ -3,7 +3,7 @@ import logging
 import pickle
 import warnings
 from collections import Counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:  # need this for circular import issues
     from s2and.data import ANDData
@@ -32,6 +32,25 @@ from s2and.featurizer import many_pairs_featurize
 logger = logging.getLogger("s2and")
 
 sns.set(context="talk")
+
+
+class FacetEvalResult(NamedTuple):
+    gender_f1: dict[str, list]
+    ethnicity_f1: dict[str, list]
+    author_num_f1: dict[int, list]
+    year_f1: dict[int, list]
+    block_len_f1: dict[int, list]
+    cluster_len_f1: dict[int, list]
+    homonymity_f1: dict[float, list]
+    synonymity_f1: dict[float, list]
+    firstname_f1: dict[int, list]
+    affiliation_f1: dict[int, list]
+    email_f1: dict[int, list]
+    abstract_f1: dict[int, list]
+    venue_f1: dict[int, list]
+    references_f1: dict[int, list]
+    coauthors_f1: dict[int, list]
+    signature_lookup: list[dict]
 
 
 def cluster_eval(
@@ -202,24 +221,7 @@ def facet_eval(
     dataset: "ANDData",
     metrics_per_signature: dict[str, tuple[float, float, float]],
     block_type: str = "original",
-) -> tuple[
-    dict[str, list],
-    dict[str, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    dict[int, list],
-    list[dict],
-]:
+) -> FacetEvalResult:
     """
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
@@ -418,7 +420,7 @@ def facet_eval(
 
         signature_lookup.append(_signature_dict)
 
-    return (
+    return FacetEvalResult(
         gender_f1,
         ethnicity_f1,
         author_num_f1,

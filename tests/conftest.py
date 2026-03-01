@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import math
-import os
 import sys
 from importlib.machinery import PathFinder
 from typing import Any
+
+import pytest
 
 from s2and.data import ANDData
 
@@ -56,6 +57,11 @@ def import_s2and_rust(
             return False, fallback_err
 
 
+@pytest.fixture(autouse=True)
+def _set_test_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
+
+
 def build_dummy_dataset(
     name: str,
     *,
@@ -64,7 +70,6 @@ def build_dummy_dataset(
     compute_reference_features: bool = False,
     n_jobs: int = 1,
 ) -> ANDData:
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     return ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",

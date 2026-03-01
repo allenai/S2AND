@@ -11,11 +11,11 @@ RustRuntimeCapabilities = _runtime.RustRuntimeCapabilities
 
 
 def load_s2and_rust_extension() -> Any | None:
-    # Keep monkeypatch compatibility for tests patching this module's importlib.
-    _runtime.importlib = importlib  # type: ignore[assignment]
-    return _runtime.load_s2and_rust_extension()
+    return _runtime.load_s2and_rust_extension(import_module=importlib.import_module)
 
 
 def detect_rust_runtime_capabilities(extension_module: Any | None = None) -> RustRuntimeCapabilities:
-    _runtime.importlib = importlib  # type: ignore[assignment]
-    return _runtime.detect_rust_runtime_capabilities(extension_module=extension_module)
+    return _runtime.detect_rust_runtime_capabilities(
+        extension_module=extension_module,
+        import_module=importlib.import_module,
+    )

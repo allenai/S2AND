@@ -73,6 +73,18 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(cmd, check=True, cwd=str(REPO), env=env)
 
 
+def _run_tool_with_fallback(*, primary_cmd: list[str], fallback_cmd: list[str]) -> None:
+    try:
+        run(primary_cmd)
+    except FileNotFoundError:
+        run(fallback_cmd)
+    except OSError as exc:
+        if getattr(exc, "errno", None) in {2} or getattr(exc, "winerror", None) in {2}:
+            run(fallback_cmd)
+            return
+        raise
+
+
 def ensure_rust_on_path() -> None:
     if shutil.which("cargo") or shutil.which("rustc"):
         return
@@ -97,13 +109,10 @@ def run_ruff_format_check_on(paths: list[str]) -> None:
     if uvx:
         run(uvx + ["--from", "ruff==0.6.9", "ruff", "format", "--check", *paths])
         return
-    # Fallbacks if uvx missing
-    try:
-        run(uv_exe() + ["run", "--active", "ruff", "format", "--check", *paths])
-        return
-    except subprocess.CalledProcessError:
-        pass
-    run([sys.executable, "-m", "ruff", "format", "--check", *paths])
+    _run_tool_with_fallback(
+        primary_cmd=uv_exe() + ["run", "--active", "ruff", "format", "--check", *paths],
+        fallback_cmd=[sys.executable, "-m", "ruff", "format", "--check", *paths],
+    )
 
 
 def run_ruff_check_on(paths: list[str]) -> None:
@@ -111,12 +120,10 @@ def run_ruff_check_on(paths: list[str]) -> None:
     if uvx:
         run(uvx + ["--from", "ruff==0.6.9", "ruff", "check", *paths])
         return
-    try:
-        run(uv_exe() + ["run", "--active", "ruff", "check", *paths])
-        return
-    except subprocess.CalledProcessError:
-        pass
-    run([sys.executable, "-m", "ruff", "check", *paths])
+    _run_tool_with_fallback(
+        primary_cmd=uv_exe() + ["run", "--active", "ruff", "check", *paths],
+        fallback_cmd=[sys.executable, "-m", "ruff", "check", *paths],
+    )
 
 
 def run_ty_check_on(paths: list[str], *, script_mode: bool = False) -> None:
@@ -131,12 +138,10 @@ def run_ty_check_on(paths: list[str], *, script_mode: bool = False) -> None:
     if uvx:
         run(uvx + ["--from", f"ty=={TY_VERSION}", "ty", "check", *paths, *ignore_args])
         return
-    try:
-        run(uv_exe() + ["run", "--active", "--no-project", "ty", "check", *paths, *ignore_args])
-        return
-    except subprocess.CalledProcessError:
-        pass
-    run([sys.executable, "-m", "ty", "check", *paths, *ignore_args])
+    _run_tool_with_fallback(
+        primary_cmd=uv_exe() + ["run", "--active", "--no-project", "ty", "check", *paths, *ignore_args],
+        fallback_cmd=[sys.executable, "-m", "ty", "check", *paths, *ignore_args],
+    )
 
 
 def main() -> None:

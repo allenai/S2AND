@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import inspect
 import logging
 import math
 import time
@@ -13,13 +12,9 @@ from typing import Any, Literal
 
 import lightgbm as lgb
 import numpy as np
-from fastcluster import linkage
 from hyperopt import Trials, fmin, hp, space_eval, tpe
-from hyperopt.pyll import scope
-from scipy.cluster.hierarchy import fcluster
-from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.base import clone
 from sklearn.exceptions import EfficiencyWarning
-from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 from s2and import memory_budget
@@ -35,12 +30,17 @@ from s2and.feature_port import (
     update_rust_cluster_seeds,
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.subblocking import make_subblocks
 from s2and.text import same_prefix_tokens
 
 logger = logging.getLogger("s2and")
 IncrementalPhaseBMode = Literal["exact", "subblock_local"]
+
+# Keep canonical pickle import paths stable after splitting module internals.
+for _export in (FastCluster, PairwiseModeler, VotingClassifier, intify):
+    _export.__module__ = __name__
 
 
 def _build_incremental_result(
@@ -62,6 +62,15 @@ def _build_incremental_result(
     }
 
 
+def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None) -> tuple[int, str]:
+    return memory_budget.resolve_total_ram_bytes(
+        total_ram_bytes,
+        detect_cgroup_fn=memory_budget.detect_cgroup_total_ram_bytes_best_effort,
+        detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
+    )
+
+
+# Backward-compatible wrappers retained for tests/monkeypatch hooks.
 def _detect_total_ram_bytes_best_effort() -> tuple[int | None, str]:
     return memory_budget.detect_total_ram_bytes_best_effort()
 
@@ -72,14 +81,6 @@ def _detect_cgroup_total_ram_bytes_best_effort() -> tuple[int | None, str]:
 
 def _current_rss_bytes_best_effort(total_ram_bytes: int) -> tuple[int, str]:
     return memory_budget.current_rss_bytes_best_effort(total_ram_bytes)
-
-
-def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None) -> tuple[int, str]:
-    return memory_budget.resolve_total_ram_bytes(
-        total_ram_bytes,
-        detect_cgroup_fn=_detect_cgroup_total_ram_bytes_best_effort,
-        detect_total_fn=_detect_total_ram_bytes_best_effort,
-    )
 
 
 def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
@@ -137,9 +138,9 @@ def _compute_incremental_memory_limits(
         selected_feature_count=selected_feature_count,
         nameless_feature_count=nameless_feature_count,
         total_ram_bytes=total_ram_bytes,
-        detect_cgroup_fn=_detect_cgroup_total_ram_bytes_best_effort,
-        detect_total_fn=_detect_total_ram_bytes_best_effort,
-        current_rss_fn=_current_rss_bytes_best_effort,
+        detect_cgroup_fn=memory_budget.detect_cgroup_total_ram_bytes_best_effort,
+        detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
+        current_rss_fn=memory_budget.current_rss_bytes_best_effort,
     )
 
 
@@ -243,12 +244,13 @@ def _predict_and_combine(
     labels: np.ndarray,
     nameless_features: np.ndarray | None,
     batch_label: int | str,
-    rust_failure_counts: dict[str, int],
+    rust_failure_counts: dict[str, int] | None = None,
     *,
     num_threads: int | None = None,
     runtime_context: RuntimeContext | None = None,
 ) -> tuple[np.ndarray, float]:
     """Predict with main (and optional nameless) classifier, log telemetry, return (predictions, seconds)."""
+    del rust_failure_counts
     row_count = int(features.shape[0])
     if row_count <= 0:
         return np.asarray([], dtype=np.float64), 0.0
@@ -338,7 +340,7 @@ def _predict_and_combine(
 def _use_rust_constraints(runtime_context: RuntimeContext | None = None) -> bool:
     if runtime_context is None:
         runtime_context = build_runtime_context("constraints")
-    return stage_uses_rust(runtime_context, "constraints")
+    return stage_uses_rust(runtime_context)
 
 
 def _cluster_seeds_version(dataset: ANDData) -> int:
@@ -379,12 +381,12 @@ def _get_constraint_value(
                 use_cache=use_cache,
             )
         except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context, "constraints"):
+            if stage_uses_rust(runtime_context):
                 raise RuntimeError(
                     "Rust constraint evaluation failed in strict rust backend "
                     f"(pair=({sig_id_1}, {sig_id_2}) run_id={runtime_context.run_id} error={exc})"
                 ) from exc
-            logger.warning(f"Rust get_constraint failed, falling back to Python: {exc}")
+            logger.warning("Rust get_constraint failed, falling back to Python: %s", exc)
     return dataset.get_constraint(
         sig_id_1,
         sig_id_2,
@@ -430,12 +432,12 @@ def _sync_rust_cluster_seeds(
             dataset._rust_cluster_seeds_disallow_id = disallow_id
             dataset._rust_cluster_seeds_disallow_len = disallow_len
         except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context, "constraints"):
+            if stage_uses_rust(runtime_context):
                 raise RuntimeError(
                     "Rust cluster seed sync failed in strict rust backend "
                     f"(run_id={runtime_context.run_id} error={exc})"
                 ) from exc
-            logger.warning(f"Rust cluster seed sync failed, falling back to Python: {exc}")
+            logger.warning("Rust cluster seed sync failed, falling back to Python: %s", exc)
 
 
 def _initialize_incremental_constraint_backend(
@@ -455,52 +457,15 @@ def _initialize_incremental_constraint_backend(
     try:
         rust_featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
     except Exception as exc:  # pragma: no cover - native extension optional
-        if stage_uses_rust(runtime_context, "constraints"):
+        if stage_uses_rust(runtime_context):
             raise RuntimeError(
                 "Rust constraint stage requested but Rust featurizer init failed "
                 f"(run_id={runtime_context.run_id} error={exc})"
             ) from exc
-        logger.warning(f"Rust featurizer init failed, falling back to Python constraints: {exc}")
+        logger.warning("Rust featurizer init failed, falling back to Python constraints: %s", exc)
         return None, False
 
     return rust_featurizer, True
-
-
-def _resolve_incremental_pair_label(
-    dataset: ANDData,
-    unassigned_signature: str,
-    assigned_signature: str,
-    *,
-    partial_supervision: dict[tuple[str, str], int | float],
-    use_default_constraints_as_supervision: bool,
-    dont_merge_cluster_seeds: bool,
-    incremental_dont_use_cluster_seeds: bool,
-    rust_featurizer: object | None,
-    use_rust_constraints: bool | None,
-    runtime_context: RuntimeContext,
-    use_cache: bool = False,
-) -> float:
-    if (unassigned_signature, assigned_signature) in partial_supervision:
-        return partial_supervision[(unassigned_signature, assigned_signature)] - LARGE_INTEGER
-    if (assigned_signature, unassigned_signature) in partial_supervision:
-        return partial_supervision[(assigned_signature, unassigned_signature)] - LARGE_INTEGER
-    if not use_default_constraints_as_supervision:
-        return np.nan
-
-    value = _get_constraint_value(
-        dataset,
-        unassigned_signature,
-        assigned_signature,
-        dont_merge_cluster_seeds=dont_merge_cluster_seeds,
-        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-        rust_featurizer=rust_featurizer,
-        use_rust_constraints=use_rust_constraints,
-        runtime_context=runtime_context,
-        use_cache=use_cache,
-    )
-    if value is not None:
-        return value - LARGE_INTEGER
-    return np.nan
 
 
 def _resolve_constraint_api_mode(
@@ -537,7 +502,7 @@ def _build_incremental_constraint_backend(
         try:
             signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
         except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context, "constraints"):
+            if stage_uses_rust(runtime_context):
                 raise RuntimeError(
                     "Rust indexed constraint setup failed in strict rust backend "
                     f"(run_id={runtime_context.run_id} error={exc})"
@@ -562,18 +527,27 @@ def _resolve_constraint_labels_batch(
     dataset: ANDData,
     pair_ids: list[tuple[str, str]],
     *,
+    constraint_backend: _IncrementalConstraintBackend | None = None,
     partial_supervision: dict[tuple[str, str], int | float],
     use_default_constraints_as_supervision: bool,
     dont_merge_cluster_seeds: bool,
     incremental_dont_use_cluster_seeds: bool,
-    rust_featurizer: object | None,
-    use_rust_constraints: bool | None,
+    rust_featurizer: object | None = None,
+    use_rust_constraints: bool | None = None,
     runtime_context: RuntimeContext,
     use_cache: bool = False,
     num_threads: int | None = None,
     constraint_api_mode: str | None = None,
     signature_index_by_id: dict[str, int] | None = None,
-) -> tuple[list[float], dict[str, int | float | str]]:
+) -> tuple[list[float], _ConstraintBatchTelemetry]:
+    if constraint_backend is not None:
+        rust_featurizer = constraint_backend.rust_featurizer
+        use_rust_constraints = constraint_backend.use_rust_constraints
+        if constraint_api_mode is None:
+            constraint_api_mode = constraint_backend.constraint_api_mode
+        if signature_index_by_id is None:
+            signature_index_by_id = constraint_backend.signature_index_by_id
+
     labels: list[float] = [float(np.nan)] * len(pair_ids)
     unresolved_pairs: list[tuple[str, str]] = []
     unresolved_indices: list[int] = []
@@ -591,17 +565,17 @@ def _resolve_constraint_labels_batch(
         unresolved_indices.append(idx)
 
     mode = constraint_api_mode or _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
-    telemetry: dict[str, int | float | str] = {
-        "total_pairs": int(len(pair_ids)),
-        "partial_supervision_hits": int(partial_hits),
-        "unresolved_pairs": int(len(unresolved_pairs)),
-        "rust_batch_call_count": 0,
-        "api_mode": mode,
-        "elapsed_seconds": 0.0,
-    }
+    telemetry = _ConstraintBatchTelemetry(
+        total_pairs=int(len(pair_ids)),
+        partial_supervision_hits=int(partial_hits),
+        unresolved_pairs=int(len(unresolved_pairs)),
+        rust_batch_call_count=0,
+        api_mode=mode,
+        elapsed_seconds=0.0,
+    )
     if not unresolved_pairs or not use_default_constraints_as_supervision:
         if not use_default_constraints_as_supervision:
-            telemetry["api_mode"] = "partial_only"
+            telemetry.api_mode = "partial_only"
         return labels, telemetry
 
     start = time.perf_counter()
@@ -621,9 +595,9 @@ def _resolve_constraint_labels_batch(
                 runtime_context=runtime_context,
                 use_cache=use_cache,
             )
-            telemetry["rust_batch_call_count"] = 1
+            telemetry.rust_batch_call_count = 1
         except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context, "constraints"):
+            if stage_uses_rust(runtime_context):
                 raise RuntimeError(
                     "Rust batch constraint evaluation failed in strict rust backend "
                     f"(pairs={len(unresolved_pairs)} run_id={runtime_context.run_id} error={exc})"
@@ -638,8 +612,8 @@ def _resolve_constraint_labels_batch(
                 )
                 for s1, s2 in unresolved_pairs
             ]
-            telemetry["api_mode"] = "python_fallback"
-            telemetry["rust_batch_call_count"] = 0
+            telemetry.api_mode = "python_fallback"
+            telemetry.rust_batch_call_count = 0
     else:
         values = [
             dataset.get_constraint(
@@ -650,9 +624,9 @@ def _resolve_constraint_labels_batch(
             )
             for s1, s2 in unresolved_pairs
         ]
-        telemetry["api_mode"] = "python"
+        telemetry.api_mode = "python"
 
-    telemetry["elapsed_seconds"] = float(time.perf_counter() - start)
+    telemetry.elapsed_seconds = float(time.perf_counter() - start)
     for idx, value in zip(unresolved_indices, values, strict=False):
         if value is None:
             labels[idx] = float(np.nan)
@@ -695,16 +669,158 @@ class _ConstraintTelemetryAccumulator:
         return ",".join(sorted(self.api_modes)) if self.api_modes else "none"
 
 
+@dataclass
+class _ConstraintBatchTelemetry:
+    total_pairs: int
+    partial_supervision_hits: int
+    unresolved_pairs: int
+    rust_batch_call_count: int
+    api_mode: str
+    elapsed_seconds: float
+
+    def __getitem__(self, key: str) -> int | float | str:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+@dataclass
+class _PhaseASeedTelemetry:
+    constraint_pairs_total: int
+    constraint_chunks_total: int
+    constraint_partial_supervision_hits: int
+    constraint_unresolved_pairs: int
+    constraint_rust_batch_calls: int
+    constraint_batch_api_mode: str
+    constraint_batch_seconds: float
+    accumulator_entries_peak: int
+    model_predict_seconds: float
+    phase_a_prediction_contract_version: str
+    phase_a_predicted_peak_delta_bytes: int
+    phase_a_predicted_peak_rss_bytes: int
+    phase_a_predicted_bytes: int
+    phase_a_rss_before_bytes: int
+    phase_a_rss_peak_bytes: int
+    phase_a_rss_after_bytes: int
+    phase_a_observed_peak_delta_bytes: int
+    phase_a_prediction_error_ratio: float
+    phase_a_underpredicted: bool
+    phase_a_rss_source: str
+    phase_a_chunk_features_peak_bytes: int
+    phase_a_pair_buffer_peak_bytes: int
+    phase_a_accumulator_entry_bytes: int
+    phase_a_pair_buffer_entry_bytes: int
+    phase_a_fixed_overhead_bytes: int
+    phase_a_adaptive_halvings: int
+    phase_a_accumulator_overflow_early_stop: bool
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+@dataclass
+class _PhaseAChunkState:
+    constraint_pairs_total: int = 0
+    constraint_chunks_total: int = 0
+    model_predict_total_seconds: float = 0.0
+    accumulator_warned: bool = False
+    accumulator_overflow_early_stop: bool = False
+    accumulator_entries_peak: int = 0
+    accumulator_entries: int = 0
+    chunk_features_peak_bytes: int = 0
+    chunk_pairs_peak: int = 0
+    chunk_pairs: int = 0
+    adaptive_halvings: int = 0
+    rss_peak_bytes: int = 0
+
+
+@dataclass
+class _PhaseASummaryAccumulator:
+    pairs_total: int = 0
+    chunks_total: int = 0
+    accumulator_peak: int = 0
+    accumulator_peak_sample: int = 0
+    model_predict_seconds: float = 0.0
+    prediction_contract_version: str = "unknown"
+    predicted_peak_delta_bytes: int = 0
+    predicted_peak_rss_bytes: int = 0
+    predicted_bytes: int = 0
+    rss_before_bytes: int = 0
+    rss_peak_bytes: int = 0
+    rss_after_bytes: int = 0
+    rss_source: str = "unavailable"
+    observed_peak_delta_bytes: int = 0
+    prediction_error_ratio: float = 0.0
+    underpredicted: bool = False
+    chunk_features_peak_bytes: int = 0
+    pair_buffer_peak_bytes: int = 0
+    accumulator_entry_bytes: int = 0
+    pair_buffer_entry_bytes: int = 0
+    fixed_overhead_bytes: int = 0
+    worst_sample: _PhaseASeedTelemetry | None = None
+    accumulator_runtime_calibrated: bool = False
+    accumulator_overflow_early_stop: bool = False
+    overflow_subblocks: int = 0
+    adaptive_halvings_max: int = 0
+
+    def observe(self, sample: _PhaseASeedTelemetry) -> None:
+        if sample.phase_a_accumulator_overflow_early_stop:
+            self.accumulator_overflow_early_stop = True
+            self.overflow_subblocks += 1
+        self.adaptive_halvings_max = max(self.adaptive_halvings_max, int(sample.phase_a_adaptive_halvings))
+        self.pairs_total += int(sample.constraint_pairs_total)
+        self.chunks_total += int(sample.constraint_chunks_total)
+        self.accumulator_peak = max(self.accumulator_peak, int(sample.accumulator_entries_peak))
+        self.model_predict_seconds += float(sample.model_predict_seconds)
+        if self.worst_sample is None:
+            self.worst_sample = sample
+        else:
+            candidate_ratio = float(sample.phase_a_prediction_error_ratio)
+            candidate_observed_delta = int(sample.phase_a_observed_peak_delta_bytes)
+            current_ratio = float(self.worst_sample.phase_a_prediction_error_ratio)
+            current_observed_delta = int(self.worst_sample.phase_a_observed_peak_delta_bytes)
+            if candidate_ratio > current_ratio or (
+                candidate_ratio == current_ratio and candidate_observed_delta > current_observed_delta
+            ):
+                self.worst_sample = sample
+        self.underpredicted = self.underpredicted or bool(sample.phase_a_underpredicted)
+
+    def finalize_from_worst_sample(self) -> None:
+        if self.worst_sample is None:
+            return
+        worst = self.worst_sample
+        self.prediction_contract_version = str(worst.phase_a_prediction_contract_version)
+        self.predicted_peak_delta_bytes = int(worst.phase_a_predicted_peak_delta_bytes)
+        self.predicted_peak_rss_bytes = int(worst.phase_a_predicted_peak_rss_bytes)
+        self.predicted_bytes = int(worst.phase_a_predicted_bytes)
+        self.rss_before_bytes = int(worst.phase_a_rss_before_bytes)
+        self.rss_peak_bytes = int(worst.phase_a_rss_peak_bytes)
+        self.rss_after_bytes = int(worst.phase_a_rss_after_bytes)
+        self.rss_source = str(worst.phase_a_rss_source)
+        self.observed_peak_delta_bytes = int(worst.phase_a_observed_peak_delta_bytes)
+        self.prediction_error_ratio = float(worst.phase_a_prediction_error_ratio)
+        self.accumulator_peak_sample = int(worst.accumulator_entries_peak)
+        self.chunk_features_peak_bytes = int(worst.phase_a_chunk_features_peak_bytes)
+        self.pair_buffer_peak_bytes = int(worst.phase_a_pair_buffer_peak_bytes)
+        self.accumulator_entry_bytes = int(worst.phase_a_accumulator_entry_bytes)
+        self.pair_buffer_entry_bytes = int(worst.phase_a_pair_buffer_entry_bytes)
+        self.fixed_overhead_bytes = int(worst.phase_a_fixed_overhead_bytes)
+
+
 def _accumulate_constraint_telemetry(
     accumulator: _ConstraintTelemetryAccumulator,
-    batch_telemetry: dict[str, int | float | str],
+    batch_telemetry: _ConstraintBatchTelemetry,
 ) -> None:
-    accumulator.total_pairs += int(batch_telemetry["total_pairs"])
-    accumulator.partial_supervision_hits += int(batch_telemetry["partial_supervision_hits"])
-    accumulator.unresolved_pairs += int(batch_telemetry["unresolved_pairs"])
-    accumulator.rust_batch_call_count += int(batch_telemetry["rust_batch_call_count"])
-    accumulator.elapsed_seconds += float(batch_telemetry["elapsed_seconds"])
-    accumulator.api_modes.add(str(batch_telemetry["api_mode"]))
+    accumulator.total_pairs += int(batch_telemetry.total_pairs)
+    accumulator.partial_supervision_hits += int(batch_telemetry.partial_supervision_hits)
+    accumulator.unresolved_pairs += int(batch_telemetry.unresolved_pairs)
+    accumulator.rust_batch_call_count += int(batch_telemetry.rust_batch_call_count)
+    accumulator.elapsed_seconds += float(batch_telemetry.elapsed_seconds)
+    accumulator.api_modes.add(str(batch_telemetry.api_mode))
 
 
 @dataclass(frozen=True)
@@ -841,6 +957,55 @@ class Clusterer:
                     return out_dict
         return out_dict
 
+    def _resolve_constraint_batch(
+        self,
+        dataset: ANDData,
+        pair_ids: list[tuple[str, str]],
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+        *,
+        incremental_dont_use_cluster_seeds: bool,
+        constraint_backend: _IncrementalConstraintBackend,
+    ) -> tuple[list[float], _ConstraintBatchTelemetry]:
+        return _resolve_constraint_labels_batch(
+            dataset,
+            pair_ids,
+            constraint_backend=constraint_backend,
+            partial_supervision=partial_supervision,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+            num_threads=self.n_jobs,
+        )
+
+    def _flush_completed_block(
+        self,
+        *,
+        block_key: str,
+        pairwise_proba: np.ndarray | None,
+        block_dict: dict[str, list[str]],
+        effective_cluster_model_params: dict[str, Any] | None,
+        dataset: ANDData,
+        all_disallow_signature_ids: set[str],
+        pred_clusters: defaultdict[str, list[str]],
+    ) -> None:
+        if block_key == "" or pairwise_proba is None:
+            return
+        if not isinstance(self.cluster_model, FastCluster):
+            pairwise_proba += pairwise_proba.T
+            np.fill_diagonal(pairwise_proba, 0)
+        labels = self._cluster_one_block(
+            block_dict[block_key],
+            pairwise_proba,
+            effective_cluster_model_params,
+            dataset,
+            all_disallow_signature_ids,
+        )
+        for signature, label in zip(block_dict[block_key], labels, strict=False):
+            pred_clusters[block_key + "_" + str(label)].append(signature)
+
     def distance_matrix_helper(
         self,
         block_dict: dict,
@@ -875,10 +1040,6 @@ class Clusterer:
             runtime_context=runtime_context,
             use_cache=self.use_cache,
         )
-        rust_featurizer = constraint_backend.rust_featurizer
-        use_rust_constraints = constraint_backend.use_rust_constraints
-        constraint_api_mode = constraint_backend.constraint_api_mode
-        signature_index_by_id = constraint_backend.signature_index_by_id
 
         telemetry = _ConstraintTelemetryAccumulator()
         pair_chunk_size = max(1, int(self.batch_size))
@@ -890,20 +1051,13 @@ class Clusterer:
                 pair_batch_ids.append((signatures[i], signatures[j]))
                 index_batch.append((i, j))
                 if len(pair_batch_ids) >= pair_chunk_size:
-                    labels, batch_telemetry = _resolve_constraint_labels_batch(
+                    labels, batch_telemetry = self._resolve_constraint_batch(
                         dataset,
                         pair_batch_ids,
                         partial_supervision=partial_supervision,
-                        use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                        rust_featurizer=rust_featurizer,
-                        use_rust_constraints=use_rust_constraints,
                         runtime_context=runtime_context,
-                        use_cache=self.use_cache,
-                        num_threads=self.n_jobs,
-                        constraint_api_mode=constraint_api_mode,
-                        signature_index_by_id=signature_index_by_id,
+                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                        constraint_backend=constraint_backend,
                     )
                     _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                     for (sig_id_1, sig_id_2), label, (left, right) in zip(
@@ -917,20 +1071,13 @@ class Clusterer:
                     index_batch = []
 
             if pair_batch_ids:
-                labels, batch_telemetry = _resolve_constraint_labels_batch(
+                labels, batch_telemetry = self._resolve_constraint_batch(
                     dataset,
                     pair_batch_ids,
                     partial_supervision=partial_supervision,
-                    use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                    dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                    rust_featurizer=rust_featurizer,
-                    use_rust_constraints=use_rust_constraints,
                     runtime_context=runtime_context,
-                    use_cache=self.use_cache,
-                    num_threads=self.n_jobs,
-                    constraint_api_mode=constraint_api_mode,
-                    signature_index_by_id=signature_index_by_id,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    constraint_backend=constraint_backend,
                 )
                 _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                 for (sig_id_1, sig_id_2), label, (left, right) in zip(
@@ -963,7 +1110,7 @@ class Clusterer:
     ):
         if runtime_context is None:
             runtime_context = build_runtime_context("constraints")
-        if not stage_uses_rust(runtime_context, "model_predict"):
+        if not stage_uses_rust(runtime_context):
             raise ValueError("Rust chunk helper is only valid when runtime_context resolves to rust backend")
 
         constraint_backend = _build_incremental_constraint_backend(
@@ -973,7 +1120,6 @@ class Clusterer:
             use_cache=self.use_cache,
         )
         rust_featurizer = constraint_backend.rust_featurizer
-        use_rust_constraints = constraint_backend.use_rust_constraints
         constraint_api_mode = constraint_backend.constraint_api_mode
         signature_index_by_id = constraint_backend.signature_index_by_id
 
@@ -1019,7 +1165,7 @@ class Clusterer:
                             use_cache=self.use_cache,
                         )
                     except Exception as exc:
-                        if stage_uses_rust(runtime_context, "constraints"):
+                        if stage_uses_rust(runtime_context):
                             raise RuntimeError(
                                 "Rust fused block constraint evaluation failed in strict rust backend "
                                 f"(block={block_key} start_offset={offset} pairs={chunk_pair_count} "
@@ -1092,20 +1238,13 @@ class Clusterer:
                             (signatures[int(left)], signatures[int(right)])
                             for left, right in zip(i_chunk, j_chunk, strict=False)
                         ]
-                        labels, batch_telemetry = _resolve_constraint_labels_batch(
+                        labels, batch_telemetry = self._resolve_constraint_batch(
                             dataset,
                             pair_batch_ids,
                             partial_supervision=partial_supervision,
-                            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                            dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                            rust_featurizer=rust_featurizer,
-                            use_rust_constraints=use_rust_constraints,
                             runtime_context=runtime_context,
-                            use_cache=self.use_cache,
-                            num_threads=self.n_jobs,
-                            constraint_api_mode=constraint_api_mode,
-                            signature_index_by_id=signature_index_by_id,
+                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                            constraint_backend=constraint_backend,
                         )
                         _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                         yield _DistanceMatrixChunk(
@@ -1130,20 +1269,13 @@ class Clusterer:
                         for left, right in zip(i_chunk, j_chunk, strict=False)
                     ]
 
-                    labels, batch_telemetry = _resolve_constraint_labels_batch(
+                    labels, batch_telemetry = self._resolve_constraint_batch(
                         dataset,
                         pair_batch_ids,
                         partial_supervision=partial_supervision,
-                        use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                        rust_featurizer=rust_featurizer,
-                        use_rust_constraints=use_rust_constraints,
                         runtime_context=runtime_context,
-                        use_cache=self.use_cache,
-                        num_threads=self.n_jobs,
-                        constraint_api_mode=constraint_api_mode,
-                        signature_index_by_id=signature_index_by_id,
+                        incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                        constraint_backend=constraint_backend,
                     )
                     _accumulate_constraint_telemetry(telemetry, batch_telemetry)
 
@@ -1175,7 +1307,6 @@ class Clusterer:
         self,
         chunk: _DistanceMatrixChunk,
         dataset: ANDData,
-        rust_failure_counts: dict[str, int],
         runtime_context: RuntimeContext,
         batch_label: int | str,
     ) -> tuple[np.ndarray, float]:
@@ -1218,7 +1349,7 @@ class Clusterer:
                         featurizer=rust_featurizer,
                     )
             except Exception as exc:
-                if stage_uses_rust(runtime_context, "pair_featurization"):
+                if stage_uses_rust(runtime_context):
                     raise RuntimeError(
                         "Rust fused block featurization failed in strict rust backend "
                         f"(block={chunk.block_key} start_offset={chunk.start_offset} pairs={len(chunk.labels)} "
@@ -1246,7 +1377,7 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             batch_label,
-            rust_failure_counts,
+            None,
             num_threads=self.n_jobs,
             runtime_context=runtime_context,
         )
@@ -1298,7 +1429,7 @@ class Clusterer:
         # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
         num_pairs = 0
-        use_rust_blockwise = stage_uses_rust(runtime_context, "model_predict")
+        use_rust_blockwise = stage_uses_rust(runtime_context)
         fastcluster_dtype = np.float64 if use_rust_blockwise else np.float16
         for block_key, signatures in block_dict.items():
             block_size = len(signatures)
@@ -1313,7 +1444,6 @@ class Clusterer:
         logger.info(f"Pairwise probas initialized with {num_pairs} elements, starting making all pairs")
 
         model_predict_seconds = 0.0
-        rust_failure_counts: dict[str, int] = {"main": 0, "nameless": 0}
         if use_rust_blockwise:
             chunk_count = 0
             helper_output = self._distance_matrix_chunk_helper_rust(
@@ -1327,7 +1457,6 @@ class Clusterer:
                 batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
                     chunk,
                     dataset,
-                    rust_failure_counts,
                     runtime_context,
                     batch_label=f"chunk_{chunk_count}",
                 )
@@ -1402,7 +1531,7 @@ class Clusterer:
                     batch_labels,
                     batch_nameless_features,
                     batch_num,
-                    rust_failure_counts,
+                    None,
                     num_threads=self.n_jobs,
                     runtime_context=runtime_context,
                 )
@@ -1953,8 +2082,7 @@ class Clusterer:
         seen_block_keys: set[str] = set()
         num_pairs = sum(len(sigs) * (len(sigs) - 1) // 2 for sigs in block_dict.values())
         model_predict_seconds = 0.0
-        rust_failure_counts: dict[str, int] = {"main": 0, "nameless": 0}
-        use_rust_blockwise = stage_uses_rust(runtime_context, "model_predict")
+        use_rust_blockwise = stage_uses_rust(runtime_context)
         if use_rust_blockwise:
             chunk_count = 0
             helper_output = self._distance_matrix_chunk_helper_rust(
@@ -1996,7 +2124,6 @@ class Clusterer:
                 batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
                     chunk,
                     dataset,
-                    rust_failure_counts,
                     runtime_context,
                     batch_label=f"chunk_{chunk_count}",
                 )
@@ -2063,7 +2190,7 @@ class Clusterer:
                     batch_labels,
                     batch_nameless_features,
                     batch_num,
-                    rust_failure_counts,
+                    None,
                     num_threads=self.n_jobs,
                     runtime_context=runtime_context,
                 )
@@ -2202,38 +2329,20 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
         constraint_backend: _IncrementalConstraintBackend | None = None,
-    ) -> dict[str, Any]:
+    ) -> _PhaseASeedTelemetry:
         if chunk_pairs <= 0:
             raise ValueError("chunk_pairs must be positive")
 
         pair_buffer: list[tuple[str, str, float]] = []
         pair_id_buffer: list[tuple[str, str]] = []
-        if constraint_backend is not None:
-            rust_featurizer = constraint_backend.rust_featurizer
-            use_rust_constraints = constraint_backend.use_rust_constraints
-            constraint_api_mode = constraint_backend.constraint_api_mode
-            signature_index_by_id = constraint_backend.signature_index_by_id
-        else:
-            _backend = _build_incremental_constraint_backend(
+        if constraint_backend is None:
+            constraint_backend = _build_incremental_constraint_backend(
                 dataset,
                 use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
                 runtime_context=runtime_context,
                 use_cache=self.use_cache,
             )
-            rust_featurizer = _backend.rust_featurizer
-            use_rust_constraints = _backend.use_rust_constraints
-            constraint_api_mode = _backend.constraint_api_mode
-            signature_index_by_id = _backend.signature_index_by_id
-        constraint_pairs_total = 0
-        constraint_chunks_total = 0
         constraint_telemetry = _ConstraintTelemetryAccumulator()
-        model_predict_total_seconds = 0.0
-        accumulator_warned = False
-        accumulator_overflow_early_stop = False
-        accumulator_entries_peak = 0
-        chunk_features_peak_bytes = 0
-        chunk_pairs_peak = 0
-        adaptive_halvings = 0
         total_ram_for_phase = total_ram_bytes
         rss_source = "unavailable"
         rss_before_bytes = 0
@@ -2243,13 +2352,16 @@ class Clusterer:
             total_ram_for_phase = int(chunk_limits["total_ram_bytes"])
 
         if total_ram_for_phase is not None:
-            rss_before_bytes, rss_source = _current_rss_bytes_best_effort(total_ram_for_phase)
+            rss_before_bytes, rss_source = memory_budget.current_rss_bytes_best_effort(total_ram_for_phase)
             rss_peak_bytes = rss_before_bytes
 
-        def _accumulator_entry_count() -> int:
-            return int(sum(len(cluster_map) for cluster_map in signature_to_cluster_sum_count.values()))
+        chunk_state = _PhaseAChunkState(
+            chunk_pairs=int(chunk_pairs),
+            rss_peak_bytes=int(rss_peak_bytes),
+        )
 
         def _process_incremental_chunk(chunk_pairs_buffer: list[tuple[str, str, float]]) -> None:
+            nonlocal accumulator_entries
             nonlocal accumulator_entries_peak
             nonlocal accumulator_warned
             nonlocal accumulator_overflow_early_stop
@@ -2281,7 +2393,6 @@ class Clusterer:
             if chunk_nameless_features is not None:
                 chunk_feature_bytes += int(getattr(chunk_nameless_features, "nbytes", 0))
             chunk_features_peak_bytes = max(chunk_features_peak_bytes, chunk_feature_bytes)
-            rust_failure_counts: dict[str, int] = {"main": 0, "nameless": 0}
             chunk_predictions, chunk_model_seconds = _predict_and_combine(
                 self.classifier,
                 self.nameless_classifier,
@@ -2289,7 +2400,7 @@ class Clusterer:
                 chunk_labels,
                 chunk_nameless_features,
                 f"phase_a_chunk_{constraint_chunks_total + 1}",
-                rust_failure_counts,
+                None,
                 num_threads=self.n_jobs,
                 runtime_context=runtime_context,
             )
@@ -2301,14 +2412,16 @@ class Clusterer:
                     continue
                 cluster_id = cluster_seeds_require[assigned_signature]
                 cluster_sum_count = signature_to_cluster_sum_count.setdefault(unassigned_signature, {})
-                total_count = cluster_sum_count.setdefault(cluster_id, [0.0, 0])
+                if cluster_id not in cluster_sum_count:
+                    cluster_sum_count[cluster_id] = [0.0, 0]
+                    accumulator_entries += 1
+                total_count = cluster_sum_count[cluster_id]
                 total_count[0] = float(total_count[0]) + float(dist)
                 total_count[1] = int(total_count[1]) + 1
 
             constraint_pairs_total += len(chunk_pairs_buffer)
             constraint_chunks_total += 1
-            accumulator_entries = _accumulator_entry_count()
-            accumulator_entries_peak = max(accumulator_entries_peak, accumulator_entries)
+            accumulator_entries_peak = max(accumulator_entries_peak, int(accumulator_entries))
 
             if (
                 not accumulator_warned
@@ -2362,7 +2475,7 @@ class Clusterer:
                 return
 
             if total_ram_for_phase is not None:
-                rss_now, _ = _current_rss_bytes_best_effort(total_ram_for_phase)
+                rss_now, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_phase)
                 rss_peak_bytes = max(rss_peak_bytes, rss_now)
 
             # Fix #3: adaptive chunking — halve chunk_pairs if observed RSS delta exceeds prediction.
@@ -2404,17 +2517,14 @@ class Clusterer:
                     labels, batch_telemetry = _resolve_constraint_labels_batch(
                         dataset,
                         pair_id_buffer,
+                        constraint_backend=constraint_backend,
                         partial_supervision=partial_supervision,
                         use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                         incremental_dont_use_cluster_seeds=False,
-                        rust_featurizer=rust_featurizer,
-                        use_rust_constraints=use_rust_constraints,
                         runtime_context=runtime_context,
                         use_cache=self.use_cache,
                         num_threads=self.n_jobs,
-                        constraint_api_mode=constraint_api_mode,
-                        signature_index_by_id=signature_index_by_id,
                     )
                     _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
                     pair_buffer = [
@@ -2431,17 +2541,14 @@ class Clusterer:
             labels, batch_telemetry = _resolve_constraint_labels_batch(
                 dataset,
                 pair_id_buffer,
+                constraint_backend=constraint_backend,
                 partial_supervision=partial_supervision,
                 use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
                 dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                 incremental_dont_use_cluster_seeds=False,
-                rust_featurizer=rust_featurizer,
-                use_rust_constraints=use_rust_constraints,
                 runtime_context=runtime_context,
                 use_cache=self.use_cache,
                 num_threads=self.n_jobs,
-                constraint_api_mode=constraint_api_mode,
-                signature_index_by_id=signature_index_by_id,
             )
             _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
             pair_buffer = [
@@ -2451,7 +2558,7 @@ class Clusterer:
 
         rss_after_bytes = rss_before_bytes
         if total_ram_for_phase is not None:
-            rss_after_bytes, _ = _current_rss_bytes_best_effort(total_ram_for_phase)
+            rss_after_bytes, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_phase)
         accumulator_entry_bytes = int(memory_budget.INCREMENTAL_ACCUMULATOR_ENTRY_BYTES)
         if chunk_limits is not None and "accumulator_entry_bytes" in chunk_limits:
             accumulator_entry_bytes = int(chunk_limits["accumulator_entry_bytes"])
@@ -2481,36 +2588,36 @@ class Clusterer:
             runtime_context.run_id,
         )
 
-        return {
-            "constraint_pairs_total": int(constraint_pairs_total),
-            "constraint_chunks_total": int(constraint_chunks_total),
-            "constraint_partial_supervision_hits": int(constraint_telemetry.partial_supervision_hits),
-            "constraint_unresolved_pairs": int(constraint_telemetry.unresolved_pairs),
-            "constraint_rust_batch_calls": int(constraint_telemetry.rust_batch_call_count),
-            "constraint_batch_api_mode": constraint_telemetry.api_mode_summary,
-            "constraint_batch_seconds": float(constraint_telemetry.elapsed_seconds),
-            "accumulator_entries_peak": int(accumulator_entries_peak),
-            "model_predict_seconds": float(model_predict_total_seconds),
-            "phase_a_prediction_contract_version": str(phase_a_prediction["prediction_contract_version"]),
-            "phase_a_predicted_peak_delta_bytes": int(phase_a_prediction["predicted_peak_delta_bytes"]),
-            "phase_a_predicted_peak_rss_bytes": int(phase_a_prediction["predicted_peak_rss_bytes"]),
+        return _PhaseASeedTelemetry(
+            constraint_pairs_total=int(constraint_pairs_total),
+            constraint_chunks_total=int(constraint_chunks_total),
+            constraint_partial_supervision_hits=int(constraint_telemetry.partial_supervision_hits),
+            constraint_unresolved_pairs=int(constraint_telemetry.unresolved_pairs),
+            constraint_rust_batch_calls=int(constraint_telemetry.rust_batch_call_count),
+            constraint_batch_api_mode=constraint_telemetry.api_mode_summary,
+            constraint_batch_seconds=float(constraint_telemetry.elapsed_seconds),
+            accumulator_entries_peak=int(accumulator_entries_peak),
+            model_predict_seconds=float(model_predict_total_seconds),
+            phase_a_prediction_contract_version=str(phase_a_prediction["prediction_contract_version"]),
+            phase_a_predicted_peak_delta_bytes=int(phase_a_prediction["predicted_peak_delta_bytes"]),
+            phase_a_predicted_peak_rss_bytes=int(phase_a_prediction["predicted_peak_rss_bytes"]),
             # Backward-compatible alias; prefer phase_a_predicted_peak_delta_bytes.
-            "phase_a_predicted_bytes": int(phase_a_prediction["predicted_bytes"]),
-            "phase_a_rss_before_bytes": int(phase_a_prediction["rss_before_bytes"]),
-            "phase_a_rss_peak_bytes": int(phase_a_prediction["rss_peak_bytes"]),
-            "phase_a_rss_after_bytes": int(phase_a_prediction["rss_after_bytes"]),
-            "phase_a_observed_peak_delta_bytes": int(phase_a_prediction["observed_peak_delta_bytes"]),
-            "phase_a_prediction_error_ratio": float(phase_a_prediction["prediction_error_ratio"]),
-            "phase_a_underpredicted": bool(phase_a_prediction["underpredicted"]),
-            "phase_a_rss_source": str(rss_source),
-            "phase_a_chunk_features_peak_bytes": int(chunk_features_peak_bytes),
-            "phase_a_pair_buffer_peak_bytes": int(phase_a_pair_buffer_peak_bytes),
-            "phase_a_accumulator_entry_bytes": int(accumulator_entry_bytes),
-            "phase_a_pair_buffer_entry_bytes": int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES),
-            "phase_a_fixed_overhead_bytes": int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES),
-            "phase_a_adaptive_halvings": int(adaptive_halvings),
-            "phase_a_accumulator_overflow_early_stop": bool(accumulator_overflow_early_stop),
-        }
+            phase_a_predicted_bytes=int(phase_a_prediction["predicted_bytes"]),
+            phase_a_rss_before_bytes=int(phase_a_prediction["rss_before_bytes"]),
+            phase_a_rss_peak_bytes=int(phase_a_prediction["rss_peak_bytes"]),
+            phase_a_rss_after_bytes=int(phase_a_prediction["rss_after_bytes"]),
+            phase_a_observed_peak_delta_bytes=int(phase_a_prediction["observed_peak_delta_bytes"]),
+            phase_a_prediction_error_ratio=float(phase_a_prediction["prediction_error_ratio"]),
+            phase_a_underpredicted=bool(phase_a_prediction["underpredicted"]),
+            phase_a_rss_source=str(rss_source),
+            phase_a_chunk_features_peak_bytes=int(chunk_features_peak_bytes),
+            phase_a_pair_buffer_peak_bytes=int(phase_a_pair_buffer_peak_bytes),
+            phase_a_accumulator_entry_bytes=int(accumulator_entry_bytes),
+            phase_a_pair_buffer_entry_bytes=int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES),
+            phase_a_fixed_overhead_bytes=int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES),
+            phase_a_adaptive_halvings=int(adaptive_halvings),
+            phase_a_accumulator_overflow_early_stop=bool(accumulator_overflow_early_stop),
+        )
 
     def _convert_sum_count_to_average_distances(
         self,
@@ -3190,10 +3297,6 @@ class Clusterer:
             runtime_context=runtime_context,
             use_cache=self.use_cache,
         )
-        rust_featurizer = constraint_backend.rust_featurizer
-        use_rust_constraints = constraint_backend.use_rust_constraints
-        constraint_api_mode = constraint_backend.constraint_api_mode
-        signature_index_by_id = constraint_backend.signature_index_by_id
         signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]] = defaultdict(
             lambda: defaultdict(lambda: (0.0, 0))
         )
@@ -3221,17 +3324,14 @@ class Clusterer:
                     labels, batch_telemetry = _resolve_constraint_labels_batch(
                         dataset,
                         pair_id_batch,
+                        constraint_backend=constraint_backend,
                         partial_supervision=partial_supervision,
                         use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
                         dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                         incremental_dont_use_cluster_seeds=False,
-                        rust_featurizer=rust_featurizer,
-                        use_rust_constraints=use_rust_constraints,
                         runtime_context=runtime_context,
                         use_cache=self.use_cache,
                         num_threads=self.n_jobs,
-                        constraint_api_mode=constraint_api_mode,
-                        signature_index_by_id=signature_index_by_id,
                     )
                     _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
                     all_pairs.extend(
@@ -3244,17 +3344,14 @@ class Clusterer:
             labels, batch_telemetry = _resolve_constraint_labels_batch(
                 dataset,
                 pair_id_batch,
+                constraint_backend=constraint_backend,
                 partial_supervision=partial_supervision,
                 use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
                 dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
                 incremental_dont_use_cluster_seeds=False,
-                rust_featurizer=rust_featurizer,
-                use_rust_constraints=use_rust_constraints,
                 runtime_context=runtime_context,
                 use_cache=self.use_cache,
                 num_threads=self.n_jobs,
-                constraint_api_mode=constraint_api_mode,
-                signature_index_by_id=signature_index_by_id,
             )
             _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
             all_pairs.extend(
@@ -3287,7 +3384,6 @@ class Clusterer:
         )
 
         logger.info("Performing pairwise classification")
-        rust_failure_counts: dict[str, int] = {"main": 0, "nameless": 0}
         batch_predictions, model_predict_seconds = _predict_and_combine(
             self.classifier,
             self.nameless_classifier,
@@ -3295,7 +3391,7 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             "incremental",
-            rust_failure_counts,
+            None,
             num_threads=self.n_jobs,
             runtime_context=runtime_context,
         )
@@ -3329,408 +3425,3 @@ class Clusterer:
         )
 
 
-class PairwiseModeler:
-    """
-    Wrapper to learn the pairwise model + hyperparameter optimization
-
-    Parameters
-    ----------
-    estimator: sklearn compatible classifier
-        A binary classifier with fit/predict interface.
-        Defaults to LGBMClassifier if not specified. Will be cloned.
-    search_space: Dict:
-            A hyperopt search space for hyperparam optimization.
-            Defaults to an appropriate LGBMClassifier space if not specified.
-    monotone_constraints: string
-            Monotonic constraints for lightbm only.
-            Defaults to None and is not used.
-    n_iter: int
-        Number of iterations for hyperparam optimization.
-    n_jobs: int
-        Parallelization for the classifier.
-        Note: the hyperopt is serial, but can be made semi-parallel with batch search.
-    random_state: int
-        Random state for classifier and hyperopt.
-    """
-
-    def __init__(
-        self,
-        estimator: Any | None = None,
-        search_space: dict[str, Any] | None = None,
-        monotone_constraints: str | None = None,
-        n_iter: int = 50,
-        n_jobs: int = 16,  # for the model, not the hyperopt
-        random_state: int = 42,
-    ):
-        if estimator is None:
-            self.estimator = lgb.LGBMClassifier(
-                objective="binary",
-                metric="auc",  # lightgbm doesn't do F1 directly
-                n_jobs=n_jobs,
-                verbose=-1,
-                tree_learner="data",
-                random_state=random_state,
-            )
-        else:
-            self.estimator = clone(estimator)
-
-        if search_space is None:
-            self.search_space = {
-                "learning_rate": hp.loguniform("learning_rate", -7, 0),
-                "num_leaves": scope.int(hp.qloguniform("num_leaves", 2, 7, 1)),
-                "colsample_bytree": hp.uniform("colsample_bytree", 0.5, 1),
-                "subsample": hp.uniform("subsample", 0.5, 1),
-                "min_child_samples": scope.int(hp.qloguniform("min_child_samples", 3, 9, 1)),
-                "min_child_weight": hp.loguniform("min_child_weight", -16, 5),
-                "reg_alpha": hp.loguniform("reg_alpha", -16, 2),
-                "reg_lambda": hp.loguniform("reg_lambda", -16, 2),
-                "n_estimators": scope.int(hp.quniform("n_estimators", 1000, 2500, 1)),
-                "max_depth": scope.int(hp.quniform("max_depth", 1, 100, 1)),
-                "min_split_gain": hp.uniform("min_split_gain", 0, 2),
-            }
-        else:
-            self.search_space = search_space
-
-        self.monotone_constraints = monotone_constraints
-        if self.monotone_constraints is not None and isinstance(self.estimator, lgb.LGBMClassifier):
-            self.estimator.set_params(monotone_constraints=self.monotone_constraints)
-            self.estimator.set_params(monotone_constraints_method="advanced")
-            self.search_space["monotone_penalty"] = hp.uniform("monotone_penalty", 0, 5)
-
-        self.n_iter = n_iter
-        self.n_jobs = n_jobs
-        self.random_state = random_state
-        self.best_params: dict | None = None
-        self.hyperopt_trials_store: Trials | dict[Any, Any] | None = None
-        self.classifier: Any | None = None
-
-    def fit(
-        self,
-        X_train: np.ndarray[Any, Any] | None | Any,
-        y_train: np.ndarray[Any, Any] | None | Any,
-        X_val: np.ndarray[Any, Any] | None | Any,
-        y_val: np.ndarray[Any, Any] | None | Any,
-    ) -> Trials | dict[Any, Any]:
-        """
-        Fits the classifier
-
-        Parameters
-        ----------
-        X_train: np.ndarray
-            feature matrix for the training set
-        y_train: np.ndarray
-            labels for the training set
-        X_val: np.ndarray
-            feature matrix for the validation set
-        y_val: np.ndarray
-            labels for the validation set
-
-        Returns
-        -------
-        Trials: the Trials object from hyperparameter optimization
-        """
-        if len(self.search_space) > 0:
-
-            def obj(params):
-                params = {k: intify(v) for k, v in params.items()}
-                self.estimator.set_params(**params)
-                self.estimator.fit(X_train, y_train)
-                y_pred_proba = self.estimator.predict_proba(X_val)[:, 1]
-                return -roc_auc_score(y_val, y_pred_proba)
-
-            self.hyperopt_trials_store = Trials()
-            _ = fmin(
-                fn=obj,
-                space=self.search_space,
-                algo=tpe.suggest,
-                max_evals=self.n_iter,
-                trials=self.hyperopt_trials_store,
-                rstate=np.random.default_rng(self.random_state),
-            )
-            assert isinstance(self.hyperopt_trials_store, Trials)
-            best_params = space_eval(self.search_space, self.hyperopt_trials_store.argmin)
-            self.best_params = {k: intify(v) for k, v in best_params.items()}
-            self.estimator.set_params(**self.best_params)
-        else:
-            self.best_params = {}
-            self.hyperopt_trials_store = {}
-
-        # refitting but only on training data so as not to leak anything
-        self.classifier = self.estimator.fit(X_train, y_train)
-
-        assert self.hyperopt_trials_store is not None
-        return self.hyperopt_trials_store
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        assert self.classifier is not None, "You need to call fit first"
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="X does not have valid feature names")
-            return self.classifier.predict_proba(X)
-
-
-def intify(x):
-    """Hyperopt is bad at ints..."""
-    if hasattr(x, "is_integer") and x.is_integer():
-        return int(x)
-    else:
-        return x
-
-
-class FastCluster(TransformerMixin, BaseEstimator):
-    """
-    A scikit-learn wrapper for fastcluster.
-    Inputs:
-        linkage: string (default="average")
-            Agglomerative linkage method. Defaults to "average".
-            Must be one of "'complete', 'average', 'single,
-            'weighted', 'ward', 'centroid', 'median'."
-        eps: float (default=0.5)
-            Cutoff used to determine number of clusters.
-        preserve_input: bool (default=True)
-            Whether to preserve the X input or modify in place.
-            Defaults to False, which modifies in place.
-        input_as_observation_matrix: bool (default=False)
-            If True, the input to fit/transform must be a 2-D array
-            of observation vectors (N by d). If False input to fit/transform
-            must be a 1-D condensed distance matrix, then it must be a
-            (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix, and
-            d is the dimensionality of the vector space.
-
-    Note: FastCluster does *not* support two-dimensional distance matrices
-    as input. They *must* be flattened. For more details, please see:
-    https://cran.r-project.org/web/packages/fastcluster/vignettes/fastcluster.pdf
-    """
-
-    def __init__(
-        self,
-        linkage: str = "average",
-        eps: float = 0.5,
-        preserve_input: bool = True,
-        input_as_observation_matrix: bool = False,
-    ):
-        if linkage not in {
-            "complete",
-            "average",
-            "weighted",
-            "ward",
-            "centroid",
-            "median",
-            "single",
-        }:
-            raise Exception(
-                "The 'linkage' parameter has to be one of: "
-                + "'single', complete', 'average', 'weighted', 'ward', 'centroid', 'median'."
-            )
-
-        self.linkage = linkage
-        self.eps = eps
-        self.preserve_input = preserve_input
-        self.input_as_observation_matrix = input_as_observation_matrix
-        self.labels_ = None
-
-    # ---- new: robust get_params ----
-    def get_params(self, deep=True):
-        """
-        Return params but gracefully handle the case where an instance
-        (e.g., loaded from an old pickle) is missing attributes.
-        """
-        params = {}
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            # prefer the runtime attribute if present, otherwise the __init__ default
-            if hasattr(self, name):
-                params[name] = getattr(self, name)
-            else:
-                params[name] = param.default if param.default is not inspect._empty else None
-
-        if deep:
-            # sklearn convention: include nested estimator params with __ separator
-            for key, val in list(params.items()):
-                if hasattr(val, "get_params"):
-                    for subk, subv in val.get_params(deep=True).items():
-                        params[f"{key}__{subk}"] = subv
-        return params
-
-    # ---- new: ensure defaults after unpickling ----
-    def __setstate__(self, state):
-        """
-        Called on unpickle. Populate any missing ctor attrs with their defaults.
-        """
-        self.__dict__.update(state)
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            if not hasattr(self, name):
-                default = param.default if param.default is not inspect._empty else None
-                setattr(self, name, default)
-
-    def fit(self, X: np.ndarray) -> FastCluster:
-        """
-        Fit the estimator on input data. The results are stored in self.labels_.
-        Parameters
-        ----------
-        X: np.array
-            The input may be either a 1-D condensed distance matrix
-            or a 2-D array of observation vectors. If X is a 1-D condensed distance
-            matrix, then it must be (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix. If X is 2-D
-            then the flag `input_as_observation_matrix` must be set to True in init.
-        Returns
-        -------
-        self
-        """
-        X = np.asarray(X)
-        if len(X.shape) == 1 and self.input_as_observation_matrix:
-            raise Exception(
-                "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. "
-                "If you intended to pass in an observation matrix, it must be 2-D (N x feature_dimension)."
-            )
-        elif len(X.shape) == 2 and not self.input_as_observation_matrix:
-            raise Exception(
-                "Input to fit is two-dimensional, but input_as_observation_matrix flag is set to False. "
-                "If you intended to pass in a distance matrix, it must be flattened (1-D)."
-            )
-        elif len(X.shape) > 2:
-            raise Exception("The input to fit can only be one-dimensional or two-dimensional.")
-        Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
-        self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
-        return self
-
-    def fit_transform(
-        self,
-        X: np.ndarray,
-        y: np.ndarray | None = None,
-        **fit_params: Any,
-    ) -> np.ndarray:
-        """
-        Fit the estimator on input data, and returns results.
-        Parameters
-        ----------
-        X: np.array
-            The input may be either a 1-D condensed distance matrix
-            or a 2-D array of observation vectors. If X is a 1-D condensed distance
-            matrix, then it must be (N choose 2) sized vector, where N is the number
-            of original observations paired in the distance matrix.
-        Returns
-        -------
-        np.array: A N-length array of clustering labels.
-        """
-        del y, fit_params
-        self.fit(X)
-        return self.labels_  # type: ignore
-
-    def transform(self, X: np.ndarray):
-        raise Exception("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
-
-
-class VotingClassifier:
-    """
-    Stripped-down version of VotingClassifier that uses prefit estimators
-
-    Parameters
-    ----------
-    estimators: List[sklearn classifier]
-        A list of sklearn classifiers that support predict_proba.
-    voting: string
-        Type of voting.
-        Defaults to "hard", can also be "soft".
-        "soft" means "take the highest average probability class" and
-        "hard" means "take the class that the plurality of the models pick"
-    weights: List or np.array
-        Weights for each estimator.
-    """
-
-    def __init__(self, estimators, voting="soft", weights=None):
-        self.estimators = estimators
-        self.voting = voting
-        self.weights = weights
-
-    def fit(self, X, y, sample_weight=None):
-        raise NotImplementedError
-
-    def predict(self, X):
-        """
-        Predict class labels for X.
-
-        Parameters
-        ----------
-        X: {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        predictions : array-like, shape = [n_samples]
-            Predicted class labels.
-        """
-        if self.voting == "soft":
-            predictions = np.argmax(self.predict_proba(X), axis=1)
-        elif self.voting == "hard":
-            predictions = np.apply_along_axis(
-                lambda x: np.argmax(np.bincount(x, weights=self.weights)),
-                axis=1,
-                arr=self._predict(X).astype("int"),
-            )
-        else:
-            raise Exception("Voting type must be one of 'soft' or 'hard'")
-        return predictions
-
-    def _collect_probas(self, X):
-        """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="X does not have valid feature names")
-            return np.asarray([clf.predict_proba(X) for clf in self.estimators])
-
-    def predict_proba(self, X):
-        """
-        Compute probabilities of possible outcomes for samples in X.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        ----------
-        avg : array-like, shape = [n_samples, n_classes]
-            Weighted average probability for each class per sample.
-        """
-        if self.voting == "hard":
-            raise AttributeError(f"predict_proba is not available when voting={self.voting!r}")
-        avg = np.average(self._collect_probas(X), axis=0, weights=self.weights)
-        return avg
-
-    def transform(self, X):
-        """
-        Return class labels or probabilities for X for each estimator.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        If `voting='soft'`:
-          array-like = [n_classifiers, n_samples, n_classes]
-            Class probabilities calculated by each classifier.
-        If `voting='hard'`:
-          array-like = [n_samples, n_classifiers]
-            Class labels predicted by each classifier.
-        """
-        if self.voting == "soft":
-            return self._collect_probas(X)
-        else:
-            return self._predict(X)
-
-    def _predict(self, X):
-        """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="X does not have valid feature names")
-            return np.asarray([clf.predict(X) for clf in self.estimators]).T

@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from s2and import feature_port, runtime
-from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from tests.conftest import build_dummy_dataset
 
 
 def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,30 +77,17 @@ def test_runtime_context_use_rust(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("S2AND_BACKEND", "python")
     python_context = runtime.build_runtime_context("unit_test", emit_startup_warning=False)
     assert python_context.use_rust is False
-    assert python_context.stage_backend("pair_featurization") == "python"
-    assert python_context.stage_backend("constraints") == "python"
+    assert python_context.stage_backend() == "python"
 
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     rust_context = runtime.build_runtime_context("unit_test", emit_startup_warning=False)
     assert rust_context.use_rust is True
-    assert rust_context.stage_backend("pair_featurization") == "rust"
-    assert rust_context.stage_backend("constraints") == "rust"
-
-
-def _dummy_dataset(name: str) -> ANDData:
-    return ANDData(
-        "tests/dummy/signatures.json",
-        "tests/dummy/papers.json",
-        clusters="tests/dummy/clusters.json",
-        name=name,
-        load_name_counts=False,
-        n_jobs=1,
-    )
+    assert rust_context.stage_backend() == "rust"
 
 
 def test_python_backend_pair_featurization_makes_zero_rust_calls(monkeypatch):
     monkeypatch.setenv("S2AND_BACKEND", "python")
-    dataset = _dummy_dataset("dummy_runtime_policy_python")
+    dataset = build_dummy_dataset("dummy_runtime_policy_python")
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = [("0", "1", 0), ("0", "2", 0)]
 
@@ -126,7 +113,7 @@ def test_python_backend_pair_featurization_makes_zero_rust_calls(monkeypatch):
 
 def test_rust_backend_pair_featurization_fails_fast_on_rust_error(monkeypatch):
     monkeypatch.setenv("S2AND_BACKEND", "rust")
-    dataset = _dummy_dataset("dummy_runtime_policy_rust")
+    dataset = build_dummy_dataset("dummy_runtime_policy_rust")
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = [("0", "1", 0), ("0", "2", 0)]
 

@@ -4,7 +4,6 @@ import gc
 import json
 import logging
 import os
-import queue
 import tempfile
 import threading
 import time
@@ -56,7 +55,7 @@ _RUST_BATCH_CALIBRATION_ATTEMPTED = False
 def _use_rust_featurizer(runtime_context: RuntimeContext | None = None) -> bool:
     if runtime_context is None:
         runtime_context = build_runtime_context("pair_featurization")
-    return stage_uses_rust(runtime_context, "pair_featurization")
+    return stage_uses_rust(runtime_context)
 
 
 def _has_missing_signature_ngrams_for_pairs(
@@ -117,37 +116,6 @@ def _ensure_python_pair_signature_ngrams(
     )
 
 
-def _rust_batch_chunk_plan(
-    *,
-    feature_count: int,
-    total_pairs: int,
-    total_rows: int,
-    selected_feature_count: int,
-    nameless_feature_count: int,
-    total_ram_bytes: int | None,
-    base_chunk_pairs: int | None = None,
-    row_overhead_bytes: int | None = None,
-    persistent_row_overhead_bytes: int | None = None,
-    fixed_overhead_bytes: int | None = None,
-) -> dict[str, int | str | float]:
-    return memory_budget.compute_rust_batch_chunk_plan(
-        num_features=feature_count,
-        total_pairs=total_pairs,
-        total_rows=total_rows,
-        selected_feature_count=selected_feature_count,
-        nameless_feature_count=nameless_feature_count,
-        total_ram_bytes=total_ram_bytes,
-        base_chunk_pairs=base_chunk_pairs,
-        row_overhead_bytes=row_overhead_bytes,
-        persistent_row_overhead_bytes=persistent_row_overhead_bytes,
-        fixed_overhead_bytes=fixed_overhead_bytes,
-    )
-
-
-def _env_bool(name: str, *, default: bool) -> bool:
-    return parse_bool_env(name, default=default)
-
-
 def _rust_batch_probe_row_counts(total_pairs: int, *, probe_count: int, min_total_pairs: int) -> list[int]:
     bounded_total_pairs = max(0, int(total_pairs))
     if probe_count <= 0:
@@ -201,7 +169,7 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
     global _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES
     global _RUST_BATCH_CALIBRATION_ATTEMPTED
 
-    if not _env_bool("S2AND_RUST_BATCH_STARTUP_CALIBRATION", default=True):
+    if not parse_bool_env("S2AND_RUST_BATCH_STARTUP_CALIBRATION", default=True):
         return None
 
     try:
@@ -218,6 +186,7 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
             return int(_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES)
         if _RUST_BATCH_CALIBRATION_ATTEMPTED:
             return None
+        _RUST_BATCH_CALIBRATION_ATTEMPTED = True
 
     probe_rows = _rust_batch_probe_row_counts(
         len(pieces_of_work),
@@ -345,6 +314,10 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
         run_id,
     )
     return int(calibrated_fixed_bytes)
+
+
+def _rust_batch_chunk_plan(**kwargs: Any) -> dict[str, int | float | str]:
+    return memory_budget.compute_rust_batch_chunk_plan(**kwargs)
 
 
 def _log_featurization_backend_decision(
@@ -518,66 +491,6 @@ def _scatter_chunk_to_output(
 
 # ── constants for cache writes ───────────────────────────
 INCREMENTAL_WRITE_THRESHOLD = 1000  # only write incrementally if we have at least this many new features
-BACKGROUND_WRITE_INTERVAL = 30  # seconds between background writes
-
-
-class BackgroundCacheWriter:
-    """Async background writer to reduce cache write bottleneck"""
-
-    def __init__(self):
-        self.write_queue = queue.Queue()
-        self.stop_event = threading.Event()
-        self.worker_thread = None
-
-    def start(self):
-        if self.worker_thread is None or not self.worker_thread.is_alive():
-            self.stop_event.clear()
-            self.worker_thread = threading.Thread(target=self._writer_worker, daemon=True)
-            self.worker_thread.start()
-
-    def stop(self):
-        self.stop_event.set()
-        if self.worker_thread and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=5)
-
-    def queue_write(self, featurizer_info, cached_features, dataset_name):
-        """Queue a cache write operation"""
-        new_features = dict(cached_features.get("__new_features__", {}))
-        if len(new_features) == 0:
-            return
-        payload = {
-            "features_to_use": list(cached_features.get("features_to_use", [])),
-            "__new_features__": new_features,
-        }
-        self.write_queue.put((featurizer_info, payload, dataset_name))
-
-    def _writer_worker(self):
-        """Background worker that processes write queue"""
-        while not self.stop_event.is_set():
-            try:
-                # Process all queued writes
-                writes_processed = 0
-                while not self.write_queue.empty() and writes_processed < 10:  # Batch limit
-                    try:
-                        featurizer_info, cached_features, dataset_name = self.write_queue.get_nowait()
-                        if len(cached_features.get("__new_features__", {})) > 0:
-                            featurizer_info.write_cache(cached_features, dataset_name, incremental=True)
-                        writes_processed += 1
-                    except queue.Empty:
-                        break
-                    except Exception as e:
-                        logger.warning(f"Background cache write failed: {e}")
-
-                # Sleep before next batch
-                time.sleep(BACKGROUND_WRITE_INTERVAL)
-
-            except Exception as e:
-                logger.error(f"Background writer error: {e}")
-                time.sleep(5)
-
-
-# Global background writer
-_background_writer = BackgroundCacheWriter()
 
 
 class FeaturizationInfo:
@@ -843,7 +756,7 @@ class FeaturizationInfo:
                     with open(path, "rb") as fh:
                         existing_cache = orjson.loads(fh.read())
                 except (ValueError, orjson.JSONDecodeError):
-                    logger.warning(f"Could not load existing cache at {path}, creating new cache")
+                    logger.warning("Could not load existing cache at %s, creating new cache", path)
                     existing_cache = {"features": {}}
 
             # CONCURRENCY RISK: Another process could write between load and write
@@ -873,19 +786,17 @@ class FeaturizationInfo:
                 break  # Success, exit retry loop
             except OSError as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Cache write attempt {attempt + 1} failed: {e}, retrying...")
+                    logger.warning("Cache write attempt %d failed: %s, retrying...", attempt + 1, e)
                     time.sleep(0.1 * (attempt + 1))  # Exponential backoff
                 else:
-                    logger.error(f"Cache write failed after {max_retries} attempts: {e}")
+                    logger.error("Cache write failed after %d attempts: %s", max_retries, e)
                     raise
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
 
 
-def _single_pair_featurize(
-    work_input: tuple[str, str], index: int = -1, force_python: bool = False
-) -> tuple[list[int | float], int]:
+def _single_pair_featurize(work_input: tuple[str, str], index: int = -1) -> tuple[list[int | float], int]:
     """
     Creates the features array for a single signature pair
     NOTE: This function uses a global variable to support faster multiprocessing. That means that this function
@@ -916,7 +827,7 @@ def _single_pair_featurize(
     if runtime_context is None:
         runtime_context = build_runtime_context("pair_featurization", emit_startup_warning=False)
     use_rust = _use_rust_featurizer(runtime_context)
-    if not force_python and use_rust and feature_port.s2and_rust is not None:
+    if use_rust and feature_port.s2and_rust is not None:
         try:
             features = feature_port.featurize_pair_rust(  # type: ignore
                 dataset,
@@ -926,7 +837,7 @@ def _single_pair_featurize(
             )
             return features, index
         except Exception as exc:
-            if stage_uses_rust(runtime_context, "pair_featurization"):
+            if stage_uses_rust(runtime_context):
                 raise RuntimeError(
                     "Rust pair featurization failed in strict rust backend "
                     f"(run_id={runtime_context.run_id} pair={work_input} error={exc})"
@@ -1228,7 +1139,6 @@ def many_pairs_featurize(
     new_features_count = 0
     did_rust_batch = False
     rust_batch_plan: dict[str, int | str | float] | None = None
-    rust_batch_failure_reason: str | None = None
     rust_batch_total_ram_for_stage: int | None = None
     rust_batch_rss_before_bytes = 0
     rust_batch_rss_peak_bytes = 0
@@ -1238,7 +1148,7 @@ def many_pairs_featurize(
 
     if _use_rust_featurizer(runtime_context):
         if feature_port.s2and_rust is None:
-            if stage_uses_rust(runtime_context, "pair_featurization"):
+            if stage_uses_rust(runtime_context):
                 raise RuntimeError(
                     "Rust backend requested for pair_featurization but s2and_rust extension is unavailable "
                     f"(run_id={runtime_context.run_id})"
@@ -1252,12 +1162,12 @@ def many_pairs_featurize(
                     runtime_context=runtime_context,
                 )
             except Exception as exc:
-                if stage_uses_rust(runtime_context, "pair_featurization"):
+                if stage_uses_rust(runtime_context):
                     raise RuntimeError(
                         "Rust featurizer init failed in strict rust backend "
                         f"(run_id={runtime_context.run_id} error={exc})"
                     ) from exc
-                logger.warning(f"Rust featurizer init failed, falling back to Python: {exc}")
+                logger.warning("Rust featurizer init failed, falling back to Python: %s", exc)
         try:
             rust_batch_total_ram_for_stage, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
             rust_batch_rss_before_bytes, rust_batch_rss_source = memory_budget.current_rss_bytes_best_effort(
@@ -1421,7 +1331,6 @@ def many_pairs_featurize(
     if cache_changed:
         use_rust = _use_rust_featurizer(runtime_context)
         rust_module_available = feature_port.s2and_rust is not None if use_rust else False
-        rust_mode = use_rust
         if use_rust and not rust_module_available:
             raise RuntimeError(
                 "Rust backend requested for pair_featurization but s2and_rust extension is unavailable "
@@ -1484,7 +1393,7 @@ def many_pairs_featurize(
                     )
 
                 rust_batch_plan = _rust_batch_chunk_plan(
-                    feature_count=rust_feature_count,
+                    num_features=rust_feature_count,
                     total_pairs=len(pieces_of_work),
                     total_rows=len(signature_pairs),
                     selected_feature_count=len(indices_to_use),
@@ -1685,20 +1594,19 @@ def many_pairs_featurize(
                 did_rust_batch = True
                 backend_used = "rust_batch"
             except Exception as exc:
-                rust_batch_failure_reason = str(exc)
                 raise RuntimeError(
                     "Rust batch featurization failed in strict rust backend "
                     f"(pairs={len(pieces_of_work)} run_id={runtime_context.run_id} "
-                    f"failure_reason={rust_batch_failure_reason})"
+                    f"failure_reason={exc})"
                 ) from exc
 
-        if rust_mode and not did_rust_batch and len(pieces_of_work) > 0:
+        if use_rust and not did_rust_batch and len(pieces_of_work) > 0:
             raise RuntimeError(
                 "Rust pair_featurization stage was selected but Rust batch execution did not complete "
                 f"(run_id={runtime_context.run_id})"
             )
 
-        if not did_rust_batch and n_jobs > 1 and not rust_mode:
+        if not did_rust_batch and n_jobs > 1 and not use_rust:
             backend_used = "python_parallel"
             if use_cache:
                 logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in parallel")
@@ -1736,10 +1644,7 @@ def many_pairs_featurize(
                 logger.info(f"Cache changed, making {len(pieces_of_work)} feature vectors in serial")
             else:
                 logger.info(f"Making {len(pieces_of_work)} feature vectors in serial")
-            worker = (
-                functools.partial(_single_pair_featurize, force_python=True) if rust_mode else _single_pair_featurize
-            )
-            partial_func = functools.partial(parallel_helper, worker_func=worker)
+            partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
             for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
                 result = partial_func(piece)
                 if use_cache:
@@ -1757,12 +1662,6 @@ def many_pairs_featurize(
                     nameless_features[result[1], :] = feature_output_arr[nameless_indices_to_use]
                 if coauthor_similarity_values is not None and coauthor_similarity_index is not None:
                     coauthor_similarity_values[result[1]] = feature_output_arr[coauthor_similarity_index]
-        if rust_batch_failure_reason is not None:
-            logger.info(
-                "Rust batch fallback event: pairs=%d fallback_backend=python_serial failure_reason=%s",
-                len(pieces_of_work),
-                rust_batch_failure_reason,
-            )
         _sample_rust_batch_rss_peak()
         logger.info("Work completed")
     else:
@@ -1773,16 +1672,13 @@ def many_pairs_featurize(
         new_features_in_buffer = len(cached_features.get("__new_features__", {}))
 
         if new_features_in_buffer >= INCREMENTAL_WRITE_THRESHOLD:
-            logger.info(f"Queueing {new_features_in_buffer} new features for background write")
-            _background_writer.start()
-            _background_writer.queue_write(featurizer_info, cached_features, dataset.name)
+            logger.info(
+                "Collected %d new features in this run; writing incrementally during final cache flush",
+                new_features_in_buffer,
+            )
         else:
             logger.info(f"Only {new_features_in_buffer} new features - will write at end")
     _sample_rust_batch_rss_peak()
-
-    # Always write any remaining new features at the end
-    if use_cache and cache_changed:
-        _background_writer.stop()
 
     if use_cache and cache_changed and len(cached_features.get("__new_features__", {})) > 0:
         new_features_in_buffer = len(cached_features["__new_features__"])

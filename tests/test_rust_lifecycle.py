@@ -149,6 +149,21 @@ def test_rust_inference_with_sinonym_overwrite_keeps_from_json_paths():
     )
     assert policy.rust_build_path == "from_json_paths"
     assert policy.skip_python_paper_preprocess is True
+    assert policy.defer_rust_json_ingest_write_for_sinonym is True
+
+
+def test_rust_inference_without_sinonym_overwrite_does_not_defer_json_ingest_write():
+    policy = build_rust_lifecycle_policy(
+        backend="rust",
+        mode="inference",
+        has_signatures_path=True,
+        has_papers_path=True,
+        preprocess=True,
+        use_rust=True,
+        use_sinonym_overwrite=False,
+    )
+    assert policy.rust_build_path == "from_json_paths"
+    assert policy.defer_rust_json_ingest_write_for_sinonym is False
 
 
 @pytest.mark.parametrize("preprocess", [False, True])

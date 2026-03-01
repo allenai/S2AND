@@ -7,6 +7,7 @@ import threading
 import time
 import weakref
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -70,8 +71,13 @@ NORMALIZATION_VERSION_ENV = "S2AND_NORMALIZATION_VERSION"
 ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV = "S2AND_ALLOW_NORMALIZATION_VERSION_MISMATCH"
 
 
-def _env_flag(name: str, default: str = "0") -> bool:
-    return parse_bool_env(name, default=default.strip().lower() in {"1", "true", "yes", "on"})
+def _require_rust_runtime() -> Any:
+    if s2and_rust is None:
+        raise RuntimeError(_RUST_BUILD_ERROR)
+    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
+    if not capabilities.core_runtime_available:
+        raise RuntimeError(f"Rust runtime unavailable: {capabilities.reason}")
+    return s2and_rust
 
 
 def _dataset_name_for_logs(dataset: Any) -> str:
@@ -228,7 +234,7 @@ def _rust_featurizer_cache_metadata(dataset: ANDData, *, requested_build_path: R
         "name_tuple_count": int(len(getattr(dataset, "name_tuples", {}))),
         "compute_reference_features": bool(getattr(dataset, "compute_reference_features", False)),
         "preprocess": bool(getattr(dataset, "preprocess", True)),
-        "skip_fasttext": bool(_env_flag("S2AND_SKIP_FASTTEXT", "")),
+        "skip_fasttext": bool(parse_bool_env("S2AND_SKIP_FASTTEXT", default=False)),
         "normalization_version": _expected_normalization_version(),
         "allow_normalization_version_mismatch": bool(_allow_normalization_version_mismatch()),
         "artifacts": {
@@ -320,7 +326,7 @@ def _expected_normalization_version() -> str:
 
 
 def _allow_normalization_version_mismatch() -> bool:
-    return _env_flag(ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV, "0")
+    return parse_bool_env(ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV, default=False)
 
 
 def _build_rust_featurizer_from_json_paths(
@@ -330,12 +336,8 @@ def _build_rust_featurizer_from_json_paths(
     signature_name_counts_payload: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, float]]:
     pre_build_start = time.perf_counter()
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
-    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
-    if not capabilities.core_runtime_available:
-        raise RuntimeError(f"Rust runtime unavailable: {capabilities.reason}")
-    rust_featurizer_cls = getattr(s2and_rust, "RustFeaturizer", None)
+    rust_module = _require_rust_runtime()
+    rust_featurizer_cls = getattr(rust_module, "RustFeaturizer", None)
     if rust_featurizer_cls is None or not hasattr(rust_featurizer_cls, "from_json_paths"):
         raise RuntimeError("s2and_rust extension does not expose RustFeaturizer.from_json_paths")
 
@@ -463,11 +465,7 @@ def _build_rust_featurizer_from_dataset(
     rust_build_path: RustBuildPath,
 ) -> tuple[Any, RustBuildPath, dict[str, float]]:
     pre_build_start = time.perf_counter()
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
-    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
-    if not capabilities.core_runtime_available:
-        raise RuntimeError(f"Rust runtime unavailable: {capabilities.reason}")
+    rust_module = _require_rust_runtime()
     num_threads = max(1, int(getattr(dataset, "n_jobs", 1)))
     selected_build_path = rust_build_path
     signatures_path = getattr(dataset, "signatures_path", None)
@@ -485,7 +483,7 @@ def _build_rust_featurizer_from_dataset(
     pre_build_seconds = time.perf_counter() - pre_build_start
     ffi_seconds = 0.0
     ffi_start = time.perf_counter()
-    featurizer = s2and_rust.RustFeaturizer.from_dataset(
+    featurizer = rust_module.RustFeaturizer.from_dataset(
         dataset,
         CLUSTER_SEEDS_LOOKUP["require"],
         CLUSTER_SEEDS_LOOKUP["disallow"],
@@ -530,8 +528,7 @@ def _try_load_rust_featurizer_from_disk_cache(
     dataset_name_for_logs: str,
     expected_cache_metadata: dict[str, Any],
 ) -> tuple[Any | None, str]:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
+    rust_module = _require_rust_runtime()
     if not os.path.exists(cache_path):
         return None, "skipped"
 
@@ -551,7 +548,7 @@ def _try_load_rust_featurizer_from_disk_cache(
 
     try:
         load_start = time.perf_counter()
-        featurizer = s2and_rust.RustFeaturizer.load(cache_path)
+        featurizer = rust_module.RustFeaturizer.load(cache_path)
         # Ensure cluster seeds reflect the current dataset, even if the cache is reused.
         featurizer.update_cluster_seeds(dataset.cluster_seeds_require, dataset.cluster_seeds_disallow)
         logger.info(
@@ -562,7 +559,7 @@ def _try_load_rust_featurizer_from_disk_cache(
         )
         return featurizer, "hit"
     except Exception as e:  # pragma: no cover - disk cache is best-effort
-        logger.warning(f"Failed to load Rust featurizer cache at {cache_path}: {e}")
+        logger.warning("Failed to load Rust featurizer cache at %s: %s", cache_path, e)
         return None, "attempted"
 
 
@@ -614,9 +611,178 @@ def _save_rust_featurizer_cache_best_effort(
     try:
         featurizer.save(cache_path)
     except Exception as e:  # pragma: no cover - disk cache is best-effort
-        logger.warning(f"Failed to save Rust featurizer cache at {cache_path}: {e}")
+        logger.warning("Failed to save Rust featurizer cache at %s: %s", cache_path, e)
         return
     _write_rust_cache_metadata_best_effort(cache_path, cache_metadata)
+
+
+@dataclass(frozen=True)
+class _RustFeaturizerBuildContext:
+    operation: str
+    run_id: str
+    dataset_mode: str
+    dataset_name_for_logs: str
+    requested_build_path: RustBuildPath
+    use_disk_cache: bool
+    cache_path: str | None
+    cache_metadata: dict[str, Any] | None
+
+
+def _get_or_wait_for_cached(
+    dataset: ANDData,
+    *,
+    build_context: _RustFeaturizerBuildContext,
+) -> tuple[Any | None, _InFlightFeaturizerBuild | None]:
+    inflight_build: _InFlightFeaturizerBuild | None = None
+    with _RUST_FEATURIZER_CACHE_LOCK:
+        # Rust featurizer reuse is independent from Python pair-feature caching.
+        # Disk cache still follows use_cache.
+        entry = _RUST_FEATURIZER_CACHE.get(dataset)
+        if entry is not None:
+            logger.info(
+                "Telemetry: rust_featurizer_cache cache=hit dataset=%s mode=%s op=%s run=%s builds=%d",
+                build_context.dataset_name_for_logs,
+                build_context.dataset_mode,
+                build_context.operation,
+                build_context.run_id,
+                entry.build_count,
+            )
+            _touch_rust_featurizer(dataset)
+            return entry.featurizer, None
+
+        inflight_build = _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset)
+        if inflight_build is None:
+            inflight_build = _InFlightFeaturizerBuild()
+            _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset] = inflight_build
+            logger.info(
+                "Telemetry: rust_featurizer_cache cache=miss dataset=%s mode=%s op=%s run=%s builds=%d",
+                build_context.dataset_name_for_logs,
+                build_context.dataset_mode,
+                build_context.operation,
+                build_context.run_id,
+                0,
+            )
+            return None, inflight_build
+
+        logger.info(
+            "Telemetry: rust_featurizer_cache cache=wait dataset=%s mode=%s op=%s run=%s builds=%d",
+            build_context.dataset_name_for_logs,
+            build_context.dataset_mode,
+            build_context.operation,
+            build_context.run_id,
+            0,
+        )
+
+    inflight_build.event.wait()
+    with _RUST_FEATURIZER_CACHE_LOCK:
+        entry = _RUST_FEATURIZER_CACHE.get(dataset)
+        if entry is not None:
+            _touch_rust_featurizer(dataset)
+            return entry.featurizer, None
+        build_error = inflight_build.error
+    if build_error is not None:
+        raise RuntimeError(
+            "Rust featurizer build failed for dataset="
+            f"{build_context.dataset_name_for_logs} while waiting for concurrent builder"
+        ) from build_error
+    return None, None
+
+
+def _build_and_cache_rust_featurizer(
+    dataset: ANDData,
+    *,
+    inflight_build: _InFlightFeaturizerBuild,
+    build_context: _RustFeaturizerBuildContext,
+) -> Any:
+    featurizer: Any | None = None
+    save_cache_path: str | None = None
+    save_cache_metadata: dict[str, Any] | None = None
+    save_featurizer: Any | None = None
+    disk_cache_status = "disabled-by-flag" if not build_context.use_disk_cache else "skipped"
+    build_path = build_context.requested_build_path
+    build_count = 0
+    try:
+        if build_context.use_disk_cache and build_context.cache_path:
+            featurizer, disk_cache_attempt_status = _try_load_rust_featurizer_from_disk_cache(
+                dataset,
+                cache_path=build_context.cache_path,
+                dataset_name_for_logs=build_context.dataset_name_for_logs,
+                expected_cache_metadata=build_context.cache_metadata
+                if build_context.cache_metadata is not None
+                else {},
+            )
+            if disk_cache_attempt_status != "skipped":
+                disk_cache_status = disk_cache_attempt_status
+
+        build_timings: dict[str, float] = {
+            "pre_build_seconds": 0.0,
+            "ffi_seconds": 0.0,
+            "post_build_seconds": 0.0,
+        }
+        if featurizer is None:
+            featurizer, build_path, build_timings, build_count, build_seconds = (
+                _build_rust_featurizer_with_retry_for_missing_signature_ngrams(
+                    dataset,
+                    requested_build_path=build_context.requested_build_path,
+                )
+            )
+            logger.info(
+                "Telemetry: rust_core_build seconds=%.3f dataset=%s path=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
+                build_seconds,
+                build_context.dataset_name_for_logs,
+                build_path,
+                build_count,
+                build_timings.get("pre_build_seconds", 0.0),
+                build_timings.get("ffi_seconds", 0.0),
+                build_timings.get("post_build_seconds", 0.0),
+            )
+            if build_context.use_disk_cache and build_context.cache_path and build_context.cache_metadata is not None:
+                # Save is intentionally deferred until after lock release.
+                save_featurizer = featurizer
+                save_cache_path = build_context.cache_path
+                save_cache_metadata = build_context.cache_metadata
+        else:
+            build_count = _rust_featurizer_build_count(dataset)
+
+        with _RUST_FEATURIZER_CACHE_LOCK:
+            _auto_evict_rust_featurizers(dataset_for_policy=dataset, reserve=1)
+            global _RUST_FEATURIZER_ACCESS_COUNTER
+            _RUST_FEATURIZER_ACCESS_COUNTER += 1
+            _RUST_FEATURIZER_CACHE[dataset] = _CacheEntry(
+                featurizer=featurizer,
+                last_access=_RUST_FEATURIZER_ACCESS_COUNTER,
+                build_count=build_count,
+            )
+            cache_fill_source = "disk_cache" if disk_cache_status == "hit" else "build"
+            logger.info(
+                "Telemetry: rust_featurizer_cache_fill source=%s disk=%s dataset=%s path=%s count=%d",
+                cache_fill_source,
+                disk_cache_status,
+                build_context.dataset_name_for_logs,
+                build_path,
+                build_count,
+            )
+            inflight_build.error = None
+            inflight_build.event.set()
+            if _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset) is inflight_build:
+                del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
+    except Exception as build_error:
+        with _RUST_FEATURIZER_CACHE_LOCK:
+            inflight_build.error = build_error if isinstance(build_error, Exception) else Exception(build_error)
+            inflight_build.event.set()
+            if _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset) is inflight_build:
+                del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
+        raise
+
+    if save_featurizer is not None and save_cache_path is not None and save_cache_metadata is not None:
+        _save_rust_featurizer_cache_best_effort(
+            save_featurizer,
+            cache_path=save_cache_path,
+            cache_metadata=save_cache_metadata,
+        )
+    if featurizer is None:
+        raise RuntimeError("Rust featurizer was not initialized")
+    return featurizer
 
 
 def _get_rust_featurizer(
@@ -624,164 +790,34 @@ def _get_rust_featurizer(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> Any:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
-    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
-    if not capabilities.core_runtime_available:
-        raise RuntimeError(f"Rust runtime unavailable: {capabilities.reason}")
+    _require_rust_runtime()
     operation, run_id = _runtime_callsite_for_logs(dataset, runtime_context)
     dataset_mode = _dataset_mode_for_logs(dataset)
-    requested_build_path = _resolve_requested_build_path(
-        dataset,
-        dataset_mode=dataset_mode,
-    )
+    requested_build_path = _resolve_requested_build_path(dataset, dataset_mode=dataset_mode)
     ds_log = _dataset_name_for_logs(dataset)
     use_disk_cache = bool(use_cache)
     cache_path = _rust_cache_path(dataset) if use_disk_cache else None
     cache_metadata = (
         _rust_featurizer_cache_metadata(dataset, requested_build_path=requested_build_path) if use_disk_cache else None
     )
+    build_context = _RustFeaturizerBuildContext(
+        operation=operation,
+        run_id=run_id,
+        dataset_mode=dataset_mode,
+        dataset_name_for_logs=ds_log,
+        requested_build_path=requested_build_path,
+        use_disk_cache=use_disk_cache,
+        cache_path=cache_path,
+        cache_metadata=cache_metadata,
+    )
 
     while True:
-        inflight_build: _InFlightFeaturizerBuild | None = None
-        should_build = False
-        with _RUST_FEATURIZER_CACHE_LOCK:
-            # Rust featurizer reuse is independent from Python pair-feature caching.
-            # Disk cache still follows use_cache.
-            entry = _RUST_FEATURIZER_CACHE.get(dataset)
-            if entry is not None:
-                logger.info(
-                    "Telemetry: rust_featurizer_cache cache=hit dataset=%s mode=%s op=%s run=%s builds=%d",
-                    ds_log,
-                    dataset_mode,
-                    operation,
-                    run_id,
-                    entry.build_count,
-                )
-                _touch_rust_featurizer(dataset)
-                return entry.featurizer
-
-            inflight_build = _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset)
-            if inflight_build is None:
-                inflight_build = _InFlightFeaturizerBuild()
-                _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset] = inflight_build
-                should_build = True
-
-            cache_status = "miss" if should_build else "wait"
-            logger.info(
-                "Telemetry: rust_featurizer_cache cache=%s dataset=%s mode=%s op=%s run=%s builds=%d",
-                cache_status,
-                ds_log,
-                dataset_mode,
-                operation,
-                run_id,
-                0,
-            )
-
+        featurizer, inflight_build = _get_or_wait_for_cached(dataset, build_context=build_context)
+        if featurizer is not None:
+            return featurizer
         if inflight_build is None:
-            raise RuntimeError("Rust featurizer inflight state was not initialized")
-
-        if not should_build:
-            inflight_build.event.wait()
-            with _RUST_FEATURIZER_CACHE_LOCK:
-                entry = _RUST_FEATURIZER_CACHE.get(dataset)
-                if entry is not None:
-                    _touch_rust_featurizer(dataset)
-                    return entry.featurizer
-                build_error = inflight_build.error
-            if build_error is not None:
-                raise RuntimeError(
-                    f"Rust featurizer build failed for dataset={ds_log} while waiting for concurrent builder"
-                ) from build_error
             continue
-
-        featurizer: Any | None = None
-        save_cache_path: str | None = None
-        save_cache_metadata: dict[str, Any] | None = None
-        save_featurizer: Any | None = None
-        disk_cache_status = "disabled-by-flag" if not use_disk_cache else "skipped"
-        build_path = requested_build_path
-        build_count = 0
-        try:
-            if use_disk_cache and cache_path:
-                featurizer, disk_cache_attempt_status = _try_load_rust_featurizer_from_disk_cache(
-                    dataset,
-                    cache_path=cache_path,
-                    dataset_name_for_logs=ds_log,
-                    expected_cache_metadata=cache_metadata if cache_metadata is not None else {},
-                )
-                if disk_cache_attempt_status != "skipped":
-                    disk_cache_status = disk_cache_attempt_status
-
-            build_timings: dict[str, float] = {
-                "pre_build_seconds": 0.0,
-                "ffi_seconds": 0.0,
-                "post_build_seconds": 0.0,
-            }
-            if featurizer is None:
-                featurizer, build_path, build_timings, build_count, build_seconds = (
-                    _build_rust_featurizer_with_retry_for_missing_signature_ngrams(
-                        dataset,
-                        requested_build_path=requested_build_path,
-                    )
-                )
-                logger.info(
-                    "Telemetry: rust_core_build seconds=%.3f dataset=%s path=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
-                    build_seconds,
-                    ds_log,
-                    build_path,
-                    build_count,
-                    build_timings.get("pre_build_seconds", 0.0),
-                    build_timings.get("ffi_seconds", 0.0),
-                    build_timings.get("post_build_seconds", 0.0),
-                )
-                if use_disk_cache and cache_path and cache_metadata is not None:
-                    # Save is intentionally deferred until after lock release.
-                    save_featurizer = featurizer
-                    save_cache_path = cache_path
-                    save_cache_metadata = cache_metadata
-            else:
-                build_count = _rust_featurizer_build_count(dataset)
-
-            with _RUST_FEATURIZER_CACHE_LOCK:
-                _auto_evict_rust_featurizers(dataset_for_policy=dataset, reserve=1)
-                global _RUST_FEATURIZER_ACCESS_COUNTER
-                _RUST_FEATURIZER_ACCESS_COUNTER += 1
-                _RUST_FEATURIZER_CACHE[dataset] = _CacheEntry(
-                    featurizer=featurizer,
-                    last_access=_RUST_FEATURIZER_ACCESS_COUNTER,
-                    build_count=build_count,
-                )
-                cache_fill_source = "disk_cache" if disk_cache_status == "hit" else "build"
-                logger.info(
-                    "Telemetry: rust_featurizer_cache_fill source=%s disk=%s dataset=%s path=%s count=%d",
-                    cache_fill_source,
-                    disk_cache_status,
-                    ds_log,
-                    build_path,
-                    build_count,
-                )
-                inflight_build.error = None
-                inflight_build.event.set()
-                if _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset) is inflight_build:
-                    del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
-        except Exception as build_error:
-            with _RUST_FEATURIZER_CACHE_LOCK:
-                inflight_build.error = build_error if isinstance(build_error, Exception) else Exception(build_error)
-                inflight_build.event.set()
-                if _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset) is inflight_build:
-                    del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
-            raise
-
-        if save_featurizer is not None and save_cache_path is not None and save_cache_metadata is not None:
-            _save_rust_featurizer_cache_best_effort(
-                save_featurizer,
-                cache_path=save_cache_path,
-                cache_metadata=save_cache_metadata,
-            )
-        if featurizer is None:
-            raise RuntimeError("Rust featurizer was not initialized")
-        return featurizer
+        return _build_and_cache_rust_featurizer(dataset, inflight_build=inflight_build, build_context=build_context)
 
 
 def evict_rust_featurizer(dataset: ANDData) -> bool:
@@ -833,8 +869,7 @@ def get_constraint_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ):
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
+    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
     return featurizer.get_constraint(
@@ -859,8 +894,7 @@ def get_constraints_matrix_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> list[float | None]:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
+    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
 
@@ -891,8 +925,7 @@ def get_constraints_matrix_indexed_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> list[float | None]:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
+    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
 
@@ -922,8 +955,7 @@ def get_constraints_block_upper_triangle_indexed_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> tuple[list[int], list[int], list[float | None]]:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
+    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
 
@@ -995,8 +1027,7 @@ def build_block_upper_triangle_feature_matrix_indexed_rust(
     use_cache: bool = False,
     featurizer: Any | None = None,
 ) -> np.ndarray:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
+    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
     method = getattr(featurizer, "featurize_block_upper_triangle_matrix_indexed", None)
@@ -1030,11 +1061,10 @@ def signature_ngrams_batch_rust(
     affiliation_texts: list[str],
     num_threads: int | None = None,
 ) -> tuple[list[Counter], list[Counter]]:
-    if s2and_rust is None:
-        raise RuntimeError(_RUST_BUILD_ERROR)
-    if not hasattr(s2and_rust, "signature_ngrams_batch"):
+    rust_module = _require_rust_runtime()
+    if not hasattr(rust_module, "signature_ngrams_batch"):
         raise RuntimeError("s2and_rust extension does not expose signature_ngrams_batch")
-    coauthor_raw, affiliation_raw = s2and_rust.signature_ngrams_batch(
+    coauthor_raw, affiliation_raw = rust_module.signature_ngrams_batch(
         coauthor_texts,
         affiliation_texts,
         num_threads,

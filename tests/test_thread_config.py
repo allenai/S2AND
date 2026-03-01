@@ -24,4 +24,3 @@ def test_clusterer_n_jobs_propagates_to_lightgbm() -> None:
     assert clusterer.n_jobs == 7
     assert clusterer.classifier.get_params().get("n_jobs") == 7
     assert clusterer.nameless_classifier.get_params().get("n_jobs") == 7
-

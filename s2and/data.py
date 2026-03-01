@@ -106,8 +106,18 @@ def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str
     return _NAME_COUNTS_CACHE  # type: ignore[return-value]
 
 
+def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
+    resolved: set[tuple[str, str]] = set()
+    with open(os.path.join(PROJECT_ROOT_PATH, "data", filename), encoding="utf-8") as tuples_file:
+        for line in tuples_file:
+            line_split = line.strip().split(",")
+            if len(line_split) >= 2:
+                resolved.add((line_split[0], line_split[1]))
+    return resolved
+
+
 def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> bool:
-    use_rust_backend = stage_uses_rust(runtime_context, "ingest_preprocess")
+    use_rust_backend = stage_uses_rust(runtime_context)
     if not use_rust_backend:
         return False
 
@@ -129,11 +139,7 @@ def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> b
 
 
 def _ordered_coauthors_for_signature(signature: "Signature", papers: dict[str, "Paper"]) -> list[str]:
-    if len(papers) == 0:
-        return []
-    paper = papers.get(str(signature.paper_id))
-    if paper is None:
-        return []
+    paper = papers[str(signature.paper_id)]
     return [author.author_name for author in paper.authors if author.position != signature.author_info_position]
 
 
@@ -292,7 +298,6 @@ class ANDData:
             Also applies Sinonym-normalized names to the per-paper author list so co-author features
             (coauthor sets/blocks and n-grams) are derived from the normalized names as well.
         sinonym_overwrite_min_ratio: optional gating threshold; only counts multi-author papers.
-        sinonym_overwrite_min_ratio: gating threshold.
             Let a,b be single-author flips/not-flips and x,y be multi-author flips/not-flips.
             If (x + y) > 0: overwrite when x >= min_ratio * y; else (no multi-author evidence):
             overwrite when a > 0 (otherwise do not overwrite).
@@ -369,10 +374,7 @@ class ANDData:
             from_dataset_paper_preprocess_available=rust_capabilities.from_dataset_paper_preprocess_available,
             use_sinonym_overwrite=use_sinonym_overwrite,
         )
-        defer_rust_json_ingest_write_for_sinonym = self._should_defer_rust_json_ingest_write_for_sinonym(
-            mode=mode,
-            use_sinonym_overwrite=use_sinonym_overwrite,
-        )
+        defer_rust_json_ingest_write_for_sinonym = self.rust_lifecycle_policy.defer_rust_json_ingest_write_for_sinonym
 
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -515,7 +517,7 @@ class ANDData:
                         self.signatures, sinonym_results, min_ratio=sinonym_overwrite_min_ratio
                     )
                 except Exception as e:
-                    logger.warning(f"Sinonym overwrite gating failed, proceeding without gating: {e}")
+                    logger.warning("Sinonym overwrite gating failed, proceeding without gating: %s", e)
                     allow_overwrite_pos = None
             # Only allow block overwrites during inference to keep train/val/test splits reproducible
             overwrite_count = apply_sinonym_overwrites(
@@ -580,7 +582,7 @@ class ANDData:
         # Versioned seed state for Rust sync dedupe.
         self._cluster_seeds_version = 1
         self._rust_cluster_seeds_synced_version = 0
-        # check that all of the altered_clustere_signatures are in the cluster_seeds_require
+        # check that all altered_cluster_signatures are in cluster_seeds_require
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
                 if signature_id not in self.cluster_seeds_require:
@@ -655,24 +657,16 @@ class ANDData:
         self.n_jobs = n_jobs
         self.compute_reference_features = compute_reference_features
         self.signature_to_block = self.get_signatures_to_block()
-        papers_from_signatures = set([str(signature.paper_id) for signature in self.signatures.values()])
+        papers_from_signatures = {str(signature.paper_id) for signature in self.signatures.values()}
         for paper_id, paper in self.papers.items():
             self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
         self.preprocess = preprocess
 
         resolved_name_tuples: set[tuple[str, str]]
         if name_tuples == "filtered":
-            resolved_name_tuples = set()
-            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt")) as f2:  # type: ignore
-                for line in f2:
-                    line_split = line.strip().split(",")  # type: ignore
-                    resolved_name_tuples.add((line_split[0], line_split[1]))
+            resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples_filtered.txt")
         elif name_tuples is None:
-            resolved_name_tuples = set()
-            with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples.txt")) as f2:  # type: ignore
-                for line in f2:
-                    line_split = line.strip().split(",")  # type: ignore
-                    resolved_name_tuples.add((line_split[0], line_split[1]))
+            resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples.txt")
         elif isinstance(name_tuples, set):
             resolved_name_tuples = name_tuples
         else:
@@ -710,17 +704,6 @@ class ANDData:
         logger.debug(
             "Telemetry stage: stage=anddata_total_init seconds=%.3f",
             time.perf_counter() - init_start,
-        )
-
-    def _should_defer_rust_json_ingest_write_for_sinonym(self, *, mode: str, use_sinonym_overwrite: bool) -> bool:
-        if not use_sinonym_overwrite:
-            return False
-        return bool(
-            mode.strip().lower() == "inference"
-            and self.runtime_context.resolved_backend == "rust"
-            and self.rust_lifecycle_policy.rust_build_path == "from_json_paths"
-            and self.signatures_path is not None
-            and self.papers_path is not None
         )
 
     def _sync_in_memory_names_to_rust_json_payload(
@@ -818,8 +801,7 @@ class ANDData:
             list_of_parts.append(last)
         if include_suffix:
             list_of_parts.append(suffix)
-        name_parts = [part.strip() for part in list_of_parts if part is not None and len(part) != 0]
-        return " ".join(name_parts)
+        return _assemble_full_name(list_of_parts)
 
     def _compute_signature_name_counts(
         self,
@@ -1227,6 +1209,13 @@ class ANDData:
 
         raise TypeError(f"Unsupported specter pickle payload type: {type(loaded)}")
 
+    def _build_block_dict(self, key_attr: str) -> dict[str, list[str]]:
+        block: dict[str, list[str]] = defaultdict(list)
+        for signature_id, signature in self.signatures.items():
+            block_key = getattr(signature, key_attr)
+            block[block_key].append(signature_id)
+        return dict(block)
+
     def get_original_blocks(self) -> dict[str, list[str]]:
         """
         Gets the block dict based on the blocks provided with the dataset
@@ -1235,10 +1224,7 @@ class ANDData:
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        block: dict[str, list[str]] = defaultdict(list)
-        for signature_id, signature in self.signatures.items():
-            block[signature.author_info_given_block].append(signature_id)
-        return dict(block)
+        return self._build_block_dict("author_info_given_block")
 
     def get_s2_blocks(self) -> dict[str, list[str]]:
         """
@@ -1248,10 +1234,7 @@ class ANDData:
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        block: dict[str, list[str]] = defaultdict(list)
-        for signature_id, signature in self.signatures.items():
-            block[signature.author_info_block].append(signature_id)
-        return dict(block)
+        return self._build_block_dict("author_info_block")
 
     def get_blocks(self) -> dict[str, list[str]]:
         """
@@ -1407,10 +1390,10 @@ class ANDData:
                     overlapping_affixes = set(middle_2).intersection(middle_1).intersection(DROPPED_AFFIXES)
                     middle_1_all = [word for word in middle_1 if len(word) > 0 and word not in overlapping_affixes]
                     middle_2_all = [word for word in middle_2 if len(word) > 0 and word not in overlapping_affixes]
-                    middle_1_words = set([word for word in middle_1_all if len(word) > 1])
-                    middle_2_words = set([word for word in middle_2_all if len(word) > 1])
-                    middle_1_firsts = set([word[0] for word in middle_1_all])
-                    middle_2_firsts = set([word[0] for word in middle_2_all])
+                    middle_1_words = {word for word in middle_1_all if len(word) > 1}
+                    middle_2_words = {word for word in middle_2_all if len(word) > 1}
+                    middle_1_firsts = {word[0] for word in middle_1_all}
+                    middle_2_firsts = {word[0] for word in middle_2_all}
                     conflicting_initials = (
                         len(middle_1_firsts) > 0
                         and len(middle_2_firsts) > 0
@@ -2048,8 +2031,6 @@ def _normalized_first_last_from_signature(sig: Signature) -> tuple[str, str]:
 
     Uses hyphen-aware first/middle split and normalize_text for last.
     """
-    from s2and.text import split_first_middle_hyphen_aware  # local import to avoid cycles
-
     first_raw = sig.author_info_first or ""
     middle_raw = sig.author_info_middle or ""
     first_noapos, _ = split_first_middle_hyphen_aware(first_raw, middle_raw)
@@ -2067,8 +2048,6 @@ def compute_sinonym_overwrite_allowlist(
     Use multi-author ratio (x >= min_ratio * y) when any multi-author evidence exists; otherwise, use
     single-author rule (flip if a > 0).
     """
-    import re
-    from collections import defaultdict
 
     def _canon(s: str) -> str:
         # Lower and drop non-letters to align spaces/hyphens variants

@@ -91,6 +91,7 @@ class RustLifecyclePolicy:
     skip_python_paper_preprocess: bool
     defer_signature_ngrams_to_rust: bool
     defer_signature_fields_to_rust: bool
+    defer_rust_json_ingest_write_for_sinonym: bool
 
 
 PYTHON_ONLY_POLICY = RustLifecyclePolicy(
@@ -98,15 +99,12 @@ PYTHON_ONLY_POLICY = RustLifecyclePolicy(
     skip_python_paper_preprocess=False,
     defer_signature_ngrams_to_rust=False,
     defer_signature_fields_to_rust=False,
+    defer_rust_json_ingest_write_for_sinonym=False,
 )
 
 
 def _is_inference_mode(mode: str) -> bool:
     return mode.strip().lower() == "inference"
-
-
-def _read_bool_env(name: str, default: bool = False) -> bool:
-    return parse_bool_env(name, default=default, strict=True)
 
 
 def build_rust_lifecycle_policy(
@@ -124,7 +122,11 @@ def build_rust_lifecycle_policy(
     if backend == "python":
         return PYTHON_ONLY_POLICY
 
-    force_python_paper_preprocess = _read_bool_env(FORCE_PYTHON_PAPER_PREPROCESS_ENV, default=False)
+    force_python_paper_preprocess = parse_bool_env(
+        FORCE_PYTHON_PAPER_PREPROCESS_ENV,
+        default=False,
+        strict=True,
+    )
     is_inference = _is_inference_mode(mode)
 
     rust_build_path: RustBuildPath = (
@@ -148,10 +150,18 @@ def build_rust_lifecycle_policy(
         skip_python_paper_preprocess = False
     defer_signature_ngrams_to_rust = bool(preprocess and use_rust)
     defer_signature_fields_to_rust = bool(preprocess and use_rust and not is_inference)
+    defer_rust_json_ingest_write_for_sinonym = bool(
+        use_sinonym_overwrite
+        and is_inference
+        and rust_build_path == "from_json_paths"
+        and has_signatures_path
+        and has_papers_path
+    )
 
     return RustLifecyclePolicy(
         rust_build_path=rust_build_path,
         skip_python_paper_preprocess=skip_python_paper_preprocess,
         defer_signature_ngrams_to_rust=defer_signature_ngrams_to_rust,
         defer_signature_fields_to_rust=defer_signature_fields_to_rust,
+        defer_rust_json_ingest_write_for_sinonym=defer_rust_json_ingest_write_for_sinonym,
     )

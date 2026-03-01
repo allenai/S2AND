@@ -198,78 +198,11 @@ def collect_rust_extension_identity(
     return identity
 
 
-class ProcessTreeRSSMonitor:
-    """Monitor peak RSS across current process and all child workers."""
-
+class _BaseRSSMonitor:
     def __init__(self, interval_seconds: float = 0.05):
         self.interval_seconds = interval_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._process = psutil.Process() if psutil is not None else None
-        self.peak_rss_bytes = 0
-
-    def _tree_rss_bytes(self) -> int:
-        if psutil is None or self._process is None:
-            return RSSMonitor._fallback_rss_bytes()
-
-        rss_total = 0
-        processes = [self._process]
-        try:
-            processes.extend(self._process.children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.Error):
-            pass
-        for proc in processes:
-            try:
-                rss_total += int(proc.memory_info().rss)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        return rss_total
-
-    def sample_rss_bytes(self) -> int:
-        rss = self._tree_rss_bytes()
-        if rss > self.peak_rss_bytes:
-            self.peak_rss_bytes = rss
-        return rss
-
-    def sample_gb(self) -> float:
-        return self.sample_rss_bytes() / (1024**3)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.sample_rss_bytes()
-            self._stop.wait(self.interval_seconds)
-
-    def start(self) -> None:
-        self.peak_rss_bytes = self.sample_rss_bytes()
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-
-    def __enter__(self) -> ProcessTreeRSSMonitor:
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.stop()
-
-    @property
-    def peak_gb(self) -> float:
-        return self.peak_rss_bytes / (1024**3)
-
-
-class RSSMonitor:
-    """Monitor peak RSS for current process only."""
-
-    def __init__(self, interval_seconds: float = 0.05):
-        self.interval_seconds = interval_seconds
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._process = psutil.Process() if psutil is not None else None
         self.peak_rss_bytes = 0
 
     @staticmethod
@@ -286,13 +219,11 @@ class RSSMonitor:
         except Exception:
             return 0
 
-    def _rss_bytes(self) -> int:
-        if psutil is None or self._process is None:
-            return self._fallback_rss_bytes()
-        return int(self._process.memory_info().rss)
+    def _read_rss_bytes(self) -> int:
+        raise NotImplementedError
 
     def sample_rss_bytes(self) -> int:
-        rss = self._rss_bytes()
+        rss = self._read_rss_bytes()
         if rss > self.peak_rss_bytes:
             self.peak_rss_bytes = rss
         return rss
@@ -316,7 +247,7 @@ class RSSMonitor:
         if self._thread is not None:
             self._thread.join(timeout=2)
 
-    def __enter__(self) -> RSSMonitor:
+    def __enter__(self):
         self.start()
         return self
 
@@ -326,6 +257,44 @@ class RSSMonitor:
     @property
     def peak_gb(self) -> float:
         return self.peak_rss_bytes / (1024**3)
+
+
+class ProcessTreeRSSMonitor(_BaseRSSMonitor):
+    """Monitor peak RSS across current process and all child workers."""
+
+    def __init__(self, interval_seconds: float = 0.05):
+        super().__init__(interval_seconds=interval_seconds)
+        self._process = psutil.Process() if psutil is not None else None
+
+    def _read_rss_bytes(self) -> int:
+        if psutil is None or self._process is None:
+            return self._fallback_rss_bytes()
+
+        rss_total = 0
+        processes = [self._process]
+        try:
+            processes.extend(self._process.children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.Error):
+            pass
+        for proc in processes:
+            try:
+                rss_total += int(proc.memory_info().rss)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        return rss_total
+
+
+class RSSMonitor(_BaseRSSMonitor):
+    """Monitor peak RSS for current process only."""
+
+    def __init__(self, interval_seconds: float = 0.05):
+        super().__init__(interval_seconds=interval_seconds)
+        self._process = psutil.Process() if psutil is not None else None
+
+    def _read_rss_bytes(self) -> int:
+        if psutil is None or self._process is None:
+            return self._fallback_rss_bytes()
+        return int(self._process.memory_info().rss)
 
 
 def compute_rss_growth_fraction(rss_peak_gb_by_iteration: list[float]) -> float | None:

@@ -1701,8 +1701,9 @@ fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64>
         return Ok(f64::NAN);
     }
     if py_len(n1) == 1 || py_len(n2) == 1 {
-        let c1 = n1.chars().next().unwrap();
-        let c2 = n2.chars().next().unwrap();
+        let (Some(c1), Some(c2)) = (n1.chars().next(), n2.chars().next()) else {
+            return Ok(f64::NAN);
+        };
         return Ok(if c1 == c2 { 1.0 } else { 0.0 });
     }
     if n1 == n2 {
@@ -2007,11 +2008,9 @@ fn jaro_winkler_similarity(a: &str, b: &str, long_tolerance: bool) -> f64 {
 }
 
 fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f64; 4] {
-    if name1.is_none() || name2.is_none() {
+    let (Some(n1), Some(n2)) = (name1, name2) else {
         return [f64::NAN; 4];
-    }
-    let n1 = name1.unwrap();
-    let n2 = name2.unwrap();
+    };
     if py_len(n1) <= 1 || py_len(n2) <= 1 {
         return [f64::NAN; 4];
     }
@@ -2233,10 +2232,8 @@ impl RustFeaturizer {
             push_feat!(*value);
         }
 
-        let specter_sim =
-            if english_or_unknown_count == 2 && p1.specter.is_some() && p2.specter.is_some() {
-                let specter_a = p1.specter.as_ref().unwrap();
-                let specter_b = p2.specter.as_ref().unwrap();
+        let specter_sim = if english_or_unknown_count == 2 {
+            if let (Some(specter_a), Some(specter_b)) = (p1.specter.as_ref(), p2.specter.as_ref()) {
                 let score = match (p1.specter_norm, p2.specter_norm) {
                     (Some(norm_a), Some(norm_b)) if specter_a.len() == specter_b.len() => {
                         cosine_sim_with_norms(specter_a, norm_a, specter_b, norm_b)
@@ -2246,7 +2243,10 @@ impl RustFeaturizer {
                 score + 1.0
             } else {
                 f64::NAN
-            };
+            }
+        } else {
+            f64::NAN
+        };
         push_feat!(specter_sim);
 
         push_feat!(counter_jaccard_data(
@@ -4070,12 +4070,20 @@ impl RustFeaturizer {
             let compute = || {
                 pairs
                     .par_iter()
-                    .map(|(sig_id1, sig_id2)| {
-                        let s1 = self.signatures.get(sig_id1).unwrap();
-                        let s2 = self.signatures.get(sig_id2).unwrap();
-                        let p1 = self.papers.get(&s1.paper_id).unwrap();
-                        let p2 = self.papers.get(&s2.paper_id).unwrap();
-                        self.constraint_value_from_records(
+                    .map(|(sig_id1, sig_id2)| -> PyResult<Option<f64>> {
+                        let s1 = self.signatures.get(sig_id1).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(sig_id1.to_string())
+                        })?;
+                        let s2 = self.signatures.get(sig_id2).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(sig_id2.to_string())
+                        })?;
+                        let p1 = self.papers.get(&s1.paper_id).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(s1.paper_id.to_string())
+                        })?;
+                        let p2 = self.papers.get(&s2.paper_id).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(s2.paper_id.to_string())
+                        })?;
+                        Ok(self.constraint_value_from_records(
                             sig_id1,
                             sig_id2,
                             s1,
@@ -4086,14 +4094,13 @@ impl RustFeaturizer {
                             high_value,
                             dont_merge_cluster_seeds,
                             incremental_dont_use_cluster_seeds,
-                        )
+                        ))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<PyResult<Vec<_>>>()
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
-
-        Ok(values)
+        values
     }
 
     #[pyo3(
@@ -4315,18 +4322,26 @@ impl RustFeaturizer {
             let compute = || {
                 pairs
                     .par_iter()
-                    .map(|(sig_id1, sig_id2)| {
-                        let s1 = self.signatures.get(sig_id1).unwrap();
-                        let s2 = self.signatures.get(sig_id2).unwrap();
-                        let p1 = self.papers.get(&s1.paper_id).unwrap();
-                        let p2 = self.papers.get(&s2.paper_id).unwrap();
-                        self.featurize_pair_data(s1, s2, p1, p2).to_vec()
+                    .map(|(sig_id1, sig_id2)| -> PyResult<Vec<f64>> {
+                        let s1 = self.signatures.get(sig_id1).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(sig_id1.to_string())
+                        })?;
+                        let s2 = self.signatures.get(sig_id2).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(sig_id2.to_string())
+                        })?;
+                        let p1 = self.papers.get(&s1.paper_id).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(s1.paper_id.to_string())
+                        })?;
+                        let p2 = self.papers.get(&s2.paper_id).ok_or_else(|| {
+                            pyo3::exceptions::PyKeyError::new_err(s2.paper_id.to_string())
+                        })?;
+                        Ok(self.featurize_pair_data(s1, s2, p1, p2).to_vec())
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<PyResult<Vec<_>>>()
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
-        Ok(feats)
+        feats
     }
 
     fn signature_ids(&self) -> Vec<String> {

@@ -32,10 +32,10 @@ def _signature_affiliation_feature_keys(signature) -> list[str]:
     if signature.author_info_affiliations_n_grams is not None:
         return list(signature.author_info_affiliations_n_grams.keys())
     affiliations = list(signature.author_info_affiliations or [])
-    if len(affiliations) == 0:
+    if not affiliations:
         return []
     tokens = [word for word in " ".join(affiliations).split() if word not in AFFILIATIONS_STOP_WORDS and len(word) > 1]
-    if len(tokens) == 0:
+    if not tokens:
         return []
     ngrams = get_text_ngrams_words(" ".join(tokens), stopwords=set())
     return list(ngrams.keys())
@@ -123,7 +123,7 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
         labels = np.zeros(len(signature_ids), dtype=int)
 
     subblocks = defaultdict(list)
-    for sig_id, label in zip(signature_ids, labels, strict=False):
+    for sig_id, label in zip(signature_ids, labels, strict=True):
         subblocks[label].append(sig_id)
     # if any subblock is above the target size, just chop it up randomly into pieces that are below the target size
     seed_base = int(getattr(anddata, "random_seed", 0) or 0)
@@ -140,7 +140,7 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
             del subblocks[label]
 
     # assert that the subblocks has a complete clustering of the input signature_ids
-    assert sum([len(subblock) for subblock in subblocks.values()]) == len(signature_ids)
+    assert sum(len(subblock) for subblock in subblocks.values()) == len(signature_ids)
 
     return dict(subblocks)
 
@@ -184,7 +184,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         counts_up_to_k_good_size = counts_up_to_k[good_size_flag]
         # the case where at this point *all* the newly made subblocks are too big
         # so it is a dead-end
-        if len(counts_up_to_k_good_size) == 0:
+        if counts_up_to_k_good_size.empty:
             for name in counts_up_to_k.index:
                 flag = names_up_to_k == name
                 output_cant_subdivide[name] = signature_ids[flag]
@@ -205,8 +205,8 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         output_cant_subdivide["final"] = signature_ids
     # assert that the combo of the output and output_cant_subdivide is a complete clustering of the input signature_ids
     assert (
-        sum([len(subblock) for subblock in output.values()])
-        + sum([len(subblock) for subblock in output_cant_subdivide.values()])
+        sum(len(subblock) for subblock in output.values())
+        + sum(len(subblock) for subblock in output_cant_subdivide.values())
         == n_signature_ids
     )
     return output, output_cant_subdivide
@@ -473,7 +473,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         for k in keys_to_merge:
             counter_of_keys[k] += 1
 
-    assert all([v == 1 for v in counter_of_keys.values()])
+    assert all(v == 1 for v in counter_of_keys.values())
 
     # now perform the actual merges
     for merge_cluster_id in sorted(merging_log):
@@ -515,7 +515,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 unique_subblock_ids,
                 key=lambda x: (x.count("specter") * 10 + x.count("|"), x),
             )
-            if all([i == maximum_size for i in subblock_sizes]):
+            if all(i == maximum_size for i in subblock_sizes):
                 subblock_id_to_move_to = unique_subblock_ids[0]
             else:
                 subblock_id_to_move_to = [k for k in unique_subblock_ids if len(output[k]) < maximum_size][0]
@@ -527,7 +527,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                     output[subblock_id_to_move_to].append(sig_id)
                     output[original_subblock_id].remove(sig_id)
                     # unlikely, but if we emptied out the original subblock, then delete it
-                    if len(output[original_subblock_id]) == 0:
+                    if not output[original_subblock_id]:
                         del output[original_subblock_id]
 
     # let's assert that we have done a complete partition

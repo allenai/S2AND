@@ -5,8 +5,10 @@ import pytest
 import s2and.rust_capabilities as rust_capabilities
 
 
-def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatch):
+def _make_core_rust_featurizer(*, supports_from_dataset_paper_preprocess: bool = False):
     class RustFeaturizer:
+        SUPPORTS_FROM_DATASET_PAPER_PREPROCESS = supports_from_dataset_paper_preprocess
+
         @staticmethod
         def from_dataset(*args, **kwargs):
             return None
@@ -18,11 +20,26 @@ def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatc
         def signature_ids(self):
             return []
 
+        def get_constraint(self, *args, **kwargs):
+            return None
+
+        def get_constraints_matrix(self, *args, **kwargs):
+            return []
+
+        def get_constraints_matrix_indexed(self, *args, **kwargs):
+            return []
+
         def featurize_pairs_matrix_indexed(self, *args, **kwargs):
             return None
 
         def update_signature_name_counts(self, *args, **kwargs):
             return 0
+
+    return RustFeaturizer
+
+
+def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatch):
+    RustFeaturizer = _make_core_rust_featurizer()
 
     class ShimModule:
         __version__ = None
@@ -68,32 +85,7 @@ def test_detect_rust_runtime_capabilities_requires_core_markers():
 
 
 def test_detect_rust_runtime_capabilities_rejects_old_version():
-    class RustFeaturizer:
-        @staticmethod
-        def from_dataset(*args, **kwargs):
-            return None
-
-        @staticmethod
-        def from_json_paths(*args, **kwargs):
-            return None
-
-        def signature_ids(self):
-            return []
-
-        def get_constraint(self, *args, **kwargs):
-            return None
-
-        def get_constraints_matrix(self, *args, **kwargs):
-            return []
-
-        def get_constraints_matrix_indexed(self, *args, **kwargs):
-            return []
-
-        def featurize_pairs_matrix_indexed(self, *args, **kwargs):
-            return None
-
-        def update_signature_name_counts(self, *args, **kwargs):
-            return 0
+    RustFeaturizer = _make_core_rust_featurizer()
 
     class Module:
         __version__ = "0.30.9"
@@ -106,32 +98,7 @@ def test_detect_rust_runtime_capabilities_rejects_old_version():
 
 
 def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
-    class RustFeaturizer:
-        @staticmethod
-        def from_dataset(*args, **kwargs):
-            return None
-
-        @staticmethod
-        def from_json_paths(*args, **kwargs):
-            return None
-
-        def signature_ids(self):
-            return []
-
-        def get_constraint(self, *args, **kwargs):
-            return None
-
-        def get_constraints_matrix(self, *args, **kwargs):
-            return []
-
-        def get_constraints_matrix_indexed(self, *args, **kwargs):
-            return []
-
-        def featurize_pairs_matrix_indexed(self, *args, **kwargs):
-            return None
-
-        def update_signature_name_counts(self, *args, **kwargs):
-            return 0
+    RustFeaturizer = _make_core_rust_featurizer()
 
     class Module:
         __version__ = "dev-local"
@@ -144,34 +111,7 @@ def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
 
 
 def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_marker():
-    class RustFeaturizer:
-        SUPPORTS_FROM_DATASET_PAPER_PREPROCESS = True
-
-        @staticmethod
-        def from_dataset(*args, **kwargs):
-            return None
-
-        @staticmethod
-        def from_json_paths(*args, **kwargs):
-            return None
-
-        def signature_ids(self):
-            return []
-
-        def get_constraint(self, *args, **kwargs):
-            return None
-
-        def get_constraints_matrix(self, *args, **kwargs):
-            return []
-
-        def get_constraints_matrix_indexed(self, *args, **kwargs):
-            return []
-
-        def featurize_pairs_matrix_indexed(self, *args, **kwargs):
-            return None
-
-        def update_signature_name_counts(self, *args, **kwargs):
-            return 0
+    RustFeaturizer = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
 
     class Module:
         __version__ = "0.31.0"

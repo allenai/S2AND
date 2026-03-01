@@ -49,6 +49,17 @@ def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
     assert source == "winapi:test_80pct"
 
 
+def test_resolve_total_ram_source_suffix_tracks_safety_factor():
+    resolved, source = memory_budget.resolve_total_ram_bytes(
+        None,
+        detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        autodetect_safety_factor=0.75,
+    )
+    assert resolved == 7500
+    assert source == "cgroup:test_75pct"
+
+
 def test_current_rss_windows_fallback_used_when_psutil_missing(monkeypatch):
     monkeypatch.setattr(memory_budget, "_psutil_process_rss_bytes_best_effort", lambda: None)
     monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
@@ -167,19 +178,9 @@ def test_resolve_rust_batch_prediction_params_invalid_env_raises(monkeypatch):
 
 def test_rss_fallback_logs_warning(caplog, monkeypatch):
     """Fix #1: RSS fallback should log a warning when using the 50% assumption."""
-    import builtins
-    import os
-
-    _real_import = builtins.__import__
-
-    def _no_psutil_import(name, *args, **kwargs):
-        if name == "psutil":
-            raise ImportError("mocked")
-        return _real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _no_psutil_import)
-    # Ensure /proc/self/status doesn't exist (it won't on Windows, but be explicit)
-    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    monkeypatch.setattr(memory_budget, "_psutil_process_rss_bytes_best_effort", lambda: None)
+    monkeypatch.setattr(memory_budget, "_proc_status_rss_bytes_best_effort", lambda: (None, "unavailable"))
+    monkeypatch.setattr(memory_budget, "_windows_process_working_set_bytes_best_effort", lambda: (None, "unavailable"))
 
     with caplog.at_level(logging.WARNING, logger="s2and"):
         rss, source = memory_budget.current_rss_bytes_best_effort(2_000_000)

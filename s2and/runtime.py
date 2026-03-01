@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -28,6 +29,18 @@ _CORE_REQUIRED_FEATURIZER_MARKERS = (
     "get_constraints_matrix_indexed",
     "featurize_pairs_matrix_indexed",
     "update_signature_name_counts",
+)
+_FEATURIZER_API_SCORE_MARKERS = tuple(
+    marker
+    for marker in _CORE_REQUIRED_FEATURIZER_MARKERS
+    if marker
+    in {
+        "from_dataset",
+        "from_json_paths",
+        "signature_ids",
+        "featurize_pairs_matrix_indexed",
+        "update_signature_name_counts",
+    }
 )
 
 
@@ -56,7 +69,7 @@ class RuntimeContext:
     run_id: str
     source: RuntimeSource
 
-    def stage_backend(self, stage: str) -> Backend:
+    def stage_backend(self) -> Backend:
         return "rust" if self.use_rust else "python"
 
 
@@ -81,19 +94,13 @@ def _rust_featurizer_api_score(module: Any) -> int:
     rust_featurizer_cls = getattr(module, "RustFeaturizer", None)
     if rust_featurizer_cls is None:
         return -1
-    api_markers = (
-        "from_dataset",
-        "from_json_paths",
-        "signature_ids",
-        "featurize_pairs_matrix_indexed",
-        "update_signature_name_counts",
-    )
-    return sum(1 for marker in api_markers if hasattr(rust_featurizer_cls, marker))
+    return sum(1 for marker in _FEATURIZER_API_SCORE_MARKERS if hasattr(rust_featurizer_cls, marker))
 
 
-def load_s2and_rust_extension() -> Any | None:
+def load_s2and_rust_extension(*, import_module: Callable[[str], Any] | None = None) -> Any | None:
+    importer = import_module or importlib.import_module
     try:
-        module = importlib.import_module("s2and_rust")
+        module = importer("s2and_rust")
     except Exception:
         return None
 
@@ -103,7 +110,7 @@ def load_s2and_rust_extension() -> Any | None:
     # extension lives in a submodule. Prefer the versioned native module when scores tie.
     candidate_module: Any | None = None
     try:
-        candidate_module = importlib.import_module("s2and_rust._s2and_rust")
+        candidate_module = importer("s2and_rust._s2and_rust")
     except Exception:
         candidate_module = None
 
@@ -126,8 +133,14 @@ def load_s2and_rust_extension() -> Any | None:
     return None
 
 
-def detect_rust_runtime_capabilities(extension_module: Any | None = None) -> RustRuntimeCapabilities:
-    module = extension_module if extension_module is not None else load_s2and_rust_extension()
+def detect_rust_runtime_capabilities(
+    extension_module: Any | None = None,
+    *,
+    import_module: Callable[[str], Any] | None = None,
+) -> RustRuntimeCapabilities:
+    module = (
+        extension_module if extension_module is not None else load_s2and_rust_extension(import_module=import_module)
+    )
     if module is None:
         return RustRuntimeCapabilities(
             extension_importable=False,
@@ -276,12 +289,8 @@ def build_runtime_context(
     )
 
 
-def stage_uses_rust(runtime_context: RuntimeContext, stage: str) -> bool:
-    """Returns whether Rust is enabled for the given stage.
-
-    Stage-specific routing is not implemented yet; all stages follow the resolved backend.
-    """
-    del stage
+def stage_uses_rust(runtime_context: RuntimeContext) -> bool:
+    """Returns whether Rust is enabled for the current runtime context."""
     return runtime_context.use_rust
 
 

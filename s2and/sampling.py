@@ -1,11 +1,11 @@
-import math
-import random
-from typing import Any
-
 """
 Sampling code modified from:
 https://github.com/glouppe/beard/blob/9fb268736d195dd0c27cd0ae2915d8e00bbb4e2c/examples/applications/author-disambiguation/sampling.py
 """
+
+import math
+import random
+from typing import Any
 
 
 def sampling(
@@ -57,7 +57,7 @@ def sampling(
     List: list of sampled signature pairs
     """
 
-    random.seed(random_seed)
+    rng = random.Random(random_seed)
 
     all_candidates = (
         same_name_different_cluster
@@ -81,33 +81,33 @@ def sampling(
         leftovers = []
         for bucket in buckets:
             take = min(len(bucket), per_bucket_target)
-            sampled = random.sample(bucket, take)
+            sampled = rng.sample(bucket, take)
             sampled_buckets.append(sampled)
             sampled_set = set(sampled)
             leftovers.extend([pair for pair in bucket if pair not in sampled_set])
         pairs = [pair for sampled in sampled_buckets for pair in sampled]
         if len(pairs) < target_size and len(leftovers) > 0:
-            pairs.extend(random.sample(leftovers, min(target_size - len(pairs), len(leftovers))))
+            pairs.extend(rng.sample(leftovers, min(target_size - len(pairs), len(leftovers))))
     else:
         positive = same_name_same_cluster + different_name_same_cluster
         negative = same_name_different_cluster + different_name_different_cluster
         pos_target = int(math.ceil(target_size / 2))
         neg_target = target_size - pos_target
 
-        pos_sample = random.sample(positive, min(len(positive), pos_target))
-        neg_sample = random.sample(negative, min(len(negative), neg_target))
+        pos_sample = rng.sample(positive, min(len(positive), pos_target))
+        neg_sample = rng.sample(negative, min(len(negative), neg_target))
         pairs = pos_sample + neg_sample
 
         if len(pairs) < target_size:
             pos_left = [pair for pair in positive if pair not in set(pos_sample)]
             neg_left = [pair for pair in negative if pair not in set(neg_sample)]
             leftovers = pos_left + neg_left
-            pairs.extend(random.sample(leftovers, min(target_size - len(pairs), len(leftovers))))
+            pairs.extend(rng.sample(leftovers, min(target_size - len(pairs), len(leftovers))))
 
     if len(pairs) > target_size:
-        pairs = random.sample(pairs, target_size)
+        pairs = rng.sample(pairs, target_size)
 
-    return random.sample(pairs, len(pairs))
+    return rng.sample(pairs, len(pairs))
 
 
 def random_sampling(possible: list[Any], sample_size: int, random_seed: int) -> list[Any]:
@@ -127,5 +127,5 @@ def random_sampling(possible: list[Any], sample_size: int, random_seed: int) -> 
     -------
     List: the sample from the list
     """
-    random.seed(random_seed)
-    return random.sample(possible, sample_size)
+    rng = random.Random(random_seed)
+    return rng.sample(possible, sample_size)

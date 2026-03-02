@@ -30,6 +30,7 @@ _s2and_rust = load_s2and_rust_extension()
 s2and_rust: Any | None = _s2and_rust
 
 logger = logging.getLogger("s2and")
+_S2AND_RUST_LOAD_LOCK = threading.Lock()
 
 
 class _CacheEntry:
@@ -53,6 +54,19 @@ class _InFlightFeaturizerBuild:
         self.error: Exception | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _RustNameCountsOverlay:
+    first: float | None
+    first_last: float | None
+    last: float | None
+    last_first_initial: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RustSignatureNameCountsOverlay:
+    author_info_name_counts: _RustNameCountsOverlay
+
+
 # Single WeakKeyDictionary eliminates desync risk between separate weak dicts.
 _RUST_FEATURIZER_CACHE: "weakref.WeakKeyDictionary[ANDData, _CacheEntry]" = weakref.WeakKeyDictionary()
 _RUST_FEATURIZER_CACHE_LOCK = threading.Lock()
@@ -69,14 +83,29 @@ _RUST_FEATURIZER_CACHE_METADATA_SCHEMA_VERSION = 1
 DEFAULT_NORMALIZATION_VERSION = "legacy_compat"
 NORMALIZATION_VERSION_ENV = "S2AND_NORMALIZATION_VERSION"
 ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV = "S2AND_ALLOW_NORMALIZATION_VERSION_MISMATCH"
+RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES_ENV = "S2AND_RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES"
+RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS_ENV = "S2AND_RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS"
+DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES = 3
+DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS = 0.01
 
 
 def _require_rust_runtime() -> Any:
-    if s2and_rust is None:
+    rust_module = _ensure_s2and_rust_loaded()
+    if rust_module is None:
         raise RuntimeError(_RUST_BUILD_ERROR)
-    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
+    capabilities = detect_rust_runtime_capabilities(extension_module=rust_module)
     if not capabilities.core_runtime_available:
         raise RuntimeError(f"Rust runtime unavailable: {capabilities.reason}")
+    return rust_module
+
+
+def _ensure_s2and_rust_loaded() -> Any | None:
+    global s2and_rust
+    if s2and_rust is not None:
+        return s2and_rust
+    with _S2AND_RUST_LOAD_LOCK:
+        if s2and_rust is None:
+            s2and_rust = load_s2and_rust_extension()
     return s2and_rust
 
 
@@ -98,18 +127,52 @@ def _runtime_callsite_for_logs(dataset: Any, runtime_context: Any | None = None)
     return operation, run_id
 
 
+def _rust_featurizer_empty_wait_max_retries() -> int:
+    raw = os.environ.get(RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES_ENV)
+    if raw is None:
+        return DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r, using default=%d",
+            RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES_ENV,
+            raw,
+            DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES,
+        )
+        return DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES
+
+
+def _rust_featurizer_empty_wait_backoff_seconds() -> float:
+    raw = os.environ.get(RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS_ENV)
+    if raw is None:
+        return DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r, using default=%.3f",
+            RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS_ENV,
+            raw,
+            DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS,
+        )
+        return DEFAULT_RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS
+
+
 def _increment_rust_featurizer_build_count(dataset: ANDData) -> int:
-    entry = _RUST_FEATURIZER_CACHE.get(dataset)
-    if entry is not None:
-        entry.build_count += 1
-        return entry.build_count
-    # Entry not yet inserted — caller will set build_count on insertion.
-    return 1
+    with _RUST_FEATURIZER_CACHE_LOCK:
+        entry = _RUST_FEATURIZER_CACHE.get(dataset)
+        if entry is not None:
+            entry.build_count += 1
+            return int(entry.build_count)
+        # Entry not yet inserted — caller will set build_count on insertion.
+        return 1
 
 
 def _rust_featurizer_build_count(dataset: ANDData) -> int:
-    entry = _RUST_FEATURIZER_CACHE.get(dataset)
-    return entry.build_count if entry is not None else 0
+    with _RUST_FEATURIZER_CACHE_LOCK:
+        entry = _RUST_FEATURIZER_CACHE.get(dataset)
+        return int(entry.build_count) if entry is not None else 0
 
 
 def _dataset_rust_lifecycle_policy(dataset: Any) -> RustLifecyclePolicy | None:
@@ -122,14 +185,13 @@ def _dataset_rust_lifecycle_policy(dataset: Any) -> RustLifecyclePolicy | None:
 _RUST_FEATURIZER_MAX_INMEM_CACHE: int | None = None  # None = not yet read
 
 
-def _rust_featurizer_max_inmem(dataset: ANDData | None = None) -> int:
+def _rust_featurizer_max_inmem() -> int:
     """Return the max number of Rust featurizers kept in memory.
 
     Default ``0`` (unbounded) in all modes — matching the Python feature
     cache which also keeps everything in memory for experiment iteration.
     Override with ``S2AND_RUST_FEATURIZER_MAX_INMEM=<int>`` to cap.
     """
-    del dataset
     global _RUST_FEATURIZER_MAX_INMEM_CACHE
     if _RUST_FEATURIZER_MAX_INMEM_CACHE is None:
         configured = os.environ.get("S2AND_RUST_FEATURIZER_MAX_INMEM")
@@ -155,8 +217,8 @@ def _touch_rust_featurizer(dataset: ANDData) -> None:
         entry.last_access = _RUST_FEATURIZER_ACCESS_COUNTER
 
 
-def _auto_evict_rust_featurizers(dataset_for_policy: ANDData | None = None, reserve: int = 0) -> None:
-    max_inmem = _rust_featurizer_max_inmem(dataset_for_policy)
+def _auto_evict_rust_featurizers(*, reserve: int = 0) -> None:
+    max_inmem = _rust_featurizer_max_inmem()
     if max_inmem <= 0:
         return
     overflow = len(_RUST_FEATURIZER_CACHE) - max_inmem + reserve
@@ -196,7 +258,14 @@ def _rust_cache_path(dataset: ANDData) -> str:
     cache_identity_hash = hashlib.sha256(
         json.dumps(cache_metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
-    key = f"{dataset.name}_v{FEATURIZER_VERSION}_cv{RUST_FEATURIZER_CACHE_VERSION}_{cache_identity_hash}"
+    dataset_name = _dataset_name_for_logs(dataset)
+    dataset_name_prefix = "".join(ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_" for ch in dataset_name)
+    dataset_name_prefix = dataset_name_prefix.strip("._-")[:40] or "dataset"
+    dataset_name_hash = hashlib.sha256(dataset_name.encode("utf-8")).hexdigest()[:8]
+    key = (
+        f"{dataset_name_prefix}_{dataset_name_hash}"
+        f"_v{FEATURIZER_VERSION}_cv{RUST_FEATURIZER_CACHE_VERSION}_{cache_identity_hash}"
+    )
     return os.path.join(cache_dir, f"{key}.bin")
 
 
@@ -221,28 +290,30 @@ def _artifact_identity(path: str | None) -> dict[str, Any]:
 
 
 def _rust_featurizer_cache_metadata(dataset: ANDData, *, requested_build_path: RustBuildPath) -> dict[str, Any]:
-    rust_version = getattr(s2and_rust, "__version__", None) if s2and_rust is not None else None
+    rust_module = _ensure_s2and_rust_loaded()
+    rust_version = getattr(rust_module, "__version__", None) if rust_module is not None else None
     return {
         "schema_version": _RUST_FEATURIZER_CACHE_METADATA_SCHEMA_VERSION,
         "cache_version": int(RUST_FEATURIZER_CACHE_VERSION),
         "rust_version": rust_version,
-        "dataset_name": getattr(dataset, "name", ""),
+        "dataset_name": dataset.name,
         "dataset_mode": _dataset_mode_for_logs(dataset),
         "requested_build_path": str(requested_build_path),
-        "signature_count": int(len(getattr(dataset, "signatures", {}))),
-        "paper_count": int(len(getattr(dataset, "papers", {}))),
-        "name_tuple_count": int(len(getattr(dataset, "name_tuples", {}))),
-        "compute_reference_features": bool(getattr(dataset, "compute_reference_features", False)),
-        "preprocess": bool(getattr(dataset, "preprocess", True)),
+        "signature_count": int(len(dataset.signatures)),
+        "paper_count": int(len(dataset.papers)),
+        "name_tuple_count": int(len(dataset.name_tuples)),
+        "compute_reference_features": bool(dataset.compute_reference_features),
+        "preprocess": bool(dataset.preprocess),
+        "name_counts_last_first_initial_semantics": str(dataset.name_counts_last_first_initial_semantics),
         "skip_fasttext": bool(parse_bool_env("S2AND_SKIP_FASTTEXT", default=False)),
         "normalization_version": _expected_normalization_version(),
         "allow_normalization_version_mismatch": bool(_allow_normalization_version_mismatch()),
         "artifacts": {
-            "signatures_path": _artifact_identity(getattr(dataset, "signatures_path", None)),
-            "papers_path": _artifact_identity(getattr(dataset, "papers_path", None)),
-            "clusters_path": _artifact_identity(getattr(dataset, "clusters_path", None)),
-            "cluster_seeds_path": _artifact_identity(getattr(dataset, "cluster_seeds_path", None)),
-            "specter_embeddings_path": _artifact_identity(getattr(dataset, "specter_embeddings_path", None)),
+            "signatures_path": _artifact_identity(dataset.signatures_path),
+            "papers_path": _artifact_identity(dataset.papers_path),
+            "clusters_path": _artifact_identity(dataset.clusters_path),
+            "cluster_seeds_path": _artifact_identity(dataset.cluster_seeds_path),
+            "specter_embeddings_path": _artifact_identity(dataset.specter_embeddings_path),
             "name_counts_json_path": _artifact_identity(_rust_name_counts_artifact_path()),
         },
     }
@@ -291,32 +362,105 @@ def _rust_name_counts_artifact_path() -> str | None:
     return configured or None
 
 
-def _signature_has_materialized_name_counts(signature: Any) -> bool:
-    counts = getattr(signature, "author_info_name_counts", None)
-    if counts is None:
+def _name_count_value_present(value: Any) -> bool:
+    if value is None:
         return False
-    try:
-        return any(v is not None and not (isinstance(v, float) and math.isnan(v)) for v in counts)
-    except TypeError:
-        return True
+    if isinstance(value, float):
+        return not math.isnan(value)
+    if isinstance(value, np.floating):
+        return not math.isnan(float(value))
+    return True
+
+
+def _extract_overlay_name_counts_values(
+    counts: Any,
+) -> tuple[float | None, float | None, float | None, float | None] | None:
+    if counts is None:
+        return None
+
+    if all(hasattr(counts, field) for field in ("first", "last", "first_last", "last_first_initial")):
+        return (
+            counts.first,
+            counts.last,
+            counts.first_last,
+            counts.last_first_initial,
+        )
+
+    if isinstance(counts, tuple | list) and len(counts) >= 4:
+        return (
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+        )
+
+    return None
+
+
+def _build_signature_name_counts_overlay_entry(signature: Any) -> _RustSignatureNameCountsOverlay | None:
+    counts = getattr(signature, "author_info_name_counts", None)
+    values = _extract_overlay_name_counts_values(counts)
+    if values is None:
+        return None
+    first, last, first_last, last_first_initial = values
+    if not any(_name_count_value_present(v) for v in values):
+        return None
+    return _RustSignatureNameCountsOverlay(
+        author_info_name_counts=_RustNameCountsOverlay(
+            first=first,
+            first_last=first_last,
+            last=last,
+            last_first_initial=last_first_initial,
+        )
+    )
+
+
+def _signature_has_materialized_name_counts(signature: Any) -> bool:
+    return _build_signature_name_counts_overlay_entry(signature) is not None
 
 
 def _signature_name_counts_overlay_payload_from_dataset(dataset: Any) -> tuple[int, int, dict[str, Any]]:
     signatures = getattr(dataset, "signatures", None)
     if signatures is None:
         return 0, 0, {}
+    dataset_name_for_logs = _dataset_name_for_logs(dataset)
     try:
         signatures_total = int(len(signatures))
-    except Exception:
+    except (TypeError, AttributeError) as length_exc:
+        logger.warning(
+            "Rust JSON ingest: failed to compute signatures length for name-count overlay dataset=%s: %s",
+            dataset_name_for_logs,
+            length_exc,
+        )
         signatures_total = 0
 
     payload: dict[str, Any] = {}
     try:
-        for signature_id, signature in signatures.items():
-            if _signature_has_materialized_name_counts(signature):
-                payload[str(signature_id)] = signature
-    except Exception:
-        return signatures_total, 0, {}
+        signature_items = signatures.items()
+    except (TypeError, AttributeError) as items_exc:
+        logger.exception(
+            "Rust JSON ingest: failed to iterate signatures for name-count overlay dataset=%s",
+            dataset_name_for_logs,
+        )
+        raise RuntimeError(
+            "Rust JSON ingest failed while iterating signatures for name-count overlay payload "
+            f"(dataset={dataset_name_for_logs})"
+        ) from items_exc
+
+    try:
+        for signature_id, signature in signature_items:
+            overlay_entry = _build_signature_name_counts_overlay_entry(signature)
+            if overlay_entry is not None:
+                payload[str(signature_id)] = overlay_entry
+    except (TypeError, AttributeError) as overlay_exc:
+        logger.exception(
+            "Rust JSON ingest: failed to materialize signature name-count overlay payload dataset=%s",
+            dataset_name_for_logs,
+        )
+        raise RuntimeError(
+            "Rust JSON ingest failed while materializing signature name-count overlay payload "
+            f"(dataset={dataset_name_for_logs})"
+        ) from overlay_exc
     return signatures_total, len(payload), payload
 
 
@@ -348,11 +492,11 @@ def _build_rust_featurizer_from_json_paths(
 
     rust_can_overlay_signature_counts = hasattr(rust_featurizer_cls, "update_signature_name_counts")
     if signature_name_counts_payload is not None:
-        dataset_signature_counts_payload = {
-            str(signature_id): signature
-            for signature_id, signature in signature_name_counts_payload.items()
-            if _signature_has_materialized_name_counts(signature)
-        }
+        dataset_signature_counts_payload = {}
+        for signature_id, signature in signature_name_counts_payload.items():
+            overlay_entry = _build_signature_name_counts_overlay_entry(signature)
+            if overlay_entry is not None:
+                dataset_signature_counts_payload[str(signature_id)] = overlay_entry
         signatures_with_counts = len(dataset_signature_counts_payload)
         signatures_total = signatures_with_counts
         try:
@@ -466,10 +610,10 @@ def _build_rust_featurizer_from_dataset(
 ) -> tuple[Any, RustBuildPath, dict[str, float]]:
     pre_build_start = time.perf_counter()
     rust_module = _require_rust_runtime()
-    num_threads = max(1, int(getattr(dataset, "n_jobs", 1)))
+    num_threads = max(1, int(dataset.n_jobs))
     selected_build_path = rust_build_path
-    signatures_path = getattr(dataset, "signatures_path", None)
-    papers_path = getattr(dataset, "papers_path", None)
+    signatures_path = dataset.signatures_path
+    papers_path = dataset.papers_path
     if selected_build_path == "from_json_paths":
         if signatures_path and papers_path:
             outer_pre_build_seconds = time.perf_counter() - pre_build_start
@@ -507,8 +651,8 @@ def _resolve_requested_build_path(
     dataset_mode: str,
 ) -> RustBuildPath:
     dataset_mode_normalized = dataset_mode.strip().lower()
-    has_signatures_path = bool(getattr(dataset, "signatures_path", None))
-    has_papers_path = bool(getattr(dataset, "papers_path", None))
+    has_signatures_path = bool(dataset.signatures_path)
+    has_papers_path = bool(dataset.papers_path)
     legacy_requested_build_path: RustBuildPath = (
         "from_json_paths"
         if dataset_mode_normalized == "inference" and has_signatures_path and has_papers_path
@@ -583,9 +727,7 @@ def _build_rust_featurizer_with_retry_for_missing_signature_ngrams(
                 build_exc,
             )
             try:
-                dataset.materialize_signature_ngrams_python(  # type: ignore[attr-defined]
-                    batch_size=_SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE
-                )
+                dataset.materialize_signature_ngrams_python(batch_size=_SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE)
             except Exception as materialize_exc:
                 logger.warning(
                     "Failed to materialize Python signature ngrams for Rust featurizer retry: %s",
@@ -745,7 +887,7 @@ def _build_and_cache_rust_featurizer(
             build_count = _rust_featurizer_build_count(dataset)
 
         with _RUST_FEATURIZER_CACHE_LOCK:
-            _auto_evict_rust_featurizers(dataset_for_policy=dataset, reserve=1)
+            _auto_evict_rust_featurizers(reserve=1)
             global _RUST_FEATURIZER_ACCESS_COUNTER
             _RUST_FEATURIZER_ACCESS_COUNTER += 1
             _RUST_FEATURIZER_CACHE[dataset] = _CacheEntry(
@@ -768,7 +910,7 @@ def _build_and_cache_rust_featurizer(
                 del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
     except Exception as build_error:
         with _RUST_FEATURIZER_CACHE_LOCK:
-            inflight_build.error = build_error if isinstance(build_error, Exception) else Exception(build_error)
+            inflight_build.error = build_error
             inflight_build.event.set()
             if _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset) is inflight_build:
                 del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
@@ -810,12 +952,36 @@ def _get_rust_featurizer(
         cache_path=cache_path,
         cache_metadata=cache_metadata,
     )
+    max_empty_wait_retries = _rust_featurizer_empty_wait_max_retries()
+    empty_wait_backoff_seconds = _rust_featurizer_empty_wait_backoff_seconds()
+    empty_wait_attempt = 0
 
     while True:
         featurizer, inflight_build = _get_or_wait_for_cached(dataset, build_context=build_context)
         if featurizer is not None:
             return featurizer
         if inflight_build is None:
+            empty_wait_attempt += 1
+            if empty_wait_attempt > max_empty_wait_retries:
+                raise RuntimeError(
+                    "Rust featurizer cache resolution exhausted retries for empty wait state "
+                    f"(dataset={ds_log}, mode={dataset_mode}, run={run_id}, "
+                    f"attempts={empty_wait_attempt}, max_retries={max_empty_wait_retries})"
+                )
+            backoff_seconds = empty_wait_backoff_seconds * float(empty_wait_attempt)
+            logger.warning(
+                "Telemetry: rust_featurizer_cache cache=retry_empty dataset=%s mode=%s op=%s run=%s attempt=%d/%d "
+                "backoff_seconds=%.3f",
+                ds_log,
+                dataset_mode,
+                operation,
+                run_id,
+                empty_wait_attempt,
+                max_empty_wait_retries,
+                backoff_seconds,
+            )
+            if backoff_seconds > 0:
+                time.sleep(backoff_seconds)
             continue
         return _build_and_cache_rust_featurizer(dataset, inflight_build=inflight_build, build_context=build_context)
 
@@ -869,7 +1035,6 @@ def get_constraint_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ):
-    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
     return featurizer.get_constraint(
@@ -894,7 +1059,6 @@ def get_constraints_matrix_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> list[float | None]:
-    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
 
@@ -925,7 +1089,6 @@ def get_constraints_matrix_indexed_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> list[float | None]:
-    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
 
@@ -955,7 +1118,6 @@ def get_constraints_block_upper_triangle_indexed_rust(
     runtime_context: Any | None = None,
     use_cache: bool = False,
 ) -> tuple[list[int], list[int], list[float | None]]:
-    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
 
@@ -1027,7 +1189,6 @@ def build_block_upper_triangle_feature_matrix_indexed_rust(
     use_cache: bool = False,
     featurizer: Any | None = None,
 ) -> np.ndarray:
-    _require_rust_runtime()
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
     method = getattr(featurizer, "featurize_block_upper_triangle_matrix_indexed", None)
@@ -1048,12 +1209,14 @@ def build_block_upper_triangle_feature_matrix_indexed_rust(
 
 
 def rust_featurizer_available() -> bool:
-    capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
+    rust_module = _ensure_s2and_rust_loaded()
+    capabilities = detect_rust_runtime_capabilities(extension_module=rust_module)
     return bool(capabilities.core_runtime_available)
 
 
 def rust_signature_preprocess_available() -> bool:
-    return bool(s2and_rust is not None and hasattr(s2and_rust, "signature_ngrams_batch"))
+    rust_module = _ensure_s2and_rust_loaded()
+    return bool(rust_module is not None and hasattr(rust_module, "signature_ngrams_batch"))
 
 
 def signature_ngrams_batch_rust(

@@ -36,6 +36,8 @@ sys.path.insert(0, PROJECT_ROOT)
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 T = TypeVar("T")
+PaperStageInputT = TypeVar("PaperStageInputT")
+PaperStageOutputT = TypeVar("PaperStageOutputT")
 
 
 def _load_json(path: str) -> Any:
@@ -197,8 +199,8 @@ def _signature_ngrams_one(pair: tuple[str, str]) -> tuple[Counter, Counter]:
 def _run_paper_stage(
     *,
     label: str,
-    items: list[tuple[str, Any]],
-    func: Callable[[tuple[str, Any]], tuple[str, Any]],
+    items: list[PaperStageInputT],
+    func: Callable[[PaperStageInputT], PaperStageOutputT],
     n_jobs: int,
     use_threads: bool | None,
     chunk_size: int,
@@ -220,7 +222,7 @@ def _run_paper_stage(
     t1 = time.perf_counter()
     out_count = 0
     with pool:
-        for _key, _value in pool.imap(func, items, chunk_size):
+        for _ in pool.imap(func, items, chunk_size):
             out_count += 1
     work = time.perf_counter() - t1
     _ = label  # keep param for symmetry/readability

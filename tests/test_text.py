@@ -1,4 +1,6 @@
 import random
+import threading
+import time
 import unittest
 from collections import Counter
 
@@ -164,3 +166,41 @@ class TestClusterer(unittest.TestCase):
         assert is_reliable is True
         assert is_english is True
         assert predicted_language == "en"
+
+
+def test_fasttext_model_lazy_load_is_thread_safe(monkeypatch):
+    import s2and.text as text_module
+
+    fake_model = object()
+    load_calls = {"count": 0}
+    load_calls_lock = threading.Lock()
+    start_event = threading.Event()
+    outputs: list[object | None] = []
+
+    def _fake_load_model(_path: str):
+        with load_calls_lock:
+            load_calls["count"] += 1
+        time.sleep(0.05)
+        return fake_model
+
+    def _worker() -> None:
+        start_event.wait(timeout=2.0)
+        outputs.append(text_module._get_fasttext_model())
+
+    monkeypatch.setattr(text_module.fasttext, "load_model", _fake_load_model)
+    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
+    monkeypatch.setattr(text_module, "FASTTEXT_PATH", "dummy_model_path.bin")
+    monkeypatch.delenv("S2AND_SKIP_FASTTEXT", raising=False)
+    text_module._FASTTEXT_MODEL = None
+    text_module._FASTTEXT_MODEL_INITIALIZED = False
+
+    threads = [threading.Thread(target=_worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    start_event.set()
+    for thread in threads:
+        thread.join(timeout=3.0)
+
+    assert load_calls["count"] == 1
+    assert len(outputs) == 8
+    assert all(model is fake_model for model in outputs)

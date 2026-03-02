@@ -10,7 +10,7 @@ import pytest
 import s2and.featurizer as featurizer_mod
 from s2and.data import ANDData, Author, NameCounts
 from s2and.featurizer import _single_pair_featurize
-from tests.conftest import equalish, import_s2and_rust
+from tests.helpers import equalish, import_s2and_rust
 
 HAS_RUST, s2and_rust = import_s2and_rust(required_method="from_dataset")
 if not HAS_RUST:
@@ -166,7 +166,7 @@ def test_from_dataset_fastpath_parity_for_field_sensitive_values():
     assert python_features[venue_idx] == pytest.approx(0.5)
     assert python_features[journal_idx] == pytest.approx(0.0)
     assert len(python_features) == len(rust_features)
-    for idx, (ref_val, got_val) in enumerate(zip(python_features, rust_features, strict=False)):
+    for idx, (ref_val, got_val) in enumerate(zip(python_features, rust_features, strict=True)):
         assert equalish(ref_val, got_val), f"Mismatch idx={idx}: ref={ref_val} got={got_val}"
 
 
@@ -211,7 +211,7 @@ def test_from_dataset_raw_papers_match_preprocessed_for_language_and_coauthors()
     observed_constraint = rust_raw.get_constraint("s1", "s2")
 
     assert len(expected_features) == len(observed_features)
-    for idx, (expected, observed) in enumerate(zip(expected_features, observed_features, strict=False)):
+    for idx, (expected, observed) in enumerate(zip(expected_features, observed_features, strict=True)):
         assert equalish(expected, observed), f"Mismatch idx={idx}: expected={expected} observed={observed}"
     assert equalish(expected_constraint, observed_constraint)
     assert not math.isnan(float(expected_constraint))

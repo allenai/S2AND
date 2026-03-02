@@ -128,8 +128,6 @@ def load_s2and_rust_extension(*, import_module: Callable[[str], Any] | None = No
 
     if shim_score >= 0:
         return module
-    if candidate_module is not None and candidate_score >= 0:
-        return candidate_module
     return None
 
 
@@ -237,6 +235,23 @@ def _resolve_auto_backend(
     )
 
 
+def _resolve_explicit_rust_backend(*, source: RuntimeSource) -> BackendResolution:
+    capabilities = detect_rust_runtime_capabilities()
+    if not capabilities.core_runtime_available:
+        min_version = _version_tuple_to_string(MIN_SUPPORTED_RUST_EXTENSION_VERSION)
+        raise RuntimeError(
+            "S2AND_BACKEND='rust' requested but Rust runtime is unavailable or unsupported "
+            f"(reason={capabilities.reason}). Install/upgrade s2and_rust (>= {min_version}) "
+            "or set S2AND_BACKEND=python/auto."
+        )
+    return BackendResolution(
+        requested_backend="rust",
+        resolved_backend="rust",
+        source=source,
+        capability_reason=capabilities.reason,
+    )
+
+
 def resolve_backend(*, emit_startup_warning: bool = True) -> BackendResolution:
     requested_raw = os.environ.get("S2AND_BACKEND")
     if requested_raw is not None:
@@ -248,13 +263,14 @@ def resolve_backend(*, emit_startup_warning: bool = True) -> BackendResolution:
                 requested_backend="auto",
                 source="S2AND_BACKEND",
             )
+        elif requested == "rust":
+            resolution = _resolve_explicit_rust_backend(source="S2AND_BACKEND")
         else:
-            explicit_backend: Backend = "python" if requested == "python" else "rust"
             resolution = BackendResolution(
-                requested_backend=explicit_backend,
-                resolved_backend=explicit_backend,
+                requested_backend="python",
+                resolved_backend="python",
                 source="S2AND_BACKEND",
-                capability_reason=f"explicit_{requested}",
+                capability_reason="explicit_python",
             )
         if emit_startup_warning:
             _emit_startup_runtime_warning_once(resolution)

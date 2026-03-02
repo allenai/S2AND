@@ -3,7 +3,6 @@ import os
 import shutil
 import tempfile
 from hashlib import sha256
-from pathlib import Path
 from typing import IO
 from urllib.parse import urlparse
 
@@ -16,7 +15,7 @@ ARTIFACTS_CACHE = str(CACHE_ROOT / "artifacts")
 # file largely taken from https://github.com/allenai/scispacy/blob/master/scispacy/file_cache.py
 
 
-def cached_path(url_or_filename: str | Path, cache_dir: str | None = None) -> str:
+def cached_path(url_or_filename: str | os.PathLike[str], cache_dir: str | None = None) -> str:
     """
     Given something that might be a URL (or might be a local path),
     determine which. If it's a URL, download the file and cache it, and
@@ -25,8 +24,8 @@ def cached_path(url_or_filename: str | Path, cache_dir: str | None = None) -> st
     """
     if cache_dir is None:
         cache_dir = ARTIFACTS_CACHE
-    if isinstance(url_or_filename, Path):
-        url_or_filename = str(url_or_filename)
+    if not isinstance(url_or_filename, str):
+        url_or_filename = os.fspath(url_or_filename)
 
     parsed = urlparse(url_or_filename)
 

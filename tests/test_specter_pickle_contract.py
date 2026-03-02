@@ -8,7 +8,7 @@ import pytest
 
 from s2and.consts import PROJECT_ROOT_PATH
 from s2and.data import ANDData
-from tests.conftest import import_s2and_rust
+from tests.helpers import import_s2and_rust
 
 
 def test_python_maybe_load_specter_accepts_dict_payload():
@@ -39,7 +39,6 @@ def test_rust_from_json_paths_accepts_tuple_specter_pickle(tmp_path):
 
     signatures_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "signatures.json")
     papers_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "papers.json")
-    clusters_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "clusters.json")
     cluster_seeds_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "cluster_seeds.json")
 
     keys = ["53235312", "27077319", "19901392", "21094749", "38029096", "1", "2"]
@@ -51,7 +50,6 @@ def test_rust_from_json_paths_accepts_tuple_specter_pickle(tmp_path):
     rust_featurizer = s2and_rust.RustFeaturizer.from_json_paths(
         signatures_path,
         papers_path,
-        clusters_path,
         cluster_seeds_path,
         str(specter_path),
         None,
@@ -74,7 +72,6 @@ def test_rust_from_json_paths_accepts_dict_specter():
 
     signatures_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "signatures.json")
     papers_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "papers.json")
-    clusters_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "clusters.json")
     cluster_seeds_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "cluster_seeds.json")
 
     keys = ["53235312", "27077319", "19901392", "21094749", "38029096", "1", "2"]
@@ -84,7 +81,6 @@ def test_rust_from_json_paths_accepts_dict_specter():
     rust_featurizer = s2and_rust.RustFeaturizer.from_json_paths(
         signatures_path,
         papers_path,
-        clusters_path,
         cluster_seeds_path,
         specter_dict,
         None,

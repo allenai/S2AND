@@ -73,7 +73,6 @@ def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
         labels,
         _nameless_features,
         _batch_label,
-        _rust_failure_counts,
         runtime_context=None,
         **_kwargs,
     ):
@@ -124,7 +123,6 @@ def test_make_distance_matrices_rust_blockwise_square_matrix(monkeypatch):
         labels,
         _nameless_features,
         _batch_label,
-        _rust_failure_counts,
         runtime_context=None,
         **_kwargs,
     ):
@@ -227,7 +225,6 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
         labels,
         _nameless_features,
         _batch_label,
-        _rust_failure_counts,
         runtime_context=None,
         **_kwargs,
     ):

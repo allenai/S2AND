@@ -18,7 +18,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v3
 
-      # Cache uv tool + resolver cache (speeds up uvx + resolves)
+      # Cache uv tool + resolver cache
       - name: Cache uv caches
         uses: actions/cache@v4
         with:
@@ -26,18 +26,27 @@ jobs:
             ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
-      # Style checks via uvx (no env creation needed, blazing fast)
+      # Sync environment from lock if present so tool versions come from pyproject.toml/uv.lock
+      - name: Sync deps (locked if available)
+        shell: bash
+        run: |
+          if [[ -f uv.lock ]]; then
+            uv sync --extra dev --frozen
+          else
+            uv sync --extra dev
+          fi
+
       - name: ruff check
-        run: uvx --from ruff==0.6.9 ruff check s2and scripts tests
+        run: uv run ruff check s2and scripts tests
       - name: ruff format (s2and/)
-        run: uvx --from ruff==0.6.9 ruff format --check s2and
+        run: uv run ruff format --check s2and
       - name: ruff format (scripts/*.py)
         shell: bash
         run: |
           shopt -s nullglob
           files=(scripts/*.py)
           if (( ${#files[@]} )); then
-            uvx --from ruff==0.6.9 ruff format --check "${files[@]}"
+            uv run ruff format --check "${files[@]}"
           fi
 
   typecheck-and-test:
@@ -132,7 +141,7 @@ jobs:
       # Type checking (ty with tuned migration rules)
       - name: ty (s2and)
         run: |
-          uvx --from ty==0.0.18 ty check s2and \
+          uv run ty check s2and \
             --ignore unresolved-import \
             --ignore unused-type-ignore-comment \
             --ignore possibly-missing-attribute \
@@ -143,7 +152,7 @@ jobs:
           shopt -s nullglob
           files=(scripts/*.py)
           if (( ${#files[@]} )); then
-            uvx --from ty==0.0.18 ty check "${files[@]}" \
+            uv run ty check "${files[@]}" \
               --ignore unresolved-import \
               --ignore unused-type-ignore-comment \
               --ignore possibly-missing-attribute \

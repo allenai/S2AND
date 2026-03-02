@@ -4,6 +4,7 @@ if TYPE_CHECKING:
     from s2and.data import NameCounts
 
 import re
+import threading
 import warnings
 from collections import Counter
 
@@ -21,6 +22,8 @@ from s2and.file_cache import cached_path
 
 # Lazily-loaded fastText model to avoid heavy import-time cost
 _FASTTEXT_MODEL = None
+_FASTTEXT_MODEL_INITIALIZED = False
+_FASTTEXT_MODEL_LOCK = threading.Lock()
 
 
 def _get_fasttext_model():
@@ -31,19 +34,23 @@ def _get_fasttext_model():
     import os
 
     global _FASTTEXT_MODEL
-    if _FASTTEXT_MODEL is not None:
+    global _FASTTEXT_MODEL_INITIALIZED
+    if _FASTTEXT_MODEL_INITIALIZED:
         return _FASTTEXT_MODEL
-
-    if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
-        return None
-
-    # Load once and cache
-    try:
-        _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
-    except Exception:
-        # If loading fails, degrade gracefully to no fastText
-        _FASTTEXT_MODEL = None
-    return _FASTTEXT_MODEL
+    with _FASTTEXT_MODEL_LOCK:
+        if _FASTTEXT_MODEL_INITIALIZED:
+            return _FASTTEXT_MODEL
+        if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
+            _FASTTEXT_MODEL = None
+            _FASTTEXT_MODEL_INITIALIZED = True
+            return None
+        try:
+            _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
+        except Exception:
+            # If loading fails, degrade gracefully to no fastText.
+            _FASTTEXT_MODEL = None
+        _FASTTEXT_MODEL_INITIALIZED = True
+        return _FASTTEXT_MODEL
 
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")

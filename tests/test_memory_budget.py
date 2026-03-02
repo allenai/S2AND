@@ -90,6 +90,19 @@ def test_compute_incremental_limits_uses_available_bytes():
     assert int(limits["chunk_pairs"]) >= 1
 
 
+def test_compute_incremental_limits_uses_default_phase_a_chunk_cap():
+    limits = memory_budget.compute_incremental_phase_split_limits(
+        num_features=1,
+        total_ram_bytes=10_000_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+    assert int(limits["derived_chunk_pairs"]) > memory_budget.PHASE_A_MAX_CHUNK_PAIRS_DEFAULT
+    assert int(limits["max_chunk_pairs"]) == memory_budget.PHASE_A_MAX_CHUNK_PAIRS_DEFAULT
+    assert int(limits["chunk_pairs"]) == memory_budget.PHASE_A_MAX_CHUNK_PAIRS_DEFAULT
+
+
 def test_compute_rust_batch_chunk_plan_respects_stage_budget():
     plan = memory_budget.compute_rust_batch_chunk_plan(
         num_features=1_000,
@@ -154,26 +167,6 @@ def test_compute_rust_batch_chunk_plan_adds_persistent_row_overhead():
         + int(plan["predicted_fixed_overhead_bytes"])
     )
     assert int(plan["predicted_stage_peak_delta_bytes"]) == expected
-
-
-def test_resolve_rust_batch_prediction_params_env(monkeypatch):
-    monkeypatch.setenv("S2AND_RUST_BATCH_BASE_CHUNK_PAIRS", "123")
-    monkeypatch.setenv("S2AND_RUST_BATCH_ROW_OVERHEAD_BYTES", "45")
-    monkeypatch.setenv("S2AND_RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES", "67")
-    monkeypatch.setenv("S2AND_RUST_BATCH_FIXED_OVERHEAD_BYTES", "890")
-
-    params = memory_budget.resolve_rust_batch_prediction_params()
-
-    assert params["base_chunk_pairs"] == 123
-    assert params["row_overhead_bytes"] == 45
-    assert params["persistent_row_overhead_bytes"] == 67
-    assert params["fixed_overhead_bytes"] == 890
-
-
-def test_resolve_rust_batch_prediction_params_invalid_env_raises(monkeypatch):
-    monkeypatch.setenv("S2AND_RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES", "-1")
-    with pytest.raises(ValueError, match="S2AND_RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES"):
-        memory_budget.resolve_rust_batch_prediction_params()
 
 
 def test_rss_fallback_logs_warning(caplog, monkeypatch):

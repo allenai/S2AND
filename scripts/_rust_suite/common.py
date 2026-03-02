@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -8,6 +9,8 @@ import platform
 import subprocess
 import sys
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,17 +21,70 @@ except ModuleNotFoundError:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+RESULT_MARKERS: dict[str, tuple[str, str]] = {
+    "profile": ("===S2AND_PROFILE_RESULT_START===", "===S2AND_PROFILE_RESULT_END==="),
+    "compare": ("===S2AND_COMPARE_RESULT_START===", "===S2AND_COMPARE_RESULT_END==="),
+    "largest_block": ("===S2AND_LARGEST_BLOCK_RESULT_START===", "===S2AND_LARGEST_BLOCK_RESULT_END==="),
+    "big_block": ("===S2AND_BIG_BLOCK_RESULT_START===", "===S2AND_BIG_BLOCK_RESULT_END==="),
+}
+
 DEFAULT_ENV_KEYS = (
     "S2AND_BACKEND",
     "S2AND_SKIP_FASTTEXT",
     "S2AND_RUST_FEATURIZER_MAX_INMEM",
-    "S2AND_RUST_BATCH_RSS_SAMPLER_MS",
     "S2AND_NORMALIZATION_VERSION",
     "S2AND_RUST_NAME_COUNTS_JSON",
     "PYTHONHASHSEED",
     "RAYON_NUM_THREADS",
     "OMP_NUM_THREADS",
 )
+
+
+def get_result_markers(kind: str) -> tuple[str, str]:
+    markers = RESULT_MARKERS.get(str(kind))
+    if markers is None:
+        supported = ", ".join(sorted(RESULT_MARKERS))
+        raise KeyError(f"Unsupported marker kind={kind!r}. Supported kinds: {supported}")
+    return markers
+
+
+@dataclass
+class TimedMethodStats:
+    seconds: float = 0.0
+    calls: int = 0
+
+
+@contextlib.contextmanager
+def timed_method(target: Any, attr_name: str):
+    """Temporarily wrap target.attr_name and capture call count + elapsed seconds."""
+    original = getattr(target, attr_name)
+    if not callable(original):
+        raise TypeError(f"{type(target).__name__}.{attr_name} is not callable")
+
+    stats = TimedMethodStats()
+    target_dict = getattr(target, "__dict__", None)
+    had_direct_attr = isinstance(target_dict, dict) and attr_name in target_dict
+
+    def _timed_wrapper(*args: Any, **kwargs: Any):
+        start = time.perf_counter()
+        try:
+            return original(*args, **kwargs)
+        finally:
+            stats.seconds += float(time.perf_counter() - start)
+            stats.calls += 1
+
+    setattr(target, attr_name, _timed_wrapper)
+    try:
+        yield stats
+    finally:
+        if had_direct_attr:
+            setattr(target, attr_name, original)
+        else:
+            try:
+                delattr(target, attr_name)
+            except AttributeError:
+                # Fallback for targets that don't support deletion.
+                setattr(target, attr_name, original)
 
 
 def _run_git_command(project_root: Path, args: list[str]) -> str | None:

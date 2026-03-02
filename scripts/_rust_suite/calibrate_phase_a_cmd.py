@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from _rust_suite.calibrate_cmd import run_calibration
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.calibrate_cmd import run_calibration  # noqa: E402
 
 
 def main(argv: list[str]) -> int:

@@ -51,23 +51,26 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from _rust_suite.common import (
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.common import (  # noqa: E402
+    PROJECT_ROOT,
     ProcessTreeRSSMonitor,
     build_run_metadata,
     collect_rust_extension_identity,
     extract_marked_json_payload,
+    get_result_markers,
 )
-from _rust_suite.common import (
+from _rust_suite.common import (  # noqa: E402
     cluster_membership_digest as _cluster_membership_digest,
 )
-from _rust_suite.common import (
+from _rust_suite.common import (  # noqa: E402
     signature_to_cluster_fingerprint_map as _signature_to_cluster_fingerprint_map,
 )
 
-RESULT_JSON_START = "===S2AND_LARGEST_BLOCK_RESULT_START==="
-RESULT_JSON_END = "===S2AND_LARGEST_BLOCK_RESULT_END==="
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RESULT_JSON_START, RESULT_JSON_END = get_result_markers("largest_block")
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_MODEL_PATH = str(DATA_DIR / "production_model_v1.1.pickle")
 

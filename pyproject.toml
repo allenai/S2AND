@@ -20,7 +20,7 @@ dependencies = [
   "text-unidecode==1.3",
   "requests>=2.28,<3",
   "urllib3>=2.6.3",
-  "hyperopt",
+  "hyperopt @ git+https://github.com/hyperopt/hyperopt.git@c49ad148201c81c6ad1b43730ef4d0912734aa37",
   "pandas>=1.5,<2.2",
   "lightgbm==4.6.0",
   "fastcluster>=1.2.6,<2",
@@ -34,7 +34,7 @@ dependencies = [
   "numpy>=1.24,<2",
   "orjson>=3.9,<4",
   "pyasn1>=0.6.2",
-  "shap",
+  "shap>=0.45",
   "sinonym>=0.2.2",
 ]
 
@@ -68,6 +68,9 @@ version = { file = "VERSION" }
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
+markers = [
+    "heavy: opt-in stress / integration tests; run with -m heavy",
+]
 
 # Ruff config (used for lint + format)
 [tool.ruff]
@@ -80,7 +83,6 @@ ignore = []
 
 [tool.uv.sources]
 s2and-rust = { path = "s2and_rust" }
-hyperopt = { git = "https://github.com/hyperopt/hyperopt.git", rev = "c49ad148201c81c6ad1b43730ef4d0912734aa37" }
 
 # ------------------------
 # If you must replicate the *exact* legacy pins you sent, use this block instead

@@ -5,7 +5,7 @@ into smaller subproblems so memory stays bounded, while making the semantic trad
 
 Related docs:
 - `docs/stage_memory_estimates.md` (memory telemetry + predictors used by guards)
-- `docs/rust/roadmap.md` (performance work that interacts with Subblocking)
+- `docs/work_plan.md` (performance next steps + backlog)
 
 ## What “Subblocking” means here
 
@@ -56,7 +56,7 @@ When `U_total` is small (the normal incremental case), monolithic clustering is 
 
 ## The incremental pipeline phases (A–D)
 
-Conceptually, `predict_incremental_helper` can be understood as four phases:
+Conceptually, `_predict_incremental_helper` can be understood as four phases:
 
 - Notation used below:
   - `U_total`: all unassigned signatures in the block.
@@ -208,7 +208,7 @@ Artifact: `scratch/big_block/compare_phase_split_10k_seed43_python_20260224.json
 |---|---|---|
 | `predict_incremental(..., total_ram_bytes=<int>)` | unset | Optional explicit RAM input for Phase A/B budget derivation. |
 | RAM autodetect safety factor | `0.8` | Applied to detected cgroup/host RAM before deriving budgets. |
-| `S2AND_PHASE_A_MAX_CHUNK_PAIRS` | `500000` | Caps Phase A `chunk_pairs` (pair buffer size) to avoid giant Python buffers; set `0` to disable. |
+| Phase A `chunk_pairs` cap | `1000000` | Caps Phase A `chunk_pairs` (pair buffer size) to avoid giant Python buffers. Hardcoded as `PHASE_A_MAX_CHUNK_PAIRS_DEFAULT`. |
 
 ## Residual risks (what can still surprise you)
 

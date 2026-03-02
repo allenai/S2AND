@@ -108,13 +108,11 @@ def extract_phase_a_sample(line: str) -> PhaseASample | None:
             if predicted_raw is not None and entry_bytes_raw is not None:
                 predicted_peak_delta_bytes = int(predicted_raw)
                 accumulator_entry_bytes = int(entry_bytes_raw)
-                residual = (
-                    int(predicted_peak_delta_bytes) - int(chunk_features_peak_bytes) - int(phase_a_fixed_overhead_bytes)
-                )
+                residual = predicted_peak_delta_bytes - chunk_features_peak_bytes - phase_a_fixed_overhead_bytes
                 if accumulator_entry_bytes > 0 and residual > 0 and residual % accumulator_entry_bytes == 0:
                     inferred_entries = residual // accumulator_entry_bytes
                     if inferred_entries > 0:
-                        accumulator_entries_peak_inferred = int(inferred_entries)
+                        accumulator_entries_peak_inferred = inferred_entries
 
         accumulator_entries_peak = accumulator_entries_peak_parsed
         if "accumulator_entries_peak_sample" not in kv and accumulator_entries_peak_inferred is not None:
@@ -131,13 +129,13 @@ def extract_phase_a_sample(line: str) -> PhaseASample | None:
                 )
 
         return PhaseASample(
-            accumulator_entries_peak=int(accumulator_entries_peak or 0),
+            accumulator_entries_peak=accumulator_entries_peak or 0,
             accumulator_entries_peak_parsed=accumulator_entries_peak_parsed,
             accumulator_entries_peak_inferred=accumulator_entries_peak_inferred,
-            chunk_features_peak_bytes=int(chunk_features_peak_bytes),
-            phase_a_pair_buffer_peak_bytes=int(phase_a_pair_buffer_peak_bytes),
-            phase_a_fixed_overhead_bytes=int(phase_a_fixed_overhead_bytes),
-            observed_peak_delta_bytes=int(observed_peak_delta_bytes),
+            chunk_features_peak_bytes=chunk_features_peak_bytes,
+            phase_a_pair_buffer_peak_bytes=phase_a_pair_buffer_peak_bytes,
+            phase_a_fixed_overhead_bytes=phase_a_fixed_overhead_bytes,
+            observed_peak_delta_bytes=observed_peak_delta_bytes,
         )
     except (KeyError, ValueError):
         return None
@@ -167,11 +165,9 @@ def effective_accumulator_entry_bytes(sample: PhaseASample) -> float | None:
     if sample.accumulator_entries_peak <= 0:
         return None
     modeled_arrays_bytes = (
-        int(sample.chunk_features_peak_bytes)
-        + int(sample.phase_a_pair_buffer_peak_bytes)
-        + int(sample.phase_a_fixed_overhead_bytes)
+        sample.chunk_features_peak_bytes + sample.phase_a_pair_buffer_peak_bytes + sample.phase_a_fixed_overhead_bytes
     )
-    residual_bytes = int(sample.observed_peak_delta_bytes) - modeled_arrays_bytes
+    residual_bytes = sample.observed_peak_delta_bytes - modeled_arrays_bytes
     if residual_bytes <= 0:
         return None
     return float(residual_bytes) / float(sample.accumulator_entries_peak)
@@ -181,12 +177,12 @@ def effective_rust_batch_persistent_row_overhead_bytes(sample: RustBatchSample) 
     if sample.total_rows <= 0:
         return None
     modeled_without_persistent = (
-        int(sample.predicted_features_matrix_bytes)
-        + int(sample.predicted_labels_bytes)
-        + int(sample.predicted_chunk_bytes)
-        + int(sample.predicted_fixed_overhead_bytes)
+        sample.predicted_features_matrix_bytes
+        + sample.predicted_labels_bytes
+        + sample.predicted_chunk_bytes
+        + sample.predicted_fixed_overhead_bytes
     )
-    residual_bytes = int(sample.observed_peak_delta_bytes) - modeled_without_persistent
+    residual_bytes = sample.observed_peak_delta_bytes - modeled_without_persistent
     if residual_bytes <= 0:
         return None
     return float(residual_bytes) / float(sample.total_rows)

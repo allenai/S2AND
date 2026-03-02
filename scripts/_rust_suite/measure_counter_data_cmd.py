@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import os
+import sys
 import tempfile
 import time
 from collections import Counter
@@ -25,7 +26,11 @@ from typing import Any
 
 import psutil
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.common import PROJECT_ROOT  # noqa: E402
 
 
 def _rss_gb() -> float:
@@ -97,7 +102,7 @@ def _load_featurizer(path: str) -> Any:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="kisti")
-    parser.add_argument("--data-dir", default=str(_PROJECT_ROOT / "data"))
+    parser.add_argument("--data-dir", default=str(PROJECT_ROOT / "data"))
     parser.add_argument("--n-jobs", type=int, default=1)
     args = parser.parse_args()
 

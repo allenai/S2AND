@@ -9,7 +9,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from functools import partial, reduce
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -53,12 +53,20 @@ logger = logging.getLogger("s2and")
 
 # Lazy-initialized global for Sinonym detector within worker processes
 _SINONYM_DETECTOR = None  # type: ignore
+_SINONYM_DETECTOR_LOCK = threading.Lock()
 CHUNK_SIZE = 1000  # for multiprocessing imap chunks
+_PAIR_LABEL_MAP: dict[str | int, int] = {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
 
 # Cache for large, immutable resources loaded across instances
 _NAME_COUNTS_CACHE: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _NAME_COUNTS_CACHE_LOCK = threading.Lock()
 SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
+NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY = "legacy_full_first_token"
+NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR = "initial_char"
+NameCountsLastFirstInitialSemantics = Literal[
+    "legacy_full_first_token",
+    "initial_char",
+]
 
 
 # ------------------------ Local helpers (backcompat shims) ------------------------
@@ -116,6 +124,28 @@ def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
     return resolved
 
 
+def _resolve_name_counts_last_first_initial_semantics(
+    value: str | None,
+    *,
+    default: NameCountsLastFirstInitialSemantics = NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+    strict: bool = True,
+) -> NameCountsLastFirstInitialSemantics:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {
+        NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
+        NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+    }:
+        return normalized  # type: ignore[return-value]
+    if strict:
+        raise ValueError(
+            "name_counts_last_first_initial_semantics must be one of "
+            f"{NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY!r}, {NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR!r}; got {value!r}"
+        )
+    return default
+
+
 def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> bool:
     use_rust_backend = stage_uses_rust(runtime_context)
     if not use_rust_backend:
@@ -139,7 +169,15 @@ def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> b
 
 
 def _ordered_coauthors_for_signature(signature: "Signature", papers: dict[str, "Paper"]) -> list[str]:
-    paper = papers[str(signature.paper_id)]
+    paper = papers.get(str(signature.paper_id))
+    if paper is None:
+        logger.warning(
+            "Missing paper for signature ngram materialization; treating coauthors as empty "
+            "(signature_id=%s paper_id=%s)",
+            signature.signature_id,
+            signature.paper_id,
+        )
+        return []
     return [author.author_name for author in paper.authors if author.position != signature.author_info_position]
 
 
@@ -297,6 +335,10 @@ class ANDData:
             Sinonym and overwrites the corresponding signature name parts with Sinonym's normalized output.
             Also applies Sinonym-normalized names to the per-paper author list so co-author features
             (coauthor sets/blocks and n-grams) are derived from the normalized names as well.
+        name_counts_last_first_initial_semantics: semantics for constructing the
+            `last_first_initial` lookup key in `name_counts`.
+            - "initial_char": `<last> <first[0]>` (current semantics)
+            - "legacy_full_first_token": `<last> <first_token>` (legacy compatibility)
         sinonym_overwrite_min_ratio: optional gating threshold; only counts multi-author papers.
             Let a,b be single-author flips/not-flips and x,y be multi-author flips/not-flips.
             If (x + y) > 0: overwrite when x >= min_ratio * y; else (no multi-author evidence):
@@ -346,6 +388,7 @@ class ANDData:
         name_tuples: set[tuple[str, str]] | str | None = "filtered",
         use_orcid_id: bool = True,
         use_sinonym_overwrite: bool = False,
+        name_counts_last_first_initial_semantics: NameCountsLastFirstInitialSemantics | None = None,
         sinonym_overwrite_min_ratio: float | None = 3.0,
         compute_reference_features: bool = False,
     ):
@@ -516,8 +559,12 @@ class ANDData:
                     allow_overwrite_pos = compute_sinonym_overwrite_allowlist(
                         self.signatures, sinonym_results, min_ratio=sinonym_overwrite_min_ratio
                     )
-                except Exception as e:
-                    logger.warning("Sinonym overwrite gating failed, proceeding without gating: %s", e)
+                except (TypeError, ValueError, AttributeError, KeyError) as e:
+                    logger.warning(
+                        "Sinonym overwrite gating failed (%s), proceeding without gating: %s",
+                        type(e).__name__,
+                        e,
+                    )
                     allow_overwrite_pos = None
             # Only allow block overwrites during inference to keep train/val/test splits reproducible
             overwrite_count = apply_sinonym_overwrites(
@@ -547,6 +594,11 @@ class ANDData:
 
         self.name = name
         self.mode = mode
+        self.name_counts_last_first_initial_semantics = _resolve_name_counts_last_first_initial_semantics(
+            name_counts_last_first_initial_semantics,
+            default=NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+            strict=True,
+        )
         logger.info("loading clusters")
         self.clusters: dict | None = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
@@ -582,6 +634,12 @@ class ANDData:
         # Versioned seed state for Rust sync dedupe.
         self._cluster_seeds_version = 1
         self._rust_cluster_seeds_synced_version = 0
+        self._rust_cluster_seeds_sync_calls = 0
+        self._rust_cluster_seeds_sync_attempted = 0
+        self._rust_cluster_seeds_sync_succeeded = 0
+        self._rust_cluster_seeds_sync_skipped_unchanged = 0
+        self._rust_cluster_seeds_sync_seconds_total = 0.0
+        self._rust_cluster_seeds_sync_seconds_max = 0.0
         # check that all altered_cluster_signatures are in cluster_seeds_require
         if self.altered_cluster_signatures is not None:
             for signature_id in self.altered_cluster_signatures:
@@ -610,9 +668,7 @@ class ANDData:
         self.pair_sampling_balanced_homonym_synonym = pair_sampling_balanced_homonym_synonym
         self.all_test_pairs_flag = all_test_pairs_flag
         self.random_seed = random_seed
-
-        if self.clusters is None:
-            self.signature_to_cluster_id = None
+        self.signature_to_cluster_id = None
 
         if self.mode == "train":
             if self.clusters is not None:
@@ -653,6 +709,7 @@ class ANDData:
             self.last_first_initial_dict = last_first_initial_dict
             name_counts_loaded = True
             logger.info("loaded name counts")
+        self.name_counts_loaded = bool(name_counts_loaded)
 
         self.n_jobs = n_jobs
         self.compute_reference_features = compute_reference_features
@@ -774,35 +831,6 @@ class ANDData:
             time.perf_counter() - filtered_paths_start,
         )
 
-    @staticmethod
-    def get_full_name_for_features(signature: Signature, include_last: bool = True, include_suffix: bool = True) -> str:
-        """
-        Creates the full name from the name parts.
-
-        Parameters
-        ----------
-        signature: Signature
-            the signature to create the full name for
-        include_last: bool
-            whether to include the last name
-        include_suffix: bool
-            whether to include the suffix
-
-        Returns
-        -------
-        string: the full name
-        """
-        first = signature.author_info_first_normalized_without_apostrophe or signature.author_info_first
-        middle = signature.author_info_middle_normalized_without_apostrophe or signature.author_info_middle
-        last = signature.author_info_last_normalized or signature.author_info_last
-        suffix = signature.author_info_suffix_normalized or signature.author_info_suffix
-        list_of_parts = [first, middle]
-        if include_last:
-            list_of_parts.append(last)
-        if include_suffix:
-            list_of_parts.append(suffix)
-        return _assemble_full_name(list_of_parts)
-
     def _compute_signature_name_counts(
         self,
         signature: Signature,
@@ -815,12 +843,16 @@ class ANDData:
         # Backward-compatibility for name count keys:
         # - Historically, counts used the legacy single-token `author_info_first_normalized`.
         # - With Sinonym, `author_info_first_normalized_without_apostrophe` can contain multiple tokens
-        #   for hyphenated Chinese given names (for counts only, join internal spaces when raw first had '-').
+        #   for hyphenated Chinese given names (e.g., "qi xin"). For counts only, we heuristically
+        #   join internal spaces to form a single token ("qixin") IF the raw first contained a hyphen.
+        # - This preserves old behavior for most names while improving lookups for hyphenated cases.
+        # TODO: revisit once we re-extract name_counts using Sinonym-aware canonicalization.
         counts_first_without_apostrophe = first_without_apostrophe
         counts_last_normalized = last_normalized
         if counts_first_without_apostrophe is None or counts_last_normalized is None:
             counts_first_without_apostrophe, _ = split_first_middle_hyphen_aware(first_raw, middle_raw)
             counts_last_normalized = normalize_text(signature.author_info_last)
+        # need this for name counts (legacy single-token behavior)
         first_normalized_token_for_counts = (
             counts_first_without_apostrophe.split(" ")[0] if counts_first_without_apostrophe else ""
         )
@@ -830,13 +862,19 @@ class ANDData:
             if joined:
                 first_for_counts = joined
 
-        # Backward-compatibility for last-name count keys:
-        # treat space/hyphen variants as the same token ("ou yang" -> "ouyang").
+        # Backward-compatibility for last name keys:
+        # - Historically, last names were single tokens; normalization turns hyphens into spaces
+        #   (e.g., "ou-yang" -> "ou yang"). For counts only, treat space/hyphen variants as the
+        #   same token by joining internal spaces ("ouyang").
+        # TODO(s2and): remove this once name_counts are regenerated with hyphen-aware surnames.
         last_for_counts = _canonicalize_last_for_counts(signature.author_info_last, counts_last_normalized)
 
         first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
-        first_initial = first_for_counts[0] if first_for_counts else ""
-        last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
+        if self.name_counts_last_first_initial_semantics == NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY:
+            last_first_initial_for_count = (last_for_counts + " " + first_for_counts).strip()
+        else:
+            first_initial = first_for_counts[0] if first_for_counts else ""
+            last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
 
         return NameCounts(
             first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),  # type: ignore
@@ -940,17 +978,29 @@ class ANDData:
                         else:
                             # our normalization scheme is to normalize first and middle separately,
                             # join them, then take the first token of the combined join
+                            # NOTE: Hyphen-aware handling
+                            # - First/middle: handled via split_first_middle_hyphen_aware (keeps hyphenated Chinese
+                            #   given names together).
+                            # - Surname: for downstream lookups/constraints we also treat hyphen/space variants
+                            #   equivalently.
+                            # TODO(s2and): Once name_counts/name_tuples are regenerated with Sinonym-aware
+                            #              canonicalization, remove the backward-compat shims added below for
+                            #              last-name counts/constraints.
+                            # Default normalization (keeps legacy behavior for counts/lookups)
                             first_normalized = normalize_text(first_raw)
                             middle_normalized = normalize_text(middle_raw)
                             first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
                             if first_middle_normalized_split and first_middle_normalized_split[0] in NAME_PREFIXES:
                                 first_middle_normalized_split = first_middle_normalized_split[1:]
 
-                            # Hyphen-preserving split for canonical fields.
+                            # Hyphen-preserving split for the "without_apostrophe" canonical fields
+                            # Centralize in s2and.text for reuse by other scripts
                             first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(
                                 first_raw,
                                 middle_raw,
                             )
+                            # need this for name counts (legacy single-token behavior)
+                            # canonical fields used across featurization, prediction, etc.
                             stored_first_normalized_token = (
                                 first_middle_normalized_split[0] if first_middle_normalized_split else ""
                             )
@@ -1058,6 +1108,70 @@ class ANDData:
                     self.signatures[row["signature_id"]] = row["signature"]._replace(**replace_kwargs)
 
                 progress_bar.update(len(batch_signature_ids))
+
+    def _refresh_signature_name_counts(self) -> int:
+        if not self.name_counts_loaded:
+            return 0
+        updated = 0
+        for signature_id, signature in self.signatures.items():
+            refreshed_counts = self._compute_signature_name_counts(
+                signature,
+                first_raw=signature.author_info_first or "",
+                middle_raw=signature.author_info_middle or "",
+                first_without_apostrophe=signature.author_info_first_normalized_without_apostrophe,
+                last_normalized=signature.author_info_last_normalized,
+            )
+            if signature.author_info_name_counts == refreshed_counts:
+                continue
+            self.signatures[signature_id] = signature._replace(author_info_name_counts=refreshed_counts)
+            updated += 1
+        return updated
+
+    def set_name_counts_last_first_initial_semantics(self, semantics: str) -> bool:
+        resolved = _resolve_name_counts_last_first_initial_semantics(
+            semantics,
+            default=NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+            strict=True,
+        )
+        if resolved == self.name_counts_last_first_initial_semantics:
+            return False
+        previous = self.name_counts_last_first_initial_semantics
+        self.name_counts_last_first_initial_semantics = resolved
+        signatures_updated = self._refresh_signature_name_counts()
+        try:
+            from s2and import feature_port
+        except ImportError:
+            logger.info(
+                "Skipping Rust featurizer eviction while updating name-count semantics "
+                "(dataset=%s mode=%s run_id=%s old=%s new=%s): feature_port unavailable",
+                self.name,
+                self.mode,
+                self.runtime_context.run_id,
+                previous,
+                resolved,
+            )
+        else:
+            try:
+                feature_port.evict_rust_featurizer(self)
+            except (RuntimeError, AttributeError):
+                logger.exception(
+                    "Failed to evict Rust featurizer cache during name-count semantics refresh "
+                    "(dataset=%s mode=%s run_id=%s old=%s new=%s)",
+                    self.name,
+                    self.mode,
+                    self.runtime_context.run_id,
+                    previous,
+                    resolved,
+                )
+                raise
+        logger.info(
+            "Updated name-count semantics for last_first_initial old=%s new=%s signatures_updated=%d mode=%s",
+            previous,
+            resolved,
+            signatures_updated,
+            self.mode,
+        )
+        return True
 
     def materialize_signature_ngrams_python(self, batch_size: int = SIGNATURE_PREPROCESS_BATCH_SIZE) -> None:
         """
@@ -1370,10 +1484,12 @@ class ANDData:
             # Legacy name_tuples were curated over single-token first names. To remain compatible,
             # try multiple forms for alias membership: exact, joined-without-spaces, and first-token only.
             # TODO: revisit once we re-extract name_tuples aligned with Sinonym canonicalization.
-            f1_join = "".join(first_1.split()) if isinstance(first_1, str) else first_1
-            f2_join = "".join(first_2.split()) if isinstance(first_2, str) else first_2
-            f1_tok = first_1.split()[0] if isinstance(first_1, str) and len(first_1.split()) > 0 else first_1
-            f2_tok = first_2.split()[0] if isinstance(first_2, str) and len(first_2.split()) > 0 else first_2
+            first_1_parts = first_1.split()
+            first_2_parts = first_2.split()
+            f1_join = "".join(first_1_parts)
+            f2_join = "".join(first_2_parts)
+            f1_tok = first_1_parts[0] if first_1_parts else first_1
+            f2_tok = first_2_parts[0] if first_2_parts else first_2
             known_alias = (
                 (first_1, first_2) in self.name_tuples
                 or (f1_join, f2_join) in self.name_tuples
@@ -1486,14 +1602,10 @@ class ANDData:
         -------
         Dict: the block dict for the input signatures
         """
-        block_to_signatures: dict[str, list[str]] = {}
-
-        for s in signature_list:
-            if self.signature_to_block[s] not in block_to_signatures:
-                block_to_signatures[self.signature_to_block[s]] = [s]
-            else:
-                block_to_signatures[self.signature_to_block[s]].append(s)
-        return block_to_signatures
+        block_to_signatures: dict[str, list[str]] = defaultdict(list)
+        for signature_id in signature_list:
+            block_to_signatures[self.signature_to_block[signature_id]].append(signature_id)
+        return dict(block_to_signatures)
 
     def split_cluster_signatures(
         self,
@@ -1637,7 +1749,7 @@ class ANDData:
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
             np.random.seed(self.random_seed)
             split_prob = np.random.rand(len(self.train_signatures))
-            for signature, p in zip(self.train_signatures, split_prob, strict=False):
+            for signature, p in zip(self.train_signatures, split_prob, strict=True):
                 if p < train_prob:
                     train_signatures.append(signature)
                 else:
@@ -1747,24 +1859,23 @@ class ANDData:
         assert (
             self.train_pairs is not None and self.test_pairs is not None
         ), "You need to pass in train and test pairs to use this function"
-        self.train_pairs.loc[:, "label"] = self.train_pairs["label"].map(
-            {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
-        )
+        train_pairs_df = self.train_pairs.copy()
+        train_pairs_df.loc[:, "label"] = train_pairs_df["label"].map(_PAIR_LABEL_MAP)
         if self.val_pairs is not None:
-            self.val_pairs.loc[:, "label"] = self.val_pairs["label"].map(
-                {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
-            )
-            train_pairs = list(self.train_pairs.to_records(index=False))
-            val_pairs = list(self.val_pairs.to_records(index=False))
+            val_pairs_df = self.val_pairs.copy()
+            val_pairs_df.loc[:, "label"] = val_pairs_df["label"].map(_PAIR_LABEL_MAP)
+            train_pairs = list(train_pairs_df.to_records(index=False))
+            val_pairs = list(val_pairs_df.to_records(index=False))
         else:
             np.random.seed(self.random_seed)
             # split train into train/val
             train_prob = self.train_ratio / (self.train_ratio + self.val_ratio)
-            msk = np.random.rand(len(self.train_pairs)) < train_prob
-            train_pairs = list(self.train_pairs[msk].to_records(index=False))
-            val_pairs = list(self.train_pairs[~msk].to_records(index=False))
-        self.test_pairs.loc[:, "label"] = self.test_pairs["label"].map({"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1})
-        test_pairs = list(self.test_pairs.to_records(index=False))
+            msk = np.random.rand(len(train_pairs_df)) < train_prob
+            train_pairs = list(train_pairs_df[msk].to_records(index=False))
+            val_pairs = list(train_pairs_df[~msk].to_records(index=False))
+        test_pairs_df = self.test_pairs.copy()
+        test_pairs_df.loc[:, "label"] = test_pairs_df["label"].map(_PAIR_LABEL_MAP)
+        test_pairs = list(test_pairs_df.to_records(index=False))
 
         return train_pairs, val_pairs, test_pairs
 
@@ -1831,7 +1942,7 @@ class ANDData:
         -------
         list: list of signature pairs
         """
-        assert (
+        valid_configuration = (
             (not self.pair_sampling_block and self.pair_sampling_balanced_classes)
             or (self.pair_sampling_block and self.pair_sampling_balanced_classes)
             or (
@@ -1839,11 +1950,15 @@ class ANDData:
                 and not self.pair_sampling_balanced_homonym_synonym
                 and not self.pair_sampling_balanced_classes
             )
-        ), f"You chose sample within blocks? {self.pair_sampling_block}, sample balanced pos/neg?\
-             {self.pair_sampling_balanced_classes}, sample balanced homonym/synonym?\
-              {self.pair_sampling_balanced_homonym_synonym}. This is not a valid combination.\
-               Not using blocks and not doing balancing is not supported, and homonym/synonym\
-                balancing without pos/neg balancing is not supported"
+        )
+        if not valid_configuration:
+            raise ValueError(
+                f"You chose sample within blocks? {self.pair_sampling_block}, sample balanced pos/neg?\
+                 {self.pair_sampling_balanced_classes}, sample balanced homonym/synonym?\
+                  {self.pair_sampling_balanced_homonym_synonym}. This is not a valid combination.\
+                   Not using blocks and not doing balancing is not supported, and homonym/synonym\
+                    balancing without pos/neg balancing is not supported"
+            )
 
         same_name_different_cluster: list[tuple[str, str, int | float]] = []
         same_name_same_cluster: list[tuple[str, str, int | float]] = []
@@ -1939,7 +2054,13 @@ class ANDData:
             ):
                 sample_size = min(len(possible), sample_size)
                 pairs = random_sampling(possible, sample_size, self.random_seed)
-
+            else:
+                raise ValueError(
+                    "Unsupported pair sampling configuration for non-exhaustive sampling "
+                    f"(pair_sampling_block={self.pair_sampling_block}, "
+                    f"pair_sampling_balanced_classes={self.pair_sampling_balanced_classes}, "
+                    f"pair_sampling_balanced_homonym_synonym={self.pair_sampling_balanced_homonym_synonym})"
+                )
             return pairs
 
 
@@ -1949,14 +2070,17 @@ class ANDData:
 def _ensure_sinonym_detector():
     """Lazily import and initialize a process-level default detector."""
     global _SINONYM_DETECTOR  # type: ignore
-    if _SINONYM_DETECTOR is None:
-        try:
-            from sinonym.detector import ChineseNameDetector  # type: ignore
-        except Exception as e:  # pragma: no cover - optional dependency
-            raise ImportError(
-                "Sinonym is not installed or failed to import. Install 'sinonym' to enable this feature."
-            ) from e
-        _SINONYM_DETECTOR = ChineseNameDetector()
+    if _SINONYM_DETECTOR is not None:
+        return _SINONYM_DETECTOR
+    with _SINONYM_DETECTOR_LOCK:
+        if _SINONYM_DETECTOR is None:
+            try:
+                from sinonym.detector import ChineseNameDetector  # type: ignore
+            except Exception as e:  # pragma: no cover - optional dependency
+                raise ImportError(
+                    "Sinonym is not installed or failed to import. Install 'sinonym' to enable this feature."
+                ) from e
+            _SINONYM_DETECTOR = ChineseNameDetector()
     return _SINONYM_DETECTOR
 
 
@@ -2005,7 +2129,7 @@ def _parse_sinonym_name(name_or_struct: Any) -> tuple[str, str, str]:
         middle_tokens = name_or_struct.get("middle_tokens")
         middle_name = name_or_struct.get("middle_name")
         if isinstance(given_tokens, list) and isinstance(surname_tokens, list):
-            first = "-".join([t for t in given_tokens if isinstance(t, str) and t])
+            first = " ".join([t for t in given_tokens if isinstance(t, str) and t])
 
             # Build middle string if available
             middle = ""
@@ -2019,7 +2143,7 @@ def _parse_sinonym_name(name_or_struct: Any) -> tuple[str, str, str]:
             if isinstance(original_compound, str) and original_compound.strip():
                 last = original_compound.strip()
             else:
-                last = "-".join([t for t in surname_tokens if isinstance(t, str) and t])
+                last = " ".join([t for t in surname_tokens if isinstance(t, str) and t])
             return first, middle, last
 
     # If we got here, we don't have a parsed structure we recognize
@@ -2255,6 +2379,8 @@ def apply_sinonym_overwrites(
             try:
                 if first and last:
                     # Match standard block computation: first-initial + last, then normalize.
+                    # TODO(s2and): When blocks are recomputed everywhere from Sinonym-aware
+                    # canonical forms, remove compatibility handling in this overwrite path.
                     new_block = normalize_text(f"{first[:1]} {last}")
             except Exception:
                 # Log any unexpected formatting issues; keep prior block on error

@@ -19,7 +19,7 @@ from s2and.feature_port import (
     update_rust_cluster_seeds,
 )
 from s2and.featurizer import _single_pair_featurize
-from tests.conftest import equalish, import_s2and_rust
+from tests.helpers import equalish, import_s2and_rust
 
 HAS_RUST, _rust_import_payload = import_s2and_rust(required_method="from_dataset", prefer_site_packages=True)
 _RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
@@ -158,6 +158,8 @@ def dataset():
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     # Force python reference featurizer for parity tests
     os.environ["S2AND_BACKEND"] = "python"
+    # Avoid reusing stale process-level env caches between parity fixtures.
+    _reset_featurizer_env_caches()
 
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
     ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
@@ -173,6 +175,8 @@ def dataset_with_refs():
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     # Force python reference featurizer for parity tests
     os.environ.setdefault("S2AND_BACKEND", "python")
+    # Avoid reusing stale process-level env caches between parity fixtures.
+    _reset_featurizer_env_caches()
 
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "qian")
     ds = _load_dataset_from_dir(data_dir, "qian_parity_session", compute_reference_features=True)
@@ -332,7 +336,7 @@ def test_featurize_pair_rust_parity(dataset, sample_pairs):
         ref_features, _ = _single_pair_featurize((s1, s2))
         rust_features = featurize_pair_rust(dataset, s1, s2)
         assert len(ref_features) == len(rust_features)
-        for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+        for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
             assert equalish(ref_val, got_val), (
                 f"Featurize pair mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
             )
@@ -354,7 +358,7 @@ def test_featurize_pair_rust_parity_with_deferred_signature_ngrams(dataset, samp
         ref_features, _ = _single_pair_featurize((s1, s2))
         rust_features = featurize_pair_rust(ds_rust, s1, s2)
         assert len(ref_features) == len(rust_features)
-        for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+        for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
             assert equalish(ref_val, got_val), (
                 f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
             )
@@ -425,7 +429,7 @@ def test_get_constraints_matrix_rust_parity(dataset, constraint_pairs):
     expected = [dataset.get_constraint(s1, s2) for s1, s2 in constraint_pairs]
     got = get_constraints_matrix_rust(dataset, constraint_pairs)
     assert len(got) == len(expected)
-    for pair, ref_val, got_val in zip(constraint_pairs, expected, got, strict=False):
+    for pair, ref_val, got_val in zip(constraint_pairs, expected, got, strict=True):
         assert ref_val == got_val, f"Batch string constraint mismatch for pair {pair}: ref={ref_val}, got={got_val}"
 
 
@@ -438,7 +442,7 @@ def test_get_constraints_matrix_indexed_rust_parity(dataset, constraint_pairs):
     string_values = get_constraints_matrix_rust(dataset, constraint_pairs, featurizer=rust_featurizer)
     indexed_values = get_constraints_matrix_indexed_rust(dataset, indexed_pairs, featurizer=rust_featurizer)
     assert len(indexed_values) == len(string_values)
-    for pair, string_val, indexed_val in zip(constraint_pairs, string_values, indexed_values, strict=False):
+    for pair, string_val, indexed_val in zip(constraint_pairs, string_values, indexed_values, strict=True):
         assert (
             string_val == indexed_val
         ), f"Batch indexed constraint mismatch for pair {pair}: string={string_val}, indexed={indexed_val}"
@@ -470,8 +474,7 @@ def test_get_constraints_matrix_rust_flag_parity(dataset, constraint_pairs, cons
         constraint_pairs,
         expected,
         got_string,
-        got_indexed,
-        strict=False,
+        got_indexed, strict=True
     ):
         assert ref_val == string_val, f"Flag parity mismatch (string) for pair {pair}: ref={ref_val}, got={string_val}"
         assert (
@@ -485,10 +488,10 @@ def test_featurize_pairs_rust_batch_parity(dataset, sample_pairs):
     rust_features = rust_featurizer.featurize_pairs(sample_pairs)
 
     assert len(rust_features) == len(sample_pairs)
-    for (s1, s2), rust_vec in zip(sample_pairs, rust_features, strict=False):
+    for (s1, s2), rust_vec in zip(sample_pairs, rust_features, strict=True):
         ref_vec, _ = _single_pair_featurize((s1, s2))
         assert len(ref_vec) == len(rust_vec)
-        for idx, (ref_val, got_val) in enumerate(zip(ref_vec, rust_vec, strict=False)):
+        for idx, (ref_val, got_val) in enumerate(zip(ref_vec, rust_vec, strict=True)):
             assert equalish(ref_val, got_val), (
                 f"Batch featurize mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
             )
@@ -507,7 +510,7 @@ def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
     rust_features = featurize_pair_rust(dataset_with_refs, s1, s2)
     # Ensure reference branch executed in Python (self-citation is computed even with empty refs)
     assert not math.isnan(ref_features[20])
-    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
         assert equalish(
             ref_val, got_val
         ), f"Reference-empty mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
@@ -523,7 +526,7 @@ def test_featurize_pair_rust_parity_reference_details_nonempty(dataset_with_refs
     ref_features, _ = _single_pair_featurize((s1, s2))
     rust_features = featurize_pair_rust(dataset_with_refs, s1, s2)
     assert not math.isnan(ref_features[16]), "Reference author overlap should be computed for non-empty counters"
-    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
         assert equalish(
             ref_val, got_val
         ), f"Reference-nonempty mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
@@ -545,7 +548,7 @@ def test_featurize_pair_rust_parity_missing_email(dataset):
     ref_features, _ = _single_pair_featurize((s1, s2))
     rust_features = featurize_pair_rust(dataset, s1, s2)
     assert math.isnan(ref_features[7]) and math.isnan(ref_features[8])
-    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
         assert equalish(
             ref_val, got_val
         ), f"Missing-email mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
@@ -565,7 +568,7 @@ def test_featurize_pair_rust_parity_specter_present(dataset):
     ref_features, _ = _single_pair_featurize((s1, s2))
     rust_features = featurize_pair_rust(dataset, s1, s2)
     assert not math.isnan(ref_features[33])
-    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
         assert equalish(
             ref_val, got_val
         ), f"Specter-present mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
@@ -586,7 +589,7 @@ def test_featurize_pair_rust_parity_specter_absent(dataset):
     ref_features, _ = _single_pair_featurize((s1, s2))
     rust_features = featurize_pair_rust(dataset, s1, s2)
     assert math.isnan(ref_features[33])
-    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=False)):
+    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
         assert equalish(
             ref_val, got_val
         ), f"Specter-absent mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
@@ -647,3 +650,5 @@ def test_get_constraint_rust_parity_dont_merge_cluster_seeds_false(dataset):
         assert ref_val is None and got_val is None
     else:
         assert ref_val == got_val, f"Dont-merge constraint mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
+
+

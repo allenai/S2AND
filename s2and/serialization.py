@@ -14,6 +14,33 @@ from sklearn.preprocessing import LabelEncoder
 logger = logging.getLogger("s2and")
 
 PickleSource = str | PathLike[str] | BinaryIO
+_LEGACY_NAME_COUNT_SEMANTICS = "legacy_full_first_token"
+_INITIAL_NAME_COUNT_SEMANTICS = "initial_char"
+
+
+def _resolve_name_count_semantics_from_featurizer_version(featurizer_version: Any) -> str | None:
+    if not isinstance(featurizer_version, int):
+        return None
+    if featurizer_version <= 2:
+        return _LEGACY_NAME_COUNT_SEMANTICS
+    return _INITIAL_NAME_COUNT_SEMANTICS
+
+
+def _attach_feature_contract_metadata(loaded: Any) -> None:
+    clusterer = loaded.get("clusterer") if isinstance(loaded, dict) else None
+    if clusterer is None:
+        return
+    contract = getattr(clusterer, "feature_contract", None)
+    if not isinstance(contract, dict):
+        contract = {}
+    semantics = contract.get("name_counts_last_first_initial_semantics")
+    if semantics not in {_LEGACY_NAME_COUNT_SEMANTICS, _INITIAL_NAME_COUNT_SEMANTICS}:
+        featurizer_info = getattr(clusterer, "featurizer_info", None)
+        featurizer_version = getattr(featurizer_info, "featurizer_version", None)
+        inferred = _resolve_name_count_semantics_from_featurizer_version(featurizer_version)
+        if inferred is not None:
+            contract["name_counts_last_first_initial_semantics"] = inferred
+    clusterer.feature_contract = contract
 
 
 def _iter_object_graph(root: Any) -> Iterator[Any]:
@@ -62,11 +89,11 @@ def _refresh_compatible_label_encoders(root: Any) -> int:
     return refreshed_count
 
 
-def _replay_warning(warning_message: warnings.WarningMessage) -> None:
+def _replay_warning(warning_message: warnings.WarningMessage, *, stacklevel: int = 3) -> None:
     warnings.warn(
         message=warning_message.message,
         category=warning_message.category,
-        stacklevel=2,
+        stacklevel=stacklevel,
     )
 
 
@@ -124,4 +151,5 @@ def load_pickle_with_verified_label_encoder_compat(
             continue
         _replay_warning(warning_message)
 
+    _attach_feature_contract_metadata(loaded)
     return loaded

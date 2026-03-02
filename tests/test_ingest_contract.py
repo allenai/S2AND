@@ -35,7 +35,6 @@ def test_build_rust_json_ingest_contract_collects_canonical_fields():
     assert contract.as_from_json_paths_args() == (
         "signatures.json",
         "papers.json",
-        "clusters.json",
         "cluster_seeds.json",
         "specter.pkl",
         "name_tuples.txt",

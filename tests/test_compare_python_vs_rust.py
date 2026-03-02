@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from s2and.consts import PROJECT_ROOT_PATH
+from scripts._rust_suite.common import get_result_markers
 
 
 def _load_compare_module():
@@ -153,3 +154,10 @@ def test_rust_suite_requires_subcommand():
     with pytest.raises(SystemExit) as exc_info:
         module.main([])
     assert int(exc_info.value.code) != 0
+
+
+def test_rust_suite_profile_markers_use_common_source():
+    module = _load_compare_module()
+    expected_start, expected_end = get_result_markers("profile")
+    assert module.RESULT_JSON_START == expected_start
+    assert module.RESULT_JSON_END == expected_end

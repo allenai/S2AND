@@ -29,7 +29,6 @@ def test_predict_and_combine_all_predicted_rows():
         labels,
         None,
         "batch",
-        {"main": 0, "nameless": 0},
     )
 
     assert classifier.last_shape == features.shape
@@ -67,7 +66,6 @@ def test_predict_and_combine_respects_constrained_rows():
         labels,
         None,
         "batch",
-        {"main": 0, "nameless": 0},
     )
 
     assert classifier.last_shape == (3, 3)
@@ -92,7 +90,6 @@ def test_predict_and_combine_averages_nameless_classifier():
         labels,
         nameless_features,
         "batch",
-        {"main": 0, "nameless": 0},
     )
 
     assert classifier.last_shape == (2, 2)

@@ -5,13 +5,22 @@ import pytest
 
 from s2and import feature_port, runtime
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from tests.conftest import build_dummy_dataset
+from tests.helpers import build_dummy_dataset
 
 
 def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("S2AND_BACKEND",):
         monkeypatch.delenv(name, raising=False)
     runtime.reset_runtime_warning_state_for_tests()
+
+
+def _runtime_capabilities(*, core_available: bool, reason: str) -> runtime.RustRuntimeCapabilities:
+    return runtime.RustRuntimeCapabilities(
+        extension_importable=core_available,
+        core_runtime_available=core_available,
+        from_dataset_paper_preprocess_available=core_available,
+        reason=reason,
+    )
 
 
 def test_resolve_backend_unset_auto_falls_back_to_python_when_rust_core_missing(monkeypatch: pytest.MonkeyPatch):
@@ -50,6 +59,32 @@ def test_resolve_backend_prefers_explicit_s2and_backend(monkeypatch: pytest.Monk
     assert resolution.source == "S2AND_BACKEND"
 
 
+def test_resolve_backend_explicit_rust_raises_when_runtime_unavailable(monkeypatch: pytest.MonkeyPatch):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("S2AND_BACKEND", "rust")
+    monkeypatch.setattr(
+        runtime,
+        "detect_rust_runtime_capabilities",
+        lambda: _runtime_capabilities(core_available=False, reason="rust_extension_unavailable"),
+    )
+    with pytest.raises(RuntimeError, match="reason=rust_extension_unavailable"):
+        runtime.resolve_backend(emit_startup_warning=False)
+
+
+def test_resolve_backend_explicit_rust_uses_capability_probe(monkeypatch: pytest.MonkeyPatch):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("S2AND_BACKEND", "rust")
+    monkeypatch.setattr(
+        runtime,
+        "detect_rust_runtime_capabilities",
+        lambda: _runtime_capabilities(core_available=True, reason="rust_core_available"),
+    )
+    resolution = runtime.resolve_backend(emit_startup_warning=False)
+    assert resolution.requested_backend == "rust"
+    assert resolution.resolved_backend == "rust"
+    assert resolution.capability_reason == "rust_core_available"
+
+
 def test_resolve_backend_auto_env_uses_capability_probe(monkeypatch: pytest.MonkeyPatch):
     _clear_runtime_env(monkeypatch)
     monkeypatch.setenv("S2AND_BACKEND", "auto")
@@ -80,6 +115,11 @@ def test_runtime_context_use_rust(monkeypatch: pytest.MonkeyPatch):
     assert python_context.stage_backend() == "python"
 
     monkeypatch.setenv("S2AND_BACKEND", "rust")
+    monkeypatch.setattr(
+        runtime,
+        "detect_rust_runtime_capabilities",
+        lambda: _runtime_capabilities(core_available=True, reason="rust_core_available"),
+    )
     rust_context = runtime.build_runtime_context("unit_test", emit_startup_warning=False)
     assert rust_context.use_rust is True
     assert rust_context.stage_backend() == "rust"
@@ -113,6 +153,11 @@ def test_python_backend_pair_featurization_makes_zero_rust_calls(monkeypatch):
 
 def test_rust_backend_pair_featurization_fails_fast_on_rust_error(monkeypatch):
     monkeypatch.setenv("S2AND_BACKEND", "rust")
+    monkeypatch.setattr(
+        runtime,
+        "detect_rust_runtime_capabilities",
+        lambda: _runtime_capabilities(core_available=True, reason="rust_core_available"),
+    )
     dataset = build_dummy_dataset("dummy_runtime_policy_rust")
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = [("0", "1", 0), ("0", "2", 0)]

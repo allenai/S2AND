@@ -1183,7 +1183,7 @@ requires-dist = [
     { name = "s2and-rust", marker = "extra == 'rust'", directory = "s2and_rust" },
     { name = "scikit-learn", specifier = "==1.7.1" },
     { name = "seaborn", specifier = ">=0.12,<0.14" },
-    { name = "shap" },
+    { name = "shap", specifier = ">=0.45" },
     { name = "sinonym", specifier = ">=0.2.2" },
     { name = "strsimpy", specifier = ">=0.2,<0.3" },
     { name = "text-unidecode", specifier = "==1.3" },

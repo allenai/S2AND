@@ -203,7 +203,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
             "median",
             "single",
         }:
-            raise Exception(
+            raise ValueError(
                 "The 'linkage' parameter has to be one of: "
                 + "'single', complete', 'average', 'weighted', 'ward', 'centroid', 'median'."
             )
@@ -229,7 +229,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
             if hasattr(self, name):
                 params[name] = getattr(self, name)
             else:
-                params[name] = param.default if param.default is not inspect._empty else None
+                params[name] = param.default if param.default is not inspect.Parameter.empty else None
 
         if deep:
             # sklearn convention: include nested estimator params with __ separator
@@ -250,7 +250,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
             if name == "self":
                 continue
             if not hasattr(self, name):
-                default = param.default if param.default is not inspect._empty else None
+                default = param.default if param.default is not inspect.Parameter.empty else None
                 setattr(self, name, default)
 
     def fit(self, X: np.ndarray) -> FastCluster:
@@ -270,17 +270,17 @@ class FastCluster(TransformerMixin, BaseEstimator):
         """
         X = np.asarray(X)
         if len(X.shape) == 1 and self.input_as_observation_matrix:
-            raise Exception(
+            raise ValueError(
                 "Input to fit is one-dimensional, but input_as_observation_matrix flag is set to True. "
                 "If you intended to pass in an observation matrix, it must be 2-D (N x feature_dimension)."
             )
         elif len(X.shape) == 2 and not self.input_as_observation_matrix:
-            raise Exception(
+            raise ValueError(
                 "Input to fit is two-dimensional, but input_as_observation_matrix flag is set to False. "
                 "If you intended to pass in a distance matrix, it must be flattened (1-D)."
             )
         elif len(X.shape) > 2:
-            raise Exception("The input to fit can only be one-dimensional or two-dimensional.")
+            raise ValueError("The input to fit can only be one-dimensional or two-dimensional.")
         Z = linkage(X, self.linkage, preserve_input=self.preserve_input)
         self.labels_ = fcluster(Z, t=self.eps, criterion="distance")
         return self
@@ -309,7 +309,7 @@ class FastCluster(TransformerMixin, BaseEstimator):
         return self.labels_  # type: ignore
 
     def transform(self, X: np.ndarray):
-        raise Exception("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
+        raise NotImplementedError("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
 
 
 class VotingClassifier:
@@ -361,7 +361,7 @@ class VotingClassifier:
                 arr=self._predict(X).astype("int"),
             )
         else:
-            raise Exception("Voting type must be one of 'soft' or 'hard'")
+            raise ValueError("Voting type must be one of 'soft' or 'hard'")
         return predictions
 
     def _collect_probas(self, X):

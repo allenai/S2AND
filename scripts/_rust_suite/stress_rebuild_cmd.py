@@ -4,12 +4,17 @@ import argparse
 import gc
 import json
 import os
+import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any
 
-from _rust_suite.common import (
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.common import (  # noqa: E402
     ProcessTreeRSSMonitor,
     build_run_metadata,
     collect_rust_extension_identity,
@@ -133,7 +138,6 @@ def _build_from_json_paths(
     return s2and_rust_module.RustFeaturizer.from_json_paths(
         paths["signatures"],
         paths["papers"],
-        paths["clusters"],
         paths["cluster_seeds"],
         paths["specter"] if use_specter else None,
         None,  # name_tuples_path

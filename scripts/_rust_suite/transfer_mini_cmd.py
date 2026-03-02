@@ -32,6 +32,7 @@ Diagnostic toggles:
 """
 
 import argparse
+import contextlib
 import gc
 import json
 import os
@@ -42,18 +43,22 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from _rust_suite.common import (
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.common import (  # noqa: E402
+    PROJECT_ROOT,
     ProcessTreeRSSMonitor,
     build_run_metadata,
     canonical_sha256,
     collect_rust_extension_identity,
     extract_marked_json_payload,
+    get_result_markers,
+    timed_method,
 )
 
-RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
-RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV = "S2AND_RUST_FORCE_PYTHON_PAPER_PREPROCESS"
+RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
 
 # Match transfer_experiment_internal.py defaults
 SPECTER_SUFFIX = "_specter.pickle"
@@ -349,19 +354,12 @@ def _single_run(
     workload_id: str,
     require_rust_release: bool,
     rust_cleanup_boundary: bool,
-    force_python_paper_preprocess: bool,
 ) -> dict[str, Any]:
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
     os.environ["S2AND_BACKEND"] = backend
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     # Match the internal script: limit featurizer residency
     os.environ["S2AND_RUST_FEATURIZER_MAX_INMEM"] = "1"
-    # Improve RSS peak capture inside Rust batch loops unless explicitly disabled.
-    os.environ.setdefault("S2AND_RUST_BATCH_RSS_SAMPLER_MS", "5")
-    if force_python_paper_preprocess:
-        os.environ[RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV] = "1"
-    else:
-        os.environ.pop(RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV, None)
 
     rust_extension_identity: dict[str, Any] | None = None
     if backend == "rust":
@@ -595,32 +593,17 @@ def _single_run(
             n_iter=n_iter,
         )
 
-        distance_matrix_seconds = 0.0
-        distance_matrix_calls = 0
-        original_make_distance_matrices = union_clusterer.make_distance_matrices
-
-        def _timed_make_distance_matrices(*args: Any, **kwargs: Any):
-            nonlocal distance_matrix_seconds, distance_matrix_calls
-            _t = time.perf_counter()
-            result = original_make_distance_matrices(*args, **kwargs)
-            distance_matrix_seconds += time.perf_counter() - _t
-            distance_matrix_calls += 1
-            return result
-
-        union_clusterer.make_distance_matrices = _timed_make_distance_matrices  # type: ignore[method-assign]
         t0 = time.perf_counter()
-        try:
+        with timed_method(union_clusterer, "make_distance_matrices") as distance_matrix_stats:
             union_clusterer.fit(anddatas)
-        finally:
-            union_clusterer.make_distance_matrices = original_make_distance_matrices  # type: ignore[method-assign]
         union_clusterer_fit_seconds = time.perf_counter() - t0
         stage_timings["union_clusterer_fit_seconds"] = round(union_clusterer_fit_seconds, 3)
-        stage_timings["union_distance_matrix_seconds"] = round(distance_matrix_seconds, 3)
+        stage_timings["union_distance_matrix_seconds"] = round(distance_matrix_stats.seconds, 3)
         stage_timings["union_hyperopt_seconds"] = round(
-            max(0.0, union_clusterer_fit_seconds - distance_matrix_seconds),
+            max(0.0, union_clusterer_fit_seconds - distance_matrix_stats.seconds),
             3,
         )
-        stage_timings["union_distance_matrix_calls"] = int(distance_matrix_calls)
+        stage_timings["union_distance_matrix_calls"] = int(distance_matrix_stats.calls)
         stage_timings["union_clusterer_hyperopt"] = _summarize_hyperopt_trials(union_clusterer.hyperopt_trials_store)
         _snapshot_stage_rss(stage_rss_gb, monitor, "union_clusterer_fit")
         print(f"  [{run_label}] Union clusterer fit in {_fmt(stage_timings['union_clusterer_fit_seconds'])}s")
@@ -637,44 +620,17 @@ def _single_run(
 
         import s2and.model as s2and_model_module
 
-        original_predict = union_clusterer.predict
-        original_many_pairs_featurize = s2and_model_module.many_pairs_featurize
-
-        model_predict_seconds = 0.0
-        model_predict_calls = 0
-        pair_featurize_seconds = 0.0
-        pair_featurize_calls = 0
-
-        def _timed_predict(*args: Any, **kwargs: Any):
-            nonlocal model_predict_seconds, model_predict_calls
-            _t = time.perf_counter()
-            result = original_predict(*args, **kwargs)
-            model_predict_seconds += time.perf_counter() - _t
-            model_predict_calls += 1
-            return result
-
-        def _timed_many_pairs_featurize(*args: Any, **kwargs: Any):
-            nonlocal pair_featurize_seconds, pair_featurize_calls
-            _t = time.perf_counter()
-            result = original_many_pairs_featurize(*args, **kwargs)
-            pair_featurize_seconds += time.perf_counter() - _t
-            pair_featurize_calls += 1
-            return result
-
-        union_clusterer.predict = _timed_predict  # type: ignore[method-assign]
-        s2and_model_module.many_pairs_featurize = cast(Any, _timed_many_pairs_featurize)
         t0 = time.perf_counter()
-        try:
+        with contextlib.ExitStack() as stack:
+            predict_stats = stack.enter_context(timed_method(union_clusterer, "predict"))
+            pair_featurize_stats = stack.enter_context(timed_method(s2and_model_module, "many_pairs_featurize"))
             cluster_metrics, _ = cluster_eval(target_anddata, union_clusterer, split="test")
-        finally:
-            union_clusterer.predict = original_predict  # type: ignore[method-assign]
-            s2and_model_module.many_pairs_featurize = original_many_pairs_featurize
         cluster_eval_seconds = time.perf_counter() - t0
         stage_timings["cluster_eval_seconds"] = round(cluster_eval_seconds, 3)
-        stage_timings["cluster_eval_model_predict_seconds"] = round(model_predict_seconds, 3)
-        stage_timings["cluster_eval_model_predict_calls"] = int(model_predict_calls)
-        stage_timings["cluster_eval_pair_featurize_seconds"] = round(pair_featurize_seconds, 3)
-        stage_timings["cluster_eval_pair_featurize_calls"] = int(pair_featurize_calls)
+        stage_timings["cluster_eval_model_predict_seconds"] = round(predict_stats.seconds, 3)
+        stage_timings["cluster_eval_model_predict_calls"] = int(predict_stats.calls)
+        stage_timings["cluster_eval_pair_featurize_seconds"] = round(pair_featurize_stats.seconds, 3)
+        stage_timings["cluster_eval_pair_featurize_calls"] = int(pair_featurize_stats.calls)
         _snapshot_stage_rss(stage_rss_gb, monitor, "cluster_eval")
         print(f"  [{run_label}] cluster_eval in {_fmt(stage_timings['cluster_eval_seconds'])}s")
 
@@ -710,7 +666,6 @@ def _single_run(
         "stage_rss_gb": stage_rss_gb,
         "diagnostics": {
             "rust_cleanup_boundary": bool(rust_cleanup_boundary),
-            "force_python_paper_preprocess": bool(force_python_paper_preprocess),
         },
         "rust_extension_identity": rust_extension_identity,
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
@@ -733,7 +688,6 @@ def _run_subprocess(
     require_rust_release: int,
     run_label: str = "",
     rust_cleanup_boundary: int = 1,
-    force_python_paper_preprocess: int = 0,
 ) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -760,8 +714,6 @@ def _run_subprocess(
         str(int(require_rust_release)),
         "--rust-cleanup-boundary",
         str(int(rust_cleanup_boundary)),
-        "--force-python-paper-preprocess",
-        str(int(force_python_paper_preprocess)),
         "--run-label",
         run_label or backend,
     ]
@@ -824,7 +776,6 @@ def _compare(args: argparse.Namespace, workload: dict[str, Any], workload_id: st
             train_pairs_size_mode=common["train_pairs_size_mode"],
             require_rust_release=int(args.require_rust_release),
             rust_cleanup_boundary=int(args.rust_cleanup_boundary),
-            force_python_paper_preprocess=int(args.force_python_paper_preprocess),
             run_label=config["run_label"],
         )
         results.append(result)
@@ -1110,16 +1061,6 @@ def main() -> None:
     parser.add_argument("--require-rust-release", type=int, choices=[0, 1], default=0)
     parser.add_argument("--run-label", default="")
     parser.add_argument("--rust-cleanup-boundary", type=int, choices=[0, 1], default=1)
-    parser.add_argument(
-        "--force-python-paper-preprocess",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help=(
-            "Diagnostic override: when set to 1, force Python paper preprocessing by "
-            f"setting {RUST_FORCE_PYTHON_PAPER_PREPROCESS_ENV}=1 in the child process."
-        ),
-    )
     parser.add_argument("--write-json", default="", help="Output JSON path (compare or single mode).")
     parser.add_argument("--baseline-json", default="", help="Required for --mode gate.")
     parser.add_argument("--current-json", default="", help="Required for --mode gate.")
@@ -1167,7 +1108,6 @@ def main() -> None:
             workload_id=workload_id,
             require_rust_release=bool(args.require_rust_release),
             rust_cleanup_boundary=bool(args.rust_cleanup_boundary),
-            force_python_paper_preprocess=bool(args.force_python_paper_preprocess),
         )
         if args.write_json:
             out_path = Path(args.write_json)

@@ -81,13 +81,12 @@ def _call_from_json_paths(
 ):
     """Call from_json_paths with positional args matching the ingest contract."""
     assert feature_port.s2and_rust is not None
-    # Positional order: signatures, papers, clusters, cluster_seeds, specter,
-    #   name_tuples, name_counts, preprocess, compute_ref, seed_require, seed_disallow,
+    # Positional order: signatures, papers, cluster_seeds, specter, name_tuples,
+    #   name_counts, preprocess, compute_ref, seed_require, seed_disallow,
     #   num_threads, expected_normalization_version, allow_normalization_version_mismatch
     feature_port.s2and_rust.RustFeaturizer.from_json_paths(
         sig_path,
         paper_path,
-        None,  # clusters_path
         None,  # cluster_seeds_path
         None,  # specter_embeddings
         None,  # name_tuples_path

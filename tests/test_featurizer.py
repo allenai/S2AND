@@ -8,7 +8,7 @@ import s2and.feature_port as feature_port
 import s2and.memory_budget as memory_budget
 from s2and.consts import LARGE_INTEGER
 from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from s2and.featurizer import FeaturizationInfo, _signature_id_to_index_or_raise, many_pairs_featurize
 from s2and.runtime import RuntimeContext
 
 
@@ -351,3 +351,17 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):
         # Verify feature values are reasonable (not all zeros or errors)
         non_missing_features = features[features != -LARGE_INTEGER]
         assert len(non_missing_features) > 0, "No valid features computed"
+
+
+def test_signature_id_to_index_or_raise_accepts_non_string_pair_ids():
+    signature_id_to_index = {"1": 10, "2": 20}
+
+    assert _signature_id_to_index_or_raise(signature_id_to_index, 1) == 10
+    assert _signature_id_to_index_or_raise(signature_id_to_index, 2) == 20
+
+
+def test_signature_id_to_index_or_raise_reports_missing_signature_id():
+    signature_id_to_index = {"1": 10}
+
+    with pytest.raises(ValueError, match="999"):
+        _signature_id_to_index_or_raise(signature_id_to_index, 999)

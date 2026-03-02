@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from s2and.rust_lifecycle import (
-    FORCE_PYTHON_PAPER_PREPROCESS_ENV,
     PYTHON_ONLY_POLICY,
     RustLifecyclePolicy,
     build_rust_lifecycle_policy,
@@ -21,6 +20,25 @@ def test_python_backend_always_returns_python_only_policy():
             use_rust=False,
         )
         assert policy == PYTHON_ONLY_POLICY
+
+
+@pytest.mark.parametrize(
+    ("backend", "use_rust"),
+    [
+        ("python", True),
+        ("rust", False),
+    ],
+)
+def test_backend_use_rust_mismatch_raises(backend: str, use_rust: bool):
+    with pytest.raises(ValueError, match="Inconsistent backend/use_rust configuration"):
+        build_rust_lifecycle_policy(
+            backend=backend,  # type: ignore[arg-type]
+            mode="train",
+            has_signatures_path=False,
+            has_papers_path=False,
+            preprocess=True,
+            use_rust=use_rust,
+        )
 
 
 @pytest.mark.parametrize(
@@ -106,37 +124,6 @@ def test_rust_training_from_dataset_does_not_skip_without_capability():
     assert policy.skip_python_paper_preprocess is False
 
 
-def test_force_python_paper_preprocess_env_disables_skip(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(FORCE_PYTHON_PAPER_PREPROCESS_ENV, "1")
-    policy = build_rust_lifecycle_policy(
-        backend="rust",
-        mode="train",
-        has_signatures_path=False,
-        has_papers_path=False,
-        preprocess=True,
-        compute_reference_features=False,
-        use_rust=True,
-        from_dataset_paper_preprocess_available=True,
-    )
-    assert policy.rust_build_path == "from_dataset"
-    assert policy.skip_python_paper_preprocess is False
-
-
-def test_force_python_paper_preprocess_env_invalid_value_raises(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(FORCE_PYTHON_PAPER_PREPROCESS_ENV, "maybe")
-    with pytest.raises(ValueError, match="Invalid"):
-        build_rust_lifecycle_policy(
-            backend="rust",
-            mode="train",
-            has_signatures_path=False,
-            has_papers_path=False,
-            preprocess=True,
-            compute_reference_features=False,
-            use_rust=True,
-            from_dataset_paper_preprocess_available=True,
-        )
-
-
 def test_rust_inference_with_sinonym_overwrite_keeps_from_json_paths():
     policy = build_rust_lifecycle_policy(
         backend="rust",
@@ -169,8 +156,9 @@ def test_rust_inference_without_sinonym_overwrite_does_not_defer_json_ingest_wri
 @pytest.mark.parametrize("preprocess", [False, True])
 @pytest.mark.parametrize("use_rust", [False, True])
 def test_defer_signature_ngrams_requires_preprocess_and_rust(preprocess: bool, use_rust: bool):
+    backend = "rust" if use_rust else "python"
     policy = build_rust_lifecycle_policy(
-        backend="rust",
+        backend=backend,  # type: ignore[arg-type]
         mode="train",
         has_signatures_path=True,
         has_papers_path=True,
@@ -186,8 +174,9 @@ def test_defer_signature_fields_requires_rust_and_non_inference(
     mode: str,
     use_rust: bool,
 ):
+    backend = "rust" if use_rust else "python"
     policy = build_rust_lifecycle_policy(
-        backend="rust",
+        backend=backend,  # type: ignore[arg-type]
         mode=mode,
         has_signatures_path=True,
         has_papers_path=True,
@@ -202,7 +191,7 @@ def test_defer_signature_fields_requires_rust_and_non_inference(
     ("backend", "mode", "has_signatures_path", "has_papers_path", "preprocess", "use_rust"),
     [
         ("python", "train", False, False, False, False),
-        ("python", "inference", True, True, True, True),
+        ("python", "inference", True, True, True, False),
         ("rust", "train", False, False, True, True),
         ("rust", "train", True, True, True, True),
         ("rust", "inference", True, True, True, True),

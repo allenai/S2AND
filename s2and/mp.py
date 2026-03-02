@@ -2,7 +2,7 @@ import multiprocessing as mp
 import os
 import platform
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from itertools import islice
 from typing import Any
 
@@ -39,13 +39,22 @@ class UniversalPool:
         """
         if use_threads is None:
             use_threads = platform.system() in ("Windows", "Darwin")
-        self.processes = processes or os.cpu_count()
+        if processes is None:
+            detected_cpu_count = os.cpu_count()
+            self.processes = int(detected_cpu_count) if detected_cpu_count is not None else 1
+        else:
+            if int(processes) <= 0:
+                raise ValueError(f"processes must be a positive integer when provided, got {processes!r}")
+            self.processes = int(processes)
+        # _pool can be a process or thread executor depending on platform/settings.
         self._pool: ProcessPoolExecutor | ThreadPoolExecutor
 
         if use_threads:
             self._pool = ThreadPoolExecutor(max_workers=self.processes)
         else:
-            # fork on Linux (fast, avoids re-import); spawn on Windows/macOS (required)
+            # Try process workers with an explicit start method:
+            # - fork on Linux (fast, avoids re-import)
+            # - spawn on Windows/macOS (required)
             if platform.system() not in ("Windows", "Darwin"):
                 ctx = mp.get_context("fork")
             else:
@@ -60,6 +69,7 @@ class UniversalPool:
         Stream results *in order* like multiprocessing.Pool.imap.
         `max_prefetch` limits outstanding chunks to bound RAM.
         """
+        # Use streaming implementation for ProcessPoolExecutor/ThreadPoolExecutor.
         return self._streaming_imap(func, iterable, chunksize, max_prefetch)
 
     def _streaming_imap(
@@ -85,19 +95,41 @@ class UniversalPool:
             if not submit_chunk():
                 break
 
-        while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for fut in done:
-                pending.remove(fut)
-                for idx, res in fut.result():
-                    buffer[idx] = res
-                # keep queue topped-up
-                submit_chunk()
+        try:
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pending.remove(fut)
+                    for idx, res in fut.result():
+                        buffer[idx] = res
+                    # keep queue topped-up
+                    submit_chunk()
 
-            # yield any ready-in-order items
-            while next_yield in buffer:
-                yield buffer.pop(next_yield)
-                next_yield += 1
+                # yield any ready-in-order items
+                while next_yield in buffer:
+                    yield buffer.pop(next_yield)
+                    next_yield += 1
+        except BaseException as exc:
+            cancelled_count = self._cancel_pending_futures(pending)
+            exc.add_note(
+                "UniversalPool._streaming_imap aborted after an exception; "
+                f"best-effort cancelled {cancelled_count} outstanding futures."
+            )
+            raise
+
+    def _cancel_pending_futures(self, pending: set[Future[Any]]) -> int:
+        """Best-effort cancellation for futures still pending when streaming fails."""
+        cancelled_count = 0
+        for fut in tuple(pending):
+            if fut.cancel():
+                cancelled_count += 1
+            pending.discard(fut)
+        try:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            # Python executors that do not support cancel_futures.
+            self._pool.shutdown(wait=False)
+        return cancelled_count
 
     # ---------- context manager ----------
     def __enter__(self):

@@ -78,6 +78,8 @@ def read_name_tuples(file_path):
 
 input_tuples = read_name_tuples(os.path.join(CONFIG["main_data_dir"], "s2and_name_tuples_filtered.txt"))
 
+# testing
+
 
 def batched(iterable, n):
     "Batch data into tuples of length n. The last batch may be shorter."

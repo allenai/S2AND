@@ -11,22 +11,23 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from _rust_suite.common import (
+# When this module is executed directly (including via the compare-mode subprocess
+# path), ensure `scripts/` is importable so `import _rust_suite.*` works.
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.common import (  # noqa: E402, I001
+    PROJECT_ROOT,
     ProcessTreeRSSMonitor,
+    cluster_membership_digest as _cluster_membership_digest,
     collect_rust_extension_identity,
     extract_marked_json_payload,
-)
-from _rust_suite.common import (
-    cluster_membership_digest as _cluster_membership_digest,
-)
-from _rust_suite.common import (
+    get_result_markers,
     signature_to_cluster_fingerprint_map as _signature_to_cluster_fingerprint_map,
 )
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-RESULT_JSON_START = "===S2AND_BIG_BLOCK_RESULT_START==="
-RESULT_JSON_END = "===S2AND_BIG_BLOCK_RESULT_END==="
+RESULT_JSON_START, RESULT_JSON_END = get_result_markers("big_block")
 DEFAULT_TOTAL_RAM_BYTES = 32 * 1024 * 1024 * 1024
 
 
@@ -348,6 +349,20 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "phase_a_adaptive_halvings_max": int(incremental_result.get("phase_a_adaptive_halvings_max", 0)),
         "rust_extension_identity": rust_extension_identity,
+        "rust_cluster_seed_sync_calls": int(getattr(anddata, "_rust_cluster_seeds_sync_calls", 0)),
+        "rust_cluster_seed_sync_attempted": int(getattr(anddata, "_rust_cluster_seeds_sync_attempted", 0)),
+        "rust_cluster_seed_sync_succeeded": int(getattr(anddata, "_rust_cluster_seeds_sync_succeeded", 0)),
+        "rust_cluster_seed_sync_skipped_unchanged": int(
+            getattr(anddata, "_rust_cluster_seeds_sync_skipped_unchanged", 0)
+        ),
+        "rust_cluster_seed_sync_seconds_total": round(
+            float(getattr(anddata, "_rust_cluster_seeds_sync_seconds_total", 0.0)),
+            6,
+        ),
+        "rust_cluster_seed_sync_seconds_max": round(
+            float(getattr(anddata, "_rust_cluster_seeds_sync_seconds_max", 0.0)),
+            6,
+        ),
     }
     if int(args.emit_signature_map) == 1:
         result["signature_to_cluster_fingerprint"] = _signature_to_cluster_fingerprint_map(pred_clusters)
@@ -531,7 +546,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=["single", "compare_phase_split"], default="compare_phase_split")
     parser.add_argument("--backend", choices=["python", "rust", "auto"], default="rust")
-    parser.add_argument("--subset-dir", default=str(_PROJECT_ROOT / "scratch" / "inventors_topblock_15k"))
+    parser.add_argument("--subset-dir", default=str(PROJECT_ROOT / "scratch" / "inventors_topblock_15k"))
     parser.add_argument(
         "--target-block",
         default="",
@@ -549,7 +564,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TOTAL_RAM_BYTES,
         help="RAM budget for phase-split Phase A chunking.",
     )
-    parser.add_argument("--model-path", default=str(_PROJECT_ROOT / "data" / "production_model_v1.1.pickle"))
+    parser.add_argument("--model-path", default=str(PROJECT_ROOT / "data" / "production_model_v1.1.pickle"))
     parser.add_argument(
         "--emit-signature-map",
         type=int,

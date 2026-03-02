@@ -129,6 +129,12 @@ def incremental_cluster_eval(
     This includes both time-split and random split of signatures.
     Returns B3, Cluster F1, and Cluster Macro F1.
 
+    Notes
+    -----
+    Partial supervision is materialized for all observed-signature pairs.
+    If there are M observed signatures, this step builds M*(M-1)/2 pairs
+    (quadratic time and memory in M).
+
     Parameters
     ----------
     dataset: ANDData
@@ -182,6 +188,13 @@ def incremental_cluster_eval(
         raise ValueError("cluster_eval requires dataset.signature_to_cluster_id")
     signature_to_cluster_id = dataset.signature_to_cluster_id
     list_obs_signatures = list(observed_signatures)
+    observed_count = len(list_obs_signatures)
+    observed_pair_count = observed_count * (observed_count - 1) // 2
+    logger.debug(
+        "Building incremental partial supervision for %d observed signatures (%d pairs).",
+        observed_count,
+        observed_pair_count,
+    )
     # considers the supervision as distances
     for i, signature_i in enumerate(list_obs_signatures):
         for signature_j in list_obs_signatures[i + 1 : len(list_obs_signatures)]:
@@ -1160,7 +1173,7 @@ def min_pair_edit(preds):
             break
 
     if len(wrong) != 0:
-        print("something went wrong")
+        logger.error("fix_cluster_assignments finished with unresolved errors: %d wrong pairs remain", len(wrong))
 
     denom = max(len(worst_ids) - 1, 1)
     return steps / denom, steps, len(worst_ids)

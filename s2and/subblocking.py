@@ -133,10 +133,8 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
             label_seed = seed_base + sum(ord(ch) for ch in str(label))
             random.Random(label_seed).shuffle(subblock)
             num_new_subblocks = int(np.ceil(len(subblock) / target_subblock_size))
-            c = 0
             for i in range(num_new_subblocks):
                 subblocks[f"{label}.{i}"] = subblock[i * target_subblock_size : (i + 1) * target_subblock_size]
-                c += len(subblocks[f"{label}.{i}"])
             del subblocks[label]
 
     # assert that the subblocks has a complete clustering of the input signature_ids
@@ -401,7 +399,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 small_enough_pairs_counts.append((pair, 1e5 + score))
             # the other option is that the names are different but we have counts
             else:
-                # Temporary compatibility tweak for hyphen-preserving first names.
+                # TODO(s2and): Temporary compatibility tweak for hyphen-preserving first names.
                 # The ORCID-derived first_k_letter_counts were generated with legacy normalization.
                 # To preserve utility without regenerating, probe counts using token before first space.
                 # Consider removing this once counts are regenerated with new logic.
@@ -521,14 +519,24 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 subblock_id_to_move_to = [k for k in unique_subblock_ids if len(output[k]) < maximum_size][0]
             # 4: move the signature_ids around so that they are all in the same subblock
             # we take ONLY the signature ids that are not in the chosen subblock_id
-            # and move them there, removing from their original subblock
+            # and move them there, then batch-remove via set membership to avoid repeated list.remove().
+            sig_ids_to_move = []
+            moved_sig_ids_by_source = defaultdict(set)
             for sig_id, original_subblock_id in sig_id_subblock_id:
                 if original_subblock_id != subblock_id_to_move_to:
-                    output[subblock_id_to_move_to].append(sig_id)
-                    output[original_subblock_id].remove(sig_id)
+                    sig_ids_to_move.append(sig_id)
+                    moved_sig_ids_by_source[original_subblock_id].add(sig_id)
+
+            output[subblock_id_to_move_to].extend(sig_ids_to_move)
+            for original_subblock_id, moved_sig_ids in moved_sig_ids_by_source.items():
+                if original_subblock_id not in output:
+                    continue
+                remaining_sig_ids = [sig_id for sig_id in output[original_subblock_id] if sig_id not in moved_sig_ids]
+                if remaining_sig_ids:
+                    output[original_subblock_id] = remaining_sig_ids
+                else:
                     # unlikely, but if we emptied out the original subblock, then delete it
-                    if not output[original_subblock_id]:
-                        del output[original_subblock_id]
+                    del output[original_subblock_id]
 
     # let's assert that we have done a complete partition
     assert set(np.hstack([output[k] for k in output])) == set(signature_ids)

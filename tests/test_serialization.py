@@ -38,6 +38,16 @@ class LegacyLabelEncoderCarrier:
         )
 
 
+class _DummyFeaturizerInfo:
+    def __init__(self, featurizer_version: int):
+        self.featurizer_version = int(featurizer_version)
+
+
+class LegacyClustererWithoutFeatureContract:
+    def __init__(self, featurizer_version: int):
+        self.featurizer_info = _DummyFeaturizerInfo(featurizer_version)
+
+
 def _dump_pickle(path: Path, obj) -> None:
     with path.open("wb") as pickle_file:
         pickle.dump(obj, pickle_file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -93,3 +103,13 @@ def test_load_pickle_replays_non_label_encoder_inconsistent_warning(tmp_path):
     inconsistent_warnings = [w for w in caught if isinstance(w.message, InconsistentVersionWarning)]
     assert len(inconsistent_warnings) == 1
     assert inconsistent_warnings[0].message.estimator_name == "RandomForestClassifier"
+
+
+def test_load_pickle_attaches_name_count_feature_contract_for_legacy_model(tmp_path):
+    payload = {"clusterer": LegacyClustererWithoutFeatureContract(featurizer_version=1)}
+    pickle_path = tmp_path / "legacy_clusterer.pkl"
+    _dump_pickle(pickle_path, payload)
+
+    loaded = load_pickle_with_verified_label_encoder_compat(pickle_path)
+    contract = loaded["clusterer"].feature_contract
+    assert contract["name_counts_last_first_initial_semantics"] == "legacy_full_first_token"

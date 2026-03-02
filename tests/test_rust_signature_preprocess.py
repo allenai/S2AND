@@ -11,7 +11,7 @@ from s2and import feature_port
 from s2and.featurizer import _single_pair_featurize
 from s2and.subblocking import make_subblocks
 from s2and.text import AFFILIATIONS_STOP_WORDS, get_text_ngrams, get_text_ngrams_words
-from tests.conftest import build_dummy_dataset, equalish
+from tests.helpers import build_dummy_dataset, equalish
 
 if not feature_port.rust_signature_preprocess_available():
     pytest.skip("s2and_rust signature preprocessing API is unavailable", allow_module_level=True)
@@ -126,7 +126,7 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_deferred
         python_features, _ = _single_pair_featurize((s1, s2))
         rust_features = feature_port.featurize_pair_rust(dataset_rust, s1, s2)
         assert len(python_features) == len(rust_features)
-        for idx, (python_value, rust_value) in enumerate(zip(python_features, rust_features, strict=False)):
+        for idx, (python_value, rust_value) in enumerate(zip(python_features, rust_features, strict=True)):
             assert equalish(python_value, rust_value), (
                 f"Feature mismatch for pair ({s1}, {s2}) at idx={idx}: " f"python={python_value} rust={rust_value}"
             )
@@ -204,3 +204,5 @@ def test_rust_json_ingest_uses_minimal_python_paper_preprocess():
     assert inference_paper.title_ngrams_chars is None
     assert train_paper.title_ngrams_words is not None
     assert inference_paper.title_ngrams_words is None
+
+

@@ -35,6 +35,8 @@ fn is_dropped_affix(token: &str) -> bool {
 struct CounterData {
     // FNV-1a 64-bit hashes of original string keys, sorted ascending.
     // Values are f32 counts. Binary search replaces HashMap lookup.
+    // Trade-off: collisions are possible but rare at expected key counts.
+    // If they occur, colliding keys merge silently in this representation.
     entries: Vec<(u64, f32)>,
     sum: f32,
 }
@@ -128,6 +130,8 @@ struct RustFeaturizer {
     cluster_seed_disallow_value: f64,
     #[serde(skip)]
     cached_signature_id_order: OnceLock<Vec<String>>,
+    #[serde(skip)]
+    cluster_seeds_disallow_index: OnceLock<HashMap<String, HashSet<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -137,12 +141,6 @@ struct JsonIngestTelemetry {
     reference_counter_seconds: f64,
     signature_preprocess_seconds: f64,
     cluster_seed_seconds: f64,
-    normalize_text_calls: usize,
-    split_first_middle_hyphen_aware_calls: usize,
-    compute_block_calls: usize,
-    detect_language_calls: usize,
-    get_text_ngrams_calls: usize,
-    get_text_ngrams_words_calls: usize,
 }
 
 static LAST_JSON_INGEST_TELEMETRY: OnceLock<Mutex<Option<JsonIngestTelemetry>>> = OnceLock::new();
@@ -280,23 +278,8 @@ fn get_last_json_ingest_telemetry(py: Python<'_>) -> PyResult<Option<Py<PyDict>>
     )?;
     stage_seconds.set_item("cluster_seed_seconds", telemetry.cluster_seed_seconds)?;
 
-    let callback_counts = PyDict::new(py);
-    callback_counts.set_item("normalize_text_calls", telemetry.normalize_text_calls)?;
-    callback_counts.set_item(
-        "split_first_middle_hyphen_aware_calls",
-        telemetry.split_first_middle_hyphen_aware_calls,
-    )?;
-    callback_counts.set_item("compute_block_calls", telemetry.compute_block_calls)?;
-    callback_counts.set_item("detect_language_calls", telemetry.detect_language_calls)?;
-    callback_counts.set_item("get_text_ngrams_calls", telemetry.get_text_ngrams_calls)?;
-    callback_counts.set_item(
-        "get_text_ngrams_words_calls",
-        telemetry.get_text_ngrams_words_calls,
-    )?;
-
     let telemetry_dict = PyDict::new(py);
     telemetry_dict.set_item("stage_seconds", stage_seconds)?;
-    telemetry_dict.set_item("callback_counts", callback_counts)?;
     Ok(Some(telemetry_dict.unbind()))
 }
 
@@ -327,7 +310,25 @@ fn extract_counter(obj: &Bound<'_, PyAny>) -> PyResult<Option<CounterData>> {
     Ok(Some(CounterData { entries, sum }))
 }
 
-fn extract_set_str(obj: &Bound<'_, PyAny>) -> PyResult<Option<HashSet<String>>> {
+fn extract_reference_details_counters(
+    py: Python<'_>,
+    ref_details_obj: &Bound<'_, PyAny>,
+) -> PyResult<(
+    Option<CounterData>,
+    Option<CounterData>,
+    Option<CounterData>,
+    Option<CounterData>,
+)> {
+    let tuple = ref_details_obj.extract::<(PyObject, PyObject, PyObject, PyObject)>()?;
+    Ok((
+        extract_counter(&tuple.0.bind(py))?,
+        extract_counter(&tuple.1.bind(py))?,
+        extract_counter(&tuple.2.bind(py))?,
+        extract_counter(&tuple.3.bind(py))?,
+    ))
+}
+
+fn extract_optional_string_set(obj: &Bound<'_, PyAny>) -> PyResult<Option<HashSet<String>>> {
     if obj.is_none() {
         return Ok(None);
     }
@@ -343,12 +344,25 @@ fn extract_set_str(obj: &Bound<'_, PyAny>) -> PyResult<Option<HashSet<String>>> 
     }
 }
 
-fn canonical_signature_pair(a: &str, b: &str) -> (String, String) {
+fn canonical_signature_pair_ref<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b {
-        (a.to_string(), b.to_string())
+        (a, b)
     } else {
-        (b.to_string(), a.to_string())
+        (b, a)
     }
+}
+
+fn canonical_signature_pair_owned(a: String, b: String) -> (String, String) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn canonical_signature_pair_cloned(a: &str, b: &str) -> (String, String) {
+    let (left, right) = canonical_signature_pair_ref(a, b);
+    (left.to_string(), right.to_string())
 }
 
 fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)>> {
@@ -359,7 +373,7 @@ fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)
     for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
-        out.insert(canonical_signature_pair(&a, &b));
+        out.insert(canonical_signature_pair_owned(a, b));
     }
     Ok(out)
 }
@@ -537,7 +551,7 @@ fn extract_paper_authors_with_positions(obj: &Bound<'_, PyAny>) -> PyResult<Vec<
     Ok(out)
 }
 
-fn extract_string_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
+fn extract_required_string_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
     let mut out = HashSet::new();
     for item in PyIterator::from_object(obj)? {
         out.insert(item?.extract()?);
@@ -548,7 +562,7 @@ fn extract_string_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
 fn extract_affiliation_stopwords(py: Python<'_>) -> PyResult<HashSet<String>> {
     let text_module = py.import("s2and.text")?;
     let stopwords_obj = text_module.getattr("AFFILIATIONS_STOP_WORDS")?;
-    extract_string_set(&stopwords_obj)
+    extract_required_string_set(&stopwords_obj)
 }
 
 fn prefilter_affiliation_text(affiliations: &[String], stopwords: &HashSet<String>) -> String {
@@ -707,6 +721,12 @@ fn resolve_fasttext_model_path(py: Python<'_>) -> Option<String> {
     cached_path.call1((fasttext_path,)).ok()?.extract().ok()
 }
 
+fn emit_runtime_warning(py: Python<'_>, message: &str) {
+    if let Ok(warnings) = py.import("warnings") {
+        let _ = warnings.call_method1("warn", (message.to_string(),));
+    }
+}
+
 struct LanguageDetectorCompat {
     fasttext: Option<FastText>,
 }
@@ -718,10 +738,17 @@ impl LanguageDetectorCompat {
         }
         let fasttext = resolve_fasttext_model_path(py).and_then(|model_path| {
             let mut model = FastText::new();
-            if model.load_model(&model_path).is_ok() {
-                Some(model)
-            } else {
-                None
+            match model.load_model(&model_path) {
+                Ok(()) => Some(model),
+                Err(err) => {
+                    let warning = format!(
+                        "s2and_rust: failed to load fastText model at '{}' ({}); falling back to CLD2-only language detection.",
+                        model_path, err
+                    );
+                    emit_runtime_warning(py, &warning);
+                    eprintln!("{warning}");
+                    None
+                }
             }
         });
         Self { fasttext }
@@ -1650,32 +1677,32 @@ fn compute_name_counts_data(
     ]
 }
 
-fn first_names_equal(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
+fn first_names_equal(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let (Some(n1), Some(n2)) = (name1, name2) else {
-        return Ok(f64::NAN);
+        return f64::NAN;
     };
     if py_len(n1) == 0 || py_len(n2) == 0 {
-        return Ok(f64::NAN);
+        return f64::NAN;
     }
     if n1 == "-" || n2 == "-" {
-        return Ok(f64::NAN);
+        return f64::NAN;
     }
     let n1_norm = n1.trim().to_lowercase();
     let n2_norm = n2.trim().to_lowercase();
     if n1_norm == n2_norm {
-        Ok(1.0)
+        1.0
     } else {
-        Ok(0.0)
+        0.0
     }
 }
 
-fn middle_initials_overlap(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
+fn middle_initials_overlap(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let s1 = name1.unwrap_or("");
     let s2 = name2.unwrap_or("");
     let c1 = count_initials(s1);
     let c2 = count_initials(s2);
     if c1.is_empty() || c2.is_empty() {
-        return Ok(f64::NAN);
+        return f64::NAN;
     }
     let mut intersection_sum: usize = 0;
     for (k, v1) in c1.iter() {
@@ -1687,49 +1714,49 @@ fn middle_initials_overlap(name1: Option<&str>, name2: Option<&str>) -> PyResult
     let sum2: usize = c2.values().sum();
     let union_sum = sum1 + sum2 - intersection_sum;
     if union_sum == 0 {
-        return Ok(f64::NAN);
+        return f64::NAN;
     }
     let score = (intersection_sum as f64) / (union_sum as f64);
-    Ok(if score > 1.0 { 1.0 } else { score })
+    if score > 1.0 { 1.0 } else { score }
 }
 
-fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
+fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let (Some(n1), Some(n2)) = (name1, name2) else {
-        return Ok(f64::NAN);
+        return f64::NAN;
     };
     if py_len(n1) == 0 || py_len(n2) == 0 {
-        return Ok(f64::NAN);
+        return f64::NAN;
     }
     if py_len(n1) == 1 || py_len(n2) == 1 {
         let (Some(c1), Some(c2)) = (n1.chars().next(), n2.chars().next()) else {
-            return Ok(f64::NAN);
+            return f64::NAN;
         };
-        return Ok(if c1 == c2 { 1.0 } else { 0.0 });
+        return if c1 == c2 { 1.0 } else { 0.0 };
     }
     if n1 == n2 {
-        Ok(1.0)
+        1.0
     } else {
-        Ok(0.0)
+        0.0
     }
 }
 
-fn middle_one_missing(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
+fn middle_one_missing(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let n1 = name1.unwrap_or("");
     let n2 = name2.unwrap_or("");
     let len1 = py_len(n1);
     let len2 = py_len(n2);
     let val = (len1 == 0 && len2 != 0) || (len2 == 0 && len1 != 0);
-    Ok(if val { 1.0 } else { 0.0 })
+    if val { 1.0 } else { 0.0 }
 }
 
-fn single_char_first(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
+fn single_char_first(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let n1 = name1.unwrap_or("");
     let n2 = name2.unwrap_or("");
     let val = py_len(n1) == 1 || py_len(n2) == 1;
-    Ok(if val { 1.0 } else { 0.0 })
+    if val { 1.0 } else { 0.0 }
 }
 
-fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64> {
+fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let n1 = name1.unwrap_or("");
     let n2 = name2.unwrap_or("");
     let mut val = false;
@@ -1747,60 +1774,52 @@ fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> PyResult<f64>
             }
         }
     }
-    Ok(if val { 1.0 } else { 0.0 })
+    if val { 1.0 } else { 0.0 }
 }
 
 fn email_parts(email: &str) -> (String, String) {
-    let mut e = email.to_string();
-    if !e.contains('@') {
-        e.push_str("@MISSING");
-    }
-    let parts: Vec<&str> = e.split('@').collect();
-    let last = parts.len() - 1;
-    let prefix_raw = parts[..last].join("");
-    let suffix_raw = parts[last];
+    let (prefix_raw, suffix_raw) = if let Some((before_last, after_last)) = email.rsplit_once('@') {
+        let mut merged_prefix = String::with_capacity(before_last.len());
+        for ch in before_last.chars() {
+            if ch != '@' {
+                merged_prefix.push(ch);
+            }
+        }
+        (merged_prefix, after_last.to_string())
+    } else {
+        (email.to_string(), "MISSING".to_string())
+    };
     let prefix = prefix_raw.trim_matches('.').to_lowercase();
     let suffix = suffix_raw.trim_matches('.').to_lowercase();
     (prefix, suffix)
 }
 
-fn email_prefix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f64> {
+fn email_pair_parts(
+    email1: Option<&str>,
+    email2: Option<&str>,
+) -> Option<((String, String), (String, String))> {
     let (Some(e1), Some(e2)) = (email1, email2) else {
-        return Ok(f64::NAN);
+        return None;
     };
     if py_len(e1) == 0 || py_len(e2) == 0 {
-        return Ok(f64::NAN);
+        return None;
     }
-    let (p1, _) = email_parts(e1);
-    let (p2, _) = email_parts(e2);
-    Ok(if p1 == p2 { 1.0 } else { 0.0 })
+    Some((email_parts(e1), email_parts(e2)))
 }
 
-fn email_suffix_equal(email1: Option<&str>, email2: Option<&str>) -> PyResult<f64> {
-    let (Some(e1), Some(e2)) = (email1, email2) else {
-        return Ok(f64::NAN);
-    };
-    if py_len(e1) == 0 || py_len(e2) == 0 {
-        return Ok(f64::NAN);
-    }
-    let (_, s1) = email_parts(e1);
-    let (_, s2) = email_parts(e2);
-    Ok(if s1 == s2 { 1.0 } else { 0.0 })
-}
-
-fn year_diff(year1: Option<i64>, year2: Option<i64>) -> PyResult<f64> {
+fn year_diff(year1: Option<i64>, year2: Option<i64>) -> f64 {
     let (Some(y1_raw), Some(y2_raw)) = (year1, year2) else {
-        return Ok(f64::NAN);
+        return f64::NAN;
     };
     let y1 = y1_raw as f64;
     let y2 = y2_raw as f64;
     let diff = (y1 - y2).abs();
-    Ok(diff.min(50.0))
+    diff.min(50.0)
 }
 
-fn position_diff(p1: i64, p2: i64) -> PyResult<f64> {
+fn position_diff(p1: i64, p2: i64) -> f64 {
     let diff = (p1 - p2).abs() as f64;
-    Ok(diff.min(50.0))
+    diff.min(50.0)
 }
 
 fn cosine_sim_vec_f32(a: &[f32], b: &[f32]) -> f64 {
@@ -1838,10 +1857,37 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     if a == b {
         return 0;
     }
-    let a_chars: Vec<char> = a.chars().collect();
+
+    if a.is_ascii() && b.is_ascii() {
+        return levenshtein_distance_bytes(a.as_bytes(), b.as_bytes());
+    }
+
     let b_chars: Vec<char> = b.chars().collect();
-    let len_a = a_chars.len();
     let len_b = b_chars.len();
+    if a.is_empty() {
+        return len_b;
+    }
+    if len_b == 0 {
+        return a.chars().count();
+    }
+    let mut prev: Vec<usize> = (0..=len_b).collect();
+    let mut cur: Vec<usize> = vec![0; len_b + 1];
+    for (i, a_char) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for j in 1..=len_b {
+            let deletion = prev[j] + 1;
+            let insertion = cur[j - 1] + 1;
+            let edit = prev[j - 1] + if a_char == b_chars[j - 1] { 0 } else { 1 };
+            cur[j] = deletion.min(insertion).min(edit);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[len_b]
+}
+
+fn levenshtein_distance_bytes(a: &[u8], b: &[u8]) -> usize {
+    let len_a = a.len();
+    let len_b = b.len();
     if len_a == 0 {
         return len_b;
     }
@@ -1855,15 +1901,10 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
         for j in 1..=len_b {
             let deletion = prev[j] + 1;
             let insertion = cur[j - 1] + 1;
-            let edit = prev[j - 1]
-                + if a_chars[i - 1] == b_chars[j - 1] {
-                    0
-                } else {
-                    1
-                };
+            let edit = prev[j - 1] + if a[i - 1] == b[j - 1] { 0 } else { 1 };
             cur[j] = deletion.min(insertion).min(edit);
         }
-        prev.clone_from_slice(&cur);
+        std::mem::swap(&mut prev, &mut cur);
     }
     prev[len_b]
 }
@@ -1889,27 +1930,50 @@ fn prefix_dist(a: &str, b: &str) -> f64 {
 }
 
 fn lcs_length(a: &str, b: &str) -> usize {
-    let a_chars: Vec<char> = a.chars().collect();
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+
+    if a.is_ascii() && b.is_ascii() {
+        return lcs_length_bytes(a.as_bytes(), b.as_bytes());
+    }
+
     let b_chars: Vec<char> = b.chars().collect();
-    let len_a = a_chars.len();
     let len_b = b_chars.len();
+    let mut prev = vec![0usize; len_b + 1];
+    let mut cur = vec![0usize; len_b + 1];
+    for a_char in a.chars() {
+        cur[0] = 0;
+        for j in 1..=len_b {
+            if a_char == b_chars[j - 1] {
+                cur[j] = prev[j - 1] + 1;
+            } else {
+                cur[j] = cur[j - 1].max(prev[j]);
+            }
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[len_b]
+}
+
+fn lcs_length_bytes(a: &[u8], b: &[u8]) -> usize {
+    let len_a = a.len();
+    let len_b = b.len();
     if len_a == 0 || len_b == 0 {
         return 0;
     }
     let mut prev = vec![0usize; len_b + 1];
     let mut cur = vec![0usize; len_b + 1];
     for i in 1..=len_a {
+        cur[0] = 0;
         for j in 1..=len_b {
-            if a_chars[i - 1] == b_chars[j - 1] {
+            if a[i - 1] == b[j - 1] {
                 cur[j] = prev[j - 1] + 1;
             } else {
                 cur[j] = cur[j - 1].max(prev[j]);
             }
         }
-        prev.clone_from_slice(&cur);
-        for v in cur.iter_mut() {
-            *v = 0;
-        }
+        std::mem::swap(&mut prev, &mut cur);
     }
     prev[len_b]
 }
@@ -2100,6 +2164,26 @@ const SIGNATURE_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 13] = [
 ];
 
 impl RustFeaturizer {
+    fn cluster_seeds_disallow_index(&self) -> &HashMap<String, HashSet<String>> {
+        self.cluster_seeds_disallow_index.get_or_init(|| {
+            let mut index: HashMap<String, HashSet<String>> = HashMap::new();
+            for (left, right) in self.cluster_seeds_disallow.iter() {
+                index
+                    .entry(left.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(right.clone());
+            }
+            index
+        })
+    }
+
+    fn cluster_seeds_disallow_contains(&self, sig_id1: &str, sig_id2: &str) -> bool {
+        let (left, right) = canonical_signature_pair_ref(sig_id1, sig_id2);
+        self.cluster_seeds_disallow_index()
+            .get(left)
+            .is_some_and(|rights| rights.contains(right))
+    }
+
     fn featurize_pair_data(
         &self,
         s1: &SignatureData,
@@ -2121,12 +2205,12 @@ impl RustFeaturizer {
         let middle1 = s1.middle.as_deref();
         let middle2 = s2.middle.as_deref();
 
-        push_feat!(first_names_equal(first1, first2).unwrap_or(f64::NAN));
-        push_feat!(middle_initials_overlap(middle1, middle2).unwrap_or(f64::NAN));
-        push_feat!(middle_names_equal(middle1, middle2).unwrap_or(f64::NAN));
-        push_feat!(middle_one_missing(middle1, middle2).unwrap_or(f64::NAN));
-        push_feat!(single_char_first(first1, first2).unwrap_or(f64::NAN));
-        push_feat!(single_char_middle(middle1, middle2).unwrap_or(f64::NAN));
+        push_feat!(first_names_equal(first1, first2));
+        push_feat!(middle_initials_overlap(middle1, middle2));
+        push_feat!(middle_names_equal(middle1, middle2));
+        push_feat!(middle_one_missing(middle1, middle2));
+        push_feat!(single_char_first(first1, first2));
+        push_feat!(single_char_middle(middle1, middle2));
 
         push_feat!(counter_jaccard_data(
             &s1.affiliations,
@@ -2134,8 +2218,16 @@ impl RustFeaturizer {
             f64::INFINITY,
         ));
 
-        push_feat!(email_prefix_equal(s1.email.as_deref(), s2.email.as_deref()).unwrap_or(f64::NAN));
-        push_feat!(email_suffix_equal(s1.email.as_deref(), s2.email.as_deref()).unwrap_or(f64::NAN));
+        let (email_prefix, email_suffix) =
+            match email_pair_parts(s1.email.as_deref(), s2.email.as_deref()) {
+                Some(((p1, sfx1), (p2, sfx2))) => (
+                    if p1 == p2 { 1.0 } else { 0.0 },
+                    if sfx1 == sfx2 { 1.0 } else { 0.0 },
+                ),
+                None => (f64::NAN, f64::NAN),
+            };
+        push_feat!(email_prefix);
+        push_feat!(email_suffix);
 
         push_feat!(set_jaccard_data(&s1.coauthor_blocks, &s2.coauthor_blocks));
         push_feat!(counter_jaccard_data(
@@ -2150,7 +2242,7 @@ impl RustFeaturizer {
             &p2.venue_ngrams,
             f64::INFINITY,
         ));
-        push_feat!(year_diff(p1.year, p2.year).unwrap_or(f64::NAN));
+        push_feat!(year_diff(p1.year, p2.year));
 
         push_feat!(counter_jaccard_data(
             &p1.title_words,
@@ -2213,7 +2305,7 @@ impl RustFeaturizer {
             count
         };
 
-        push_feat!(position_diff(s1.position, s2.position).unwrap_or(f64::NAN));
+        push_feat!(position_diff(s1.position, s2.position));
         push_feat!((p1.has_abstract as i64 + p2.has_abstract as i64) as f64);
         push_feat!(english_or_unknown_count as f64);
         let same_lang = match (
@@ -2277,8 +2369,7 @@ impl RustFeaturizer {
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
     ) -> Option<f64> {
-        let canonical_pair = canonical_signature_pair(sig_id1, sig_id2);
-        if self.cluster_seeds_disallow.contains(&canonical_pair) {
+        if self.cluster_seeds_disallow_contains(sig_id1, sig_id2) {
             return Some(self.cluster_seed_disallow_value);
         }
 
@@ -2532,9 +2623,9 @@ impl RustFeaturizer {
 
         let text_module = py.import("s2and.text")?;
         let unidecode = text_module.getattr("unidecode")?;
-        let stop_words = extract_string_set(&text_module.getattr("STOPWORDS")?)?;
-        let venue_stop_words = extract_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
-        let name_prefixes = extract_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
+        let stop_words = extract_required_string_set(&text_module.getattr("STOPWORDS")?)?;
+        let venue_stop_words = extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
+        let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
         let mut language_detector: Option<LanguageDetectorCompat> = None;
@@ -2661,16 +2752,8 @@ impl RustFeaturizer {
                 )?;
                 ref_details_present = !ref_details_obj.is_none();
                 if ref_details_present {
-                    if let Ok(tuple) =
-                        ref_details_obj.extract::<(PyObject, PyObject, PyObject, PyObject)>()
-                    {
-                        Python::with_gil(|py| {
-                            ref_authors = extract_counter(&tuple.0.bind(py)).ok().flatten();
-                            ref_titles = extract_counter(&tuple.1.bind(py)).ok().flatten();
-                            ref_venues = extract_counter(&tuple.2.bind(py)).ok().flatten();
-                            ref_blocks = extract_counter(&tuple.3.bind(py)).ok().flatten();
-                        });
-                    }
+                    (ref_authors, ref_titles, ref_venues, ref_blocks) =
+                        extract_reference_details_counters(py, &ref_details_obj)?;
                 }
             } else {
                 ref_details_present = false;
@@ -2737,12 +2820,7 @@ impl RustFeaturizer {
                 || need_venue_ngrams
                 || need_journal_ngrams
                 || need_language;
-            if need_title_words
-                || need_title_chars
-                || need_venue_ngrams
-                || need_journal_ngrams
-                || need_author_normalization
-            {
+            if need_author_normalization {
                 ensure_unidecode_for_text(&unidecode, &raw_title, &mut unidecode_char_map)?;
                 if preprocess {
                     ensure_unidecode_for_text(&unidecode, &raw_venue, &mut unidecode_char_map)?;
@@ -3038,7 +3116,7 @@ impl RustFeaturizer {
                 SIG_IDX_AFFILIATIONS_NGRAMS,
                 "author_info_affiliations_n_grams",
             )?)?;
-            let mut coauthor_blocks = extract_set_str(&get_namedtuple_item_or_attr(
+            let mut coauthor_blocks = extract_optional_string_set(&get_namedtuple_item_or_attr(
                 &sig_obj,
                 use_signature_tuple_fastpath,
                 SIG_IDX_COAUTHOR_BLOCKS,
@@ -3050,7 +3128,7 @@ impl RustFeaturizer {
                 SIG_IDX_COAUTHOR_NGRAMS,
                 "author_info_coauthor_n_grams",
             )?)?;
-            let mut coauthors = extract_set_str(&get_namedtuple_item_or_attr(
+            let mut coauthors = extract_optional_string_set(&get_namedtuple_item_or_attr(
                 &sig_obj,
                 use_signature_tuple_fastpath,
                 SIG_IDX_COAUTHORS,
@@ -3216,6 +3294,7 @@ impl RustFeaturizer {
             cluster_seed_require_value,
             cluster_seed_disallow_value,
             cached_signature_id_order: OnceLock::new(),
+            cluster_seeds_disallow_index: OnceLock::new(),
         })
     }
 
@@ -3224,7 +3303,6 @@ impl RustFeaturizer {
         signature = (
             signatures_path,
             papers_path,
-            clusters_path = None,
             cluster_seeds_path = None,
             specter_embeddings = None,
             name_tuples_path = None,
@@ -3242,7 +3320,6 @@ impl RustFeaturizer {
         py: Python<'_>,
         signatures_path: &str,
         papers_path: &str,
-        clusters_path: Option<&str>,
         cluster_seeds_path: Option<&str>,
         specter_embeddings: Option<&Bound<'_, PyAny>>,
         name_tuples_path: Option<&str>,
@@ -3255,7 +3332,6 @@ impl RustFeaturizer {
         expected_normalization_version: Option<&str>,
         allow_normalization_version_mismatch: bool,
     ) -> PyResult<Self> {
-        let _ = clusters_path;
         reset_last_json_ingest_telemetry_internal();
 
         let text_module = py.import("s2and.text")?;
@@ -3264,16 +3340,10 @@ impl RustFeaturizer {
         let venue_stop_words_obj = text_module.getattr("VENUE_STOP_WORDS")?;
         let name_prefixes_obj = text_module.getattr("NAME_PREFIXES")?;
 
-        let stop_words = extract_string_set(&stop_words_obj)?;
-        let venue_stop_words = extract_string_set(&venue_stop_words_obj)?;
-        let name_prefixes = extract_string_set(&name_prefixes_obj)?;
+        let stop_words = extract_required_string_set(&stop_words_obj)?;
+        let venue_stop_words = extract_required_string_set(&venue_stop_words_obj)?;
+        let name_prefixes = extract_required_string_set(&name_prefixes_obj)?;
 
-        let normalize_text_calls = 0usize;
-        let split_first_middle_hyphen_aware_calls = 0usize;
-        let compute_block_calls = 0usize;
-        let detect_language_calls = 0usize;
-        let get_text_ngrams_calls = 0usize;
-        let get_text_ngrams_words_calls = 0usize;
         let language_detector = if preprocess {
             Some(LanguageDetectorCompat::new(py))
         } else {
@@ -3954,8 +4024,10 @@ impl RustFeaturizer {
                         continue;
                     };
                     if constraint == "disallow" {
-                        cluster_seeds_disallow
-                            .insert(canonical_signature_pair(signature_id_a, signature_id_b));
+                        cluster_seeds_disallow.insert(canonical_signature_pair_cloned(
+                            signature_id_a,
+                            signature_id_b,
+                        ));
                     } else if constraint == "require" {
                         if !root_added {
                             cluster_seeds_require
@@ -3977,12 +4049,6 @@ impl RustFeaturizer {
             reference_counter_seconds,
             signature_preprocess_seconds,
             cluster_seed_seconds,
-            normalize_text_calls,
-            split_first_middle_hyphen_aware_calls,
-            compute_block_calls,
-            detect_language_calls,
-            get_text_ngrams_calls,
-            get_text_ngrams_words_calls,
         });
 
         Ok(RustFeaturizer {
@@ -3996,6 +4062,7 @@ impl RustFeaturizer {
             cluster_seed_require_value,
             cluster_seed_disallow_value,
             cached_signature_id_order: OnceLock::new(),
+            cluster_seeds_disallow_index: OnceLock::new(),
         })
     }
 
@@ -4006,6 +4073,7 @@ impl RustFeaturizer {
     ) -> PyResult<()> {
         self.cluster_seeds_require = extract_cluster_seeds_require(cluster_seeds_require)?;
         self.cluster_seeds_disallow = extract_pair_set(cluster_seeds_disallow)?;
+        self.cluster_seeds_disallow_index = OnceLock::new();
         Ok(())
     }
 
@@ -4713,6 +4781,26 @@ fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     build_info.set_item("host", option_env!("HOST").unwrap_or("unknown"))?;
     build_info.set_item("rustc", option_env!("RUSTC").unwrap_or("unknown"))?;
     Ok(build_info.unbind())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::PyString;
+
+    #[test]
+    fn reference_details_extraction_errors_are_not_silenced() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let non_tuple = PyString::new(py, "not-a-tuple");
+            let result = extract_reference_details_counters(py, non_tuple.as_any());
+            assert!(result.is_err(), "non-tuple reference_details should raise");
+            let err = result
+                .err()
+                .unwrap_or_else(|| unreachable!("assert above guarantees error"));
+            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+        });
+    }
 }
 
 #[pymodule]

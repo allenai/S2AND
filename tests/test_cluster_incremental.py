@@ -1,10 +1,11 @@
-import unittest
 from typing import Any
 
 import lightgbm as lgb
 import numpy as np
+import pytest
 
 import s2and.model as model_module
+from s2and import memory_budget
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
@@ -33,82 +34,13 @@ def _seeds_preserved(clusters: dict[str, list[str]], seed_groups: list[list[str]
     return True
 
 
-class TestClusterer(unittest.TestCase):
-    def setUp(self):
-        super().setUp()
-        self.dummy_dataset = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            cluster_seeds={"6": {"7": "require"}, "3": {"4": "require"}},
-            name="dummy",
-            load_name_counts=True,
-        )
-
-        features_to_use = [
-            "year_diff",
-            "misc_features",
-        ]
-        featurizer_info = FeaturizationInfo(features_to_use=features_to_use)
-        np.random.seed(1)
-        X_random = np.random.random((10, 6))
-        y_random = np.random.randint(0, 6, 10)
-        self.dummy_clusterer = Clusterer(
-            featurizer_info=featurizer_info,
-            classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
-                X_random, y_random
-            ),
-            n_jobs=1,
-            use_cache=False,
-            use_default_constraints_as_supervision=True,
-        )
-
-    def test_predict_incremental(self):
-        # base clustering of the random model would be
-        # {'0': ['0', '1', '2'], '1': ['3', '4', '5', '8'], '2': ['6', '7']}
-
-        block = ["3", "4", "5", "6", "7", "8"]
-
-        # Non-subblocked (monolithic) is the reference output.
-        output_monolithic = _clusters(
-            self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=None)
-        )
-        expected_output = {"0": ["6", "7"], "1": ["3", "4", "5", "8"]}
-        assert output_monolithic == expected_output
-
-        # Subblocked output covers all signatures and preserves seed pairs.
-        # Note: subblocked and monolithic may differ because the unassigned
-        # re-clustering step within the helper operates on subblock-local
-        # unassigned sets. This is inherent to subblocking. The frozen-seed
-        # approach ensures each subblock sees the same original seeds.
-        output_subblocked = _clusters(
-            self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=3)
-        )
-        subblocked_sigs = {s for sigs in output_subblocked.values() for s in sigs}
-        assert subblocked_sigs == set(block), f"Subblocked output missing signatures: {set(block) - subblocked_sigs}"
-        # Seed pairs must stay together: (3,4) in one cluster, (6,7) in another.
-        assert _seeds_preserved(output_subblocked, [["3", "4"], ["6", "7"]])
-
-        self.dummy_dataset.cluster_seeds_disallow = {("5", "7"), ("8", "4"), ("5", "4"), ("8", "7")}
-        output = _clusters(self.dummy_clusterer.predict_incremental(block, self.dummy_dataset))
-        expected_output = {"0": ["6", "7"], "1": ["3", "4"], "2": ["5", "8"]}
-        assert output == expected_output
-
-        self.dummy_dataset.altered_cluster_signatures = ["1", "5"]
-        self.dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
-        block = ["3", "4", "8"]
-        output = _clusters(self.dummy_clusterer.predict_incremental(block, self.dummy_dataset, batching_threshold=None))
-        expected_output = {"0": ["1", "2", "5", "8"], "1": ["6", "7", "3", "4"]}
-        assert output == expected_output
-
-
-def _build_dummy_clusterer_and_dataset():
+def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_chunked") -> tuple[Clusterer, ANDData]:
     dataset = ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
         clusters="tests/dummy/clusters.json",
         cluster_seeds={"6": {"7": "require"}, "3": {"4": "require"}},
-        name="dummy_chunked",
+        name=name,
         load_name_counts=True,
     )
 
@@ -126,6 +58,130 @@ def _build_dummy_clusterer_and_dataset():
         use_default_constraints_as_supervision=True,
     )
     return clusterer, dataset
+
+
+@pytest.fixture
+def clusterer_dataset_factory():
+    def _factory(*, name: str = "dummy_chunked") -> tuple[Clusterer, ANDData]:
+        return _build_dummy_clusterer_and_dataset(name=name)
+
+    return _factory
+
+
+def test_predict_incremental(clusterer_dataset_factory):
+    # base clustering of the random model would be
+    # {'0': ['0', '1', '2'], '1': ['3', '4', '5', '8'], '2': ['6', '7']}
+    dummy_clusterer, dummy_dataset = clusterer_dataset_factory(name="dummy")
+    block = ["3", "4", "5", "6", "7", "8"]
+
+    # Non-subblocked (monolithic) is the reference output.
+    output_monolithic = _clusters(dummy_clusterer.predict_incremental(block, dummy_dataset, batching_threshold=None))
+    expected_output = {"0": ["6", "7"], "1": ["3", "4", "5", "8"]}
+    assert output_monolithic == expected_output
+
+    # Subblocked output covers all signatures and preserves seed pairs.
+    # Note: subblocked and monolithic may differ because the unassigned
+    # re-clustering step within the helper operates on subblock-local
+    # unassigned sets. This is inherent to subblocking. The frozen-seed
+    # approach ensures each subblock sees the same original seeds.
+    output_subblocked = _clusters(dummy_clusterer.predict_incremental(block, dummy_dataset, batching_threshold=3))
+    subblocked_sigs = {s for sigs in output_subblocked.values() for s in sigs}
+    assert subblocked_sigs == set(block), f"Subblocked output missing signatures: {set(block) - subblocked_sigs}"
+    # Seed pairs must stay together: (3,4) in one cluster, (6,7) in another.
+    assert _seeds_preserved(output_subblocked, [["3", "4"], ["6", "7"]])
+
+    dummy_dataset.cluster_seeds_disallow = {("5", "7"), ("8", "4"), ("5", "4"), ("8", "7")}
+    output = _clusters(dummy_clusterer.predict_incremental(block, dummy_dataset))
+    expected_output = {"0": ["6", "7"], "1": ["3", "4"], "2": ["5", "8"]}
+    assert output == expected_output
+
+    dummy_dataset.altered_cluster_signatures = ["1", "5"]
+    dummy_dataset.cluster_seeds_require = {"1": 0, "2": 0, "5": 0, "6": 1, "7": 1}
+    block = ["3", "4", "8"]
+    output = _clusters(dummy_clusterer.predict_incremental(block, dummy_dataset, batching_threshold=None))
+    expected_output = {"0": ["1", "2", "5", "8"], "1": ["6", "7", "3", "4"]}
+    assert output == expected_output
+
+
+def test_predict_incremental_return_contract(clusterer_dataset_factory, monkeypatch):
+    block = ["3", "4", "5", "6", "7", "8"]
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_incremental_contract")
+    canned = {
+        "clusters": {"0": ["3", "4"], "1": ["5", "6", "7", "8"]},
+        "phase_b_mode": "exact",
+        "phase_b_budget_bytes": 123,
+        "phase_b_required_bytes": 120,
+    }
+
+    def _fake_predict_incremental_helper(self, *args, **kwargs):
+        del self, args, kwargs
+        return dict(canned)
+
+    monkeypatch.setattr(Clusterer, "_predict_incremental_helper", _fake_predict_incremental_helper)
+
+    payload = clusterer.predict_incremental(block, dataset, batching_threshold=None)
+    assert payload == canned
+
+    clusters_only = clusterer.predict_incremental(
+        block,
+        dataset,
+        batching_threshold=None,
+        return_clusters_only=True,
+    )
+    assert clusters_only == canned["clusters"]
+
+
+def test_predict_incremental_helper_deprecated_shim(clusterer_dataset_factory, monkeypatch):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_incremental_deprecated_shim")
+    block = ["3", "4", "5"]
+    canned = {
+        "clusters": {"0": ["3", "4", "5"]},
+        "phase_b_mode": "exact",
+        "phase_b_budget_bytes": 24,
+        "phase_b_required_bytes": 24,
+    }
+
+    def _fake_private(self, *args, **kwargs):
+        del self, args, kwargs
+        return dict(canned)
+
+    monkeypatch.setattr(Clusterer, "_predict_incremental_helper", _fake_private)
+    with pytest.deprecated_call(match="predict_incremental_helper"):
+        output = clusterer.predict_incremental_helper(block, dataset)
+    assert output == canned
+
+
+def test_predict_incremental_dont_use_cluster_seeds_flag(clusterer_dataset_factory):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_incremental_alias")
+    block = {"block": ["3", "4", "5", "6"]}
+
+    expected_clusters, _ = clusterer.predict(block, dataset)
+    explicit_default_clusters, _ = clusterer.predict(
+        block,
+        dataset,
+        incremental_dont_use_cluster_seeds=False,
+    )
+
+    assert _same_partition(expected_clusters, explicit_default_clusters)
+
+
+def test_clusterer_init_prefers_legacy_seed_flag_name():
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    rng = np.random.RandomState(7)
+    X_random = rng.random((10, 6))
+    y_random = rng.randint(0, 2, 10)
+
+    clusterer = Clusterer(
+        featurizer_info=featurizer_info,
+        classifier=lgb.LGBMClassifier(random_state=7, data_random_seed=7, feature_fraction_seed=7).fit(
+            X_random, y_random
+        ),
+        dont_merge_cluster_seeds=False,
+        n_jobs=1,
+        use_cache=False,
+    )
+
+    assert clusterer.dont_merge_cluster_seeds is False
 
 
 def _mock_incremental_limits(
@@ -158,7 +214,7 @@ def test_next_unused_cluster_id_prevents_overwrite():
     start = model_module._next_unused_cluster_id(pred_clusters, 2)
     assert start == 3
 
-    # Simulate the singleton recluster append loop in predict_incremental_helper.
+    # Simulate the singleton recluster append loop in _predict_incremental_helper.
     for signatures in (["new_a"], ["new_b"]):
         cluster_id = model_module._next_unused_cluster_id(pred_clusters, start)
         pred_clusters[str(cluster_id)] = signatures
@@ -169,8 +225,8 @@ def test_next_unused_cluster_id_prevents_overwrite():
     assert pred_clusters["4"] == ["new_b"]
 
 
-def test_predict_incremental_without_seeds_covers_all_signatures():
-    clusterer, dataset = _build_dummy_clusterer_and_dataset()
+def test_predict_incremental_without_seeds_covers_all_signatures(clusterer_dataset_factory):
+    clusterer, dataset = clusterer_dataset_factory()
     dataset.cluster_seeds_require = {}
     block = ["3", "4", "5", "6", "7", "8"]
 
@@ -179,7 +235,7 @@ def test_predict_incremental_without_seeds_covers_all_signatures():
     assert assigned_no_subblock == set(block)
 
     # Re-create to get fresh state (dataset.cluster_seeds_require was mutated above).
-    clusterer2, dataset2 = _build_dummy_clusterer_and_dataset()
+    clusterer2, dataset2 = clusterer_dataset_factory()
     dataset2.cluster_seeds_require = {}
     output_subblock = _clusters(clusterer2.predict_incremental(block, dataset2, batching_threshold=3))
     assigned_subblock = {signature for signatures in output_subblock.values() for signature in signatures}
@@ -192,13 +248,13 @@ def test_predict_incremental_without_seeds_covers_all_signatures():
     )
 
 
-def test_predict_incremental_phase_split_parity(monkeypatch):
+def test_predict_incremental_phase_split_parity(clusterer_dataset_factory, monkeypatch):
     block = ["3", "4", "5", "6", "7", "8"]
 
-    baseline_clusterer, baseline_dataset = _build_dummy_clusterer_and_dataset()
+    baseline_clusterer, baseline_dataset = clusterer_dataset_factory()
     baseline = _clusters(baseline_clusterer.predict_incremental(block, baseline_dataset, batching_threshold=None))
 
-    phase_split_clusterer, phase_split_dataset = _build_dummy_clusterer_and_dataset()
+    phase_split_clusterer, phase_split_dataset = clusterer_dataset_factory()
     monkeypatch.setattr(
         model_module,
         "_compute_incremental_memory_limits",
@@ -210,13 +266,13 @@ def test_predict_incremental_phase_split_parity(monkeypatch):
     ), f"Phase-split and monolithic partitions differ:\n  phase_split={phase_split}\n  monolithic={baseline}"
 
 
-def test_predict_incremental_batch_constraint_path_parity(monkeypatch):
+def test_predict_incremental_batch_constraint_path_parity(clusterer_dataset_factory, monkeypatch):
     block = ["3", "4", "5", "6", "7", "8"]
 
-    baseline_clusterer, baseline_dataset = _build_dummy_clusterer_and_dataset()
+    baseline_clusterer, baseline_dataset = clusterer_dataset_factory()
     baseline = _clusters(baseline_clusterer.predict_incremental(block, baseline_dataset, batching_threshold=None))
 
-    batch_clusterer, batch_dataset = _build_dummy_clusterer_and_dataset()
+    batch_clusterer, batch_dataset = clusterer_dataset_factory()
 
     sig_ids = list(batch_dataset.signatures.keys())
 
@@ -258,9 +314,9 @@ def test_predict_incremental_batch_constraint_path_parity(monkeypatch):
     assert calls["batch"] > 0
 
 
-def test_predict_incremental_phase_split_budget_approx_fallback(monkeypatch):
+def test_predict_incremental_phase_split_budget_approx_fallback(clusterer_dataset_factory, monkeypatch):
     block = ["3", "4", "5", "6", "7", "8"]
-    clusterer, dataset = _build_dummy_clusterer_and_dataset()
+    clusterer, dataset = clusterer_dataset_factory()
     monkeypatch.setattr(
         model_module,
         "_compute_incremental_memory_limits",
@@ -279,9 +335,9 @@ def test_predict_incremental_phase_split_budget_approx_fallback(monkeypatch):
     assert result["phase_b_mode"] == "subblock_local"
 
 
-def test_phase_b_telemetry_exact_vs_subblock(monkeypatch):
+def test_phase_b_telemetry_exact_vs_subblock(clusterer_dataset_factory, monkeypatch):
     block = ["3", "4", "5", "6", "7", "8"]
-    clusterer_exact, dataset_exact = _build_dummy_clusterer_and_dataset()
+    clusterer_exact, dataset_exact = clusterer_dataset_factory()
     monkeypatch.setattr(
         model_module,
         "_compute_incremental_memory_limits",
@@ -291,7 +347,7 @@ def test_phase_b_telemetry_exact_vs_subblock(monkeypatch):
     assert exact["phase_b_mode"] == "exact"
     assert int(exact["phase_b_required_bytes"]) <= int(exact["phase_b_budget_bytes"])
 
-    clusterer_fallback, dataset_fallback = _build_dummy_clusterer_and_dataset()
+    clusterer_fallback, dataset_fallback = clusterer_dataset_factory()
     monkeypatch.setattr(
         model_module,
         "_compute_incremental_memory_limits",
@@ -306,8 +362,8 @@ def test_phase_b_telemetry_exact_vs_subblock(monkeypatch):
     assert int(fallback["phase_b_required_bytes"]) > int(fallback["phase_b_budget_bytes"])
 
 
-def test_predict_subblocked_processes_subblocks_in_sorted_key_order(monkeypatch):
-    clusterer, dataset = _build_dummy_clusterer_and_dataset()
+def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_dataset_factory, monkeypatch):
+    clusterer, dataset = clusterer_dataset_factory()
     block_signatures = ["3", "4", "5", "6"]
     observed_order: list[str] = []
 
@@ -341,10 +397,10 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(monkeypatch)
     assert observed_order == ["block|subblock=alpha", "block|subblock=zeta"]
 
 
-def test_phase_a_memory_prediction_logged_and_bounded(caplog):
-    clusterer, dataset = _build_dummy_clusterer_and_dataset()
+def test_phase_a_memory_prediction_logged_and_bounded(clusterer_dataset_factory, caplog):
+    clusterer, dataset = clusterer_dataset_factory()
     block = ["3", "4", "5", "6", "7", "8"]
-    rss_now, _ = model_module._current_rss_bytes_best_effort(16 * 1024 * 1024 * 1024)
+    rss_now, _ = memory_budget.current_rss_bytes_best_effort(16 * 1024 * 1024 * 1024)
     total_ram_bytes = max(8 * 1024 * 1024 * 1024, int(rss_now) + 4 * 1024 * 1024 * 1024)
 
     with caplog.at_level("INFO", logger="s2and"):
@@ -372,8 +428,8 @@ def test_phase_a_memory_prediction_logged_and_bounded(caplog):
     assert ratio <= 10.0
 
 
-def test_phase_a_overflow_surfaces_in_result_and_telemetry(monkeypatch, caplog):
-    clusterer, dataset = _build_dummy_clusterer_and_dataset()
+def test_phase_a_overflow_surfaces_in_result_and_telemetry(clusterer_dataset_factory, monkeypatch, caplog):
+    clusterer, dataset = clusterer_dataset_factory()
     block = ["3", "4", "5", "6", "7", "8"]
 
     limits = _mock_incremental_limits(chunk_pairs=3, accumulator_budget_bytes=1_000_000)

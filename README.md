@@ -69,6 +69,12 @@ Notes:
 - Once wheels are published, you can install the native extension via extras:
   `uv pip install "s2and[rust]"`.
 
+## Docs
+
+- Index (start here): `docs/README.md`
+- Next steps: `docs/work_plan.md`
+- Backlog: `docs/work_plan.md` (Backlog section)
+
 ## Running Tests
 
 To run the tests, use the following command:
@@ -85,9 +91,9 @@ uv run python scripts/run_ci_locally.py
 To run CI checks locally without Rust extension compilation (faster iteration), run:
 ```bash
 uv sync --active --extra dev --frozen
-uvx --from ruff==0.6.9 ruff format --check s2and scripts/*.py
-uvx --from ty==0.0.18 ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
-uvx --from ty==0.0.18 ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
+uv run --active --no-project ruff format --check s2and scripts/*.py
+uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
+uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
 # macOS/Linux:
 PYTHONPATH=. uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
 # Windows PowerShell:
@@ -161,11 +167,13 @@ mode, fallback only occurs during backend resolution; runtime Rust-stage failure
 
 Stable runtime controls:
 - `S2AND_BACKEND=python|rust|auto` to select runtime backend.
+- `S2AND_CACHE=<path>` to set the cache root directory (only used when `use_cache=True`; default `~/.s2and`).
 - `S2AND_RUST_NAME_COUNTS_JSON=<path>` to provide artifact-backed name-count lookups for Rust JSON ingest.
   This is used when `from_json_paths` is active and dataset signature-level name counts are not available.
 - `Clusterer.predict_incremental(..., total_ram_bytes=<int>)` to provide explicit RAM input for phase-split chunk/budget derivation.
 
 Advanced/internal knobs (not a stable public API):
+(Inventory note: this section is intended to be exhaustive for `S2AND_*` env vars currently referenced in the repo.)
 - `S2AND_RUST_FEATURIZER_MAX_INMEM=<int>` — cap in-memory Rust featurizer entries (`0` = unbounded).
   Quick guide: use `1` for single-dataset-per-process workloads; use `2-3` if one process alternates among a few datasets.
   This knob only matters when `use_cache=True`, and it is read once at process start.
@@ -347,6 +355,24 @@ We provide a trained production model (the one that is used in the Semantic Scho
 
 Please note that the production models still use SPECTER1, and these embeddings are still available via the S2 API.
 
+### Name-count semantics compatibility (important)
+S2AND currently supports two runtime semantics for the name-count feature key used by
+`last_first_initial_count_min`:
+
+- `legacy_full_first_token`: key is `<last> <first_token>` (historical behavior).
+- `initial_char`: key is `<last> <first[0]>` (current intended semantics).
+
+Model compatibility rules:
+
+- `production_model_v1.1.pickle` and `production_model_v1.2.pickle` were trained with
+  `legacy_full_first_token`.
+- In `ANDData(..., mode="inference")`, prediction automatically applies the semantics expected by
+  the loaded model via `clusterer.feature_contract["name_counts_last_first_initial_semantics"]`
+  (with `featurizer_version` fallback for older artifacts).
+- Do not mix model artifacts and feature semantics without retraining, because this changes model
+  inputs and can materially change clustering output.
+
+
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.
 
@@ -374,7 +400,7 @@ pip install pip==21.0.0
 pip install -r paper_experiments_env.txt --use-feature=fast-deps --use-deprecated=legacy-resolver
 ``` 
 
-Then, Rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will udpate here if this becomes not true). 
+Then, rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will udpate here if this becomes not true). 
 
 Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (very close to what is running on the Semantic Scholar website, except the production model doesn't compute the reference features) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "How to use S2AND for predicting with a saved model", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
 
@@ -401,4 +427,3 @@ If you use S2AND in your research, please cite [S2AND: A Benchmark and Evaluatio
 
 S2AND is an open-source project developed by [the Allen Institute for Artificial Intelligence (AI2)](http://www.allenai.org).
 AI2 is a non-profit institute with the mission to contribute to humanity through high-impact AI research and engineering.
-

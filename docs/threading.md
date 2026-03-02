@@ -13,7 +13,49 @@ Within the Python API, treat `n_jobs` as the canonical concurrency setting for a
 - **LightGBM inference**: `Clusterer.n_jobs` propagates into the underlying estimators, and prediction passes
   `num_threads=n_jobs` when supported.
 - **Python preprocessing**: `ANDData(n_jobs=...)` controls the limited (and platform-dependent) pooling used in some
-  preprocessing phases.
+  preprocessing phases (see “Python preprocessing parallelism” below).
+
+## Python preprocessing parallelism
+
+S2AND has three main Python preprocessing phases that can dominate end-to-end runtime:
+
+1. **Papers 1/2**: `preprocess_paper_1` (title/author normalization + word ngrams; and venue/journal normalization when `preprocess=True`)
+2. **Papers 2/2**: `preprocess_paper_2` (reference-details ngrams + block counts)
+3. **Signatures**: `ANDData.preprocess_signatures` (normalization + feature creation)
+
+**Production default behavior (as of 2026-02-27):**
+
+- **Linux / WSL2**: use a process pool for **Papers 1/2** when `n_jobs > 1`; run **Papers 2/2** serial; run **Signatures** serial.
+- **Windows/macOS (native)**: run **Papers 1/2** serial (even if `n_jobs > 1`); run **Papers 2/2** serial; run **Signatures** serial.
+
+Rationale (high level): `preprocess_paper_1` is CPU-bound and benefits from `fork` multiprocessing on Linux, while
+`spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For `preprocess_paper_2` and signature preprocessing,
+the overhead of shipping large Python objects around dominates, so pooling is net negative.
+
+Implementation notes:
+
+- `preprocess_paper_1` takes an explicit `preprocess=...` flag (spawn-safe; no worker globals).
+- `preprocess_papers_parallel` uses `UniversalPool` only for the **Papers 1/2** phase on Linux; **Papers 2/2** always runs serial.
+- `UniversalPool` remains platform-aware when used elsewhere: processes on Linux (`fork`), threads on Windows/macOS by default.
+
+Benchmark script:
+
+- `scripts/bench_preprocess_phases.py` benchmarks the three phases separately.
+
+Rust `from_dataset` bypass (Bundle 1):
+
+When training/eval runs use the Rust backend, paper preprocessing can be deferred to Rust (see
+`docs/rust/runtime.md` section "Training-mode deferred paper preprocessing"). In that mode,
+`preprocess_papers_parallel` is **skipped entirely**, and Rust’s `from_dataset` handles paper
+normalization, ngrams, and language detection via Rayon parallelism, making the Python parallelism
+discussion above moot for Rust-enabled training runs.
+
+Conditions for the bypass:
+
+- Backend resolves to Rust (`S2AND_BACKEND=rust` or `auto` resolved to Rust)
+- `preprocess=True`
+- Rust extension supports `SUPPORTS_FROM_DATASET_PAPER_PREPROCESS`
+- `compute_reference_features=False`
 
 ## Recommended run setup
 
@@ -54,5 +96,4 @@ fresh Python process).
 
 ## Date
 
-2026-03-01
-
+2026-03-02

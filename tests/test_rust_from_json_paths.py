@@ -11,7 +11,7 @@ import pytest
 from s2and.consts import PROJECT_ROOT_PATH
 from s2and.data import ANDData, NameCounts
 from s2and.featurizer import FeaturizationInfo
-from tests.conftest import equalish, import_s2and_rust
+from tests.helpers import equalish, import_s2and_rust
 
 HAS_FROM_JSON_PATHS, s2and_rust = import_s2and_rust(required_method="from_json_paths")
 if not HAS_FROM_JSON_PATHS:
@@ -25,14 +25,6 @@ EXPECTED_STAGE_SECONDS_KEYS = {
     "reference_counter_seconds",
     "signature_preprocess_seconds",
     "cluster_seed_seconds",
-}
-EXPECTED_CALLBACK_COUNT_KEYS = {
-    "normalize_text_calls",
-    "split_first_middle_hyphen_aware_calls",
-    "compute_block_calls",
-    "detect_language_calls",
-    "get_text_ngrams_calls",
-    "get_text_ngrams_words_calls",
 }
 
 
@@ -98,13 +90,11 @@ def _sample_pairs(signature_ids: list[str], count: int, seed: int) -> list[tuple
 def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bool):
     signatures_path = os.path.join(data_dir, "signatures.json")
     papers_path = os.path.join(data_dir, "papers.json")
-    clusters_path = os.path.join(data_dir, "clusters.json")
     cluster_seeds_path = os.path.join(data_dir, "cluster_seeds.json")
     cluster_seeds_path_arg = cluster_seeds_path if os.path.exists(cluster_seeds_path) else None
     return s2and_rust.RustFeaturizer.from_json_paths(
         signatures_path,
         papers_path,
-        clusters_path,
         cluster_seeds_path_arg,
         None,  # specter_embeddings
         None,  # name_tuples_path
@@ -128,7 +118,7 @@ def test_from_json_paths_feature_parity_vs_from_dataset_dummy():
         ref_features = rust_from_dataset.featurize_pair(s1, s2)
         got_features = rust_from_json.featurize_pair(s1, s2)
         assert len(ref_features) == len(got_features)
-        for idx, (ref, got) in enumerate(zip(ref_features, got_features, strict=False)):
+        for idx, (ref, got) in enumerate(zip(ref_features, got_features, strict=True)):
             assert equalish(ref, got), f"Mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
 
 
@@ -178,7 +168,7 @@ def test_from_json_paths_reference_feature_parity_vs_from_dataset_qian():
         ref_features = rust_from_dataset.featurize_pair(s1, s2)
         got_features = rust_from_json.featurize_pair(s1, s2)
         assert len(ref_features) == len(got_features)
-        for idx, (ref, got) in enumerate(zip(ref_features, got_features, strict=False)):
+        for idx, (ref, got) in enumerate(zip(ref_features, got_features, strict=True)):
             if idx not in reference_feature_indices:
                 continue
             assert equalish(ref, got), f"Reference mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
@@ -198,21 +188,10 @@ def test_from_json_paths_emits_telemetry_payload_dummy():
 
     assert isinstance(telemetry, dict)
     stage_seconds = telemetry.get("stage_seconds")
-    callback_counts = telemetry.get("callback_counts")
     assert isinstance(stage_seconds, dict)
-    assert isinstance(callback_counts, dict)
     assert EXPECTED_STAGE_SECONDS_KEYS.issubset(stage_seconds.keys())
-    assert EXPECTED_CALLBACK_COUNT_KEYS.issubset(callback_counts.keys())
     for key in EXPECTED_STAGE_SECONDS_KEYS:
         assert float(stage_seconds[key]) >= 0.0
-    for key in EXPECTED_CALLBACK_COUNT_KEYS:
-        assert int(callback_counts[key]) >= 0
-    assert int(callback_counts["normalize_text_calls"]) == 0
-    assert int(callback_counts["split_first_middle_hyphen_aware_calls"]) == 0
-    assert int(callback_counts["compute_block_calls"]) == 0
-    assert int(callback_counts["detect_language_calls"]) == 0
-    assert int(callback_counts["get_text_ngrams_calls"]) == 0
-    assert int(callback_counts["get_text_ngrams_words_calls"]) == 0
 
 
 def test_from_json_paths_signature_name_counts_overlay_parity_dummy():
@@ -277,10 +256,8 @@ def test_repeated_rust_featurizer_rebuild_dummy_smoke(build_path, tmp_path):
     assert all("rss_peak_gb" in iteration for iteration in result["iterations"])
 
 
-@pytest.mark.skipif(
-    os.environ.get("S2AND_RUN_HEAVY_RUST_STRESS", "0") != "1",
-    reason="Set S2AND_RUN_HEAVY_RUST_STRESS=1 to run AMiner rebuild stress.",
-)
+@pytest.mark.heavy
+@pytest.mark.skip(reason="Run explicitly with: uv run pytest -m heavy")
 def test_repeated_from_json_paths_aminer_opt_in(tmp_path):
     aminer_signatures = Path(PROJECT_ROOT_PATH) / "data" / "aminer" / "aminer_signatures.json"
     if not aminer_signatures.exists():

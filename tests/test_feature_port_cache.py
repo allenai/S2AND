@@ -1,11 +1,16 @@
 import json
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import s2and.feature_port as feature_port
 import s2and.rust_capabilities as rust_capabilities
+from s2and.data import NameCounts
+
+_REAL_RUST_CACHE_PATH = feature_port._rust_cache_path
 
 
 class DummyRustFeaturizer:
@@ -67,8 +72,31 @@ class DummyDataset:
         self.name_tuples = {}
         self.compute_reference_features = False
         self.preprocess = True
+        self.n_jobs = 1
         self.cluster_seeds_require = {}
         self.cluster_seeds_disallow = set()
+        self.signatures_path = None
+        self.papers_path = None
+        self.clusters_path = None
+        self.cluster_seeds_path = None
+        self.specter_embeddings_path = None
+        self.name_counts_last_first_initial_semantics = "legacy_compat"
+
+
+class SleepyCounter:
+    """Counter that yields mid-increment to expose race windows in tests."""
+
+    def __init__(self, value: int = 0):
+        self.value = value
+
+    def __iadd__(self, increment: int):
+        current = self.value
+        time.sleep(0.0005)
+        self.value = current + int(increment)
+        return self
+
+    def __int__(self) -> int:
+        return self.value
 
 
 def _cache_size() -> int:
@@ -110,6 +138,56 @@ def test_use_cache_true_keeps_unbounded_cache_in_train_mode():
     # Re-access d1 — should be a cache hit, no rebuild.
     feature_port._get_rust_featurizer(d1, use_cache=True)
     assert DummyRustFeaturizer.created == ["d1", "d2"]
+
+
+def test_rust_cache_path_sanitizes_dataset_name_for_windows_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(feature_port, "CACHE_ROOT", tmp_path)
+    dataset = DummyDataset("a:b/c", mode="train")
+
+    cache_path = _REAL_RUST_CACHE_PATH(dataset)
+    cache_name = Path(cache_path).name
+
+    assert Path(cache_path).suffix == ".bin"
+    assert ":" not in cache_name
+    assert "/" not in cache_name
+    assert "\\" not in cache_name
+    assert Path(cache_path).parent == tmp_path / "rust_featurizer"
+
+
+def test_rust_featurizer_available_reloads_extension_when_missing(monkeypatch):
+    sentinel_module = object()
+    load_calls = {"count": 0}
+
+    def _load_stub():
+        load_calls["count"] += 1
+        return sentinel_module
+
+    def _detect_stub(*, extension_module):
+        return SimpleNamespace(core_runtime_available=extension_module is sentinel_module)
+
+    monkeypatch.setattr(feature_port, "s2and_rust", None)
+    monkeypatch.setattr(feature_port, "load_s2and_rust_extension", _load_stub)
+    monkeypatch.setattr(feature_port, "detect_rust_runtime_capabilities", _detect_stub)
+
+    assert feature_port.rust_featurizer_available() is True
+    assert feature_port.s2and_rust is sentinel_module
+    assert load_calls["count"] == 1
+
+
+def test_rust_signature_preprocess_available_reloads_extension_when_missing(monkeypatch):
+    sentinel_module = SimpleNamespace(signature_ngrams_batch=lambda *_args, **_kwargs: None)
+    load_calls = {"count": 0}
+
+    def _load_stub():
+        load_calls["count"] += 1
+        return sentinel_module
+
+    monkeypatch.setattr(feature_port, "s2and_rust", None)
+    monkeypatch.setattr(feature_port, "load_s2and_rust_extension", _load_stub)
+
+    assert feature_port.rust_signature_preprocess_available() is True
+    assert feature_port.s2and_rust is sentinel_module
+    assert load_calls["count"] == 1
 
 
 def test_max_inmem_env_uses_lru_eviction_policy(monkeypatch):
@@ -303,6 +381,95 @@ def test_concurrent_builds_for_same_dataset_share_single_inflight_build(monkeypa
     assert build_calls["count"] == 1
 
 
+def test_increment_rust_featurizer_build_count_is_thread_safe():
+    dataset = DummyDataset("build_count_threadsafe", mode="train")
+    with feature_port._RUST_FEATURIZER_CACHE_LOCK:
+        feature_port._RUST_FEATURIZER_CACHE[dataset] = feature_port._CacheEntry(
+            featurizer=DummyRustFeaturizer(dataset.name),
+            build_count=SleepyCounter(0),
+        )
+
+    worker_count = 8
+    increments_per_worker = 25
+    errors: list[Exception] = []
+    counts: list[int] = []
+    counts_lock = threading.Lock()
+
+    def _worker():
+        try:
+            for _ in range(increments_per_worker):
+                next_count = feature_port._increment_rust_featurizer_build_count(dataset)
+                with counts_lock:
+                    counts.append(next_count)
+        except Exception as exc:  # pragma: no cover - assertion guard
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(worker_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    expected_count = worker_count * increments_per_worker
+    assert feature_port._rust_featurizer_build_count(dataset) == expected_count
+    assert sorted(counts) == list(range(1, expected_count + 1))
+
+
+def test_get_rust_featurizer_raises_after_repeated_empty_wait(monkeypatch):
+    dataset = DummyDataset("empty_wait_retry_budget", mode="train")
+    attempts = {"count": 0}
+    runtime_context = type("RuntimeContext", (), {"operation": "test_empty_wait", "run_id": "run-empty-wait"})()
+    monkeypatch.setenv(feature_port.RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES_ENV, "2")
+    monkeypatch.setenv(feature_port.RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS_ENV, "0")
+
+    def _always_empty(_dataset, *, build_context):
+        del build_context
+        attempts["count"] += 1
+        return None, None
+
+    monkeypatch.setattr(feature_port, "_get_or_wait_for_cached", _always_empty)
+
+    with pytest.raises(RuntimeError, match="empty wait state") as exc_info:
+        feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=False)
+    message = str(exc_info.value)
+    assert "dataset=empty_wait_retry_budget" in message
+    assert "run=run-empty-wait" in message
+    assert "attempts=3" in message
+    assert attempts["count"] == 3
+
+
+def test_get_rust_featurizer_retries_empty_wait_then_builds(monkeypatch):
+    dataset = DummyDataset("empty_wait_then_build", mode="train")
+    attempts = {"count": 0}
+    build_calls = {"count": 0}
+    inflight = feature_port._InFlightFeaturizerBuild()
+    expected_featurizer = DummyRustFeaturizer("built_after_empty_wait")
+    monkeypatch.setenv(feature_port.RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES_ENV, "2")
+    monkeypatch.setenv(feature_port.RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS_ENV, "0")
+
+    def _empty_then_build(_dataset, *, build_context):
+        del build_context
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return None, None
+        return None, inflight
+
+    def _build_stub(_dataset, *, inflight_build, build_context):
+        del build_context
+        build_calls["count"] += 1
+        assert inflight_build is inflight
+        return expected_featurizer
+
+    monkeypatch.setattr(feature_port, "_get_or_wait_for_cached", _empty_then_build)
+    monkeypatch.setattr(feature_port, "_build_and_cache_rust_featurizer", _build_stub)
+
+    featurizer = feature_port._get_rust_featurizer(dataset, use_cache=False)
+    assert featurizer is expected_featurizer
+    assert attempts["count"] == 2
+    assert build_calls["count"] == 1
+
+
 def test_disk_cache_metadata_mismatch_skips_load(monkeypatch, tmp_path):
     dataset = DummyDataset("cache_meta_miss", mode="train")
     cache_path = str(tmp_path / "cache_meta_miss.bin")
@@ -404,7 +571,6 @@ def test_json_ingest_routes_canonical_payload(monkeypatch):
     assert args == (
         "signatures.json",
         "papers.json",
-        "clusters.json",
         "cluster_seeds.json",
         "specter.pkl",
         None,
@@ -454,7 +620,19 @@ def test_json_ingest_overlay_payload_includes_only_signatures_with_name_counts(m
     dataset.signatures_path = "signatures.json"
     dataset.papers_path = "papers.json"
     dataset.signatures = {
-        "s1": type("Sig", (), {"author_info_name_counts": (1.0, 2.0, 3.0, 4.0), "extra": "full_signature"})(),
+        "s1": type(
+            "Sig",
+            (),
+            {
+                "author_info_name_counts": NameCounts(
+                    first=1.0,
+                    last=2.0,
+                    first_last=3.0,
+                    last_first_initial=4.0,
+                ),
+                "extra": "full_signature",
+            },
+        )(),
         "s2": type("Sig", (), {"author_info_name_counts": None, "extra": "ignored"})(),
     }
 
@@ -465,8 +643,30 @@ def test_json_ingest_overlay_payload_includes_only_signatures_with_name_counts(m
     assert list(payload.keys()) == ["s1"]
     payload_entry = payload["s1"]
     assert hasattr(payload_entry, "author_info_name_counts")
-    assert payload_entry.author_info_name_counts == (1.0, 2.0, 3.0, 4.0)
-    assert payload_entry.extra == "full_signature"
+    assert not hasattr(payload_entry, "extra")
+    assert payload_entry.author_info_name_counts.first == 1.0
+    assert payload_entry.author_info_name_counts.last == 2.0
+    assert payload_entry.author_info_name_counts.first_last == 3.0
+    assert payload_entry.author_info_name_counts.last_first_initial == 4.0
+
+
+def test_signature_name_counts_overlay_payload_surfaces_items_failure(caplog):
+    class FailingSignatures:
+        def __len__(self):
+            return 2
+
+        def items(self):
+            raise TypeError("items failed")
+
+    dataset = DummyDataset("overlay_items_failure", mode="inference")
+    dataset.signatures = FailingSignatures()
+
+    with caplog.at_level("ERROR", logger="s2and"):
+        with pytest.raises(RuntimeError, match="iterating signatures"):
+            feature_port._signature_name_counts_overlay_payload_from_dataset(dataset)
+
+    logs = "\n".join(caplog.messages)
+    assert "failed to iterate signatures for name-count overlay dataset=overlay_items_failure" in logs
 
 
 def test_json_ingest_source_telemetry_prefers_dataset_over_artifact(caplog, monkeypatch):
@@ -475,7 +675,18 @@ def test_json_ingest_source_telemetry_prefers_dataset_over_artifact(caplog, monk
     dataset.signatures_path = "signatures.json"
     dataset.papers_path = "papers.json"
     dataset.signatures = {
-        "s1": type("Sig", (), {"author_info_name_counts": (1.0, 2.0, 3.0, 4.0)})(),
+        "s1": type(
+            "Sig",
+            (),
+            {
+                "author_info_name_counts": NameCounts(
+                    first=1.0,
+                    last=2.0,
+                    first_last=3.0,
+                    last_first_initial=4.0,
+                )
+            },
+        )(),
         "s2": type("Sig", (), {"author_info_name_counts": None})(),
     }
 
@@ -490,7 +701,7 @@ def test_json_ingest_source_telemetry_prefers_dataset_over_artifact(caplog, monk
     assert "artifact_configured=True" in logs
 
     args, _kwargs = DummyRustFeaturizer.from_json_created[0]
-    assert args[6] is None
+    assert args[5] is None
 
 
 def test_json_ingest_source_telemetry_uses_artifact_when_non_minimal(tmp_path, caplog, monkeypatch):
@@ -512,7 +723,7 @@ def test_json_ingest_source_telemetry_uses_artifact_when_non_minimal(tmp_path, c
     assert "normalization_check_executed=True" in logs
 
     args, _kwargs = DummyRustFeaturizer.from_json_created[0]
-    assert args[6] == str(artifact_path)
+    assert args[5] == str(artifact_path)
 
 
 def test_explicit_evict_and_clear_api(monkeypatch):

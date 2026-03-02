@@ -4,10 +4,11 @@ Run CI steps locally using the ACTIVE virtual environment.
 
 Order (matches your CI):
   1) uv sync --extra dev [--frozen if uv.lock exists]  (ACTIVE venv)
-  2) ruff lint + format checks via uvx --from ruff==0.6.9 ...
-  3) ty checks with tuned migration rules via uvx --from ty==0.0.18 ...
+  2) ruff lint + format checks via uv run ...
+  3) ty checks with tuned migration rules via uv run ...
   4) pytest tests/ with coverage and PYTHONPATH=.
 
+Tool versions come from the synced dev dependencies in pyproject.toml/uv.lock.
 Key fix: resolve repo root (pyproject.toml) and run all commands from there.
 """
 
@@ -34,18 +35,6 @@ def uv_exe() -> list[str]:
     return [sys.executable, "-m", "uv"]
 
 
-def uvx_exe() -> list[str] | None:
-    uvx_path = which("uvx")
-    if uvx_path:
-        return [uvx_path]
-    try:
-        import uvx  # noqa: F401
-
-        return [sys.executable, "-m", "uvx"]
-    except Exception:
-        return None
-
-
 def repo_root() -> Path:
     here = Path(__file__).resolve().parent
     for d in [here] + list(here.parents):
@@ -55,7 +44,6 @@ def repo_root() -> Path:
 
 
 REPO = repo_root()
-TY_VERSION = "0.0.18"
 TY_BASE_IGNORES = [
     "unresolved-import",
     "unused-type-ignore-comment",
@@ -105,23 +93,15 @@ def ensure_rust_on_path() -> None:
 
 
 def run_ruff_format_check_on(paths: list[str]) -> None:
-    uvx = uvx_exe()
-    if uvx:
-        run(uvx + ["--from", "ruff==0.6.9", "ruff", "format", "--check", *paths])
-        return
     _run_tool_with_fallback(
-        primary_cmd=uv_exe() + ["run", "--active", "ruff", "format", "--check", *paths],
+        primary_cmd=uv_exe() + ["run", "--active", "--no-project", "ruff", "format", "--check", *paths],
         fallback_cmd=[sys.executable, "-m", "ruff", "format", "--check", *paths],
     )
 
 
 def run_ruff_check_on(paths: list[str]) -> None:
-    uvx = uvx_exe()
-    if uvx:
-        run(uvx + ["--from", "ruff==0.6.9", "ruff", "check", *paths])
-        return
     _run_tool_with_fallback(
-        primary_cmd=uv_exe() + ["run", "--active", "ruff", "check", *paths],
+        primary_cmd=uv_exe() + ["run", "--active", "--no-project", "ruff", "check", *paths],
         fallback_cmd=[sys.executable, "-m", "ruff", "check", *paths],
     )
 
@@ -134,10 +114,6 @@ def run_ty_check_on(paths: list[str], *, script_mode: bool = False) -> None:
     for rule in ignore_rules:
         ignore_args.extend(["--ignore", rule])
 
-    uvx = uvx_exe()
-    if uvx:
-        run(uvx + ["--from", f"ty=={TY_VERSION}", "ty", "check", *paths, *ignore_args])
-        return
     _run_tool_with_fallback(
         primary_cmd=uv_exe() + ["run", "--active", "--no-project", "ty", "check", *paths, *ignore_args],
         fallback_cmd=[sys.executable, "-m", "ty", "check", *paths, *ignore_args],

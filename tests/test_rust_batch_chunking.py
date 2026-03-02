@@ -7,7 +7,7 @@ import numpy as np
 import s2and.featurizer as featurizer_mod
 from s2and import feature_port, memory_budget
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
-from tests.conftest import build_dummy_dataset
+from tests.helpers import build_dummy_dataset
 
 
 def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> dict[str, int | str | float]:
@@ -57,6 +57,15 @@ def test_rust_batch_probe_row_counts_uses_three_probes():
     assert derived[0] < derived[1] < derived[2]
 
 
+def test_prefault_numpy_pages_inplace_mutates_scratch_buffer():
+    scratch = np.full(8193, 7, dtype=np.uint8)
+    featurizer_mod._prefault_scratch_array_pages_inplace(scratch)
+    assert scratch[0] == 0
+    assert scratch[-1] == 0
+    assert scratch[4096] == 0
+    assert scratch[8192] == 0
+
+
 def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking_calibrated_fixed", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
@@ -85,7 +94,7 @@ def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
         captured_fixed.append(int(kwargs["fixed_overhead_bytes"]))
         return _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs))
 
-    monkeypatch.setattr(featurizer_mod, "_rust_batch_chunk_plan", _capturing_plan)
+    monkeypatch.setattr(memory_budget, "compute_rust_batch_chunk_plan", _capturing_plan)
     monkeypatch.setattr(
         memory_budget,
         "resolve_rust_batch_prediction_params",
@@ -129,8 +138,8 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
 
     monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
     monkeypatch.setattr(
-        featurizer_mod,
-        "_rust_batch_chunk_plan",
+        memory_budget,
+        "compute_rust_batch_chunk_plan",
         lambda **_kwargs: _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs)),
     )
     monkeypatch.setattr(feature_port, "s2and_rust", object())
@@ -183,8 +192,8 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
 
     monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
     monkeypatch.setattr(
-        featurizer_mod,
-        "_rust_batch_chunk_plan",
+        memory_budget,
+        "compute_rust_batch_chunk_plan",
         lambda **_kwargs: _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs)),
     )
     monkeypatch.setattr(feature_port, "s2and_rust", object())
@@ -219,6 +228,60 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
     assert labels.shape[0] == len(pairs)
 
 
+def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
+    dataset = build_dummy_dataset("dummy_rust_chunking_indexed_int_ids", load_name_counts=True)
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    indexed_pairs_seen: list[tuple[int, int]] = []
+
+    class FakeRustFeaturizer:
+        def signature_ids(self):
+            return sorted(dataset.signatures.keys())
+
+        def featurize_pairs_matrix_indexed(self, pairs, selected_indices, num_threads, nan_value):
+            del num_threads, nan_value
+            indexed_pairs_seen.extend((int(left), int(right)) for left, right in pairs)
+            if selected_indices is None:
+                return np.zeros((len(pairs), featurizer_mod.NUM_FEATURES), dtype=np.float64)
+            return np.zeros((len(pairs), len(selected_indices)), dtype=np.float64)
+
+    fake_rust_featurizer = FakeRustFeaturizer()
+    string_pairs = _build_pairs(5)
+    pairs = [(int(left), int(right), label) for left, right, label in string_pairs]
+
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(
+        memory_budget,
+        "compute_rust_batch_chunk_plan",
+        lambda **_kwargs: _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs)),
+    )
+    monkeypatch.setattr(feature_port, "s2and_rust", object())
+    monkeypatch.setattr(
+        feature_port,
+        "_get_rust_featurizer",
+        lambda _dataset, use_cache=False, **_kw: fake_rust_featurizer,
+    )
+
+    features, labels, _ = many_pairs_featurize(
+        pairs,  # type: ignore[arg-type]
+        dataset,
+        featurizer_info,
+        n_jobs=2,
+        use_cache=False,
+        chunk_size=1,
+        nan_value=np.nan,
+        total_ram_bytes=2 * 1024 * 1024 * 1024,
+    )
+
+    signature_index = {sig_id: idx for idx, sig_id in enumerate(sorted(dataset.signatures.keys()))}
+    expected_indexed_pairs = [
+        (signature_index[str(left)], signature_index[str(right)]) for left, right, _label in pairs
+    ]
+
+    assert indexed_pairs_seen == expected_indexed_pairs
+    assert features.shape[0] == len(pairs)
+    assert labels.shape[0] == len(pairs)
+
+
 def test_rust_batch_forwards_use_cache_flag(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking_use_cache_forward", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
@@ -234,8 +297,8 @@ def test_rust_batch_forwards_use_cache_flag(monkeypatch):
 
     monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
     monkeypatch.setattr(
-        featurizer_mod,
-        "_rust_batch_chunk_plan",
+        memory_budget,
+        "compute_rust_batch_chunk_plan",
         lambda **_kwargs: _mock_chunk_plan(chunk_pairs=1, total_pairs=len(pairs)),
     )
     monkeypatch.setattr(feature_port, "s2and_rust", object())

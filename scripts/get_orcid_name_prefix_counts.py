@@ -106,8 +106,8 @@ k_values = (2, 3, 4, 5)  # only care up to first 5 letters
 orcid_first_k_letter_counts = Counter()  # type: ignore
 
 
-# In each group, take all pairs of unique names and then count the number of times each first k letter combination
-# occurs.
+# in each group, take all pairs of unique names and then count the number of
+# times each first k letter combination occurs
 # (name_1[:k], name_2[:k]) for k in range(2, 6) where k is the outer dictionary key
 def group_update(group, k_values=k_values):
     names = [i for i in group["first_norm"].unique() if isinstance(i, str)]

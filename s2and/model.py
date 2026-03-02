@@ -6,9 +6,10 @@ import math
 import time
 import warnings
 from collections import defaultdict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import lightgbm as lgb
 import numpy as np
@@ -19,7 +20,11 @@ from tqdm import tqdm
 
 from s2and import memory_budget
 from s2and.consts import DEFAULT_CHUNK_SIZE, LARGE_INTEGER
-from s2and.data import ANDData
+from s2and.data import (
+    NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+    NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
+    ANDData,
+)
 from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_featurizer,
@@ -36,7 +41,9 @@ from s2and.subblocking import make_subblocks
 from s2and.text import same_prefix_tokens
 
 logger = logging.getLogger("s2and")
+IncrementalChunkLimits = Mapping[str, Any]
 IncrementalPhaseBMode = Literal["exact", "subblock_local"]
+_TReturn = TypeVar("_TReturn")
 
 # Keep canonical pickle import paths stable after splitting module internals.
 for _export in (FastCluster, PairwiseModeler, VotingClassifier, intify):
@@ -68,19 +75,6 @@ def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None)
         detect_cgroup_fn=memory_budget.detect_cgroup_total_ram_bytes_best_effort,
         detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
     )
-
-
-# Backward-compatible wrappers retained for tests/monkeypatch hooks.
-def _detect_total_ram_bytes_best_effort() -> tuple[int | None, str]:
-    return memory_budget.detect_total_ram_bytes_best_effort()
-
-
-def _detect_cgroup_total_ram_bytes_best_effort() -> tuple[int | None, str]:
-    return memory_budget.detect_cgroup_total_ram_bytes_best_effort()
-
-
-def _current_rss_bytes_best_effort(total_ram_bytes: int) -> tuple[int, str]:
-    return memory_budget.current_rss_bytes_best_effort(total_ram_bytes)
 
 
 def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
@@ -132,7 +126,7 @@ def _compute_incremental_memory_limits(
     selected_feature_count: int | None = None,
     nameless_feature_count: int = 0,
     total_ram_bytes: int | None = None,
-) -> dict[str, int | str | float]:
+) -> memory_budget.IncrementalPhaseSplitLimits:
     return memory_budget.compute_incremental_phase_split_limits(
         num_features,
         selected_feature_count=selected_feature_count,
@@ -165,12 +159,20 @@ def _ensure_lightgbm_fitted(clf: Any) -> None:
         return
     booster = getattr(clf, "_Booster", None)
     if booster is None:
-        return
+        raise RuntimeError(
+            "LightGBM estimator has no fitted booster (_Booster is None); " "fit the estimator before prediction."
+        )
     if not getattr(clf, "fitted_", False):
+        logger.debug("Patching missing LightGBM fitted_ flag for estimator=%s", type(clf).__name__)
         clf.fitted_ = True
     if not hasattr(clf, "n_features_in_"):
         n_feat = getattr(clf, "_n_features", None)
         if n_feat is not None:
+            logger.debug(
+                "Patching missing LightGBM n_features_in_ from _n_features=%d for estimator=%s",
+                int(n_feat),
+                type(clf).__name__,
+            )
             clf.n_features_in_ = n_feat
 
 
@@ -201,14 +203,91 @@ def _propagate_n_jobs(estimator: Any, n_jobs: int) -> None:
     if callable(set_params):
         try:
             set_params(n_jobs=int(n_jobs))
-        except (TypeError, ValueError):
-            pass
+        except TypeError as exc:
+            logger.debug(
+                "Skipping set_params n_jobs propagation for estimator=%s: %s",
+                type(estimator).__name__,
+                exc,
+            )
+        except Exception:
+            logger.debug(
+                "Unexpected error while propagating n_jobs via set_params for estimator=%s",
+                type(estimator).__name__,
+                exc_info=True,
+            )
+            raise
 
     if hasattr(estimator, "n_jobs"):
         try:
             estimator.n_jobs = int(n_jobs)
-        except (AttributeError, TypeError, ValueError):
-            pass
+        except (AttributeError, TypeError) as exc:
+            logger.debug(
+                "Skipping n_jobs attribute propagation for estimator=%s: %s",
+                type(estimator).__name__,
+                exc,
+            )
+        except Exception:
+            logger.debug(
+                "Unexpected error while propagating n_jobs via attribute assignment for estimator=%s",
+                type(estimator).__name__,
+                exc_info=True,
+            )
+            raise
+
+
+def _name_count_semantics_from_featurizer_version(
+    featurizer_version: int | None,
+) -> str | None:
+    if not isinstance(featurizer_version, int):
+        return None
+    if featurizer_version <= 2:
+        return NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY
+    return NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+
+
+def _resolve_clusterer_name_count_semantics(
+    clusterer: Any,
+    *,
+    strict: bool,
+) -> str:
+    contract = getattr(clusterer, "feature_contract", None)
+    if isinstance(contract, dict):
+        contract_value = contract.get("name_counts_last_first_initial_semantics")
+        if contract_value in {
+            NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
+            NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+        }:
+            return str(contract_value)
+        if contract_value is not None and strict:
+            raise ValueError(
+                "Invalid clusterer feature_contract['name_counts_last_first_initial_semantics'] "
+                f"value: {contract_value!r}"
+            )
+
+    featurizer_info = getattr(clusterer, "featurizer_info", None)
+    featurizer_version = getattr(featurizer_info, "featurizer_version", None)
+    inferred = _name_count_semantics_from_featurizer_version(featurizer_version)
+    if inferred is not None:
+        return inferred
+
+    if strict:
+        raise ValueError(
+            "Unable to resolve model name-count semantics from feature_contract or featurizer_version. "
+            "Inference requires explicit semantics metadata."
+        )
+    return NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+
+
+def _apply_dataset_name_count_semantics_for_prediction(
+    clusterer: Any,
+    dataset: ANDData,
+) -> None:
+    dataset_mode = str(getattr(dataset, "mode", "")).strip().lower()
+    if dataset_mode == "inference":
+        desired = _resolve_clusterer_name_count_semantics(clusterer, strict=True)
+    else:
+        desired = NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+    dataset.set_name_counts_last_first_initial_semantics(desired)
 
 
 def _predict_class0_with_runtime(
@@ -244,13 +323,11 @@ def _predict_and_combine(
     labels: np.ndarray,
     nameless_features: np.ndarray | None,
     batch_label: int | str,
-    rust_failure_counts: dict[str, int] | None = None,
     *,
     num_threads: int | None = None,
     runtime_context: RuntimeContext | None = None,
 ) -> tuple[np.ndarray, float]:
     """Predict with main (and optional nameless) classifier, log telemetry, return (predictions, seconds)."""
-    del rust_failure_counts
     row_count = int(features.shape[0])
     if row_count <= 0:
         return np.asarray([], dtype=np.float64), 0.0
@@ -333,6 +410,9 @@ def _predict_and_combine(
             seconds += batch_seconds
 
     if np.any(not_predict_flag):
+        # Fill rows where we already had constraints/partial supervision.
+        # Undo the LARGE_INTEGER offset that was applied when labels were staged.
+        # For classifier outputs, index 0 corresponds to p(not the same).
         predictions[not_predict_flag] = labels[not_predict_flag] + LARGE_INTEGER
     return predictions, seconds
 
@@ -341,6 +421,43 @@ def _use_rust_constraints(runtime_context: RuntimeContext | None = None) -> bool
     if runtime_context is None:
         runtime_context = build_runtime_context("constraints")
     return stage_uses_rust(runtime_context)
+
+
+def _handle_rust_backend_exception(
+    runtime_context: RuntimeContext,
+    *,
+    strict_message: str,
+    exc: Exception,
+    fallback_warning: str,
+    context_fields: tuple[str, ...] = (),
+) -> None:
+    details = " ".join((*context_fields, f"run_id={runtime_context.run_id}", f"error={exc}"))
+    if stage_uses_rust(runtime_context):
+        raise RuntimeError(f"{strict_message} ({details})") from exc
+    logger.warning("%s: %s", fallback_warning, exc)
+
+
+def _rust_with_fallback(
+    fn: Callable[[], _TReturn],
+    fallback_fn: Callable[[], _TReturn],
+    *,
+    runtime_context: RuntimeContext,
+    label: str,
+    context_fields: tuple[str, ...] = (),
+    strict_message: str | None = None,
+    fallback_warning: str | None = None,
+) -> _TReturn:
+    try:
+        return fn()
+    except Exception as exc:  # pragma: no cover - native extension optional
+        _handle_rust_backend_exception(
+            runtime_context,
+            strict_message=(strict_message or f"Rust {label} failed in strict rust backend"),
+            exc=exc,
+            fallback_warning=(fallback_warning or f"Rust {label} failed, falling back to Python"),
+            context_fields=context_fields,
+        )
+        return fallback_fn()
 
 
 def _cluster_seeds_version(dataset: ANDData) -> int:
@@ -369,8 +486,8 @@ def _get_constraint_value(
     if use_rust_constraints is None:
         use_rust_constraints = _use_rust_constraints(runtime_context)
     if use_rust_constraints:
-        try:
-            return get_constraint_rust(
+        return _rust_with_fallback(
+            fn=lambda: get_constraint_rust(
                 dataset,
                 sig_id_1,
                 sig_id_2,
@@ -379,14 +496,19 @@ def _get_constraint_value(
                 featurizer=rust_featurizer,
                 runtime_context=runtime_context,
                 use_cache=use_cache,
-            )
-        except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context):
-                raise RuntimeError(
-                    "Rust constraint evaluation failed in strict rust backend "
-                    f"(pair=({sig_id_1}, {sig_id_2}) run_id={runtime_context.run_id} error={exc})"
-                ) from exc
-            logger.warning("Rust get_constraint failed, falling back to Python: %s", exc)
+            ),
+            fallback_fn=lambda: dataset.get_constraint(
+                sig_id_1,
+                sig_id_2,
+                dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            ),
+            runtime_context=runtime_context,
+            label="constraint evaluation",
+            strict_message="Rust constraint evaluation failed in strict rust backend",
+            fallback_warning="Rust get_constraint failed, falling back to Python",
+            context_fields=(f"pair=({sig_id_1}, {sig_id_2})",),
+        )
     return dataset.get_constraint(
         sig_id_1,
         sig_id_2,
@@ -403,6 +525,10 @@ def _sync_rust_cluster_seeds(
     if runtime_context is None:
         runtime_context = build_runtime_context("constraints")
     if _use_rust_constraints(runtime_context):
+        # Best-effort instrumentation for subblocking lifecycle overhead.
+        # Stored on the dataset to avoid changing return payloads on hot paths.
+        dataset._rust_cluster_seeds_sync_calls = int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) + 1
+
         seed_version = _cluster_seeds_version(dataset)
         require = getattr(dataset, "cluster_seeds_require", {})
         disallow = getattr(dataset, "cluster_seeds_disallow", set())
@@ -423,21 +549,41 @@ def _sync_rust_cluster_seeds(
             and last_disallow_id == disallow_id
             and last_disallow_len == disallow_len
         ):
+            dataset._rust_cluster_seeds_sync_skipped_unchanged = (
+                int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) + 1
+            )
             return
-        try:
+
+        dataset._rust_cluster_seeds_sync_attempted = int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) + 1
+
+        def _sync() -> None:
+            sync_start = time.perf_counter()
             update_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=use_cache)
+            sync_seconds = float(time.perf_counter() - sync_start)
+            dataset._rust_cluster_seeds_sync_succeeded = (
+                int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) + 1
+            )
+            dataset._rust_cluster_seeds_sync_seconds_total = (
+                float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_total", 0.0)) + sync_seconds
+            )
+            dataset._rust_cluster_seeds_sync_seconds_max = max(
+                float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_max", 0.0)),
+                sync_seconds,
+            )
             dataset._rust_cluster_seeds_synced_version = seed_version
             dataset._rust_cluster_seeds_require_id = require_id
             dataset._rust_cluster_seeds_require_len = require_len
             dataset._rust_cluster_seeds_disallow_id = disallow_id
             dataset._rust_cluster_seeds_disallow_len = disallow_len
-        except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context):
-                raise RuntimeError(
-                    "Rust cluster seed sync failed in strict rust backend "
-                    f"(run_id={runtime_context.run_id} error={exc})"
-                ) from exc
-            logger.warning("Rust cluster seed sync failed, falling back to Python: %s", exc)
+
+        _rust_with_fallback(
+            fn=_sync,
+            fallback_fn=lambda: None,
+            runtime_context=runtime_context,
+            label="cluster seed sync",
+            strict_message="Rust cluster seed sync failed in strict rust backend",
+            fallback_warning="Rust cluster seed sync failed, falling back to Python",
+        )
 
 
 def _initialize_incremental_constraint_backend(
@@ -454,15 +600,15 @@ def _initialize_incremental_constraint_backend(
     if not use_rust_constraints:
         return None, False
 
-    try:
-        rust_featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
-    except Exception as exc:  # pragma: no cover - native extension optional
-        if stage_uses_rust(runtime_context):
-            raise RuntimeError(
-                "Rust constraint stage requested but Rust featurizer init failed "
-                f"(run_id={runtime_context.run_id} error={exc})"
-            ) from exc
-        logger.warning("Rust featurizer init failed, falling back to Python constraints: %s", exc)
+    rust_featurizer = _rust_with_fallback(
+        fn=lambda: _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache),
+        fallback_fn=lambda: None,
+        runtime_context=runtime_context,
+        label="constraint featurizer init",
+        strict_message="Rust constraint stage requested but Rust featurizer init failed",
+        fallback_warning="Rust featurizer init failed, falling back to Python constraints",
+    )
+    if rust_featurizer is None:
         return None, False
 
     return rust_featurizer, True
@@ -499,19 +645,18 @@ def _build_incremental_constraint_backend(
     constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
     signature_index_by_id: dict[str, int] | None = None
     if constraint_api_mode == "indexed" and rust_featurizer is not None:
-        try:
-            signature_index_by_id = _build_signature_index_by_id(rust_featurizer)
-        except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context):
-                raise RuntimeError(
-                    "Rust indexed constraint setup failed in strict rust backend "
-                    f"(run_id={runtime_context.run_id} error={exc})"
-                ) from exc
-            logger.warning(
+        signature_index_by_id = _rust_with_fallback(
+            fn=lambda: _build_signature_index_by_id(rust_featurizer),
+            fallback_fn=lambda: None,
+            runtime_context=runtime_context,
+            label="indexed constraint setup",
+            strict_message="Rust indexed constraint setup failed in strict rust backend",
+            fallback_warning=(
                 "Rust indexed constraint setup failed in phase A; disabling Rust constraints and falling back "
-                "to Python: %s",
-                exc,
-            )
+                "to Python"
+            ),
+        )
+        if signature_index_by_id is None:
             use_rust_constraints = False
             rust_featurizer = None
             constraint_api_mode = "python"
@@ -554,10 +699,12 @@ def _resolve_constraint_labels_batch(
     partial_hits = 0
     for idx, (sig_id_1, sig_id_2) in enumerate(pair_ids):
         if (sig_id_1, sig_id_2) in partial_supervision:
+            # Subtract LARGE_INTEGER so downstream featurization knows not to recompute these constraints.
             labels[idx] = float(partial_supervision[(sig_id_1, sig_id_2)] - LARGE_INTEGER)
             partial_hits += 1
             continue
         if (sig_id_2, sig_id_1) in partial_supervision:
+            # Subtract LARGE_INTEGER so downstream featurization knows not to recompute these constraints.
             labels[idx] = float(partial_supervision[(sig_id_2, sig_id_1)] - LARGE_INTEGER)
             partial_hits += 1
             continue
@@ -580,12 +727,26 @@ def _resolve_constraint_labels_batch(
 
     start = time.perf_counter()
     values: list[float | None]
+
+    def _resolve_values_python() -> list[float | None]:
+        return [
+            dataset.get_constraint(
+                s1,
+                s2,
+                dont_merge_cluster_seeds=dont_merge_cluster_seeds,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            )
+            for s1, s2 in unresolved_pairs
+        ]
+
     if use_rust_constraints and rust_featurizer is not None and mode == "indexed":
-        try:
+        used_python_fallback = False
+
+        def _resolve_values_rust() -> list[float | None]:
             if signature_index_by_id is None:
                 raise RuntimeError("Indexed constraint API requested without signature index lookup")
             indexed_pairs = [(signature_index_by_id[s1], signature_index_by_id[s2]) for s1, s2 in unresolved_pairs]
-            values = get_constraints_matrix_indexed_rust(
+            return get_constraints_matrix_indexed_rust(
                 dataset,
                 indexed_pairs,
                 dont_merge_cluster_seeds=dont_merge_cluster_seeds,
@@ -595,42 +756,36 @@ def _resolve_constraint_labels_batch(
                 runtime_context=runtime_context,
                 use_cache=use_cache,
             )
-            telemetry.rust_batch_call_count = 1
-        except Exception as exc:  # pragma: no cover - native extension optional
-            if stage_uses_rust(runtime_context):
-                raise RuntimeError(
-                    "Rust batch constraint evaluation failed in strict rust backend "
-                    f"(pairs={len(unresolved_pairs)} run_id={runtime_context.run_id} error={exc})"
-                ) from exc
-            logger.warning("Rust batch constraint evaluation failed, falling back to Python constraints: %s", exc)
-            values = [
-                dataset.get_constraint(
-                    s1,
-                    s2,
-                    dont_merge_cluster_seeds=dont_merge_cluster_seeds,
-                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                )
-                for s1, s2 in unresolved_pairs
-            ]
+
+        def _resolve_values_python_fallback() -> list[float | None]:
+            nonlocal used_python_fallback
+            used_python_fallback = True
+            return _resolve_values_python()
+
+        values = _rust_with_fallback(
+            fn=_resolve_values_rust,
+            fallback_fn=_resolve_values_python_fallback,
+            runtime_context=runtime_context,
+            label="batch constraint evaluation",
+            strict_message="Rust batch constraint evaluation failed in strict rust backend",
+            fallback_warning="Rust batch constraint evaluation failed, falling back to Python constraints",
+            context_fields=(f"pairs={len(unresolved_pairs)}",),
+        )
+        if used_python_fallback:
             telemetry.api_mode = "python_fallback"
             telemetry.rust_batch_call_count = 0
+        else:
+            telemetry.rust_batch_call_count = 1
     else:
-        values = [
-            dataset.get_constraint(
-                s1,
-                s2,
-                dont_merge_cluster_seeds=dont_merge_cluster_seeds,
-                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-            )
-            for s1, s2 in unresolved_pairs
-        ]
+        values = _resolve_values_python()
         telemetry.api_mode = "python"
 
     telemetry.elapsed_seconds = float(time.perf_counter() - start)
-    for idx, value in zip(unresolved_indices, values, strict=False):
+    for idx, value in zip(unresolved_indices, values, strict=True):
         if value is None:
             labels[idx] = float(np.nan)
         else:
+            # Keep partial/constraint labels in the LARGE_INTEGER-offset convention.
             labels[idx] = float(value - LARGE_INTEGER)
     return labels, telemetry
 
@@ -651,8 +806,24 @@ class _DistanceMatrixChunk:
             raise RuntimeError("signature_pairs requested for fused Rust chunk without explicit pair ids")
         return [
             (sig_id_1, sig_id_2, float(label))
-            for (sig_id_1, sig_id_2), label in zip(self.pair_ids, self.labels, strict=False)
+            for (sig_id_1, sig_id_2), label in zip(self.pair_ids, self.labels, strict=True)
         ]
+
+
+@dataclass(frozen=True)
+class _PredictedDistanceMatrixChunk:
+    chunk: _DistanceMatrixChunk
+    predictions: np.ndarray
+    batch_seconds: float
+
+
+@dataclass(frozen=True)
+class _PredictedDistanceMatrixBatch:
+    batch_num: int
+    blocks: list[str]
+    indices: list[tuple[int, int]]
+    predictions: np.ndarray
+    batch_seconds: float
 
 
 @dataclass
@@ -678,48 +849,51 @@ class _ConstraintBatchTelemetry:
     api_mode: str
     elapsed_seconds: float
 
-    def __getitem__(self, key: str) -> int | float | str:
-        return getattr(self, key)
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
+@dataclass(frozen=True)
+class _ConstraintSummary:
+    pairs_total: int
+    chunks_total: int
+    partial_supervision_hits: int
+    unresolved_pairs: int
+    rust_batch_calls: int
+    api_mode: str
+    elapsed_seconds: float
 
 
-@dataclass
+@dataclass(frozen=True)
+class _AccumulatorSummary:
+    entries_peak: int
+    chunk_features_peak_bytes: int
+    pair_buffer_peak_bytes: int
+    accumulator_entry_bytes: int
+    pair_buffer_entry_bytes: int
+    fixed_overhead_bytes: int
+    adaptive_halvings: int
+    overflow_early_stop: bool
+
+
+@dataclass(frozen=True)
+class _MemoryPredictionSummary:
+    contract_version: str
+    predicted_peak_delta_bytes: int
+    predicted_peak_rss_bytes: int
+    predicted_bytes: int
+    rss_before_bytes: int
+    rss_peak_bytes: int
+    rss_after_bytes: int
+    observed_peak_delta_bytes: int
+    prediction_error_ratio: float
+    underpredicted: bool
+    rss_source: str
+
+
+@dataclass(frozen=True)
 class _PhaseASeedTelemetry:
-    constraint_pairs_total: int
-    constraint_chunks_total: int
-    constraint_partial_supervision_hits: int
-    constraint_unresolved_pairs: int
-    constraint_rust_batch_calls: int
-    constraint_batch_api_mode: str
-    constraint_batch_seconds: float
-    accumulator_entries_peak: int
+    constraints: _ConstraintSummary
+    accumulator: _AccumulatorSummary
+    memory: _MemoryPredictionSummary
     model_predict_seconds: float
-    phase_a_prediction_contract_version: str
-    phase_a_predicted_peak_delta_bytes: int
-    phase_a_predicted_peak_rss_bytes: int
-    phase_a_predicted_bytes: int
-    phase_a_rss_before_bytes: int
-    phase_a_rss_peak_bytes: int
-    phase_a_rss_after_bytes: int
-    phase_a_observed_peak_delta_bytes: int
-    phase_a_prediction_error_ratio: float
-    phase_a_underpredicted: bool
-    phase_a_rss_source: str
-    phase_a_chunk_features_peak_bytes: int
-    phase_a_pair_buffer_peak_bytes: int
-    phase_a_accumulator_entry_bytes: int
-    phase_a_pair_buffer_entry_bytes: int
-    phase_a_fixed_overhead_bytes: int
-    phase_a_adaptive_halvings: int
-    phase_a_accumulator_overflow_early_stop: bool
-
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
 
 
 @dataclass
@@ -768,47 +942,47 @@ class _PhaseASummaryAccumulator:
     adaptive_halvings_max: int = 0
 
     def observe(self, sample: _PhaseASeedTelemetry) -> None:
-        if sample.phase_a_accumulator_overflow_early_stop:
+        if sample.accumulator.overflow_early_stop:
             self.accumulator_overflow_early_stop = True
             self.overflow_subblocks += 1
-        self.adaptive_halvings_max = max(self.adaptive_halvings_max, int(sample.phase_a_adaptive_halvings))
-        self.pairs_total += int(sample.constraint_pairs_total)
-        self.chunks_total += int(sample.constraint_chunks_total)
-        self.accumulator_peak = max(self.accumulator_peak, int(sample.accumulator_entries_peak))
-        self.model_predict_seconds += float(sample.model_predict_seconds)
+        self.adaptive_halvings_max = max(self.adaptive_halvings_max, sample.accumulator.adaptive_halvings)
+        self.pairs_total += sample.constraints.pairs_total
+        self.chunks_total += sample.constraints.chunks_total
+        self.accumulator_peak = max(self.accumulator_peak, sample.accumulator.entries_peak)
+        self.model_predict_seconds += sample.model_predict_seconds
         if self.worst_sample is None:
             self.worst_sample = sample
         else:
-            candidate_ratio = float(sample.phase_a_prediction_error_ratio)
-            candidate_observed_delta = int(sample.phase_a_observed_peak_delta_bytes)
-            current_ratio = float(self.worst_sample.phase_a_prediction_error_ratio)
-            current_observed_delta = int(self.worst_sample.phase_a_observed_peak_delta_bytes)
+            candidate_ratio = sample.memory.prediction_error_ratio
+            candidate_observed_delta = sample.memory.observed_peak_delta_bytes
+            current_ratio = self.worst_sample.memory.prediction_error_ratio
+            current_observed_delta = self.worst_sample.memory.observed_peak_delta_bytes
             if candidate_ratio > current_ratio or (
                 candidate_ratio == current_ratio and candidate_observed_delta > current_observed_delta
             ):
                 self.worst_sample = sample
-        self.underpredicted = self.underpredicted or bool(sample.phase_a_underpredicted)
+        self.underpredicted = self.underpredicted or sample.memory.underpredicted
 
     def finalize_from_worst_sample(self) -> None:
         if self.worst_sample is None:
             return
         worst = self.worst_sample
-        self.prediction_contract_version = str(worst.phase_a_prediction_contract_version)
-        self.predicted_peak_delta_bytes = int(worst.phase_a_predicted_peak_delta_bytes)
-        self.predicted_peak_rss_bytes = int(worst.phase_a_predicted_peak_rss_bytes)
-        self.predicted_bytes = int(worst.phase_a_predicted_bytes)
-        self.rss_before_bytes = int(worst.phase_a_rss_before_bytes)
-        self.rss_peak_bytes = int(worst.phase_a_rss_peak_bytes)
-        self.rss_after_bytes = int(worst.phase_a_rss_after_bytes)
-        self.rss_source = str(worst.phase_a_rss_source)
-        self.observed_peak_delta_bytes = int(worst.phase_a_observed_peak_delta_bytes)
-        self.prediction_error_ratio = float(worst.phase_a_prediction_error_ratio)
-        self.accumulator_peak_sample = int(worst.accumulator_entries_peak)
-        self.chunk_features_peak_bytes = int(worst.phase_a_chunk_features_peak_bytes)
-        self.pair_buffer_peak_bytes = int(worst.phase_a_pair_buffer_peak_bytes)
-        self.accumulator_entry_bytes = int(worst.phase_a_accumulator_entry_bytes)
-        self.pair_buffer_entry_bytes = int(worst.phase_a_pair_buffer_entry_bytes)
-        self.fixed_overhead_bytes = int(worst.phase_a_fixed_overhead_bytes)
+        self.prediction_contract_version = worst.memory.contract_version
+        self.predicted_peak_delta_bytes = worst.memory.predicted_peak_delta_bytes
+        self.predicted_peak_rss_bytes = worst.memory.predicted_peak_rss_bytes
+        self.predicted_bytes = worst.memory.predicted_bytes
+        self.rss_before_bytes = worst.memory.rss_before_bytes
+        self.rss_peak_bytes = worst.memory.rss_peak_bytes
+        self.rss_after_bytes = worst.memory.rss_after_bytes
+        self.rss_source = worst.memory.rss_source
+        self.observed_peak_delta_bytes = worst.memory.observed_peak_delta_bytes
+        self.prediction_error_ratio = worst.memory.prediction_error_ratio
+        self.accumulator_peak_sample = worst.accumulator.entries_peak
+        self.chunk_features_peak_bytes = worst.accumulator.chunk_features_peak_bytes
+        self.pair_buffer_peak_bytes = worst.accumulator.pair_buffer_peak_bytes
+        self.accumulator_entry_bytes = worst.accumulator.accumulator_entry_bytes
+        self.pair_buffer_entry_bytes = worst.accumulator.pair_buffer_entry_bytes
+        self.fixed_overhead_bytes = worst.accumulator.fixed_overhead_bytes
 
 
 def _accumulate_constraint_telemetry(
@@ -868,8 +1042,7 @@ class Clusterer:
         nameless_featurizer_info: FeaturizationInfo
             The FeaturizationInfo for the second classifier. Won't be used if None
         dont_merge_cluster_seeds: bool
-            this flag controls whether to use cluster seeds to enforce "dont merge"
-            as well as "must merge" constraints
+            whether to enforce "disallow" constraints for signatures in different required seed clusters
         batch_size: int
             batch size for featurization, lower means less memory, but slower
     """
@@ -913,6 +1086,14 @@ class Clusterer:
         else:
             self.search_space = search_space
 
+        default_name_count_semantics = _name_count_semantics_from_featurizer_version(
+            getattr(self.featurizer_info, "featurizer_version", None)
+        )
+        self.feature_contract = {
+            "name_counts_last_first_initial_semantics": (
+                default_name_count_semantics or NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+            ),
+        }
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
         self.batch_size = batch_size
@@ -1003,7 +1184,7 @@ class Clusterer:
             dataset,
             all_disallow_signature_ids,
         )
-        for signature, label in zip(block_dict[block_key], labels, strict=False):
+        for signature, label in zip(block_dict[block_key], labels, strict=True):
             pred_clusters[block_key + "_" + str(label)].append(signature)
 
     def distance_matrix_helper(
@@ -1026,7 +1207,7 @@ class Clusterer:
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
         incremental_dont_use_cluster_seeds: bool
-            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
+            whether to ignore dataset cluster seeds while resolving constraints in incremental flows
 
         Returns
         -------
@@ -1047,7 +1228,7 @@ class Clusterer:
         for block_key, signatures in block_dict.items():
             pair_batch_ids: list[tuple[str, str]] = []
             index_batch: list[tuple[int, int]] = []
-            for i, j in zip(*np.triu_indices(len(signatures), k=1), strict=False):
+            for i, j in zip(*np.triu_indices(len(signatures), k=1), strict=True):
                 pair_batch_ids.append((signatures[i], signatures[j]))
                 index_batch.append((i, j))
                 if len(pair_batch_ids) >= pair_chunk_size:
@@ -1061,10 +1242,7 @@ class Clusterer:
                     )
                     _accumulate_constraint_telemetry(telemetry, batch_telemetry)
                     for (sig_id_1, sig_id_2), label, (left, right) in zip(
-                        pair_batch_ids,
-                        labels,
-                        index_batch,
-                        strict=False,
+                        pair_batch_ids, labels, index_batch, strict=True
                     ):
                         yield ((sig_id_1, sig_id_2, label), (left, right), block_key)
                     pair_batch_ids = []
@@ -1080,12 +1258,7 @@ class Clusterer:
                     constraint_backend=constraint_backend,
                 )
                 _accumulate_constraint_telemetry(telemetry, batch_telemetry)
-                for (sig_id_1, sig_id_2), label, (left, right) in zip(
-                    pair_batch_ids,
-                    labels,
-                    index_batch,
-                    strict=False,
-                ):
+                for (sig_id_1, sig_id_2), label, (left, right) in zip(pair_batch_ids, labels, index_batch, strict=True):
                     yield ((sig_id_1, sig_id_2, label), (left, right), block_key)
 
         logger.info(
@@ -1099,6 +1272,52 @@ class Clusterer:
             telemetry.elapsed_seconds,
             runtime_context.run_id,
         )
+
+    def _yield_non_fused_chunks(
+        self,
+        *,
+        block_key: str,
+        signatures: list[str],
+        dataset: ANDData,
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+        incremental_dont_use_cluster_seeds: bool,
+        constraint_backend: _IncrementalConstraintBackend,
+        telemetry: _ConstraintTelemetryAccumulator,
+    ):
+        block_size = len(signatures)
+        if block_size <= 1:
+            return
+        block_pair_count = int(block_size * (block_size - 1) / 2)
+        pair_chunk_size = max(1, int(self.batch_size))
+        tri_i, tri_j = np.triu_indices(block_size, k=1)
+        offset = 0
+        while offset < block_pair_count:
+            end = min(offset + pair_chunk_size, block_pair_count)
+            i_chunk = tri_i[offset:end]
+            j_chunk = tri_j[offset:end]
+            pair_batch_ids = [
+                (signatures[int(left)], signatures[int(right)]) for left, right in zip(i_chunk, j_chunk, strict=True)
+            ]
+            labels, batch_telemetry = self._resolve_constraint_batch(
+                dataset,
+                pair_batch_ids,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                constraint_backend=constraint_backend,
+            )
+            _accumulate_constraint_telemetry(telemetry, batch_telemetry)
+            yield _DistanceMatrixChunk(
+                block_key=block_key,
+                block_size=block_size,
+                start_offset=offset,
+                index_i=i_chunk,
+                index_j=j_chunk,
+                pair_ids=pair_batch_ids,
+                labels=np.asarray(labels, dtype=np.float64),
+            )
+            offset = end
 
     def _distance_matrix_chunk_helper_rust(
         self,
@@ -1165,15 +1384,18 @@ class Clusterer:
                             use_cache=self.use_cache,
                         )
                     except Exception as exc:
-                        if stage_uses_rust(runtime_context):
-                            raise RuntimeError(
-                                "Rust fused block constraint evaluation failed in strict rust backend "
-                                f"(block={block_key} start_offset={offset} pairs={chunk_pair_count} "
-                                f"run_id={runtime_context.run_id} error={exc})"
-                            ) from exc
-                        logger.warning(
-                            "Rust fused block constraint evaluation failed; falling back to non-fused chunk path: %s",
-                            exc,
+                        _handle_rust_backend_exception(
+                            runtime_context,
+                            strict_message="Rust fused block constraint evaluation failed in strict rust backend",
+                            exc=exc,
+                            fallback_warning=(
+                                "Rust fused block constraint evaluation failed; falling back to non-fused chunk path"
+                            ),
+                            context_fields=(
+                                f"block={block_key}",
+                                f"start_offset={offset}",
+                                f"pairs={chunk_pair_count}",
+                            ),
                         )
                         use_fused_block_api = False
                         break
@@ -1228,67 +1450,27 @@ class Clusterer:
                     offset += chunk_pair_count
                 if not use_fused_block_api:
                     # Fused path disabled after runtime failure; continue with fallback for this and later blocks.
-                    tri_i, tri_j = np.triu_indices(block_size, k=1)
-                    offset = 0
-                    while offset < block_pair_count:
-                        end = min(offset + pair_chunk_size, block_pair_count)
-                        i_chunk = tri_i[offset:end]
-                        j_chunk = tri_j[offset:end]
-                        pair_batch_ids = [
-                            (signatures[int(left)], signatures[int(right)])
-                            for left, right in zip(i_chunk, j_chunk, strict=False)
-                        ]
-                        labels, batch_telemetry = self._resolve_constraint_batch(
-                            dataset,
-                            pair_batch_ids,
-                            partial_supervision=partial_supervision,
-                            runtime_context=runtime_context,
-                            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                            constraint_backend=constraint_backend,
-                        )
-                        _accumulate_constraint_telemetry(telemetry, batch_telemetry)
-                        yield _DistanceMatrixChunk(
-                            block_key=block_key,
-                            block_size=block_size,
-                            start_offset=offset,
-                            index_i=i_chunk,
-                            index_j=j_chunk,
-                            pair_ids=pair_batch_ids,
-                            labels=np.asarray(labels, dtype=np.float64),
-                        )
-                        offset = end
-            else:
-                tri_i, tri_j = np.triu_indices(block_size, k=1)
-                offset = 0
-                while offset < block_pair_count:
-                    end = min(offset + pair_chunk_size, block_pair_count)
-                    i_chunk = tri_i[offset:end]
-                    j_chunk = tri_j[offset:end]
-                    pair_batch_ids = [
-                        (signatures[int(left)], signatures[int(right)])
-                        for left, right in zip(i_chunk, j_chunk, strict=False)
-                    ]
-
-                    labels, batch_telemetry = self._resolve_constraint_batch(
-                        dataset,
-                        pair_batch_ids,
+                    yield from self._yield_non_fused_chunks(
+                        block_key=block_key,
+                        signatures=signatures,
+                        dataset=dataset,
                         partial_supervision=partial_supervision,
                         runtime_context=runtime_context,
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                         constraint_backend=constraint_backend,
+                        telemetry=telemetry,
                     )
-                    _accumulate_constraint_telemetry(telemetry, batch_telemetry)
-
-                    yield _DistanceMatrixChunk(
-                        block_key=block_key,
-                        block_size=block_size,
-                        start_offset=offset,
-                        index_i=i_chunk,
-                        index_j=j_chunk,
-                        pair_ids=pair_batch_ids,
-                        labels=np.asarray(labels, dtype=np.float64),
-                    )
-                    offset = end
+            else:
+                yield from self._yield_non_fused_chunks(
+                    block_key=block_key,
+                    signatures=signatures,
+                    dataset=dataset,
+                    partial_supervision=partial_supervision,
+                    runtime_context=runtime_context,
+                    incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                    constraint_backend=constraint_backend,
+                    telemetry=telemetry,
+                )
 
         logger.info(
             "Telemetry: constraint_batch stage=distance_matrix total_pairs=%d partial_supervision_hits=%d "
@@ -1377,7 +1559,6 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             batch_label,
-            None,
             num_threads=self.n_jobs,
             runtime_context=runtime_context,
         )
@@ -1387,6 +1568,162 @@ class Clusterer:
                 f"expected={expected_rows} got={batch_predictions.shape[0]}"
             )
         return np.asarray(batch_predictions, dtype=np.float64), float(batch_seconds)
+
+    def _iter_rust_predicted_distance_matrix_chunks(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        partial_supervision: dict[tuple[str, str], int | float],
+        *,
+        incremental_dont_use_cluster_seeds: bool,
+        runtime_context: RuntimeContext,
+    ):
+        chunk_count = 0
+        helper_output = self._distance_matrix_chunk_helper_rust(
+            block_dict,
+            dataset,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+        )
+        for chunk in helper_output:
+            batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
+                chunk,
+                dataset,
+                runtime_context,
+                batch_label=f"chunk_{chunk_count}",
+            )
+            expected = int(len(chunk.labels))
+            if int(batch_predictions.shape[0]) != expected:
+                raise RuntimeError(
+                    "Distance-matrix batch prediction count mismatch: "
+                    f"expected={expected} got={batch_predictions.shape[0]}"
+                )
+            yield _PredictedDistanceMatrixChunk(
+                chunk=chunk,
+                predictions=np.asarray(batch_predictions, dtype=np.float64),
+                batch_seconds=float(batch_seconds),
+            )
+            chunk_count += 1
+        logger.info(
+            "Telemetry: distance_matrix_chunking backend=rust chunks=%d run_id=%s",
+            chunk_count,
+            runtime_context.run_id,
+        )
+
+    def _iter_python_predicted_distance_matrix_batches(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        partial_supervision: dict[tuple[str, str], int | float],
+        *,
+        incremental_dont_use_cluster_seeds: bool,
+        runtime_context: RuntimeContext,
+        num_pairs: int,
+    ):
+        helper_output = self.distance_matrix_helper(
+            block_dict,
+            dataset,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+        )
+        batch_num = 0
+        num_batches = math.ceil(num_pairs / self.batch_size) if num_pairs > 0 else 0
+        while True:
+            logger.info(f"Featurizing batch {batch_num}/{num_batches}")
+            count = 0
+            pairs: list[tuple[str, str, float]] = []
+            indices: list[tuple[int, int]] = []
+            blocks: list[str] = []
+            for item in helper_output:
+                pairs.append(item[0])
+                indices.append(item[1])
+                blocks.append(item[2])
+                count += 1
+                if count == self.batch_size:
+                    break
+
+            if len(pairs) == 0:
+                break
+
+            batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
+                pairs,
+                dataset,
+                self.featurizer_info,
+                self.n_jobs,
+                use_cache=self.use_cache,
+                chunk_size=DEFAULT_CHUNK_SIZE,
+                nameless_featurizer_info=self.nameless_featurizer_info,
+                runtime_context=runtime_context,
+            )
+            batch_predictions, batch_seconds = _predict_and_combine(
+                self.classifier,
+                self.nameless_classifier,
+                batch_features,
+                batch_labels,
+                batch_nameless_features,
+                batch_num,
+                num_threads=self.n_jobs,
+                runtime_context=runtime_context,
+            )
+            yield _PredictedDistanceMatrixBatch(
+                batch_num=int(batch_num),
+                blocks=blocks,
+                indices=indices,
+                predictions=np.asarray(batch_predictions, dtype=np.float64),
+                batch_seconds=float(batch_seconds),
+            )
+
+            if count < self.batch_size:
+                break
+            batch_num += 1
+
+    def _featurize_predict_write_batches(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        partial_supervision: dict[tuple[str, str], int | float],
+        *,
+        incremental_dont_use_cluster_seeds: bool,
+        runtime_context: RuntimeContext,
+        num_pairs: int,
+        write_prediction: Callable[[str, tuple[int, int], float], None],
+        on_block_start: Callable[[str], None] | None = None,
+        post_block_callback: Callable[[str], None] | None = None,
+        disable_tqdm: bool = True,
+        tqdm_desc: str = "Writing matrices",
+    ) -> float:
+        model_predict_seconds = 0.0
+        prev_block_key = ""
+        for batch in self._iter_python_predicted_distance_matrix_batches(
+            block_dict,
+            dataset,
+            partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            num_pairs=num_pairs,
+        ):
+            model_predict_seconds += batch.batch_seconds
+            batch_iter = tqdm(
+                enumerate(batch.predictions),
+                total=len(batch.predictions),
+                desc=tqdm_desc,
+                disable=disable_tqdm,
+            )
+            for within_batch_index, prediction in batch_iter:
+                block_key = batch.blocks[within_batch_index]
+                if block_key != prev_block_key:
+                    if prev_block_key != "" and post_block_callback is not None:
+                        post_block_callback(prev_block_key)
+                    if on_block_start is not None:
+                        on_block_start(block_key)
+                write_prediction(block_key, batch.indices[within_batch_index], float(prediction))
+                prev_block_key = block_key
+
+        if prev_block_key != "" and post_block_callback is not None:
+            post_block_callback(prev_block_key)
+        return float(model_predict_seconds)
 
     def make_distance_matrices(
         self,
@@ -1412,7 +1749,7 @@ class Clusterer:
         disable_tqdm: bool
             whether to turn off the tqdm progress bars in this function
         incremental_dont_use_cluster_seeds: bool
-            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
+            whether to ignore dataset cluster seeds while resolving constraints in incremental flows
 
         Returns
         -------
@@ -1445,28 +1782,17 @@ class Clusterer:
 
         model_predict_seconds = 0.0
         if use_rust_blockwise:
-            chunk_count = 0
-            helper_output = self._distance_matrix_chunk_helper_rust(
+            for prediction_chunk in self._iter_rust_predicted_distance_matrix_chunks(
                 block_dict,
                 dataset,
                 partial_supervision,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
-            )
-            for chunk in helper_output:
-                batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
-                    chunk,
-                    dataset,
-                    runtime_context,
-                    batch_label=f"chunk_{chunk_count}",
-                )
-                model_predict_seconds += batch_seconds
+            ):
+                chunk = prediction_chunk.chunk
+                batch_predictions = prediction_chunk.predictions
+                model_predict_seconds += prediction_chunk.batch_seconds
                 expected = int(len(chunk.labels))
-                if int(batch_predictions.shape[0]) != int(expected):
-                    raise RuntimeError(
-                        "Distance-matrix batch prediction count mismatch: "
-                        f"expected={expected} got={batch_predictions.shape[0]}"
-                    )
                 pairwise_proba = pairwise_probas[chunk.block_key]
                 if isinstance(self.cluster_model, FastCluster):
                     start = int(chunk.start_offset)
@@ -1477,91 +1803,49 @@ class Clusterer:
                         batch_predictions,
                         dtype=pairwise_proba.dtype,
                     )
-                chunk_count += 1
-            logger.info(
-                "Telemetry: distance_matrix_chunking backend=rust chunks=%d run_id=%s",
-                chunk_count,
-                runtime_context.run_id,
-            )
         else:
-            # featurize and predict in batches
-            helper_output = self.distance_matrix_helper(
+            fastcluster_write_indices: dict[str, int] = defaultdict(int)
+
+            def _write_prediction(
+                block_key: str,
+                index_pair: tuple[int, int],
+                prediction: float,
+            ) -> None:
+                pairwise_proba = pairwise_probas[block_key]
+                if isinstance(self.cluster_model, FastCluster):
+                    write_index = fastcluster_write_indices[block_key]
+                    if write_index >= len(pairwise_proba):
+                        raise RuntimeError(
+                            "FastCluster pairwise probability write overflow: "
+                            f"block={block_key} index={write_index} capacity={len(pairwise_proba)}"
+                        )
+                    pairwise_proba[write_index] = prediction
+                    fastcluster_write_indices[block_key] = write_index + 1
+                else:
+                    i, j = index_pair
+                    pairwise_proba[i, j] = prediction
+
+            model_predict_seconds += self._featurize_predict_write_batches(
                 block_dict,
                 dataset,
                 partial_supervision,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
+                num_pairs=num_pairs,
+                write_prediction=_write_prediction,
+                disable_tqdm=disable_tqdm,
+                tqdm_desc="Writing matrices",
             )
 
-            prev_block_key = ""
-            batch_num = 0
-            num_batches = math.ceil(num_pairs / self.batch_size)
-            while True:
-                logger.info(f"Featurizing batch {batch_num}/{num_batches}")
-                count = 0
-                pairs = []
-                indices = []
-                blocks = []
-                # iterate over a batch_size number of pairs
-                for item in helper_output:
-                    pairs.append(item[0])
-                    indices.append(item[1])
-                    blocks.append(item[2])
-                    count += 1
-                    if count == self.batch_size:
-                        break
-
-                if len(pairs) == 0:
-                    break
-
-                batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
-                    pairs,
-                    dataset,
-                    self.featurizer_info,
-                    self.n_jobs,
-                    use_cache=self.use_cache,
-                    chunk_size=DEFAULT_CHUNK_SIZE,
-                    nameless_featurizer_info=self.nameless_featurizer_info,
-                    runtime_context=runtime_context,
-                )
-                batch_predictions, batch_seconds = _predict_and_combine(
-                    self.classifier,
-                    self.nameless_classifier,
-                    batch_features,
-                    batch_labels,
-                    batch_nameless_features,
-                    batch_num,
-                    None,
-                    num_threads=self.n_jobs,
-                    runtime_context=runtime_context,
-                )
-                model_predict_seconds += batch_seconds
-
-                for within_batch_index, prediction in tqdm(
-                    enumerate(batch_predictions),
-                    total=len(batch_predictions),
-                    desc="Writing matrices",
-                    disable=disable_tqdm,
-                ):
-                    block_key = blocks[within_batch_index]
-                    if block_key != prev_block_key:
-                        block_key_start_index = blocks.index(block_key) + (batch_num * self.batch_size)
-                        pairwise_proba = pairwise_probas[block_key]
-
-                    if isinstance(self.cluster_model, FastCluster):
-                        index = (batch_num * self.batch_size + within_batch_index) - block_key_start_index
-
-                        pairwise_proba[index] = prediction
-                    else:
-                        i, j = indices[within_batch_index]
-                        pairwise_proba[i, j] = prediction
-
-                    prev_block_key = block_key
-
-                if count < self.batch_size:
-                    break
-
-                batch_num += 1
+            if isinstance(self.cluster_model, FastCluster):
+                for block_key, pairwise_proba in pairwise_probas.items():
+                    expected_pairs = int(len(pairwise_proba))
+                    observed_pairs = int(fastcluster_write_indices.get(block_key, 0))
+                    if observed_pairs != expected_pairs:
+                        raise RuntimeError(
+                            "FastCluster pairwise probability fill mismatch: "
+                            f"block={block_key} expected_pairs={expected_pairs} observed_pairs={observed_pairs}"
+                        )
 
         if not isinstance(self.cluster_model, FastCluster):
             for pairwise_proba in pairwise_probas.values():
@@ -1641,7 +1925,7 @@ class Clusterer:
             f1s = []
             ratios = []
             for val_dataset, val_block_dict, val_cluster_to_signatures, val_dists in zip(
-                val_datasets_list, val_block_dict_list, val_cluster_to_signatures_list, val_dists_list, strict=False
+                val_datasets_list, val_block_dict_list, val_cluster_to_signatures_list, val_dists_list, strict=True
             ):
                 pred_clusters, _ = self.predict(
                     val_block_dict,
@@ -1704,6 +1988,221 @@ class Clusterer:
         else:
             self.cluster_model.set_params(**params)
 
+    def _build_subblocked_block_dict(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        *,
+        batching_threshold: int,
+    ) -> dict[str, list[str]]:
+        block_dict_subblocked: dict[str, list[str]] = {}
+        for block_key in sorted(block_dict):
+            block_signatures = block_dict[block_key]
+            if len(block_signatures) > batching_threshold:
+                subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
+                for subblock_key in sorted(subblocks):
+                    subblock_signatures = subblocks[subblock_key]
+                    block_dict_subblocked[f"{block_key}|subblock={subblock_key}"] = subblock_signatures
+                    assert len(subblock_signatures) <= batching_threshold, "Subblock is too big for some reason!"
+            else:
+                block_dict_subblocked[block_key] = block_signatures
+        return block_dict_subblocked
+
+    def _partition_subblocked_first_name_groups(
+        self,
+        block_dict_subblocked: dict[str, list[str]],
+        dataset: ANDData,
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], bool]:
+        single_letter = {
+            block_key: block_signatures
+            for block_key, block_signatures in block_dict_subblocked.items()
+            if len(_signature_first_for_rules(dataset.signatures[block_signatures[0]])) <= 1
+        }
+        multiple_letter = {
+            block_key: block_signatures
+            for block_key, block_signatures in block_dict_subblocked.items()
+            if block_key not in single_letter
+        }
+        if len(multiple_letter) == 0:
+            return single_letter, {}, True
+        return multiple_letter, single_letter, False
+
+    def _predict_subblocked_multiple_letter_groups(
+        self,
+        block_dict_multiple_letter: dict[str, list[str]],
+        *,
+        alert_flag: bool,
+        dataset: ANDData,
+        cluster_model_params: dict[str, Any] | None,
+        partial_supervision: dict[tuple[str, str], int | float],
+        use_s2_clusters: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        runtime_context: RuntimeContext,
+    ) -> dict[str, list[str]]:
+        pred_clusters: dict[str, list[str]] = {}
+        if len(block_dict_multiple_letter) == 0:
+            return pred_clusters
+
+        if alert_flag:
+            logger.info("Note! There are no subblocks with multiple letter first names")
+            logger.info("Running predict on subblocks with single letter first names")
+        else:
+            logger.info("Running predict on subblocks with multiple letter first names")
+
+        predict_times: dict[str, float] = {}
+        for block_key in sorted(block_dict_multiple_letter):
+            block_signatures = block_dict_multiple_letter[block_key]
+            logger.info(f"Working on subblock {block_key}")
+            start = time.time()
+            pred_clusters_intermediate, _ = self.predict_helper(
+                {block_key: block_signatures},
+                dataset,
+                dists=None,
+                cluster_model_params=cluster_model_params,
+                partial_supervision=partial_supervision,
+                use_s2_clusters=use_s2_clusters,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                runtime_context=runtime_context,
+            )
+            end = time.time()
+            predict_times[block_key] = end - start
+            pred_clusters.update(pred_clusters_intermediate)
+        logger.info(f"Finished, here's how long each took: {predict_times}")
+        return pred_clusters
+
+    def _predict_subblocked_single_letter_incremental_groups(
+        self,
+        block_dict_single_letter: dict[str, list[str]],
+        *,
+        pred_clusters: dict[str, list[str]],
+        desired_memory_use: int,
+        dataset: ANDData,
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+    ) -> dict[str, list[str]]:
+        if len(block_dict_single_letter) == 0:
+            return pred_clusters
+
+        logger.info("Running predict incremental on subblocks with single letter first names")
+        cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
+        dataset.cluster_seeds_require = {}
+        for cluster_id, signatures in pred_clusters.items():
+            for signature in signatures:
+                dataset.cluster_seeds_require[signature] = cluster_id
+        _bump_cluster_seeds_version(dataset)
+        _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
+
+        predict_times: dict[str, float] = {}
+        pred_clusters_intermediate: dict[str, list[str]] = pred_clusters
+        for block_key in sorted(block_dict_single_letter.keys()):
+            block_signatures = block_dict_single_letter[block_key]
+            n_assigned = len(dataset.cluster_seeds_require)
+            actual_memory_usage = len(block_signatures) * n_assigned
+            logger.debug(
+                "Incremental batching memory probe: "
+                "n_seeds=%d n_signatures=%d desired_memory_use=%d actual_memory_usage=%d",
+                n_assigned,
+                len(block_signatures),
+                int(desired_memory_use),
+                int(actual_memory_usage),
+            )
+            if n_assigned <= 0:
+                loop_batching_threshold = None
+            elif actual_memory_usage > desired_memory_use:
+                loop_batching_threshold = max(1, int(desired_memory_use / n_assigned))
+            else:
+                loop_batching_threshold = None
+            logger.info(f"Working on subblock {block_key} with computed batching threshold {loop_batching_threshold}")
+            start_predict_time = time.time()
+            incremental_result = self.predict_incremental(
+                block_signatures,
+                dataset,
+                prevent_new_incompatibilities=True,
+                batching_threshold=loop_batching_threshold,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+            )
+            clusters_payload = incremental_result.get("clusters")
+            if not isinstance(clusters_payload, dict):
+                raise RuntimeError(
+                    "predict_incremental returned invalid clusters payload; expected dict "
+                    f"got {type(clusters_payload).__name__}"
+                )
+            pred_clusters_intermediate = {}
+            for cluster_id, signatures in clusters_payload.items():
+                if not isinstance(signatures, list):
+                    raise RuntimeError(
+                        "predict_incremental returned invalid cluster member payload; expected list "
+                        f"for cluster_id={cluster_id!r}, got {type(signatures).__name__}"
+                    )
+                pred_clusters_intermediate[str(cluster_id)] = [str(signature) for signature in signatures]
+            end_predict_time = time.time()
+            predict_times[block_key] = end_predict_time - start_predict_time
+
+            dataset.cluster_seeds_require = {}
+            for cluster_id, signatures in pred_clusters_intermediate.items():
+                for signature in signatures:
+                    dataset.cluster_seeds_require[signature] = cluster_id
+            _bump_cluster_seeds_version(dataset)
+            _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
+
+        logger.info(f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}")
+        dataset.cluster_seeds_require = cluster_seeds_require_original
+        _bump_cluster_seeds_version(dataset)
+        _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
+        return pred_clusters_intermediate
+
+    def _predict_subblocked(
+        self,
+        block_dict: dict[str, list[str]],
+        dataset: ANDData,
+        *,
+        cluster_model_params: dict[str, Any] | None,
+        partial_supervision: dict[tuple[str, str], int | float],
+        use_s2_clusters: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        batching_threshold: int,
+        desired_memory_use: int | None,
+        runtime_context: RuntimeContext,
+        dists: dict[str, np.ndarray] | None,
+    ) -> tuple[dict[str, list[str]], None]:
+        assert batching_threshold > 0, "Batching threshold must be positive"
+        assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
+        effective_desired_memory_use = (
+            int(desired_memory_use) if desired_memory_use is not None else batching_threshold * batching_threshold
+        )
+
+        block_dict_subblocked = self._build_subblocked_block_dict(
+            block_dict,
+            dataset,
+            batching_threshold=batching_threshold,
+        )
+        (
+            block_dict_multiple_letter_first_names,
+            block_dict_single_letter_first_names,
+            alert_flag,
+        ) = self._partition_subblocked_first_name_groups(block_dict_subblocked, dataset)
+
+        pred_clusters = self._predict_subblocked_multiple_letter_groups(
+            block_dict_multiple_letter_first_names,
+            alert_flag=alert_flag,
+            dataset=dataset,
+            cluster_model_params=cluster_model_params,
+            partial_supervision=partial_supervision,
+            use_s2_clusters=use_s2_clusters,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+        )
+        pred_clusters = self._predict_subblocked_single_letter_incremental_groups(
+            block_dict_single_letter_first_names,
+            pred_clusters=pred_clusters,
+            desired_memory_use=effective_desired_memory_use,
+            dataset=dataset,
+            partial_supervision=partial_supervision,
+            runtime_context=runtime_context,
+        )
+        return dict(pred_clusters), None
+
     def predict(
         self,
         block_dict: dict[str, list[str]],
@@ -1735,8 +2234,7 @@ class Clusterer:
         use_s2_clusters: bool
             whether to "predict" using the clusters from Semantic Scholar's old system
         incremental_dont_use_cluster_seeds: bool
-            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
-            Don't use if you don't know what this is
+            whether to ignore dataset cluster seeds while resolving constraints in incremental flows
         batching_threshold: int
             If the number of signatures in a block is above this number, we will use subblocking on the block.
             This means that the single-letter first names will be sent through via predict_incremental.
@@ -1763,167 +2261,19 @@ class Clusterer:
         if partial_supervision is None:
             partial_supervision = {}
 
-        # The approach will be to (1) take every block, apply subblocking function to it.
-        # (2) Then run the clusterer on the subblocked blocks, taking care to remove subblocks that are
-        # single-letter first names.
-        # (3) Then run predict incremental on the single-letter first names.
         if batching_threshold is not None:
-            assert batching_threshold > 0, "Batching threshold must be positive"
-            assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
-
-            if desired_memory_use is None:
-                desired_memory_use = batching_threshold * batching_threshold
-
-            # run subblocking on each block in the block_dict
-            block_dict_subblocked: dict[str, list[str]] = {}
-            for block_key in sorted(block_dict):
-                block_signatures = block_dict[block_key]
-                if len(block_signatures) > batching_threshold:
-                    # run subblocking on this block
-                    subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
-                    # add these subblocks to the block_dict
-                    for subblock_key in sorted(subblocks):
-                        subblock_signatures = subblocks[subblock_key]
-                        block_dict_subblocked[f"{block_key}|subblock={subblock_key}"] = subblock_signatures
-                        assert len(subblock_signatures) <= batching_threshold, "Subblock is too big for some reason!"
-                else:
-                    # add this block to the block_dict_subblocked
-                    block_dict_subblocked[block_key] = block_signatures
-
-            # now run predict_helper on the blocks in block_dict_subblocked
-            # pull out all of the ones that are single-letter first names
-            block_dict_subblocked_single_letter_first_names = {
-                block_key: block_signatures
-                for block_key, block_signatures in block_dict_subblocked.items()
-                if len(_signature_first_for_rules(dataset.signatures[block_signatures[0]])) <= 1
-            }
-            block_dict_subblocked_multiple_letter_first_names = {
-                block_key: block_signatures
-                for block_key, block_signatures in block_dict_subblocked.items()
-                if block_key not in block_dict_subblocked_single_letter_first_names
-            }
-
-            # edge case: where there are no block_dict_subblocked_multiple_letter_first_names
-            # so then it makes no sense to (1) run predict on multiple letters and (2) incremental on single.
-            # the only thing we can do is run predict on the multi.
-            if len(block_dict_subblocked_multiple_letter_first_names) == 0:
-                # not really true, but it makes the code much easier below
-                alert_flag = True
-                block_dict_subblocked_multiple_letter_first_names = block_dict_subblocked_single_letter_first_names
-                block_dict_subblocked_single_letter_first_names = {}
-            else:
-                alert_flag = False
-
-            pred_clusters = {}
-            # ideally we would batch the subblocks for predictions
-            # but it's hard to know how to batch since this can be called
-            # from inside of predict_incremental, which has different OOM behavior.
-            # so just doing it one at a time here
-            if len(block_dict_subblocked_multiple_letter_first_names) > 0:
-                if alert_flag:
-                    logger.info("Note! There are no subblocks with multiple letter first names")
-                    logger.info("Running predict on subblocks with single letter first names")
-                else:
-                    logger.info("Running predict on subblocks with multiple letter first names")
-                predict_times = {}
-                for block_key in sorted(block_dict_subblocked_multiple_letter_first_names):
-                    block_signatures = block_dict_subblocked_multiple_letter_first_names[block_key]
-                    logger.info(f"Working on subblock {block_key}")
-                    start = time.time()
-                    pred_clusters_intermediate, _ = self.predict_helper(
-                        {block_key: block_signatures},
-                        dataset,
-                        None,  # precomputed dists is too hard to do here
-                        cluster_model_params,
-                        partial_supervision,
-                        use_s2_clusters,
-                        incremental_dont_use_cluster_seeds,
-                        runtime_context=runtime_context,
-                    )
-                    end = time.time()
-                    total_predict_time = end - start
-                    predict_times[block_key] = total_predict_time
-                    pred_clusters.update(pred_clusters_intermediate)
-                logger.info(f"Finished, here's how long each took: {predict_times}")
-            # now we run predict_incremental on the single-letter first name blocks, one block at a time
-            # and we will be using the pred_clusters as cluster_seeds_require because
-            # that's how predict_incremental works: cluster_seeds_require is what is already clustered
-            # and the input to predict_incremental will be assigned into those seed clusters
-            # note: storing the original cluster_seeds_require so we can restore it later
-            if len(block_dict_subblocked_single_letter_first_names) > 0:
-                logger.info("Running predict incremental on subblocks with single letter first names")
-                cluster_seeds_require_original = copy.deepcopy(dataset.cluster_seeds_require)
-                dataset.cluster_seeds_require = {}
-                for cluster_id, signatures in pred_clusters.items():
-                    for signature in signatures:
-                        dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
-                _bump_cluster_seeds_version(dataset)
-                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
-
-                predict_times = {}
-                for block_key in sorted(block_dict_subblocked_single_letter_first_names, key=str):
-                    block_signatures = block_dict_subblocked_single_letter_first_names[block_key]
-                    # we have to be super careful here and adjust the batching threshold take into account
-                    # the implied requirement of passing batching_threshold into batch predict:
-                    # it essentially assumes that max memory is batching_threshold ** 2,
-                    # but it could be MUCH bigger here since predict incremental memory use is up to
-                    # (batching_threshold * (total_block_size - batching_threshold))
-                    # so we need a special batching_threshold just for this operation
-
-                    # this is the number of signatures already assigned
-                    N = len(dataset.cluster_seeds_require)
-                    actual_memory_usage = len(block_signatures) * N
-                    logger.debug(
-                        "Incremental batching memory probe: "
-                        "n_seeds=%d n_signatures=%d desired_memory_use=%d actual_memory_usage=%d",
-                        N,
-                        len(block_signatures),
-                        int(desired_memory_use),
-                        int(actual_memory_usage),
-                    )
-                    if N <= 0:
-                        loop_batching_threshold = None  # type: ignore
-                    elif actual_memory_usage > desired_memory_use:
-                        # we need to have a loop_batching_threshold such that
-                        # loop_batching_threshold * N = desired_memory_use
-                        loop_batching_threshold = max(1, int(desired_memory_use / N))
-                    else:
-                        # already within memory limits using no batching
-                        loop_batching_threshold = None  # type: ignore
-                    logger.info(
-                        f"Working on subblock {block_key} with computed batching threshold {loop_batching_threshold}"
-                    )
-                    start_predict_time = time.time()
-                    incremental_result = self.predict_incremental(
-                        block_signatures,
-                        dataset,
-                        prevent_new_incompatibilities=True,
-                        batching_threshold=loop_batching_threshold,
-                        partial_supervision=partial_supervision,
-                        runtime_context=runtime_context,
-                    )
-                    pred_clusters_intermediate = incremental_result["clusters"]
-                    end_predict_time = time.time()
-                    total_predict_time = end_predict_time - start_predict_time
-                    predict_times[block_key] = total_predict_time
-                    # again, make cluster seeds require
-                    dataset.cluster_seeds_require = {}
-                    for cluster_id, signatures in pred_clusters_intermediate.items():
-                        for signature in signatures:
-                            dataset.cluster_seeds_require[signature] = cluster_id  # type: ignore
-                    _bump_cluster_seeds_version(dataset)
-                    _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
-
-                # undoing the damage
-                logger.info(
-                    f"Finished subblocked predict incremental. Here's how long each subblock took: {predict_times}"
-                )
-                dataset.cluster_seeds_require = cluster_seeds_require_original
-                _bump_cluster_seeds_version(dataset)
-                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
-                # the output of predict_incremental_helper has the ENTIRE clustering, not just the new stuff
-                pred_clusters = pred_clusters_intermediate
-            dists = None
+            pred_clusters, dists = self._predict_subblocked(
+                block_dict,
+                dataset,
+                cluster_model_params=cluster_model_params,
+                partial_supervision=partial_supervision,
+                use_s2_clusters=use_s2_clusters,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                batching_threshold=int(batching_threshold),
+                desired_memory_use=desired_memory_use,
+                runtime_context=runtime_context,
+                dists=dists,
+            )
 
         else:
             # normal mode - everything goes through full block clustering
@@ -1932,11 +2282,11 @@ class Clusterer:
             pred_clusters, dists = self.predict_helper(
                 block_dict,
                 dataset,
-                dists,
-                cluster_model_params,
-                partial_supervision,
-                use_s2_clusters,
-                incremental_dont_use_cluster_seeds,
+                dists=dists,
+                cluster_model_params=cluster_model_params,
+                partial_supervision=partial_supervision,
+                use_s2_clusters=use_s2_clusters,
+                incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
             )
             end = time.time()
@@ -1962,19 +2312,26 @@ class Clusterer:
 
         cluster_model = self.set_params(cluster_model_params, clone_flag=True)
         with warnings.catch_warnings():
+            # annoying sparse matrix not sorted warning
             warnings.simplefilter("ignore", category=EfficiencyWarning)
             cluster_model.fit(dist_matrix)
         labels = cluster_model.labels_
         max_label = labels.max()
+        # In HDBSCAN, label -1 denotes outliers.
+        # Give each outlier its own unique label starting at max_label + 1.
         negative_one_label_locations = np.where(labels == -1)[0]
         for i, loc in enumerate(negative_one_label_locations):
             labels[loc] = max_label + 1 + i
         if self.use_default_constraints_as_supervision:
             disallow_signature_ids = all_disallow_signature_ids
             inverse_id_map = defaultdict(set)
-            for signature_id, label in zip(block_signatures, labels, strict=False):
+            for signature_id, label in zip(block_signatures, labels, strict=True):
                 if signature_id in dataset.cluster_seeds_require and signature_id not in disallow_signature_ids:
                     inverse_id_map[dataset.cluster_seeds_require[signature_id]].add(label)
+            # Clusters that should merge can still remain split after distance-based clustering.
+            # This happens when required-pair zero distances are outweighed by many large distances
+            # in average-linkage behavior. Post-hoc, merge label sets that overlap according to
+            # cluster_seeds_require (excluding signatures that appear in disallow constraints).
             to_join_sets = [sorted(join_set) for join_set in inverse_id_map.values() if len(join_set) > 1]
             mapped_labels = {label: label for label in labels}
             labels = np.array(labels)
@@ -2014,7 +2371,7 @@ class Clusterer:
         use_s2_clusters: bool
             whether to "predict" using the clusters from Semantic Scholar's old system
         incremental_dont_use_cluster_seeds: bool
-            Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
+            whether to ignore dataset cluster seeds while resolving constraints in incremental flows
 
         Returns
         -------
@@ -2027,6 +2384,7 @@ class Clusterer:
 
         if partial_supervision is None:
             partial_supervision = {}
+        _apply_dataset_name_count_semantics_for_prediction(self, dataset)
 
         pred_clusters = defaultdict(list)
 
@@ -2038,6 +2396,7 @@ class Clusterer:
 
             return dict(pred_clusters), dists
 
+        # we may need this set later for post-hoc merging
         # pre-compute disallow set for post-hoc constraint merging
         all_disallow_signature_ids: set[str] = set()
         if self.use_default_constraints_as_supervision:
@@ -2068,7 +2427,7 @@ class Clusterer:
                     dataset,
                     all_disallow_signature_ids,
                 )
-                for signature, label in zip(block_dict[block_key], labels, strict=False):
+                for signature, label in zip(block_dict[block_key], labels, strict=True):
                     pred_clusters[block_key + "_" + str(label)].append(signature)
             return dict(pred_clusters), dists
 
@@ -2084,32 +2443,27 @@ class Clusterer:
         model_predict_seconds = 0.0
         use_rust_blockwise = stage_uses_rust(runtime_context)
         if use_rust_blockwise:
-            chunk_count = 0
-            helper_output = self._distance_matrix_chunk_helper_rust(
+            for prediction_chunk in self._iter_rust_predicted_distance_matrix_chunks(
                 block_dict,
                 dataset,
                 partial_supervision,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
-            )
-            for chunk in helper_output:
+            ):
+                chunk = prediction_chunk.chunk
                 block_key = chunk.block_key
                 if block_key != prev_block_key:
                     # cluster the completed block
-                    if prev_block_key != "" and pairwise_proba is not None:
-                        if not isinstance(self.cluster_model, FastCluster):
-                            pairwise_proba += pairwise_proba.T
-                            np.fill_diagonal(pairwise_proba, 0)
-                        labels = self._cluster_one_block(
-                            block_dict[prev_block_key],
-                            pairwise_proba,
-                            effective_cluster_model_params,
-                            dataset,
-                            all_disallow_signature_ids,
-                        )
-                        for signature, label in zip(block_dict[prev_block_key], labels, strict=False):
-                            pred_clusters[prev_block_key + "_" + str(label)].append(signature)
-                        del pairwise_proba
+                    self._flush_completed_block(
+                        block_key=prev_block_key,
+                        pairwise_proba=pairwise_proba,
+                        block_dict=block_dict,
+                        effective_cluster_model_params=effective_cluster_model_params,
+                        dataset=dataset,
+                        all_disallow_signature_ids=all_disallow_signature_ids,
+                        pred_clusters=pred_clusters,
+                    )
+                    pairwise_proba = None
 
                     # allocate new block's matrix
                     seen_block_keys.add(block_key)
@@ -2121,13 +2475,8 @@ class Clusterer:
                     else:
                         pairwise_proba = np.zeros((chunk.block_size, chunk.block_size), dtype=np.float16)
 
-                batch_predictions, batch_seconds = self._predict_distance_matrix_chunk(
-                    chunk,
-                    dataset,
-                    runtime_context,
-                    batch_label=f"chunk_{chunk_count}",
-                )
-                model_predict_seconds += batch_seconds
+                batch_predictions = prediction_chunk.predictions
+                model_predict_seconds += prediction_chunk.batch_seconds
                 assert pairwise_proba is not None
                 if isinstance(self.cluster_model, FastCluster):
                     start = int(chunk.start_offset)
@@ -2139,123 +2488,70 @@ class Clusterer:
                         dtype=pairwise_proba.dtype,
                     )
                 prev_block_key = block_key
-                chunk_count += 1
-            logger.info(
-                "Telemetry: distance_matrix_chunking backend=rust chunks=%d run_id=%s",
-                chunk_count,
-                runtime_context.run_id,
+
+            # cluster the final block
+            self._flush_completed_block(
+                block_key=prev_block_key,
+                pairwise_proba=pairwise_proba,
+                block_dict=block_dict,
+                effective_cluster_model_params=effective_cluster_model_params,
+                dataset=dataset,
+                all_disallow_signature_ids=all_disallow_signature_ids,
+                pred_clusters=pred_clusters,
             )
         else:
-            helper_output = self.distance_matrix_helper(
+            block_pair_index = 0
+
+            def _on_block_start(block_key: str) -> None:
+                nonlocal pairwise_proba, block_pair_index
+                pairwise_proba = None
+                seen_block_keys.add(block_key)
+                block_size = len(block_dict[block_key])
+                if isinstance(self.cluster_model, FastCluster):
+                    pairwise_proba = np.zeros(
+                        block_size * (block_size - 1) // 2,
+                        dtype=fastcluster_fused_dtype,
+                    )
+                else:
+                    pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
+                block_pair_index = 0
+
+            def _write_prediction(
+                _block_key: str,
+                index_pair: tuple[int, int],
+                prediction: float,
+            ) -> None:
+                nonlocal block_pair_index
+                assert pairwise_proba is not None
+                if isinstance(self.cluster_model, FastCluster):
+                    pairwise_proba[block_pair_index] = prediction
+                else:
+                    i, j = index_pair
+                    pairwise_proba[i, j] = prediction
+                block_pair_index += 1
+
+            def _post_block_callback(block_key: str) -> None:
+                self._flush_completed_block(
+                    block_key=block_key,
+                    pairwise_proba=pairwise_proba,
+                    block_dict=block_dict,
+                    effective_cluster_model_params=effective_cluster_model_params,
+                    dataset=dataset,
+                    all_disallow_signature_ids=all_disallow_signature_ids,
+                    pred_clusters=pred_clusters,
+                )
+
+            model_predict_seconds += self._featurize_predict_write_batches(
                 block_dict,
                 dataset,
                 partial_supervision,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
+                num_pairs=num_pairs,
+                write_prediction=_write_prediction,
+                on_block_start=_on_block_start,
+                post_block_callback=_post_block_callback,
             )
-            batch_num = 0
-            num_batches = math.ceil(num_pairs / self.batch_size) if num_pairs > 0 else 0
-            block_pair_index = 0
-            while True:
-                logger.info(f"Featurizing batch {batch_num}/{num_batches}")
-                count = 0
-                pairs: list = []
-                indices: list = []
-                blocks: list = []
-                for item in helper_output:
-                    pairs.append(item[0])
-                    indices.append(item[1])
-                    blocks.append(item[2])
-                    count += 1
-                    if count == self.batch_size:
-                        break
-
-                if len(pairs) == 0:
-                    break
-
-                batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
-                    pairs,
-                    dataset,
-                    self.featurizer_info,
-                    self.n_jobs,
-                    use_cache=self.use_cache,
-                    chunk_size=DEFAULT_CHUNK_SIZE,
-                    nameless_featurizer_info=self.nameless_featurizer_info,
-                    runtime_context=runtime_context,
-                )
-                batch_predictions, batch_seconds = _predict_and_combine(
-                    self.classifier,
-                    self.nameless_classifier,
-                    batch_features,
-                    batch_labels,
-                    batch_nameless_features,
-                    batch_num,
-                    None,
-                    num_threads=self.n_jobs,
-                    runtime_context=runtime_context,
-                )
-                model_predict_seconds += batch_seconds
-
-                for within_batch_index, prediction in enumerate(batch_predictions):
-                    block_key = blocks[within_batch_index]
-                    if block_key != prev_block_key:
-                        # cluster the completed block
-                        if prev_block_key != "" and pairwise_proba is not None:
-                            if not isinstance(self.cluster_model, FastCluster):
-                                pairwise_proba += pairwise_proba.T
-                                np.fill_diagonal(pairwise_proba, 0)
-                            labels = self._cluster_one_block(
-                                block_dict[prev_block_key],
-                                pairwise_proba,
-                                effective_cluster_model_params,
-                                dataset,
-                                all_disallow_signature_ids,
-                            )
-                            for signature, label in zip(block_dict[prev_block_key], labels, strict=False):
-                                pred_clusters[prev_block_key + "_" + str(label)].append(signature)
-                            del pairwise_proba
-
-                        # allocate new block's matrix
-                        seen_block_keys.add(block_key)
-                        block_size = len(block_dict[block_key])
-                        if isinstance(self.cluster_model, FastCluster):
-                            pairwise_proba = np.zeros(
-                                block_size * (block_size - 1) // 2,
-                                dtype=fastcluster_fused_dtype,
-                            )
-                        else:
-                            pairwise_proba = np.zeros((block_size, block_size), dtype=np.float16)
-                        block_pair_index = 0
-
-                    if isinstance(self.cluster_model, FastCluster):
-                        assert pairwise_proba is not None
-                        pairwise_proba[block_pair_index] = prediction
-                    else:
-                        assert pairwise_proba is not None
-                        i, j = indices[within_batch_index]
-                        pairwise_proba[i, j] = prediction
-                    block_pair_index += 1
-                    prev_block_key = block_key
-
-                if count < self.batch_size:
-                    break
-                batch_num += 1
-
-        # cluster the final block
-        if prev_block_key != "" and pairwise_proba is not None:
-            if not isinstance(self.cluster_model, FastCluster):
-                pairwise_proba += pairwise_proba.T
-                np.fill_diagonal(pairwise_proba, 0)
-            labels = self._cluster_one_block(
-                block_dict[prev_block_key],
-                pairwise_proba,
-                effective_cluster_model_params,
-                dataset,
-                all_disallow_signature_ids,
-            )
-            for signature, label in zip(block_dict[prev_block_key], labels, strict=False):
-                pred_clusters[prev_block_key + "_" + str(label)].append(signature)
-            del pairwise_proba
 
         # handle singleton blocks (0 or 1 signature — never appeared in generator)
         for block_key in block_dict.keys():
@@ -2287,6 +2583,8 @@ class Clusterer:
             cluster_seeds_require_inverse[cluster_num].append(signature_id)
 
         # Split altered claimed profiles once so incremental assignment can map back to original cluster IDs.
+        # Claimed profiles from production can be "unnatural" with respect to S2AND constraints;
+        # this pre-split step aligns them to natural-looking clusters before adding new signatures.
         if dataset.altered_cluster_signatures is not None and len(dataset.altered_cluster_signatures) > 0:
             logger.info("Dealing with altered cluster signatures")
             altered_cluster_nums = set(
@@ -2294,12 +2592,16 @@ class Clusterer:
                 for altered_signature_id in dataset.altered_cluster_signatures
                 if altered_signature_id in dataset.cluster_seeds_require
             )
+            # It's possible an altered signature is not in cluster_seeds_require when
+            # a custom seed map is passed; skip those safely here.
             for altered_cluster_num in altered_cluster_nums:
                 signature_ids_for_cluster_num = cluster_seeds_require_inverse.get(altered_cluster_num, [])
                 if len(signature_ids_for_cluster_num) == 0:
                     continue
 
                 # During this pre-split, do not apply incoming cluster seeds as constraints.
+                # At this stage we are splitting claimed profiles to match S2AND predictions,
+                # so claimed-profile seeds should not bias the split.
                 reclustered_output, _ = self.predict_helper(
                     {"block": signature_ids_for_cluster_num},
                     dataset,
@@ -2313,9 +2615,160 @@ class Clusterer:
                     new_cluster_num = str(altered_cluster_num) + f"_{i}"
                     recluster_map[new_cluster_num] = altered_cluster_num
                     for reclustered_signature_id in new_cluster_of_signatures:
-                        cluster_seeds_require[reclustered_signature_id] = new_cluster_num  # type: ignore
+                        cluster_seeds_require[reclustered_signature_id] = new_cluster_num
 
         return cluster_seeds_require, recluster_map, cluster_seeds_require_inverse
+
+    def _process_phase_a_chunk(
+        self,
+        chunk_pairs_buffer: list[tuple[str, str, float]],
+        *,
+        dataset: ANDData,
+        cluster_seeds_require: dict[str, int | str],
+        signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]],
+        chunk_state: _PhaseAChunkState,
+        chunk_limits: IncrementalChunkLimits | None,
+        runtime_context: RuntimeContext,
+        total_ram_for_phase: int | None,
+        rss_before_bytes: int,
+    ) -> None:
+        if len(chunk_pairs_buffer) == 0:
+            return
+
+        chunk_state.chunk_pairs_peak = max(chunk_state.chunk_pairs_peak, len(chunk_pairs_buffer))
+        chunk_features, chunk_labels, chunk_nameless_features = many_pairs_featurize(
+            chunk_pairs_buffer,
+            dataset,
+            self.featurizer_info,
+            self.n_jobs,
+            use_cache=self.use_cache,
+            chunk_size=DEFAULT_CHUNK_SIZE,
+            nameless_featurizer_info=self.nameless_featurizer_info,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_for_phase,
+        )
+        chunk_feature_bytes = int(getattr(chunk_features, "nbytes", 0))
+        if chunk_nameless_features is not None:
+            chunk_feature_bytes += int(getattr(chunk_nameless_features, "nbytes", 0))
+        chunk_state.chunk_features_peak_bytes = max(chunk_state.chunk_features_peak_bytes, chunk_feature_bytes)
+        chunk_predictions, chunk_model_seconds = _predict_and_combine(
+            self.classifier,
+            self.nameless_classifier,
+            chunk_features,
+            chunk_labels,
+            chunk_nameless_features,
+            f"phase_a_chunk_{chunk_state.constraint_chunks_total + 1}",
+            num_threads=self.n_jobs,
+            runtime_context=runtime_context,
+        )
+        chunk_state.model_predict_total_seconds += chunk_model_seconds
+
+        for signature_pair, dist in zip(chunk_pairs_buffer, chunk_predictions, strict=True):
+            unassigned_signature, assigned_signature, _ = signature_pair
+            if assigned_signature not in cluster_seeds_require:
+                continue
+            cluster_id = cluster_seeds_require[assigned_signature]
+            cluster_sum_count = signature_to_cluster_sum_count.setdefault(unassigned_signature, {})
+            if cluster_id not in cluster_sum_count:
+                cluster_sum_count[cluster_id] = [0.0, 0]
+                chunk_state.accumulator_entries += 1
+            total_count = cluster_sum_count[cluster_id]
+            total_count[0] = float(total_count[0]) + float(dist)
+            total_count[1] = int(total_count[1]) + 1
+
+        chunk_state.constraint_pairs_total += len(chunk_pairs_buffer)
+        chunk_state.constraint_chunks_total += 1
+        chunk_state.accumulator_entries_peak = max(
+            chunk_state.accumulator_entries_peak,
+            int(chunk_state.accumulator_entries),
+        )
+
+        if (
+            not chunk_state.accumulator_warned
+            and chunk_limits is not None
+            and chunk_state.accumulator_entries >= int(chunk_limits["accumulator_warn"])
+        ):
+            chunk_state.accumulator_warned = True
+            logger.warning(
+                "Phase A accumulator approaching limit: entries=%d warn=%d max=%d run_id=%s",
+                chunk_state.accumulator_entries,
+                int(chunk_limits["accumulator_warn"]),
+                int(chunk_limits["accumulator_max"]),
+                runtime_context.run_id,
+            )
+
+        if chunk_limits is not None and chunk_state.accumulator_entries > int(chunk_limits["accumulator_max"]):
+            clusters_touched_avg = float(chunk_state.accumulator_entries) / float(
+                max(1, len(signature_to_cluster_sum_count))
+            )
+            logger.warning(
+                "Phase A accumulator exceeded limit: "
+                "entries=%d max=%d warn=%d "
+                "chunk_pairs=%d available_bytes=%d current_rss_bytes=%d "
+                "unassigned_signatures=%d clusters_touched_avg=%.3f run_id=%s. "
+                "Stopping Phase A early; remaining unassigned signatures will proceed "
+                "with partial seed distances.",
+                chunk_state.accumulator_entries,
+                int(chunk_limits["accumulator_max"]),
+                int(chunk_limits["accumulator_warn"]),
+                int(chunk_limits["chunk_pairs"]),
+                int(chunk_limits["available_bytes"]),
+                int(chunk_limits["current_rss_bytes"]),
+                len(signature_to_cluster_sum_count),
+                clusters_touched_avg,
+                runtime_context.run_id,
+            )
+            chunk_state.accumulator_overflow_early_stop = True
+            return
+
+        # Fallback accumulator bound when chunk_limits is None.
+        if chunk_limits is None and chunk_state.accumulator_entries > memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES:
+            logger.warning(
+                "Phase A accumulator exceeded fallback limit: "
+                "entries=%d max=%d run_id=%s. "
+                "Stopping Phase A early; remaining unassigned signatures will proceed "
+                "with partial seed distances. "
+                "Pass total_ram_bytes to enable proper memory budgeting.",
+                chunk_state.accumulator_entries,
+                memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES,
+                runtime_context.run_id,
+            )
+            chunk_state.accumulator_overflow_early_stop = True
+            return
+
+        if total_ram_for_phase is not None:
+            rss_now, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_phase)
+            chunk_state.rss_peak_bytes = max(chunk_state.rss_peak_bytes, rss_now)
+
+        # Fix #3: adaptive chunking — halve chunk_pairs if observed RSS delta exceeds prediction.
+        if total_ram_for_phase is not None and chunk_state.adaptive_halvings < 3:
+            acc_entry_bytes = int(memory_budget.INCREMENTAL_ACCUMULATOR_ENTRY_BYTES)
+            if chunk_limits is not None and "accumulator_entry_bytes" in chunk_limits:
+                acc_entry_bytes = int(chunk_limits["accumulator_entry_bytes"])
+            current_predicted_delta = (
+                chunk_state.chunk_features_peak_bytes
+                + chunk_state.accumulator_entries_peak * acc_entry_bytes
+                + chunk_state.chunk_pairs_peak * int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES)
+                + int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES)
+            )
+            current_observed_delta = max(0, chunk_state.rss_peak_bytes - rss_before_bytes)
+            if current_predicted_delta > 0 and current_observed_delta > current_predicted_delta * 1.2:
+                chunk_state.chunk_pairs = max(1, chunk_state.chunk_pairs // 2)
+                chunk_state.adaptive_halvings += 1
+                logger.warning(
+                    "Phase A adaptive chunking: observed_delta=%d > predicted_delta=%d * 1.2; "
+                    "halving chunk_pairs to %d (halving %d/3) run_id=%s",
+                    current_observed_delta,
+                    current_predicted_delta,
+                    chunk_state.chunk_pairs,
+                    chunk_state.adaptive_halvings,
+                    runtime_context.run_id,
+                )
+
+        del chunk_features
+        del chunk_nameless_features
+        del chunk_predictions
+        del chunk_labels
 
     def _phase_a_seed_distances(
         self,
@@ -2325,7 +2778,7 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]],
         chunk_pairs: int,
-        chunk_limits: dict[str, int | str | float] | None,
+        chunk_limits: IncrementalChunkLimits | None,
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
         constraint_backend: _IncrementalConstraintBackend | None = None,
@@ -2360,201 +2813,65 @@ class Clusterer:
             rss_peak_bytes=int(rss_peak_bytes),
         )
 
-        def _process_incremental_chunk(chunk_pairs_buffer: list[tuple[str, str, float]]) -> None:
-            nonlocal accumulator_entries
-            nonlocal accumulator_entries_peak
-            nonlocal accumulator_warned
-            nonlocal accumulator_overflow_early_stop
-            nonlocal constraint_pairs_total
-            nonlocal constraint_chunks_total
-            nonlocal model_predict_total_seconds
-            nonlocal rss_peak_bytes
-            nonlocal chunk_features_peak_bytes
-            nonlocal chunk_pairs_peak
-            nonlocal chunk_pairs
-            nonlocal adaptive_halvings
-
-            if len(chunk_pairs_buffer) == 0:
-                return
-
-            chunk_pairs_peak = max(chunk_pairs_peak, len(chunk_pairs_buffer))
-            chunk_features, chunk_labels, chunk_nameless_features = many_pairs_featurize(
-                chunk_pairs_buffer,
-                dataset,
-                self.featurizer_info,
-                self.n_jobs,
-                use_cache=self.use_cache,
-                chunk_size=DEFAULT_CHUNK_SIZE,
-                nameless_featurizer_info=self.nameless_featurizer_info,
-                runtime_context=runtime_context,
-                total_ram_bytes=total_ram_for_phase,
-            )
-            chunk_feature_bytes = int(getattr(chunk_features, "nbytes", 0))
-            if chunk_nameless_features is not None:
-                chunk_feature_bytes += int(getattr(chunk_nameless_features, "nbytes", 0))
-            chunk_features_peak_bytes = max(chunk_features_peak_bytes, chunk_feature_bytes)
-            chunk_predictions, chunk_model_seconds = _predict_and_combine(
-                self.classifier,
-                self.nameless_classifier,
-                chunk_features,
-                chunk_labels,
-                chunk_nameless_features,
-                f"phase_a_chunk_{constraint_chunks_total + 1}",
-                None,
-                num_threads=self.n_jobs,
-                runtime_context=runtime_context,
-            )
-            model_predict_total_seconds += chunk_model_seconds
-
-            for signature_pair, dist in zip(chunk_pairs_buffer, chunk_predictions, strict=False):
-                unassigned_signature, assigned_signature, _ = signature_pair
-                if assigned_signature not in cluster_seeds_require:
-                    continue
-                cluster_id = cluster_seeds_require[assigned_signature]
-                cluster_sum_count = signature_to_cluster_sum_count.setdefault(unassigned_signature, {})
-                if cluster_id not in cluster_sum_count:
-                    cluster_sum_count[cluster_id] = [0.0, 0]
-                    accumulator_entries += 1
-                total_count = cluster_sum_count[cluster_id]
-                total_count[0] = float(total_count[0]) + float(dist)
-                total_count[1] = int(total_count[1]) + 1
-
-            constraint_pairs_total += len(chunk_pairs_buffer)
-            constraint_chunks_total += 1
-            accumulator_entries_peak = max(accumulator_entries_peak, int(accumulator_entries))
-
-            if (
-                not accumulator_warned
-                and chunk_limits is not None
-                and accumulator_entries >= int(chunk_limits["accumulator_warn"])
-            ):
-                accumulator_warned = True
-                logger.warning(
-                    "Phase A accumulator approaching limit: entries=%d warn=%d max=%d run_id=%s",
-                    accumulator_entries,
-                    int(chunk_limits["accumulator_warn"]),
-                    int(chunk_limits["accumulator_max"]),
-                    runtime_context.run_id,
-                )
-
-            if chunk_limits is not None and accumulator_entries > int(chunk_limits["accumulator_max"]):
-                clusters_touched_avg = float(accumulator_entries) / float(max(1, len(signature_to_cluster_sum_count)))
-                logger.warning(
-                    "Phase A accumulator exceeded limit: "
-                    "entries=%d max=%d warn=%d "
-                    "chunk_pairs=%d available_bytes=%d current_rss_bytes=%d "
-                    "unassigned_signatures=%d clusters_touched_avg=%.3f run_id=%s. "
-                    "Stopping Phase A early; remaining unassigned signatures will proceed "
-                    "with partial seed distances.",
-                    accumulator_entries,
-                    int(chunk_limits["accumulator_max"]),
-                    int(chunk_limits["accumulator_warn"]),
-                    int(chunk_limits["chunk_pairs"]),
-                    int(chunk_limits["available_bytes"]),
-                    int(chunk_limits["current_rss_bytes"]),
-                    len(signature_to_cluster_sum_count),
-                    clusters_touched_avg,
-                    runtime_context.run_id,
-                )
-                accumulator_overflow_early_stop = True
-                return
-
-            # Fallback accumulator bound when chunk_limits is None.
-            if chunk_limits is None and accumulator_entries > memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES:
-                logger.warning(
-                    "Phase A accumulator exceeded fallback limit: "
-                    "entries=%d max=%d run_id=%s. "
-                    "Stopping Phase A early; remaining unassigned signatures will proceed "
-                    "with partial seed distances. "
-                    "Pass total_ram_bytes to enable proper memory budgeting.",
-                    accumulator_entries,
-                    memory_budget.FALLBACK_ACCUMULATOR_MAX_ENTRIES,
-                    runtime_context.run_id,
-                )
-                accumulator_overflow_early_stop = True
-                return
-
-            if total_ram_for_phase is not None:
-                rss_now, _ = memory_budget.current_rss_bytes_best_effort(total_ram_for_phase)
-                rss_peak_bytes = max(rss_peak_bytes, rss_now)
-
-            # Fix #3: adaptive chunking — halve chunk_pairs if observed RSS delta exceeds prediction.
-            if total_ram_for_phase is not None and adaptive_halvings < 3:
-                acc_entry_bytes = int(memory_budget.INCREMENTAL_ACCUMULATOR_ENTRY_BYTES)
-                if chunk_limits is not None and "accumulator_entry_bytes" in chunk_limits:
-                    acc_entry_bytes = int(chunk_limits["accumulator_entry_bytes"])
-                current_predicted_delta = (
-                    chunk_features_peak_bytes
-                    + accumulator_entries_peak * acc_entry_bytes
-                    + chunk_pairs_peak * int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES)
-                    + int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES)
-                )
-                current_observed_delta = max(0, rss_peak_bytes - rss_before_bytes)
-                if current_predicted_delta > 0 and current_observed_delta > current_predicted_delta * 1.2:
-                    chunk_pairs = max(1, chunk_pairs // 2)
-                    adaptive_halvings += 1
-                    logger.warning(
-                        "Phase A adaptive chunking: observed_delta=%d > predicted_delta=%d * 1.2; "
-                        "halving chunk_pairs to %d (halving %d/3) run_id=%s",
-                        current_observed_delta,
-                        current_predicted_delta,
-                        chunk_pairs,
-                        adaptive_halvings,
-                        runtime_context.run_id,
-                    )
-
-            del chunk_features
-            del chunk_nameless_features
-            del chunk_predictions
-            del chunk_labels
-
         for unassigned_signature in unassigned_signature_ids:
-            if accumulator_overflow_early_stop:
+            if chunk_state.accumulator_overflow_early_stop:
                 break
             for signature in cluster_seeds_require.keys():
                 pair_id_buffer.append((unassigned_signature, signature))
-                if len(pair_id_buffer) >= chunk_pairs:
-                    labels, batch_telemetry = _resolve_constraint_labels_batch(
+                if len(pair_id_buffer) >= chunk_state.chunk_pairs:
+                    labels, batch_telemetry = self._resolve_constraint_batch(
                         dataset,
                         pair_id_buffer,
-                        constraint_backend=constraint_backend,
                         partial_supervision=partial_supervision,
-                        use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=False,
                         runtime_context=runtime_context,
-                        use_cache=self.use_cache,
-                        num_threads=self.n_jobs,
+                        incremental_dont_use_cluster_seeds=False,
+                        constraint_backend=constraint_backend,
                     )
                     _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
                     pair_buffer = [
                         (sig_id_1, sig_id_2, label)
-                        for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=False)
+                        for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=True)
                     ]
-                    _process_incremental_chunk(pair_buffer)
+                    self._process_phase_a_chunk(
+                        pair_buffer,
+                        dataset=dataset,
+                        cluster_seeds_require=cluster_seeds_require,
+                        signature_to_cluster_sum_count=signature_to_cluster_sum_count,
+                        chunk_state=chunk_state,
+                        chunk_limits=chunk_limits,
+                        runtime_context=runtime_context,
+                        total_ram_for_phase=total_ram_for_phase,
+                        rss_before_bytes=rss_before_bytes,
+                    )
                     pair_buffer = []
                     pair_id_buffer = []
-                    if accumulator_overflow_early_stop:
+                    if chunk_state.accumulator_overflow_early_stop:
                         break
 
-        if len(pair_id_buffer) > 0 and not accumulator_overflow_early_stop:
-            labels, batch_telemetry = _resolve_constraint_labels_batch(
+        if len(pair_id_buffer) > 0 and not chunk_state.accumulator_overflow_early_stop:
+            labels, batch_telemetry = self._resolve_constraint_batch(
                 dataset,
                 pair_id_buffer,
-                constraint_backend=constraint_backend,
                 partial_supervision=partial_supervision,
-                use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                incremental_dont_use_cluster_seeds=False,
                 runtime_context=runtime_context,
-                use_cache=self.use_cache,
-                num_threads=self.n_jobs,
+                incremental_dont_use_cluster_seeds=False,
+                constraint_backend=constraint_backend,
             )
             _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
             pair_buffer = [
-                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=False)
+                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_buffer, labels, strict=True)
             ]
-            _process_incremental_chunk(pair_buffer)
+            self._process_phase_a_chunk(
+                pair_buffer,
+                dataset=dataset,
+                cluster_seeds_require=cluster_seeds_require,
+                signature_to_cluster_sum_count=signature_to_cluster_sum_count,
+                chunk_state=chunk_state,
+                chunk_limits=chunk_limits,
+                runtime_context=runtime_context,
+                total_ram_for_phase=total_ram_for_phase,
+                rss_before_bytes=rss_before_bytes,
+            )
 
         rss_after_bytes = rss_before_bytes
         if total_ram_for_phase is not None:
@@ -2562,10 +2879,12 @@ class Clusterer:
         accumulator_entry_bytes = int(memory_budget.INCREMENTAL_ACCUMULATOR_ENTRY_BYTES)
         if chunk_limits is not None and "accumulator_entry_bytes" in chunk_limits:
             accumulator_entry_bytes = int(chunk_limits["accumulator_entry_bytes"])
-        phase_a_pair_buffer_peak_bytes = int(chunk_pairs_peak) * int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES)
+        phase_a_pair_buffer_peak_bytes = int(chunk_state.chunk_pairs_peak) * int(
+            memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES
+        )
         phase_a_predicted_peak_delta_bytes = (
-            int(chunk_features_peak_bytes)
-            + int(accumulator_entries_peak) * accumulator_entry_bytes
+            int(chunk_state.chunk_features_peak_bytes)
+            + int(chunk_state.accumulator_entries_peak) * accumulator_entry_bytes
             + int(phase_a_pair_buffer_peak_bytes)
             + int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES)
         )
@@ -2573,13 +2892,13 @@ class Clusterer:
             stage_name="phase_a_seed_distances",
             predicted_peak_delta_bytes=phase_a_predicted_peak_delta_bytes,
             rss_before_bytes=rss_before_bytes,
-            rss_peak_bytes=rss_peak_bytes,
+            rss_peak_bytes=chunk_state.rss_peak_bytes,
             rss_after_bytes=rss_after_bytes,
         )
         logger.info(
             "Telemetry: constraint_batch stage=phase_a_seed_distances total_pairs=%d partial_supervision_hits=%d "
             "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f run_id=%s",
-            int(constraint_pairs_total),
+            int(chunk_state.constraint_pairs_total),
             int(constraint_telemetry.partial_supervision_hits),
             int(constraint_telemetry.unresolved_pairs),
             int(constraint_telemetry.rust_batch_call_count),
@@ -2589,34 +2908,40 @@ class Clusterer:
         )
 
         return _PhaseASeedTelemetry(
-            constraint_pairs_total=int(constraint_pairs_total),
-            constraint_chunks_total=int(constraint_chunks_total),
-            constraint_partial_supervision_hits=int(constraint_telemetry.partial_supervision_hits),
-            constraint_unresolved_pairs=int(constraint_telemetry.unresolved_pairs),
-            constraint_rust_batch_calls=int(constraint_telemetry.rust_batch_call_count),
-            constraint_batch_api_mode=constraint_telemetry.api_mode_summary,
-            constraint_batch_seconds=float(constraint_telemetry.elapsed_seconds),
-            accumulator_entries_peak=int(accumulator_entries_peak),
-            model_predict_seconds=float(model_predict_total_seconds),
-            phase_a_prediction_contract_version=str(phase_a_prediction["prediction_contract_version"]),
-            phase_a_predicted_peak_delta_bytes=int(phase_a_prediction["predicted_peak_delta_bytes"]),
-            phase_a_predicted_peak_rss_bytes=int(phase_a_prediction["predicted_peak_rss_bytes"]),
-            # Backward-compatible alias; prefer phase_a_predicted_peak_delta_bytes.
-            phase_a_predicted_bytes=int(phase_a_prediction["predicted_bytes"]),
-            phase_a_rss_before_bytes=int(phase_a_prediction["rss_before_bytes"]),
-            phase_a_rss_peak_bytes=int(phase_a_prediction["rss_peak_bytes"]),
-            phase_a_rss_after_bytes=int(phase_a_prediction["rss_after_bytes"]),
-            phase_a_observed_peak_delta_bytes=int(phase_a_prediction["observed_peak_delta_bytes"]),
-            phase_a_prediction_error_ratio=float(phase_a_prediction["prediction_error_ratio"]),
-            phase_a_underpredicted=bool(phase_a_prediction["underpredicted"]),
-            phase_a_rss_source=str(rss_source),
-            phase_a_chunk_features_peak_bytes=int(chunk_features_peak_bytes),
-            phase_a_pair_buffer_peak_bytes=int(phase_a_pair_buffer_peak_bytes),
-            phase_a_accumulator_entry_bytes=int(accumulator_entry_bytes),
-            phase_a_pair_buffer_entry_bytes=int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES),
-            phase_a_fixed_overhead_bytes=int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES),
-            phase_a_adaptive_halvings=int(adaptive_halvings),
-            phase_a_accumulator_overflow_early_stop=bool(accumulator_overflow_early_stop),
+            constraints=_ConstraintSummary(
+                pairs_total=chunk_state.constraint_pairs_total,
+                chunks_total=chunk_state.constraint_chunks_total,
+                partial_supervision_hits=constraint_telemetry.partial_supervision_hits,
+                unresolved_pairs=constraint_telemetry.unresolved_pairs,
+                rust_batch_calls=constraint_telemetry.rust_batch_call_count,
+                api_mode=constraint_telemetry.api_mode_summary,
+                elapsed_seconds=constraint_telemetry.elapsed_seconds,
+            ),
+            accumulator=_AccumulatorSummary(
+                entries_peak=chunk_state.accumulator_entries_peak,
+                chunk_features_peak_bytes=chunk_state.chunk_features_peak_bytes,
+                pair_buffer_peak_bytes=phase_a_pair_buffer_peak_bytes,
+                accumulator_entry_bytes=accumulator_entry_bytes,
+                pair_buffer_entry_bytes=int(memory_budget.PHASE_A_PAIR_BUFFER_ENTRY_BYTES),
+                fixed_overhead_bytes=int(memory_budget.PHASE_A_FIXED_OVERHEAD_BYTES),
+                adaptive_halvings=chunk_state.adaptive_halvings,
+                overflow_early_stop=chunk_state.accumulator_overflow_early_stop,
+            ),
+            memory=_MemoryPredictionSummary(
+                contract_version=str(phase_a_prediction["prediction_contract_version"]),
+                predicted_peak_delta_bytes=int(phase_a_prediction["predicted_peak_delta_bytes"]),
+                predicted_peak_rss_bytes=int(phase_a_prediction["predicted_peak_rss_bytes"]),
+                # Backward-compatible alias; keep this while telemetry logs still emit predicted_bytes.
+                predicted_bytes=int(phase_a_prediction["predicted_bytes"]),
+                rss_before_bytes=int(phase_a_prediction["rss_before_bytes"]),
+                rss_peak_bytes=int(phase_a_prediction["rss_peak_bytes"]),
+                rss_after_bytes=int(phase_a_prediction["rss_after_bytes"]),
+                observed_peak_delta_bytes=int(phase_a_prediction["observed_peak_delta_bytes"]),
+                prediction_error_ratio=float(phase_a_prediction["prediction_error_ratio"]),
+                underpredicted=bool(phase_a_prediction["underpredicted"]),
+                rss_source=str(rss_source),
+            ),
+            model_predict_seconds=chunk_state.model_predict_total_seconds,
         )
 
     def _convert_sum_count_to_average_distances(
@@ -2645,6 +2970,9 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
     ) -> dict[str, list[str]]:
+        # NEW!
+        # First cluster the unassigned signatures, then decide which resulting unassigned
+        # clusters should merge with existing seeded clusters.
         logger.info("Batch clustering the unassigned signatures")
         incremental_only_clusters, _ = self.predict_helper(
             {"incremental_unassigned": unassigned_signature_ids},
@@ -2660,6 +2988,8 @@ class Clusterer:
         )
 
         # Average over Phase A signature-to-seed distances at the pre-cluster level.
+        # This is equivalent to computing average distance between each unassigned cluster
+        # and each assigned cluster, then broadcasting that score back to member signatures.
         cluster_ids = sorted(set(cluster_seeds_require.values()), key=lambda cluster_id: str(cluster_id))
         for incremental_cluster_signature_ids in incremental_only_clusters.values():
             for cluster_id in cluster_ids:
@@ -2716,7 +3046,9 @@ class Clusterer:
                                 if prefix or known_alias:
                                     match_found = True
                                     break
-                            # if not a prefix/alias match to any existing name, disallow this merge
+                            # if the candidate name is a prefix or a name alias for any existing name,
+                            # we allow it to cluster. Otherwise, it was clustered with a single-character
+                            # name and we don't want to allow that merge.
                             if not match_found:
                                 signature = dataset.signatures[unassigned_signature]
                                 first = signature.author_info_first
@@ -2750,6 +3082,7 @@ class Clusterer:
                 pred_clusters[str(new_cluster_id)] = new_cluster
                 new_cluster_id += 1
         logger.info("Done. Returning incrementally predicted clusters")
+        # end NEW!
         return dict(pred_clusters)
 
     def _phase_split_subblock_fallback(
@@ -2757,7 +3090,6 @@ class Clusterer:
         block_signatures: list[str],
         subblocks: dict[str, list[str]],
         dataset: ANDData,
-        all_unassigned: list[str],
         signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]],
         cluster_seeds_require: dict[str, int | str],
         recluster_map: dict[int | str, int | str],
@@ -2766,7 +3098,6 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
     ) -> dict[str, list[str]]:
-        del all_unassigned  # fallback is intentionally subblock-local in Phase B/C/D
         original_seed_sigs = set(dataset.cluster_seeds_require.keys())
         original_cluster_ids = set(str(cid) for cid in dataset.cluster_seeds_require.values())
         predict_times: dict[str, float] = {}
@@ -2887,32 +3218,7 @@ class Clusterer:
         )
 
         signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]] = defaultdict(dict)
-        phase_a_pairs_total = 0
-        phase_a_chunks_total = 0
-        phase_a_accumulator_peak = 0
-        phase_a_accumulator_peak_sample = 0
-        phase_a_model_predict_seconds = 0.0
-        phase_a_prediction_contract_version = "unknown"
-        phase_a_predicted_peak_delta_bytes = 0
-        phase_a_predicted_peak_rss_bytes = 0
-        phase_a_predicted_bytes = 0
-        phase_a_rss_before_bytes = 0
-        phase_a_rss_peak_bytes = 0
-        phase_a_rss_after_bytes = 0
-        phase_a_rss_source = "unavailable"
-        phase_a_observed_peak_delta_bytes = 0
-        phase_a_prediction_error_ratio = 0.0
-        phase_a_underpredicted = False
-        phase_a_chunk_features_peak_bytes = 0
-        phase_a_pair_buffer_peak_bytes = 0
-        phase_a_accumulator_entry_bytes = 0
-        phase_a_pair_buffer_entry_bytes = 0
-        phase_a_fixed_overhead_bytes = 0
-        phase_a_worst_sample: dict[str, Any] | None = None
-        accumulator_runtime_calibrated = False
-        phase_a_accumulator_overflow_early_stop = False
-        phase_a_overflow_subblocks = 0
-        phase_a_adaptive_halvings_max = 0
+        phase_a = _PhaseASummaryAccumulator()
 
         constraint_backend = _build_incremental_constraint_backend(
             dataset,
@@ -2939,46 +3245,24 @@ class Clusterer:
                 total_ram_bytes=int(chunk_limits["total_ram_bytes"]),
                 constraint_backend=constraint_backend,
             )
-            if bool(phase_a_telemetry.get("phase_a_accumulator_overflow_early_stop", False)):
-                phase_a_accumulator_overflow_early_stop = True
-                phase_a_overflow_subblocks += 1
-            phase_a_adaptive_halvings_max = max(
-                phase_a_adaptive_halvings_max,
-                int(phase_a_telemetry.get("phase_a_adaptive_halvings", 0)),
-            )
-            phase_a_pairs_total += int(phase_a_telemetry["constraint_pairs_total"])
-            phase_a_chunks_total += int(phase_a_telemetry["constraint_chunks_total"])
-            phase_a_accumulator_peak = max(phase_a_accumulator_peak, int(phase_a_telemetry["accumulator_entries_peak"]))
-            phase_a_model_predict_seconds += float(phase_a_telemetry["model_predict_seconds"])
-            candidate_ratio = float(phase_a_telemetry["phase_a_prediction_error_ratio"])
-            candidate_observed_delta = int(phase_a_telemetry["phase_a_observed_peak_delta_bytes"])
-            if phase_a_worst_sample is None:
-                phase_a_worst_sample = phase_a_telemetry
-            else:
-                current_ratio = float(phase_a_worst_sample["phase_a_prediction_error_ratio"])
-                current_observed_delta = int(phase_a_worst_sample["phase_a_observed_peak_delta_bytes"])
-                if candidate_ratio > current_ratio or (
-                    candidate_ratio == current_ratio and candidate_observed_delta > current_observed_delta
-                ):
-                    phase_a_worst_sample = phase_a_telemetry
-            phase_a_underpredicted = phase_a_underpredicted or bool(phase_a_telemetry["phase_a_underpredicted"])
+            phase_a.observe(phase_a_telemetry)
 
             # Runtime accumulator calibration: after the first subblock with meaningful data,
             # derive the effective bytes/entry from the observed telemetry and recalibrate
             # the accumulator budget for subsequent subblocks.
             if (
-                not accumulator_runtime_calibrated
-                and int(phase_a_telemetry["accumulator_entries_peak"]) > 100
-                and int(phase_a_telemetry["phase_a_observed_peak_delta_bytes"]) > 0
+                not phase_a.accumulator_runtime_calibrated
+                and phase_a_telemetry.accumulator.entries_peak > 100
+                and phase_a_telemetry.memory.observed_peak_delta_bytes > 0
             ):
-                observed_delta = int(phase_a_telemetry["phase_a_observed_peak_delta_bytes"])
+                observed_delta = phase_a_telemetry.memory.observed_peak_delta_bytes
                 modeled_non_accum = (
-                    int(phase_a_telemetry["phase_a_chunk_features_peak_bytes"])
-                    + int(phase_a_telemetry["phase_a_pair_buffer_peak_bytes"])
-                    + int(phase_a_telemetry.get("phase_a_fixed_overhead_bytes", 0))
+                    phase_a_telemetry.accumulator.chunk_features_peak_bytes
+                    + phase_a_telemetry.accumulator.pair_buffer_peak_bytes
+                    + phase_a_telemetry.accumulator.fixed_overhead_bytes
                 )
                 residual = observed_delta - modeled_non_accum
-                entries = int(phase_a_telemetry["accumulator_entries_peak"])
+                entries = phase_a_telemetry.accumulator.entries_peak
                 if residual > 0 and entries > 0:
                     effective_entry_bytes = float(residual) / float(entries)
                     configured_entry_bytes = int(chunk_limits.get("accumulator_entry_bytes", 200))
@@ -2999,32 +3283,16 @@ class Clusterer:
                             chunk_limits["accumulator_max"],
                             runtime_context.run_id,
                         )
-                    accumulator_runtime_calibrated = True
+                phase_a.accumulator_runtime_calibrated = True
 
-        if phase_a_worst_sample is not None:
-            phase_a_prediction_contract_version = str(phase_a_worst_sample["phase_a_prediction_contract_version"])
-            phase_a_predicted_peak_delta_bytes = int(phase_a_worst_sample["phase_a_predicted_peak_delta_bytes"])
-            phase_a_predicted_peak_rss_bytes = int(phase_a_worst_sample["phase_a_predicted_peak_rss_bytes"])
-            phase_a_predicted_bytes = int(phase_a_worst_sample["phase_a_predicted_bytes"])
-            phase_a_rss_before_bytes = int(phase_a_worst_sample["phase_a_rss_before_bytes"])
-            phase_a_rss_peak_bytes = int(phase_a_worst_sample["phase_a_rss_peak_bytes"])
-            phase_a_rss_after_bytes = int(phase_a_worst_sample["phase_a_rss_after_bytes"])
-            phase_a_rss_source = str(phase_a_worst_sample["phase_a_rss_source"])
-            phase_a_observed_peak_delta_bytes = int(phase_a_worst_sample["phase_a_observed_peak_delta_bytes"])
-            phase_a_prediction_error_ratio = float(phase_a_worst_sample["phase_a_prediction_error_ratio"])
-            phase_a_accumulator_peak_sample = int(phase_a_worst_sample.get("accumulator_entries_peak", 0))
-            phase_a_chunk_features_peak_bytes = int(phase_a_worst_sample.get("phase_a_chunk_features_peak_bytes", 0))
-            phase_a_pair_buffer_peak_bytes = int(phase_a_worst_sample.get("phase_a_pair_buffer_peak_bytes", 0))
-            phase_a_accumulator_entry_bytes = int(phase_a_worst_sample.get("phase_a_accumulator_entry_bytes", 0))
-            phase_a_pair_buffer_entry_bytes = int(phase_a_worst_sample.get("phase_a_pair_buffer_entry_bytes", 0))
-            phase_a_fixed_overhead_bytes = int(phase_a_worst_sample.get("phase_a_fixed_overhead_bytes", 0))
+        phase_a.finalize_from_worst_sample()
 
         logger.info(
             "Telemetry: phase_split_phase_a_overflow overflow_early_stop=%s overflow_subblocks=%d "
             "accumulator_entries_peak=%d accumulator_max=%d run_id=%s",
-            phase_a_accumulator_overflow_early_stop,
-            phase_a_overflow_subblocks,
-            phase_a_accumulator_peak,
+            phase_a.accumulator_overflow_early_stop,
+            phase_a.overflow_subblocks,
+            phase_a.accumulator_peak,
             int(chunk_limits["accumulator_max"]),
             runtime_context.run_id,
         )
@@ -3037,27 +3305,27 @@ class Clusterer:
             "prediction_contract_version=%s predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d "
             "predicted_bytes=%d rss_before_bytes=%d rss_peak_bytes=%d rss_after_bytes=%d "
             "observed_peak_delta_bytes=%d prediction_error_ratio=%.3f underpredicted=%s rss_source=%s",
-            phase_a_pairs_total,
-            phase_a_chunks_total,
-            phase_a_accumulator_peak,
-            phase_a_accumulator_peak_sample,
-            phase_a_chunk_features_peak_bytes,
-            phase_a_pair_buffer_peak_bytes,
-            phase_a_accumulator_entry_bytes,
-            phase_a_pair_buffer_entry_bytes,
-            phase_a_fixed_overhead_bytes,
-            phase_a_model_predict_seconds,
-            phase_a_prediction_contract_version,
-            phase_a_predicted_peak_delta_bytes,
-            phase_a_predicted_peak_rss_bytes,
-            phase_a_predicted_bytes,
-            phase_a_rss_before_bytes,
-            phase_a_rss_peak_bytes,
-            phase_a_rss_after_bytes,
-            phase_a_observed_peak_delta_bytes,
-            phase_a_prediction_error_ratio,
-            phase_a_underpredicted,
-            phase_a_rss_source,
+            phase_a.pairs_total,
+            phase_a.chunks_total,
+            phase_a.accumulator_peak,
+            phase_a.accumulator_peak_sample,
+            phase_a.chunk_features_peak_bytes,
+            phase_a.pair_buffer_peak_bytes,
+            phase_a.accumulator_entry_bytes,
+            phase_a.pair_buffer_entry_bytes,
+            phase_a.fixed_overhead_bytes,
+            phase_a.model_predict_seconds,
+            phase_a.prediction_contract_version,
+            phase_a.predicted_peak_delta_bytes,
+            phase_a.predicted_peak_rss_bytes,
+            phase_a.predicted_bytes,
+            phase_a.rss_before_bytes,
+            phase_a.rss_peak_bytes,
+            phase_a.rss_after_bytes,
+            phase_a.observed_peak_delta_bytes,
+            phase_a.prediction_error_ratio,
+            phase_a.underpredicted,
+            phase_a.rss_source,
         )
 
         signature_to_cluster_to_average_dist = self._convert_sum_count_to_average_distances(
@@ -3072,7 +3340,7 @@ class Clusterer:
         # accumulator has been replaced by the converted distance dict. Available memory is
         # the freed chunk budget + freed accumulator budget - the still-live converted dict.
         accumulator_entry_bytes_for_budget = int(chunk_limits.get("accumulator_entry_bytes", 200))
-        estimated_converted_dict_bytes = phase_a_accumulator_peak * accumulator_entry_bytes_for_budget
+        estimated_converted_dict_bytes = phase_a.accumulator_peak * accumulator_entry_bytes_for_budget
         phase_b_budget_bytes = max(
             1,
             int(chunk_limits["chunk_budget_bytes"])
@@ -3089,7 +3357,6 @@ class Clusterer:
                 block_signatures,
                 subblocks,
                 dataset,
-                all_unassigned,
                 signature_to_cluster_to_average_dist,
                 cluster_seeds_require,
                 recluster_map,
@@ -3108,8 +3375,8 @@ class Clusterer:
                 phase_b_mode="subblock_local",
                 phase_b_budget_bytes=phase_b_budget_bytes,
                 phase_b_required_bytes=recluster_bytes,
-                phase_a_accumulator_overflow_early_stop=phase_a_accumulator_overflow_early_stop,
-                phase_a_adaptive_halvings_max=phase_a_adaptive_halvings_max,
+                phase_a_accumulator_overflow_early_stop=phase_a.accumulator_overflow_early_stop,
+                phase_a_adaptive_halvings_max=phase_a.adaptive_halvings_max,
             )
 
         exact_clusters = self._run_incremental_phases_bcd(
@@ -3133,8 +3400,8 @@ class Clusterer:
             phase_b_mode="exact",
             phase_b_budget_bytes=phase_b_budget_bytes,
             phase_b_required_bytes=recluster_bytes,
-            phase_a_accumulator_overflow_early_stop=phase_a_accumulator_overflow_early_stop,
-            phase_a_adaptive_halvings_max=phase_a_adaptive_halvings_max,
+            phase_a_accumulator_overflow_early_stop=phase_a.accumulator_overflow_early_stop,
+            phase_a_adaptive_halvings_max=phase_a.adaptive_halvings_max,
         )
 
     def predict_incremental(
@@ -3146,7 +3413,8 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float] | None = None,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
-    ) -> dict[str, Any]:
+        return_clusters_only: bool = False,
+    ) -> dict[str, Any] | dict[str, list[str]]:
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
         in using the cluster_seeds_require parameter of the dataset class, and skips work by simply assigning each
@@ -3184,17 +3452,22 @@ class Clusterer:
             the dictionary of partial supervision provided with this dataset/these blocks
         total_ram_bytes: Optional[int]
             Optional explicit RAM budget for incremental phase-split memory-limit derivation.
+        return_clusters_only: bool
+            If True, return only the historical clusters dict shape instead of the full
+            telemetry payload.
         Returns
         -------
-        Dict: incremental clustering result payload
+        Dict: incremental clustering payload (default) or clusters-only dict when
+        return_clusters_only=True
         """
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_incremental")
+        _apply_dataset_name_count_semantics_for_prediction(self, dataset)
         _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
         if partial_supervision is None:
             partial_supervision = {}
         if batching_threshold is None or len(block_signatures) <= batching_threshold:
-            return self.predict_incremental_helper(
+            incremental_result = self._predict_incremental_helper(
                 block_signatures,
                 dataset,
                 prevent_new_incompatibilities=prevent_new_incompatibilities,
@@ -3202,6 +3475,7 @@ class Clusterer:
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
             )
+            return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
 
         assert batching_threshold > 0, "Batching threshold must be positive"
         if len(dataset.cluster_seeds_require) == 0:
@@ -3209,7 +3483,7 @@ class Clusterer:
                 "No cluster seeds provided for subblocked incremental; "
                 "falling back to monolithic incremental helper for partition parity."
             )
-            return self.predict_incremental_helper(
+            incremental_result = self._predict_incremental_helper(
                 block_signatures,
                 dataset,
                 prevent_new_incompatibilities=prevent_new_incompatibilities,
@@ -3217,8 +3491,9 @@ class Clusterer:
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
             )
+            return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
 
-        return self._predict_incremental_phase_split(
+        incremental_result = self._predict_incremental_phase_split(
             block_signatures,
             dataset,
             prevent_new_incompatibilities,
@@ -3227,8 +3502,9 @@ class Clusterer:
             runtime_context,
             total_ram_bytes=total_ram_bytes,
         )
+        return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
 
-    def predict_incremental_helper(
+    def _predict_incremental_helper(
         self,
         block_signatures: list[str],
         dataset: ANDData,
@@ -3237,48 +3513,13 @@ class Clusterer:
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
     ) -> dict[str, Any]:
-        """
-        Predict clustering in incremental mode. This assumes that the majority of the labels are passed
-        in using the cluster_seeds_require parameter of the dataset class, and skips work by simply assigning each
-        unassigned signature to the closest cluster if distance is less than eps, and then separately clusters all
-        the unassigned signatures that are not within eps of any existing cluster.
+        """Internal incremental execution path used by `predict_incremental`.
 
-        Corrected, claimed profiles should be noted via the altered_cluster_signatures parameter (in ANDData).
-        Then predict_incremental performs a pre-clustering step on each altered cluster to determine how
-        S2AND would divide it into clusters. Mentions are incrementally added to these new subclusters,
-        then reassembled to restore the complete claimed profile when S2AND returns results.
-
-        Currently this would be useful in the following situation. We have a massive block, for which we want
-        to cluster a small number of new signatures into (block size * number of new signatures should be less
-        than the normal batch size).
-
-        Notes:
-        -This function was designed to work on a single block at a time.
-        -This function should not be called directly. Use predict_incremental instead.
-        -Constraint resolution is chunked by self.batch_size; featurization remains monolithic in this helper.
-
-        Parameters
-        ----------
-        block_signatures: List[str]
-            the signature ids in the block to predict from
-        dataset: ANDData
-            the dataset
-        prevent_new_incompatibilities: bool
-            if True, prevents the addition to a cluster of new first names that are not prefix match
-            or in the name pairs list, for at least one existing name in the cluster. This can happen
-            if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
-            and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
-            final cluster would have D Jones, David Jones, and Donald Jones.
-        partial_supervision: Dict
-            the dictionary of partial supervision provided with this dataset/these blocks
-        total_ram_bytes: Optional[int]
-            Optional explicit RAM input used to derive featurization chunk budgets.
-        Returns
-        -------
-        Dict: incremental clustering result payload
+        For behavior/parameters, refer to `predict_incremental`.
         """
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_incremental")
+        _apply_dataset_name_count_semantics_for_prediction(self, dataset)
         if partial_supervision is None:
             partial_supervision = {}
         logger.info(f"Beginning incremental clustering for {len(block_signatures)} signatures...")
@@ -3321,45 +3562,38 @@ class Clusterer:
             for assigned_signature in assigned_signature_ids:
                 pair_id_batch.append((unassigned_signature, assigned_signature))
                 if len(pair_id_batch) >= pair_chunk_size:
-                    labels, batch_telemetry = _resolve_constraint_labels_batch(
+                    labels, batch_telemetry = self._resolve_constraint_batch(
                         dataset,
                         pair_id_batch,
-                        constraint_backend=constraint_backend,
                         partial_supervision=partial_supervision,
-                        use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                        dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                        incremental_dont_use_cluster_seeds=False,
                         runtime_context=runtime_context,
-                        use_cache=self.use_cache,
-                        num_threads=self.n_jobs,
+                        incremental_dont_use_cluster_seeds=False,
+                        constraint_backend=constraint_backend,
                     )
                     _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
                     all_pairs.extend(
                         (sig_id_1, sig_id_2, label)
-                        for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=False)
+                        for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=True)
                     )
                     pair_id_batch = []
 
         if pair_id_batch:
-            labels, batch_telemetry = _resolve_constraint_labels_batch(
+            labels, batch_telemetry = self._resolve_constraint_batch(
                 dataset,
                 pair_id_batch,
-                constraint_backend=constraint_backend,
                 partial_supervision=partial_supervision,
-                use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
-                dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
-                incremental_dont_use_cluster_seeds=False,
                 runtime_context=runtime_context,
-                use_cache=self.use_cache,
-                num_threads=self.n_jobs,
+                incremental_dont_use_cluster_seeds=False,
+                constraint_backend=constraint_backend,
             )
             _accumulate_constraint_telemetry(constraint_telemetry, batch_telemetry)
             all_pairs.extend(
-                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=False)
+                (sig_id_1, sig_id_2, label) for (sig_id_1, sig_id_2), label in zip(pair_id_batch, labels, strict=True)
             )
 
         logger.info(
-            "Telemetry: constraint_batch stage=predict_incremental_helper total_pairs=%d partial_supervision_hits=%d "
+            "Telemetry: constraint_batch stage=_predict_incremental_helper total_pairs=%d "
+            "partial_supervision_hits=%d "
             "unresolved_pairs=%d rust_batch_calls=%d api_mode=%s seconds=%.3f run_id=%s",
             constraint_telemetry.total_pairs,
             constraint_telemetry.partial_supervision_hits,
@@ -3384,6 +3618,8 @@ class Clusterer:
         )
 
         logger.info("Performing pairwise classification")
+        # Get predictions where there isn't partial supervision,
+        # and fill the rest from partial supervision labels.
         batch_predictions, model_predict_seconds = _predict_and_combine(
             self.classifier,
             self.nameless_classifier,
@@ -3391,14 +3627,13 @@ class Clusterer:
             batch_labels,
             batch_nameless_features,
             "incremental",
-            None,
             num_threads=self.n_jobs,
             runtime_context=runtime_context,
         )
         logger.info("Telemetry: model_predict_total seconds=%.3f blocks=1", model_predict_seconds)
 
         logger.info("Computing average distances for unassigned signatures")
-        for signature_pair, dist in zip(all_pairs, batch_predictions, strict=False):
+        for signature_pair, dist in zip(all_pairs, batch_predictions, strict=True):
             unassigned_signature, assigned_signature, _ = signature_pair
             if assigned_signature not in cluster_seeds_require:
                 continue
@@ -3424,4 +3659,26 @@ class Clusterer:
             phase_b_required_bytes=phase_b_required_bytes,
         )
 
-
+    def predict_incremental_helper(
+        self,
+        block_signatures: list[str],
+        dataset: ANDData,
+        prevent_new_incompatibilities: bool = True,
+        partial_supervision: dict[tuple[str, str], int | float] | None = None,
+        runtime_context: RuntimeContext | None = None,
+        total_ram_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Deprecated shim for `predict_incremental`; use the public method instead."""
+        warnings.warn(
+            "Clusterer.predict_incremental_helper is deprecated; use predict_incremental instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._predict_incremental_helper(
+            block_signatures,
+            dataset,
+            prevent_new_incompatibilities=prevent_new_incompatibilities,
+            partial_supervision=partial_supervision,
+            runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
+        )

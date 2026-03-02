@@ -22,14 +22,15 @@ if TYPE_CHECKING:
     from scripts._rust_suite.common import RSSMonitor as CommonRSSMonitor
     from scripts._rust_suite.common import build_run_metadata as common_build_run_metadata
     from scripts._rust_suite.common import extract_marked_json_payload as common_extract_marked_json_payload
+    from scripts._rust_suite.common import get_result_markers as common_get_result_markers
 else:
     from _rust_suite.common import ProcessTreeRSSMonitor as CommonProcessTreeRSSMonitor
     from _rust_suite.common import RSSMonitor as CommonRSSMonitor
     from _rust_suite.common import build_run_metadata as common_build_run_metadata
     from _rust_suite.common import extract_marked_json_payload as common_extract_marked_json_payload
+    from _rust_suite.common import get_result_markers as common_get_result_markers
 
-RESULT_JSON_START = "===S2AND_PROFILE_RESULT_START==="
-RESULT_JSON_END = "===S2AND_PROFILE_RESULT_END==="
+RESULT_JSON_START, RESULT_JSON_END = common_get_result_markers("profile")
 
 _MODULE_IMPORTS = {
     "compare": "_rust_suite.compare_cmd",

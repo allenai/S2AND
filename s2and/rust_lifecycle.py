@@ -3,11 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from s2and.env import parse_bool_env
 from s2and.runtime import Backend
 
 RustBuildPath = Literal["from_dataset", "from_json_paths"]
-FORCE_PYTHON_PAPER_PREPROCESS_ENV = "S2AND_RUST_FORCE_PYTHON_PAPER_PREPROCESS"
 
 
 @dataclass(frozen=True)
@@ -33,7 +31,6 @@ class RustJsonIngestContract:
         return (
             self.signatures_path,
             self.papers_path,
-            self.clusters_path,
             self.cluster_seeds_path,
             self.specter_embeddings,
             self.name_tuples_path,
@@ -119,14 +116,16 @@ def build_rust_lifecycle_policy(
     from_dataset_paper_preprocess_available: bool = False,
     use_sinonym_overwrite: bool = False,
 ) -> RustLifecyclePolicy:
+    expected_use_rust = backend == "rust"
+    if use_rust is not expected_use_rust:
+        raise ValueError(
+            "Inconsistent backend/use_rust configuration: "
+            f"backend={backend!r} implies use_rust={expected_use_rust}, got use_rust={use_rust}."
+        )
+
     if backend == "python":
         return PYTHON_ONLY_POLICY
 
-    force_python_paper_preprocess = parse_bool_env(
-        FORCE_PYTHON_PAPER_PREPROCESS_ENV,
-        default=False,
-        strict=True,
-    )
     is_inference = _is_inference_mode(mode)
 
     rust_build_path: RustBuildPath = (
@@ -146,8 +145,6 @@ def build_rust_lifecycle_policy(
         and use_rust
         and (rust_build_path == "from_json_paths" or training_from_dataset_can_skip_python_paper_preprocess)
     )
-    if force_python_paper_preprocess:
-        skip_python_paper_preprocess = False
     defer_signature_ngrams_to_rust = bool(preprocess and use_rust)
     defer_signature_fields_to_rust = bool(preprocess and use_rust and not is_inference)
     defer_rust_json_ingest_write_for_sinonym = bool(

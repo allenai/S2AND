@@ -9,15 +9,20 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from _rust_suite.common import (
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _rust_suite.common import (  # noqa: E402
     ProcessTreeRSSMonitor,
     build_run_metadata,
     collect_rust_extension_identity,
     extract_marked_json_payload,
+    get_result_markers,
 )
 
-RESULT_JSON_START = "===S2AND_COMPARE_RESULT_START==="
-RESULT_JSON_END = "===S2AND_COMPARE_RESULT_END==="
+RESULT_JSON_START, RESULT_JSON_END = get_result_markers("compare")
 LANGUAGE_FEATURE_NAMES = {
     "english_count",
     "same_language",

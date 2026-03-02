@@ -372,7 +372,6 @@ def test_make_distance_matrices_rust_blockwise_uses_indexed_constraint_api(monke
         labels,
         _nameless_features,
         _batch_label,
-        _rust_failure_counts,
         runtime_context=None,
         **_kwargs,
     ):
@@ -418,7 +417,94 @@ def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
     assert calls["count"] == 1
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) == 2
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) == 1
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) == 1
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 1
+    assert float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_total", 0.0)) >= 0.0
+    assert float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_max", 0.0)) >= 0.0
 
     dataset._cluster_seeds_version += 1
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
     assert calls["count"] == 2
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) == 3
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) == 2
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) == 2
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 1
+
+
+def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_order(monkeypatch):
+    dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set())
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    clusterer = Clusterer(
+        featurizer_info=featurizer_info,
+        classifier=None,
+        n_jobs=1,
+        use_cache=False,
+        batch_size=2,
+    )
+
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model_module, "stage_uses_rust", lambda _runtime_context: False)
+
+    batches = [
+        model_module._PredictedDistanceMatrixBatch(
+            batch_num=0,
+            blocks=["a", "a"],
+            indices=[(0, 1), (0, 2)],
+            predictions=np.asarray([0.1, 0.2], dtype=np.float64),
+            batch_seconds=0.0,
+        ),
+        model_module._PredictedDistanceMatrixBatch(
+            batch_num=1,
+            blocks=["b", "a"],
+            indices=[(0, 1), (0, 3)],
+            predictions=np.asarray([9.9, 0.3], dtype=np.float64),
+            batch_seconds=0.0,
+        ),
+        model_module._PredictedDistanceMatrixBatch(
+            batch_num=2,
+            blocks=["a", "a", "a"],
+            indices=[(1, 2), (1, 3), (2, 3)],
+            predictions=np.asarray([0.4, 0.5, 0.6], dtype=np.float64),
+            batch_seconds=0.0,
+        ),
+    ]
+
+    def fake_iter_python_batches(self, *_args, **_kwargs):
+        del self, _args, _kwargs
+        yield from batches
+
+    monkeypatch.setattr(
+        model_module.Clusterer,
+        "_iter_python_predicted_distance_matrix_batches",
+        fake_iter_python_batches,
+    )
+
+    output = clusterer.make_distance_matrices(
+        {"a": ["s1", "s2", "s3", "s4"], "b": ["t1", "t2"]},
+        dataset,
+        partial_supervision={},
+    )
+
+    np.testing.assert_allclose(
+        output["a"],
+        np.asarray([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float16),
+        rtol=0,
+        atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        output["b"],
+        np.asarray([9.9], dtype=np.float16),
+        rtol=0,
+        atol=1e-3,
+    )
+
+
+def test_propagate_n_jobs_re_raises_unexpected_set_params_error():
+    class _ExplodingEstimator:
+        def set_params(self, **_kwargs):
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        model_module._propagate_n_jobs(_ExplodingEstimator(), 4)

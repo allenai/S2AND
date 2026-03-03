@@ -4,6 +4,55 @@
 """
 Evaluate production S2AND models (SPECTER1 vs SPECTER2) on various datasets.
 
+
+In this script we try to answer the question: if we deploy SPECTER2, will S2AND care?
+Both with retraining and without retraining.
+
+This is done with s2and-mini. Ai2 employee, find it at s3://ai2-s2-research/s2and/s2and-mini/
+
+With retraining (random seed 42):
+
+Performance with SPECTERv1 data, on arnetminer (B3): (0.922, 0.985, 0.952)
+Performance with SPECTERv2 data, on arnetminer (B3): (0.93, 0.988, 0.958)
+
+Performance with SPECTERv1 data, on inspire (B3): (0.958, 0.974, 0.966)
+Performance with SPECTERv2 data, on inspire (B3): (0.995, 0.959, 0.977)
+
+Performance with SPECTERv1 data, on kisti (B3): (0.951, 0.971, 0.961)
+Performance with SPECTERv2 data, on kisti (B3): (0.946, 0.98, 0.963)
+
+Performance with SPECTERv1 data, on pubmed (B3): (0.849, 0.988, 0.913)
+Performance with SPECTERv2 data, on pubmed (B3): (0.86, 0.988, 0.92)
+
+Performance with SPECTERv1 data, on qian (B3): (0.936, 0.943, 0.94)
+Performance with SPECTERv2 data, on qian (B3): (0.95, 0.964, 0.957)
+
+Performance with SPECTERv1 data, on zbmath (B3): (0.966, 0.984, 0.975)
+Performance with SPECTERv2 data, on zbmath (B3): (0.975, 0.991, 0.983)
+
+---
+
+Without retraining,
+
+Performance with SPECTERv1 data, on arnetminer (B3): (0.977, 0.982, 0.979)
+Performance with SPECTERv2 data, on arnetminer (B3):
+
+Performance with SPECTERv1 data, on inspire (B3): (0.993, 0.964, 0.978)
+Performance with SPECTERv2 data, on inspire (B3):
+
+Performance with SPECTERv1 data, on kisti (B3): (0.96, 0.957, 0.959)
+Performance with SPECTERv2 data, on kisti (B3):
+
+Performance with SPECTERv1 data, on pubmed (B3): (1.0, 0.968, 0.984)
+Performance with SPECTERv2 data, on pubmed (B3):
+
+Performance with SPECTERv1 data, on qian (B3): (0.985, 0.955, 0.969)
+Performance with SPECTERv2 data, on qian (B3):
+
+Performance with SPECTERv1 data, on zbmath (B3): (0.967, 0.955, 0.961)
+Performance with SPECTERv2 data, on zbmath (B3):
+
+
 Usage:
     # Evaluate on inventors_s2and (default)
     python scripts/eval_prod_models.py

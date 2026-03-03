@@ -1064,9 +1064,7 @@ def get_constraints_matrix_rust(
 
     get_constraints_matrix = getattr(featurizer, "get_constraints_matrix", None)
     if not callable(get_constraints_matrix):
-        raise RuntimeError(
-            "RustFeaturizer.get_constraints_matrix is unavailable; rebuild/install s2and-rust>=0.40.0."
-        )
+        raise RuntimeError("RustFeaturizer.get_constraints_matrix is unavailable; rebuild/install s2and-rust>=0.40.0.")
     return list(
         get_constraints_matrix(
             pairs,

@@ -2245,7 +2245,9 @@ def sinonym_preprocess_papers_parallel(papers_dict: dict[str, Paper], n_jobs: in
     """
     output: dict[str, dict[int, Any]] = {}
     if n_jobs > 1:
-        with UniversalPool(processes=n_jobs) as p:  # type: ignore
+        # Explicit platform policy to avoid implicit UniversalPool defaults at call sites.
+        use_threads = platform.system() in ("Windows", "Darwin")
+        with UniversalPool(processes=n_jobs, use_threads=use_threads) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
                 # Build a lightweight iterable to minimize serialization overhead
@@ -2562,8 +2564,8 @@ def preprocess_papers_parallel(
     output: dict = {}
     use_pool_stage_1 = n_jobs > 1 and platform.system() == "Linux"
     if use_pool_stage_1:
-        # Use UniversalPool to replicate the original p.imap() streaming behavior
-        with UniversalPool(processes=n_jobs) as p:  # type: ignore
+        # Linux/WSL2: force process workers for CPU-bound paper 1 preprocessing.
+        with UniversalPool(processes=n_jobs, use_threads=False) as p:  # type: ignore
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
                 func = partial(preprocess_paper_1, preprocess=preprocess)

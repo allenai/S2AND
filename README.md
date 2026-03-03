@@ -4,7 +4,7 @@ This repository provides access to the S2AND dataset and S2AND reference model d
 The reference model is live on semanticscholar.org, and the trained model is available now as part of the data download (see below).
 
 ## Installation Prereqs (one-time)
-Clone the repo. 
+Clone the repo.
 
 If `uv` is not installed yet, install it:
 
@@ -219,8 +219,8 @@ from s2and.feature_port import warm_rust_featurizer
 warm_rust_featurizer(dataset, use_cache=True)
 ```
 
-## Data 
-To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  
+## Data
+To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):
 ```[Expected download size is: 50.4 GiB]```
 
 `aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
@@ -265,7 +265,7 @@ dataset = ANDData(
 This may take a few minutes - there is a lot of text pre-processing to do.
 
 The first step in the S2AND pipeline is to specify a featurizer and then train a binary classifier
-that tries to guess whether two signatures are referring to the same person. 
+that tries to guess whether two signatures are referring to the same person.
 
 We'll do hyperparameter selection with the validation set and then get the test area under ROC curve.
 
@@ -391,16 +391,16 @@ RAM policy:
 - If omitted, runtime auto-detects RAM (cgroup first, then host probes) and applies a `0.8` safety factor before deriving budgets.
 
 ## Reproducibility
-The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`, in the branch `s2and_paper`. 
+The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`, in the branch `s2and_paper`.
 
 To install, run:
 ```bash
 git checkout s2and_paper
 pip install pip==21.0.0
 pip install -r paper_experiments_env.txt --use-feature=fast-deps --use-deprecated=legacy-resolver
-``` 
+```
 
-Then, rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will udpate here if this becomes not true). 
+Then, rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will update here if this becomes not true).
 
 Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (very close to what is running on the Semantic Scholar website, except the production model doesn't compute the reference features) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "How to use S2AND for predicting with a saved model", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
 
@@ -415,7 +415,7 @@ If you use S2AND in your research, please cite [S2AND: A Benchmark and Evaluatio
 
 ```
 @inproceedings{subramanian2021s2and,
-      title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation}, 
+      title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation},
       author={Subramanian, Shivashankar and King, Daniel and Downey, Doug and Feldman, Sergey},
       year={2021},
       publisher = {Association for Computing Machinery},

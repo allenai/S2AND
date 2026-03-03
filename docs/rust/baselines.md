@@ -1,6 +1,6 @@
 # Rust Operational Baselines
 
-Status date: 2026-03-02
+Status date: 2026-03-02 (latest snapshot: [`profiling/2026-03-02.md`](profiling/2026-03-02.md))
 
 This doc is the operator guide for rerunning Rust promotion gates.
 The JSON artifacts under `scratch/` are the source of truth; avoid copying full metric tables into Markdown.
@@ -16,11 +16,38 @@ The JSON artifacts under `scratch/` are the source of truth; avoid copying full 
 
 ---
 
+## Profiling snapshots (historical evidence)
+
+Profiling snapshots are dated Markdown files under `profiling/YYYY-MM-DD.md`. Each snapshot captures
+one gate refresh at a point in time (environment, commands, artifact paths, and any noteworthy interpretation).
+
+When refreshing gates:
+1. Write JSON artifacts under `scratch/baselines_YYYYMMDD/`.
+2. Add a new snapshot file under `profiling/YYYY-MM-DD.md` referencing those artifacts.
+3. Update the `Status date` (and `latest snapshot` link) at the top of this doc.
+
+### Snapshots
+
+| Date | Highlights |
+|---|---|
+| [2026-03-02](profiling/2026-03-02.md) | Gate rerun refresh snapshot (commands + artifact paths). |
+
+---
+
 ## Canonical gate commands
 
 Build first (develop mode is slower, so use release mode for gates):
 ```
 uv run maturin develop -m s2and_rust/Cargo.toml --release
+```
+
+Capture a log for every gate run (stdout + stderr):
+- PowerShell: append `*> scratch/baselines_YYYYMMDD/<run>_YYYYMMDD.log`
+- bash/zsh: append `> scratch/baselines_YYYYMMDD/<run>_YYYYMMDD.log 2>&1`
+
+Optional: summarize memory prediction telemetry from a run log:
+```
+uv run python scripts/rust_suite.py summarize-memory-telemetry scratch/baselines_YYYYMMDD/<run>_YYYYMMDD.log --write-json scratch/baselines_YYYYMMDD/<run>_memory_telemetry_YYYYMMDD.json
 ```
 
 **1. Inference comparator**
@@ -46,4 +73,3 @@ uv run --with psutil python scripts/rust_suite.py stress-rebuild \
   --repeats 6 --num-threads 1 --rss-sample-ms 50 --require-rust-release 1 \
   --write-json scratch/baselines_YYYYMMDD/stress_rust_from_json_paths_aminer_6x_YYYYMMDD.json
 ```
-

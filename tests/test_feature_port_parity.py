@@ -470,12 +470,7 @@ def test_get_constraints_matrix_rust_flag_parity(dataset, constraint_pairs, cons
         **constraint_kwargs,
     )
 
-    for pair, ref_val, string_val, indexed_val in zip(
-        constraint_pairs,
-        expected,
-        got_string,
-        got_indexed, strict=True
-    ):
+    for pair, ref_val, string_val, indexed_val in zip(constraint_pairs, expected, got_string, got_indexed, strict=True):
         assert ref_val == string_val, f"Flag parity mismatch (string) for pair {pair}: ref={ref_val}, got={string_val}"
         assert (
             string_val == indexed_val
@@ -650,5 +645,3 @@ def test_get_constraint_rust_parity_dont_merge_cluster_seeds_false(dataset):
         assert ref_val is None and got_val is None
     else:
         assert ref_val == got_val, f"Dont-merge constraint mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
-
-

@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Self, TypeVar
 
 import lightgbm as lgb
 import numpy as np
@@ -44,6 +44,7 @@ logger = logging.getLogger("s2and")
 IncrementalChunkLimits = Mapping[str, Any]
 IncrementalPhaseBMode = Literal["exact", "subblock_local"]
 _TReturn = TypeVar("_TReturn")
+_MISSING = object()
 
 # Keep canonical pickle import paths stable after splitting module internals.
 for _export in (FastCluster, PairwiseModeler, VotingClassifier, intify):
@@ -470,6 +471,161 @@ def _bump_cluster_seeds_version(dataset: ANDData) -> int:
     return next_version
 
 
+class _VersionedClusterSeedDict(dict[Any, Any]):
+    def __init__(self, *args: Any, on_mutation: Callable[[], None] | None = None, **kwargs: Any) -> None:
+        self._on_mutation = on_mutation
+        super().__init__(*args, **kwargs)
+
+    def set_on_mutation(self, on_mutation: Callable[[], None] | None) -> None:
+        self._on_mutation = on_mutation
+
+    def _mark_mutated(self) -> None:
+        callback = self._on_mutation
+        if callback is not None:
+            callback()
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(key, value)
+        self._mark_mutated()
+
+    def __delitem__(self, key: Any) -> None:
+        super().__delitem__(key)
+        self._mark_mutated()
+
+    def clear(self) -> None:
+        if self:
+            super().clear()
+            self._mark_mutated()
+
+    def pop(self, key: Any, default: Any = _MISSING) -> Any:
+        if key in self:
+            value = super().pop(key)
+            self._mark_mutated()
+            return value
+        if default is not _MISSING:
+            return default
+        raise KeyError(key)
+
+    def popitem(self) -> tuple[Any, Any]:
+        value = super().popitem()
+        self._mark_mutated()
+        return value
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        if key in self:
+            return self[key]
+        super().__setitem__(key, default)
+        self._mark_mutated()
+        return default
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        if args or kwargs:
+            super().update(*args, **kwargs)
+            self._mark_mutated()
+
+    def __ior__(self, value: Any) -> Self:
+        super().__ior__(value)
+        self._mark_mutated()
+        return self
+
+
+class _VersionedClusterSeedSet(set[tuple[Any, Any]]):
+    def __init__(self, *args: Any, on_mutation: Callable[[], None] | None = None) -> None:
+        self._on_mutation = on_mutation
+        super().__init__(*args)
+
+    def set_on_mutation(self, on_mutation: Callable[[], None] | None) -> None:
+        self._on_mutation = on_mutation
+
+    def _mark_mutated(self) -> None:
+        callback = self._on_mutation
+        if callback is not None:
+            callback()
+
+    def add(self, element: tuple[Any, Any]) -> None:
+        super().add(element)
+        self._mark_mutated()
+
+    def remove(self, element: tuple[Any, Any]) -> None:
+        super().remove(element)
+        self._mark_mutated()
+
+    def discard(self, element: tuple[Any, Any]) -> None:
+        if element in self:
+            super().discard(element)
+            self._mark_mutated()
+
+    def pop(self) -> tuple[Any, Any]:
+        value = super().pop()
+        self._mark_mutated()
+        return value
+
+    def clear(self) -> None:
+        if self:
+            super().clear()
+            self._mark_mutated()
+
+    def update(self, *others: Any) -> None:
+        if others:
+            super().update(*others)
+            self._mark_mutated()
+
+    def difference_update(self, *others: Any) -> None:
+        if others:
+            super().difference_update(*others)
+            self._mark_mutated()
+
+    def intersection_update(self, *others: Any) -> None:
+        if others:
+            super().intersection_update(*others)
+            self._mark_mutated()
+
+    def symmetric_difference_update(self, other: Any) -> None:
+        super().symmetric_difference_update(other)
+        self._mark_mutated()
+
+    def __ior__(self, value: Any) -> Self:
+        super().__ior__(value)
+        self._mark_mutated()
+        return self
+
+    def __iand__(self, value: Any) -> Self:
+        super().__iand__(value)
+        self._mark_mutated()
+        return self
+
+    def __isub__(self, value: Any) -> Self:
+        super().__isub__(value)
+        self._mark_mutated()
+        return self
+
+    def __ixor__(self, value: Any) -> Self:
+        super().__ixor__(value)
+        self._mark_mutated()
+        return self
+
+
+def _ensure_cluster_seed_version_tracking(dataset: ANDData) -> None:
+    def _mark_mutated() -> None:
+        _bump_cluster_seeds_version(dataset)
+
+    require = getattr(dataset, "cluster_seeds_require", {})
+    if require is None:
+        require = {}
+    if isinstance(require, _VersionedClusterSeedDict):
+        require.set_on_mutation(_mark_mutated)
+    else:
+        dataset.cluster_seeds_require = _VersionedClusterSeedDict(require, on_mutation=_mark_mutated)
+
+    disallow = getattr(dataset, "cluster_seeds_disallow", set())
+    if disallow is None:
+        disallow = set()
+    if isinstance(disallow, _VersionedClusterSeedSet):
+        disallow.set_on_mutation(_mark_mutated)
+    else:
+        dataset.cluster_seeds_disallow = _VersionedClusterSeedSet(disallow, on_mutation=_mark_mutated)
+
+
 def _get_constraint_value(
     dataset: ANDData,
     sig_id_1: str,
@@ -529,6 +685,7 @@ def _sync_rust_cluster_seeds(
         # Stored on the dataset to avoid changing return payloads on hot paths.
         dataset._rust_cluster_seeds_sync_calls = int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) + 1
 
+        _ensure_cluster_seed_version_tracking(dataset)
         seed_version = _cluster_seeds_version(dataset)
         require = getattr(dataset, "cluster_seeds_require", {})
         disallow = getattr(dataset, "cluster_seeds_disallow", set())

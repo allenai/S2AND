@@ -20,5 +20,5 @@ This folder contains internal design + operational notes for working on S2AND.
 
 ## Where things go
 
-- New profiling refreshes: add dated snapshots under `docs/rust/profiling/` (see `docs/rust/profiling/README.md`).
+- New profiling refreshes: add dated snapshots under `docs/rust/profiling/` (indexed in `docs/rust/baselines.md`).
 - Historical/forensics-only notes: `docs/archive/` (see `docs/archive/README.md`).

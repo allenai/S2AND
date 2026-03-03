@@ -433,6 +433,46 @@ def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
     assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 1
 
 
+def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_update(_dataset, runtime_context=None, use_cache=False):
+        del runtime_context, use_cache
+        calls["count"] += 1
+
+    monkeypatch.setattr(model_module, "update_rust_cluster_seeds", fake_update)
+
+    dataset = SimpleNamespace(
+        cluster_seeds_require={"s1": "c1", "s2": "c1"},
+        cluster_seeds_disallow={("s1", "s3")},
+        _cluster_seeds_version=1,
+    )
+    runtime_context = RuntimeContext(
+        operation="constraints",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="run-2",
+        source="default",
+    )
+
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
+    assert calls["count"] == 1
+
+    dataset.cluster_seeds_require["s2"] = "c2"
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
+    assert calls["count"] == 2
+
+    dataset.cluster_seeds_disallow.remove(("s1", "s3"))
+    dataset.cluster_seeds_disallow.add(("s2", "s3"))
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=False)
+    assert calls["count"] == 3
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) == 3
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) == 3
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) == 3
+    assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 0
+
+
 def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_order(monkeypatch):
     dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set())
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])

@@ -69,8 +69,12 @@ class UniversalPool:
         Stream results *in order* like multiprocessing.Pool.imap.
         `max_prefetch` limits outstanding chunks to bound RAM.
         """
+        if int(chunksize) <= 0:
+            raise ValueError(f"chunksize must be >= 1, got {chunksize!r}")
+        if int(max_prefetch) <= 0:
+            raise ValueError(f"max_prefetch must be >= 1, got {max_prefetch!r}")
         # Use streaming implementation for ProcessPoolExecutor/ThreadPoolExecutor.
-        return self._streaming_imap(func, iterable, chunksize, max_prefetch)
+        return self._streaming_imap(func, iterable, int(chunksize), int(max_prefetch))
 
     def _streaming_imap(
         self, func: Callable[[Any], Any], iterable: Iterable[Any], chunksize: int = 1, max_prefetch: int = 4

@@ -25,8 +25,8 @@ Step 1: Get orcid name pairs from our internal databases
 """
 
 query = """
- select p.year, p.inserted paper_inserted, 
-      pae.corpus_paper_id, pae.source, pae.orcid,  pae.position, pae.first_name, pa.middle, pae.last_name, 
+ select p.year, p.inserted paper_inserted,
+      pae.corpus_paper_id, pae.source, pae.orcid,  pae.position, pae.first_name, pa.middle, pae.last_name,
       pa.corpus_author_id,
       au.ai2_id,
       pa.inserted pa_inserted,
@@ -34,13 +34,13 @@ query = """
       pa.cluster_block_key,
       pa.model_version,
       pa.clusterer
- from content_ext.paper_authors_orcids pae 
- join content_ext.papers p 
-      on pae.corpus_paper_id=p.corpus_paper_id  
-join content_ext.paper_authors pa 
-     on pae.corpus_paper_id=pa.corpus_paper_id 
+ from content_ext.paper_authors_orcids pae
+ join content_ext.papers p
+      on pae.corpus_paper_id=p.corpus_paper_id
+join content_ext.paper_authors pa
+     on pae.corpus_paper_id=pa.corpus_paper_id
      and pae.position=pa.position+1 and lower(pae.last_name)=lower(pa.last)
-join content_ext.authors au 
+join content_ext.authors au
    on pa.corpus_author_id=au.corpus_author_id
 where pae.source in ('Crossref')
 ;

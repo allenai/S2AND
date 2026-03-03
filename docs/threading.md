@@ -36,7 +36,8 @@ Implementation notes:
 
 - `preprocess_paper_1` takes an explicit `preprocess=...` flag (spawn-safe; no worker globals).
 - `preprocess_papers_parallel` uses `UniversalPool` only for the **Papers 1/2** phase on Linux; **Papers 2/2** always runs serial.
-- `UniversalPool` remains platform-aware when used elsewhere: processes on Linux (`fork`), threads on Windows/macOS by default.
+- Production `UniversalPool` call sites pass explicit `use_threads=...` so pool mode does not rely on implicit defaults.
+- `UniversalPool` remains platform-aware for helpers/callers that do not pass `use_threads`: processes on Linux (`fork`), threads on Windows/macOS by default.
 
 Benchmark script:
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from s2and import data
-from s2and.data import Author, Paper, preprocess_papers_parallel
+from s2and.data import Author, Paper, preprocess_papers_parallel, sinonym_preprocess_papers_parallel
 from s2and.text import normalize_text
 
 
@@ -53,11 +53,13 @@ def test_preprocess_papers_parallel_linux_uses_pool_only_for_stage_1(monkeypatch
     class FakeUniversalPool:
         init_calls = 0
         imap_calls = 0
+        last_use_threads = None
 
         def __init__(self, processes: int | None = None, use_threads: bool | None = None):
             type(self).init_calls += 1
             self.processes = processes
             self.use_threads = use_threads
+            type(self).last_use_threads = use_threads
 
         def __enter__(self):
             return self
@@ -81,5 +83,36 @@ def test_preprocess_papers_parallel_linux_uses_pool_only_for_stage_1(monkeypatch
 
     assert FakeUniversalPool.init_calls == 1
     assert FakeUniversalPool.imap_calls == 1
+    assert FakeUniversalPool.last_use_threads is False
     assert out["1"].reference_details is not None
     assert out["2"].reference_details is not None
+
+
+def test_sinonym_preprocess_parallel_explicit_pool_mode_on_windows(monkeypatch):
+    monkeypatch.setattr(data.platform, "system", lambda: "Windows")
+
+    class FakeUniversalPool:
+        init_calls = 0
+        last_use_threads = None
+
+        def __init__(self, processes: int | None = None, use_threads: bool | None = None):
+            type(self).init_calls += 1
+            type(self).last_use_threads = use_threads
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def imap(self, _func, _iterable, chunksize=1, max_prefetch=4):
+            _ = chunksize, max_prefetch
+            return iter(())
+
+    monkeypatch.setattr(data, "UniversalPool", FakeUniversalPool)
+
+    out = sinonym_preprocess_papers_parallel({}, n_jobs=2)
+
+    assert out == {}
+    assert FakeUniversalPool.init_calls == 1
+    assert FakeUniversalPool.last_use_threads is True

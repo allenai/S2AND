@@ -4,6 +4,7 @@ import gc
 import json
 import logging
 import os
+import platform
 import tempfile
 import threading
 import time
@@ -580,7 +581,9 @@ def _feature_cache_file_lock(cache_path: str):
             finally:
                 os.close(lock_fd)
             break
-        except FileExistsError as e:
+        except (FileExistsError, PermissionError) as e:
+            if isinstance(e, PermissionError) and not os.path.exists(lock_path):
+                raise
             try:
                 lock_age_seconds = time.time() - os.path.getmtime(lock_path)
             except OSError:
@@ -1269,7 +1272,10 @@ def _execute_python_featurization_phase(
         else:
             logger.info("Making %d feature vectors in parallel", len(pieces_of_work))
 
-        with UniversalPool(processes=n_jobs if len(pieces_of_work) > 1000 else 1) as p:
+        pool_size = n_jobs if len(pieces_of_work) > 1000 else 1
+        # Explicit platform policy to avoid implicit UniversalPool defaults at call sites.
+        use_threads = platform.system() in ("Windows", "Darwin")
+        with UniversalPool(processes=pool_size, use_threads=use_threads) as p:
             work_count = len(pieces_of_work)
             with tqdm(total=work_count, desc="Doing work", disable=work_count <= 10000) as pbar:
                 for feature_output, index in p.imap(

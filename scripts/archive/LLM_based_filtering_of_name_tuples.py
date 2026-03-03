@@ -33,15 +33,15 @@ Here are name tuples that might be synonyms or variants or spelling variants of 
 
  {tuples_str}
 
- output the ones that are correct. 
-exclude wrong ones like (jon,jack) but include spelling variants, nicknames, pet names, misspellings etc etc. 
+ output the ones that are correct.
+ exclude wrong ones like (jon,jack) but include spelling variants, nicknames, pet names, misspellings etc etc.
 output every pair that is plausibly referring to the same human.
 also output are not plausibly referring to the same human
 we also want to separate out chinese names, so output those separately.
 
-output the VERBATIM correct ones 
-then a newline 
-  then the bad ones 
+ output the VERBATIM correct ones
+then a newline
+  then the bad ones
   then a newline
   then the chinese ones only
   and nothing else at all"""
@@ -157,12 +157,12 @@ def generate_chinese(input_tuples):
 
 {tuples_str}
 
-output the ones that are correct. 
+output the ones that are correct.
 output every pair that is plausibly referring to the same human with spelling variants
 also output tuples that are not plausibly referring to the same human right after
-output the VERBATIM correct ones 
-then a newline 
-then the bad ones 
+output the VERBATIM correct ones
+then a newline
+then the bad ones
 and nothing else at all"""
                 ),
             ],

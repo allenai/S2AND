@@ -43,6 +43,7 @@ _MODULE_IMPORTS = {
     "calibrate_phase_a": "_rust_suite.calibrate_phase_a_cmd",
     "calibrate_rust_batch": "_rust_suite.calibrate_rust_batch_cmd",
     "measure_counter_data": "_rust_suite.measure_counter_data_cmd",
+    "summarize_memory_telemetry": "_rust_suite.summarize_memory_telemetry_cmd",
 }
 
 _MODULE_CACHE: dict[str, ModuleType] = {}
@@ -248,6 +249,11 @@ _COMMANDS = {
     "calibrate-rust-batch": {
         "module": "calibrate_rust_batch",
         "help": "Calibrate Rust batch overhead bytes from logs.",
+        "main_kind": "argv",
+    },
+    "summarize-memory-telemetry": {
+        "module": "summarize_memory_telemetry",
+        "help": "Summarize memory prediction error ratios from telemetry logs.",
         "main_kind": "argv",
     },
     "measure-counter-data": {

@@ -420,8 +420,15 @@ def test_phase_a_memory_prediction_logged_and_bounded(clusterer_dataset_factory,
     assert "predicted_bytes=" in phase_a_log
     assert "rss_before_bytes=" in phase_a_log
     assert "rss_peak_bytes=" in phase_a_log
+    assert "rss_after_bytes=" in phase_a_log
     assert "observed_peak_delta_bytes=" in phase_a_log
     assert "prediction_error_ratio=" in phase_a_log
+    assert "underpredicted=" in phase_a_log
+
+    # Keep Phase A modeled terms stable for calibration and post-hoc analysis.
+    assert "accumulator_entries_peak_sample=" in phase_a_log
+    assert "phase_a_pair_buffer_peak_bytes=" in phase_a_log
+    assert "phase_a_pair_buffer_entry_bytes=" in phase_a_log
 
     ratio_text = phase_a_log.split("prediction_error_ratio=")[1].split()[0]
     ratio = float(ratio_text)

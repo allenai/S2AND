@@ -35,12 +35,12 @@ Boundary rules:
 
 ## What remains (next work)
 
-1. **Capture true peaks reliably**
-   - Prefer explicit RSS probes at known peak points; use a lightweight sampler only if probes are too brittle.
-2. **Reduce Phase A buffer overhead (if it becomes dominant)**
-   - Replace large Python tuple buffers with compact numeric representations (signature indices) to reduce peak and variance.
-3. **Calibrate constants from more workload shapes before tightening defaults**
-   - Keep calibration conservative (e.g., P95) and require multiple workload shapes before promoting new constants.
+No additional work is planned right now. These predictors are treated as best-effort; we prioritize stable telemetry contracts and regression tests over further tightening.
+
+Regression coverage:
+- `tests/test_cluster_incremental.py::test_phase_a_memory_prediction_logged_and_bounded`
+- `tests/test_rust_batch_chunking.py::test_rust_batch_prediction_matches_observed_real_workload`
+- `tests/test_memory_calibration.py`
 
 ## Where to look / how to calibrate
 

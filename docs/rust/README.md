@@ -14,7 +14,7 @@ for the Rust integration.
 | [baselines.md](baselines.md) | Gate operator guide: canonical gate commands, artifact conventions, and promotion policy. Start here when verifying Rust behavior or promoting a new baseline. |
 | [runtime.md](runtime.md) | Runtime contract: backend resolution (`python`/`rust`/`auto`), stage defaults, failure semantics, verification gates, risk register, and key capability gates (incl. training-mode deferred paper preprocessing). |
 | [artifact_divergence.md](artifact_divergence.md) | Artifact format divergence map between Python and Rust paths. Format migration plan (MessagePack, Safetensors) and deferred unification backlog. |
-| [profiling/](profiling/) | Point-in-time profiling snapshots, named by date. Historical evidence, not active gates. |
+| [profiling/](profiling/) | Point-in-time profiling snapshots, named by date (indexed in `baselines.md`). Historical evidence, not active gates. |
 
 ---
 

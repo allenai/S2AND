@@ -2039,9 +2039,7 @@ class Clusterer:
         if len(datasets) == 0:
             raise ValueError("Clusterer.fit requires at least one dataset")
 
-        dataset_semantics = {
-            getattr(dataset, "name_counts_last_first_initial_semantics", None) for dataset in datasets
-        }
+        dataset_semantics = {getattr(dataset, "name_counts_last_first_initial_semantics", None) for dataset in datasets}
         if len(dataset_semantics) != 1:
             raise ValueError(
                 "Clusterer.fit requires consistent name-count semantics across datasets; "

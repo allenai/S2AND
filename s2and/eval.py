@@ -28,6 +28,7 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 from s2and.featurizer import many_pairs_featurize
+from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
 logger = logging.getLogger("s2and")
 
@@ -514,10 +515,12 @@ def pairwise_eval(
     if nameless_classifier is not None and hasattr(nameless_classifier, "classifier"):
         nameless_classifier = nameless_classifier.classifier
 
-    if nameless_classifier is not None:
-        y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
-    else:
-        y_prob = classifier.predict_proba(X)[:, 1]
+    with warnings.catch_warnings():
+        suppress_sklearn_feature_name_warnings()
+        if nameless_classifier is not None:
+            y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
+        else:
+            y_prob = classifier.predict_proba(X)[:, 1]
 
     # plot AUROC
     fpr, tpr, _ = roc_curve(y, y_prob)

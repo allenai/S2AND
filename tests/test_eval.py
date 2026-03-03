@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 
@@ -224,6 +225,34 @@ class TestShapIntegration(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_roc.png")))
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_pr.png")))
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_shap.png")))
+
+    def test_pairwise_eval_suppresses_feature_name_warning(self):
+        import lightgbm as lgb
+        import pandas as pd
+
+        rng = np.random.default_rng(7)
+        X_train = pd.DataFrame(rng.random((20, 3)), columns=["f0", "f1", "f2"])
+        y_train = rng.integers(0, 2, size=20)
+        classifier = lgb.LGBMClassifier(n_estimators=8, random_state=7, verbosity=-1)
+        classifier.fit(X_train, y_train)
+
+        X = rng.random((4, 3))
+        y = np.array([0, 1, 0, 1])
+        with tempfile.TemporaryDirectory() as td:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                _ = pairwise_eval(
+                    X=X,
+                    y=y,
+                    classifier=classifier,
+                    figs_path=td,
+                    title="Warning Suppressed",
+                    shap_feature_names=["a", "b", "c"],
+                    skip_shap=True,
+                )
+
+        leaked = [w for w in caught if "X does not have valid feature names" in str(w.message)]
+        self.assertEqual(leaked, [])
 
     # -------------------- shap_utils.compute_shap_summary_plots tests --------------------
 

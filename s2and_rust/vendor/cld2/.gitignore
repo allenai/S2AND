@@ -1,0 +1,3 @@
+/target
+/Cargo.lock
+/cld2-sys/src/wrapper.o

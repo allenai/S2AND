@@ -102,6 +102,7 @@ from s2and.eval import cluster_eval
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, PairwiseModeler
 from s2and.serialization import load_pickle_with_verified_label_encoder_compat
+from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
 # specter suffix -> production model pickle
 # v1.1 was trained on specter1 features, v1.2 on specter2
@@ -153,6 +154,7 @@ nameless_featurization_info = FeaturizationInfo(
 
 def main() -> None:
     args = _build_parser().parse_args()
+    suppress_sklearn_feature_name_warnings()
     n_jobs = args.n_jobs
     random_seed = args.seed
     train_flag = bool(args.train)

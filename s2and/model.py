@@ -39,6 +39,7 @@ from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier,
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.subblocking import make_subblocks
 from s2and.text import same_prefix_tokens
+from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
 logger = logging.getLogger("s2and")
 IncrementalChunkLimits = Mapping[str, Any]
@@ -303,7 +304,7 @@ def _predict_class0_with_runtime(
 
     python_start = time.perf_counter()
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="X does not have valid feature names")
+        suppress_sklearn_feature_name_warnings()
         if num_threads is not None:
             try:
                 predictions = classifier.predict_proba(features_2d, num_threads=int(num_threads))[:, 0]

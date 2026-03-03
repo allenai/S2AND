@@ -19,3 +19,6 @@ serde_json = "1.0"
 
 [dev-dependencies]
 pyo3 = "0.24.2"
+
+[patch.crates-io]
+cld2 = { path = "vendor/cld2" }

@@ -13,6 +13,8 @@ from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
 
+from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
+
 
 class PairwiseModeler:
     """
@@ -149,7 +151,7 @@ class PairwiseModeler:
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self.classifier is not None, "You need to call fit first"
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="X does not have valid feature names")
+            suppress_sklearn_feature_name_warnings()
             return self.classifier.predict_proba(X)
 
 
@@ -367,7 +369,7 @@ class VotingClassifier:
     def _collect_probas(self, X):
         """Collect results from clf.predict calls."""
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="X does not have valid feature names")
+            suppress_sklearn_feature_name_warnings()
             return np.asarray([clf.predict_proba(X) for clf in self.estimators])
 
     def predict_proba(self, X):
@@ -417,5 +419,5 @@ class VotingClassifier:
     def _predict(self, X):
         """Collect results from clf.predict calls."""
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="X does not have valid feature names")
+            suppress_sklearn_feature_name_warnings()
             return np.asarray([clf.predict(X) for clf in self.estimators]).T

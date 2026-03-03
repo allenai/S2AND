@@ -54,8 +54,6 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "cld2"
 version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80918b622b5301998079b2ee8e1d58caa37afe5e733f8b5894793bef88e55fed"
 dependencies = [
  "cld2-sys",
  "lazy_static",

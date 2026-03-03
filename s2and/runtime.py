@@ -19,7 +19,7 @@ RuntimeSource = Literal["S2AND_BACKEND", "default"]
 _STARTUP_WARNING_EMITTED = False
 _STARTUP_WARNING_LOCK = threading.Lock()
 
-MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 31, 0)
+MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 40, 0)
 _CORE_REQUIRED_FEATURIZER_MARKERS = (
     "from_dataset",
     "from_json_paths",

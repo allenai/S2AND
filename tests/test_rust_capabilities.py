@@ -47,7 +47,7 @@ def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatc
     ShimModule.RustFeaturizer = RustFeaturizer
 
     class NativeModule:
-        __version__ = "0.31.0"
+        __version__ = "0.40.0"
 
     NativeModule.RustFeaturizer = RustFeaturizer
 
@@ -74,7 +74,7 @@ def test_detect_rust_runtime_capabilities_requires_core_markers():
             return None
 
     class Module:
-        __version__ = "0.31.0"
+        __version__ = "0.40.0"
 
     Module.RustFeaturizer = MissingMarkerRustFeaturizer
 
@@ -88,7 +88,7 @@ def test_detect_rust_runtime_capabilities_rejects_old_version():
     RustFeaturizer = _make_core_rust_featurizer()
 
     class Module:
-        __version__ = "0.30.9"
+        __version__ = "0.39.9"
 
     Module.RustFeaturizer = RustFeaturizer
 
@@ -114,7 +114,7 @@ def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_ma
     RustFeaturizer = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
 
     class Module:
-        __version__ = "0.31.0"
+        __version__ = "0.40.0"
 
     Module.RustFeaturizer = RustFeaturizer
 

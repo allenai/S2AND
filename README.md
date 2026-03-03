@@ -87,6 +87,13 @@ To run the entire CI suite mimicking the GH Actions, use the following command:
 ```bash
 uv run python scripts/run_ci_locally.py
 ```
+`scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
+- lint job (`ruff check` + `ruff format --check`)
+- `typecheck-and-test` matrix lanes (`py-only`, then `rust-enabled`)
+- Rust parity guardrail tests in the `rust-enabled` lane
+
+By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
+To override platform emulation locally, set `S2AND_CI_TY_PLATFORM` (for example, `windows`).
 
 To run CI checks locally without Rust extension compilation (faster iteration), run:
 ```bash

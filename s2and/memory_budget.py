@@ -243,7 +243,10 @@ def _windows_total_ram_bytes_best_effort() -> tuple[int | None, str]:
 
         status = MEMORYSTATUSEX()
         status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return None, "unavailable"
+        if not windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             return None, "unavailable"
         total = int(status.ullTotalPhys)
         if total > 0:
@@ -276,8 +279,11 @@ def _windows_process_working_set_bytes_best_effort() -> tuple[int | None, str]:
 
         counters = PROCESS_MEMORY_COUNTERS()
         counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-        process_handle = ctypes.windll.kernel32.GetCurrentProcess()
-        if not ctypes.windll.psapi.GetProcessMemoryInfo(process_handle, ctypes.byref(counters), counters.cb):
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return None, "unavailable"
+        process_handle = windll.kernel32.GetCurrentProcess()
+        if not windll.psapi.GetProcessMemoryInfo(process_handle, ctypes.byref(counters), counters.cb):
             return None, "unavailable"
         rss = int(counters.WorkingSetSize)
         if rss >= 0:

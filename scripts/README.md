@@ -53,7 +53,7 @@
 
 | Script | What it does |
 |---|---|
-| `run_ci_locally.py` | Run full CI locally: Rust extension compile (`maturin develop`), ruff, ty, pytest |
+| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: lint job, `py-only` + `rust-enabled` matrix lanes, Rust parity tests, ty, pytest |
 | `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
 
 ### Archived

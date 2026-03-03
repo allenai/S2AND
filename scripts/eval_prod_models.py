@@ -35,22 +35,22 @@ Performance with SPECTERv2 data, on zbmath (B3): (0.975, 0.991, 0.983)
 Without retraining,
 
 Performance with SPECTERv1 data, on arnetminer (B3): (0.977, 0.982, 0.979)
-Performance with SPECTERv2 data, on arnetminer (B3):
+Performance with SPECTERv2 data, on arnetminer (B3): (0.942, 0.982, 0.961)
 
 Performance with SPECTERv1 data, on inspire (B3): (0.993, 0.964, 0.978)
-Performance with SPECTERv2 data, on inspire (B3):
+Performance with SPECTERv2 data, on inspire (B3): (0.998, 0.952, 0.974)
 
 Performance with SPECTERv1 data, on kisti (B3): (0.96, 0.957, 0.959)
-Performance with SPECTERv2 data, on kisti (B3):
+Performance with SPECTERv2 data, on kisti (B3): (0.957, 0.968, 0.962)
 
 Performance with SPECTERv1 data, on pubmed (B3): (1.0, 0.968, 0.984)
-Performance with SPECTERv2 data, on pubmed (B3):
+Performance with SPECTERv2 data, on pubmed (B3): (1.0, 0.892, 0.943)
 
 Performance with SPECTERv1 data, on qian (B3): (0.985, 0.955, 0.969)
-Performance with SPECTERv2 data, on qian (B3):
+Performance with SPECTERv2 data, on qian (B3): (0.974, 0.962, 0.968)
 
 Performance with SPECTERv1 data, on zbmath (B3): (0.967, 0.955, 0.961)
-Performance with SPECTERv2 data, on zbmath (B3):
+Performance with SPECTERv2 data, on zbmath (B3): (0.961, 0.97, 0.965)
 
 
 Usage:

@@ -48,6 +48,12 @@ class LegacyClustererWithoutFeatureContract:
         self.featurizer_info = _DummyFeaturizerInfo(featurizer_version)
 
 
+class LegacyClustererWithFeatureContract:
+    def __init__(self, featurizer_version: int, semantics: str):
+        self.featurizer_info = _DummyFeaturizerInfo(featurizer_version)
+        self.feature_contract = {"name_counts_last_first_initial_semantics": semantics}
+
+
 def _dump_pickle(path: Path, obj) -> None:
     with path.open("wb") as pickle_file:
         pickle.dump(obj, pickle_file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -113,3 +119,18 @@ def test_load_pickle_attaches_name_count_feature_contract_for_legacy_model(tmp_p
     loaded = load_pickle_with_verified_label_encoder_compat(pickle_path)
     contract = loaded["clusterer"].feature_contract
     assert contract["name_counts_last_first_initial_semantics"] == "legacy_full_first_token"
+
+
+def test_load_pickle_preserves_existing_name_count_feature_contract(tmp_path):
+    payload = {
+        "clusterer": LegacyClustererWithFeatureContract(
+            featurizer_version=1,
+            semantics="initial_char",
+        )
+    }
+    pickle_path = tmp_path / "contract_clusterer.pkl"
+    _dump_pickle(pickle_path, payload)
+
+    loaded = load_pickle_with_verified_label_encoder_compat(pickle_path)
+    contract = loaded["clusterer"].feature_contract
+    assert contract["name_counts_last_first_initial_semantics"] == "initial_char"

@@ -87,7 +87,7 @@ def test_inference_prediction_uses_legacy_semantics_for_old_model():
     assert dataset.name_counts_last_first_initial_semantics == NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY
 
 
-def test_train_prediction_forces_initial_semantics_even_for_old_model():
+def test_train_prediction_uses_model_semantics_for_old_model():
     dataset = ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
@@ -109,8 +109,8 @@ def test_train_prediction_forces_initial_semantics_even_for_old_model():
 
     after = dataset.signatures["1"].author_info_name_counts
     assert after is not None
-    assert after.last_first_initial == 13
-    assert dataset.name_counts_last_first_initial_semantics == NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+    assert after.last_first_initial == 41
+    assert dataset.name_counts_last_first_initial_semantics == NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY
 
 
 def test_set_name_counts_semantics_logs_and_reraises_cache_evict_failure(monkeypatch, caplog):

@@ -249,8 +249,6 @@ def _name_count_semantics_from_featurizer_version(
 
 def _resolve_clusterer_name_count_semantics(
     clusterer: Any,
-    *,
-    strict: bool,
 ) -> str:
     contract = getattr(clusterer, "feature_contract", None)
     if isinstance(contract, dict):
@@ -260,7 +258,7 @@ def _resolve_clusterer_name_count_semantics(
             NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
         }:
             return str(contract_value)
-        if contract_value is not None and strict:
+        if contract_value is not None:
             raise ValueError(
                 "Invalid clusterer feature_contract['name_counts_last_first_initial_semantics'] "
                 f"value: {contract_value!r}"
@@ -272,23 +270,17 @@ def _resolve_clusterer_name_count_semantics(
     if inferred is not None:
         return inferred
 
-    if strict:
-        raise ValueError(
-            "Unable to resolve model name-count semantics from feature_contract or featurizer_version. "
-            "Inference requires explicit semantics metadata."
-        )
-    return NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+    raise ValueError(
+        "Unable to resolve model name-count semantics from feature_contract or featurizer_version. "
+        "Inference requires explicit semantics metadata."
+    )
 
 
 def _apply_dataset_name_count_semantics_for_prediction(
     clusterer: Any,
     dataset: ANDData,
 ) -> None:
-    dataset_mode = str(getattr(dataset, "mode", "")).strip().lower()
-    if dataset_mode == "inference":
-        desired = _resolve_clusterer_name_count_semantics(clusterer, strict=True)
-    else:
-        desired = NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+    desired = _resolve_clusterer_name_count_semantics(clusterer)
     dataset.set_name_counts_last_first_initial_semantics(desired)
 
 
@@ -2044,6 +2036,32 @@ class Clusterer:
         logger.info("Fitting clusterer")
         if isinstance(datasets, ANDData):
             datasets = [datasets]
+        if len(datasets) == 0:
+            raise ValueError("Clusterer.fit requires at least one dataset")
+
+        dataset_semantics = {
+            getattr(dataset, "name_counts_last_first_initial_semantics", None) for dataset in datasets
+        }
+        if len(dataset_semantics) != 1:
+            raise ValueError(
+                "Clusterer.fit requires consistent name-count semantics across datasets; "
+                f"observed={sorted(repr(value) for value in dataset_semantics)}"
+            )
+        training_semantics = next(iter(dataset_semantics))
+        if training_semantics not in {
+            NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
+            NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+        }:
+            raise ValueError(
+                "Clusterer.fit could not determine valid dataset name-count semantics; "
+                f"observed={training_semantics!r}"
+            )
+        contract = getattr(self, "feature_contract", None)
+        if not isinstance(contract, dict):
+            contract = {}
+        contract["name_counts_last_first_initial_semantics"] = training_semantics
+        self.feature_contract = contract
+
         val_block_dict_list = []
         val_cluster_to_signatures_list = []
         val_dists_list = []

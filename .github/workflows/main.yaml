@@ -122,19 +122,19 @@ jobs:
         if: matrix.lane == 'rust-enabled'
         run: uv run --with maturin maturin develop -m s2and_rust/Cargo.toml
 
-      - name: Rust parity guardrail: feature parity
+      - name: "Rust parity guardrail: feature parity"
         if: matrix.lane == 'rust-enabled'
         run: uv run pytest -q tests/test_feature_port_parity.py
 
-      - name: Rust parity guardrail: signature preprocess parity
+      - name: "Rust parity guardrail: signature preprocess parity"
         if: matrix.lane == 'rust-enabled'
         run: uv run pytest -q tests/test_rust_signature_preprocess.py
 
-      - name: Rust parity guardrail: batch chunking/fallback parity
+      - name: "Rust parity guardrail: batch chunking/fallback parity"
         if: matrix.lane == 'rust-enabled'
         run: uv run pytest -q tests/test_rust_batch_chunking.py
 
-      - name: Rust parity guardrail: JSON ingest parity
+      - name: "Rust parity guardrail: JSON ingest parity"
         if: matrix.lane == 'rust-enabled'
         run: uv run pytest -q tests/test_rust_from_json_paths.py
 

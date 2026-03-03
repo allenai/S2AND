@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
+from s2and import feature_port
+
+if not feature_port.rust_featurizer_available():
+    pytest.skip("s2and_rust extension is unavailable", allow_module_level=True)
+
 import numpy as np
 
 import s2and.model as model_module

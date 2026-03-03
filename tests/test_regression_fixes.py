@@ -309,6 +309,11 @@ def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
 
 
 def test_make_distance_matrices_rust_blockwise_uses_indexed_constraint_api(monkeypatch):
+    from s2and import feature_port
+
+    if not feature_port.rust_featurizer_available():
+        pytest.skip("s2and_rust extension is unavailable")
+
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set())
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])

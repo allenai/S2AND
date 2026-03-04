@@ -60,6 +60,7 @@ rust = [
 
 [tool.setuptools.packages.find]
 include = ["s2and*"]
+exclude = ["s2and_rust*"]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

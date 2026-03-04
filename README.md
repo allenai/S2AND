@@ -6,13 +6,36 @@ The reference model is live on semanticscholar.org, and the trained model is ava
 ## Installation Prereqs (one-time)
 Clone the repo.
 
-If `uv` is not installed yet, install it:
+Install `uv` using the official guide:
+- [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/)
+
+Install Rust (needed to build the native extension from source):
+- [Rust installation docs](https://www.rust-lang.org/tools/install)
+
+If you are building the Rust extension, install OS prerequisites:
 
 ```bash
-# (any OS) install uv into the Python you use to bootstrap environments
-python -m pip install --user --upgrade uv
-# Alternatively (if you use pipx): pipx install uv
+# Ubuntu / Debian / WSL2
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libgomp1
 ```
+
+```powershell
+# Windows (one-time)
+# Install Visual Studio Build Tools with the "Desktop development with C++" workload.
+```
+
+Verify toolchain availability:
+
+```bash
+uv --version
+rustc --version
+cargo --version
+```
+
+WSL notes:
+- Some Ubuntu images do not provide a `python` alias by default; use `python3` for system Python commands.
+- On PEP 668-managed systems, `python3 -m pip install --user ...` may fail with `externally-managed-environment`; use one of the official `uv` install methods above.
 
 ---
 
@@ -59,6 +82,8 @@ uv sync --active --extra dev
 
 ```bash
 # requires Rust toolchain on PATH (rustc/cargo)
+# if Rust was just installed via rustup in this shell:
+# source "$HOME/.cargo/env"
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
@@ -68,6 +93,8 @@ Notes:
   `maturin develop` step above.
 - Once wheels are published, you can install the native extension via extras:
   `uv pip install "s2and[rust]"`.
+- On WSL with repo paths mounted from Windows (for example, `/mnt/c/...`), `uv` may warn about failed hardlinks.
+  To suppress this and avoid repeated warnings, set `UV_LINK_MODE=copy` before `uv sync` / `uv pip install`.
 
 ## Docs
 
@@ -137,94 +164,167 @@ Notes:
 When running scripts from the repo, prefer `uv run --no-project` so the installed packages (including the Rust extension)
 resolve from site-packages. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
 
+Quickstart with bundled fixture (`tests/qian`, no large data download):
+
 ```bash
-uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py \
+  --use-rust 1 \
+  --dataset qian \
+  --data-root tests \
+  --load-name-counts 0
+```
+
+Run the same tutorial on `data/s2and_mini` (downloaded artifacts):
+
+```bash
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1 --dataset qian
 ```
 
 Profiling (Rust inference):
 
 ```bash
-S2AND_BACKEND=rust uv run --no-project python scripts/rust_suite.py prod-inference
+S2AND_BACKEND=rust uv run --no-project python scripts/rust_suite.py prod-inference \
+  --dataset-name qian \
+  --data-root tests \
+  --n-jobs 4
 ```
 
 Benchmark baseline ownership:
 - Active Rust runtime gate baselines and promotion rules: `docs/rust/baselines.md`
-- Historical compare logs (forensics only): `docs/archive/README.md`
 
 ## Rust featurizer (runtime backend)
-S2AND backend selection is controlled by one public env var:
-- `S2AND_BACKEND=auto` (default when unset)
-- `S2AND_BACKEND=rust` (strict Rust mode for migrated stages)
-- `S2AND_BACKEND=python` (Python-only path; zero Rust calls)
+S2AND backend selection is controlled by `S2AND_BACKEND`:
+- `auto` (default) — uses Rust when available and capable, otherwise Python
+- `rust` — strict Rust mode; fails fast on Rust-stage errors
+- `python` — Python-only path; zero Rust calls
 
-`auto` resolves to Rust only when core Rust runtime capability is available
-(`s2and_rust` extension importable, required `RustFeaturizer` API markers present,
-and extension version is parseable semver meeting the minimum supported version);
-otherwise it resolves to Python.
+For the full list of environment variables, see [docs/environment.md](docs/environment.md).
 
 Install contract:
-
 - `uv pip install s2and`: Python-only runtime.
-- `uv pip install "s2and[rust]"`: Rust-enabled runtime when the extension is importable and core-capable.
-- Full runtime contract + verification commands: `docs/rust/runtime.md`.
-
-
-In `rust` backend mode, migrated Rust stages fail fast on Rust-stage errors (no silent Python rescue). In `auto`
-mode, fallback only occurs during backend resolution; runtime Rust-stage failures still fail fast.
-
-Stable runtime controls:
-- `S2AND_BACKEND=python|rust|auto` to select runtime backend.
-- `S2AND_CACHE=<path>` to set the cache root directory (only used when `use_cache=True`; default `~/.s2and`).
-- `S2AND_RUST_NAME_COUNTS_JSON=<path>` to provide artifact-backed name-count lookups for Rust JSON ingest.
-  This is used when `from_json_paths` is active and dataset signature-level name counts are not available.
-- `Clusterer.predict_incremental(..., total_ram_bytes=<int>)` to provide explicit RAM input for phase-split chunk/budget derivation.
-
-Advanced/internal knobs (not a stable public API):
-(Inventory note: this section is intended to be exhaustive for `S2AND_*` env vars currently referenced in the repo.)
-- `S2AND_RUST_FEATURIZER_MAX_INMEM=<int>` — cap in-memory Rust featurizer entries (`0` = unbounded).
-  Quick guide: use `1` for single-dataset-per-process workloads; use `2-3` if one process alternates among a few datasets.
-  This knob only matters when `use_cache=True`, and it is read once at process start.
-- `S2AND_NORMALIZATION_VERSION=<string>` — normalization version expected by artifact-backed name-count ingest. Default `legacy_compat`.
-- `S2AND_ALLOW_NORMALIZATION_VERSION_MISMATCH=0|1` — allow artifact-backed name-count ingest with missing/mismatched normalization metadata. Default `0`.
-- `S2AND_SKIP_FASTTEXT=0|1` — skip FastText loading (tests/benchmarks). Default `0`.
-- `RAYON_NUM_THREADS=<int>` — Rust-side thread count (standard Rayon env var).
+- `uv pip install "s2and[rust]"`: Rust-enabled runtime.
+- Full runtime contract: [docs/rust/runtime.md](docs/rust/runtime.md).
 
 Notes:
-- Rust batch mode is used for all `n_jobs` by default and uses Rayon internally for parallelism.
-- Rust batch chunk sizing is stage-budgeted from current RSS and total RAM (explicit `total_ram_bytes` when provided, otherwise autodetect).
-- Rust batch mode uses chunked calls internally and shows a tqdm progress bar for large batches.
-- In Rust mode, pair featurization enforces a single parallelism layer: Rust threads in batch mode; Python process pools are not used.
-- Resolved Rust defaults use Rust for `ingest_preprocess`, `constraints`, and `pair_featurization`.
-- Signature preprocessing follows runtime backend selection (`S2AND_BACKEND`).
-- When Rust is enabled, signature affiliation/coauthor n-gram Counters may be deferred in Python (`None`) and computed
-  natively during Rust featurizer construction.
-- If a Python code path needs eager signature n-gram Counters, call `ANDData.materialize_signature_ngrams_python()`.
-- The Rust featurizer is built with `maturin develop -m s2and_rust/Cargo.toml`.
-
-Name-count artifact exporter for JSON ingest:
-
-```bash
-uv run --no-project python scripts/export_name_counts_for_rust.py --output scratch/name_counts_rust.json
-```
+- Rust batch mode uses Rayon internally for parallelism; Python process pools are not used.
+- When Rust is enabled, signature n-gram Counters may be deferred and computed natively during Rust featurizer construction.
+- If a Python code path needs eager n-gram Counters, call `ANDData.materialize_signature_ngrams_python()`.
 
 ## Cache policy
-Cache behavior is controlled by one flag: `use_cache` (Python + Rust).
-- Default: `use_cache=False`.
-- `use_cache=False`: no Python pair-feature cache read/write, no Rust featurizer in-memory cache, and no Rust disk cache read/write.
-- `use_cache=True`: enable Python pair-feature cache and Rust featurizer cache (in-memory + disk).
-- Cache root directory: `S2AND_CACHE` (defaults to `~/.s2and`).
+- Default: `use_cache=False` (no caching).
+- `use_cache=True`: enables Python pair-feature cache and Rust featurizer cache.
+- Cache root: `S2AND_CACHE` env var (defaults to `~/.s2and`).
 
-Recommended setting for one-shot inference services:
-- `S2AND_BACKEND=rust`
-
-Pre-warm once at server start so requests are hot:
+Pre-warm once at server start:
 
 ```python
 from s2and.feature_port import warm_rust_featurizer
-
-# after you build/load your ANDData dataset:
 warm_rust_featurizer(dataset, use_cache=True)
 ```
+
+## Large-scale Rust inference with subblocking
+
+For processing massive blocks (hundreds of thousands of signatures), use the Rust backend with
+subblocking to keep memory bounded. This is the recommended production setup.
+
+### Standard prediction with subblocking
+
+Use `predict()` with `batching_threshold` to automatically split large blocks into manageable subblocks:
+
+```python
+import os
+
+# 1. Force Rust backend (set before importing s2and modules)
+os.environ["S2AND_BACKEND"] = "rust"
+
+from s2and.data import ANDData
+from s2and.feature_port import warm_rust_featurizer
+from s2and.serialization import load_pickle_with_verified_label_encoder_compat
+
+# 2. Load the production model
+clusterer = load_pickle_with_verified_label_encoder_compat(
+    "data/production_model_v1.2.pickle"
+)["clusterer"]
+clusterer.use_cache = False  # disable caching for one-shot inference
+clusterer.n_jobs = 8
+
+# 3. Load your dataset in inference mode
+dataset = ANDData(
+    signatures="path/to/signatures.json",
+    papers="path/to/papers.json",
+    specter_embeddings="path/to/specter.pickle",
+    mode="inference",
+    block_type="s2",
+    n_jobs=8,
+    name="my_dataset",
+)
+
+# 4. (Optional) Pre-warm Rust featurizer to reduce cold-start latency
+warm_rust_featurizer(dataset, use_cache=False)
+
+# 5. Predict clusters with subblocking for large blocks
+pred_clusters, _ = clusterer.predict(
+    dataset.get_blocks(),
+    dataset,
+    batching_threshold=5000,  # blocks larger than this are split into subblocks
+    desired_memory_use=5000 * 5000,  # memory budget in signature-pairs (25M pairs here)
+)
+
+# pred_clusters is a dict mapping signature_id -> list of cluster member signature_ids
+print(f"Total clusters: {len(pred_clusters)}")
+```
+
+Key parameters for `predict()`:
+- `batching_threshold`: blocks larger than this are split via `make_subblocks()` before clustering
+- `desired_memory_use`: memory budget in signature-pair units; controls chunk sizing for subblocked incremental paths (default: `batching_threshold²`)
+
+### Incremental prediction (adding new signatures to existing clusters)
+
+Use `predict_incremental()` when you have existing clusters (`cluster_seeds`) and want to assign
+new signatures without reclustering everything:
+
+```python
+# Load dataset with existing cluster seeds
+dataset = ANDData(
+    signatures="path/to/signatures.json",
+    papers="path/to/papers.json",
+    specter_embeddings="path/to/specter.pickle",
+    mode="inference",
+    block_type="s2",
+    n_jobs=8,
+    name="my_dataset",
+    cluster_seeds={
+        "require": {
+            "block_key": {("sig1", "sig2"): 1.0, ...},  # pairs that must cluster together
+        },
+        "disallow": {
+            "block_key": {("sig3", "sig4"), ...},  # pairs that must NOT cluster together
+        },
+    },
+)
+
+# Run incremental prediction on one block
+blocks = dataset.get_blocks()
+block_key = "j smith"  # target block
+block_signatures = blocks[block_key]
+
+result = clusterer.predict_incremental(
+    block_signatures,
+    dataset,
+    batching_threshold=5000,       # subblock size cap for phase-split mode
+    total_ram_bytes=32 * 1024**3,  # explicit RAM budget (32 GB)
+)
+
+clusters = result["clusters"]
+phase_b_mode = result.get("phase_b_mode", "N/A")
+
+# phase_b_mode indicates how phase-split handled memory:
+# - "exact": ran Phase B globally (monolithic-equivalent behavior)
+# - "subblock_local": ran Phase B per-subblock (memory-bounded approximation)
+print(f"Clusters: {len(set(clusters.values()))}, mode={phase_b_mode}")
+```
+
+For detailed subblocking behavior, see `docs/subclustering.md`.
 
 ## Data
 To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):
@@ -358,7 +458,23 @@ pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), 
 # pred_distance_matrices can be None when using memory-optimized fused clustering
 ```
 ## How to use the released production model
-We provide a trained production model (the one that is used in the Semantic Scholar website and API) in the S3 bucket along with the datasets, in the file `production_model_v1.1.pickle`. To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data. The older "v1.0" model is also available, but it's worse.
+We provide trained production models in the S3 bucket along with the datasets:
+
+- **`production_model_v1.2.pickle`** — current production model (used on Semantic Scholar website and API).
+- `production_model_v1.1.pickle` — previous production version.
+- `production_model_v1.0.pickle` — original version (deprecated).
+
+To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data.
+
+Bundled quick example:
+
+```bash
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py \
+  --use-rust 1 \
+  --dataset qian \
+  --data-root tests \
+  --load-name-counts 0
+```
 
 Please note that the production models still use SPECTER1, and these embeddings are still available via the S2 API.
 

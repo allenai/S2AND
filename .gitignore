@@ -153,6 +153,7 @@ dmypy.json
 .pyre/
 
 *.pickle
+!tests/qian/specter.pickle
 .vscode
 foo-*
 *.dat

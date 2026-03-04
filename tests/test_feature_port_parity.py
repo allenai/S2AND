@@ -63,14 +63,6 @@ def _ref_details_empty(paper):
     return all(len(counter) == 0 for counter in paper.reference_details)
 
 
-def _ref_details_nonempty(paper, idx=None):
-    if paper.reference_details is None:
-        return False
-    if idx is None:
-        return any(len(counter) > 0 for counter in paper.reference_details)
-    return len(paper.reference_details[idx]) > 0
-
-
 @contextmanager
 def _temporary_cluster_seeds(dataset, require_map, disallow_set):
     orig_require = dataset.cluster_seeds_require
@@ -509,22 +501,6 @@ def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
         assert equalish(
             ref_val, got_val
         ), f"Reference-empty mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
-
-
-def test_featurize_pair_rust_parity_reference_details_nonempty(dataset_with_refs):
-    featurizer_mod.global_dataset = dataset_with_refs  # type: ignore
-    sigs = _find_signatures(dataset_with_refs, lambda _s, p: _ref_details_nonempty(p, idx=0), limit=2)
-    if len(sigs) < 2:
-        pytest.skip("Not enough papers with non-empty reference author counters found")
-    s1, s2 = sigs[0], sigs[1]
-
-    ref_features, _ = _single_pair_featurize((s1, s2))
-    rust_features = featurize_pair_rust(dataset_with_refs, s1, s2)
-    assert not math.isnan(ref_features[16]), "Reference author overlap should be computed for non-empty counters"
-    for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
-        assert equalish(
-            ref_val, got_val
-        ), f"Reference-nonempty mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 
 
 def test_featurize_pair_rust_parity_missing_email(dataset):

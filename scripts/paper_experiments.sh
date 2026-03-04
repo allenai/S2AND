@@ -36,8 +36,8 @@ python scripts/transfer_experiment_seed_paper.py --n_jobs 25 --random_seed 1 2 3
 python scripts/transfer_experiment_seed_paper.py --n_jobs 25 --random_seed 1 2 3 4 5 --skip_individual_models --experiment_name paper_experiments/ablations/no_references --feature_groups_to_skip reference_features --use_cache
 
 # SOTA
-python scripts/sota.py --n_jobs 25 --random_seed 42 --inspire_split 0 --inspire_only --experiment_name paper_experiments_sota/inspire_split_0/
-python scripts/sota.py --n_jobs 25 --random_seed 42 --inspire_split 1 --inspire_only --experiment_name paper_experiments_sota/inspire_split_1/
-python scripts/sota.py --n_jobs 25 --random_seed 42 --inspire_split 2 --inspire_only --experiment_name paper_experiments_sota/inspire_split_2/
-python scripts/sota.py --n_jobs 25 --random_seed 42 --aminer_only --experiment_name paper_experiments_sota/aminer/
-python scripts/sota.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name paper_experiments_sota/kisti_pubmed_medline/
+python scripts/archive/sota.py --n_jobs 25 --random_seed 42 --inspire_split 0 --inspire_only --experiment_name paper_experiments_sota/inspire_split_0/
+python scripts/archive/sota.py --n_jobs 25 --random_seed 42 --inspire_split 1 --inspire_only --experiment_name paper_experiments_sota/inspire_split_1/
+python scripts/archive/sota.py --n_jobs 25 --random_seed 42 --inspire_split 2 --inspire_only --experiment_name paper_experiments_sota/inspire_split_2/
+python scripts/archive/sota.py --n_jobs 25 --random_seed 42 --aminer_only --experiment_name paper_experiments_sota/aminer/
+python scripts/archive/sota.py --n_jobs 25 --random_seed 1 2 3 4 5 --experiment_name paper_experiments_sota/kisti_pubmed_medline/

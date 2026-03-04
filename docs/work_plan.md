@@ -41,7 +41,7 @@ Choose one:
 
 ## Separate tracks
 
-- Normalization migration (blocked until data is ready): `docs/normalization_migration.md`
+- Normalization migration [BLOCKED]: `docs/normalization_migration_blocked.md`
 
 ## Backlog
 

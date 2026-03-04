@@ -45,15 +45,46 @@ def _resolve_path(project_root: str, maybe_relative_path: str) -> str:
     return str(Path(project_root) / candidate)
 
 
+def _resolve_dataset_file(
+    dataset_root: str,
+    dataset_name: str,
+    preferred_name: str,
+    fallback_name: str,
+) -> str:
+    preferred_path = os.path.join(dataset_root, preferred_name)
+    if os.path.exists(preferred_path):
+        return preferred_path
+    fallback_path = os.path.join(dataset_root, fallback_name)
+    if os.path.exists(fallback_path):
+        return fallback_path
+    raise FileNotFoundError(
+        "Missing dataset file for "
+        f"'{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
+    )
+
+
 def _build_data_paths(project_root: str, dataset_name: str, data_root: str, specter_file: str) -> dict[str, str]:
     data_root_path = _resolve_path(project_root, data_root)
     dataset_root = os.path.join(data_root_path, dataset_name)
-    specter_name = specter_file or f"{dataset_name}_specter.pickle"
+    if specter_file:
+        specter_path = os.path.join(dataset_root, specter_file)
+    else:
+        specter_path = _resolve_dataset_file(
+            dataset_root,
+            dataset_name,
+            f"{dataset_name}_specter.pickle",
+            "specter.pickle",
+        )
     return {
-        "signatures": os.path.join(dataset_root, f"{dataset_name}_signatures.json"),
-        "papers": os.path.join(dataset_root, f"{dataset_name}_papers.json"),
-        "clusters": os.path.join(dataset_root, f"{dataset_name}_clusters.json"),
-        "specter": os.path.join(dataset_root, specter_name),
+        "signatures": _resolve_dataset_file(
+            dataset_root,
+            dataset_name,
+            f"{dataset_name}_signatures.json",
+            "signatures.json",
+        ),
+        "papers": _resolve_dataset_file(dataset_root, dataset_name, f"{dataset_name}_papers.json", "papers.json"),
+        "clusters": _resolve_dataset_file(dataset_root, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"),
+        "specter": specter_path,
     }
 
 

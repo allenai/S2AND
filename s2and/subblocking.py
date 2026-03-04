@@ -1,24 +1,69 @@
-import random
-import os
 import json
+import logging
+import os
+import random
+from collections import defaultdict
+from itertools import combinations
+
+import genieclust
 import numpy as np
 import pandas as pd
-import logging
-from itertools import combinations
-from collections import defaultdict
-from sklearn.preprocessing import MultiLabelBinarizer
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
-import genieclust
-from s2and.consts import SPECTER_DIM, PROJECT_ROOT_PATH
-from s2and.text import same_prefix_tokens
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import MultiLabelBinarizer
 
+from s2and.consts import PROJECT_ROOT_PATH, SPECTER_DIM
+from s2and.text import (
+    AFFILIATIONS_STOP_WORDS,
+    compute_block,
+    get_text_ngrams_words,
+    same_prefix_tokens,
+    split_first_middle_hyphen_aware,
+)
 
 logger = logging.getLogger("s2and")
 
 
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json"), "r") as f:
+with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json")) as f:
     FIRST_K_LETTER_COUNTS = json.load(f)
+
+
+def _signature_affiliation_feature_keys(signature) -> list[str]:
+    if signature.author_info_affiliations_n_grams is not None:
+        return list(signature.author_info_affiliations_n_grams.keys())
+    affiliations = list(signature.author_info_affiliations or [])
+    if not affiliations:
+        return []
+    tokens = [word for word in " ".join(affiliations).split() if word not in AFFILIATIONS_STOP_WORDS and len(word) > 1]
+    if not tokens:
+        return []
+    ngrams = get_text_ngrams_words(" ".join(tokens), stopwords=set())
+    return list(ngrams.keys())
+
+
+def _signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
+    first = signature.author_info_first_normalized_without_apostrophe
+    middle = signature.author_info_middle_normalized_without_apostrophe
+    if first is not None and middle is not None:
+        return first, middle
+    # Rust preprocessing can defer normalized name fields; reconstruct with Python-equivalent logic.
+    return split_first_middle_hyphen_aware(signature.author_info_first, signature.author_info_middle)
+
+
+def _signature_coauthor_blocks_for_specter(signature, anddata) -> list[str]:
+    coauthor_blocks = signature.author_info_coauthor_blocks
+    if coauthor_blocks is not None:
+        return list(coauthor_blocks)
+
+    coauthors = signature.author_info_coauthors
+    if coauthors is None:
+        paper = anddata.papers.get(str(signature.paper_id))
+        if paper is None:
+            return []
+        coauthors = [
+            author.author_name for author in paper.authors if author.position != signature.author_info_position
+        ]
+    return [compute_block(author) for author in coauthors]
 
 
 def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
@@ -51,19 +96,19 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
     try:
         # same for the co-author blocks
         X = MultiLabelBinarizer(sparse_output=True).fit_transform(
-            [list(anddata.signatures[i].author_info_coauthor_blocks) for i in signature_ids]
+            [_signature_coauthor_blocks_for_specter(anddata.signatures[i], anddata) for i in signature_ids]
         )
         X_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(X)
 
         # same for affiliations
         X = TfidfVectorizer(preprocessor=None, analyzer=lambda x: x).fit_transform(
-            [list(anddata.signatures[i].author_info_affiliations_n_grams.keys()) for i in signature_ids]
+            [_signature_affiliation_feature_keys(anddata.signatures[i]) for i in signature_ids]
         )
         X_svd2 = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(X)
 
         # all together now
         X = X_specter + np.mean([X_svd, X_svd2], axis=0)
-    except:
+    except Exception:
         X = X_specter
 
     # how many subblocks do we want given this data and target subblock size?
@@ -72,27 +117,28 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000):
 
     # this can fail when X are all zeros
     try:
-        g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01, exact=False)
+        g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01)
         labels = g.fit_predict(X)
-    except:
+    except Exception:
         labels = np.zeros(len(signature_ids), dtype=int)
 
     subblocks = defaultdict(list)
-    for sig_id, label in zip(signature_ids, labels):
+    for sig_id, label in zip(signature_ids, labels, strict=True):
         subblocks[label].append(sig_id)
     # if any subblock is above the target size, just chop it up randomly into pieces that are below the target size
+    seed_base = int(getattr(anddata, "random_seed", 0) or 0)
     for label, subblock in list(subblocks.items()):
         if len(subblock) > target_subblock_size:
-            random.shuffle(subblock)
+            # Keep oversize split order deterministic for reproducible subblocking behavior.
+            label_seed = seed_base + sum(ord(ch) for ch in str(label))
+            random.Random(label_seed).shuffle(subblock)
             num_new_subblocks = int(np.ceil(len(subblock) / target_subblock_size))
-            c = 0
             for i in range(num_new_subblocks):
                 subblocks[f"{label}.{i}"] = subblock[i * target_subblock_size : (i + 1) * target_subblock_size]
-                c += len(subblocks[f"{label}.{i}"])
             del subblocks[label]
 
     # assert that the subblocks has a complete clustering of the input signature_ids
-    assert sum([len(subblock) for subblock in subblocks.values()]) == len(signature_ids)
+    assert sum(len(subblock) for subblock in subblocks.values()) == len(signature_ids)
 
     return dict(subblocks)
 
@@ -136,7 +182,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         counts_up_to_k_good_size = counts_up_to_k[good_size_flag]
         # the case where at this point *all* the newly made subblocks are too big
         # so it is a dead-end
-        if len(counts_up_to_k_good_size) == 0:
+        if counts_up_to_k_good_size.empty:
             for name in counts_up_to_k.index:
                 flag = names_up_to_k == name
                 output_cant_subdivide[name] = signature_ids[flag]
@@ -153,12 +199,12 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         signature_ids = signature_ids[bad_size_flag]
         k += 1
     # last ditch clean-up in case things didn't work out
-    if len(names) > 0 and clean_break == False:
+    if len(names) > 0 and not clean_break:
         output_cant_subdivide["final"] = signature_ids
     # assert that the combo of the output and output_cant_subdivide is a complete clustering of the input signature_ids
     assert (
-        sum([len(subblock) for subblock in output.values()])
-        + sum([len(subblock) for subblock in output_cant_subdivide.values()])
+        sum(len(subblock) for subblock in output.values())
+        + sum(len(subblock) for subblock in output_cant_subdivide.values())
         == n_signature_ids
     )
     return output, output_cant_subdivide
@@ -188,12 +234,9 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     """
     logger.info("Beginning subblocking...")
     signature_ids = np.array(signature_ids)
-    first_names = np.array(
-        [anddata.signatures[i].author_info_first_normalized_without_apostrophe for i in signature_ids]
-    )
-    middle_names = np.array(
-        [anddata.signatures[i].author_info_middle_normalized_without_apostrophe for i in signature_ids]
-    )
+    first_middle_names = [_signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids]
+    first_names = np.array([name_parts[0] for name_parts in first_middle_names])
+    middle_names = np.array([name_parts[1] for name_parts in first_middle_names])
 
     # set aside those that are only 1 letter long for a different treatment
     single_letter_first_names_flag = np.array([len(first_name) <= 1 for first_name in first_names])
@@ -219,7 +262,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     output_for_specter = {}
     for key, sig_ids_loop in output_cant_subdivide.items():
         middle_names_loop = np.array(
-            [anddata.signatures[i].author_info_middle_normalized_without_apostrophe for i in sig_ids_loop]
+            [_signature_name_parts_for_subblocking(anddata.signatures[i])[1] for i in sig_ids_loop]
         )
         output_loop, output_cant_subdivide_loop = subdivide_helper(
             middle_names_loop, sig_ids_loop, maximum_size, starting_k=1
@@ -263,7 +306,8 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     # which also does totally random sub-blocking in case things went awry
     if len(output_for_specter) > 0:
         logger.info(
-            "Subdividing the subblocks that could not be subdivided via middle names using SPECTER (and random subblocking)"
+            "Subdividing the subblocks that could not be subdivided via middle names using SPECTER "
+            "(and random subblocking)"
         )
     for key, sig_ids_loop in output_for_specter.items():
         output_loop = {}
@@ -427,11 +471,13 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         for k in keys_to_merge:
             counter_of_keys[k] += 1
 
-    assert all([v == 1 for v in counter_of_keys.values()])
+    assert all(v == 1 for v in counter_of_keys.values())
 
     # now perform the actual merges
-    for keys_to_merge in merging_log.values():
-        key_of_keys = ", ".join(sorted(list(keys_to_merge)))
+    for merge_cluster_id in sorted(merging_log):
+        # Keep merged member ordering deterministic across processes.
+        keys_to_merge = sorted(merging_log[merge_cluster_id])
+        key_of_keys = ", ".join(keys_to_merge)
         signature_ids_stacked = np.hstack([output[k] for k in keys_to_merge])
         output[key_of_keys] = signature_ids_stacked
         # delete what was merged
@@ -454,8 +500,8 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
             if orcid is not None:
                 orcid_to_sig_id_subblock_id[orcid].append((sig_id, subblock_id))
     # 2: for each orcid, if there is more than one unique subblock_id, then we need to move signature_ids around
-    for orcid, sig_id_subblock_id in orcid_to_sig_id_subblock_id.items():
-        unique_subblock_ids = list(set([i[1] for i in sig_id_subblock_id]))
+    for _orcid, sig_id_subblock_id in orcid_to_sig_id_subblock_id.items():
+        unique_subblock_ids = sorted({item[1] for item in sig_id_subblock_id})
         if len(unique_subblock_ids) > 1:
             # 3: pick a subblock that isn't already maximum size
             # if they are all maximum size, then pick the first one
@@ -465,22 +511,32 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
             # (b) have more than 1 letter
             unique_subblock_ids = sorted(
                 unique_subblock_ids,
-                key=lambda x: x.count("specter") * 10 + x.count("|"),
+                key=lambda x: (x.count("specter") * 10 + x.count("|"), x),
             )
-            if all([i == maximum_size for i in subblock_sizes]):
+            if all(i == maximum_size for i in subblock_sizes):
                 subblock_id_to_move_to = unique_subblock_ids[0]
             else:
                 subblock_id_to_move_to = [k for k in unique_subblock_ids if len(output[k]) < maximum_size][0]
             # 4: move the signature_ids around so that they are all in the same subblock
             # we take ONLY the signature ids that are not in the chosen subblock_id
-            # and move them there, removing from their original subblock
+            # and move them there, then batch-remove via set membership to avoid repeated list.remove().
+            sig_ids_to_move = []
+            moved_sig_ids_by_source = defaultdict(set)
             for sig_id, original_subblock_id in sig_id_subblock_id:
                 if original_subblock_id != subblock_id_to_move_to:
-                    output[subblock_id_to_move_to].append(sig_id)
-                    output[original_subblock_id].remove(sig_id)
+                    sig_ids_to_move.append(sig_id)
+                    moved_sig_ids_by_source[original_subblock_id].add(sig_id)
+
+            output[subblock_id_to_move_to].extend(sig_ids_to_move)
+            for original_subblock_id, moved_sig_ids in moved_sig_ids_by_source.items():
+                if original_subblock_id not in output:
+                    continue
+                remaining_sig_ids = [sig_id for sig_id in output[original_subblock_id] if sig_id not in moved_sig_ids]
+                if remaining_sig_ids:
+                    output[original_subblock_id] = remaining_sig_ids
+                else:
                     # unlikely, but if we emptied out the original subblock, then delete it
-                    if len(output[original_subblock_id]) == 0:
-                        del output[original_subblock_id]
+                    del output[original_subblock_id]
 
     # let's assert that we have done a complete partition
     assert set(np.hstack([output[k] for k in output])) == set(signature_ids)
@@ -491,6 +547,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
 
     average_subblock_length = np.mean([len(output[k]) for k in output])
     logger.info(
-        f"Done subblocking. There are {len(output)} subblocks with an average of {average_subblock_length} signatures each."
+        f"Done subblocking. There are {len(output)} subblocks with an average of "
+        f"{average_subblock_length} signatures each."
     )
     return output

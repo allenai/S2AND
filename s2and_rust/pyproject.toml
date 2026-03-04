@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "s2and-rust"
-version = "0.31.0"
+version = "0.40.0"
 description = "Rust extension for s2and"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 

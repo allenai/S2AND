@@ -1,37 +1,57 @@
-from typing import Dict, Optional, Any, List, Tuple, TYPE_CHECKING, Union, DefaultDict
-
+import json
 import logging
 import pickle
-import json
 import warnings
 from collections import Counter
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:  # need this for circular import issues
-    from s2and.model import Clusterer
     from s2and.data import ANDData
+    from s2and.model import Clusterer
 
-import os
-from os.path import join
-from functools import reduce
-import itertools
-from collections import defaultdict
-
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-from sklearn.metrics import roc_curve, auc
-from sklearn.metrics import precision_recall_fscore_support
-from sklearn.metrics import average_precision_score
-from sklearn.metrics import precision_recall_curve
 import copy
+import itertools
+import os
+from collections import defaultdict
+from os.path import join
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+from sklearn.metrics import (
+    auc,
+    average_precision_score,
+    precision_recall_curve,
+    precision_recall_fscore_support,
+    roc_curve,
+)
 from tqdm import tqdm
 
 from s2and.featurizer import many_pairs_featurize
+from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
 logger = logging.getLogger("s2and")
 
 sns.set(context="talk")
+
+
+class FacetEvalResult(NamedTuple):
+    gender_f1: dict[str, list]
+    ethnicity_f1: dict[str, list]
+    author_num_f1: dict[int, list]
+    year_f1: dict[int, list]
+    block_len_f1: dict[int, list]
+    cluster_len_f1: dict[int, list]
+    homonymity_f1: dict[float, list]
+    synonymity_f1: dict[float, list]
+    firstname_f1: dict[int, list]
+    affiliation_f1: dict[int, list]
+    email_f1: dict[int, list]
+    abstract_f1: dict[int, list]
+    venue_f1: dict[int, list]
+    references_f1: dict[int, list]
+    coauthors_f1: dict[int, list]
+    signature_lookup: list[dict]
 
 
 def cluster_eval(
@@ -39,7 +59,7 @@ def cluster_eval(
     clusterer: "Clusterer",
     split: str = "test",
     use_s2_clusters: bool = False,
-) -> Tuple[Dict[str, Tuple], Dict[str, Tuple[float, float, float]]]:
+) -> tuple[dict[str, tuple], dict[str, tuple[float, float, float]]]:
     """
     Performs clusterwise evaluation.
     Returns B3, Cluster F1, and Cluster Macro F1.
@@ -83,7 +103,7 @@ def cluster_eval(
         pred_bigger_ratios,
         true_bigger_ratios,
     ) = b3_precision_recall_fscore(cluster_to_signatures, pred_clusters)
-    metrics: Dict[str, Tuple] = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
+    metrics: dict[str, tuple] = {"B3 (P, R, F1)": (b3_p, b3_r, b3_f1)}
     metrics["Cluster (P, R F1)"] = pairwise_precision_recall_fscore(
         cluster_to_signatures, pred_clusters, block_dict, "clusters"
     )
@@ -104,11 +124,17 @@ def cluster_eval(
 
 def incremental_cluster_eval(
     dataset: "ANDData", clusterer: "Clusterer", split: str = "test"
-) -> Tuple[Dict[str, Tuple[float, float, float]], Dict[str, Tuple[float, float, float]]]:
+) -> tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]:
     """
     Performs clusterwise evaluation for the incremental clustering setting.
     This includes both time-split and random split of signatures.
     Returns B3, Cluster F1, and Cluster Macro F1.
+
+    Notes
+    -----
+    Partial supervision is materialized for all observed-signature pairs.
+    If there are M observed signatures, this step builds M*(M-1)/2 pairs
+    (quadratic time and memory in M).
 
     Parameters
     ----------
@@ -139,7 +165,7 @@ def incremental_cluster_eval(
     # use entire block of signatures for predictions
     # NOTE: train/val/test block dicts can have overlapping signatures in the incremental case
     eval_block_dict_full = {}
-    eval_block_dict_for_metrics: Dict[str, List[str]]
+    eval_block_dict_for_metrics: dict[str, list[str]]
     if split == "test":
         for block_key, _ in test_block_dict.items():
             eval_block_dict_full[block_key] = block_dict[block_key]
@@ -158,12 +184,22 @@ def incremental_cluster_eval(
     else:
         raise Exception("Evaluation split must be one of: {val, test}!")
 
-    partial_supervision: Dict[Tuple[str, str], Union[int, float]] = {}
+    partial_supervision: dict[tuple[str, str], int | float] = {}
+    if dataset.signature_to_cluster_id is None:
+        raise ValueError("cluster_eval requires dataset.signature_to_cluster_id")
+    signature_to_cluster_id = dataset.signature_to_cluster_id
     list_obs_signatures = list(observed_signatures)
+    observed_count = len(list_obs_signatures)
+    observed_pair_count = observed_count * (observed_count - 1) // 2
+    logger.debug(
+        "Building incremental partial supervision for %d observed signatures (%d pairs).",
+        observed_count,
+        observed_pair_count,
+    )
     # considers the supervision as distances
     for i, signature_i in enumerate(list_obs_signatures):
         for signature_j in list_obs_signatures[i + 1 : len(list_obs_signatures)]:
-            if dataset.signature_to_cluster_id[signature_i] == dataset.signature_to_cluster_id[signature_j]:
+            if signature_to_cluster_id[signature_i] == signature_to_cluster_id[signature_j]:
                 partial_supervision[(signature_i, signature_j)] = 0
             else:
                 partial_supervision[(signature_i, signature_j)] = 1
@@ -197,26 +233,9 @@ def incremental_cluster_eval(
 
 def facet_eval(
     dataset: "ANDData",
-    metrics_per_signature: Dict[str, Tuple[float, float, float]],
+    metrics_per_signature: dict[str, tuple[float, float, float]],
     block_type: str = "original",
-) -> Tuple[
-    Dict[str, List],
-    Dict[str, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    Dict[int, List],
-    List[dict],
-]:
+) -> FacetEvalResult:
     """
     Extracts B3 per facets.
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
@@ -258,14 +277,17 @@ def facet_eval(
 
     # we need to know the length of each cluster
     assert dataset.clusters is not None
+    if dataset.signature_to_cluster_id is None:
+        raise ValueError("facet_eval requires dataset.signature_to_cluster_id")
+    signature_to_cluster_id = dataset.signature_to_cluster_id
     cluster_len_dict = {}
     for cluster_id, cluster_dict in dataset.clusters.items():
         cluster_len_dict[cluster_id] = len(cluster_dict["signature_ids"])
 
     # for homonymity and synonymity we need to check all pairs
-    homonymity: Dict[str, int] = defaultdict(int)
-    synonymity: Dict[str, int] = defaultdict(int)
-    denominator: Dict[str, int] = defaultdict(int)
+    homonymity: dict[str, int] = defaultdict(int)
+    synonymity: dict[str, int] = defaultdict(int)
+    denominator: dict[str, int] = defaultdict(int)
     signature_keys = list(metrics_per_signature.keys())
     for i, signature_key_a in enumerate(signature_keys):
         for signature_key_b in signature_keys[i + 1 :]:
@@ -278,9 +300,7 @@ def facet_eval(
                 same_block = signature_a.author_info_block == signature_b.author_info_block
             if same_block:
                 same_name = signature_a.author_info_full_name == signature_b.author_info_full_name
-                same_cluster = (
-                    dataset.signature_to_cluster_id[signature_key_a] == dataset.signature_to_cluster_id[signature_key_b]
-                )
+                same_cluster = signature_to_cluster_id[signature_key_a] == signature_to_cluster_id[signature_key_b]
                 if same_name and not same_cluster:
                     homonymity[signature_key_a] += 1
                     homonymity[signature_key_b] += 1
@@ -294,7 +314,7 @@ def facet_eval(
     gender_f1 = defaultdict(list)
     ethnicity_f1 = defaultdict(list)
     author_num_f1 = defaultdict(list)
-    year_f1: DefaultDict[int, List[float]] = defaultdict(list)
+    year_f1: defaultdict[int, list[float]] = defaultdict(list)
     block_len_f1 = defaultdict(list)
     cluster_len_f1 = defaultdict(list)
     homonymity_f1 = defaultdict(list)
@@ -313,7 +333,7 @@ def facet_eval(
     for signature_key, (p, r, f1) in metrics_per_signature.items():
         _signature_dict = dict()
 
-        cluster_id = dataset.signature_to_cluster_id[signature_key]
+        cluster_id = signature_to_cluster_id[signature_key]
         signature = dataset.signatures[signature_key]
         paper = dataset.papers[str(signature.paper_id)]
 
@@ -338,7 +358,7 @@ def facet_eval(
             firstname_f1[0].append(f1)
             _signature_dict["first name"] = 0
 
-        if len(signature.author_info_affiliations) > 0:
+        if signature.author_info_affiliations and len(signature.author_info_affiliations) > 0:
             affiliation_f1[1].append(f1)
             _signature_dict["affiliation"] = 1
         else:
@@ -373,7 +393,12 @@ def facet_eval(
             references_f1[0].append(f1)
             _signature_dict["references"] = 0
 
-        if len(signature.author_info_coauthors) > 0:
+        has_coauthors = (
+            len(signature.author_info_coauthors) > 0
+            if signature.author_info_coauthors is not None
+            else len(paper.authors) > 1
+        )
+        if has_coauthors:
             coauthors_f1[1].append(f1)
             _signature_dict["multiple_authors"] = 1
         else:
@@ -409,7 +434,7 @@ def facet_eval(
 
         signature_lookup.append(_signature_dict)
 
-    return (
+    return FacetEvalResult(
         gender_f1,
         ethnicity_f1,
         author_num_f1,
@@ -435,14 +460,14 @@ def pairwise_eval(
     classifier: Any,
     figs_path: str,
     title: str,
-    shap_feature_names: List[str],
+    shap_feature_names: list[str],
     thresh_for_f1: float = 0.5,
-    shap_plot_type: Optional[str] = "dot",
-    nameless_classifier: Optional[Any] = None,
-    nameless_X: Optional[np.ndarray] = None,
-    nameless_feature_names: Optional[List[str]] = None,
+    shap_plot_type: str | None = "dot",
+    nameless_classifier: Any | None = None,
+    nameless_X: np.ndarray | None = None,
+    nameless_feature_names: list[str] | None = None,
     skip_shap: bool = False,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Performs pairwise model evaluation, without using blocks.
     Also writes plots to the provided file path
@@ -490,17 +515,19 @@ def pairwise_eval(
     if nameless_classifier is not None and hasattr(nameless_classifier, "classifier"):
         nameless_classifier = nameless_classifier.classifier
 
-    if nameless_classifier is not None:
-        y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
-    else:
-        y_prob = classifier.predict_proba(X)[:, 1]
+    with warnings.catch_warnings():
+        suppress_sklearn_feature_name_warnings()
+        if nameless_classifier is not None:
+            y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
+        else:
+            y_prob = classifier.predict_proba(X)[:, 1]
 
     # plot AUROC
     fpr, tpr, _ = roc_curve(y, y_prob)
     roc_auc = auc(fpr, tpr)
 
     plt.figure(0, figsize=(15, 15))
-    plt.plot(fpr, tpr, lw=2, label="ROC curve (area = %0.2f)" % roc_auc)
+    plt.plot(fpr, tpr, lw=2, label=f"ROC curve (area = {roc_auc:0.2f})")
     plt.xlim([-0.01, 1.0])
     plt.ylim([0.0, 1.05])
     plt.xlabel("False Positive Rate")
@@ -688,8 +715,8 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
 
 
 def cluster_precision_recall_fscore(
-    true_clus: Dict[str, List[str]], pred_clus: Dict[str, List[str]]
-) -> Tuple[float, float, float]:
+    true_clus: dict[str, list[str]], pred_clus: dict[str, list[str]]
+) -> tuple[float, float, float]:
     """
     Compute cluster-wise pair-wise precision, recall and F-score.
 
@@ -839,11 +866,11 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
 def claims_eval(
     dataset: "ANDData",
     clusterer: "Clusterer",
-    claims_pairs: List[Tuple[str, str, int, str, str]],
-    directory_for_caching: Optional[str] = None,
+    claims_pairs: list[tuple[str, str, int, str, str]],
+    directory_for_caching: str | None = None,
     output_shap: bool = False,
-    optional_name: Optional[str] = None,
-) -> Dict[str, Union[int, float]]:
+    optional_name: str | None = None,
+) -> dict[str, int | float]:
     """
     Evaluates predicted clusters on one block of the Semantic Scholar corrections data
 
@@ -862,12 +889,30 @@ def claims_eval(
         whether to output shaps for the incorrect pairs (slow)
     optional_name: str
         what name to use to write output instead of the featurizer version
+        note: distance matrices may not be available from `clusterer.predict`
+        if the clusterer uses a fused memory-optimized path
 
     Returns
     -------
     Dict: dictionary of metrics for this block based on claims data
     """
     blocks = dataset.get_blocks()
+    # Snapshot metadata before predict so inference-state release policies
+    # inside clusterer.predict do not break first-party eval consumers.
+    paper_metadata_by_id: dict[str, tuple[str, list[str]]] = {}
+    signature_affiliations_by_id: dict[str, list[str]] = {}
+    for block_signatures in blocks.values():
+        for signature_id in block_signatures:
+            signature_info = dataset.signatures[signature_id]
+            signature_affiliations_by_id[signature_id] = list(signature_info.author_info_affiliations or [])
+            paper_id, _ = signature_id.split("___")
+            if paper_id not in paper_metadata_by_id:
+                paper = dataset.papers[paper_id]
+                paper_metadata_by_id[paper_id] = (
+                    paper.title,
+                    [author.author_name for author in paper.authors],
+                )
+
     preds, dists = clusterer.predict(blocks, dataset)
 
     all_block_signatures = set()
@@ -908,16 +953,13 @@ def claims_eval(
             tn += 1
 
     logger.info("Computing predictions (output_to_write)")
-    output_to_write: Dict[str, Any] = {}
+    output_to_write: dict[str, Any] = {}
     for cluster_key, cluster_signatures in preds.items():
         cluster_output = []
         for signature in cluster_signatures:
             paper_id, _ = signature.split("___")
-            paper = dataset.papers[paper_id]
-            signature_info = dataset.signatures[signature]
-            title = paper.title
-            authors = [author.author_name for author in paper.authors]
-            affiliations = signature_info.author_info_affiliations
+            title, authors = paper_metadata_by_id[paper_id]
+            affiliations = signature_affiliations_by_id[signature]
             cluster_output.append((paper_id, signature, title, affiliations, authors))
         output_to_write[cluster_key] = cluster_output
 
@@ -926,12 +968,10 @@ def claims_eval(
     # keep tqdm off for programmatic runs; enable by setting env var if desired
     for id1, id2, pred_same, gold_same in tqdm(sig_pairs, disable=True):
         paper_id1, _ = id1.split("___")
-        paper1 = dataset.papers[paper_id1]
-        title1 = paper1.title
+        title1 = paper_metadata_by_id[paper_id1][0]
 
         paper_id2, _ = id2.split("___")
-        paper2 = dataset.papers[paper_id2]
-        title2 = paper2.title
+        title2 = paper_metadata_by_id[paper_id2][0]
 
         # temporarily silence noisy handlers
         _prev_level = logger.level
@@ -1002,7 +1042,7 @@ def claims_eval(
 
     if directory_for_caching is not None:
         logger.info("Writing predictions to disk")
-        suffix: Union[int, str]
+        suffix: int | str
         if optional_name is None:
             suffix = clusterer.featurizer_info.featurizer_version
         else:
@@ -1010,9 +1050,12 @@ def claims_eval(
         with open(join(directory_for_caching, f"preds_{suffix}.json"), "w") as _json_file:
             json.dump(output_to_write, _json_file)
 
-        logger.info("Writing dists to disk")
-        with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
-            pickle.dump(dists, _pkl_file)
+        if dists is None:
+            logger.info("Skipping distance matrix dump because clusterer.predict returned dists=None")
+        else:
+            logger.info("Writing dists to disk")
+            with open(join(directory_for_caching, f"dists_{suffix}.pkl"), "wb") as _pkl_file:
+                pickle.dump(dists, _pkl_file)
         logger.info("Done dumping")
 
     precision = tp / (tp + fp) if tp + fp > 0 else np.nan
@@ -1068,7 +1111,7 @@ def min_pair_edit(preds):
 
     tp_sigs = set()
     tn_sigs = set()
-    for sig_id_1, sig_id_2, title_1, title_2, pred_same, gold_same in wrong + right:
+    for sig_id_1, sig_id_2, _title_1, _title_2, _pred_same, gold_same in wrong + right:
         if gold_same:
             tp_sigs.add((sig_id_1, sig_id_2))
         else:
@@ -1093,7 +1136,7 @@ def min_pair_edit(preds):
         return -fp + -fn
 
     wrong_counts = Counter()
-    for sig_id_1, sig_id_2, title_1, title_2, pred_same, gold_same in wrong:
+    for sig_id_1, sig_id_2, _title_1, _title_2, _pred_same, _gold_same in wrong:
         wrong_counts.update([sig_id_1, sig_id_2])
 
     worst_ids = [i[0] for i in wrong_counts.most_common(10000000)]
@@ -1133,7 +1176,7 @@ def min_pair_edit(preds):
             break
 
     if len(wrong) != 0:
-        print("something went wrong")
+        logger.error("fix_cluster_assignments finished with unresolved errors: %d wrong pairs remain", len(wrong))
 
     denom = max(len(worst_ids) - 1, 1)
     return steps / denom, steps, len(worst_ids)

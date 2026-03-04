@@ -1,14 +1,14 @@
 import unittest
-import pytest
+
+import lightgbm as lgb
 import numpy as np
-import pickle
+import pytest
 
 import s2and.featurizer
-from s2and.data import ANDData
-from s2and.model import Clusterer
-from s2and.featurizer import FeaturizationInfo
 from s2and.consts import LARGE_DISTANCE
-import lightgbm as lgb
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo
+from s2and.model import Clusterer
 
 
 class TestClusterer(unittest.TestCase):
@@ -45,9 +45,6 @@ class TestClusterer(unittest.TestCase):
         )
 
     def test_get_constraints(self):
-        block = {
-            "a sattar": ["0", "1", "2"],
-        }
         constraint_1 = self.dummy_dataset.get_constraint("0", "1", low_value=0, high_value=2)
         constraint_2 = self.dummy_dataset.get_constraint("1", "0", low_value=0, high_value=2)
         constraint_3 = self.dummy_dataset.get_constraint("1", "2", low_value=0, high_value=2)
@@ -69,9 +66,12 @@ class TestClusterer(unittest.TestCase):
             partial_supervision=partial_supervision,
         )
         distance_matrix = distance_matrices["a sattar"]
-        self.assertEqual(distance_matrix[0], np.float16(1.1))
-        self.assertEqual(distance_matrix[1], np.float16(0.3))
-        self.assertEqual(distance_matrix[2], np.float16(1e-6))
+        np.testing.assert_allclose(
+            distance_matrix,
+            np.asarray([1.1, 0.3, 1e-6], dtype=np.float64),
+            rtol=0,
+            atol=1e-3,
+        )
 
         distance_matrices = self.dummy_clusterer.make_distance_matrices(
             block_dict=block,
@@ -79,9 +79,12 @@ class TestClusterer(unittest.TestCase):
             partial_supervision={},
         )
         distance_matrix = distance_matrices["a sattar"]
-        self.assertEqual(distance_matrix[0], np.float16(0.3))
-        self.assertEqual(distance_matrix[1], np.float16(0.3))
-        self.assertEqual(distance_matrix[2], np.float16(0.3))
+        np.testing.assert_allclose(
+            distance_matrix,
+            np.asarray([0.3, 0.3, 0.3], dtype=np.float64),
+            rtol=0,
+            atol=1e-3,
+        )
 
     def test_subblocking(self):
         block = {
@@ -102,3 +105,26 @@ class TestClusterer(unittest.TestCase):
         # stricter batching - just making sure it doesn't break
         self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=2)
         self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=1)
+
+    def test_fused_path_equivalence(self):
+        """The fused cluster-and-free path (dists=None) must produce
+        identical pred_clusters as the two-phase path (precomputed dists)."""
+        block = {
+            "a sattar": ["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+        }
+        # two-phase: build dists first, then cluster from precomputed
+        dists = self.dummy_clusterer.make_distance_matrices(block, self.dummy_dataset)
+        precomputed_result, _ = self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists=dists)
+
+        # fused: dists=None triggers cluster-and-free
+        fused_result, fused_dists = self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists=None)
+
+        self.assertIsNone(fused_dists)
+        self.assertEqual(precomputed_result, fused_result)
+
+    def test_predict_helper_missing_precomputed_dists_raises(self):
+        block = {
+            "a sattar": ["0", "1", "2"],
+        }
+        with pytest.raises(KeyError, match="Missing precomputed distance matrix for block"):
+            self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists={})

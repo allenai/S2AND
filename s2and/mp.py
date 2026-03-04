@@ -1,14 +1,14 @@
+import multiprocessing as mp
 import os
 import platform
-import multiprocessing as mp
-from multiprocessing.context import BaseContext
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from itertools import islice
-from typing import Callable, Iterable, Iterator, Any, Dict, List, Tuple, Optional
+from typing import Any
 
 
 # ---------- private helper ----------
-def _run_chunk(func: Callable[[Any], Any], idx_items: List[Tuple[int, Any]]) -> List[Tuple[int, Any]]:
+def _run_chunk(func: Callable[[Any], Any], idx_items: list[tuple[int, Any]]) -> list[tuple[int, Any]]:
     """Run func on each item in the chunk and keep the index."""
     out = []
     for idx, item in idx_items:
@@ -26,52 +26,40 @@ class UniversalPool:
     with ordered streaming imap and cross-platform support.
     """
 
-    def __init__(self, processes: Optional[int] = None, use_threads: bool = True):
+    def __init__(self, processes: int | None = None, use_threads: bool | None = None):
         """
         Initialize UniversalPool with optimal worker selection.
 
         Args:
             processes: Number of workers (defaults to CPU count)
-            use_threads: Use threads instead of processes (default True).
-                        Threads avoid serialization overhead and work well
-                        when the GIL is released (NumPy, I/O operations).
+            use_threads: Use threads instead of processes.  When None (default),
+                        auto-selects based on platform: processes on Linux (fork
+                        is cheap and bypasses the GIL for CPU-bound work), threads
+                        on Windows/macOS (spawn overhead is too high).
         """
-        self.processes = processes or os.cpu_count()
-        self._use_threads = use_threads
-        self._is_native_pool = False
-        # _pool can be a multiprocessing.Pool or an Executor depending on platform/settings
-        self._pool: Any
-        # reusable context that may be None on platforms without get_context
-        ctx: Optional[BaseContext] = None
+        if use_threads is None:
+            use_threads = platform.system() in ("Windows", "Darwin")
+        if processes is None:
+            detected_cpu_count = os.cpu_count()
+            self.processes = int(detected_cpu_count) if detected_cpu_count is not None else 1
+        else:
+            if int(processes) <= 0:
+                raise ValueError(f"processes must be a positive integer when provided, got {processes!r}")
+            self.processes = int(processes)
+        # _pool can be a process or thread executor depending on platform/settings.
+        self._pool: ProcessPoolExecutor | ThreadPoolExecutor
 
         if use_threads:
             self._pool = ThreadPoolExecutor(max_workers=self.processes)
         else:
-            # Try native multiprocessing.Pool first (most efficient)
-            try:
-                if hasattr(mp, "get_context") and platform.system() not in ("Windows", "Darwin"):
-                    ctx = mp.get_context("fork")
-                    self._pool = ctx.Pool(processes=self.processes)
-                    self._is_native_pool = True
-                else:
-                    raise ValueError("Use ProcessPoolExecutor fallback")
-            except (ValueError, AttributeError):
-                # Fall back to ProcessPoolExecutor with robust context selection
-                try:
-                    if hasattr(mp, "get_context") and platform.system() not in ("Windows", "Darwin"):
-                        ctx = mp.get_context("fork")
-                        self._pool = ProcessPoolExecutor(max_workers=self.processes, mp_context=ctx)
-                    else:
-                        # Fall back to spawn (Windows, macOS, or when fork unavailable)
-                        ctx = mp.get_context("spawn") if hasattr(mp, "get_context") else None
-                        if ctx:
-                            self._pool = ProcessPoolExecutor(max_workers=self.processes, mp_context=ctx)
-                        else:
-                            # Python 3.8 fallback
-                            self._pool = ProcessPoolExecutor(max_workers=self.processes)
-                except (ValueError, AttributeError):
-                    # Final fallback to basic ProcessPoolExecutor
-                    self._pool = ProcessPoolExecutor(max_workers=self.processes)
+            # Try process workers with an explicit start method:
+            # - fork on Linux (fast, avoids re-import)
+            # - spawn on Windows/macOS (required)
+            if platform.system() not in ("Windows", "Darwin"):
+                ctx = mp.get_context("fork")
+            else:
+                ctx = mp.get_context("spawn")
+            self._pool = ProcessPoolExecutor(max_workers=self.processes, mp_context=ctx)
 
     # ---------- public API ----------
     def imap(
@@ -79,23 +67,23 @@ class UniversalPool:
     ) -> Iterator[Any]:
         """
         Stream results *in order* like multiprocessing.Pool.imap.
-        `max_prefetch` limits outstanding chunks to bound RAM (ignored for native pools).
+        `max_prefetch` limits outstanding chunks to bound RAM.
         """
-        if self._is_native_pool:
-            # Use native imap (ignores max_prefetch but is very efficient)
-            return self._pool.imap(func, iterable, chunksize)
-        else:
-            # Use streaming implementation for ProcessPoolExecutor/ThreadPoolExecutor
-            return self._streaming_imap(func, iterable, chunksize, max_prefetch)
+        if int(chunksize) <= 0:
+            raise ValueError(f"chunksize must be >= 1, got {chunksize!r}")
+        if int(max_prefetch) <= 0:
+            raise ValueError(f"max_prefetch must be >= 1, got {max_prefetch!r}")
+        # Use streaming implementation for ProcessPoolExecutor/ThreadPoolExecutor.
+        return self._streaming_imap(func, iterable, int(chunksize), int(max_prefetch))
 
     def _streaming_imap(
         self, func: Callable[[Any], Any], iterable: Iterable[Any], chunksize: int = 1, max_prefetch: int = 4
     ) -> Iterator[Any]:
-        """Streaming imap implementation for ExecutorPool-based backends."""
+        """Streaming imap implementation with backpressure control."""
         # producer over the input
         it = enumerate(iterable)  # keeps original positions
         next_yield = 0  # next index expected to yield
-        buffer: Dict[int, Any] = {}  # completed results waiting to be yielded
+        buffer: dict[int, Any] = {}  # completed results waiting to be yielded
         pending = set()
 
         def submit_chunk():
@@ -111,33 +99,51 @@ class UniversalPool:
             if not submit_chunk():
                 break
 
-        while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for fut in done:
-                pending.remove(fut)
-                for idx, res in fut.result():
-                    buffer[idx] = res
-                # keep queue topped-up
-                submit_chunk()
+        try:
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pending.remove(fut)
+                    for idx, res in fut.result():
+                        buffer[idx] = res
+                    # keep queue topped-up
+                    submit_chunk()
 
-            # yield any ready-in-order items
-            while next_yield in buffer:
-                yield buffer.pop(next_yield)
-                next_yield += 1
+                # yield any ready-in-order items
+                while next_yield in buffer:
+                    yield buffer.pop(next_yield)
+                    next_yield += 1
+        except BaseException as exc:
+            cancelled_count = self._cancel_pending_futures(pending)
+            exc.add_note(
+                "UniversalPool._streaming_imap aborted after an exception; "
+                f"best-effort cancelled {cancelled_count} outstanding futures."
+            )
+            raise
+
+    def _cancel_pending_futures(self, pending: set[Future[Any]]) -> int:
+        """Best-effort cancellation for futures still pending when streaming fails."""
+        cancelled_count = 0
+        for fut in tuple(pending):
+            if fut.cancel():
+                cancelled_count += 1
+            pending.discard(fut)
+        try:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            # Python executors that do not support cancel_futures.
+            self._pool.shutdown(wait=False)
+        return cancelled_count
 
     # ---------- context manager ----------
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self._is_native_pool:
-            self._pool.close()
-            self._pool.join()
-        else:
-            self._pool.shutdown(wait=True)
+        self._pool.shutdown(wait=True)
 
 
 # convenience factory
-def get_pool(processes: Optional[int] = None, threads: bool = True) -> UniversalPool:
+def get_pool(processes: int | None = None, threads: bool | None = None) -> UniversalPool:
     """Get a pool that works on all platforms with optimal performance."""
     return UniversalPool(processes, use_threads=threads)

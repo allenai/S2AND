@@ -1,14 +1,17 @@
-import unittest
-import tempfile
 import os
+import tempfile
+import unittest
+import warnings
+
 import numpy as np
 
+import s2and.shap_utils as shap_utils
 from s2and.eval import (
     b3_precision_recall_fscore,
+    claims_eval,
     f1_score,
     pairwise_eval,
 )
-import s2and.shap_utils as shap_utils
 
 
 class TestB3AndF1(unittest.TestCase):
@@ -223,6 +226,34 @@ class TestShapIntegration(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_pr.png")))
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_shap.png")))
 
+    def test_pairwise_eval_suppresses_feature_name_warning(self):
+        import lightgbm as lgb
+        import pandas as pd
+
+        rng = np.random.default_rng(7)
+        X_train = pd.DataFrame(rng.random((20, 3)), columns=["f0", "f1", "f2"])
+        y_train = rng.integers(0, 2, size=20)
+        classifier = lgb.LGBMClassifier(n_estimators=8, random_state=7, verbosity=-1)
+        classifier.fit(X_train, y_train)
+
+        X = rng.random((4, 3))
+        y = np.array([0, 1, 0, 1])
+        with tempfile.TemporaryDirectory() as td:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                _ = pairwise_eval(
+                    X=X,
+                    y=y,
+                    classifier=classifier,
+                    figs_path=td,
+                    title="Warning Suppressed",
+                    shap_feature_names=["a", "b", "c"],
+                    skip_shap=True,
+                )
+
+        leaked = [w for w in caught if "X does not have valid feature names" in str(w.message)]
+        self.assertEqual(leaked, [])
+
     # -------------------- shap_utils.compute_shap_summary_plots tests --------------------
 
     def test_compute_shap_summary_plots_voting_mean(self):
@@ -338,6 +369,92 @@ class TestShapIntegration(unittest.TestCase):
             )
             self.assertEqual(len(outs), 1)
             self.assertTrue(os.path.exists(outs[0]))
+
+
+def _build_claims_eval_test_inputs(dists):
+    class _Author:
+        def __init__(self, author_name):
+            self.author_name = author_name
+
+    class _Paper:
+        def __init__(self, title):
+            self.title = title
+            self.authors = [_Author("Test Author")]
+
+    class _Signature:
+        def __init__(self, affiliations):
+            self.author_info_affiliations = affiliations
+
+    class _Dataset:
+        def __init__(self):
+            self.mode = "inference"
+            self._blocks = {"blk": ["p1___0", "p2___0"]}
+            self.papers = {
+                "p1": _Paper("Paper 1"),
+                "p2": _Paper("Paper 2"),
+            }
+            self.signatures = {
+                "p1___0": _Signature(["Org 1"]),
+                "p2___0": _Signature(["Org 2"]),
+            }
+
+        def get_blocks(self):
+            return self._blocks
+
+    class _Clusterer:
+        def __init__(self, dists_value):
+            self._dists = dists_value
+
+        def predict(self, _block_dict, _dataset):
+            return {"blk_0": ["p1___0", "p2___0"]}, self._dists
+
+    dataset = _Dataset()
+    clusterer = _Clusterer(dists)
+    claims_pairs = [("p1___0", "p2___0", 1, "blk", "blk")]
+    return dataset, clusterer, claims_pairs
+
+
+def test_claims_eval_skips_distance_dump_when_predict_returns_none():
+    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists=None)
+    with tempfile.TemporaryDirectory() as td:
+        output = claims_eval(
+            dataset=dataset,
+            clusterer=clusterer,
+            claims_pairs=claims_pairs,
+            directory_for_caching=td,
+            optional_name="unit",
+        )
+        assert os.path.exists(os.path.join(td, "preds_unit.json"))
+        assert not os.path.exists(os.path.join(td, "dists_unit.pkl"))
+        assert output["total"] == 1
+
+
+def test_claims_eval_handles_none_affiliations():
+    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists=None)
+    dataset.signatures["p1___0"].author_info_affiliations = None
+    output = claims_eval(
+        dataset=dataset,
+        clusterer=clusterer,
+        claims_pairs=claims_pairs,
+        directory_for_caching=None,
+        optional_name="unit",
+    )
+    assert output["total"] == 1
+
+
+def test_claims_eval_writes_distance_dump_when_available():
+    dataset, clusterer, claims_pairs = _build_claims_eval_test_inputs(dists={"blk": np.array([0.5])})
+    with tempfile.TemporaryDirectory() as td:
+        output = claims_eval(
+            dataset=dataset,
+            clusterer=clusterer,
+            claims_pairs=claims_pairs,
+            directory_for_caching=td,
+            optional_name="unit",
+        )
+        assert os.path.exists(os.path.join(td, "preds_unit.json"))
+        assert os.path.exists(os.path.join(td, "dists_unit.pkl"))
+        assert output["total"] == 1
 
 
 if __name__ == "__main__":

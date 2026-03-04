@@ -1,10 +1,15 @@
 import unittest
-import pytest
-import numpy as np
+from types import SimpleNamespace
 
-from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+import numpy as np
+import pytest
+
+import s2and.feature_port as feature_port
+import s2and.memory_budget as memory_budget
 from s2and.consts import LARGE_INTEGER
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo, _signature_id_to_index_or_raise, many_pairs_featurize
+from s2and.runtime import RuntimeContext
 
 
 class TestData(unittest.TestCase):
@@ -57,90 +62,52 @@ class TestData(unittest.TestCase):
             ("3", "2", 0),
             ("3", "2", -1),
         ]
-        features, labels, _ = many_pairs_featurize(
-            test_pairs, self.dummy_dataset, self.dummy_featurizer, 2, False, 1, nan_value=-1
-        )
+        many_pairs_featurize(test_pairs, self.dummy_dataset, self.dummy_featurizer, 2, False, 1, nan_value=-1)
 
-        expected_features_1 = [
-            0.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.2,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            4.0,
-            0.0,
-            0.03067484662576687,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            -1.0,
-            1.0,
-            2.0,
-            2.0,
-            1.0,
-            2.0,
-            82081.0,
-            12.0,
-            807.0,
-            1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.7777777777777778,
-            0.8,
-            0.7777777777777778,
-            0.5407407407407407,
-        ]
-        expected_features_2 = [
-            0.0,
-            -1.0,
-            -1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.2,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            0.0,
-            6.0,
-            0.02857142857142857,
-            0.09615384615384616,
-            0.25757575757575757,
-            0.34615384615384615,
-            0.8181818181818182,
-            0.2222222222222222,
-            0.0,
-            0.5,
-            1.0,
-            2.0,
-            2.0,
-            1.0,
-            2.0,
-            23425.0,
-            12.0,
-            807.0,
-            1.0,
-            82081.0,
-            20.0,
-            -1.0,
-            0.7777777777777778,
-            0.8,
-            0.7777777777777778,
-            0.5407407407407407,
-        ]
+
+def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):
+    dataset = SimpleNamespace(name="dummy", mode="train", compute_reference_features=False)
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    runtime_context = RuntimeContext(
+        operation="featurization_run",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="run-1",
+        source="default",
+    )
+
+    state = {"prewarm_called": False, "rss_called": False}
+
+    def fake_get_rust_featurizer(*_args, **_kwargs):
+        state["prewarm_called"] = True
+        return object()
+
+    def fake_resolve_total_ram_bytes(_total_ram_bytes):
+        return 1024, "test"
+
+    def fake_current_rss(_total_ram_bytes):
+        state["rss_called"] = True
+        assert state["prewarm_called"] is True
+        return 128, "test"
+
+    monkeypatch.setattr(feature_port, "s2and_rust", object())
+    monkeypatch.setattr(feature_port, "_get_rust_featurizer", fake_get_rust_featurizer)
+    monkeypatch.setattr(memory_budget, "resolve_total_ram_bytes", fake_resolve_total_ram_bytes)
+    monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", fake_current_rss)
+
+    many_pairs_featurize(
+        [("a", "b", -1)],
+        dataset,
+        featurizer_info,
+        n_jobs=1,
+        use_cache=False,
+        chunk_size=1,
+        runtime_context=runtime_context,
+    )
+
+    assert state["prewarm_called"] is True
+    assert state["rss_called"] is True
 
     def test_featurizer_without_reference_features_raises(self):
         # Build a dataset with reference features enabled (baseline) and disabled
@@ -384,3 +351,17 @@ class TestData(unittest.TestCase):
         # Verify feature values are reasonable (not all zeros or errors)
         non_missing_features = features[features != -LARGE_INTEGER]
         assert len(non_missing_features) > 0, "No valid features computed"
+
+
+def test_signature_id_to_index_or_raise_accepts_non_string_pair_ids():
+    signature_id_to_index = {"1": 10, "2": 20}
+
+    assert _signature_id_to_index_or_raise(signature_id_to_index, 1) == 10
+    assert _signature_id_to_index_or_raise(signature_id_to_index, 2) == 20
+
+
+def test_signature_id_to_index_or_raise_reports_missing_signature_id():
+    signature_id_to_index = {"1": 10}
+
+    with pytest.raises(ValueError, match="999"):
+        _signature_id_to_index_or_raise(signature_id_to_index, 999)

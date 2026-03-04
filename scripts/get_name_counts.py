@@ -7,9 +7,10 @@ TODO: rerun this when we change (a) how first names are normalized, and
 """
 
 import pickle
-from pys2 import _evaluate_redshift_query
-from s2and.text import normalize_text
 
+from pys2 import _evaluate_redshift_query
+
+from s2and.text import normalize_text
 
 # this queries our internal databases
 query = """

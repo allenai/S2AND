@@ -1,30 +1,43 @@
 from __future__ import annotations
 
+import importlib
 import os
+from collections.abc import Sequence
 from os.path import join
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
-import numpy as np
-
-# NumPy 1.24+ removed aliases like np.bool/np.int/np.float. Avoid triggering
-# numpy's __getattr__ FutureWarnings by checking the dict directly before
-# setting compatibility aliases used by older SHAP code paths.
-if np.__dict__.get("bool", None) is None:  # NumPy>=1.24
-    np.bool = np.bool_  # type: ignore[attr-defined]
-if np.__dict__.get("int", None) is None:
-    np.int = np.int_  # type: ignore[attr-defined]
-if np.__dict__.get("float", None) is None:
-    np.float = np.float64  # type: ignore[attr-defined]
-if np.__dict__.get("object", None) is None:
-    np.object = np.object_  # type: ignore[attr-defined]
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")  # headless-friendly
 import matplotlib.pyplot as plt
-import shap
 from sklearn.calibration import CalibratedClassifierCV
 
-ArrayLike = Union[np.ndarray, "shap._explanation.Explanation"]  # type: ignore[attr-defined]
+ArrayLike = np.ndarray | Any
+_SHAP_MODULE: Any | None = None
+
+
+def _get_shap_module() -> Any:
+    global _SHAP_MODULE
+    if _SHAP_MODULE is not None:
+        return _SHAP_MODULE
+    try:
+        _SHAP_MODULE = importlib.import_module("shap")
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to import shap. Install a NumPy-1.24-compatible SHAP version "
+            "(for example, `uv add 'shap>=0.45'`)."
+        ) from exc
+    return _SHAP_MODULE
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose the ``shap`` module as ``shap_utils.shap`` so that tests
+    and callers can monkey-patch ``shap_utils.shap.<attr>`` without requiring
+    an eager import at module load time."""
+    if name == "shap":
+        return _get_shap_module()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _is_fitted_tree_estimator(est) -> bool:
@@ -74,6 +87,7 @@ def _shap_values_for_tree_model(model, X, class_index: int = 1) -> np.ndarray:
         * list of arrays (multiclass) -> we pick class_index
         * single 2D array
     """
+    shap = _get_shap_module()
     expl = shap.TreeExplainer(model)
     vals = expl.shap_values(X)
     if isinstance(vals, list):
@@ -88,16 +102,17 @@ def _shap_values_for_tree_model(model, X, class_index: int = 1) -> np.ndarray:
 
 def _safe_summary_plot(
     shap_values: np.ndarray,
-    X: Union[np.ndarray, Any],
+    X: np.ndarray | Any,
     feature_names: Sequence[str],
     shap_plot_type: str,
     outpath: str,
-    fig_num: Optional[int] = None,
+    fig_num: int | None = None,
 ) -> None:
     """
     Prefer legacy summary_plot for cross-version compatibility.
     Falls back to beeswarm if summary_plot misbehaves.
     """
+    shap = _get_shap_module()
     if fig_num is not None:
         plt.figure(fig_num)
     else:
@@ -136,9 +151,9 @@ def compute_shap_summary_plots(
     figs_path: str,
     nameless_classifier=None,
     nameless_X=None,
-    nameless_feature_names: Optional[Sequence[str]] = None,
+    nameless_feature_names: Sequence[str] | None = None,
     class_index: int = 1,
-) -> List[str]:
+) -> list[str]:
     """
     Computes SHAP values and writes summary plots as PNGs.
     Returns list of written file paths.
@@ -166,13 +181,13 @@ def compute_shap_summary_plots(
     -------
     List[str] : list of saved file paths
     """
-    outputs: List[str] = []
+    outputs: list[str] = []
     assert shap_feature_names is not None
 
     # Branch 1: ensemble averaging
     ensemble = _iter_estimators(classifier)
     if ensemble:
-        vals_list: List[np.ndarray] = []
+        vals_list: list[np.ndarray] = []
         for c in ensemble:
             base = _base_estimator(c)
             vals_list.append(_shap_values_for_tree_model(base, X, class_index))
@@ -184,7 +199,7 @@ def compute_shap_summary_plots(
 
     # Branch 2: two-model (named + nameless)
     if nameless_classifier is not None:
-        pairs: List[Tuple[object, np.ndarray, Sequence[str], str]] = []
+        pairs: list[tuple[object, np.ndarray, Sequence[str], str]] = []
 
         base_a = _base_estimator(classifier)
         vals_a = _shap_values_for_tree_model(base_a, X, class_index)

@@ -1,9 +1,7 @@
-import pytest
-
 from s2and.data import (
     Signature,
-    _lasts_equivalent_for_constraint,
     _canonicalize_last_for_counts,
+    _lasts_equivalent_for_constraint,
     apply_sinonym_overwrites,
 )
 
@@ -76,5 +74,4 @@ def test_apply_sinonym_overwrites_block_compound_surname():
     )
     assert updated == 1
     new_sig = signatures["s1"]
-    assert new_sig.author_info_block == "q ouyang"
-
+    assert new_sig.author_info_block == "q ou yang"

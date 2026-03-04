@@ -16,6 +16,9 @@ data/augmented/
 data/orcid/
 data/test/
 data/zbmath/
+data/inventors*/
+data/inventors_s2and/
+data/name_counts_rust.json
 data/lid.176.bin
 data/LICENSE.txt
 pypitoken
@@ -150,6 +153,7 @@ dmypy.json
 .pyre/
 
 *.pickle
+!tests/qian/specter.pickle
 .vscode
 foo-*
 *.dat

@@ -4,15 +4,38 @@ This repository provides access to the S2AND dataset and S2AND reference model d
 The reference model is live on semanticscholar.org, and the trained model is available now as part of the data download (see below).
 
 ## Installation Prereqs (one-time)
-Clone the repo. 
+Clone the repo.
 
-If `uv` is not installed yet, install it:
+Install `uv` using the official guide:
+- [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/)
+
+Install Rust (needed to build the native extension from source):
+- [Rust installation docs](https://www.rust-lang.org/tools/install)
+
+If you are building the Rust extension, install OS prerequisites:
 
 ```bash
-# (any OS) install uv into the Python you use to bootstrap environments
-python -m pip install --user --upgrade uv
-# Alternatively (if you use pipx): pipx install uv
+# Ubuntu / Debian / WSL2
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libgomp1
 ```
+
+```powershell
+# Windows (one-time)
+# Install Visual Studio Build Tools with the "Desktop development with C++" workload.
+```
+
+Verify toolchain availability:
+
+```bash
+uv --version
+rustc --version
+cargo --version
+```
+
+WSL notes:
+- Some Ubuntu images do not provide a `python` alias by default; use `python3` for system Python commands.
+- On PEP 668-managed systems, `python3 -m pip install --user ...` may fail with `externally-managed-environment`; use one of the official `uv` install methods above.
 
 ---
 
@@ -39,17 +62,28 @@ source .venv/bin/activate
 .venv\Scripts\activate.bat
 ```
 
-3. Install project dependencies (dev extras):
+3. Runtime install (end users, pick one):
+
+```bash
+# default runtime is Python (`auto` resolves to Python).
+uv pip install s2and
+# optional: Rust-enabled runtime when extension wheels are available.
+uv pip install "s2and[rust]"
+```
+
+4. Developer install (repo checkout):
 
 ```bash
 # prefer uv --active so uv uses your activated environment
 uv sync --active --extra dev
 ```
 
-4. (Recommended) Build/install the Rust extension into the active venv:
+5. (Recommended) Build/install the Rust extension into the active venv:
 
 ```bash
 # requires Rust toolchain on PATH (rustc/cargo)
+# if Rust was just installed via rustup in this shell:
+# source "$HOME/.cargo/env"
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
@@ -59,6 +93,14 @@ Notes:
   `maturin develop` step above.
 - Once wheels are published, you can install the native extension via extras:
   `uv pip install "s2and[rust]"`.
+- On WSL with repo paths mounted from Windows (for example, `/mnt/c/...`), `uv` may warn about failed hardlinks.
+  To suppress this and avoid repeated warnings, set `UV_LINK_MODE=copy` before `uv sync` / `uv pip install`.
+
+## Docs
+
+- Index (start here): `docs/README.md`
+- Next steps: `docs/work_plan.md`
+- Backlog: `docs/work_plan.md` (Backlog section)
 
 ## Running Tests
 
@@ -70,7 +112,26 @@ uv run --no-project pytest tests/
 
 To run the entire CI suite mimicking the GH Actions, use the following command:
 ```bash
-python scripts\run_ci_locally.py
+uv run python scripts/run_ci_locally.py
+```
+`scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
+- lint job (`ruff check` + `ruff format --check`)
+- `typecheck-and-test` matrix lanes (`py-only`, then `rust-enabled`)
+- Rust parity guardrail tests in the `rust-enabled` lane
+
+By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
+To override platform emulation locally, set `S2AND_CI_TY_PLATFORM` (for example, `windows`).
+
+To run CI checks locally without Rust extension compilation (faster iteration), run:
+```bash
+uv sync --active --extra dev --frozen
+uv run --active --no-project ruff format --check s2and scripts/*.py
+uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
+uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
+# macOS/Linux:
+PYTHONPATH=. uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
+# Windows PowerShell:
+$env:PYTHONPATH='.'; uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
 ```
 
 ## Version bumping
@@ -85,7 +146,7 @@ git config core.hooksPath .githooks
 Workflow:
 ```bash
 # 1) edit VERSION
-echo 0.31.0 > VERSION
+echo 0.40.0 > VERSION
 
 # 2) sync manifests
 uv run python scripts/sync_version.py
@@ -103,66 +164,170 @@ Notes:
 When running scripts from the repo, prefer `uv run --no-project` so the installed packages (including the Rust extension)
 resolve from site-packages. Avoid setting `PYTHONPATH` to the repo root, which can shadow the compiled module.
 
-```bash
-uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
-```
-
-Profiling (Rust, prod-mode):
+Quickstart with bundled fixture (`tests/qian`, no large data download):
 
 ```bash
-S2AND_RUST_PROD_MODE=1 S2AND_USE_RUST_FEATURIZER=1 S2AND_USE_RUST_CONSTRAINT=1 \
-  uv run --no-project python scripts/profile_kisti_rust_prod.py
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py \
+  --use-rust 1 \
+  --dataset qian \
+  --data-root tests \
+  --load-name-counts 0
 ```
 
-## Rust featurizer (optional, enabled by default)
-S2AND can use a Rust-backed featurizer for faster pairwise feature generation. This is **enabled by default** and falls back
-to Python if the native extension is not available.
+Run the same tutorial on `data/s2and_mini` (downloaded artifacts):
 
-Install the Rust extension from wheels (when available):
 ```bash
-uv pip install "s2and[rust]"
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1 --dataset qian
 ```
 
-Environment toggles:
-- `S2AND_USE_RUST_FEATURIZER=0` to force the Python path.
-- `S2AND_USE_RUST_CONSTRAINT=0` to force Python `get_constraint`.
-- `S2AND_RUST_BATCH=0` to disable Rust batch mode in `many_pairs_featurize`.
-- `S2AND_RUST_BATCH_THRESHOLD` to fall back to Python for tiny batches (default: disabled).
-- `RAYON_NUM_THREADS` controls Rust parallelism (when batch mode is used).
-- `S2AND_RUST_FEATURIZER_DISK_CACHE=0` to disable on-disk Rust featurizer caching.
-- `S2AND_RUST_FEATURIZER_DISK_CACHE_WRITE=1` to force saving Rust featurizer snapshots even when feature caching is off.
-- `S2AND_RUST_PROD_MODE=1` to disable Rust snapshot load/save entirely (best for one-shot inference).
-- `S2AND_RUST_FEATURIZER_CACHE_DIR` to override the cache directory.
+Profiling (Rust inference):
+
+```bash
+S2AND_BACKEND=rust uv run --no-project python scripts/rust_suite.py prod-inference \
+  --dataset-name qian \
+  --data-root tests \
+  --n-jobs 4
+```
+
+Benchmark baseline ownership:
+- Active Rust runtime gate baselines and promotion rules: `docs/rust/baselines.md`
+
+## Rust featurizer (runtime backend)
+S2AND backend selection is controlled by `S2AND_BACKEND`:
+- `auto` (default) — uses Rust when available and capable, otherwise Python
+- `rust` — strict Rust mode; fails fast on Rust-stage errors
+- `python` — Python-only path; zero Rust calls
+
+For the full list of environment variables, see [docs/environment.md](docs/environment.md).
+
+Install contract:
+- `uv pip install s2and`: Python-only runtime.
+- `uv pip install "s2and[rust]"`: Rust-enabled runtime.
+- Full runtime contract: [docs/rust/runtime.md](docs/rust/runtime.md).
 
 Notes:
-- Rust batch mode is used for all `n_jobs` by default and uses Rayon internally for parallelism.
-- Rust featurizer snapshots are saved only when feature caching is enabled unless overridden via `S2AND_RUST_FEATURIZER_DISK_CACHE_WRITE=1`.
-- The Rust featurizer is built with `maturin develop -m s2and_rust/Cargo.toml`.
+- Rust batch mode uses Rayon internally for parallelism; Python process pools are not used.
+- When Rust is enabled, signature n-gram Counters may be deferred and computed natively during Rust featurizer construction.
+- If a Python code path needs eager n-gram Counters, call `ANDData.materialize_signature_ngrams_python()`.
 
-## Prod mode (low-latency, one-shot inference)
-If your service handles single or batched blocks that are **only seen once**, enabling prod mode avoids costly
-snapshot I/O. This keeps everything in memory and relies on the per-process Rust featurizer cache.
+## Cache policy
+- Default: `use_cache=False` (no caching).
+- `use_cache=True`: enables Python pair-feature cache and Rust featurizer cache.
+- Cache root: `S2AND_CACHE` env var (defaults to `~/.s2and`).
 
-Default behavior:
-- If `S2AND_RUST_PROD_MODE` is **unset**, `dataset.mode == "inference"` implies prod mode.
-- If `S2AND_RUST_PROD_MODE` is set, it overrides the dataset mode.
-
-Recommended settings:
-- `S2AND_RUST_PROD_MODE=1`
-- `S2AND_RUST_FEATURIZER_DISK_CACHE=0` (optional; prod mode already disables read/write)
-- keep `S2AND_USE_RUST_FEATURIZER=1` and `S2AND_USE_RUST_CONSTRAINT=1`
-
-Pre-warm once at server start so requests are hot:
+Pre-warm once at server start:
 
 ```python
 from s2and.feature_port import warm_rust_featurizer
-
-# after you build/load your ANDData dataset:
-warm_rust_featurizer(dataset)
+warm_rust_featurizer(dataset, use_cache=True)
 ```
 
-## Data 
-To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):  
+## Large-scale Rust inference with subblocking
+
+For processing massive blocks (hundreds of thousands of signatures), use the Rust backend with
+subblocking to keep memory bounded. This is the recommended production setup.
+
+### Standard prediction with subblocking
+
+Use `predict()` with `batching_threshold` to automatically split large blocks into manageable subblocks:
+
+```python
+import os
+
+# 1. Force Rust backend (set before importing s2and modules)
+os.environ["S2AND_BACKEND"] = "rust"
+
+from s2and.data import ANDData
+from s2and.feature_port import warm_rust_featurizer
+from s2and.serialization import load_pickle_with_verified_label_encoder_compat
+
+# 2. Load the production model
+clusterer = load_pickle_with_verified_label_encoder_compat(
+    "data/production_model_v1.2.pickle"
+)["clusterer"]
+clusterer.use_cache = False  # disable caching for one-shot inference
+clusterer.n_jobs = 8
+
+# 3. Load your dataset in inference mode
+dataset = ANDData(
+    signatures="path/to/signatures.json",
+    papers="path/to/papers.json",
+    specter_embeddings="path/to/specter.pickle",
+    mode="inference",
+    block_type="s2",
+    n_jobs=8,
+    name="my_dataset",
+)
+
+# 4. (Optional) Pre-warm Rust featurizer to reduce cold-start latency
+warm_rust_featurizer(dataset, use_cache=False)
+
+# 5. Predict clusters with subblocking for large blocks
+pred_clusters, _ = clusterer.predict(
+    dataset.get_blocks(),
+    dataset,
+    batching_threshold=5000,  # blocks larger than this are split into subblocks
+    desired_memory_use=5000 * 5000,  # memory budget in signature-pairs (25M pairs here)
+)
+
+# pred_clusters is a dict mapping signature_id -> list of cluster member signature_ids
+print(f"Total clusters: {len(pred_clusters)}")
+```
+
+Key parameters for `predict()`:
+- `batching_threshold`: blocks larger than this are split via `make_subblocks()` before clustering
+- `desired_memory_use`: memory budget in signature-pair units; controls chunk sizing for subblocked incremental paths (default: `batching_threshold²`)
+
+### Incremental prediction (adding new signatures to existing clusters)
+
+Use `predict_incremental()` when you have existing clusters (`cluster_seeds`) and want to assign
+new signatures without reclustering everything:
+
+```python
+# Load dataset with existing cluster seeds
+dataset = ANDData(
+    signatures="path/to/signatures.json",
+    papers="path/to/papers.json",
+    specter_embeddings="path/to/specter.pickle",
+    mode="inference",
+    block_type="s2",
+    n_jobs=8,
+    name="my_dataset",
+    cluster_seeds={
+        "require": {
+            "block_key": {("sig1", "sig2"): 1.0, ...},  # pairs that must cluster together
+        },
+        "disallow": {
+            "block_key": {("sig3", "sig4"), ...},  # pairs that must NOT cluster together
+        },
+    },
+)
+
+# Run incremental prediction on one block
+blocks = dataset.get_blocks()
+block_key = "j smith"  # target block
+block_signatures = blocks[block_key]
+
+result = clusterer.predict_incremental(
+    block_signatures,
+    dataset,
+    batching_threshold=5000,       # subblock size cap for phase-split mode
+    total_ram_bytes=32 * 1024**3,  # explicit RAM budget (32 GB)
+)
+
+clusters = result["clusters"]
+phase_b_mode = result.get("phase_b_mode", "N/A")
+
+# phase_b_mode indicates how phase-split handled memory:
+# - "exact": ran Phase B globally (monolithic-equivalent behavior)
+# - "subblock_local": ran Phase B per-subblock (memory-bounded approximation)
+print(f"Clusters: {len(set(clusters.values()))}, mode={phase_b_mode}")
+```
+
+For detailed subblocking behavior, see `docs/subclustering.md`.
+
+## Data
+To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):
 ```[Expected download size is: 50.4 GiB]```
 
 `aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
@@ -207,7 +372,7 @@ dataset = ANDData(
 This may take a few minutes - there is a lot of text pre-processing to do.
 
 The first step in the S2AND pipeline is to specify a featurizer and then train a binary classifier
-that tries to guess whether two signatures are referring to the same person. 
+that tries to guess whether two signatures are referring to the same person.
 
 We'll do hyperparameter selection with the validation set and then get the test area under ROC curve.
 
@@ -215,8 +380,8 @@ Here's how to do all that:
 
 ```python
 from s2and.model import PairwiseModeler
-from s2and.featurizer import FeaturizationInfo
-from s2and.eval import pairwise_eval
+from s2and.featurizer import FeaturizationInfo, featurize
+from s2and.eval import cluster_eval, pairwise_eval
 
 featurization_info = FeaturizationInfo()
 # the cache will make it faster to train multiple times - it stores the features on disk for you
@@ -263,7 +428,7 @@ metrics, metrics_per_signature = cluster_eval(dataset, clusterer)
 print(metrics)
 ```
 
-For a fuller example, please see the transfer script: `scripts/transfer_experiment.py`.
+For a fuller example, please see the transfer script: `scripts/transfer_experiment_seed_paper.py`.
 
 ## How to use S2AND for predicting with a saved model
 Assuming you have a clusterer already fit, you can dump the model to disk like so
@@ -290,30 +455,79 @@ anddata = ANDData(
     block_type="s2",
 )
 pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
+# pred_distance_matrices can be None when using memory-optimized fused clustering
 ```
 ## How to use the released production model
-We provide a trained production model (the one that is used in the Semantic Scholar website and API) in the S3 bucket along with the datasets, in the file `production_model_v1.1.pickle`. To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data. The older "v1.0" model is also available, but it's worse.
+We provide trained production models in the S3 bucket along with the datasets:
+
+- **`production_model_v1.2.pickle`** — current production model (used on Semantic Scholar website and API).
+- `production_model_v1.1.pickle` — previous production version.
+- `production_model_v1.0.pickle` — original version (deprecated).
+
+To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data.
+
+Bundled quick example:
+
+```bash
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py \
+  --use-rust 1 \
+  --dataset qian \
+  --data-root tests \
+  --load-name-counts 0
+```
 
 Please note that the production models still use SPECTER1, and these embeddings are still available via the S2 API.
+
+### Name-count semantics compatibility (important)
+S2AND currently supports two runtime semantics for the name-count feature key used by
+`last_first_initial_count_min`:
+
+- `legacy_full_first_token`: key is `<last> <first_token>` (historical behavior).
+- `initial_char`: key is `<last> <first[0]>` (current intended semantics).
+
+Model compatibility rules:
+
+- `production_model_v1.1.pickle` and `production_model_v1.2.pickle` were trained with
+  `legacy_full_first_token`.
+- In `ANDData(..., mode="inference")`, prediction automatically applies the semantics expected by
+  the loaded model via `clusterer.feature_contract["name_counts_last_first_initial_semantics"]`
+  (with `featurizer_version` fallback for older artifacts).
+- Do not mix model artifacts and feature semantics without retraining, because this changes model
+  inputs and can materially change clustering output.
+
 
 ### Incremental prediction
 There is a also a `predict_incremental` function on the `Clusterer`, that allows prediction for just a small set of *new* signatures. When instantiating `ANDData`, you can pass in `cluster_seeds`, which will be used instead of model predictions for those signatures. If you call `predict_incremental`, the full distance matrix will not be created, and the new signatures will simply be assigned to the cluster they have the lowest average distance to, as long as it is below the model's `eps`, or separately reclustered with the other unassigned signatures, if not within `eps` of any existing cluster.
 
+For very large incremental blocks, phase-split mode is used automatically when subblocking is active (i.e., when `batching_threshold` is set and the block exceeds it). Phase-split subblocks Phase A and then:
+- runs Phase B globally when it fits budget (`phase_b_mode="exact"`),
+- auto-falls back to subblock-local B/C/D when over budget (`phase_b_mode="subblock_local"`).
+
+`predict_incremental` returns a payload with:
+- `clusters`
+- `phase_b_mode`
+- `phase_b_budget_bytes`
+- `phase_b_required_bytes`
+
+RAM policy:
+- Preferred: pass `total_ram_bytes=<int>` directly to `predict_incremental`.
+- If omitted, runtime auto-detects RAM (cgroup first, then host probes) and applies a `0.8` safety factor before deriving budgets.
+
 ## Reproducibility
-The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`, in the branch `s2and_paper`. 
+The experiments in the paper were run with the python (3.7.9) package versions in `paper_experiments_env.txt`, in the branch `s2and_paper`.
 
 To install, run:
 ```bash
 git checkout s2and_paper
 pip install pip==21.0.0
 pip install -r paper_experiments_env.txt --use-feature=fast-deps --use-deprecated=legacy-resolver
-``` 
+```
 
-Then, Rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will udpate here if this becomes not true). 
+Then, rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will update here if this becomes not true).
 
 Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (very close to what is running on the Semantic Scholar website, except the production model doesn't compute the reference features) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "How to use S2AND for predicting with a saved model", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
 
-Note that by default we are using the `--use_cache` flag, which will cache all the features so future reruns are faster. There are two things to be aware of: (a) the cache is stored in RAM and can be huge (100gb+) and (b) if you intend to change the features and rerun, you'll have to turn off the cache or the new features won't be used.
+`use_cache` defaults to `False` in the current codebase. Enable it explicitly when you want cached reruns, and disable it when validating feature changes or running one-shot experiments.
 
 ## Licensing
 The code in this repo is released under the Apache 2.0 license. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).
@@ -324,7 +538,7 @@ If you use S2AND in your research, please cite [S2AND: A Benchmark and Evaluatio
 
 ```
 @inproceedings{subramanian2021s2and,
-      title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation}, 
+      title={{S}2{AND}: {A} {B}enchmark and {E}valuation {S}ystem for {A}uthor {N}ame {D}isambiguation},
       author={Subramanian, Shivashankar and King, Daniel and Downey, Doug and Feldman, Sergey},
       year={2021},
       publisher = {Association for Computing Machinery},

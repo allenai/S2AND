@@ -1,27 +1,29 @@
-from typing import List, Union, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from s2and.data import NameCounts
 
 import re
+import threading
 import warnings
-import numpy as np
-from numpy import inner
-from numpy.linalg import norm
 from collections import Counter
 
-from text_unidecode import unidecode
 import fasttext
-import pycld2 as cld2
 import jellyfish
+import numpy as np
+import pycld2 as cld2
+from numpy import inner
+from numpy.linalg import norm
 from strsimpy.metric_lcs import MetricLCS
+from text_unidecode import unidecode
 
-
-from s2and.consts import NUMPY_NAN, FASTTEXT_PATH
+from s2and.consts import FASTTEXT_PATH, NUMPY_NAN
 from s2and.file_cache import cached_path
 
 # Lazily-loaded fastText model to avoid heavy import-time cost
 _FASTTEXT_MODEL = None
+_FASTTEXT_MODEL_INITIALIZED = False
+_FASTTEXT_MODEL_LOCK = threading.Lock()
 
 
 def _get_fasttext_model():
@@ -32,19 +34,23 @@ def _get_fasttext_model():
     import os
 
     global _FASTTEXT_MODEL
-    if _FASTTEXT_MODEL is not None:
+    global _FASTTEXT_MODEL_INITIALIZED
+    if _FASTTEXT_MODEL_INITIALIZED:
         return _FASTTEXT_MODEL
-
-    if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
-        return None
-
-    # Load once and cache
-    try:
-        _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
-    except Exception:
-        # If loading fails, degrade gracefully to no fastText
-        _FASTTEXT_MODEL = None
-    return _FASTTEXT_MODEL
+    with _FASTTEXT_MODEL_LOCK:
+        if _FASTTEXT_MODEL_INITIALIZED:
+            return _FASTTEXT_MODEL
+        if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
+            _FASTTEXT_MODEL = None
+            _FASTTEXT_MODEL_INITIALIZED = True
+            return None
+        try:
+            _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
+        except Exception:
+            # If loading fails, degrade gracefully to no fastText.
+            _FASTTEXT_MODEL = None
+        _FASTTEXT_MODEL_INITIALIZED = True
+        return _FASTTEXT_MODEL
 
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
@@ -315,7 +321,7 @@ def detect_language(text: str):
         predicted_language_2 = cld2_pred[2][0][1]
         if predicted_language_2 == "un":
             predicted_language_2 = "un_2"
-    except:  # noqa: E722
+    except Exception:
         predicted_language_2 = "un_2"
 
     if predicted_language_ft == "un_ft" and predicted_language_2 == "un_2":
@@ -340,7 +346,7 @@ def detect_language(text: str):
     return is_reliable, is_english, predicted_language
 
 
-def normalize_text(text: Optional[str], special_case_apostrophes: bool = False) -> str:
+def normalize_text(text: str | None, special_case_apostrophes: bool = False) -> str:
     """
     Normalize text.
 
@@ -369,7 +375,7 @@ def normalize_text(text: Optional[str], special_case_apostrophes: bool = False) 
     return norm_text
 
 
-def split_first_middle_hyphen_aware(first_raw: Optional[str], middle_raw: Optional[str]) -> Tuple[str, str]:
+def split_first_middle_hyphen_aware(first_raw: str | None, middle_raw: str | None) -> tuple[str, str]:
     """Normalize and split first/middle with hyphen awareness for canonical fields.
 
     Rules:
@@ -404,7 +410,7 @@ def name_text_features(
     name_1: str,
     name_2: str,
     default_val: float = NUMPY_NAN,
-) -> List[float]:
+) -> list[float]:
     """
     Computes various text similarity features for two names
 
@@ -457,7 +463,7 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def get_text_ngrams(
-    text: Optional[str], use_unigrams: bool = False, use_bigrams: bool = True, stopwords: Optional[Set[str]] = STOPWORDS
+    text: str | None, use_unigrams: bool = False, use_bigrams: bool = True, stopwords: set[str] | None = STOPWORDS
 ) -> Counter:
     """
     Get character bigrams, trigrams, quadgrams, and optionally unigrams for a piece of text.
@@ -490,17 +496,17 @@ def get_text_ngrams(
     if use_bigrams:
         bigrams = map(  # type: ignore
             lambda x: "".join(x),
-            filter(lambda x: " " not in x, zip(text, text[1:])),
+            filter(lambda x: " " not in x, zip(text, text[1:], strict=False)),
         )
 
     trigrams = map(
         lambda x: "".join(x),
-        filter(lambda x: " " not in x, zip(text, text[1:], text[2:])),
+        filter(lambda x: " " not in x, zip(text, text[1:], text[2:], strict=False)),
     )
 
     quadgrams = map(
         lambda x: "".join(x),
-        filter(lambda x: " " not in x, zip(text, text[1:], text[2:], text[3:])),
+        filter(lambda x: " " not in x, zip(text, text[1:], text[2:], text[3:], strict=False)),
     )
     ngrams: Counter = Counter()
     ngrams.update(Counter(unigrams))
@@ -510,7 +516,7 @@ def get_text_ngrams(
     return ngrams
 
 
-def get_text_ngrams_words(text: Optional[str], stopwords: Set[str] = STOPWORDS) -> Counter:
+def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> Counter:
     """
     Get word unigrams, bigrams, and trigrams for a piece of text.
 
@@ -531,11 +537,11 @@ def get_text_ngrams_words(text: Optional[str], stopwords: Set[str] = STOPWORDS) 
     unigrams = Counter(text_split)
     bigrams = map(
         lambda x: " ".join(x),
-        zip(text_split, text_split[1:]),
+        zip(text_split, text_split[1:], strict=False),
     )
     trigrams = map(
         lambda x: " ".join(x),
-        zip(text_split, text_split[1:], text_split[2:]),
+        zip(text_split, text_split[1:], text_split[2:], strict=False),
     )
     ngrams: Counter = Counter()
     ngrams.update(unigrams)
@@ -553,17 +559,17 @@ def same_prefix_tokens(a: str, b: str) -> bool:
            one token is a prefix of the other.
     """
     ta, tb = a.split(), b.split()
-    for x, y in zip(ta, tb):
+    for x, y in zip(ta, tb, strict=False):
         if not (x.startswith(y) or y.startswith(x)):
             return False
     return True
 
 
 def equal(
-    name_1: Optional[str],
-    name_2: Optional[str],
+    name_1: str | None,
+    name_2: str | None,
     default_val: float = NUMPY_NAN,
-) -> Union[int, float]:
+) -> int | float:
     """
     Check if two names are exactly equal after lowercasing
 
@@ -593,10 +599,10 @@ def equal(
 
 
 def equal_middle(
-    name_1: Optional[str],
-    name_2: Optional[str],
+    name_1: str | None,
+    name_2: str | None,
     default_val: float = NUMPY_NAN,
-) -> Union[int, float]:
+) -> int | float:
     """
     Checks if two middle names are equal. If either middle name is just an initial,
     just check euqality of initials
@@ -628,10 +634,10 @@ def equal_middle(
 
 
 def equal_initial(
-    name_1: Optional[str],
-    name_2: Optional[str],
+    name_1: str | None,
+    name_2: str | None,
     default_val: float = NUMPY_NAN,
-) -> Union[int, float]:
+) -> int | float:
     """
     Checks if two initials are qual
 
@@ -686,8 +692,8 @@ def counter_jaccard(
 
 
 def jaccard(
-    set_1: Set,
-    set_2: Set,
+    set_1: set,
+    set_2: set,
     default_val: float = NUMPY_NAN,
 ) -> float:
     """
@@ -737,7 +743,7 @@ def compute_block(name: str) -> str:
     return block
 
 
-def diff(value_1: Optional[float], value_2: Optional[float], default_val: float = NUMPY_NAN) -> float:
+def diff(value_1: float | None, value_2: float | None, default_val: float = NUMPY_NAN) -> float:
     """
     Compute absolute difference between two values.
 
@@ -763,7 +769,7 @@ def diff(value_1: Optional[float], value_2: Optional[float], default_val: float 
 def name_counts(
     counts_1: "NameCounts",
     counts_2: "NameCounts",
-) -> List[Union[int, float]]:
+) -> list[int | float]:
     """
     Gets name counts for first, last, and first_last names.
     These counts were computed from the entire S2 corpus.

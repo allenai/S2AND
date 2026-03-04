@@ -1,20 +1,30 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from os.path import join
 import json
-import pandas as pd
 import os
+from os.path import join
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
 
 CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
+_PLOTTING_CONFIG: dict | None = None
 
-EXP_DIR = os.path.join(CONFIG["internal_data_dir"], "experiments/paper_experiments_baseline_save_facets_w_gen_eth/")
+
+def _load_plotting_config() -> dict:
+    global _PLOTTING_CONFIG
+    if _PLOTTING_CONFIG is None:
+        with open(CONFIG_LOCATION, encoding="utf-8") as json_file:
+            _PLOTTING_CONFIG = json.load(json_file)
+    return _PLOTTING_CONFIG
+
+
+def _experiment_dir() -> str:
+    config = _load_plotting_config()
+    return os.path.join(config["internal_data_dir"], "experiments/paper_experiments_baseline_save_facets_w_gen_eth/")
 
 
 def plot_box(s2and_performance: dict, s2_performance: dict, figs_path: str, title: str, total_bins: int = 5):
-
     b3 = []
     keylist = []
     model = []
@@ -137,7 +147,6 @@ def plot_facets(
     gender_ethnicity_available=True,
     save_results=True,
 ):
-
     pred_facets = [
         union_gender_f1,
         union_ethnicity_f1,
@@ -192,8 +201,7 @@ def plot_facets(
         num_bins.remove(0)
         num_bins.remove(0)
 
-    for pred_facet, s2_facet, plot_name, bin_size in zip(pred_facets, s2_facets, plot_names, num_bins):
-
+    for pred_facet, s2_facet, plot_name, bin_size in zip(pred_facets, s2_facets, plot_names, num_bins, strict=True):
         if save_results:
             with open(figs_path + plot_name + "_dict_pred.json", "w") as fp:
                 json.dump(pred_facet, fp, indent=4)
@@ -204,40 +212,40 @@ def plot_facets(
 
 
 if __name__ == "__main__":
-    TEST_DATA_PATH = EXP_DIR
+    TEST_DATA_PATH = _experiment_dir()
 
-    with open(TEST_DATA_PATH + "facetsgender_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsgender_dict_pred.json") as f:
         union_gender_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsethnicity_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsethnicity_dict_pred.json") as f:
         union_ethnicity_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsnumber of authors_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsnumber of authors_dict_pred.json") as f:
         union_author_num_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsyear_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsyear_dict_pred.json") as f:
         union_year_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsblock size_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsblock size_dict_pred.json") as f:
         union_block_len_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetscluster size_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetscluster size_dict_pred.json") as f:
         union_cluster_len_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetshomonymity_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetshomonymity_dict_pred.json") as f:
         union_homonymity_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetssynonymity_dict_pred.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetssynonymity_dict_pred.json") as f:
         union_synonymity_f1 = json.load(f)
 
-    with open(TEST_DATA_PATH + "facetsgender_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsgender_dict_s2.json") as f:
         union_s2_gender_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsethnicity_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsethnicity_dict_s2.json") as f:
         union_s2_ethnicity_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsnumber of authors_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsnumber of authors_dict_s2.json") as f:
         union_s2_author_num_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsyear_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsyear_dict_s2.json") as f:
         union_s2_year_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetsblock size_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetsblock size_dict_s2.json") as f:
         union_s2_block_len_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetscluster size_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetscluster size_dict_s2.json") as f:
         union_s2_cluster_len_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetshomonymity_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetshomonymity_dict_s2.json") as f:
         union_s2_homonymity_f1 = json.load(f)
-    with open(TEST_DATA_PATH + "facetssynonymity_dict_s2.json", "r") as f:
+    with open(TEST_DATA_PATH + "facetssynonymity_dict_s2.json") as f:
         union_s2_synonymity_f1 = json.load(f)
 
     plot_facets(
@@ -257,6 +265,6 @@ if __name__ == "__main__":
         union_s2_cluster_len_f1,
         union_s2_homonymity_f1,
         union_s2_synonymity_f1,
-        figs_path=EXP_DIR + "boxplot/",
+        figs_path=_experiment_dir() + "boxplot/",
         gender_ethnicity_available=True,
     )

@@ -28,7 +28,7 @@ uv sync --extra dev
 uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml
 
 # Keep sync script formatted to avoid CI failures.
-uv run --active --no-project black scripts/sync_version.py
+uv run --active --no-project ruff format scripts/sync_version.py
 
 # Stage version-related files so the commit includes the updates.
 git add "${VERSION_FILES[@]}"

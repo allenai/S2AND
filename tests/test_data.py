@@ -1,7 +1,9 @@
 import unittest
+
+import pandas as pd
 import pytest
 
-from s2and.data import ANDData
+from s2and.data import ANDData, _parse_sinonym_name
 
 
 class TestData(unittest.TestCase):
@@ -106,8 +108,8 @@ class TestData(unittest.TestCase):
         self.dummy_dataset.block_type = "original"
         original_blocks_2 = self.dummy_dataset.get_blocks()
         self.dummy_dataset.block_type = "dummy"
-        with pytest.raises(Exception):
-            blocks = self.dummy_dataset.get_blocks()
+        with pytest.raises(ValueError):
+            self.dummy_dataset.get_blocks()
         self.dummy_dataset.block_type = "s2"
 
         assert original_blocks == expected_original_blocks
@@ -116,7 +118,7 @@ class TestData(unittest.TestCase):
         assert s2_blocks_2 == expected_s2_blocks
 
     def test_initialization(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -129,7 +131,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -141,7 +143,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -154,7 +156,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -166,7 +168,7 @@ class TestData(unittest.TestCase):
                 preprocess=False,
             )
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={},
                 papers={},
@@ -188,7 +190,7 @@ class TestData(unittest.TestCase):
         assert dataset.all_test_pairs_flag
         assert dataset.block_type == "s2"
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             dataset = ANDData(
                 signatures={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
             )
@@ -221,6 +223,9 @@ class TestData(unittest.TestCase):
             n_jobs=2,
         )
 
+        # Verify that at least one paper was processed (has title normalization)
+        assert len(dataset_single.papers) > 0 and len(dataset_multi.papers) > 0
+
         # Compare that papers are preprocessed identically
         for paper_id in dataset_single.papers:
             paper_single = dataset_single.papers[paper_id]
@@ -240,39 +245,136 @@ class TestData(unittest.TestCase):
                     paper_single.title_ngrams_words == paper_multi.title_ngrams_words
                 ), f"Title ngrams mismatch for paper {paper_id}"
 
-    def test_global_variable_initialization(self):
-        """Test that global variables are properly initialized in worker processes"""
-        # This test verifies that the _init_pool function works correctly
-        # by ensuring preprocessing can access global variables
-        dataset = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_global_test",
-            load_name_counts=False,
-            preprocess=True,
-            n_jobs=2,
+
+def test_compute_signature_name_counts_uses_single_character_initial():
+    load_name_counts = {
+        "first_dict": {},
+        "last_dict": {"smith": 11},
+        "first_last_dict": {},
+        "last_first_initial_dict": {"smith m": 17},
+    }
+    dataset = ANDData(
+        "tests/dummy/signatures.json",
+        "tests/dummy/papers.json",
+        name="dummy_name_counts_initial",
+        mode="inference",
+        load_name_counts=load_name_counts,
+        preprocess=False,
+    )
+    signature = next(iter(dataset.signatures.values()))._replace(
+        author_info_first="Michael",
+        author_info_middle="",
+        author_info_last="Smith",
+        author_info_first_normalized_without_apostrophe="michael",
+        author_info_middle_normalized_without_apostrophe="",
+        author_info_last_normalized="smith",
+    )
+    counts = dataset._compute_signature_name_counts(
+        signature,
+        first_raw="Michael",
+        middle_raw="",
+        first_without_apostrophe="michael",
+        last_normalized="smith",
+    )
+    assert counts.last_first_initial == 17
+
+
+def test_pair_sampling_invalid_configuration_raises_value_error():
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="invalid_pair_sampling_configuration",
+        mode="inference",
+        load_name_counts=False,
+        preprocess=False,
+    )
+    dataset.pair_sampling_block = False
+    dataset.pair_sampling_balanced_classes = False
+    dataset.pair_sampling_balanced_homonym_synonym = False
+
+    with pytest.raises(ValueError, match="not a valid combination"):
+        dataset.pair_sampling(
+            sample_size=10,
+            signature_ids=[],
+            blocks={},
+            all_pairs=False,
         )
 
-        # If global variables weren't initialized properly, this would fail
-        # Verify that at least one paper was processed (has title normalization)
-        processed_papers = [p for p in dataset.papers.values() if hasattr(p, "title") and p.title]
-        assert len(processed_papers) > 0, "No papers were properly processed with multiprocessing"
 
-    def test_preprocess_no_multiprocessing_fallback(self):
-        """Test that code works correctly when falling back to single-threaded due to small dataset"""
-        # Test with n_jobs > 1 but with conditions that force single-threaded execution
-        dataset = ANDData(
-            "tests/dummy/signatures.json",
-            "tests/dummy/papers.json",
-            clusters="tests/dummy/clusters.json",
-            name="dummy_fallback",
-            load_name_counts=False,
-            preprocess=True,
-            n_jobs=4,  # Request multiple jobs but dataset might be too small
-        )
+def test_parse_sinonym_name_matches_between_object_and_dict_inputs():
+    class _ParsedNameStub:
+        def __init__(self):
+            self.given_tokens = ["Xiao", "Ming"]
+            self.surname_tokens = ["Ou", "Yang"]
+            self.original_compound_surname = None
+            self.middle_tokens = ["Li"]
+            self.middle_name = None
 
-        # Should still work correctly even if it falls back to single-threaded
-        assert len(dataset.papers) > 0
-        processed_papers = [p for p in dataset.papers.values() if hasattr(p, "title")]
-        assert len(processed_papers) > 0
+    object_output = _parse_sinonym_name(_ParsedNameStub())
+    dict_output = _parse_sinonym_name(
+        {
+            "given_tokens": ["Xiao", "Ming"],
+            "surname_tokens": ["Ou", "Yang"],
+            "original_compound_surname": None,
+            "middle_tokens": ["Li"],
+            "middle_name": None,
+        }
+    )
+
+    assert object_output == dict_output
+    assert object_output == ("Xiao Ming", "Li", "Ou Yang")
+
+
+def test_inference_dataset_with_clusters_initializes_signature_to_cluster_id():
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        clusters={},
+        name="inference_with_clusters_signature_mapping",
+        mode="inference",
+        load_name_counts=False,
+        preprocess=False,
+    )
+
+    assert hasattr(dataset, "signature_to_cluster_id")
+    assert dataset.signature_to_cluster_id is None
+
+
+def test_fixed_pairs_does_not_mutate_source_dataframes():
+    train_pairs_df = pd.DataFrame(
+        [("s1", "s2", "YES"), ("s3", "s4", "NO")],
+        columns=["signature_id_1", "signature_id_2", "label"],
+    )
+    val_pairs_df = pd.DataFrame(
+        [("s5", "s6", "1"), ("s7", "s8", "0")],
+        columns=["signature_id_1", "signature_id_2", "label"],
+    )
+    test_pairs_df = pd.DataFrame(
+        [("s9", "s10", 1), ("s11", "s12", 0)],
+        columns=["signature_id_1", "signature_id_2", "label"],
+    )
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="fixed_pairs_copy_safety",
+        mode="train",
+        clusters=None,
+        train_pairs=train_pairs_df,
+        val_pairs=val_pairs_df,
+        test_pairs=test_pairs_df,
+        load_name_counts=False,
+        preprocess=False,
+    )
+
+    train_before = dataset.train_pairs.copy(deep=True)
+    val_before = dataset.val_pairs.copy(deep=True)
+    test_before = dataset.test_pairs.copy(deep=True)
+
+    train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()
+
+    assert dataset.train_pairs.equals(train_before)
+    assert dataset.val_pairs is not None and dataset.val_pairs.equals(val_before)
+    assert dataset.test_pairs.equals(test_before)
+
+    all_labels = [int(pair[2]) for pair in train_pairs + val_pairs + test_pairs]
+    assert set(all_labels).issubset({0, 1})

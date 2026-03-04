@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "VERSION"
@@ -98,7 +96,8 @@ def main() -> None:
     verify_version(version)
     print(f"Updated versions to {version}")
     print(
-        "Next: run `uv sync --extra dev` and `uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml`."
+        "Next: run `uv sync --extra dev` and "
+        "`uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml`."
     )
 
 

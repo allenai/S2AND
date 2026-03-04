@@ -10,29 +10,37 @@ TODO(s2and): This JSON was generated with legacy normalization (single-token fir
              for compatibility.
 """
 
-import os
 import json
+import os
 from collections import Counter
 from itertools import combinations
-from s2and.text import normalize_text, NAME_PREFIXES, same_prefix_tokens
-from s2and.consts import PROJECT_ROOT_PATH
+
 from pys2.pys2 import _evaluate_redshift_query
+
+from s2and.consts import PROJECT_ROOT_PATH
+from s2and.text import NAME_PREFIXES, normalize_text, same_prefix_tokens
 
 """
 Step 1: Get orcid name pairs from our internal databases
 """
 
 query = """
-select p.year, p.inserted paper_inserted, 
-     pae.corpus_paper_id, pae.source, pae.orcid,  pae.position, pae.first_name, pa.middle, pae.last_name, 
-     pa.corpus_author_id, au.ai2_id, pa.inserted pa_inserted, pa.updated pa_updated, pa.cluster_block_key, pa.model_version, pa.clusterer
-from content_ext.paper_authors_orcids pae 
-join content_ext.papers p 
-     on pae.corpus_paper_id=p.corpus_paper_id  
-join content_ext.paper_authors pa 
-     on pae.corpus_paper_id=pa.corpus_paper_id 
+ select p.year, p.inserted paper_inserted,
+      pae.corpus_paper_id, pae.source, pae.orcid,  pae.position, pae.first_name, pa.middle, pae.last_name,
+      pa.corpus_author_id,
+      au.ai2_id,
+      pa.inserted pa_inserted,
+      pa.updated pa_updated,
+      pa.cluster_block_key,
+      pa.model_version,
+      pa.clusterer
+ from content_ext.paper_authors_orcids pae
+ join content_ext.papers p
+      on pae.corpus_paper_id=p.corpus_paper_id
+join content_ext.paper_authors pa
+     on pae.corpus_paper_id=pa.corpus_paper_id
      and pae.position=pa.position+1 and lower(pae.last_name)=lower(pa.last)
-join content_ext.authors au 
+join content_ext.authors au
    on pa.corpus_author_id=au.corpus_author_id
 where pae.source in ('Crossref')
 ;
@@ -83,7 +91,7 @@ orcids = df_all[["cluster_block_key", "orcid", "first_norm", "middle_norm"]]
 Step 2: Get name pairs that are included in S2AND
 """
 name_tuples = set()
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt"), "r") as f2:
+with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt")) as f2:
     for line in f2:
         line_split = line.strip().split(",")
         name_tuples.add((line_split[0], line_split[1]))
@@ -98,10 +106,11 @@ k_values = (2, 3, 4, 5)  # only care up to first 5 letters
 orcid_first_k_letter_counts = Counter()  # type: ignore
 
 
-# in each group, take all pairs of unique names and then count the number of times each first k letter combination occurs
+# in each group, take all pairs of unique names and then count the number of
+# times each first k letter combination occurs
 # (name_1[:k], name_2[:k]) for k in range(2, 6) where k is the outer dictionary key
 def group_update(group, k_values=k_values):
-    names = [i for i in group["first_norm"].unique() if type(i) == str]
+    names = [i for i in group["first_norm"].unique() if isinstance(i, str)]
     if len(names) > 1:
         for name1, name2 in combinations(names, 2):
             if name1[0] == name2[0]:

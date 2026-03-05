@@ -460,9 +460,9 @@ pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), 
 ## How to use the released production model
 We provide trained production models in the S3 bucket along with the datasets:
 
-- **`production_model_v1.2.pickle`** — current production model (used on Semantic Scholar website and API).
-- `production_model_v1.1.pickle` — previous production version.
-- `production_model_v1.0.pickle` — original version (deprecated).
+- **`production_model_v1.2.pickle`** — current production model (used on Semantic Scholar website and API). It expects SPECTER2 [PRX] embeddings for papers. It does not use reference features. 
+- `production_model_v1.1.pickle` — previous production version. It expects SPECTER1 embeddings for papers. It does not use reference features. 
+- `production_model_v1.0.pickle` — original version (deprecated). It expects SPECTER1 embeddings for papers. It does use reference features. 
 
 To see an example of using it, please see the script `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data.
 

@@ -152,7 +152,7 @@ uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.p
 Run the same tutorial on `data/s2and_mini` (after downloading the dataset above):
 
 ```bash
-uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1 --dataset qian
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
 ```
 
 When running scripts from the repo, prefer `uv run --no-project` so the installed packages (including the Rust extension)

@@ -117,12 +117,20 @@ Notes:
 ---
 
 ## Data
-To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory):
-```[Expected download size is: 50.4 GiB]```
+To obtain the S2AND dataset, run the following command after the package is installed (from inside the `S2AND` directory).
+Expected download size is **~50.4 GiB**.
 
-`aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/`
+```bash
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/
+```
 
 Note that this software package comes with tools specifically designed to access and model the dataset.
+
+If you only need the production model (without the full dataset), you can download just the model pickle:
+
+```bash
+aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.1.pickle data/
+```
 
 ## Configuration
 Modify the config file at `data/path_config.json`. This file should look like this
@@ -139,7 +147,7 @@ As the dummy file says, `main_data_dir` should be set to the location of whereve
 
 ## Quick Start
 
-Run a bundled example with the `tests/qian` fixture (no large data download needed):
+Run a bundled example with the `tests/qian` fixture. You still need the production model pickle — download it first if you haven't already (see [Data](#data)):
 
 ```bash
 uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py \
@@ -149,10 +157,10 @@ uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.p
   --load-name-counts 0
 ```
 
-Run the same tutorial on `data/s2and_mini` (after downloading the dataset above):
+Run the same tutorial on `data/s2and_mini` (after downloading the full dataset):
 
 ```bash
-uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1
+uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py --use-rust 1 --dataset qian
 ```
 
 When running scripts from the repo, prefer `uv run --no-project` so the installed packages (including the Rust extension)

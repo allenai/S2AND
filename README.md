@@ -521,6 +521,68 @@ RAM policy:
 
 For detailed subblocking behavior, see `docs/subclustering.md`.
 
+### Controlling RAM usage
+
+S2AND provides two primary knobs for controlling peak memory consumption, plus several secondary knobs that interact with them.
+
+#### `total_ram_bytes` — explicit RAM budget (bytes)
+
+Pass this to `predict_incremental()` or `many_pairs_featurize()` to tell S2AND how much physical RAM is available. The system uses it to derive chunk sizes, accumulator limits, and Rust batch plans that stay within budget.
+
+```python
+result = clusterer.predict_incremental(
+    block_signatures,
+    dataset,
+    total_ram_bytes=16 * 1024**3,  # 16 GiB
+)
+```
+
+If omitted, the runtime auto-detects RAM (cgroup limits first, then host probes) and applies two sequential reductions: first a **0.8× safety factor** on the detected total, then a **10% safety margin** (plus current RSS) is subtracted to compute the usable budget. Together these mean the effective budget is roughly 72% of detected RAM minus current process memory. You can always override with an explicit value — useful in containers where cgroup detection may return the host's total RAM instead of the container's limit.
+
+#### `train_pairs_size` — number of training tuples
+
+Controls how many signature pairs are sampled for training the pairwise classifier (in `ANDData`). Each pair produces a feature vector held in memory, so this directly determines the size of the training feature matrix.
+
+```python
+dataset = ANDData(
+    ...,
+    mode="train",
+    train_pairs_size=100000,   # default: 30000
+    val_pairs_size=10000,
+    test_pairs_size=10000,
+)
+```
+
+Lowering `train_pairs_size` reduces peak RAM during training at the cost of potentially fewer training examples. Raising it increases memory usage proportionally.
+
+#### How they interact
+
+| Knob | Phase | What it controls |
+|---|---|---|
+| `train_pairs_size` | Training | Number of sampled pairs → size of feature matrix in RAM |
+| `total_ram_bytes` | Inference (incremental / Rust batch) | Chunk sizes and accumulator limits for memory-bounded featurization |
+| `batch_size` (on `Clusterer`, default `1_000_000`) | Inference (standard predict) | Max pairs featurized per chunk; lower = less peak RAM but slower |
+| `n_jobs` (on `ANDData` / `Clusterer`) | Both | Parallelism level; more jobs = more concurrent memory |
+| `batching_threshold` (on `predict` / `predict_incremental`) | Inference | Block-size cap before subblocking kicks in; controls per-block pair count |
+| `desired_memory_use` (on `predict`) | Inference | Memory budget in signature-pair units for subblocked paths (default: `batching_threshold²`) |
+
+**During training**, `train_pairs_size` is the main lever. `total_ram_bytes` is not used during training — the feature matrix is built in one shot from the sampled pairs.
+
+**During inference**, `total_ram_bytes` is the primary lever. When set, the runtime derives:
+- **Chunk pairs**: how many pairs to featurize per chunk (bounded by available bytes ÷ bytes-per-pair).
+- **Accumulator limits**: how many entries the incremental Phase A accumulator can hold before early-stopping.
+- **Rust batch plan**: chunk sizing for the Rust featurization backend.
+
+If you are running out of memory during inference, try (in order):
+1. Set `total_ram_bytes` to a value smaller than your actual RAM (e.g., 50–75% of physical RAM).
+2. Lower `batch_size` on the `Clusterer` (e.g., `clusterer.batch_size = 100_000`).
+3. Lower `n_jobs` to reduce parallel memory pressure.
+4. Use `batching_threshold` to force subblocking on large blocks.
+
+If you are running out of memory during training:
+1. Lower `train_pairs_size` (e.g., from `100000` to `30000`).
+2. Lower `n_jobs`.
+
 ### Profiling
 
 ```bash

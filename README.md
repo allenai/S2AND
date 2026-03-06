@@ -170,7 +170,7 @@ We provide trained production models in the S3 bucket along with the datasets:
 | `production_model_v1.1.pickle` | Previous | SPECTER1 | No |
 | `production_model_v1.0.pickle` | Deprecated | SPECTER1 | Yes |
 
-To see a full example, see `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data.
+To see a full example, see `scripts/tutorial_for_predicting_with_the_prod_model.py`. You can also use it on your own data, as long as it is formatted the same way as the S2AND data. SPECTER embeddings for papers are available via the [Semantic Scholar API](https://api.semanticscholar.org/) (use the `embedding.specter_v2` field for v1.2, or `embedding.specter_v1` for v1.1).
 
 ### What "does not use reference features" means
 
@@ -605,7 +605,7 @@ pip install -r paper_experiments_env.txt --use-feature=fast-deps --use-deprecate
 
 Then, rerunning `scripts/paper_experiments.sh` on the branch `s2and_paper` should produce the same numbers as in the paper (we will update here if this becomes not true).
 
-Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (very close to what is running on the Semantic Scholar website, except the production model doesn't compute the reference features) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "[Predicting with a Saved Model](#predicting-with-a-saved-model)", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
+Our trained, released models are in the `s3` folder referenced above, and are called `production_model.pickle` (the original paper-era model, which does not compute reference features; see [Using the Production Model](#using-the-production-model) for the current versioned models) and `full_union_seed_*.pickle` (models trained during benchmark experiments). They can be loaded the same way as in the section above called "[Predicting with a Saved Model](#predicting-with-a-saved-model)", except that the pickled object is a *dictionary*, with a `clusterer` key. *Important*: these pickles will only run on the branch `s2and_paper` and not on main.
 
 ## Licensing
 The code in this repo is released under the Apache 2.0 license. The dataset is released under ODC-BY (included in S3 bucket with the data). We would also like to acknowledge that some of the affiliations data comes directly from the Microsoft Academic Graph (https://aka.ms/msracad).

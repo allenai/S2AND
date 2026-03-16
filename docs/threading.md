@@ -65,13 +65,62 @@ Conditions for the bypass:
    - `clusterer.n_jobs = N` (or pass `n_jobs=N` when constructing `Clusterer`)
 
 2. **Set thread env vars before importing compute-heavy libraries** (especially on Windows):
-   - `OMP_NUM_THREADS=N` (OpenMP; LightGBM, some clustering libs)
-   - `MKL_NUM_THREADS=N`, `OPENBLAS_NUM_THREADS=N`, `NUMEXPR_NUM_THREADS=N` (if your NumPy/SciPy stack uses them)
+   - `OMP_NUM_THREADS=N` for OpenMP users such as LightGBM
+   - Usually `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`
    - Optional: `RAYON_NUM_THREADS=N` (only affects Rust code that uses Rayon’s global pool; S2AND’s Rust extension
      primarily uses explicit `num_threads` arguments instead)
 
+   Why are the BLAS / NumExpr knobs usually pinned to `1` while OpenMP / Rayon may be set to `N`?
+
+   - In typical S2AND runs, the main parallel work is Rust featurization / constraint resolution and LightGBM inference.
+   - MKL, OpenBLAS, and NumExpr can create their own thread pools for helper operations inside NumPy / SciPy expressions.
+   - If those helper libraries also fan out to `N` threads, a single S2AND process can end up with nested parallelism
+     (`Rayon x BLAS`, `OpenMP x BLAS`, etc.), which usually hurts end-to-end throughput through oversubscription.
+   - So the safe default is: let the intended top-level engine use threads, and keep BLAS / NumExpr at `1` unless a
+     profile shows a BLAS-heavy phase dominates and benefits from a different setting.
+
    Many OpenMP runtimes read environment variables at first use / first load; setting them after importing `lightgbm`
    is not reliable.
+
+3. **Choose the env pattern that matches your deployment shape**:
+
+   - **One S2AND process should use the machine**:
+
+     ```bash
+     export PYTHONUNBUFFERED=1
+     export S2AND_BACKEND=rust
+     export OMP_NUM_THREADS=36
+     export MKL_NUM_THREADS=1
+     export OPENBLAS_NUM_THREADS=1
+     export NUMEXPR_NUM_THREADS=1
+     export RAYON_NUM_THREADS=36
+
+     uv run python your_script.py --n_jobs 36
+     ```
+
+     In this setup, do **not** leave `OMP_NUM_THREADS=1` if you want LightGBM / OpenMP inference to use the available
+     cores.
+
+   - **An outer scheduler / worker pool is already parallelizing the job**:
+
+     ```bash
+     export PYTHONUNBUFFERED=1
+     export S2AND_BACKEND=rust
+     export OMP_NUM_THREADS=1
+     export MKL_NUM_THREADS=1
+     export OPENBLAS_NUM_THREADS=1
+     export NUMEXPR_NUM_THREADS=1
+     export RAYON_NUM_THREADS=1
+
+     uv run python your_worker_script.py --n_jobs 1
+     ```
+
+     If an outer launcher runs `W` workers on a machine with `N` cores, size each worker to roughly `floor(N / W)`
+     inner threads, often `1`.
+
+4. **Treat `PYTHONUNBUFFERED=1` as a logging knob**:
+   - It helps flush logs promptly.
+   - It does not make compute faster.
 
 ## Avoiding nested parallelism
 
@@ -85,6 +134,8 @@ Rules of thumb:
 - Prefer **one parallelism layer per phase**:
   - Rust batch featurization: Rayon handles parallelism; avoid wrapping it in additional thread pools.
   - LightGBM inference: let LightGBM/OpenMP use threads; avoid concurrent `predict_proba()` calls from multiple workers.
+- BLAS / NumExpr are usually **not** the parallelism layer you want to scale first in S2AND. Leave
+  `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1` unless profiling shows otherwise.
 
 ## Rust Rayon pool lifetime
 
@@ -97,4 +148,4 @@ fresh Python process).
 
 ## Date
 
-2026-03-02
+2026-03-16

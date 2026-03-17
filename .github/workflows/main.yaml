@@ -12,15 +12,15 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Install uv (fast Python + package manager) and enable caching
       - name: Setup uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
 
       # Cache uv tool + resolver cache
       - name: Cache uv caches
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/uv
@@ -58,14 +58,14 @@ jobs:
       matrix:
         lane: [py-only, rust-enabled]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
 
       # Optional: ensure a specific Python (uv can also manage this on its own)
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -75,7 +75,7 @@ jobs:
 
       - name: Cache cargo build
         if: matrix.lane == 'rust-enabled'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -87,7 +87,7 @@ jobs:
 
       # Cache uv resolver + wheels + project venv
       - name: Cache uv + venv
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/uv
@@ -179,4 +179,3 @@ jobs:
         run: |
           uv run pytest tests/ \
             --cov=s2and --cov-report=term-missing --cov-fail-under=40
-

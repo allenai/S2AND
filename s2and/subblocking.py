@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import combinations
 
 import genieclust
@@ -210,8 +210,27 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
     return output, output_cant_subdivide
 
 
-def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS):
-    """Splits a list of signature IDs into subblocks based on name attributes.
+def _specter_labeled_subblock_stats(subblocks: dict[str, list[str]]) -> tuple[int, int]:
+    """Count final subblocks whose lineage includes SPECTER fallback.
+
+    Args:
+        subblocks: Mapping from subblock key to signature IDs.
+
+    Returns:
+        Tuple of `(subblock_count, signature_count)` for keys containing `|specter=`.
+    """
+    specter_keys = [key for key in subblocks if "|specter=" in key]
+    specter_signature_count = sum(len(subblocks[key]) for key in specter_keys)
+    return len(specter_keys), specter_signature_count
+
+
+def make_subblocks_with_telemetry(
+    signature_ids,
+    anddata,
+    maximum_size=7500,
+    first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS,
+):
+    """Split signature IDs into subblocks and report how the partition was built.
 
     This function takes a list of signature IDs and splits them into subblocks of maximum_size.
     It first splits by first name initial letter. Then it recursively splits any subblocks larger than
@@ -219,7 +238,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     smaller than maximum_size that share name attributes.
 
     There is a special case for ORCIDs: we make sure that signatures with the same ORCID end up
-    in the same subblock
+    in the same subblock.
 
     Args:
         signature_ids (list[str/int]): List of signature IDs.
@@ -230,7 +249,9 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
             in this file.
 
     Returns:
-        dict: Dictionary of subblock keys mapped to lists of signature IDs.
+        tuple[dict, dict]: `(subblocks, telemetry)` where `subblocks` is the final partition and
+        `telemetry` reports first-name dead-ends, SPECTER fallback usage, and final SPECTER-labeled
+        subblock counts/signatures.
     """
     logger.info("Beginning subblocking...")
     signature_ids = np.array(signature_ids)
@@ -240,6 +261,28 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
 
     # set aside those that are only 1 letter long for a different treatment
     single_letter_first_names_flag = np.array([len(first_name) <= 1 for first_name in first_names])
+    telemetry = {
+        "maximum_size": int(maximum_size),
+        "input_signature_count": int(len(signature_ids)),
+        "single_letter_first_name_signature_count": int(np.sum(single_letter_first_names_flag)),
+        "multi_letter_first_name_signature_count": int(np.sum(~single_letter_first_names_flag)),
+        "first_name_dead_end_block_count": 0,
+        "first_name_dead_end_signature_count": 0,
+        "specter_fallback_candidate_block_count": 0,
+        "specter_fallback_candidate_signature_count": 0,
+        "specter_non_invoked_candidate_block_count": 0,
+        "specter_non_invoked_candidate_signature_count": 0,
+        "specter_invocation_count": 0,
+        "specter_input_signature_count": 0,
+        "pre_merge_subblock_count": 0,
+        "pre_merge_specter_labeled_subblock_count": 0,
+        "pre_merge_specter_labeled_signature_count": 0,
+        "orcid_merge_skipped_due_to_capacity_count": 0,
+        "orcid_merge_skipped_due_to_capacity_signature_count": 0,
+        "final_subblock_count": 0,
+        "final_specter_labeled_subblock_count": 0,
+        "final_specter_labeled_signature_count": 0,
+    }
 
     # first letter is
     first_letter = "?"  # could happen if all the first names are missing
@@ -253,6 +296,8 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     output, output_cant_subdivide = subdivide_helper(
         first_names[~single_letter_first_names_flag], signature_ids[~single_letter_first_names_flag], maximum_size
     )
+    telemetry["first_name_dead_end_block_count"] = int(len(output_cant_subdivide))
+    telemetry["first_name_dead_end_signature_count"] = int(sum(len(v) for v in output_cant_subdivide.values()))
 
     # for each block in output_cant_subdivide, we need to subdivide it further using middle names
     if len(output_cant_subdivide) > 0:
@@ -302,6 +347,9 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
             output_cant_subdivide_single_letter_first_name
         )  # since it already went through the middle name step
 
+    telemetry["specter_fallback_candidate_block_count"] = int(len(output_for_specter))
+    telemetry["specter_fallback_candidate_signature_count"] = int(sum(len(v) for v in output_for_specter.values()))
+
     # for each subblock that STILL can't be subdivided, we must use SPECTER
     # which also does totally random sub-blocking in case things went awry
     if len(output_for_specter) > 0:
@@ -313,13 +361,22 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
         output_loop = {}
         if len(sig_ids_loop) <= maximum_size:
             # edge case where the subblock is already fine
+            telemetry["specter_non_invoked_candidate_block_count"] += 1
+            telemetry["specter_non_invoked_candidate_signature_count"] += int(len(sig_ids_loop))
             output_loop[key] = sig_ids_loop
         else:
+            telemetry["specter_invocation_count"] += 1
+            telemetry["specter_input_signature_count"] += int(len(sig_ids_loop))
             specter_clustering = cluster_with_specter(sig_ids_loop, anddata, target_subblock_size=maximum_size)
             # prepend the key to the specter_clustering keys
             for key_loop in list(specter_clustering.keys()):
                 output_loop[key + "|specter=" + str(key_loop)] = specter_clustering.pop(key_loop)
         output.update(output_loop)
+
+    pre_merge_specter_subblock_count, pre_merge_specter_signature_count = _specter_labeled_subblock_stats(output)
+    telemetry["pre_merge_subblock_count"] = int(len(output))
+    telemetry["pre_merge_specter_labeled_subblock_count"] = int(pre_merge_specter_subblock_count)
+    telemetry["pre_merge_specter_labeled_signature_count"] = int(pre_merge_specter_signature_count)
 
     """
     Merging too small subblocks back up to maximum_size
@@ -492,20 +549,21 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     # approach: find all the signature_ids with ORCIDs that appear more than once
     # AND are in different subblocks
     # then move around the individual signatures so that they are in the same subblock
-    # 1: get a mapping from orcid -> (signature_id, subblock_id)
-    orcid_to_sig_id_subblock_id = defaultdict(list)
+    # 1: get a mapping from orcid -> signature_ids, plus a live index of current subblock membership
+    orcid_to_sig_ids = defaultdict(list)
+    sig_id_to_subblock_id = {}
     for subblock_id, sig_ids in output.items():
         for sig_id in sig_ids:
+            sig_id_to_subblock_id[sig_id] = subblock_id
             orcid = anddata.signatures[sig_id].author_info_orcid
             if orcid is not None:
-                orcid_to_sig_id_subblock_id[orcid].append((sig_id, subblock_id))
+                orcid_to_sig_ids[orcid].append(sig_id)
     # 2: for each orcid, if there is more than one unique subblock_id, then we need to move signature_ids around
-    for _orcid, sig_id_subblock_id in orcid_to_sig_id_subblock_id.items():
-        unique_subblock_ids = sorted({item[1] for item in sig_id_subblock_id})
+    for orcid, orcid_sig_ids in orcid_to_sig_ids.items():
+        current_subblock_counts = Counter(sig_id_to_subblock_id[sig_id] for sig_id in orcid_sig_ids)
+        unique_subblock_ids = sorted(current_subblock_counts)
         if len(unique_subblock_ids) > 1:
-            # 3: pick a subblock that isn't already maximum size
-            # if they are all maximum size, then pick the first one
-            subblock_sizes = [len(output[k]) for k in unique_subblock_ids]
+            # 3: pick a subblock that can absorb the full ORCID group without exceeding maximum_size
             # try to move into subblocks that
             # (a) are not SPECTER subblocks
             # (b) have more than 1 letter
@@ -513,21 +571,40 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
                 unique_subblock_ids,
                 key=lambda x: (x.count("specter") * 10 + x.count("|"), x),
             )
-            if all(i == maximum_size for i in subblock_sizes):
-                subblock_id_to_move_to = unique_subblock_ids[0]
-            else:
-                subblock_id_to_move_to = [k for k in unique_subblock_ids if len(output[k]) < maximum_size][0]
+            total_orcid_sig_count = len(orcid_sig_ids)
+            feasible_subblock_ids = [
+                subblock_id
+                for subblock_id in unique_subblock_ids
+                if len(output[subblock_id]) + (
+                    total_orcid_sig_count - current_subblock_counts[subblock_id]
+                )
+                <= maximum_size
+            ]
+            if not feasible_subblock_ids:
+                telemetry["orcid_merge_skipped_due_to_capacity_count"] += 1
+                telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] += int(total_orcid_sig_count)
+                logger.warning(
+                    "Skipping ORCID merge for %s across %d subblocks; no target fits within maximum_size=%d",
+                    orcid,
+                    len(unique_subblock_ids),
+                    maximum_size,
+                )
+                continue
+            subblock_id_to_move_to = feasible_subblock_ids[0]
             # 4: move the signature_ids around so that they are all in the same subblock
             # we take ONLY the signature ids that are not in the chosen subblock_id
             # and move them there, then batch-remove via set membership to avoid repeated list.remove().
             sig_ids_to_move = []
             moved_sig_ids_by_source = defaultdict(set)
-            for sig_id, original_subblock_id in sig_id_subblock_id:
+            for sig_id in orcid_sig_ids:
+                original_subblock_id = sig_id_to_subblock_id[sig_id]
                 if original_subblock_id != subblock_id_to_move_to:
                     sig_ids_to_move.append(sig_id)
                     moved_sig_ids_by_source[original_subblock_id].add(sig_id)
 
             output[subblock_id_to_move_to].extend(sig_ids_to_move)
+            for sig_id in sig_ids_to_move:
+                sig_id_to_subblock_id[sig_id] = subblock_id_to_move_to
             for original_subblock_id, moved_sig_ids in moved_sig_ids_by_source.items():
                 if original_subblock_id not in output:
                     continue
@@ -549,5 +626,33 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     logger.info(
         f"Done subblocking. There are {len(output)} subblocks with an average of "
         f"{average_subblock_length} signatures each."
+    )
+    final_specter_subblock_count, final_specter_signature_count = _specter_labeled_subblock_stats(output)
+    telemetry["final_subblock_count"] = int(len(output))
+    telemetry["final_specter_labeled_subblock_count"] = int(final_specter_subblock_count)
+    telemetry["final_specter_labeled_signature_count"] = int(final_specter_signature_count)
+    return output, telemetry
+
+
+def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS):
+    """Split signature IDs into subblocks based on name attributes.
+
+    This is the existing production-facing wrapper around
+    `make_subblocks_with_telemetry(...)` and preserves the original return type.
+
+    Args:
+        signature_ids (list[str/int]): List of signature IDs.
+        anddata (s2and.data.ANDData): Contains name attribute data for the signatures.
+        maximum_size (int): Maximum size of any subblock. Default is 7500.
+        first_k_letter_counts_sorted (dict): Prefix-count priors used when merging small subblocks.
+
+    Returns:
+        dict: Dictionary of subblock keys mapped to lists of signature IDs.
+    """
+    output, _ = make_subblocks_with_telemetry(
+        signature_ids,
+        anddata,
+        maximum_size=maximum_size,
+        first_k_letter_counts_sorted=first_k_letter_counts_sorted,
     )
     return output

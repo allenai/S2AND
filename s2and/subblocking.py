@@ -227,7 +227,7 @@ def _specter_labeled_subblock_stats(subblocks: dict[str, list[str]]) -> tuple[in
 def make_subblocks_with_telemetry(
     signature_ids,
     anddata,
-    maximum_size=7500,
+    maximum_size=15000,
     first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS,
 ):
     """Split signature IDs into subblocks and report how the partition was built.
@@ -243,7 +243,7 @@ def make_subblocks_with_telemetry(
     Args:
         signature_ids (list[str/int]): List of signature IDs.
         anddata (s2and.data.ANDData): Contains name attribute data for the signatures.
-        maximum_size (int): Maximum size of any subblock. Default is 7500.
+        maximum_size (int): Maximum size of any subblock. Default is 15000.
         first_k_letter_counts_sorted (dict): Dictionary of name letter counts, used for merging subblocks.
             Already included in the package. Default is FIRST_K_LETTER_COUNTS, which is imported
             in this file.
@@ -575,9 +575,7 @@ def make_subblocks_with_telemetry(
             feasible_subblock_ids = [
                 subblock_id
                 for subblock_id in unique_subblock_ids
-                if len(output[subblock_id]) + (
-                    total_orcid_sig_count - current_subblock_counts[subblock_id]
-                )
+                if len(output[subblock_id]) + (total_orcid_sig_count - current_subblock_counts[subblock_id])
                 <= maximum_size
             ]
             if not feasible_subblock_ids:
@@ -634,7 +632,7 @@ def make_subblocks_with_telemetry(
     return output, telemetry
 
 
-def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS):
+def make_subblocks(signature_ids, anddata, maximum_size=15000, first_k_letter_counts_sorted=FIRST_K_LETTER_COUNTS):
     """Split signature IDs into subblocks based on name attributes.
 
     This is the existing production-facing wrapper around
@@ -643,7 +641,7 @@ def make_subblocks(signature_ids, anddata, maximum_size=7500, first_k_letter_cou
     Args:
         signature_ids (list[str/int]): List of signature IDs.
         anddata (s2and.data.ANDData): Contains name attribute data for the signatures.
-        maximum_size (int): Maximum size of any subblock. Default is 7500.
+        maximum_size (int): Maximum size of any subblock. Default is 15000.
         first_k_letter_counts_sorted (dict): Prefix-count priors used when merging small subblocks.
 
     Returns:

@@ -39,6 +39,7 @@
 | `make_inventors_s2and_subset.py` | Create inventors S2AND subset (defaults output to `scratch/inventors_s2and`) |
 | `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults output to `scratch/inventors`) |
 | `make_inventors_hf_specter_embeddings.py` | Generate SPECTER embeddings for inventors dataset (defaults to `scratch/inventors_s2and`) |
+| `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 | `get_name_counts.py` | Documentation for how name counts metadata was collected (internal data) |
 | `get_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |

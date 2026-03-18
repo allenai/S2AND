@@ -10,10 +10,10 @@ import random
 import statistics
 import time
 from collections import Counter, defaultdict
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -37,10 +37,11 @@ QUERY_VIEW_INFORMATION_PRIORITY = {
     "initial_only": 3,
     "full": 4,
 }
-_ORIGINAL_COMPUTE_BLOCK = s2and_data_module.compute_block
+EMPTY_STRING_SET: frozenset[str] = frozenset()
+_ORIGINAL_COMPUTE_BLOCK: Callable[[str], str] = s2and_data_module.compute_block
 
 
-def _safe_compute_block(name: str | None) -> str:
+def _safe_compute_block(name: str) -> str:
     normalized_name = normalize_text(name or "")
     if not normalized_name:
         return ""
@@ -50,8 +51,8 @@ def _safe_compute_block(name: str | None) -> str:
 def _install_safe_compute_block_patch() -> None:
     # Some real datasets contain blank coauthor names. For this retrieval experiment,
     # treat them as missing instead of failing ingest or query feature extraction.
-    s2and_data_module.compute_block = _safe_compute_block
-    s2and_subblocking_module.compute_block = _safe_compute_block
+    cast(Any, s2and_data_module).compute_block = _safe_compute_block
+    cast(Any, s2and_subblocking_module).compute_block = _safe_compute_block
 
 
 @dataclass(frozen=True)
@@ -302,28 +303,24 @@ def _mask_query_features(base: QueryFeatures, view: str) -> QueryFeatures:
     if view == "initial_only":
         return masked
     if view == "initial_only_no_specter":
-        return QueryFeatures(**{**asdict(masked), "specter": None, "has_specter": False})
+        return replace(masked, specter=None, has_specter=False)
     if view == "initial_only_sparse_metadata":
-        return QueryFeatures(
-            **{
-                **asdict(masked),
-                "coauthor_blocks": frozenset(),
-                "affiliation_terms": frozenset(),
-                "has_coauthors": False,
-                "has_affiliations": False,
-            }
+        return replace(
+            masked,
+            coauthor_blocks=EMPTY_STRING_SET,
+            affiliation_terms=EMPTY_STRING_SET,
+            has_coauthors=False,
+            has_affiliations=False,
         )
     if view == "initial_only_nearly_empty":
-        return QueryFeatures(
-            **{
-                **asdict(masked),
-                "coauthor_blocks": frozenset(),
-                "affiliation_terms": frozenset(),
-                "specter": None,
-                "has_specter": False,
-                "has_coauthors": False,
-                "has_affiliations": False,
-            }
+        return replace(
+            masked,
+            coauthor_blocks=EMPTY_STRING_SET,
+            affiliation_terms=EMPTY_STRING_SET,
+            specter=None,
+            has_specter=False,
+            has_coauthors=False,
+            has_affiliations=False,
         )
     raise ValueError(f"Unknown query view: {view}")
 

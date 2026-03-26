@@ -368,6 +368,106 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
     assert captured["batching_threshold"] == 1
 
 
+@pytest.mark.parametrize(
+    ("restore_rust_cluster_seeds_on_exit", "expected_sync_calls", "expected_evict_calls"),
+    [
+        (True, 3, 0),
+        (False, 2, 1),
+    ],
+)
+def test_clusterer_predict_optionally_skips_final_rust_seed_restore(
+    monkeypatch,
+    restore_rust_cluster_seeds_on_exit,
+    expected_sync_calls,
+    expected_evict_calls,
+):
+    class Signature:
+        def __init__(self, first_name):
+            self.author_info_first_normalized_without_apostrophe = first_name
+
+    original_cluster_seeds = {"orig_seed": "orig_cluster"}
+    dataset = SimpleNamespace(
+        signatures={
+            "m1": Signature("alex"),
+            "m2": Signature("alex"),
+            "s1": Signature("a"),
+            "s2": Signature("a"),
+        },
+        cluster_seeds_require=dict(original_cluster_seeds),
+        cluster_seeds_disallow=set(),
+    )
+
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    clusterer = Clusterer(featurizer_info=featurizer_info, classifier=None, n_jobs=1, use_cache=False)
+
+    sync_snapshots: list[dict[str, str]] = []
+    evict_snapshots: list[dict[str, str]] = []
+
+    monkeypatch.setattr(
+        model_module,
+        "_sync_rust_cluster_seeds",
+        lambda dataset_arg, runtime_context=None, use_cache=False: sync_snapshots.append(
+            dict(dataset_arg.cluster_seeds_require)
+        ),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "evict_rust_featurizer",
+        lambda dataset_arg: evict_snapshots.append(dict(dataset_arg.cluster_seeds_require)) or True,
+    )
+    monkeypatch.setattr(
+        model_module,
+        "make_subblocks",
+        lambda block_signatures, _dataset, maximum_size: {
+            "multi_1": ["m1", "m2"],
+            "single_1": ["s1", "s2"],
+        },
+    )
+
+    def fake_predict_helper(self, block_dict, _dataset, *args, **kwargs):
+        del self, _dataset, args, kwargs
+        block_key = next(iter(block_dict))
+        return {"cluster_multi": list(block_dict[block_key])}, None
+
+    def fake_predict_incremental(self, block_signatures, dataset_arg, *args, **kwargs):
+        del self, args, kwargs
+        return {
+            "clusters": {"merged": list(dataset_arg.cluster_seeds_require.keys()) + list(block_signatures)},
+            "phase_b_mode": "exact",
+            "phase_b_budget_bytes": 0,
+            "phase_b_required_bytes": 0,
+        }
+
+    monkeypatch.setattr(Clusterer, "predict_helper", fake_predict_helper)
+    monkeypatch.setattr(Clusterer, "predict_incremental", fake_predict_incremental)
+
+    pred_clusters, _ = clusterer.predict(
+        {"block": ["m1", "m2", "s1", "s2"]},
+        dataset,
+        batching_threshold=2,
+        restore_rust_cluster_seeds_on_exit=restore_rust_cluster_seeds_on_exit,
+    )
+
+    assert pred_clusters == {"merged": ["m1", "m2", "s1", "s2"]}
+    assert sync_snapshots[:2] == [
+        {"m1": "cluster_multi", "m2": "cluster_multi"},
+        {"m1": "merged", "m2": "merged", "s1": "merged", "s2": "merged"},
+    ]
+    assert len(sync_snapshots) == expected_sync_calls
+    assert len(evict_snapshots) == expected_evict_calls
+    assert dict(dataset.cluster_seeds_require) == original_cluster_seeds
+
+    if restore_rust_cluster_seeds_on_exit:
+        assert sync_snapshots[-1] == original_cluster_seeds
+        assert evict_snapshots == []
+    else:
+        assert evict_snapshots == [original_cluster_seeds]
+
+    version_before_mutation = int(dataset._cluster_seeds_version)
+    dataset.cluster_seeds_require["new_seed"] = "new_cluster"
+    assert int(dataset._cluster_seeds_version) == version_before_mutation + 1
+
+
 def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
     dataset = SimpleNamespace()
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])

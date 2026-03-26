@@ -128,3 +128,45 @@ class TestClusterer(unittest.TestCase):
         }
         with pytest.raises(KeyError, match="Missing precomputed distance matrix for block"):
             self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists={})
+
+
+def test_predict_helper_logs_cluster_model_fit_boundary(caplog):
+    dataset = ANDData(
+        "tests/dummy/signatures.json",
+        "tests/dummy/papers.json",
+        clusters="tests/dummy/clusters.json",
+        cluster_seeds="tests/dummy/cluster_seeds.json",
+        name="dummy",
+        load_name_counts=True,
+    )
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    np.random.seed(1)
+    x_random = np.random.random((10, 6))
+    y_random = np.random.randint(0, 6, 10)
+    clusterer = Clusterer(
+        featurizer_info=featurizer_info,
+        classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
+            x_random,
+            y_random,
+        ),
+        n_jobs=1,
+        use_cache=False,
+        use_default_constraints_as_supervision=False,
+    )
+    block = {"a sattar": ["0", "1", "2"]}
+    cluster_model_name = type(clusterer.cluster_model).__name__
+
+    with caplog.at_level("INFO", logger="s2and"):
+        pred_clusters, returned_dists = clusterer.predict_helper(block, dataset, dists=None)
+
+    assert returned_dists is None
+    assert pred_clusters
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        f"Starting cluster_model.fit for block a sattar using {cluster_model_name} (signatures=3)" in messages
+    )
+    assert any(
+        message.startswith(f"Finished cluster_model.fit for block a sattar using {cluster_model_name} in ")
+        and " (clusters=" in message
+        for message in messages
+    )

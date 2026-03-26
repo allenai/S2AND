@@ -45,6 +45,9 @@ from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 logger = logging.getLogger("s2and")
 IncrementalChunkLimits = Mapping[str, Any]
 IncrementalPhaseBMode = Literal["exact", "subblock_local"]
+IncrementalBroadcastMode = Literal["always", "never", "top1_consensus"]
+IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
+IncrementalDistStats = tuple[float, int, float]
 _TReturn = TypeVar("_TReturn")
 _MISSING = object()
 
@@ -1230,6 +1233,132 @@ class _IncrementalConstraintBackend:
     signature_index_by_id: dict[str, int] | None
 
 
+@dataclass(frozen=True)
+class _PhaseASubblockWorkItem:
+    """One non-empty Phase A subblock before optional batching."""
+
+    subblock_key: str
+    unassigned_signature_ids: tuple[str, ...]
+    estimated_pairs: int
+
+
+@dataclass(frozen=True)
+class _PhaseASubblockBatch:
+    """One Phase A work unit after optional batching."""
+
+    subblock_keys: tuple[str, ...]
+    unassigned_signature_ids: tuple[str, ...]
+    estimated_pairs: int
+
+
+@dataclass(frozen=True)
+class _IncrementalExperimentConfig:
+    """Experiment-only controls for incremental single-letter assignment."""
+
+    precluster_broadcast_mode: IncrementalBroadcastMode
+    seed_score_mode: IncrementalSeedScoreMode
+    mean_min_hybrid_weight: float
+    phase_a_pair_batch_target_multiple: float
+
+
+def _build_phase_a_subblock_work_items(
+    subblocks: Mapping[str, list[str]],
+    cluster_seeds_require: Mapping[str, int | str],
+    *,
+    seed_signature_count: int,
+) -> list[_PhaseASubblockWorkItem]:
+    """Build ordered non-empty Phase A work items with estimated pair counts."""
+
+    if seed_signature_count < 0:
+        raise ValueError(f"seed_signature_count must be >= 0; got {seed_signature_count}")
+
+    work_items: list[_PhaseASubblockWorkItem] = []
+    for subblock_key, subblock_signatures in subblocks.items():
+        subblock_unassigned = tuple(
+            str(signature_id) for signature_id in subblock_signatures if signature_id not in cluster_seeds_require
+        )
+        if len(subblock_unassigned) == 0:
+            continue
+        work_items.append(
+            _PhaseASubblockWorkItem(
+                subblock_key=str(subblock_key),
+                unassigned_signature_ids=subblock_unassigned,
+                estimated_pairs=int(len(subblock_unassigned) * seed_signature_count),
+            )
+        )
+    return work_items
+
+
+def _batch_phase_a_subblocks(
+    work_items: list[_PhaseASubblockWorkItem],
+    *,
+    batch_target_pairs: int | None,
+) -> list[_PhaseASubblockBatch]:
+    """Greedily merge adjacent small Phase A subblocks up to a target pair budget."""
+
+    if batch_target_pairs is not None and batch_target_pairs <= 0:
+        raise ValueError(f"batch_target_pairs must be positive when set; got {batch_target_pairs}")
+
+    batches: list[_PhaseASubblockBatch] = []
+    pending_keys: list[str] = []
+    pending_unassigned: list[str] = []
+    pending_pairs = 0
+
+    def _flush_pending() -> None:
+        nonlocal pending_pairs
+        if len(pending_keys) == 0:
+            return
+        batches.append(
+            _PhaseASubblockBatch(
+                subblock_keys=tuple(pending_keys),
+                unassigned_signature_ids=tuple(pending_unassigned),
+                estimated_pairs=int(pending_pairs),
+            )
+        )
+        pending_keys.clear()
+        pending_unassigned.clear()
+        pending_pairs = 0
+
+    for work_item in work_items:
+        if batch_target_pairs is None or work_item.estimated_pairs >= batch_target_pairs:
+            _flush_pending()
+            batches.append(
+                _PhaseASubblockBatch(
+                    subblock_keys=(work_item.subblock_key,),
+                    unassigned_signature_ids=work_item.unassigned_signature_ids,
+                    estimated_pairs=int(work_item.estimated_pairs),
+                )
+            )
+            continue
+
+        pending_keys.append(work_item.subblock_key)
+        pending_unassigned.extend(work_item.unassigned_signature_ids)
+        pending_pairs += int(work_item.estimated_pairs)
+        if pending_pairs >= batch_target_pairs:
+            _flush_pending()
+
+    _flush_pending()
+    return batches
+
+
+def _incremental_cluster_score(
+    stats: IncrementalDistStats,
+    *,
+    config: _IncrementalExperimentConfig,
+) -> float:
+    """Return the assignment score for one query/seed cluster pair."""
+
+    mean_dist, _count, min_dist = stats
+    if config.seed_score_mode == "mean":
+        return float(mean_dist)
+    if config.seed_score_mode == "min":
+        return float(min_dist)
+    return float(
+        (1.0 - float(config.mean_min_hybrid_weight)) * float(mean_dist)
+        + float(config.mean_min_hybrid_weight) * float(min_dist)
+    )
+
+
 class Clusterer:
     """
     A wrapper for learning a clusterer
@@ -1320,6 +1449,10 @@ class Clusterer:
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
         self.batch_size = batch_size
+        self.incremental_precluster_broadcast_mode: IncrementalBroadcastMode = "always"
+        self.incremental_seed_score_mode: IncrementalSeedScoreMode = "mean"
+        self.incremental_mean_min_hybrid_weight: float = 0.5
+        self.incremental_phase_a_pair_batch_target_multiple: float = 0.0
 
     @property
     def n_jobs(self) -> int:
@@ -1360,6 +1493,64 @@ class Clusterer:
                 if num_to_keep is not None and count == num_to_keep:
                     return out_dict
         return out_dict
+
+    def _incremental_experiment_config(self) -> _IncrementalExperimentConfig:
+        """Return validated experiment controls for incremental assignment."""
+
+        raw_broadcast_mode = str(getattr(self, "incremental_precluster_broadcast_mode", "always"))
+        raw_seed_score_mode = str(getattr(self, "incremental_seed_score_mode", "mean"))
+        raw_hybrid_weight = float(getattr(self, "incremental_mean_min_hybrid_weight", 0.5))
+        raw_phase_a_batch_multiple = float(getattr(self, "incremental_phase_a_pair_batch_target_multiple", 0.0))
+
+        valid_broadcast_modes: set[str] = {"always", "never", "top1_consensus"}
+        if raw_broadcast_mode not in valid_broadcast_modes:
+            raise ValueError(
+                "Unsupported incremental_precluster_broadcast_mode="
+                f"{raw_broadcast_mode!r}; expected one of {sorted(valid_broadcast_modes)}"
+            )
+        valid_seed_score_modes: set[str] = {"mean", "min", "mean_min_hybrid"}
+        if raw_seed_score_mode not in valid_seed_score_modes:
+            raise ValueError(
+                "Unsupported incremental_seed_score_mode="
+                f"{raw_seed_score_mode!r}; expected one of {sorted(valid_seed_score_modes)}"
+            )
+        if not 0.0 <= raw_hybrid_weight <= 1.0:
+            raise ValueError(
+                "incremental_mean_min_hybrid_weight must be in [0, 1]; "
+                f"got {raw_hybrid_weight!r}"
+            )
+        if not math.isfinite(raw_phase_a_batch_multiple) or raw_phase_a_batch_multiple < 0.0:
+            raise ValueError(
+                "incremental_phase_a_pair_batch_target_multiple must be finite and >= 0; "
+                f"got {raw_phase_a_batch_multiple!r}"
+            )
+        return _IncrementalExperimentConfig(
+            precluster_broadcast_mode=raw_broadcast_mode,  # type: ignore[arg-type]
+            seed_score_mode=raw_seed_score_mode,  # type: ignore[arg-type]
+            mean_min_hybrid_weight=float(raw_hybrid_weight),
+            phase_a_pair_batch_target_multiple=float(raw_phase_a_batch_multiple),
+        )
+
+    def _best_incremental_cluster(
+        self,
+        cluster_dists: Mapping[int | str, IncrementalDistStats],
+        *,
+        config: _IncrementalExperimentConfig,
+    ) -> tuple[int | str | None, float, float]:
+        """Return the best and second-best seed-cluster scores for one query."""
+
+        best_cluster_id: int | str | None = None
+        best_score = float("inf")
+        second_best_score = float("inf")
+        for cluster_id, stats in cluster_dists.items():
+            score = _incremental_cluster_score(stats, config=config)
+            if score < best_score:
+                second_best_score = best_score
+                best_score = score
+                best_cluster_id = cluster_id
+            elif score < second_best_score:
+                second_best_score = score
+        return best_cluster_id, float(best_score), float(second_best_score)
 
     def _resolve_constraint_batch(
         self,
@@ -2603,7 +2794,9 @@ class Clusterer:
         if dist_matrix is None:
             raise ValueError("Distance matrix is required for blocks with more than one signature.")
 
-        cluster_model = self.set_params(cluster_model_params, clone_flag=True)
+        cluster_model = clone(self.cluster_model)
+        params = {k: intify(v) for k, v in (cluster_model_params or {}).items()}
+        cluster_model.set_params(**params)
         with warnings.catch_warnings():
             # annoying sparse matrix not sorted warning
             warnings.simplefilter("ignore", category=EfficiencyWarning)
@@ -3052,11 +3245,12 @@ class Clusterer:
             cluster_id = cluster_seeds_require[assigned_signature]
             cluster_sum_count = signature_to_cluster_sum_count.setdefault(unassigned_signature, {})
             if cluster_id not in cluster_sum_count:
-                cluster_sum_count[cluster_id] = [0.0, 0]
+                cluster_sum_count[cluster_id] = [0.0, 0, float("inf")]
                 chunk_state.accumulator_entries += 1
             total_count = cluster_sum_count[cluster_id]
             total_count[0] = float(total_count[0]) + float(dist)
             total_count[1] = int(total_count[1]) + 1
+            total_count[2] = min(float(total_count[2]), float(dist))
 
         chunk_state.constraint_pairs_total += len(chunk_pairs_buffer)
         chunk_state.constraint_chunks_total += 1
@@ -3329,22 +3523,26 @@ class Clusterer:
     def _convert_sum_count_to_average_distances(
         self,
         signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]],
-    ) -> dict[str, dict[int | str, tuple[float, int]]]:
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]] = defaultdict(dict)
+    ) -> dict[str, dict[int | str, IncrementalDistStats]]:
+        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(dict)
         for signature_id, cluster_sum_count in signature_to_cluster_sum_count.items():
             for cluster_id, sum_count in cluster_sum_count.items():
                 total = float(sum_count[0])
                 count = int(sum_count[1])
                 if count <= 0:
                     continue
-                signature_to_cluster_to_average_dist[signature_id][cluster_id] = (total / float(count), count)
+                signature_to_cluster_to_average_dist[signature_id][cluster_id] = (
+                    total / float(count),
+                    count,
+                    float(sum_count[2]),
+                )
         return signature_to_cluster_to_average_dist
 
     def _run_incremental_phases_bcd(
         self,
         unassigned_signature_ids: list[str],
         dataset: ANDData,
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]],
+        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]],
         cluster_seeds_require: dict[str, int | str],
         recluster_map: dict[int | str, int | str],
         cluster_seeds_require_inverse: dict[int | str, list[str]],
@@ -3352,6 +3550,7 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
     ) -> dict[str, list[str]]:
+        config = self._incremental_experiment_config()
         # NEW!
         # First cluster the unassigned signatures, then decide which resulting unassigned
         # clusters should merge with existing seeded clusters.
@@ -3369,25 +3568,52 @@ class Clusterer:
             len(unassigned_signature_ids),
         )
 
-        # Average over Phase A signature-to-seed distances at the pre-cluster level.
-        # This is equivalent to computing average distance between each unassigned cluster
-        # and each assigned cluster, then broadcasting that score back to member signatures.
-        cluster_ids = sorted(set(cluster_seeds_require.values()), key=lambda cluster_id: str(cluster_id))
-        for incremental_cluster_signature_ids in incremental_only_clusters.values():
-            for cluster_id in cluster_ids:
-                dists = []
-                for signature in incremental_cluster_signature_ids:
-                    cluster_entry = signature_to_cluster_to_average_dist.get(signature, {}).get(cluster_id)
-                    if cluster_entry is None:
+        if config.precluster_broadcast_mode != "never":
+            # Average over Phase A signature-to-seed distances at the pre-cluster level.
+            # This is equivalent to computing average distance between each unassigned cluster
+            # and each assigned cluster, then broadcasting that score back to member signatures.
+            cluster_ids = sorted(set(cluster_seeds_require.values()), key=lambda cluster_id: str(cluster_id))
+            for incremental_cluster_signature_ids in incremental_only_clusters.values():
+                if config.precluster_broadcast_mode == "top1_consensus":
+                    top1_cluster_id: int | str | None = None
+                    should_broadcast = True
+                    for signature in incremental_cluster_signature_ids:
+                        best_cluster_id, best_score, _second_best_score = self._best_incremental_cluster(
+                            signature_to_cluster_to_average_dist.get(signature, {}),
+                            config=config,
+                        )
+                        if best_cluster_id is None or not math.isfinite(best_score):
+                            should_broadcast = False
+                            break
+                        if top1_cluster_id is None:
+                            top1_cluster_id = best_cluster_id
+                        elif top1_cluster_id != best_cluster_id:
+                            should_broadcast = False
+                            break
+                    if not should_broadcast:
                         continue
-                    if int(cluster_entry[1]) <= 0:
+                for cluster_id in cluster_ids:
+                    mean_dists = []
+                    min_dists = []
+                    support_count = 0
+                    for signature in incremental_cluster_signature_ids:
+                        cluster_entry = signature_to_cluster_to_average_dist.get(signature, {}).get(cluster_id)
+                        if cluster_entry is None:
+                            continue
+                        if int(cluster_entry[1]) <= 0:
+                            continue
+                        mean_dists.append(float(cluster_entry[0]))
+                        min_dists.append(float(cluster_entry[2]))
+                        support_count += int(cluster_entry[1])
+                    if len(mean_dists) == 0:
                         continue
-                    dists.append(float(cluster_entry[0]))
-                if len(dists) == 0:
-                    continue
-                out = (float(np.mean(dists)), len(dists))
-                for signature in incremental_cluster_signature_ids:
-                    signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out
+                    out = (
+                        float(np.mean(mean_dists)),
+                        int(support_count),
+                        float(np.mean(min_dists)),
+                    )
+                    for signature in incremental_cluster_signature_ids:
+                        signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out
 
         logger.info("Assigning unassigned signatures for incremental clustering")
         pred_clusters = defaultdict(list)
@@ -3396,13 +3622,11 @@ class Clusterer:
             pred_clusters[f"{cluster_id}"].append(signature_id)
         for unassigned_signature in unassigned_signature_ids:
             cluster_dists = signature_to_cluster_to_average_dist.get(unassigned_signature, {})
-            best_cluster_id = None
-            best_dist = float("inf")
-            for cluster_id, (average_dist, _) in cluster_dists.items():
-                if average_dist < best_dist and average_dist < self.cluster_model.eps:
-                    best_cluster_id = cluster_id
-                    best_dist = average_dist
-            if best_cluster_id is not None:
+            best_cluster_id, best_dist, _second_best_dist = self._best_incremental_cluster(
+                cluster_dists,
+                config=config,
+            )
+            if best_cluster_id is not None and best_dist < self.cluster_model.eps:
                 # undo the altered-cluster split if applicable
                 new_name_disallowed = False
                 if best_cluster_id in recluster_map:
@@ -3472,7 +3696,7 @@ class Clusterer:
         block_signatures: list[str],
         subblocks: dict[str, list[str]],
         dataset: ANDData,
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]],
+        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]],
         cluster_seeds_require: dict[str, int | str],
         recluster_map: dict[int | str, int | str],
         cluster_seeds_require_inverse: dict[int | str, list[str]],
@@ -3565,6 +3789,7 @@ class Clusterer:
         all_unassigned = [
             signature_id for signature_id in block_signatures if signature_id not in dataset.cluster_seeds_require
         ]
+        config = self._incremental_experiment_config()
 
         cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = self._build_incremental_seed_setup(
             dataset,
@@ -3601,6 +3826,25 @@ class Clusterer:
 
         signature_to_cluster_sum_count: dict[str, dict[int | str, list[float | int]]] = defaultdict(dict)
         phase_a = _PhaseASummaryAccumulator()
+        phase_a_seed_count = len(cluster_seeds_require)
+        phase_a_work_items = _build_phase_a_subblock_work_items(
+            subblocks,
+            cluster_seeds_require,
+            seed_signature_count=phase_a_seed_count,
+        )
+        phase_a_nonempty_subblocks = len(phase_a_work_items)
+        phase_a_batch_target_pairs: int | None = None
+        if phase_a_seed_count > 0 and config.phase_a_pair_batch_target_multiple > 0.0:
+            phase_a_batch_target_pairs = max(
+                1,
+                int(math.ceil(float(chunk_pairs) * float(config.phase_a_pair_batch_target_multiple))),
+            )
+        phase_a_batches = _batch_phase_a_subblocks(
+            phase_a_work_items,
+            batch_target_pairs=phase_a_batch_target_pairs,
+        )
+        phase_a_call_unassigned_counts: list[int] = []
+        phase_a_call_estimated_pairs: list[int] = []
 
         constraint_backend = _build_incremental_constraint_backend(
             dataset,
@@ -3609,14 +3853,14 @@ class Clusterer:
             use_cache=self.use_cache,
         )
 
-        for subblock_signatures in subblocks.values():
-            subblock_unassigned = [
-                signature_id for signature_id in subblock_signatures if signature_id not in cluster_seeds_require
-            ]
-            if len(subblock_unassigned) == 0:
-                continue
+        for phase_a_batch_index, phase_a_batch in enumerate(phase_a_batches, start=1):
+            batch_unassigned_signature_ids = list(phase_a_batch.unassigned_signature_ids)
+            batch_unassigned_count = len(batch_unassigned_signature_ids)
+            batch_estimated_pairs = int(phase_a_batch.estimated_pairs)
+            phase_a_call_unassigned_counts.append(batch_unassigned_count)
+            phase_a_call_estimated_pairs.append(batch_estimated_pairs)
             phase_a_telemetry = self._phase_a_seed_distances(
-                subblock_unassigned,
+                batch_unassigned_signature_ids,
                 cluster_seeds_require,
                 dataset,
                 partial_supervision,
@@ -3628,6 +3872,22 @@ class Clusterer:
                 constraint_backend=constraint_backend,
             )
             phase_a.observe(phase_a_telemetry)
+            logger.info(
+                "Telemetry: phase_split_phase_a_subblock index=%d key=%s "
+                "subblock_count=%d unassigned=%d estimated_pairs=%d constraint_pairs_total=%d "
+                "constraint_chunks_total=%d model_predict_seconds=%.3f "
+                "overflow_early_stop=%s run_id=%s",
+                phase_a_batch_index,
+                ", ".join(phase_a_batch.subblock_keys),
+                len(phase_a_batch.subblock_keys),
+                batch_unassigned_count,
+                batch_estimated_pairs,
+                int(phase_a_telemetry.constraints.pairs_total),
+                int(phase_a_telemetry.constraints.chunks_total),
+                float(phase_a_telemetry.model_predict_seconds),
+                bool(phase_a_telemetry.accumulator.overflow_early_stop),
+                runtime_context.run_id,
+            )
 
             # Runtime accumulator calibration: after the first subblock with meaningful data,
             # derive the effective bytes/entry from the observed telemetry and recalibrate
@@ -3667,6 +3927,62 @@ class Clusterer:
                         )
                 phase_a.accumulator_runtime_calibrated = True
 
+        original_unassigned_counts = [len(work_item.unassigned_signature_ids) for work_item in phase_a_work_items]
+        original_estimated_pairs = [int(work_item.estimated_pairs) for work_item in phase_a_work_items]
+        if len(original_unassigned_counts) > 0:
+            min_unassigned = int(min(original_unassigned_counts))
+            median_unassigned = int(np.median(original_unassigned_counts))
+            p90_unassigned = int(np.percentile(original_unassigned_counts, 90))
+            max_unassigned = int(max(original_unassigned_counts))
+            min_estimated_pairs = int(min(original_estimated_pairs))
+            median_estimated_pairs = int(np.median(original_estimated_pairs))
+            p90_estimated_pairs = int(np.percentile(original_estimated_pairs, 90))
+            max_estimated_pairs = int(max(original_estimated_pairs))
+        else:
+            min_unassigned = 0
+            median_unassigned = 0
+            p90_unassigned = 0
+            max_unassigned = 0
+            min_estimated_pairs = 0
+            median_estimated_pairs = 0
+            p90_estimated_pairs = 0
+            max_estimated_pairs = 0
+        batched_phase_a_calls = sum(1 for phase_a_batch in phase_a_batches if len(phase_a_batch.subblock_keys) > 1)
+        batched_subblocks = sum(
+            len(phase_a_batch.subblock_keys)
+            for phase_a_batch in phase_a_batches
+            if len(phase_a_batch.subblock_keys) > 1
+        )
+        logger.info(
+            "Telemetry: phase_split_phase_a_subblocks total_subblocks=%d "
+            "nonempty_subblocks=%d seed_signatures=%d total_unassigned=%d "
+            "total_estimated_pairs=%d chunk_pairs=%d subblocks_below_chunk_pairs=%d "
+            "phase_a_calls=%d batched_phase_a_calls=%d batched_subblocks=%d "
+            "phase_a_batch_target_pairs=%d "
+            "min_unassigned=%d median_unassigned=%d p90_unassigned=%d "
+            "max_unassigned=%d min_estimated_pairs=%d median_estimated_pairs=%d "
+            "p90_estimated_pairs=%d max_estimated_pairs=%d run_id=%s",
+            len(subblocks),
+            phase_a_nonempty_subblocks,
+            phase_a_seed_count,
+            int(sum(original_unassigned_counts)),
+            int(sum(original_estimated_pairs)),
+            chunk_pairs,
+            sum(1 for estimated_pairs in original_estimated_pairs if estimated_pairs <= chunk_pairs),
+            len(phase_a_batches),
+            batched_phase_a_calls,
+            batched_subblocks,
+            int(phase_a_batch_target_pairs or 0),
+            min_unassigned,
+            median_unassigned,
+            p90_unassigned,
+            max_unassigned,
+            min_estimated_pairs,
+            median_estimated_pairs,
+            p90_estimated_pairs,
+            max_estimated_pairs,
+            runtime_context.run_id,
+        )
         phase_a.finalize_from_worst_sample()
 
         logger.info(
@@ -3920,18 +4236,21 @@ class Clusterer:
             runtime_context=runtime_context,
             use_cache=self.use_cache,
         )
-        signature_to_cluster_to_average_dist: dict[str, dict[int | str, tuple[float, int]]] = defaultdict(
-            lambda: defaultdict(lambda: (0.0, 0))
+        signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(
+            lambda: defaultdict(lambda: (0.0, 0, float("inf")))
         )
         assigned_signature_ids: list[str] = list(cluster_seeds_require.keys())
         pair_chunk_size = max(1, int(self.batch_size))
         constraint_telemetry = _ConstraintTelemetryAccumulator()
 
         def _update_signature_cluster_average(unassigned_signature: str, cluster_id: int | str, dist: float) -> None:
-            previous_average, previous_count = signature_to_cluster_to_average_dist[unassigned_signature][cluster_id]
+            previous_average, previous_count, previous_min = signature_to_cluster_to_average_dist[unassigned_signature][
+                cluster_id
+            ]
             signature_to_cluster_to_average_dist[unassigned_signature][cluster_id] = (
                 (previous_average * previous_count + float(dist)) / (previous_count + 1),
                 previous_count + 1,
+                min(float(previous_min), float(dist)) if previous_count > 0 else float(dist),
             )
 
         for possibly_unassigned_signature in block_signatures:

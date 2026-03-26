@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 import math
 import sys
+from collections import Counter
 from importlib.machinery import PathFinder
 from typing import Any
 
+import scripts.eval_cluster_retrieval as retrieval
 from s2and.data import ANDData
 
 
@@ -73,4 +75,75 @@ def build_dummy_dataset(
         preprocess=True,
         n_jobs=n_jobs,
         compute_reference_features=compute_reference_features,
+    )
+
+
+def build_query_features(
+    *,
+    first: str = "a",
+    middle_initials: frozenset[str] = frozenset(),
+    year: int | None = None,
+    orcid: str | None = None,
+    specter: Any | None = None,
+    has_coauthors: bool = False,
+    has_affiliations: bool = False,
+    has_full_first: bool = False,
+    has_middle: bool = False,
+) -> retrieval.QueryFeatures:
+    """Build a compact `QueryFeatures` fixture for retrieval tests."""
+
+    return retrieval.QueryFeatures(
+        first=first,
+        middle="",
+        first_initial=first[:1] if first else "",
+        middle_initials=middle_initials,
+        coauthor_blocks=frozenset({"a smith"}) if has_coauthors else frozenset(),
+        affiliation_terms=frozenset({"lab"}) if has_affiliations else frozenset(),
+        venue_terms=frozenset(),
+        year=year,
+        orcid=orcid,
+        specter=specter,
+        has_specter=specter is not None,
+        has_coauthors=has_coauthors,
+        has_affiliations=has_affiliations,
+        has_full_first=has_full_first,
+        has_middle=has_middle,
+    )
+
+
+def build_cluster_summary(
+    *,
+    component_key: str,
+    size: int = 1,
+    first_name_counts: Counter[str] | None = None,
+    middle_initial_counts: Counter[str] | None = None,
+    coauthor_counts: Counter[str] | None = None,
+    affiliation_counts: Counter[str] | None = None,
+    venue_counts: Counter[str] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    year_mean: float | None = None,
+    orcid_values: frozenset[str] = frozenset(),
+    specter_centroid: Any | None = None,
+    exemplar_vectors: list[Any] | None = None,
+) -> retrieval.ClusterSummary:
+    """Build a compact `ClusterSummary` fixture for retrieval tests."""
+
+    return retrieval.ClusterSummary(
+        component_key=component_key,
+        cluster_id=component_key,
+        block_key="b",
+        size=size,
+        first_name_counts=first_name_counts or Counter(),
+        middle_initial_counts=middle_initial_counts or Counter(),
+        coauthor_counts=coauthor_counts or Counter(),
+        affiliation_counts=affiliation_counts or Counter(),
+        venue_counts=venue_counts or Counter(),
+        year_values=[],
+        year_min=year_min,
+        year_max=year_max,
+        year_mean=year_mean,
+        orcid_values=orcid_values,
+        specter_centroid=specter_centroid,
+        exemplar_vectors=[] if exemplar_vectors is None else exemplar_vectors,
     )

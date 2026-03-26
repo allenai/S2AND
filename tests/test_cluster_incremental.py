@@ -205,6 +205,50 @@ def _mock_incremental_limits(
     }
 
 
+def _build_minimal_incremental_clusterer() -> Clusterer:
+    return Clusterer(
+        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
+        classifier=object(),
+        n_jobs=1,
+        use_cache=False,
+    )
+
+
+def test_batch_phase_a_subblocks_merges_adjacent_small_work_items():
+    work_items = [
+        model_module._PhaseASubblockWorkItem("alpha", ("u0",), 4),
+        model_module._PhaseASubblockWorkItem("beta", ("u1",), 4),
+        model_module._PhaseASubblockWorkItem("gamma", ("u2",), 4),
+        model_module._PhaseASubblockWorkItem("delta", ("u3", "u4"), 8),
+        model_module._PhaseASubblockWorkItem("omega", ("u5", "u6", "u7"), 12),
+    ]
+
+    unbatched = model_module._batch_phase_a_subblocks(work_items, batch_target_pairs=None)
+    assert [batch.subblock_keys for batch in unbatched] == [
+        ("alpha",),
+        ("beta",),
+        ("gamma",),
+        ("delta",),
+        ("omega",),
+    ]
+
+    batched = model_module._batch_phase_a_subblocks(work_items, batch_target_pairs=10)
+    assert [batch.subblock_keys for batch in batched] == [
+        ("alpha", "beta", "gamma"),
+        ("delta",),
+        ("omega",),
+    ]
+    assert [batch.unassigned_signature_ids for batch in batched] == [
+        ("u0", "u1", "u2"),
+        ("u3", "u4"),
+        ("u5", "u6", "u7"),
+    ]
+    assert [batch.estimated_pairs for batch in batched] == [12, 8, 12]
+
+    with pytest.raises(ValueError, match="batch_target_pairs must be positive"):
+        model_module._batch_phase_a_subblocks(work_items, batch_target_pairs=0)
+
+
 def test_next_unused_cluster_id_prevents_overwrite():
     pred_clusters = {
         "0": ["s0"],
@@ -382,9 +426,10 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_da
         use_s2_clusters=False,
         incremental_dont_use_cluster_seeds=False,
         runtime_context=None,
+        total_ram_bytes=None,
     ):
         del self, dataset, dists, cluster_model_params, partial_supervision
-        del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context
+        del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context, total_ram_bytes
         key = next(iter(block_dict))
         observed_order.append(key)
         return {f"cluster_{len(observed_order)}": list(block_dict[key])}, None
@@ -411,7 +456,11 @@ def test_phase_a_memory_prediction_logged_and_bounded(clusterer_dataset_factory,
             total_ram_bytes=total_ram_bytes,
         )
 
-    phase_a_logs = [record.message for record in caplog.records if "Telemetry: phase_split_phase_a" in record.message]
+    phase_a_logs = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a constraints_pairs_total=")
+    ]
     assert phase_a_logs, "Expected phase_split_phase_a telemetry log with memory prediction metrics"
     phase_a_log = phase_a_logs[-1]
     assert "prediction_contract_version=" in phase_a_log
@@ -435,6 +484,159 @@ def test_phase_a_memory_prediction_logged_and_bounded(clusterer_dataset_factory,
     assert ratio <= 10.0
 
 
+def test_phase_a_subblock_telemetry_logged(clusterer_dataset_factory, monkeypatch, caplog):
+    clusterer, dataset = clusterer_dataset_factory()
+    block = ["3", "5", "6", "8"]
+
+    monkeypatch.setattr(
+        model_module,
+        "_compute_incremental_memory_limits",
+        lambda *_args, **_kwargs: _mock_incremental_limits(chunk_pairs=10, accumulator_budget_bytes=1_000_000),
+    )
+
+    def _fake_make_subblocks(signatures, anddata, maximum_size=7500, first_k_letter_counts_sorted=None):
+        del signatures, anddata, maximum_size, first_k_letter_counts_sorted
+        return {
+            "alpha": ["3", "5"],
+            "beta": ["6", "8"],
+        }
+
+    monkeypatch.setattr(model_module, "make_subblocks", _fake_make_subblocks)
+
+    with caplog.at_level("INFO", logger="s2and"):
+        clusterer.predict_incremental(block, dataset, batching_threshold=3)
+
+    phase_a_subblocks_logs = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a_subblocks ")
+    ]
+    assert phase_a_subblocks_logs
+    phase_a_subblocks_log = phase_a_subblocks_logs[-1]
+    assert "total_subblocks=2" in phase_a_subblocks_log
+    assert "nonempty_subblocks=2" in phase_a_subblocks_log
+    assert "seed_signatures=4" in phase_a_subblocks_log
+    assert "total_unassigned=2" in phase_a_subblocks_log
+    assert "total_estimated_pairs=8" in phase_a_subblocks_log
+    assert "chunk_pairs=10" in phase_a_subblocks_log
+    assert "subblocks_below_chunk_pairs=2" in phase_a_subblocks_log
+    assert "phase_a_calls=2" in phase_a_subblocks_log
+    assert "batched_phase_a_calls=0" in phase_a_subblocks_log
+    assert "batched_subblocks=0" in phase_a_subblocks_log
+    assert "phase_a_batch_target_pairs=0" in phase_a_subblocks_log
+
+    phase_a_subblock_logs = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
+    ]
+    assert any(
+        "key=alpha" in message
+        and "subblock_count=1" in message
+        and "unassigned=1" in message
+        and "estimated_pairs=4" in message
+        and "constraint_pairs_total=4" in message
+        and "constraint_chunks_total=1" in message
+        for message in phase_a_subblock_logs
+    )
+    assert any(
+        "key=beta" in message
+        and "subblock_count=1" in message
+        and "unassigned=1" in message
+        and "estimated_pairs=4" in message
+        and "constraint_pairs_total=4" in message
+        and "constraint_chunks_total=1" in message
+        for message in phase_a_subblock_logs
+    )
+
+
+def test_phase_a_batching_reduces_calls_and_preserves_partition(clusterer_dataset_factory, monkeypatch, caplog):
+    block = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
+
+    monkeypatch.setattr(
+        model_module,
+        "_compute_incremental_memory_limits",
+        lambda *_args, **_kwargs: _mock_incremental_limits(chunk_pairs=10, accumulator_budget_bytes=1_000_000),
+    )
+
+    def _fake_make_subblocks(signatures, anddata, maximum_size=7500, first_k_letter_counts_sorted=None):
+        del signatures, anddata, maximum_size, first_k_letter_counts_sorted
+        return {
+            "alpha": ["0", "3"],
+            "beta": ["1", "4"],
+            "gamma": ["2", "6"],
+            "delta": ["5", "7", "8"],
+        }
+
+    monkeypatch.setattr(model_module, "make_subblocks", _fake_make_subblocks)
+
+    baseline_clusterer, baseline_dataset = clusterer_dataset_factory(name="dummy_phase_a_batching_off")
+    with caplog.at_level("INFO", logger="s2and"):
+        baseline = baseline_clusterer.predict_incremental(block, baseline_dataset, batching_threshold=3)
+
+    baseline_phase_a_subblock_logs = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
+    ]
+    assert len(baseline_phase_a_subblock_logs) == 4
+    baseline_summary = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a_subblocks ")
+    )
+    assert "phase_a_calls=4" in baseline_summary
+    assert "batched_phase_a_calls=0" in baseline_summary
+    assert "batched_subblocks=0" in baseline_summary
+
+    caplog.clear()
+
+    batched_clusterer, batched_dataset = clusterer_dataset_factory(name="dummy_phase_a_batching_on")
+    batched_clusterer.incremental_phase_a_pair_batch_target_multiple = 1.0
+    with caplog.at_level("INFO", logger="s2and"):
+        batched = batched_clusterer.predict_incremental(block, batched_dataset, batching_threshold=3)
+
+    batched_phase_a_subblock_logs = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
+    ]
+    assert len(batched_phase_a_subblock_logs) == 2
+    assert any(
+        "key=alpha, beta, gamma" in message
+        and "subblock_count=3" in message
+        and "unassigned=3" in message
+        and "estimated_pairs=12" in message
+        for message in batched_phase_a_subblock_logs
+    )
+    assert any(
+        "key=delta" in message
+        and "subblock_count=1" in message
+        and "unassigned=2" in message
+        and "estimated_pairs=8" in message
+        for message in batched_phase_a_subblock_logs
+    )
+
+    batched_summary = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Telemetry: phase_split_phase_a_subblocks ")
+    )
+    assert "phase_a_calls=2" in batched_summary
+    assert "batched_phase_a_calls=1" in batched_summary
+    assert "batched_subblocks=3" in batched_summary
+    assert "phase_a_batch_target_pairs=10" in batched_summary
+
+    baseline_clusters = _clusters(baseline)
+    batched_clusters = _clusters(batched)
+    assert _same_partition(batched_clusters, baseline_clusters), (
+        "Phase A batching changed the predicted partition on the dummy fixture:\n"
+        f"  batched={batched_clusters}\n"
+        f"  baseline={baseline_clusters}"
+    )
+    assert _seeds_preserved(batched_clusters, [["3", "4"], ["6", "7"]])
+
+
 def test_phase_a_overflow_surfaces_in_result_and_telemetry(clusterer_dataset_factory, monkeypatch, caplog):
     clusterer, dataset = clusterer_dataset_factory()
     block = ["3", "4", "5", "6", "7", "8"]
@@ -453,3 +655,101 @@ def test_phase_a_overflow_surfaces_in_result_and_telemetry(clusterer_dataset_fac
     ]
     assert overflow_logs
     assert "overflow_early_stop=True" in overflow_logs[-1]
+
+
+def test_best_incremental_cluster_respects_seed_score_mode():
+    clusterer = _build_minimal_incremental_clusterer()
+    cluster_dists = {
+        "mean_favorite": (0.20, 2, 0.20),
+        "min_favorite": (0.29, 2, 0.01),
+    }
+
+    clusterer.incremental_seed_score_mode = "mean"
+    best_mean, best_mean_score, _ = clusterer._best_incremental_cluster(
+        cluster_dists,
+        config=clusterer._incremental_experiment_config(),
+    )
+    assert best_mean == "mean_favorite"
+    assert best_mean_score == pytest.approx(0.20)
+
+    clusterer.incremental_seed_score_mode = "min"
+    best_min, best_min_score, _ = clusterer._best_incremental_cluster(
+        cluster_dists,
+        config=clusterer._incremental_experiment_config(),
+    )
+    assert best_min == "min_favorite"
+    assert best_min_score == pytest.approx(0.01)
+
+    clusterer.incremental_seed_score_mode = "mean_min_hybrid"
+    clusterer.incremental_mean_min_hybrid_weight = 0.25
+    best_hybrid_low, best_hybrid_low_score, _ = clusterer._best_incremental_cluster(
+        cluster_dists,
+        config=clusterer._incremental_experiment_config(),
+    )
+    assert best_hybrid_low == "mean_favorite"
+    assert best_hybrid_low_score == pytest.approx(0.20)
+
+    clusterer.incremental_mean_min_hybrid_weight = 0.75
+    best_hybrid_high, best_hybrid_high_score, _ = clusterer._best_incremental_cluster(
+        cluster_dists,
+        config=clusterer._incremental_experiment_config(),
+    )
+    assert best_hybrid_high == "min_favorite"
+    assert best_hybrid_high_score == pytest.approx(0.08)
+
+
+def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():
+    def _run(mode: str, signature_dists: dict[str, dict[int, tuple[float, int, float]]]) -> dict[str, list[str]]:
+        clusterer = _build_minimal_incremental_clusterer()
+        clusterer.incremental_precluster_broadcast_mode = mode
+
+        def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context):
+            del dataset, partial_supervision, runtime_context
+            if "incremental_unassigned" in block_dict:
+                return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None
+            if "block" in block_dict:
+                return {"singleton_cluster": list(block_dict["block"])}, None
+            raise AssertionError(f"Unexpected block_dict={block_dict}")
+
+        clusterer.predict_helper = fake_predict_helper
+        dataset = type(
+            "IncrementalDataset",
+            (),
+            {
+                "cluster_seeds_require": {"seed0": 0, "seed1": 1},
+                "max_seed_cluster_id": 2,
+                "signatures": {},
+                "name_tuples": set(),
+            },
+        )()
+        return clusterer._run_incremental_phases_bcd(
+            ["u1", "u2"],
+            dataset,
+            {signature_id: dict(cluster_dists) for signature_id, cluster_dists in signature_dists.items()},
+            dict(dataset.cluster_seeds_require),
+            {},
+            {0: ["seed0"], 1: ["seed1"]},
+            False,
+            {},
+            runtime_context=object(),
+        )
+
+    divergent_top1_dists = {
+        "u1": {0: (0.10, 1, 0.10), 1: (0.60, 1, 0.60)},
+        "u2": {0: (0.60, 1, 0.60), 1: (0.20, 1, 0.20)},
+    }
+    always_divergent = _run("always", divergent_top1_dists)
+    never_divergent = _run("never", divergent_top1_dists)
+    consensus_divergent = _run("top1_consensus", divergent_top1_dists)
+    assert always_divergent == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
+    assert never_divergent == {"0": ["seed0", "u1"], "1": ["seed1", "u2"]}
+    assert consensus_divergent == never_divergent
+
+    consensus_top1_dists = {
+        "u1": {0: (0.10, 1, 0.10), 1: (0.60, 1, 0.60)},
+        "u2": {0: (0.70, 1, 0.70), 1: (0.80, 1, 0.80)},
+    }
+    never_consensus = _run("never", consensus_top1_dists)
+    consensus_enabled = _run("top1_consensus", consensus_top1_dists)
+    assert never_consensus == {"0": ["seed0", "u1"], "1": ["seed1"], "2": ["u2"]}
+    assert consensus_enabled == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}

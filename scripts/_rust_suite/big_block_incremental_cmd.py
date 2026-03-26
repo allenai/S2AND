@@ -39,6 +39,15 @@ def _resolve_existing_file(base_dir: Path, candidates: list[str]) -> Path:
     raise FileNotFoundError(f"Missing required file under {base_dir}: tried {candidates}")
 
 
+def _resolve_optional_existing_file(explicit_path: str) -> Path | None:
+    if explicit_path:
+        path = Path(explicit_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Configured file does not exist: {path}")
+        return path
+    return None
+
+
 def _load_subset_payload(
     subset_dir: Path,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str | None]:
@@ -206,18 +215,88 @@ def _set_runtime_env(
 def _validate_args(args: argparse.Namespace) -> None:
     if args.total_signatures <= 0:
         raise ValueError("--total-signatures must be > 0")
-    if args.seed_signatures <= 0:
-        raise ValueError("--seed-signatures must be > 0")
-    if args.seed_signatures >= args.total_signatures:
-        raise ValueError("--seed-signatures must be < --total-signatures")
-    if args.seed_cluster_count <= 0:
-        raise ValueError("--seed-cluster-count must be > 0")
+    if getattr(args, "cluster_seeds_path", ""):
+        if args.seed_signatures < 0:
+            raise ValueError("--seed-signatures must be >= 0 when --cluster-seeds-path is supplied")
+        if args.seed_cluster_count < 0:
+            raise ValueError("--seed-cluster-count must be >= 0 when --cluster-seeds-path is supplied")
+    else:
+        if args.seed_signatures <= 0:
+            raise ValueError("--seed-signatures must be > 0")
+        if args.seed_signatures >= args.total_signatures:
+            raise ValueError("--seed-signatures must be < --total-signatures")
+        if args.seed_cluster_count <= 0:
+            raise ValueError("--seed-cluster-count must be > 0")
     if args.n_jobs <= 0:
         raise ValueError("--n-jobs must be > 0")
     if args.batching_threshold <= 0:
         raise ValueError("--batching-threshold must be > 0")
     if args.total_signatures > 4000 and not bool(args.full_run):
         raise ValueError("Refusing large run without explicit confirmation. Use --full-run for >4000 signatures.")
+
+
+def _summarize_incremental_seed_state(
+    *,
+    selected_signature_ids: list[str],
+    anddata: Any,
+) -> dict[str, Any]:
+    selected_signature_set = {str(signature_id) for signature_id in selected_signature_ids}
+    cluster_seeds_require = {
+        str(signature_id): cluster_id
+        for signature_id, cluster_id in getattr(anddata, "cluster_seeds_require", {}).items()
+    }
+    invalid_seed_signatures = sorted(
+        signature_id for signature_id in cluster_seeds_require if signature_id not in selected_signature_set
+    )
+    if invalid_seed_signatures:
+        raise ValueError(
+            "External cluster seeds reference signatures outside the selected subset: "
+            f"{invalid_seed_signatures[:10]}"
+        )
+
+    cluster_seeds_disallow = {
+        (str(signature_id_a), str(signature_id_b))
+        for signature_id_a, signature_id_b in getattr(anddata, "cluster_seeds_disallow", set())
+    }
+    invalid_disallow_signatures = sorted(
+        {
+            signature_id
+            for pair in cluster_seeds_disallow
+            for signature_id in pair
+            if signature_id not in selected_signature_set
+        }
+    )
+    if invalid_disallow_signatures:
+        raise ValueError(
+            "External cluster seed disallow constraints reference signatures outside the selected subset: "
+            f"{invalid_disallow_signatures[:10]}"
+        )
+
+    altered_cluster_signatures = getattr(anddata, "altered_cluster_signatures", None)
+    altered_signature_ids = (
+        sorted(str(signature_id) for signature_id in altered_cluster_signatures) if altered_cluster_signatures else []
+    )
+    invalid_altered_signatures = sorted(
+        signature_id for signature_id in altered_signature_ids if signature_id not in selected_signature_set
+    )
+    if invalid_altered_signatures:
+        raise ValueError(
+            "Altered cluster signatures reference signatures outside the selected subset: "
+            f"{invalid_altered_signatures[:10]}"
+        )
+
+    seed_signature_ids = [
+        str(signature_id) for signature_id in selected_signature_ids if str(signature_id) in cluster_seeds_require
+    ]
+    unassigned_signature_ids = [
+        str(signature_id) for signature_id in selected_signature_ids if str(signature_id) not in cluster_seeds_require
+    ]
+    return {
+        "seed_signature_ids": seed_signature_ids,
+        "unassigned_signature_ids": unassigned_signature_ids,
+        "seed_cluster_count": int(len({cluster_seeds_require[signature_id] for signature_id in seed_signature_ids})),
+        "altered_signature_ids": altered_signature_ids,
+    }
 
 
 def _run_single(args: argparse.Namespace) -> dict[str, Any]:
@@ -245,6 +324,11 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
         raise FileNotFoundError(f"Model artifact not found: {model_path}")
 
     signatures, papers, meta_target_block = _load_subset_payload(subset_dir)
+    specter_path = _resolve_optional_existing_file(str(getattr(args, "specter_path", "")))
+    cluster_seeds_path = _resolve_optional_existing_file(str(getattr(args, "cluster_seeds_path", "")))
+    altered_cluster_signatures_path = _resolve_optional_existing_file(
+        str(getattr(args, "altered_cluster_signatures_path", ""))
+    )
     target_block = _resolve_target_block(signatures, args.target_block or meta_target_block)
     selected_signature_ids = _select_block_signature_ids(
         signatures=signatures,
@@ -253,13 +337,26 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
         total_signatures=int(args.total_signatures),
         random_seed=int(args.random_seed),
     )
-    seed_signature_ids = selected_signature_ids[: int(args.seed_signatures)]
-    unassigned_signature_ids = selected_signature_ids[int(args.seed_signatures) :]
-    effective_seed_cluster_count = _effective_seed_cluster_count(
-        seed_signature_count=len(seed_signature_ids),
-        requested_seed_clusters=int(args.seed_cluster_count),
-    )
-    cluster_seeds = _build_cluster_seeds(seed_signature_ids, effective_seed_cluster_count)
+    if cluster_seeds_path is None:
+        seed_signature_ids = selected_signature_ids[: int(args.seed_signatures)]
+        effective_seed_cluster_count = _effective_seed_cluster_count(
+            seed_signature_count=len(seed_signature_ids),
+            requested_seed_clusters=int(args.seed_cluster_count),
+        )
+        cluster_seeds = _build_cluster_seeds(seed_signature_ids, effective_seed_cluster_count)
+        cluster_seeds_source = "synthetic"
+    else:
+        cluster_seeds = str(cluster_seeds_path)
+        cluster_seeds_source = str(cluster_seeds_path)
+
+    altered_cluster_signatures: list[str] | str | None
+    altered_cluster_signatures_source: str
+    if altered_cluster_signatures_path is None:
+        altered_cluster_signatures = None
+        altered_cluster_signatures_source = "unset"
+    else:
+        altered_cluster_signatures = str(altered_cluster_signatures_path)
+        altered_cluster_signatures_source = str(altered_cluster_signatures_path)
 
     filtered_signatures = {signature_id: signatures[signature_id] for signature_id in selected_signature_ids}
     selected_paper_ids = {
@@ -278,8 +375,9 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             name=f"big_block_incremental_{args.backend}",
             mode="inference",
             clusters=None,
-            specter_embeddings=None,
+            specter_embeddings=str(specter_path) if specter_path is not None else None,
             cluster_seeds=cluster_seeds,
+            altered_cluster_signatures=altered_cluster_signatures,
             block_type="s2",
             train_pairs=None,
             val_pairs=None,
@@ -292,11 +390,15 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             preprocess=True,
             random_seed=int(args.random_seed),
             name_tuples="filtered",
-            use_orcid_id=True,
+            use_orcid_id=bool(int(args.use_orcid_id)),
             use_sinonym_overwrite=False,
             compute_reference_features=False,
         )
         anddata_build_seconds = time.perf_counter() - anddata_start
+        seed_state = _summarize_incremental_seed_state(selected_signature_ids=selected_signature_ids, anddata=anddata)
+        actual_seed_signature_ids = list(seed_state["seed_signature_ids"])
+        actual_unassigned_signature_ids = list(seed_state["unassigned_signature_ids"])
+        actual_seed_cluster_count = int(seed_state["seed_cluster_count"])
 
         model_artifact = load_pickle_with_verified_label_encoder_compat(str(model_path))
         clusterer = model_artifact["clusterer"]
@@ -323,16 +425,21 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
         "subset_dir": str(subset_dir),
         "model_path": str(model_path),
         "target_block": target_block,
+        "use_orcid_id": bool(int(args.use_orcid_id)),
         "total_ram_bytes": int(args.total_ram_bytes),
         "total_signatures": int(len(selected_signature_ids)),
-        "seed_signatures": int(len(seed_signature_ids)),
-        "unassigned_signatures": int(len(unassigned_signature_ids)),
+        "seed_signatures_requested": int(args.seed_signatures),
+        "seed_signatures": int(len(actual_seed_signature_ids)),
+        "unassigned_signatures": int(len(actual_unassigned_signature_ids)),
         "seed_clusters_requested": int(args.seed_cluster_count),
-        "seed_clusters_effective": int(effective_seed_cluster_count),
+        "seed_clusters_effective": int(actual_seed_cluster_count),
+        "cluster_seeds_source": cluster_seeds_source,
+        "specter_embeddings_source": str(specter_path) if specter_path is not None else "unset",
+        "altered_cluster_signatures_source": altered_cluster_signatures_source,
         "batching_threshold": int(args.batching_threshold),
         "n_jobs": int(args.n_jobs),
         "random_seed": int(args.random_seed),
-        "estimated_incremental_pairs": int(len(seed_signature_ids) * len(unassigned_signature_ids)),
+        "estimated_incremental_pairs": int(len(actual_seed_signature_ids) * len(actual_unassigned_signature_ids)),
         "anddata_build_seconds": round(anddata_build_seconds, 3),
         "predict_seconds": round(predict_seconds, 3),
         "total_runtime_seconds": round(total_runtime_seconds, 3),
@@ -413,8 +520,16 @@ def _run_subprocess_single(
         str(args.random_seed),
         "--total-ram-bytes",
         str(args.total_ram_bytes),
+        "--use-orcid-id",
+        str(int(args.use_orcid_id)),
         "--model-path",
         args.model_path,
+        "--specter-path",
+        args.specter_path,
+        "--cluster-seeds-path",
+        args.cluster_seeds_path,
+        "--altered-cluster-signatures-path",
+        args.altered_cluster_signatures_path,
         "--require-rust-release",
         str(int(args.require_rust_release)),
         "--emit-signature-map",
@@ -558,6 +673,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batching-threshold", type=int, default=1500)
     parser.add_argument("--n-jobs", type=int, default=8)
     parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument("--use-orcid-id", type=int, choices=[0, 1], default=1)
+    parser.add_argument("--specter-path", default="")
+    parser.add_argument("--cluster-seeds-path", default="")
+    parser.add_argument("--altered-cluster-signatures-path", default="")
     parser.add_argument(
         "--total-ram-bytes",
         type=int,

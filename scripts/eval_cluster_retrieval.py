@@ -1,3 +1,10 @@
+"""Evaluate block-local cluster retrieval and expose the shared retrieval helpers.
+
+The single-letter retrieval tooling reuses a small public helper surface from this
+module: `extract_query_features`, `mask_query_features`, `build_cluster_summary`,
+`apply_hard_filters`, `score_summary`, and `rank_summaries`.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -38,6 +45,16 @@ QUERY_VIEW_INFORMATION_PRIORITY = {
     "full": 4,
 }
 EMPTY_STRING_SET: frozenset[str] = frozenset()
+__all__ = [
+    "ClusterSummary",
+    "QueryFeatures",
+    "apply_hard_filters",
+    "build_cluster_summary",
+    "extract_query_features",
+    "mask_query_features",
+    "rank_summaries",
+    "score_summary",
+]
 _ORIGINAL_COMPUTE_BLOCK: Callable[[str], str] = s2and_data_module.compute_block
 
 
@@ -233,54 +250,57 @@ def _get_specter_vector(dataset: ANDData, paper_id: Any) -> np.ndarray | None:
     return arr
 
 
-def _extract_query_features(
+def extract_query_features(
     dataset: ANDData,
     signature_id: str,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
+    orcid_enabled: bool = True,
 ) -> QueryFeatures:
     if feature_cache is not None and signature_id in feature_cache:
-        return feature_cache[signature_id]
+        features = feature_cache[signature_id]
+    else:
+        signature = dataset.signatures[signature_id]
+        first, middle = _signature_name_parts_for_subblocking(signature)
+        coauthor_blocks = _nonempty_feature_values(_signature_coauthor_blocks_for_specter(signature, dataset))
+        affiliation_terms = _nonempty_feature_values(_signature_affiliation_feature_keys(signature))
+        paper = dataset.papers.get(str(signature.paper_id))
+        venue_terms = frozenset()
+        year = None
+        if paper is not None:
+            venue_terms = _normalize_term_set(" ".join(part for part in [paper.venue, paper.journal_name] if part))
+            year = paper.year
+        specter = _get_specter_vector(dataset, signature.paper_id)
+        middle_tokens = [token for token in middle.split() if token]
+        middle_initials = frozenset(token[0] for token in middle_tokens)
+        features = QueryFeatures(
+            first=first,
+            middle=middle,
+            first_initial=first[:1],
+            middle_initials=middle_initials,
+            coauthor_blocks=coauthor_blocks,
+            affiliation_terms=affiliation_terms,
+            venue_terms=venue_terms,
+            year=year,
+            orcid=signature.author_info_orcid or None,
+            specter=specter,
+            has_specter=specter is not None,
+            has_coauthors=bool(coauthor_blocks),
+            has_affiliations=bool(affiliation_terms),
+            has_full_first=len(first) > 1,
+            has_middle=bool(middle_tokens),
+        )
+        if feature_cache is not None:
+            feature_cache[signature_id] = features
 
-    signature = dataset.signatures[signature_id]
-    first, middle = _signature_name_parts_for_subblocking(signature)
-    coauthor_blocks = _nonempty_feature_values(_signature_coauthor_blocks_for_specter(signature, dataset))
-    affiliation_terms = _nonempty_feature_values(_signature_affiliation_feature_keys(signature))
-    paper = dataset.papers.get(str(signature.paper_id))
-    venue_terms = frozenset()
-    year = None
-    if paper is not None:
-        venue_terms = _normalize_term_set(" ".join(part for part in [paper.venue, paper.journal_name] if part))
-        year = paper.year
-    specter = _get_specter_vector(dataset, signature.paper_id)
-    middle_tokens = [token for token in middle.split() if token]
-    middle_initials = frozenset(token[0] for token in middle_tokens)
-    orcid = signature.author_info_orcid or None
-    features = QueryFeatures(
-        first=first,
-        middle=middle,
-        first_initial=first[:1],
-        middle_initials=middle_initials,
-        coauthor_blocks=coauthor_blocks,
-        affiliation_terms=affiliation_terms,
-        venue_terms=venue_terms,
-        year=year,
-        orcid=orcid,
-        specter=specter,
-        has_specter=specter is not None,
-        has_coauthors=bool(coauthor_blocks),
-        has_affiliations=bool(affiliation_terms),
-        has_full_first=len(first) > 1,
-        has_middle=bool(middle_tokens),
-    )
-    if feature_cache is not None:
-        feature_cache[signature_id] = features
-    return features
+    if orcid_enabled or features.orcid is None:
+        return features
+    return replace(features, orcid=None)
 
 
-def _mask_query_features(base: QueryFeatures, view: str) -> QueryFeatures:
+def mask_query_features(base: QueryFeatures, view: str, *, orcid_enabled: bool = True) -> QueryFeatures:
     if view == "full":
-        return base
+        return base if orcid_enabled else replace(base, orcid=None)
 
     first = base.first_initial
     masked = QueryFeatures(
@@ -292,7 +312,7 @@ def _mask_query_features(base: QueryFeatures, view: str) -> QueryFeatures:
         affiliation_terms=base.affiliation_terms,
         venue_terms=base.venue_terms,
         year=base.year,
-        orcid=base.orcid,
+        orcid=base.orcid if orcid_enabled else None,
         specter=base.specter,
         has_specter=base.has_specter,
         has_coauthors=base.has_coauthors,
@@ -351,7 +371,7 @@ def _select_exemplars(vectors: list[np.ndarray], max_exemplars: int) -> list[np.
     return [np.asarray(vectors[idx], dtype=np.float32) for idx in selected_indices]
 
 
-def _build_cluster_summary(
+def build_cluster_summary(
     dataset: ANDData,
     block_key: str,
     cluster_id: str,
@@ -360,6 +380,7 @@ def _build_cluster_summary(
     max_exemplars: int,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
+    orcid_enabled: bool = True,
 ) -> ClusterSummary:
     first_name_counts: Counter[str] = Counter()
     middle_initial_counts: Counter[str] = Counter()
@@ -371,7 +392,12 @@ def _build_cluster_summary(
     specter_vectors: list[np.ndarray] = []
 
     for signature_id in signature_ids:
-        features = _extract_query_features(dataset, signature_id, feature_cache=feature_cache)
+        features = extract_query_features(
+            dataset,
+            signature_id,
+            feature_cache=feature_cache,
+            orcid_enabled=orcid_enabled,
+        )
         if len(features.first) > 1:
             first_name_counts[features.first] += 1
         for initial in features.middle_initials:
@@ -413,7 +439,7 @@ def _build_cluster_summary(
     )
 
 
-def _score_summary(method: str, query: QueryFeatures, summary: ClusterSummary, max_block_component_size: int) -> float:
+def score_summary(method: str, query: QueryFeatures, summary: ClusterSummary, max_block_component_size: int) -> float:
     size_prior = _size_prior(summary.size, max_block_component_size)
     coauthor_score = _counter_query_overlap(query.coauthor_blocks, summary.coauthor_counts, summary.size)
     affiliation_score = _counter_query_overlap(query.affiliation_terms, summary.affiliation_counts, summary.size)
@@ -472,7 +498,7 @@ def _has_impossible_year_conflict(query: QueryFeatures, summary: ClusterSummary,
     return query.year < summary.year_min - max_year_gap or query.year > summary.year_max + max_year_gap
 
 
-def _apply_hard_filters(
+def apply_hard_filters(
     query: QueryFeatures,
     candidate_summaries: list[ClusterSummary],
 ) -> tuple[list[ClusterSummary], dict[str, int]]:
@@ -544,14 +570,14 @@ def _hit_within_signature_budget(
     return 0
 
 
-def _rank_summaries(
+def rank_summaries(
     method: str,
     query: QueryFeatures,
     candidate_summaries: list[ClusterSummary],
     max_block_component_size: int,
 ) -> list[tuple[float, ClusterSummary]]:
     scored = [
-        (_score_summary(method, query, summary, max_block_component_size=max_block_component_size), summary)
+        (score_summary(method, query, summary, max_block_component_size=max_block_component_size), summary)
         for summary in candidate_summaries
     ]
     scored.sort(key=lambda item: (-item[0], item[1].component_key))
@@ -631,6 +657,7 @@ def _compute_signature_feature_counts(
     dataset: ANDData,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
+    orcid_enabled: bool = True,
 ) -> dict[str, int]:
     counts = {
         "full_first": 0,
@@ -640,7 +667,12 @@ def _compute_signature_feature_counts(
         "affiliations": 0,
     }
     for signature_id in dataset.signatures:
-        features = _extract_query_features(dataset, signature_id, feature_cache=feature_cache)
+        features = extract_query_features(
+            dataset,
+            signature_id,
+            feature_cache=feature_cache,
+            orcid_enabled=orcid_enabled,
+        )
         if features.has_full_first:
             counts["full_first"] += 1
         if features.has_middle:
@@ -662,6 +694,7 @@ def _build_query_cases(
     sampling_query_view: str,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
+    orcid_enabled: bool = True,
 ) -> tuple[list[QueryCase], dict[str, Any], dict[str, list[str]], dict[str, list[str]]]:
     if dataset.clusters is None:
         raise RuntimeError(f"Dataset '{dataset_name}' has no clusters.")
@@ -694,7 +727,11 @@ def _build_query_cases(
         "eligible_components": 0,
         "signatures_total": len(dataset.signatures),
         "missing_cluster_signature_ids": missing_cluster_signature_ids,
-        "signature_feature_counts": _compute_signature_feature_counts(dataset, feature_cache=feature_cache),
+        "signature_feature_counts": _compute_signature_feature_counts(
+            dataset,
+            feature_cache=feature_cache,
+            orcid_enabled=orcid_enabled,
+        ),
         "eligible_query_feature_counts": {
             "full_first": 0,
             "middle": 0,
@@ -721,7 +758,12 @@ def _build_query_cases(
             signature_ids,
             seed=_stable_component_seed(component_key, seed),
         )
-        heldout_features = _extract_query_features(dataset, heldout_signature_id, feature_cache=feature_cache)
+        heldout_features = extract_query_features(
+            dataset,
+            heldout_signature_id,
+            feature_cache=feature_cache,
+            orcid_enabled=orcid_enabled,
+        )
         if heldout_features.has_full_first:
             census["eligible_query_feature_counts"]["full_first"] += 1
         if heldout_features.has_middle:
@@ -732,7 +774,11 @@ def _build_query_cases(
             census["eligible_query_feature_counts"]["coauthors"] += 1
         if heldout_features.has_affiliations:
             census["eligible_query_feature_counts"]["affiliations"] += 1
-        sampling_features = _mask_query_features(heldout_features, sampling_query_view)
+        sampling_features = mask_query_features(
+            heldout_features,
+            sampling_query_view,
+            orcid_enabled=orcid_enabled,
+        )
         all_cases.append(
             QueryCase(
                 dataset=dataset_name,
@@ -891,6 +937,7 @@ def _build_summary_payload(
             "sampling_query_view": str(args.sampling_query_view),
             "signature_budgets": [int(budget) for budget in args.signature_budgets],
             "backend_env": os.environ.get("S2AND_BACKEND", "auto"),
+            "orcid_enabled": bool(getattr(args, "orcid_enabled", not bool(getattr(args, "disable_orcid_id", False)))),
             "latency_definition": (
                 "query_features + view_mask + hard_filters + ranking; " "excludes summary build and persisted-index I/O"
             ),
@@ -950,7 +997,7 @@ def _write_progress(
     return summary
 
 
-def _load_dataset(data_root: str, dataset_name: str, n_jobs: int) -> ANDData:
+def _load_dataset(data_root: str, dataset_name: str, n_jobs: int, *, use_orcid_id: bool = True) -> ANDData:
     _install_safe_compute_block_patch()
     signatures_path = _resolve_dataset_file(
         data_root,
@@ -975,7 +1022,7 @@ def _load_dataset(data_root: str, dataset_name: str, n_jobs: int) -> ANDData:
         preprocess=True,
         random_seed=13,
         name_tuples="filtered",
-        use_orcid_id=True,
+        use_orcid_id=use_orcid_id,
         use_sinonym_overwrite=False,
     )
 
@@ -990,6 +1037,8 @@ def _evaluate_dataset(
     seed: int,
     sampling_query_view: str,
     signature_budgets: tuple[int, ...],
+    *,
+    orcid_enabled: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     feature_cache: dict[str, QueryFeatures] = {}
     query_cases, census, block_to_component_keys, full_component_signatures = _build_query_cases(
@@ -999,13 +1048,14 @@ def _evaluate_dataset(
         seed=seed,
         sampling_query_view=sampling_query_view,
         feature_cache=feature_cache,
+        orcid_enabled=orcid_enabled,
     )
 
     full_summaries: dict[str, ClusterSummary] = {}
     build_full_start = time.perf_counter()
     for component_key, signature_ids in full_component_signatures.items():
         block_key, cluster_id = component_key.split("::", 1)
-        full_summaries[component_key] = _build_cluster_summary(
+        full_summaries[component_key] = build_cluster_summary(
             dataset=dataset,
             block_key=block_key,
             cluster_id=cluster_id,
@@ -1013,6 +1063,7 @@ def _evaluate_dataset(
             signature_ids=signature_ids,
             max_exemplars=max_exemplars,
             feature_cache=feature_cache,
+            orcid_enabled=orcid_enabled,
         )
     full_summary_build_ms = (time.perf_counter() - build_full_start) * 1000.0
 
@@ -1022,7 +1073,12 @@ def _evaluate_dataset(
 
     for query_case in query_cases:
         query_feature_start = time.perf_counter()
-        base_query = _extract_query_features(dataset, query_case.heldout_signature_id, feature_cache=feature_cache)
+        base_query = extract_query_features(
+            dataset,
+            query_case.heldout_signature_id,
+            feature_cache=feature_cache,
+            orcid_enabled=orcid_enabled,
+        )
         query_feature_latency_ms = (time.perf_counter() - query_feature_start) * 1000.0
         component_keys_in_block = block_to_component_keys[query_case.block_key]
         raw_candidate_summaries: list[ClusterSummary] = []
@@ -1039,7 +1095,7 @@ def _evaluate_dataset(
                 ]
                 block_key, cluster_id = component_key.split("::", 1)
                 start = time.perf_counter()
-                residual_cache[residual_key] = _build_cluster_summary(
+                residual_cache[residual_key] = build_cluster_summary(
                     dataset=dataset,
                     block_key=block_key,
                     cluster_id=cluster_id,
@@ -1047,6 +1103,7 @@ def _evaluate_dataset(
                     signature_ids=signature_ids,
                     max_exemplars=max_exemplars,
                     feature_cache=feature_cache,
+                    orcid_enabled=orcid_enabled,
                 )
                 residual_build_times_ms.append((time.perf_counter() - start) * 1000.0)
             raw_candidate_summaries.append(residual_cache[residual_key])
@@ -1056,12 +1113,12 @@ def _evaluate_dataset(
 
         for query_view in query_views:
             view_prepare_start = time.perf_counter()
-            query = _mask_query_features(base_query, query_view)
-            candidate_summaries, filter_state = _apply_hard_filters(query, raw_candidate_summaries)
+            query = mask_query_features(base_query, query_view, orcid_enabled=orcid_enabled)
+            candidate_summaries, filter_state = apply_hard_filters(query, raw_candidate_summaries)
             view_prepare_latency_ms = (time.perf_counter() - view_prepare_start) * 1000.0
             for method in methods:
                 ranking_start = time.perf_counter()
-                ranked = _rank_summaries(
+                ranked = rank_summaries(
                     method,
                     query,
                     candidate_summaries,
@@ -1147,6 +1204,7 @@ def _evaluate_dataset(
         "sampling_query_view": sampling_query_view,
         "signature_budgets": list(signature_budgets),
         "specter_loaded": bool(dataset.specter_embeddings),
+        "orcid_enabled": bool(orcid_enabled),
     }
     return results, diagnostics
 
@@ -1176,6 +1234,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--signature-budgets", nargs="+", type=int, default=list(DEFAULT_SIGNATURE_BUDGETS))
     parser.add_argument("--data-root", type=str, default=os.path.join(PROJECT_ROOT_PATH, "data"))
     parser.add_argument(
+        "--disable-orcid-id",
+        action="store_true",
+        help="Disable ORCID in loaded data, query features, summaries, and hard filters.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=os.path.join(PROJECT_ROOT_PATH, "scratch", "cluster_retrieval"),
@@ -1187,6 +1250,7 @@ def main() -> None:
     args = parse_args()
     args.sampling_query_view = _resolve_sampling_query_view(list(args.query_views), args.sampling_query_view)
     args.signature_budgets = list(_normalize_signature_budgets(args.signature_budgets))
+    args.orcid_enabled = not bool(args.disable_orcid_id)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1200,6 +1264,7 @@ def main() -> None:
         f"limit_queries={args.limit_queries} "
         f"query_views={args.query_views} "
         f"sampling_query_view={args.sampling_query_view} "
+        f"orcid_enabled={args.orcid_enabled} "
         f"signature_budgets={args.signature_budgets} "
         f"methods={args.methods}"
     )
@@ -1211,6 +1276,7 @@ def main() -> None:
                 data_root=args.data_root,
                 dataset_name=dataset_name,
                 n_jobs=int(args.n_jobs),
+                use_orcid_id=bool(args.orcid_enabled),
             )
             dataset_rows, dataset_diagnostics = _evaluate_dataset(
                 dataset_name=dataset_name,
@@ -1222,6 +1288,7 @@ def main() -> None:
                 seed=int(args.seed),
                 sampling_query_view=str(args.sampling_query_view),
                 signature_budgets=tuple(int(budget) for budget in args.signature_budgets),
+                orcid_enabled=bool(args.orcid_enabled),
             )
             dataset_diagnostics["dataset_wall_seconds"] = _format_float(time.perf_counter() - dataset_start)
             diagnostics[dataset_name] = dataset_diagnostics

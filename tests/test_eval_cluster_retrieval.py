@@ -5,85 +5,27 @@ from collections import Counter
 from types import SimpleNamespace
 
 import scripts.eval_cluster_retrieval as retrieval
-
-
-def _query_features(
-    *,
-    middle_initials: frozenset[str] = frozenset(),
-    year: int | None = None,
-    orcid: str | None = None,
-    has_coauthors: bool = False,
-    has_affiliations: bool = False,
-    has_full_first: bool = False,
-    has_middle: bool = False,
-) -> retrieval.QueryFeatures:
-    return retrieval.QueryFeatures(
-        first="a",
-        middle="",
-        first_initial="a",
-        middle_initials=middle_initials,
-        coauthor_blocks=frozenset({"a smith"}) if has_coauthors else frozenset(),
-        affiliation_terms=frozenset({"lab"}) if has_affiliations else frozenset(),
-        venue_terms=frozenset(),
-        year=year,
-        orcid=orcid,
-        specter=None,
-        has_specter=False,
-        has_coauthors=has_coauthors,
-        has_affiliations=has_affiliations,
-        has_full_first=has_full_first,
-        has_middle=has_middle,
-    )
-
-
-def _cluster_summary(
-    *,
-    component_key: str,
-    size: int = 1,
-    middle_initial_counts: Counter[str] | None = None,
-    year_min: int | None = None,
-    year_max: int | None = None,
-    year_mean: float | None = None,
-    orcid_values: frozenset[str] = frozenset(),
-) -> retrieval.ClusterSummary:
-    return retrieval.ClusterSummary(
-        component_key=component_key,
-        cluster_id=component_key,
-        block_key="b",
-        size=size,
-        first_name_counts=Counter(),
-        middle_initial_counts=middle_initial_counts or Counter(),
-        coauthor_counts=Counter(),
-        affiliation_counts=Counter(),
-        venue_counts=Counter(),
-        year_values=[],
-        year_min=year_min,
-        year_max=year_max,
-        year_mean=year_mean,
-        orcid_values=orcid_values,
-        specter_centroid=None,
-        exemplar_vectors=[],
-    )
+from tests.helpers import build_cluster_summary, build_query_features
 
 
 def test_hybrid_scores_penalize_middle_initial_conflict():
-    query = _query_features(middle_initials=frozenset({"a"}))
-    empty_summary = _cluster_summary(component_key="empty", size=4)
-    conflicting_summary = _cluster_summary(
+    query = build_query_features(middle_initials=frozenset({"a"}))
+    empty_summary = build_cluster_summary(component_key="empty", size=4)
+    conflicting_summary = build_cluster_summary(
         component_key="conflict",
         size=4,
         middle_initial_counts=Counter({"b": 1}),
     )
 
-    centroid_empty = retrieval._score_summary("hybrid_centroid", query, empty_summary, max_block_component_size=4)
-    centroid_conflict = retrieval._score_summary(
+    centroid_empty = retrieval.score_summary("hybrid_centroid", query, empty_summary, max_block_component_size=4)
+    centroid_conflict = retrieval.score_summary(
         "hybrid_centroid",
         query,
         conflicting_summary,
         max_block_component_size=4,
     )
-    exemplar_empty = retrieval._score_summary("hybrid_exemplar_4", query, empty_summary, max_block_component_size=4)
-    exemplar_conflict = retrieval._score_summary(
+    exemplar_empty = retrieval.score_summary("hybrid_exemplar_4", query, empty_summary, max_block_component_size=4)
+    exemplar_conflict = retrieval.score_summary(
         "hybrid_exemplar_4",
         query,
         conflicting_summary,
@@ -95,8 +37,8 @@ def test_hybrid_scores_penalize_middle_initial_conflict():
 
 
 def test_apply_hard_filters_uses_orcid_middle_and_year_rules():
-    query = _query_features(middle_initials=frozenset({"a"}), year=2000)
-    good = _cluster_summary(
+    query = build_query_features(middle_initials=frozenset({"a"}), year=2000)
+    good = build_cluster_summary(
         component_key="good",
         size=3,
         middle_initial_counts=Counter({"a": 1}),
@@ -104,7 +46,7 @@ def test_apply_hard_filters_uses_orcid_middle_and_year_rules():
         year_max=2002,
         year_mean=2000.0,
     )
-    middle_conflict = _cluster_summary(
+    middle_conflict = build_cluster_summary(
         component_key="middle_conflict",
         size=3,
         middle_initial_counts=Counter({"b": 1}),
@@ -112,7 +54,7 @@ def test_apply_hard_filters_uses_orcid_middle_and_year_rules():
         year_max=2002,
         year_mean=2000.0,
     )
-    year_conflict = _cluster_summary(
+    year_conflict = build_cluster_summary(
         component_key="year_conflict",
         size=3,
         middle_initial_counts=Counter(),
@@ -121,24 +63,91 @@ def test_apply_hard_filters_uses_orcid_middle_and_year_rules():
         year_mean=1905.0,
     )
 
-    filtered, stats = retrieval._apply_hard_filters(query, [good, middle_conflict, year_conflict])
+    filtered, stats = retrieval.apply_hard_filters(query, [good, middle_conflict, year_conflict])
 
     assert [summary.component_key for summary in filtered] == ["good"]
     assert stats["middle_initial_filter_applied"] == 1
     assert stats["year_range_filter_applied"] == 1
 
-    orcid_query = _query_features(orcid="orcid-1")
-    orcid_match = _cluster_summary(component_key="orcid", size=2, orcid_values=frozenset({"orcid-1"}))
-    non_match = _cluster_summary(component_key="other", size=2, orcid_values=frozenset({"orcid-2"}))
-    filtered_orcid, stats_orcid = retrieval._apply_hard_filters(orcid_query, [orcid_match, non_match])
+    orcid_query = build_query_features(orcid="orcid-1")
+    orcid_match = build_cluster_summary(component_key="orcid", size=2, orcid_values=frozenset({"orcid-1"}))
+    non_match = build_cluster_summary(component_key="other", size=2, orcid_values=frozenset({"orcid-2"}))
+    filtered_orcid, stats_orcid = retrieval.apply_hard_filters(orcid_query, [orcid_match, non_match])
 
     assert [summary.component_key for summary in filtered_orcid] == ["orcid"]
     assert stats_orcid["orcid_filter_applied"] == 1
 
 
+def test_load_dataset_can_disable_orcid(monkeypatch):
+    captured_kwargs = {}
+
+    def _fake_anddata(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(runtime_context=SimpleNamespace(resolved_backend="rust"), specter_embeddings={})
+
+    monkeypatch.setattr(retrieval, "_resolve_dataset_file", lambda *args: f"{args[1]}_{args[2]}")
+    monkeypatch.setattr(retrieval, "_resolve_specter_file", lambda *_args: "specter.pickle")
+    monkeypatch.setattr(retrieval, "ANDData", _fake_anddata)
+
+    dataset = retrieval._load_dataset("root", "dummy", n_jobs=2, use_orcid_id=False)
+
+    assert dataset.runtime_context.resolved_backend == "rust"
+    assert captured_kwargs["use_orcid_id"] is False
+    assert captured_kwargs["specter_embeddings"] == "specter.pickle"
+
+
+def test_orcid_disabled_query_features_strip_orcid_and_skip_filters(monkeypatch):
+    monkeypatch.setattr(retrieval, "_signature_name_parts_for_subblocking", lambda signature: ("alice", "beth"))
+    monkeypatch.setattr(retrieval, "_signature_coauthor_blocks_for_specter", lambda signature, dataset: [])
+    monkeypatch.setattr(retrieval, "_signature_affiliation_feature_keys", lambda signature: [])
+    monkeypatch.setattr(retrieval, "_get_specter_vector", lambda dataset, paper_id: None)
+
+    dataset = SimpleNamespace(
+        signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid="0000-0001")},
+        papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+    )
+
+    enabled = retrieval.extract_query_features(dataset, "s1", orcid_enabled=True)
+    disabled = retrieval.extract_query_features(dataset, "s1", orcid_enabled=False)
+
+    assert enabled.orcid == "0000-0001"
+    assert disabled.orcid is None
+    assert retrieval.mask_query_features(enabled, "full", orcid_enabled=False).orcid is None
+    assert retrieval.mask_query_features(enabled, "initial_only", orcid_enabled=False).orcid is None
+
+    matching = build_cluster_summary(component_key="matching", size=2, orcid_values=frozenset({"0000-0001"}))
+    non_matching = build_cluster_summary(component_key="other", size=2, orcid_values=frozenset({"0000-0002"}))
+    filtered, stats = retrieval.apply_hard_filters(disabled, [matching, non_matching])
+
+    assert [summary.component_key for summary in filtered] == ["matching", "other"]
+    assert stats["orcid_filter_applied"] == 0
+
+
+def test_extract_query_features_cache_keeps_canonical_orcid_across_modes(monkeypatch):
+    monkeypatch.setattr(retrieval, "_signature_name_parts_for_subblocking", lambda signature: ("alice", "beth"))
+    monkeypatch.setattr(retrieval, "_signature_coauthor_blocks_for_specter", lambda signature, dataset: [])
+    monkeypatch.setattr(retrieval, "_signature_affiliation_feature_keys", lambda signature: [])
+    monkeypatch.setattr(retrieval, "_get_specter_vector", lambda dataset, paper_id: None)
+
+    dataset = SimpleNamespace(
+        signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid="0000-0001")},
+        papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+    )
+    feature_cache = {}
+
+    disabled = retrieval.extract_query_features(dataset, "s1", feature_cache=feature_cache, orcid_enabled=False)
+    enabled = retrieval.extract_query_features(dataset, "s1", feature_cache=feature_cache, orcid_enabled=True)
+    disabled_again = retrieval.extract_query_features(dataset, "s1", feature_cache=feature_cache, orcid_enabled=False)
+
+    assert disabled.orcid is None
+    assert enabled.orcid == "0000-0001"
+    assert disabled_again.orcid is None
+    assert feature_cache["s1"].orcid == "0000-0001"
+
+
 def test_documented_baselines_do_not_add_hidden_side_signals():
-    query = _query_features(has_affiliations=True)
-    no_coauthor = _cluster_summary(component_key="no_coauthor", size=2)
+    query = build_query_features(has_affiliations=True)
+    no_coauthor = build_cluster_summary(component_key="no_coauthor", size=2)
     affiliation_only = retrieval.ClusterSummary(
         component_key="affiliation_only",
         cluster_id="affiliation_only",
@@ -159,22 +168,22 @@ def test_documented_baselines_do_not_add_hidden_side_signals():
     )
 
     assert (
-        retrieval._score_summary("coauthor_sparse", query, no_coauthor, max_block_component_size=10)
-        == retrieval._score_summary("coauthor_sparse", query, affiliation_only, max_block_component_size=10)
+        retrieval.score_summary("coauthor_sparse", query, no_coauthor, max_block_component_size=10)
+        == retrieval.score_summary("coauthor_sparse", query, affiliation_only, max_block_component_size=10)
         == 0.0
     )
     assert (
-        retrieval._score_summary("specter_centroid", query, no_coauthor, max_block_component_size=10)
-        == retrieval._score_summary("specter_centroid", query, affiliation_only, max_block_component_size=10)
+        retrieval.score_summary("specter_centroid", query, no_coauthor, max_block_component_size=10)
+        == retrieval.score_summary("specter_centroid", query, affiliation_only, max_block_component_size=10)
         == 0.0
     )
 
 
 def test_materialized_signature_count_uses_residual_summary_sizes():
     ranked_summaries = [
-        _cluster_summary(component_key="c1", size=4),
-        _cluster_summary(component_key="c2", size=3),
-        _cluster_summary(component_key="c3", size=2),
+        build_cluster_summary(component_key="c1", size=4),
+        build_cluster_summary(component_key="c2", size=3),
+        build_cluster_summary(component_key="c3", size=2),
     ]
 
     assert retrieval._materialized_signature_count(ranked_summaries, 1) == 4
@@ -182,8 +191,8 @@ def test_materialized_signature_count_uses_residual_summary_sizes():
 
 
 def test_build_query_cases_counts_block_buckets_once_per_block(monkeypatch):
-    dummy_features = _query_features()
-    monkeypatch.setattr(retrieval, "_extract_query_features", lambda dataset, signature_id, **_: dummy_features)
+    dummy_features = build_query_features()
+    monkeypatch.setattr(retrieval, "extract_query_features", lambda dataset, signature_id, **_: dummy_features)
 
     dataset = SimpleNamespace(
         clusters={
@@ -213,13 +222,13 @@ def test_build_query_cases_counts_block_buckets_once_per_block(monkeypatch):
 
 def test_build_query_cases_uses_signature_level_census_and_sampling_view(monkeypatch):
     feature_by_signature = {
-        "singleton": _query_features(has_full_first=True),
-        "eligible_a": _query_features(has_coauthors=True),
-        "eligible_b": _query_features(),
+        "singleton": build_query_features(has_full_first=True),
+        "eligible_a": build_query_features(has_coauthors=True),
+        "eligible_b": build_query_features(),
     }
     monkeypatch.setattr(
         retrieval,
-        "_extract_query_features",
+        "extract_query_features",
         lambda dataset, signature_id, **_: feature_by_signature[signature_id],
     )
 
@@ -266,7 +275,7 @@ def test_extract_query_features_drops_empty_coauthor_blocks(monkeypatch):
         papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
     )
 
-    features = retrieval._extract_query_features(dataset, "s1")
+    features = retrieval.extract_query_features(dataset, "s1")
 
     assert features.coauthor_blocks == frozenset({"a smith"})
     assert features.has_coauthors is True
@@ -371,6 +380,7 @@ def test_build_summary_payload_reports_candidate_floor_slice():
         n_jobs=1,
         sampling_query_view="initial_only_sparse_metadata",
         signature_budgets=[25, 50],
+        disable_orcid_id=True,
     )
 
     summary = retrieval._build_summary_payload(args=args, all_rows=rows, diagnostics={})
@@ -383,6 +393,7 @@ def test_build_summary_payload_reports_candidate_floor_slice():
     assert (
         summary["overall"]["hybrid_centroid::initial_only"]["materialized_signature_fraction"]["5"]["mean"] == 0.833333
     )
+    assert summary["config"]["orcid_enabled"] is False
 
 
 def test_failure_and_census_artifact_helpers():

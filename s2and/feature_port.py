@@ -464,31 +464,13 @@ def _signature_name_counts_overlay_payload_from_dataset(dataset: Any) -> tuple[i
     return signatures_total, len(payload), payload
 
 
-def _expected_normalization_version() -> str:
-    configured = os.environ.get(NORMALIZATION_VERSION_ENV, DEFAULT_NORMALIZATION_VERSION).strip()
-    return configured or DEFAULT_NORMALIZATION_VERSION
-
-
-def _allow_normalization_version_mismatch() -> bool:
-    return parse_bool_env(ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV, default=False)
-
-
-def _build_rust_featurizer_from_json_paths(
+def _resolve_json_ingest_name_counts_plan(
     dataset: Any,
-    num_threads: int,
     *,
+    rust_featurizer_cls: Any,
     signature_name_counts_payload: dict[str, Any] | None = None,
-) -> tuple[Any, dict[str, float]]:
-    pre_build_start = time.perf_counter()
-    rust_module = _require_rust_runtime()
-    rust_featurizer_cls = getattr(rust_module, "RustFeaturizer", None)
-    if rust_featurizer_cls is None or not hasattr(rust_featurizer_cls, "from_json_paths"):
-        raise RuntimeError("s2and_rust extension does not expose RustFeaturizer.from_json_paths")
-
-    signatures_path = getattr(dataset, "signatures_path", None)
-    papers_path = getattr(dataset, "papers_path", None)
-    if not signatures_path or not papers_path:
-        raise RuntimeError("Dataset does not expose signatures_path/papers_path for Rust JSON ingest")
+) -> dict[str, Any]:
+    """Resolve the name-count source plan for Rust JSON ingest."""
 
     rust_can_overlay_signature_counts = hasattr(rust_featurizer_cls, "update_signature_name_counts")
     if signature_name_counts_payload is not None:
@@ -518,13 +500,82 @@ def _build_rust_featurizer_from_json_paths(
     elif not dataset_has_signature_counts and artifact_configured:
         name_counts_source = "artifact"
         name_counts_path = configured_name_counts_path
-    elif dataset_has_signature_counts and not rust_can_overlay_signature_counts:
+    return {
+        "dataset_signature_counts_payload": dataset_signature_counts_payload,
+        "signatures_total": int(signatures_total),
+        "signatures_with_counts": int(signatures_with_counts),
+        "dataset_has_signature_counts": bool(dataset_has_signature_counts),
+        "artifact_configured": bool(artifact_configured),
+        "rust_can_overlay_signature_counts": bool(rust_can_overlay_signature_counts),
+        "name_counts_source": str(name_counts_source),
+        "name_counts_path": name_counts_path,
+    }
+
+
+def inspect_json_ingest_name_counts_source(
+    dataset: Any,
+    *,
+    signature_name_counts_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Inspect the name-count source Rust JSON ingest would use for ``dataset``."""
+
+    rust_module = _require_rust_runtime()
+    rust_featurizer_cls = getattr(rust_module, "RustFeaturizer", None)
+    if rust_featurizer_cls is None:
+        raise RuntimeError("s2and_rust extension does not expose RustFeaturizer")
+    return _resolve_json_ingest_name_counts_plan(
+        dataset,
+        rust_featurizer_cls=rust_featurizer_cls,
+        signature_name_counts_payload=signature_name_counts_payload,
+    )
+
+
+def _expected_normalization_version() -> str:
+    configured = os.environ.get(NORMALIZATION_VERSION_ENV, DEFAULT_NORMALIZATION_VERSION).strip()
+    return configured or DEFAULT_NORMALIZATION_VERSION
+
+
+def _allow_normalization_version_mismatch() -> bool:
+    return parse_bool_env(ALLOW_NORMALIZATION_VERSION_MISMATCH_ENV, default=False)
+
+
+def _build_rust_featurizer_from_json_paths(
+    dataset: Any,
+    num_threads: int,
+    *,
+    signature_name_counts_payload: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, float]]:
+    pre_build_start = time.perf_counter()
+    rust_module = _require_rust_runtime()
+    rust_featurizer_cls = getattr(rust_module, "RustFeaturizer", None)
+    if rust_featurizer_cls is None or not hasattr(rust_featurizer_cls, "from_json_paths"):
+        raise RuntimeError("s2and_rust extension does not expose RustFeaturizer.from_json_paths")
+
+    signatures_path = getattr(dataset, "signatures_path", None)
+    papers_path = getattr(dataset, "papers_path", None)
+    if not signatures_path or not papers_path:
+        raise RuntimeError("Dataset does not expose signatures_path/papers_path for Rust JSON ingest")
+
+    plan = _resolve_json_ingest_name_counts_plan(
+        dataset,
+        rust_featurizer_cls=rust_featurizer_cls,
+        signature_name_counts_payload=signature_name_counts_payload,
+    )
+    dataset_signature_counts_payload = plan["dataset_signature_counts_payload"]
+    signatures_total = int(plan["signatures_total"])
+    signatures_with_counts = int(plan["signatures_with_counts"])
+    dataset_has_signature_counts = bool(plan["dataset_has_signature_counts"])
+    artifact_configured = bool(plan["artifact_configured"])
+    rust_can_overlay_signature_counts = bool(plan["rust_can_overlay_signature_counts"])
+    name_counts_source = str(plan["name_counts_source"])
+    name_counts_path = plan["name_counts_path"]
+    if dataset_has_signature_counts and not rust_can_overlay_signature_counts:
         logger.warning(
             "Rust JSON ingest: extension lacks update_signature_name_counts; "
             "cannot use precomputed signature name counts from dataset. "
             "name-count features will be NaN."
         )
-    elif not dataset_has_signature_counts:
+    elif not dataset_has_signature_counts and name_counts_source == "none":
         logger.warning(
             "Rust JSON ingest: no signature name counts available and no name-count artifact selected; "
             "name-count features will be NaN."

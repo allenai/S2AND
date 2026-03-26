@@ -178,7 +178,12 @@ def _ordered_coauthors_for_signature(signature: "Signature", papers: dict[str, "
             signature.paper_id,
         )
         return []
-    return [author.author_name for author in paper.authors if author.position != signature.author_info_position]
+    # Rust JSON ingest can skip Python paper preprocessing, so `paper.authors` may still hold raw names here.
+    return [
+        normalize_text(author.author_name)
+        for author in paper.authors
+        if author.position != signature.author_info_position
+    ]
 
 
 def _python_signature_ngrams_batch(

@@ -204,3 +204,17 @@ def test_rust_json_ingest_uses_minimal_python_paper_preprocess():
     assert inference_paper.title_ngrams_chars is None
     assert train_paper.title_ngrams_words is not None
     assert inference_paper.title_ngrams_words is None
+
+
+def test_rust_inference_coauthor_fields_match_python():
+    with _temporary_env("S2AND_BACKEND", "python"):
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_inference_python", mode="inference")
+    with _temporary_env("S2AND_BACKEND", "rust"):
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_inference_rust", mode="inference")
+
+    assert set(dataset_python.signatures.keys()) == set(dataset_rust.signatures.keys())
+    for signature_id in dataset_python.signatures:
+        signature_python = dataset_python.signatures[signature_id]
+        signature_rust = dataset_rust.signatures[signature_id]
+        assert signature_python.author_info_coauthors == signature_rust.author_info_coauthors
+        assert signature_python.author_info_coauthor_blocks == signature_rust.author_info_coauthor_blocks

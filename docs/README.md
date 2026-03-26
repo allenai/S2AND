@@ -10,6 +10,7 @@ This folder contains internal design + operational notes for working on S2AND.
 - Rust optimization frontier / backlog: `docs/work_plan.md` (Backlog section)
 - Stage-wise memory telemetry + prediction model: `docs/stage_memory_estimates.md`
 - Subclustering (subblocking) for large blocks: `docs/subclustering.md`
+- Cluster-summary retrieval experiment plan (production incremental routing): `docs/cluster_retrieval_experiment.md`
 - Training paper preprocessing (Rust training-mode bypass): `docs/rust/runtime.md` (Training-mode deferred paper preprocessing section)
 - Artifact divergence map + format migration (Bundle 5): `docs/rust/artifact_divergence.md`
 - Threading and parallelism (incl. preprocessing defaults): `docs/threading.md`

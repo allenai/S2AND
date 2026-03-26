@@ -490,8 +490,9 @@ block_signatures = blocks[block_key]
 result = clusterer.predict_incremental(
     block_signatures,
     dataset,
-    batching_threshold=5000,       # subblock size cap for phase-split mode
-    total_ram_bytes=32 * 1024**3,  # explicit RAM budget (32 GB)
+    batching_threshold=5000,         # subblock size cap for phase-split mode
+    total_ram_bytes=32 * 1024**3,    # explicit RAM budget (32 GB)
+    max_chunk_pairs=50_000_000,      # Phase A chunk cap (None=use default, 0=unlimited)
 )
 
 clusters = result["clusters"]
@@ -539,6 +540,44 @@ result = clusterer.predict_incremental(
 
 If omitted, the runtime auto-detects RAM (cgroup limits first, then host probes) and applies two sequential reductions: first a **0.8× safety factor** on the detected total, then a **10% safety margin** (plus current RSS) is subtracted to compute the usable budget. Together these mean the effective budget is roughly 72% of detected RAM minus current process memory. You can always override with an explicit value — useful in containers where cgroup detection may return the host's total RAM instead of the container's limit.
 
+#### `max_chunk_pairs` — Phase A chunk size cap (pairs)
+
+Pass this to `predict()` or `predict_incremental()` to set an explicit hard cap on the Phase A chunk size (the number of signature pairs processed in one featurization batch). This overrides the default `PHASE_A_MAX_CHUNK_PAIRS_DEFAULT = 1_000_000`.
+
+```python
+# With predict_incremental
+result = clusterer.predict_incremental(
+    block_signatures,
+    dataset,
+    total_ram_bytes=200 * 1024**3,
+    max_chunk_pairs=50_000_000,
+)
+
+# With predict (when batching is enabled, affects single-letter subblocks)
+pred_clusters, _ = clusterer.predict(
+    block_dict,
+    dataset,
+    batching_threshold=5000,
+    total_ram_bytes=200 * 1024**3,
+    max_chunk_pairs=50_000_000,
+)
+```
+
+**Common values**:
+- `None` (default): Uses `PHASE_A_MAX_CHUNK_PAIRS_DEFAULT = 1_000_000`
+- `100_000_000`: 100M pairs
+- `50_000_000`: 50M pairs
+- `10_000_000`: 10M pairs
+- `0`: Unlimited
+
+The actual chunk size is the minimum of:
+1. Memory-budget-derived limit (always present — from explicit `total_ram_bytes` or auto-detected RAM)
+2. `max_chunk_pairs` cap (`PHASE_A_MAX_CHUNK_PAIRS_DEFAULT` = 1M when `None`, caller value when > 0, no cap when `0`)
+
+Use this when:
+- You want a hard cap regardless of detected RAM
+- You want to disable the cap (`0`) and rely purely on memory budget calculations
+
 #### `train_pairs_size` — number of training tuples
 
 Controls how many signature pairs are sampled for training the pairwise classifier (in `ANDData`). Each pair produces a feature vector held in memory, so this directly determines the size of the training feature matrix.
@@ -561,6 +600,7 @@ Lowering `train_pairs_size` reduces peak RAM during training at the cost of pote
 |---|---|---|
 | `train_pairs_size` | Training | Number of sampled pairs → size of feature matrix in RAM |
 | `total_ram_bytes` | Inference (incremental / Rust batch) | Chunk sizes and accumulator limits for memory-bounded featurization |
+| `max_chunk_pairs` | Inference (`predict` + `predict_incremental`) | Hard cap on Phase A chunk size; overrides `PHASE_A_MAX_CHUNK_PAIRS_DEFAULT` (1M) |
 | `batch_size` (on `Clusterer`, default `1_000_000`) | Inference (standard predict) | Max pairs featurized per chunk; lower = less peak RAM but slower |
 | `n_jobs` (on `ANDData` / `Clusterer`) | Both | Parallelism level; more jobs = more concurrent memory |
 | `batching_threshold` (on `predict` / `predict_incremental`) | Inference | Block-size cap before subblocking kicks in; controls per-block pair count |

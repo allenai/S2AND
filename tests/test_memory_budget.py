@@ -124,6 +124,36 @@ def test_compute_rust_batch_chunk_plan_respects_stage_budget():
     assert int(plan["predicted_stage_peak_bytes"]) >= int(plan["predicted_chunk_bytes"])
 
 
+def test_compute_rust_batch_chunk_plan_base_chunk_pairs_zero_disables_floor():
+    plan = memory_budget.compute_rust_batch_chunk_plan(
+        num_features=1_000,
+        total_pairs=20_000,
+        total_ram_bytes=1_000_000,
+        stage_budget_fraction=0.10,
+        base_chunk_pairs=0,
+        row_overhead_bytes=128,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (200_000, "rss:test"),
+    )
+    # Same setup as test_compute_rust_batch_chunk_plan_respects_stage_budget but
+    # base_chunk_pairs=0 means the floor is disabled. chunk_pairs should equal
+    # min(total_pairs, derived_chunk_pairs) — the base floor is not a candidate.
+    assert int(plan["chunk_pairs"]) == 8  # still budget-limited, same as before
+    # Now verify with generous RAM so derived_chunk_pairs > total_pairs:
+    # chunk_pairs should equal total_pairs (not clamped by a base floor).
+    plan_big = memory_budget.compute_rust_batch_chunk_plan(
+        num_features=1,
+        total_pairs=500,
+        total_ram_bytes=10_000_000_000,
+        base_chunk_pairs=0,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+    assert int(plan_big["chunk_pairs"]) == 500  # total_pairs is the only limit
+
+
 def test_summarize_prediction_accuracy_flags_underprediction():
     summary = memory_budget.summarize_prediction_accuracy(
         stage_name="test_stage",

@@ -16,7 +16,7 @@ DEFAULT_SAFETY_MARGIN_FRACTION = 0.10
 INCREMENTAL_ACCUMULATOR_ENTRY_BYTES = 200
 
 # Rust batch featurization defaults.
-RUST_BATCH_BASE_CHUNK_PAIRS = 10_000
+RUST_BATCH_BASE_CHUNK_PAIRS = 0  # Disabled - rely on memory-budget-derived limit
 RUST_BATCH_STAGE_BUDGET_FRACTION = 0.25
 RUST_BATCH_ROW_OVERHEAD_BYTES = 128
 # Bundle 4 calibration (4 workload shapes: 37, 37, 49, 49 bytes/row); P95 = 49; 52 provides ~6% margin.
@@ -559,12 +559,15 @@ def compute_rust_batch_chunk_plan(
     chunk_feature_count = max(1, selected_feature_count_bounded + nameless_feature_count_bounded)
     bytes_per_pair_row = max(1, chunk_feature_count * 8 + row_overhead_bytes)
     derived_chunk_pairs = max(1, stage_budget_bytes // bytes_per_pair_row)
-    bounded_base_chunk_pairs = max(1, base_chunk_pairs)
     bounded_total_pairs = max(1, total_pairs)
     bounded_total_rows = bounded_total_pairs
     if total_rows is not None:
         bounded_total_rows = max(1, total_rows)
-    chunk_pairs = max(1, min(bounded_total_pairs, bounded_base_chunk_pairs, derived_chunk_pairs))
+    # base_chunk_pairs <= 0 means disabled; only include it when positive.
+    candidates = [bounded_total_pairs, derived_chunk_pairs]
+    if base_chunk_pairs > 0:
+        candidates.append(base_chunk_pairs)
+    chunk_pairs = max(1, min(candidates))
 
     predicted_chunk_bytes = chunk_pairs * bytes_per_pair_row
     predicted_selected_features_bytes = bounded_total_rows * (selected_feature_count_bounded * 8)
@@ -591,7 +594,7 @@ def compute_rust_batch_chunk_plan(
         safety_margin_bytes=snapshot.safety_margin_bytes,
         stage_budget_fraction=float(stage_budget_fraction),
         stage_budget_bytes=stage_budget_bytes,
-        base_chunk_pairs=bounded_base_chunk_pairs,
+        base_chunk_pairs=max(0, base_chunk_pairs),
         row_overhead_bytes=max(0, row_overhead_bytes),
         persistent_row_overhead_bytes=max(0, persistent_row_overhead_bytes),
         fixed_overhead_bytes=predicted_fixed_overhead_bytes,

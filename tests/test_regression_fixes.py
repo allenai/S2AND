@@ -27,6 +27,40 @@ def _load_script_module(relative_path: str, module_name: str):
     return module
 
 
+def _subblocking_signature(first_name: str, *, middle_name: str = "", orcid: str | None = None):
+    return SimpleNamespace(
+        author_info_first_normalized_without_apostrophe=first_name,
+        author_info_middle_normalized_without_apostrophe=middle_name,
+        author_info_first=first_name,
+        author_info_middle=middle_name,
+        author_info_orcid=orcid,
+    )
+
+
+def _run_make_subblocks_with_fixed_first_pass(monkeypatch, signatures, first_pass_output, *, maximum_size: int):
+    anddata = SimpleNamespace(signatures=signatures, random_seed=0)
+    call_count = {"value": 0}
+
+    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
+        del names, sig_ids, maximum_size, starting_k
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            return {key: np.array(value) for key, value in first_pass_output.items()}, {}
+        raise AssertionError("Unexpected extra call to subdivide_helper")
+
+    def fail_if_specter_called(*_args, **_kwargs):
+        raise AssertionError("cluster_with_specter should not be called in this regression test")
+
+    monkeypatch.setattr(subblocking_module, "subdivide_helper", fake_subdivide_helper)
+    monkeypatch.setattr(subblocking_module, "cluster_with_specter", fail_if_specter_called)
+    return subblocking_module.make_subblocks(
+        list(signatures),
+        anddata,
+        maximum_size=maximum_size,
+        first_k_letter_counts_sorted={},
+    )
+
+
 def test_sampling_balanced_homonym_synonym_respects_sample_size():
     all_pairs = [
         ("a", "b", 0),
@@ -114,6 +148,88 @@ def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypa
 
     output = subblocking_module.make_subblocks(["s1"], anddata, maximum_size=2, first_k_letter_counts_sorted={})
     assert output == {"ab|middle=cd": ["s1"]}
+
+
+def test_make_subblocks_skips_orcid_merge_when_all_targets_are_full(monkeypatch):
+    signatures = {
+        "s1": _subblocking_signature("aa", orcid="O1"),
+        "s2": _subblocking_signature("aa", orcid="O2"),
+        "s3": _subblocking_signature("bb", orcid="O1"),
+        "s4": _subblocking_signature("bb"),
+        "s5": _subblocking_signature("cc", orcid="O2"),
+        "s6": _subblocking_signature("cc"),
+    }
+
+    output = _run_make_subblocks_with_fixed_first_pass(
+        monkeypatch,
+        signatures,
+        {
+            "a": ["s1", "s2"],
+            "b": ["s3", "s4"],
+            "c": ["s5", "s6"],
+        },
+        maximum_size=2,
+    )
+
+    assert sorted(sorted(signature_ids) for signature_ids in output.values()) == [
+        ["s1", "s2"],
+        ["s3", "s4"],
+        ["s5", "s6"],
+    ]
+    assert all(len(signature_ids) <= 2 for signature_ids in output.values())
+
+
+def test_make_subblocks_skips_orcid_merge_without_enough_capacity(monkeypatch):
+    signatures = {
+        "s1": _subblocking_signature("aa", orcid="O1"),
+        "x1": _subblocking_signature("aa"),
+        "s2": _subblocking_signature("bb", orcid="O1"),
+        "x2": _subblocking_signature("bb"),
+        "s3": _subblocking_signature("cc", orcid="O1"),
+        "x3": _subblocking_signature("cc"),
+    }
+
+    output = _run_make_subblocks_with_fixed_first_pass(
+        monkeypatch,
+        signatures,
+        {
+            "a": ["s1", "x1"],
+            "b": ["s2", "x2"],
+            "c": ["s3", "x3"],
+        },
+        maximum_size=3,
+    )
+
+    assert sorted(sorted(signature_ids) for signature_ids in output.values()) == [
+        ["s1", "x1"],
+        ["s2", "x2"],
+        ["s3", "x3"],
+    ]
+    assert all(len(signature_ids) <= 3 for signature_ids in output.values())
+
+
+def test_make_subblocks_merges_orcid_when_target_has_capacity(monkeypatch):
+    signatures = {
+        "s1": _subblocking_signature("aa", orcid="O1"),
+        "x1": _subblocking_signature("aa"),
+        "s2": _subblocking_signature("bb", orcid="O1"),
+        "s3": _subblocking_signature("cc", orcid="O1"),
+    }
+
+    output = _run_make_subblocks_with_fixed_first_pass(
+        monkeypatch,
+        signatures,
+        {
+            "a": ["s1", "x1"],
+            "b": ["s2"],
+            "c": ["s3"],
+        },
+        maximum_size=4,
+    )
+
+    target_subblock_id = next(subblock_id for subblock_id, sig_ids in output.items() if "s1" in sig_ids)
+    assert set(output[target_subblock_id]) == {"s1", "x1", "s2", "s3"}
+    assert all(len(signature_ids) <= 4 for signature_ids in output.values())
 
 
 def test_transform_signature_file_handles_empty_email_field(tmp_path):

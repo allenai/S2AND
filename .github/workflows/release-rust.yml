@@ -32,7 +32,7 @@ jobs:
       publish_rust: ${{ steps.detect.outputs.publish_rust }}
       force_build: ${{ steps.detect.outputs.force_build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -167,9 +167,9 @@ jobs:
     needs: [detect-versions]
     if: needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -179,7 +179,7 @@ jobs:
           python -m pip install build
           python -m build --sdist --wheel --outdir dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and
           path: dist/*
@@ -195,9 +195,9 @@ jobs:
         py: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.py }}
 
@@ -209,7 +209,7 @@ jobs:
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and-rust-windows-py${{ matrix.py }}
           path: s2and_rust/dist/*
@@ -225,9 +225,9 @@ jobs:
         py: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.py }}
 
@@ -244,7 +244,7 @@ jobs:
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and-rust-macos-universal2-py${{ matrix.py }}
           path: s2and_rust/dist/*
@@ -270,7 +270,7 @@ jobs:
             manylinux: "musllinux_1_2"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build wheels (manylinux/musllinux)
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
@@ -284,7 +284,7 @@ jobs:
             -i python3.10 -i python3.11 -i python3.12
           working-directory: s2and_rust
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and-rust-linux-${{ matrix.platform.name }}
           path: s2and_rust/dist/*
@@ -295,7 +295,7 @@ jobs:
     needs: [detect-versions]
     if: needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build sdist
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
@@ -305,7 +305,7 @@ jobs:
           args: --out dist
           working-directory: s2and_rust
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-s2and-rust-sdist
           path: s2and_rust/dist/*
@@ -324,7 +324,7 @@ jobs:
 
     steps:
       - name: Download s2and dists
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dist-s2and
           path: dist/s2and
@@ -346,7 +346,7 @@ jobs:
 
     steps:
       - name: Download s2and-rust dists
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: dist-s2and-rust-*
           merge-multiple: true

@@ -382,9 +382,10 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_da
         use_s2_clusters=False,
         incremental_dont_use_cluster_seeds=False,
         runtime_context=None,
+        total_ram_bytes=None,
     ):
         del self, dataset, dists, cluster_model_params, partial_supervision
-        del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context
+        del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context, total_ram_bytes
         key = next(iter(block_dict))
         observed_order.append(key)
         return {f"cluster_{len(observed_order)}": list(block_dict[key])}, None

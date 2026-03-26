@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -66,7 +67,7 @@ class TestData(unittest.TestCase):
 
 
 def test_rust_prewarm_happens_before_rss_sampling(monkeypatch):
-    dataset = SimpleNamespace(name="dummy", mode="train", compute_reference_features=False)
+    dataset = cast(ANDData, SimpleNamespace(name="dummy", mode="train", compute_reference_features=False))
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",

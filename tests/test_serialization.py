@@ -89,7 +89,9 @@ def test_load_pickle_replays_warning_when_mapping_does_not_match(tmp_path):
 
     inconsistent_warnings = [w for w in caught if isinstance(w.message, InconsistentVersionWarning)]
     assert len(inconsistent_warnings) == 1
-    assert inconsistent_warnings[0].message.estimator_name == "LabelEncoder"
+    warning_message = inconsistent_warnings[0].message
+    assert isinstance(warning_message, InconsistentVersionWarning)
+    assert warning_message.estimator_name == "LabelEncoder"
 
 
 def test_load_pickle_replays_non_label_encoder_inconsistent_warning(tmp_path):
@@ -108,7 +110,9 @@ def test_load_pickle_replays_non_label_encoder_inconsistent_warning(tmp_path):
 
     inconsistent_warnings = [w for w in caught if isinstance(w.message, InconsistentVersionWarning)]
     assert len(inconsistent_warnings) == 1
-    assert inconsistent_warnings[0].message.estimator_name == "RandomForestClassifier"
+    warning_message = inconsistent_warnings[0].message
+    assert isinstance(warning_message, InconsistentVersionWarning)
+    assert warning_message.estimator_name == "RandomForestClassifier"
 
 
 def test_load_pickle_attaches_name_count_feature_contract_for_legacy_model(tmp_path):

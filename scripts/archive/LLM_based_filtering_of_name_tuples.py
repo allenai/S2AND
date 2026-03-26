@@ -7,8 +7,8 @@ import unicodedata
 import urllib.request
 from itertools import islice
 
-from google import genai
-from google.genai import types
+from google import genai  # type: ignore
+from google.genai import types  # type: ignore
 
 from s2and.consts import CONFIG
 from s2and.text import normalize_text

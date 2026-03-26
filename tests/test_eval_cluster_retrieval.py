@@ -3,8 +3,10 @@ from __future__ import annotations
 from argparse import Namespace
 from collections import Counter
 from types import SimpleNamespace
+from typing import cast
 
 import scripts.eval_cluster_retrieval as retrieval
+from s2and.data import ANDData
 from tests.helpers import build_cluster_summary, build_query_features
 
 
@@ -102,9 +104,12 @@ def test_orcid_disabled_query_features_strip_orcid_and_skip_filters(monkeypatch)
     monkeypatch.setattr(retrieval, "_signature_affiliation_feature_keys", lambda signature: [])
     monkeypatch.setattr(retrieval, "_get_specter_vector", lambda dataset, paper_id: None)
 
-    dataset = SimpleNamespace(
-        signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid="0000-0001")},
-        papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid="0000-0001")},
+            papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+        ),
     )
 
     enabled = retrieval.extract_query_features(dataset, "s1", orcid_enabled=True)
@@ -129,9 +134,12 @@ def test_extract_query_features_cache_keeps_canonical_orcid_across_modes(monkeyp
     monkeypatch.setattr(retrieval, "_signature_affiliation_feature_keys", lambda signature: [])
     monkeypatch.setattr(retrieval, "_get_specter_vector", lambda dataset, paper_id: None)
 
-    dataset = SimpleNamespace(
-        signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid="0000-0001")},
-        papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid="0000-0001")},
+            papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+        ),
     )
     feature_cache = {}
 
@@ -194,18 +202,21 @@ def test_build_query_cases_counts_block_buckets_once_per_block(monkeypatch):
     dummy_features = build_query_features()
     monkeypatch.setattr(retrieval, "extract_query_features", lambda dataset, signature_id, **_: dummy_features)
 
-    dataset = SimpleNamespace(
-        clusters={
-            "c1": {"signature_ids": ["s1", "s2"]},
-            "c2": {"signature_ids": ["s3", "s4"]},
-        },
-        signature_to_block={
-            "s1": "block-a",
-            "s2": "block-a",
-            "s3": "block-a",
-            "s4": "block-a",
-        },
-        signatures={signature_id: object() for signature_id in ["s1", "s2", "s3", "s4"]},
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            clusters={
+                "c1": {"signature_ids": ["s1", "s2"]},
+                "c2": {"signature_ids": ["s3", "s4"]},
+            },
+            signature_to_block={
+                "s1": "block-a",
+                "s2": "block-a",
+                "s3": "block-a",
+                "s4": "block-a",
+            },
+            signatures={signature_id: object() for signature_id in ["s1", "s2", "s3", "s4"]},
+        ),
     )
 
     _cases, census, _block_to_component_keys, _components = retrieval._build_query_cases(
@@ -232,17 +243,20 @@ def test_build_query_cases_uses_signature_level_census_and_sampling_view(monkeyp
         lambda dataset, signature_id, **_: feature_by_signature[signature_id],
     )
 
-    dataset = SimpleNamespace(
-        clusters={
-            "c1": {"signature_ids": ["eligible_a", "eligible_b"]},
-            "c2": {"signature_ids": ["singleton"]},
-        },
-        signature_to_block={
-            "eligible_a": "block-a",
-            "eligible_b": "block-a",
-            "singleton": "block-b",
-        },
-        signatures={signature_id: object() for signature_id in feature_by_signature},
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            clusters={
+                "c1": {"signature_ids": ["eligible_a", "eligible_b"]},
+                "c2": {"signature_ids": ["singleton"]},
+            },
+            signature_to_block={
+                "eligible_a": "block-a",
+                "eligible_b": "block-a",
+                "singleton": "block-b",
+            },
+            signatures={signature_id: object() for signature_id in feature_by_signature},
+        ),
     )
 
     cases, census, _block_to_component_keys, _components = retrieval._build_query_cases(
@@ -270,9 +284,12 @@ def test_extract_query_features_drops_empty_coauthor_blocks(monkeypatch):
     monkeypatch.setattr(retrieval, "_signature_affiliation_feature_keys", lambda signature: ["lab"])
     monkeypatch.setattr(retrieval, "_get_specter_vector", lambda dataset, paper_id: None)
 
-    dataset = SimpleNamespace(
-        signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid=None)},
-        papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            signatures={"s1": SimpleNamespace(paper_id="p1", author_info_orcid=None)},
+            papers={"p1": SimpleNamespace(venue=None, journal_name=None, year=None)},
+        ),
     )
 
     features = retrieval.extract_query_features(dataset, "s1")

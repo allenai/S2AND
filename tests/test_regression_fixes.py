@@ -3,6 +3,7 @@ import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypedDict, cast
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ import pytest
 import s2and.eval as eval_module
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
+from s2and.data import ANDData
 from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
@@ -17,6 +19,17 @@ from s2and.runtime import RuntimeContext
 from s2and.sampling import sampling
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class _ConstraintCapture(TypedDict):
+    featurizer_use_cache: bool | None
+    batch_use_cache: bool | None
+    batch_calls: int
+    fallback_calls: int
+
+
+def _as_anddata(dataset: object) -> ANDData:
+    return cast(ANDData, dataset)
 
 
 def _load_script_module(relative_path: str, module_name: str):
@@ -117,7 +130,7 @@ def test_incremental_cluster_eval_val_uses_val_block_for_pairwise_metrics(monkey
 
     dataset = DummyDataset()
     clusterer = DummyClusterer()
-    incremental_cluster_eval(dataset, clusterer, split="val")
+    incremental_cluster_eval(cast(ANDData, dataset), cast(Clusterer, clusterer), split="val")
 
     assert len(captured_test_blocks) == 2
     assert captured_test_blocks[0] == {"b": ["s_val"]}
@@ -305,18 +318,20 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
         def __init__(self, first_name):
             self.author_info_first_normalized_without_apostrophe = first_name
 
-    dataset = SimpleNamespace(
-        signatures={
-            "m1": Signature("alex"),
-            "m2": Signature("alex"),
-            "m3": Signature("alex"),
-            "m4": Signature("alex"),
-            "m5": Signature("alex"),
-            "m6": Signature("alex"),
-            "s1": Signature("a"),
-            "s2": Signature("a"),
-        },
-        cluster_seeds_require={},
+    dataset = _as_anddata(
+        SimpleNamespace(
+            signatures={
+                "m1": Signature("alex"),
+                "m2": Signature("alex"),
+                "m3": Signature("alex"),
+                "m4": Signature("alex"),
+                "m5": Signature("alex"),
+                "m6": Signature("alex"),
+                "s1": Signature("a"),
+                "s2": Signature("a"),
+            },
+            cluster_seeds_require={},
+        )
     )
 
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
@@ -386,15 +401,17 @@ def test_clusterer_predict_optionally_skips_final_rust_seed_restore(
             self.author_info_first_normalized_without_apostrophe = first_name
 
     original_cluster_seeds = {"orig_seed": "orig_cluster"}
-    dataset = SimpleNamespace(
-        signatures={
-            "m1": Signature("alex"),
-            "m2": Signature("alex"),
-            "s1": Signature("a"),
-            "s2": Signature("a"),
-        },
-        cluster_seeds_require=dict(original_cluster_seeds),
-        cluster_seeds_disallow=set(),
+    dataset = _as_anddata(
+        SimpleNamespace(
+            signatures={
+                "m1": Signature("alex"),
+                "m2": Signature("alex"),
+                "s1": Signature("a"),
+                "s2": Signature("a"),
+            },
+            cluster_seeds_require=dict(original_cluster_seeds),
+            cluster_seeds_disallow=set(),
+        )
     )
 
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
@@ -469,7 +486,7 @@ def test_clusterer_predict_optionally_skips_final_rust_seed_restore(
 
 
 def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
-    dataset = SimpleNamespace()
+    dataset = _as_anddata(SimpleNamespace())
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
@@ -486,7 +503,7 @@ def test_distance_matrix_helper_uses_indexed_constraint_api(monkeypatch):
         def get_constraints_matrix_indexed(self, *_args, **_kwargs):
             return [None]
 
-    captured = {
+    captured: _ConstraintCapture = {
         "featurizer_use_cache": None,
         "batch_use_cache": None,
         "batch_calls": 0,
@@ -528,10 +545,10 @@ def test_make_distance_matrices_rust_blockwise_uses_indexed_constraint_api(monke
     from s2and import feature_port
 
     if not feature_port.rust_featurizer_available():
-        pytest.skip("s2and_rust extension is unavailable")
+        raise pytest.skip.Exception("s2and_rust extension is unavailable")
 
     monkeypatch.setenv("S2AND_BACKEND", "rust")
-    dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set())
+    dataset = _as_anddata(SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set()))
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
@@ -549,7 +566,7 @@ def test_make_distance_matrices_rust_blockwise_uses_indexed_constraint_api(monke
         def get_constraints_matrix_indexed(self, *_args, **_kwargs):
             return [None]
 
-    captured = {
+    captured: _ConstraintCapture = {
         "featurizer_use_cache": None,
         "batch_use_cache": None,
         "batch_calls": 0,
@@ -621,10 +638,12 @@ def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
 
     monkeypatch.setattr(model_module, "update_rust_cluster_seeds", fake_update)
 
-    dataset = SimpleNamespace(
-        cluster_seeds_require={},
-        cluster_seeds_disallow=set(),
-        _cluster_seeds_version=1,
+    dataset = _as_anddata(
+        SimpleNamespace(
+            cluster_seeds_require={},
+            cluster_seeds_disallow=set(),
+            _cluster_seeds_version=1,
+        )
     )
     runtime_context = RuntimeContext(
         operation="constraints",
@@ -663,10 +682,12 @@ def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
 
     monkeypatch.setattr(model_module, "update_rust_cluster_seeds", fake_update)
 
-    dataset = SimpleNamespace(
-        cluster_seeds_require={"s1": "c1", "s2": "c1"},
-        cluster_seeds_disallow={("s1", "s3")},
-        _cluster_seeds_version=1,
+    dataset = _as_anddata(
+        SimpleNamespace(
+            cluster_seeds_require={"s1": "c1", "s2": "c1"},
+            cluster_seeds_disallow={("s1", "s3")},
+            _cluster_seeds_version=1,
+        )
     )
     runtime_context = RuntimeContext(
         operation="constraints",
@@ -695,7 +716,7 @@ def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
 
 
 def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_order(monkeypatch):
-    dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set())
+    dataset = _as_anddata(SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set()))
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     clusterer = Clusterer(
         featurizer_info=featurizer_info,

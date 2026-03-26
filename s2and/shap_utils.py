@@ -129,7 +129,7 @@ def _safe_summary_plot(
     except Exception:
         # Fallback to the new API if needed
         try:
-            exp = shap.Explanation(values=shap_values, data=X, feature_names=list(feature_names))  # type: ignore
+            exp = shap.Explanation(values=shap_values, data=X, feature_names=list(feature_names))
             shap.plots.beeswarm(exp, show=False, max_display=len(feature_names))
         except Exception:
             plt.close()

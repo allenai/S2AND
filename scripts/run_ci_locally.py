@@ -28,7 +28,7 @@ def uv_exe() -> list[str]:
     if uv_path:
         return [uv_path]
     try:
-        import uv  # noqa: F401
+        import uv  # type: ignore  # noqa: F401
     except Exception:
         print("ERROR: 'uv' not found. Install uv first.", file=sys.stderr)
         sys.exit(2)

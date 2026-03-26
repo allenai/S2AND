@@ -3,12 +3,13 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 import s2and.feature_port as feature_port
 import s2and.rust_capabilities as rust_capabilities
-from s2and.data import NameCounts
+from s2and.data import ANDData, NameCounts
 
 _REAL_RUST_CACHE_PATH = feature_port._rust_cache_path
 
@@ -63,13 +64,13 @@ class DummyRustModule:
     RustFeaturizer = DummyRustFeaturizer
 
 
-class DummyDataset:
+class DummyDataset(ANDData):
     def __init__(self, name: str, mode: str = "train"):
         self.name = name
         self.mode = mode
         self.signatures = {}
         self.papers = {}
-        self.name_tuples = {}
+        self.name_tuples = set()
         self.compute_reference_features = False
         self.preprocess = True
         self.n_jobs = 1
@@ -386,7 +387,7 @@ def test_increment_rust_featurizer_build_count_is_thread_safe():
     with feature_port._RUST_FEATURIZER_CACHE_LOCK:
         feature_port._RUST_FEATURIZER_CACHE[dataset] = feature_port._CacheEntry(
             featurizer=DummyRustFeaturizer(dataset.name),
-            build_count=SleepyCounter(0),
+            build_count=cast(Any, SleepyCounter(0)),
         )
 
     worker_count = 8

@@ -25,7 +25,10 @@ HAS_RUST, _rust_import_payload = import_s2and_rust(required_method="from_dataset
 _RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
 print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
 if not HAS_RUST:
-    pytest.skip(f"s2and_rust extension not built/installed: {_RUST_IMPORT_ERROR}", allow_module_level=True)
+    raise pytest.skip.Exception(
+        f"s2and_rust extension not built/installed: {_RUST_IMPORT_ERROR}",
+        allow_module_level=True,
+    )
 
 
 def _paper_for_sig(dataset, sig_id):
@@ -128,8 +131,8 @@ def _attach_fake_specter_embeddings(ds, max_papers=2, dim=8):
 
 
 def _reset_featurizer_env_caches():
-    featurizer_mod._RUST_BATCH_CHUNK_SIZE_CACHE = None
-    featurizer_mod._RUST_BATCH_MAX_CHUNK_MB_CACHE = None
+    featurizer_mod.__dict__["_RUST_BATCH_CHUNK_SIZE_CACHE"] = None
+    featurizer_mod.__dict__["_RUST_BATCH_MAX_CHUNK_MB_CACHE"] = None
 
 
 def _build_labeled_pairs(sig_ids, count=20, seed=123):
@@ -157,7 +160,7 @@ def dataset():
     ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
     ds = _attach_fake_specter_embeddings(ds)
     # set global for _single_pair_featurize
-    featurizer_mod.global_dataset = ds  # type: ignore
+    featurizer_mod.global_dataset = ds
     return ds
 
 
@@ -345,7 +348,7 @@ def test_featurize_pair_rust_parity_with_deferred_signature_ngrams(dataset, samp
         assert signature.author_info_affiliations_n_grams is None
         assert signature.author_info_coauthor_n_grams is None
 
-    featurizer_mod.global_dataset = dataset  # type: ignore
+    featurizer_mod.global_dataset = dataset
     for s1, s2 in sample_pairs[:5]:
         ref_features, _ = _single_pair_featurize((s1, s2))
         rust_features = featurize_pair_rust(ds_rust, s1, s2)
@@ -470,7 +473,7 @@ def test_get_constraints_matrix_rust_flag_parity(dataset, constraint_pairs, cons
 
 
 def test_featurize_pairs_rust_batch_parity(dataset, sample_pairs):
-    featurizer_mod.global_dataset = dataset  # type: ignore
+    featurizer_mod.global_dataset = dataset
     rust_featurizer = _get_rust_featurizer(dataset)
     rust_features = rust_featurizer.featurize_pairs(sample_pairs)
 
@@ -485,10 +488,10 @@ def test_featurize_pairs_rust_batch_parity(dataset, sample_pairs):
 
 
 def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
-    featurizer_mod.global_dataset = dataset_with_refs  # type: ignore
+    featurizer_mod.global_dataset = dataset_with_refs
     empty_sigs = _find_signatures(dataset_with_refs, lambda _s, p: _ref_details_empty(p), limit=1)
     if not empty_sigs:
-        pytest.skip("No papers with empty reference_details counters found")
+        raise pytest.skip.Exception("No papers with empty reference_details counters found")
     s1 = empty_sigs[0]
     # pick a distinct second signature
     s2 = next(sig_id for sig_id in dataset_with_refs.signatures.keys() if sig_id != s1)
@@ -504,7 +507,7 @@ def test_featurize_pair_rust_parity_reference_details_empty(dataset_with_refs):
 
 
 def test_featurize_pair_rust_parity_missing_email(dataset):
-    featurizer_mod.global_dataset = dataset  # type: ignore
+    featurizer_mod.global_dataset = dataset
     missing_email_sigs = _find_signatures(
         dataset,
         lambda s, _p: (dataset.signatures[s].author_info_email is None)
@@ -512,7 +515,7 @@ def test_featurize_pair_rust_parity_missing_email(dataset):
         limit=1,
     )
     if not missing_email_sigs:
-        pytest.skip("No signatures with missing email found")
+        raise pytest.skip.Exception("No signatures with missing email found")
     s1 = missing_email_sigs[0]
     s2 = next(sig_id for sig_id in dataset.signatures.keys() if sig_id != s1)
 
@@ -526,14 +529,14 @@ def test_featurize_pair_rust_parity_missing_email(dataset):
 
 
 def test_featurize_pair_rust_parity_specter_present(dataset):
-    featurizer_mod.global_dataset = dataset  # type: ignore
+    featurizer_mod.global_dataset = dataset
     sigs = _find_signatures(
         dataset,
         lambda s, p: p.predicted_language in {"en", "un"} and _specter_vec(dataset, p.paper_id) is not None,
         limit=2,
     )
     if len(sigs) < 2:
-        pytest.skip("Not enough papers with valid specter embeddings found")
+        raise pytest.skip.Exception("Not enough papers with valid specter embeddings found")
     s1, s2 = sigs[0], sigs[1]
 
     ref_features, _ = _single_pair_featurize((s1, s2))
@@ -546,14 +549,14 @@ def test_featurize_pair_rust_parity_specter_present(dataset):
 
 
 def test_featurize_pair_rust_parity_specter_absent(dataset):
-    featurizer_mod.global_dataset = dataset  # type: ignore
+    featurizer_mod.global_dataset = dataset
     sigs = _find_signatures(
         dataset,
         lambda s, p: p.predicted_language not in {"en", "un"} or _specter_vec(dataset, p.paper_id) is None,
         limit=1,
     )
     if not sigs:
-        pytest.skip("No papers with missing specter embeddings or non-EN/UN language found")
+        raise pytest.skip.Exception("No papers with missing specter embeddings or non-EN/UN language found")
     s1 = sigs[0]
     s2 = next(sig_id for sig_id in dataset.signatures.keys() if sig_id != s1)
 
@@ -578,7 +581,7 @@ def test_get_constraint_rust_parity_incremental_flag(dataset):
     if sigs is None:
         sig_ids = list(dataset.signatures.keys())
         if len(sig_ids) < 2:
-            pytest.skip("Not enough signatures to synthesize cluster_seeds_require pairs")
+            raise pytest.skip.Exception("Not enough signatures to synthesize cluster_seeds_require pairs")
         s1, s2 = sig_ids[0], sig_ids[1]
         require_map = {s1: "test_cluster", s2: "test_cluster"}
         disallow_set = set()
@@ -606,7 +609,7 @@ def test_get_constraint_rust_parity_dont_merge_cluster_seeds_false(dataset):
     if sigs is None:
         sig_ids = list(dataset.signatures.keys())
         if len(sig_ids) < 2:
-            pytest.skip("Not enough signatures to synthesize distinct cluster_seeds_require entries")
+            raise pytest.skip.Exception("Not enough signatures to synthesize distinct cluster_seeds_require entries")
         s1, s2 = sig_ids[0], sig_ids[1]
         require_map = {s1: "cluster_a", s2: "cluster_b"}
         disallow_set = set()

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from _rust_suite.calibrate_cmd import _open_text_log
+from _rust_suite.calibrate_cmd import _open_text_log  # type: ignore
 
 from s2and.memory_calibration import iter_log_records, parse_kv_tokens, percentile
 

@@ -1,14 +1,14 @@
-from typing import Any
+from typing import Any, Literal, cast
 
-import lightgbm as lgb
 import numpy as np
 import pytest
+from lightgbm import LGBMClassifier
 
 import s2and.model as model_module
 from s2and import memory_budget
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
-from s2and.model import Clusterer
+from s2and.model import Clusterer, IncrementalDistStats
 
 
 def _same_partition(a: dict[str, list[str]], b: dict[str, list[str]]) -> bool:
@@ -50,9 +50,7 @@ def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_chunked") -> tuple[
     y_random = rng.randint(0, 6, 10)
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
-        classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
-            X_random, y_random
-        ),
+        classifier=LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(X_random, y_random),
         n_jobs=1,
         use_cache=False,
         use_default_constraints_as_supervision=True,
@@ -173,9 +171,7 @@ def test_clusterer_init_prefers_legacy_seed_flag_name():
 
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
-        classifier=lgb.LGBMClassifier(random_state=7, data_random_seed=7, feature_fraction_seed=7).fit(
-            X_random, y_random
-        ),
+        classifier=LGBMClassifier(random_state=7, data_random_seed=7, feature_fraction_seed=7).fit(X_random, y_random),
         dont_merge_cluster_seeds=False,
         n_jobs=1,
         use_cache=False,
@@ -699,39 +695,49 @@ def test_best_incremental_cluster_respects_seed_score_mode():
 
 
 def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():
-    def _run(mode: str, signature_dists: dict[str, dict[int, tuple[float, int, float]]]) -> dict[str, list[str]]:
+    def _run(
+        mode: Literal["always", "never", "top1_consensus"],
+        signature_dists: dict[str, dict[int, tuple[float, int, float]]],
+    ) -> dict[str, list[str]]:
         clusterer = _build_minimal_incremental_clusterer()
         clusterer.incremental_precluster_broadcast_mode = mode
 
-        def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context):
-            del dataset, partial_supervision, runtime_context
+        def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+            del dataset, partial_supervision, runtime_context, total_ram_bytes
             if "incremental_unassigned" in block_dict:
                 return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None
             if "block" in block_dict:
                 return {"singleton_cluster": list(block_dict["block"])}, None
             raise AssertionError(f"Unexpected block_dict={block_dict}")
 
-        clusterer.predict_helper = fake_predict_helper
-        dataset = type(
-            "IncrementalDataset",
-            (),
-            {
-                "cluster_seeds_require": {"seed0": 0, "seed1": 1},
-                "max_seed_cluster_id": 2,
-                "signatures": {},
-                "name_tuples": set(),
-            },
-        )()
+        clusterer.predict_helper = cast(Any, fake_predict_helper)
+        dataset = cast(
+            ANDData,
+            type(
+                "IncrementalDataset",
+                (),
+                {
+                    "cluster_seeds_require": {"seed0": 0, "seed1": 1},
+                    "max_seed_cluster_id": 2,
+                    "signatures": {},
+                    "name_tuples": set(),
+                },
+            )(),
+        )
+        signature_to_cluster_to_average_dist = cast(
+            dict[str, dict[int | str, IncrementalDistStats]],
+            {signature_id: cluster_dists.copy() for signature_id, cluster_dists in signature_dists.items()},
+        )
         return clusterer._run_incremental_phases_bcd(
             ["u1", "u2"],
             dataset,
-            {signature_id: dict(cluster_dists) for signature_id, cluster_dists in signature_dists.items()},
+            signature_to_cluster_to_average_dist,
             dict(dataset.cluster_seeds_require),
             {},
             {0: ["seed0"], 1: ["seed1"]},
             False,
             {},
-            runtime_context=object(),
+            runtime_context=cast(Any, object()),
         )
 
     divergent_top1_dists = {

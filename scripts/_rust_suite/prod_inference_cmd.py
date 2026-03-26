@@ -14,7 +14,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from _rust_suite.common import (  # noqa: E402
+from _rust_suite.common import (  # type: ignore  # noqa: E402
     RSSMonitor,
     build_run_metadata,
     collect_rust_extension_identity,
@@ -58,8 +58,7 @@ def _resolve_dataset_file(
     if os.path.exists(fallback_path):
         return fallback_path
     raise FileNotFoundError(
-        "Missing dataset file for "
-        f"'{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
+        "Missing dataset file for " f"'{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
     )
 
 

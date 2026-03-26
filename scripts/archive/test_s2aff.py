@@ -210,7 +210,7 @@ _, _, test1 = featurize(
     chunk_size=DEFAULT_CHUNK_SIZE,
     nameless_featurizer_info=nameless_featurization_info,
     nan_value=np.nan,
-)  # type: ignore
+)
 if test1 is None:
     raise RuntimeError("Expected featurize to return test split outputs for anddata1")
 X_test1, y_test1, nameless_X_test1 = test1
@@ -223,7 +223,7 @@ _, _, test2 = featurize(
     chunk_size=DEFAULT_CHUNK_SIZE,
     nameless_featurizer_info=nameless_featurization_info,
     nan_value=np.nan,
-)  # type: ignore
+)
 if test2 is None:
     raise RuntimeError("Expected featurize to return test split outputs for anddata2")
 X_test2, y_test2, nameless_X_test2 = test2

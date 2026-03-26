@@ -5,6 +5,7 @@ import os
 import random
 from collections import defaultdict
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -15,7 +16,9 @@ from tests.helpers import equalish, import_s2and_rust
 
 HAS_FROM_JSON_PATHS, s2and_rust = import_s2and_rust(required_method="from_json_paths")
 if not HAS_FROM_JSON_PATHS:
-    pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable", allow_module_level=True)
+    raise pytest.skip.Exception("s2and_rust RustFeaturizer.from_json_paths is unavailable", allow_module_level=True)
+assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
+_S2AND_RUST = cast(Any, s2and_rust)
 
 _FEATURIZATION_INFO = FeaturizationInfo()
 
@@ -92,7 +95,7 @@ def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bo
     papers_path = os.path.join(data_dir, "papers.json")
     cluster_seeds_path = os.path.join(data_dir, "cluster_seeds.json")
     cluster_seeds_path_arg = cluster_seeds_path if os.path.exists(cluster_seeds_path) else None
-    return s2and_rust.RustFeaturizer.from_json_paths(
+    return _S2AND_RUST.RustFeaturizer.from_json_paths(
         signatures_path,
         papers_path,
         cluster_seeds_path_arg,
@@ -110,7 +113,7 @@ def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bo
 def test_from_json_paths_feature_parity_vs_from_dataset_dummy():
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
     dataset = _load_dataset_from_dir(data_dir, "dummy_from_json_parity", compute_reference_features=False)
-    rust_from_dataset = s2and_rust.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
+    rust_from_dataset = _S2AND_RUST.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
     rust_from_json = _build_rust_from_json_paths(data_dir, compute_reference_features=False)
 
     pairs = _sample_pairs(list(dataset.signatures.keys()), count=12, seed=1337)
@@ -125,7 +128,7 @@ def test_from_json_paths_feature_parity_vs_from_dataset_dummy():
 def test_from_json_paths_constraint_parity_vs_from_dataset_dummy():
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
     dataset = _load_dataset_from_dir(data_dir, "dummy_from_json_constraints", compute_reference_features=False)
-    rust_from_dataset = s2and_rust.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
+    rust_from_dataset = _S2AND_RUST.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
     rust_from_json = _build_rust_from_json_paths(data_dir, compute_reference_features=False)
 
     pairs = _sample_pairs(list(dataset.signatures.keys()), count=10, seed=17)
@@ -156,10 +159,10 @@ def test_from_json_paths_constraint_parity_vs_from_dataset_dummy():
 def test_from_json_paths_reference_feature_parity_vs_from_dataset_qian():
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "qian")
     if not os.path.exists(os.path.join(data_dir, "signatures.json")):
-        pytest.skip("qian fixture unavailable")
+        raise pytest.skip.Exception("qian fixture unavailable")
 
     dataset = _load_dataset_from_dir(data_dir, "qian_from_json_parity", compute_reference_features=True)
-    rust_from_dataset = s2and_rust.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
+    rust_from_dataset = _S2AND_RUST.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
     rust_from_json = _build_rust_from_json_paths(data_dir, compute_reference_features=True)
 
     pairs = _sample_pairs(list(dataset.signatures.keys()), count=10, seed=99)
@@ -178,7 +181,7 @@ def test_from_json_paths_emits_telemetry_payload_dummy():
     reset_fn = getattr(s2and_rust, "reset_last_json_ingest_telemetry", None)
     get_fn = getattr(s2and_rust, "get_last_json_ingest_telemetry", None)
     if not callable(reset_fn) or not callable(get_fn):
-        pytest.skip("json ingest telemetry helpers unavailable")
+        raise pytest.skip.Exception("json ingest telemetry helpers unavailable")
 
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
 
@@ -210,10 +213,10 @@ def test_from_json_paths_signature_name_counts_overlay_parity_dummy():
             )
         )
 
-    rust_from_dataset = s2and_rust.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
+    rust_from_dataset = _S2AND_RUST.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
     rust_from_json = _build_rust_from_json_paths(data_dir, compute_reference_features=False)
     if not hasattr(rust_from_json, "update_signature_name_counts"):
-        pytest.skip("RustFeaturizer.update_signature_name_counts is unavailable")
+        raise pytest.skip.Exception("RustFeaturizer.update_signature_name_counts is unavailable")
 
     updated = rust_from_json.update_signature_name_counts(dataset.signatures)
     assert updated == len(dataset.signatures)
@@ -261,7 +264,7 @@ def test_repeated_rust_featurizer_rebuild_dummy_smoke(build_path, tmp_path):
 def test_repeated_from_json_paths_aminer_opt_in(tmp_path):
     aminer_signatures = Path(PROJECT_ROOT_PATH) / "data" / "aminer" / "aminer_signatures.json"
     if not aminer_signatures.exists():
-        pytest.skip(f"AMiner signatures fixture unavailable: {aminer_signatures}")
+        raise pytest.skip.Exception(f"AMiner signatures fixture unavailable: {aminer_signatures}")
 
     stress_module = _load_stress_module()
     output_path = tmp_path / "stress_rust_from_json_paths_aminer.json"

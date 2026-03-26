@@ -88,7 +88,7 @@ if NEGATIVE_ONE_FOR_NAN:
 else:
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
-    NAN_VALUE = np.nan  # type: ignore
+    NAN_VALUE = np.nan
 
 
 def main():
@@ -169,17 +169,17 @@ def main():
     ]
 
     # Type: ignore to help mypy understand these are numpy arrays, not ANDData objects
-    X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in SOURCE_DATASET_NAMES])  # type: ignore
-    y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in SOURCE_DATASET_NAMES])  # type: ignore
-    X_val = np.vstack(  # type: ignore
+    X_train = np.vstack([datasets[dataset_name]["X_train"] for dataset_name in SOURCE_DATASET_NAMES])
+    y_train = np.hstack([datasets[dataset_name]["y_train"] for dataset_name in SOURCE_DATASET_NAMES])
+    X_val = np.vstack(
         [datasets[dataset_name]["X_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
     )
-    y_val = np.hstack(  # type: ignore
+    y_val = np.hstack(
         [datasets[dataset_name]["y_val"] for dataset_name in SOURCE_DATASET_NAMES if dataset_name not in {"augmented"}]
     )
 
-    nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in SOURCE_DATASET_NAMES])  # type: ignore
-    nameless_X_val = np.vstack(  # type: ignore
+    nameless_X_train = np.vstack([datasets[dataset_name]["nameless_X_train"] for dataset_name in SOURCE_DATASET_NAMES])
+    nameless_X_val = np.vstack(
         [
             datasets[dataset_name]["nameless_X_val"]
             for dataset_name in SOURCE_DATASET_NAMES

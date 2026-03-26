@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 import s2and.featurizer as featurizer_module
+from s2and.featurizer import FeaturizationInfo, ScatterContext
 
 
 @pytest.mark.parametrize(
@@ -14,6 +16,18 @@ import s2and.featurizer as featurizer_module
 )
 def test_execute_python_featurization_phase_explicit_pool_mode(monkeypatch, platform_name, expected_use_threads):
     monkeypatch.setattr(featurizer_module.platform, "system", lambda: platform_name)
+    scatter_context = ScatterContext(
+        features=np.zeros((0, 0)),
+        nameless_features=None,
+        coauthor_similarity_values=None,
+        identity_selected_indices=True,
+        indices_to_use=[],
+        nameless_indices_to_use=[],
+        selected_positions=[],
+        nameless_positions=[],
+        coauthor_similarity_index=None,
+        coauthor_position=None,
+    )
 
     class FakeUniversalPool:
         init_calls = 0
@@ -43,8 +57,8 @@ def test_execute_python_featurization_phase_explicit_pool_mode(monkeypatch, plat
         chunk_size=64,
         use_cache=False,
         signature_pairs=[],
-        featurizer_info=None,  # not used in this empty-work test
-        scatter_context=None,  # not used in this empty-work test
+        featurizer_info=FeaturizationInfo(features_to_use=[]),
+        scatter_context=scatter_context,
         cached_features={},
     )
 

@@ -1,8 +1,8 @@
 import unittest
 
-import lightgbm as lgb
 import numpy as np
 import pytest
+from lightgbm import LGBMClassifier
 
 import s2and.featurizer
 from s2and.consts import LARGE_DISTANCE
@@ -36,7 +36,7 @@ class TestClusterer(unittest.TestCase):
         y_random = np.random.randint(0, 6, 10)
         self.dummy_clusterer = Clusterer(
             featurizer_info=featurizer_info,
-            classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
+            classifier=LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
                 X_random, y_random
             ),
             n_jobs=1,
@@ -145,7 +145,7 @@ def test_predict_helper_logs_cluster_model_fit_boundary(caplog):
     y_random = np.random.randint(0, 6, 10)
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
-        classifier=lgb.LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
+        classifier=LGBMClassifier(random_state=1, data_random_seed=1, feature_fraction_seed=1).fit(
             x_random,
             y_random,
         ),
@@ -162,9 +162,7 @@ def test_predict_helper_logs_cluster_model_fit_boundary(caplog):
     assert returned_dists is None
     assert pred_clusters
     messages = [record.getMessage() for record in caplog.records]
-    assert (
-        f"Starting cluster_model.fit for block a sattar using {cluster_model_name} (signatures=3)" in messages
-    )
+    assert f"Starting cluster_model.fit for block a sattar using {cluster_model_name} (signatures=3)" in messages
     assert any(
         message.startswith(f"Finished cluster_model.fit for block a sattar using {cluster_model_name} in ")
         and " (clusters=" in message

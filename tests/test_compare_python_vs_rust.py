@@ -153,7 +153,7 @@ def test_rust_suite_requires_subcommand():
     module = _load_compare_module()
     with pytest.raises(SystemExit) as exc_info:
         module.main([])
-    assert int(exc_info.value.code) != 0
+    assert exc_info.value.code not in (0, None)
 
 
 def test_rust_suite_profile_markers_use_common_source():

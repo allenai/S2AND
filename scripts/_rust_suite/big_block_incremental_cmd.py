@@ -17,7 +17,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from _rust_suite.common import (  # noqa: E402, I001
+from _rust_suite.common import (  # type: ignore  # noqa: E402, I001
     PROJECT_ROOT,
     ProcessTreeRSSMonitor,
     cluster_membership_digest as _cluster_membership_digest,

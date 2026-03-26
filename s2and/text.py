@@ -488,13 +488,13 @@ def get_text_ngrams(
     if stopwords is not None:
         text = " ".join([word for word in text.split(" ") if word not in stopwords and len(word) > 2])
 
-    unigrams = []  # type: ignore
+    unigrams = []
     if use_unigrams:
-        unigrams = filter(lambda x: " " not in x, text)  # type: ignore
+        unigrams = filter(lambda x: " " not in x, text)
 
-    bigrams = []  # type: ignore
+    bigrams = []
     if use_bigrams:
-        bigrams = map(  # type: ignore
+        bigrams = map(
             lambda x: "".join(x),
             filter(lambda x: " " not in x, zip(text, text[1:], strict=False)),
         )

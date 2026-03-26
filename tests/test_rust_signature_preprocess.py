@@ -14,7 +14,7 @@ from s2and.text import AFFILIATIONS_STOP_WORDS, get_text_ngrams, get_text_ngrams
 from tests.helpers import build_dummy_dataset, equalish
 
 if not feature_port.rust_signature_preprocess_available():
-    pytest.skip("s2and_rust signature preprocessing API is unavailable", allow_module_level=True)
+    raise pytest.skip.Exception("s2and_rust signature preprocessing API is unavailable", allow_module_level=True)
 
 
 @contextmanager
@@ -117,7 +117,7 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_deferred
     with _temporary_env("S2AND_BACKEND", "rust"):
         dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust")
 
-    featurizer_mod.global_dataset = dataset_python  # type: ignore
+    featurizer_mod.global_dataset = dataset_python
     signature_ids = list(dataset_python.signatures.keys())
     pairs = _sample_pairs(signature_ids, limit=8)
     assert len(pairs) > 0

@@ -55,7 +55,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from _rust_suite.common import (  # noqa: E402
+from _rust_suite.common import (  # type: ignore  # noqa: E402
     PROJECT_ROOT,
     ProcessTreeRSSMonitor,
     build_run_metadata,
@@ -63,10 +63,10 @@ from _rust_suite.common import (  # noqa: E402
     extract_marked_json_payload,
     get_result_markers,
 )
-from _rust_suite.common import (  # noqa: E402
+from _rust_suite.common import (  # type: ignore  # noqa: E402
     cluster_membership_digest as _cluster_membership_digest,
 )
-from _rust_suite.common import (  # noqa: E402
+from _rust_suite.common import (  # type: ignore  # noqa: E402
     signature_to_cluster_fingerprint_map as _signature_to_cluster_fingerprint_map,
 )
 

@@ -7,7 +7,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from _rust_suite.calibrate_cmd import run_calibration  # noqa: E402
+from _rust_suite.calibrate_cmd import run_calibration  # type: ignore  # noqa: E402
 
 
 def main(argv: list[str]) -> int:

@@ -10,7 +10,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from _rust_suite.common import RSSMonitor, collect_rust_extension_identity  # noqa: E402
+from _rust_suite.common import RSSMonitor, collect_rust_extension_identity  # type: ignore  # noqa: E402
 
 
 def _build_data_paths(project_root: str, dataset_name: str) -> dict[str, str]:

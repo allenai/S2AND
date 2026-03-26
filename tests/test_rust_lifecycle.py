@@ -158,7 +158,7 @@ def test_rust_inference_without_sinonym_overwrite_does_not_defer_json_ingest_wri
 def test_defer_signature_ngrams_requires_preprocess_and_rust(preprocess: bool, use_rust: bool):
     backend = "rust" if use_rust else "python"
     policy = build_rust_lifecycle_policy(
-        backend=backend,  # type: ignore[arg-type]
+        backend=backend,
         mode="train",
         has_signatures_path=True,
         has_papers_path=True,
@@ -176,7 +176,7 @@ def test_defer_signature_fields_requires_rust_and_non_inference(
 ):
     backend = "rust" if use_rust else "python"
     policy = build_rust_lifecycle_policy(
-        backend=backend,  # type: ignore[arg-type]
+        backend=backend,
         mode=mode,
         has_signatures_path=True,
         has_papers_path=True,

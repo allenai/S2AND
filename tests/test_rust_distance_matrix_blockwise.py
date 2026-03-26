@@ -5,7 +5,7 @@ import pytest
 from s2and import feature_port
 
 if not feature_port.rust_featurizer_available():
-    pytest.skip("s2and_rust extension is unavailable", allow_module_level=True)
+    raise pytest.skip.Exception("s2and_rust extension is unavailable", allow_module_level=True)
 
 import numpy as np
 

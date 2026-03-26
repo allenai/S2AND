@@ -20,7 +20,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-import ijson
+import ijson  # type: ignore
 import numpy as np
 from sklearn.model_selection import train_test_split
 

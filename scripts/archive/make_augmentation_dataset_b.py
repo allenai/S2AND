@@ -26,7 +26,7 @@ import pandas as pd
 
 logger = logging.getLogger("s2and")
 
-from google.cloud import translate_v2
+from google.cloud import translate_v2  # type: ignore
 from tqdm import tqdm
 
 from s2and.data import ANDData

@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from typing import TypedDict
 
 import pytest
 
 from s2and import memory_budget
+
+
+class _IncrementalLimitsKwargs(TypedDict):
+    total_ram_bytes: int
+    detect_cgroup_fn: Callable[[], tuple[int | None, str]]
+    detect_total_fn: Callable[[], tuple[int | None, str]]
+    current_rss_fn: Callable[[int], tuple[int, str]]
+
+
+class _RustBatchPlanKwargs(_IncrementalLimitsKwargs):
+    base_chunk_pairs: int
+    row_overhead_bytes: int
 
 
 def test_resolve_total_ram_arg_overrides_autodetect():
@@ -124,6 +138,36 @@ def test_compute_rust_batch_chunk_plan_respects_stage_budget():
     assert int(plan["predicted_stage_peak_bytes"]) >= int(plan["predicted_chunk_bytes"])
 
 
+def test_compute_rust_batch_chunk_plan_base_chunk_pairs_zero_disables_floor():
+    plan = memory_budget.compute_rust_batch_chunk_plan(
+        num_features=1_000,
+        total_pairs=20_000,
+        total_ram_bytes=1_000_000,
+        stage_budget_fraction=0.10,
+        base_chunk_pairs=0,
+        row_overhead_bytes=128,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (200_000, "rss:test"),
+    )
+    # Same setup as test_compute_rust_batch_chunk_plan_respects_stage_budget but
+    # base_chunk_pairs=0 means the floor is disabled. chunk_pairs should equal
+    # min(total_pairs, derived_chunk_pairs) — the base floor is not a candidate.
+    assert int(plan["chunk_pairs"]) == 8  # still budget-limited, same as before
+    # Now verify with generous RAM so derived_chunk_pairs > total_pairs:
+    # chunk_pairs should equal total_pairs (not clamped by a base floor).
+    plan_big = memory_budget.compute_rust_batch_chunk_plan(
+        num_features=1,
+        total_pairs=500,
+        total_ram_bytes=10_000_000_000,
+        base_chunk_pairs=0,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+    assert int(plan_big["chunk_pairs"]) == 500  # total_pairs is the only limit
+
+
 def test_summarize_prediction_accuracy_flags_underprediction():
     summary = memory_budget.summarize_prediction_accuracy(
         stage_name="test_stage",
@@ -184,7 +228,7 @@ def test_rss_fallback_logs_warning(caplog, monkeypatch):
 
 def test_incremental_limits_with_selected_feature_counts():
     """Fix #2: selected_feature_count should produce tighter bytes_per_pair."""
-    common_kwargs = dict(
+    common_kwargs: _IncrementalLimitsKwargs = dict(
         total_ram_bytes=100_000_000,
         detect_cgroup_fn=lambda: (None, "unavailable"),
         detect_total_fn=lambda: (None, "unavailable"),
@@ -205,7 +249,7 @@ def test_incremental_limits_with_selected_feature_counts():
 
 def test_rust_batch_selected_features_tighter_chunk_sizing():
     """Fix #6: Rust batch should use selected+nameless for chunk sizing, not full_feature_count."""
-    common_kwargs = dict(
+    common_kwargs: _RustBatchPlanKwargs = dict(
         total_ram_bytes=10_000_000,
         base_chunk_pairs=100_000,
         row_overhead_bytes=128,

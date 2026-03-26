@@ -238,6 +238,8 @@ def _normalize_signature_budgets(signature_budgets: Iterable[int]) -> tuple[int,
 
 
 def _get_specter_vector(dataset: ANDData, paper_id: Any) -> np.ndarray | None:
+    if dataset.specter_embeddings is None:
+        return None
     key = str(paper_id)
     vector = dataset.specter_embeddings.get(key)
     if vector is None:

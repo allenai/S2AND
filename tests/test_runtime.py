@@ -153,7 +153,7 @@ def test_python_backend_pair_featurization_makes_zero_rust_calls(monkeypatch):
 
 def test_rust_backend_pair_featurization_fails_fast_on_rust_error(monkeypatch):
     if not feature_port.rust_featurizer_available():
-        pytest.skip("s2and_rust extension is unavailable")
+        raise pytest.skip.Exception("s2and_rust extension is unavailable")
 
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     monkeypatch.setattr(

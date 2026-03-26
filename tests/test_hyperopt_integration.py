@@ -57,7 +57,7 @@ def test_pairwise_modeler_hyperopt_small():
     trials = modeler.fit(X_train, y_train, X_val, y_val)
     assert modeler.best_params is not None
     assert "C" in modeler.best_params
-    assert trials is not None
+    assert isinstance(trials, Trials)
     assert len(trials.trials) == 4
 
     probs = modeler.predict_proba(X_val)

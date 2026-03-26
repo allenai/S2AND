@@ -20,14 +20,14 @@ def test_consts_import_does_not_read_path_config(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(builtins, "open", _guarded_open)
     module = importlib.reload(consts_module)
-    assert module._CONFIG is None
+    assert module.__dict__["_CONFIG"] is None
 
 
 def test_consts_deferred_config_load_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     module = importlib.reload(consts_module)
     monkeypatch.delenv(module.CONFIG_LOCATION_ENV, raising=False)
     monkeypatch.setattr(module, "CONFIG_LOCATION", "/definitely/missing/path_config.json")
-    module._CONFIG = None
+    module.__dict__["_CONFIG"] = None
 
     with pytest.raises(FileNotFoundError, match="path config"):
         _ = module.CONFIG["main_data_dir"]

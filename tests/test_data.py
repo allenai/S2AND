@@ -1,4 +1,5 @@
 import unittest
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -138,7 +139,7 @@ class TestData(unittest.TestCase):
                 name="",
                 mode="train",
                 clusters={},
-                train_pairs=[],
+                train_pairs=cast(Any, []),
                 load_name_counts=False,
                 preprocess=False,
             )
@@ -163,7 +164,7 @@ class TestData(unittest.TestCase):
                 name="",
                 mode="train",
                 train_blocks=[],
-                train_pairs=[],
+                train_pairs=cast(Any, []),
                 load_name_counts=False,
                 preprocess=False,
             )
@@ -366,6 +367,9 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
         preprocess=False,
     )
 
+    assert dataset.train_pairs is not None
+    assert dataset.val_pairs is not None
+    assert dataset.test_pairs is not None
     train_before = dataset.train_pairs.copy(deep=True)
     val_before = dataset.val_pairs.copy(deep=True)
     test_before = dataset.test_pairs.copy(deep=True)
@@ -373,7 +377,7 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
     train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()
 
     assert dataset.train_pairs.equals(train_before)
-    assert dataset.val_pairs is not None and dataset.val_pairs.equals(val_before)
+    assert dataset.val_pairs.equals(val_before)
     assert dataset.test_pairs.equals(test_before)
 
     all_labels = [int(pair[2]) for pair in train_pairs + val_pairs + test_pairs]

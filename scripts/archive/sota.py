@@ -193,7 +193,7 @@ def main(
     else:
         MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
         NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
-        NAN_VALUE = np.nan  # type: ignore
+        NAN_VALUE = np.nan
 
     with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
         (
@@ -323,7 +323,7 @@ def main(
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=NAN_VALUE,
-        )  # type: ignore
+        )
         X_train, y_train, nameless_X_train = train
         X_val, y_val, nameless_X_val = val
         assert test is not None

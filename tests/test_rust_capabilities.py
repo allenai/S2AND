@@ -39,17 +39,15 @@ def _make_core_rust_featurizer(*, supports_from_dataset_paper_preprocess: bool =
 
 
 def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatch):
-    RustFeaturizer = _make_core_rust_featurizer()
+    rust_featurizer_cls = _make_core_rust_featurizer()
 
     class ShimModule:
         __version__ = None
-
-    ShimModule.RustFeaturizer = RustFeaturizer
+        RustFeaturizer = rust_featurizer_cls
 
     class NativeModule:
         __version__ = "0.40.0"
-
-    NativeModule.RustFeaturizer = RustFeaturizer
+        RustFeaturizer = rust_featurizer_cls
 
     def _fake_import_module(name: str):
         if name == "s2and_rust":
@@ -75,8 +73,7 @@ def test_detect_rust_runtime_capabilities_requires_core_markers():
 
     class Module:
         __version__ = "0.40.0"
-
-    Module.RustFeaturizer = MissingMarkerRustFeaturizer
+        RustFeaturizer = MissingMarkerRustFeaturizer
 
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert capabilities.extension_importable is True
@@ -85,12 +82,11 @@ def test_detect_rust_runtime_capabilities_requires_core_markers():
 
 
 def test_detect_rust_runtime_capabilities_rejects_old_version():
-    RustFeaturizer = _make_core_rust_featurizer()
+    rust_featurizer_cls = _make_core_rust_featurizer()
 
     class Module:
         __version__ = "0.39.9"
-
-    Module.RustFeaturizer = RustFeaturizer
+        RustFeaturizer = rust_featurizer_cls
 
     blocked = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert blocked.core_runtime_available is False
@@ -98,12 +94,11 @@ def test_detect_rust_runtime_capabilities_rejects_old_version():
 
 
 def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
-    RustFeaturizer = _make_core_rust_featurizer()
+    rust_featurizer_cls = _make_core_rust_featurizer()
 
     class Module:
         __version__ = "dev-local"
-
-    Module.RustFeaturizer = RustFeaturizer
+        RustFeaturizer = rust_featurizer_cls
 
     blocked = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert blocked.core_runtime_available is False
@@ -111,12 +106,11 @@ def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
 
 
 def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_marker():
-    RustFeaturizer = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
+    rust_featurizer_cls = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
 
     class Module:
         __version__ = "0.40.0"
-
-    Module.RustFeaturizer = RustFeaturizer
+        RustFeaturizer = rust_featurizer_cls
 
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert capabilities.core_runtime_available is True

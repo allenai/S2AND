@@ -35,7 +35,8 @@ def test_python_maybe_load_specter_accepts_tuple_payload(tmp_path):
 def test_rust_from_json_paths_accepts_tuple_specter_pickle(tmp_path):
     has_rust, s2and_rust = import_s2and_rust(required_method="from_json_paths")
     if not has_rust:
-        pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable")
+        raise pytest.skip.Exception("s2and_rust RustFeaturizer.from_json_paths is unavailable")
+    assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
 
     signatures_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "signatures.json")
     papers_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "papers.json")
@@ -68,7 +69,8 @@ def test_rust_from_json_paths_accepts_tuple_specter_pickle(tmp_path):
 def test_rust_from_json_paths_accepts_dict_specter():
     has_rust, s2and_rust = import_s2and_rust(required_method="from_json_paths")
     if not has_rust:
-        pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable")
+        raise pytest.skip.Exception("s2and_rust RustFeaturizer.from_json_paths is unavailable")
+    assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
 
     signatures_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "signatures.json")
     papers_path = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy", "papers.json")

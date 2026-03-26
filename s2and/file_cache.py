@@ -7,7 +7,7 @@ from hashlib import sha256
 from typing import IO
 from urllib.parse import urlparse
 
-import requests  # type: ignore[import-untyped]
+import requests
 
 from s2and.consts import CACHE_ROOT
 

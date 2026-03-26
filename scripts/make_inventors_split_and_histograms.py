@@ -24,7 +24,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-import ijson
+import ijson  # type: ignore
 import matplotlib.pyplot as plt
 import numpy as np
 

@@ -36,7 +36,7 @@ os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_
 DATA_DIR = CONFIG["internal_data_dir"]
 
 # NOTE: This script will not run, because these functions need to access internal resources
-from scripts.redshift_funcs import (
+from scripts.redshift_funcs import (  # type: ignore
     get_affiliations,
     get_all_author_rows_for_block_key,
     get_all_references,

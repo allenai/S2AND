@@ -1,12 +1,12 @@
-import lightgbm as lgb
+from lightgbm import LGBMClassifier
 
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 
 
 def test_clusterer_n_jobs_propagates_to_lightgbm() -> None:
-    classifier = lgb.LGBMClassifier(verbosity=-1)
-    nameless_classifier = lgb.LGBMClassifier(verbosity=-1)
+    classifier = LGBMClassifier(verbosity=-1)
+    nameless_classifier = LGBMClassifier(verbosity=-1)
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=classifier,
@@ -17,6 +17,8 @@ def test_clusterer_n_jobs_propagates_to_lightgbm() -> None:
     )
 
     assert clusterer.n_jobs == 2
+    assert clusterer.classifier is not None
+    assert clusterer.nameless_classifier is not None
     assert clusterer.classifier.get_params().get("n_jobs") == 2
     assert clusterer.nameless_classifier.get_params().get("n_jobs") == 2
 

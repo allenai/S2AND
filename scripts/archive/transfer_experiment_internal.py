@@ -698,7 +698,7 @@ def main(
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=NAN_VALUE,
-        )  # type: ignore
+        )
         X_train, y_train, nameless_X_train = train
         # if we sampled more training pairs than required, then we downsample
         if len(y_train) > N_TRAIN_PAIRS_SIZE:

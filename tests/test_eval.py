@@ -227,13 +227,13 @@ class TestShapIntegration(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_shap.png")))
 
     def test_pairwise_eval_suppresses_feature_name_warning(self):
-        import lightgbm as lgb
         import pandas as pd
+        from lightgbm import LGBMClassifier
 
         rng = np.random.default_rng(7)
         X_train = pd.DataFrame(rng.random((20, 3)), columns=["f0", "f1", "f2"])
         y_train = rng.integers(0, 2, size=20)
-        classifier = lgb.LGBMClassifier(n_estimators=8, random_state=7, verbosity=-1)
+        classifier = LGBMClassifier(n_estimators=8, random_state=7, verbosity=-1)
         classifier.fit(X_train, y_train)
 
         X = rng.random((4, 3))

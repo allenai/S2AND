@@ -11,11 +11,12 @@ from s2and.data import ANDData
 from s2and.feature_port import get_constraint_rust
 
 if not feature_port.rust_featurizer_available():
-    pytest.skip("s2and_rust extension is unavailable", allow_module_level=True)
+    raise pytest.skip.Exception("s2and_rust extension is unavailable", allow_module_level=True)
 
 _RUST_FEATURIZER = getattr(feature_port, "s2and_rust", None)
 if _RUST_FEATURIZER is None or not hasattr(_RUST_FEATURIZER.RustFeaturizer, "from_json_paths"):
-    pytest.skip("s2and_rust RustFeaturizer.from_json_paths is unavailable", allow_module_level=True)
+    raise pytest.skip.Exception("s2and_rust RustFeaturizer.from_json_paths is unavailable", allow_module_level=True)
+assert _RUST_FEATURIZER is not None
 
 
 @pytest.fixture(autouse=True)

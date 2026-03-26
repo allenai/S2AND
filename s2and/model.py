@@ -132,12 +132,14 @@ def _compute_incremental_memory_limits(
     selected_feature_count: int | None = None,
     nameless_feature_count: int = 0,
     total_ram_bytes: int | None = None,
+    max_chunk_pairs: int | None = None,
 ) -> memory_budget.IncrementalPhaseSplitLimits:
     return memory_budget.compute_incremental_phase_split_limits(
         num_features,
         selected_feature_count=selected_feature_count,
         nameless_feature_count=nameless_feature_count,
         total_ram_bytes=total_ram_bytes,
+        max_chunk_pairs=max_chunk_pairs,
         detect_cgroup_fn=memory_budget.detect_cgroup_total_ram_bytes_best_effort,
         detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
         current_rss_fn=memory_budget.current_rss_bytes_best_effort,
@@ -1515,10 +1517,7 @@ class Clusterer:
                 f"{raw_seed_score_mode!r}; expected one of {sorted(valid_seed_score_modes)}"
             )
         if not 0.0 <= raw_hybrid_weight <= 1.0:
-            raise ValueError(
-                "incremental_mean_min_hybrid_weight must be in [0, 1]; "
-                f"got {raw_hybrid_weight!r}"
-            )
+            raise ValueError("incremental_mean_min_hybrid_weight must be in [0, 1]; " f"got {raw_hybrid_weight!r}")
         if not math.isfinite(raw_phase_a_batch_multiple) or raw_phase_a_batch_multiple < 0.0:
             raise ValueError(
                 "incremental_phase_a_pair_batch_target_multiple must be finite and >= 0; "
@@ -2541,6 +2540,8 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
         restore_rust_cluster_seeds_on_exit: bool,
+        total_ram_bytes: int | None = None,
+        max_chunk_pairs: int | None = None,
     ) -> dict[str, list[str]]:
         if len(block_dict_single_letter) == 0:
             return pred_clusters
@@ -2583,6 +2584,8 @@ class Clusterer:
                 batching_threshold=loop_batching_threshold,
                 partial_supervision=partial_supervision,
                 runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+                max_chunk_pairs=max_chunk_pairs,
             )
             clusters_payload = incremental_result.get("clusters")
             if not isinstance(clusters_payload, dict):
@@ -2633,6 +2636,7 @@ class Clusterer:
         runtime_context: RuntimeContext,
         dists: dict[str, np.ndarray] | None,
         total_ram_bytes: int | None,
+        max_chunk_pairs: int | None,
         restore_rust_cluster_seeds_on_exit: bool,
     ) -> tuple[dict[str, list[str]], None]:
         assert batching_threshold > 0, "Batching threshold must be positive"
@@ -2671,6 +2675,8 @@ class Clusterer:
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
             restore_rust_cluster_seeds_on_exit=restore_rust_cluster_seeds_on_exit,
+            total_ram_bytes=total_ram_bytes,
+            max_chunk_pairs=max_chunk_pairs,
         )
         return dict(pred_clusters), None
 
@@ -2687,6 +2693,7 @@ class Clusterer:
         desired_memory_use: int | None = None,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
+        max_chunk_pairs: int | None = None,
         restore_rust_cluster_seeds_on_exit: bool = True,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """
@@ -2720,6 +2727,10 @@ class Clusterer:
             Optional explicit RAM budget for exact/non-incremental predict paths. When set, predict_helper
             uses it for pair-batch sizing and fails fast before allocating a block distance matrix that
             would exceed the usable budget.
+        max_chunk_pairs: Optional[int]
+            Optional explicit cap on Phase A chunk size (pair buffer) for incremental clustering paths.
+            If None, uses PHASE_A_MAX_CHUNK_PAIRS_DEFAULT. Set to 0 to disable cap and rely solely on
+            memory-budget-derived limits. Passed through to predict_incremental when batching is enabled.
         restore_rust_cluster_seeds_on_exit: bool
             If False, restore Python-side cluster seed state after the subblocked incremental path without
             issuing the final Rust seed sync. Intended for request-scoped datasets that are discarded after
@@ -2755,11 +2766,18 @@ class Clusterer:
                 runtime_context=runtime_context,
                 dists=dists,
                 total_ram_bytes=total_ram_bytes,
+                max_chunk_pairs=max_chunk_pairs,
                 restore_rust_cluster_seeds_on_exit=restore_rust_cluster_seeds_on_exit,
             )
 
         else:
             # normal mode - everything goes through full block clustering
+            if max_chunk_pairs is not None:
+                logger.info(
+                    "max_chunk_pairs=%s was passed but batching_threshold is None; "
+                    "max_chunk_pairs only takes effect when batching is enabled (ignored)",
+                    max_chunk_pairs,
+                )
             logger.info("Running predict on full blocks - no subblocking")
             start = time.time()
             pred_clusters, dists = self.predict_helper(
@@ -2965,6 +2983,7 @@ class Clusterer:
         pairwise_proba: np.ndarray | None = None
         seen_block_keys: set[str] = set()
         num_pairs = sum(len(sigs) * (len(sigs) - 1) // 2 for sigs in block_dict.values())
+        logger.info("Predict helper: total_pairs=%d", num_pairs)
         model_predict_seconds = 0.0
         selected_count = _count_selected_features(self.featurizer_info)
         nameless_count = (
@@ -3549,6 +3568,7 @@ class Clusterer:
         prevent_new_incompatibilities: bool,
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
+        total_ram_bytes: int | None = None,
     ) -> dict[str, list[str]]:
         config = self._incremental_experiment_config()
         # NEW!
@@ -3560,6 +3580,7 @@ class Clusterer:
             dataset,
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
 
         logger.info(
@@ -3703,6 +3724,7 @@ class Clusterer:
         prevent_new_incompatibilities: bool,
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
+        total_ram_bytes: int | None = None,
     ) -> dict[str, list[str]]:
         original_seed_sigs = set(dataset.cluster_seeds_require.keys())
         original_cluster_ids = set(str(cid) for cid in dataset.cluster_seeds_require.values())
@@ -3729,6 +3751,7 @@ class Clusterer:
                 prevent_new_incompatibilities,
                 partial_supervision,
                 runtime_context,
+                total_ram_bytes=total_ram_bytes,
             )
             predict_times[subblock_key] = time.time() - start_predict_time
 
@@ -3784,6 +3807,7 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
+        max_chunk_pairs: int | None = None,
     ) -> dict[str, Any]:
         logger.info("Phase-split incremental enabled")
         all_unassigned = [
@@ -3807,6 +3831,7 @@ class Clusterer:
             selected_feature_count=selected_count,
             nameless_feature_count=nameless_count,
             total_ram_bytes=total_ram_bytes,
+            max_chunk_pairs=max_chunk_pairs,
         )
         chunk_pairs = int(chunk_limits["chunk_pairs"])
         logger.info(
@@ -4062,6 +4087,7 @@ class Clusterer:
                 prevent_new_incompatibilities,
                 partial_supervision,
                 runtime_context,
+                total_ram_bytes=total_ram_bytes,
             )
             logger.info(
                 "Telemetry: phase_split_phase_b mode=subblock_local required_bytes=%d budget_bytes=%d",
@@ -4087,6 +4113,7 @@ class Clusterer:
             prevent_new_incompatibilities,
             partial_supervision,
             runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
         logger.info(
             "Telemetry: phase_split_phase_b mode=exact required_bytes=%d budget_bytes=%d",
@@ -4111,6 +4138,7 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float] | None = None,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
+        max_chunk_pairs: int | None = None,
         return_clusters_only: bool = False,
     ) -> dict[str, Any] | dict[str, list[str]]:
         """
@@ -4150,6 +4178,10 @@ class Clusterer:
             the dictionary of partial supervision provided with this dataset/these blocks
         total_ram_bytes: Optional[int]
             Optional explicit RAM budget for incremental phase-split memory-limit derivation.
+        max_chunk_pairs: Optional[int]
+            Optional explicit cap on Phase A chunk size (pair buffer).
+            If None, uses PHASE_A_MAX_CHUNK_PAIRS_DEFAULT.
+            Set to 0 to rely solely on memory-budget-derived limits.
         return_clusters_only: bool
             If True, return only the historical clusters dict shape instead of the full
             telemetry payload.
@@ -4199,6 +4231,7 @@ class Clusterer:
             partial_supervision,
             runtime_context,
             total_ram_bytes=total_ram_bytes,
+            max_chunk_pairs=max_chunk_pairs,
         )
         return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
 
@@ -4351,6 +4384,7 @@ class Clusterer:
             prevent_new_incompatibilities,
             partial_supervision,
             runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
         phase_b_required_bytes = len(unassigned_signature_ids) * (len(unassigned_signature_ids) - 1) // 2 * 8
         return _build_incremental_result(

@@ -9,7 +9,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from functools import partial, reduce
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
@@ -52,7 +52,7 @@ from s2and.text import (
 logger = logging.getLogger("s2and")
 
 # Lazy-initialized global for Sinonym detector within worker processes
-_SINONYM_DETECTOR = None  # type: ignore
+_SINONYM_DETECTOR = None
 _SINONYM_DETECTOR_LOCK = threading.Lock()
 CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 _PAIR_LABEL_MAP: dict[str | int, int] = {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
@@ -105,13 +105,13 @@ def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str
     """
     global _NAME_COUNTS_CACHE
     if _NAME_COUNTS_CACHE is not None:
-        return _NAME_COUNTS_CACHE  # type: ignore[return-value]
+        return _NAME_COUNTS_CACHE
     with _NAME_COUNTS_CACHE_LOCK:
         # Double-check after acquiring lock (another thread may have loaded).
         if _NAME_COUNTS_CACHE is None:
             with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
                 _NAME_COUNTS_CACHE = pickle.load(f)
-    return _NAME_COUNTS_CACHE  # type: ignore[return-value]
+    return _NAME_COUNTS_CACHE
 
 
 def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
@@ -137,7 +137,7 @@ def _resolve_name_counts_last_first_initial_semantics(
         NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
         NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
     }:
-        return normalized  # type: ignore[return-value]
+        return cast(NameCountsLastFirstInitialSemantics, normalized)
     if strict:
         raise ValueError(
             "name_counts_last_first_initial_semantics must be one of "
@@ -610,16 +610,16 @@ class ANDData:
         self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
         # prevents errors during testing where we have no specter embeddings
         if self.specter_embeddings is None:
-            self.specter_embeddings = {}  # type: ignore
+            self.specter_embeddings = {}
         else:
             # Only keep embeddings for papers we retained
             needed_keys = set(self.papers.keys())
-            self.specter_embeddings = {k: v for k, v in self.specter_embeddings.items() if str(k) in needed_keys}  # type: ignore
+            self.specter_embeddings = {k: v for k, v in self.specter_embeddings.items() if str(k) in needed_keys}
         logger.info("loaded specter, loading cluster seeds")
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
         self.cluster_seeds_disallow = set()
-        self.cluster_seeds_require = {}  # type: ignore
+        self.cluster_seeds_require = {}
         self.max_seed_cluster_id = None
         if cluster_seeds_dict is not None:
             cluster_num = 0
@@ -882,11 +882,9 @@ class ANDData:
             last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
 
         return NameCounts(
-            first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),  # type: ignore
+            first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),
             last=self.last_dict.get(last_for_counts, 1),
-            first_last=(
-                self.first_last_dict.get(first_last_for_count, 1) if len(first_for_counts) > 1 else np.nan  # type: ignore
-            ),
+            first_last=(self.first_last_dict.get(first_last_for_count, 1) if len(first_for_counts) > 1 else np.nan),
             last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
         )
 
@@ -1660,7 +1658,7 @@ class ANDData:
                     signature_to_year[signature_id] = 0
                 else:
                     # mypy: year is Optional[int] on Paper; guarded above, so cast to int here
-                    signature_to_year[signature_id] = int(self.papers[paper_id].year)  # type: ignore[arg-type]
+                    signature_to_year[signature_id] = int(self.papers[paper_id].year)
 
             train_size = int(len(signature_to_year) * self.train_ratio)
             val_size = int(len(signature_to_year) * self.val_ratio)
@@ -1719,9 +1717,9 @@ class ANDData:
 
         logger.info(f"shuffled train/val/test {len(train_block_dict), len(val_block_dict), len(test_block_dict)}")
 
-        train_set = set(reduce(lambda x, y: x + y, train_block_dict.values()))  # type: ignore
-        val_set = set(reduce(lambda x, y: x + y, val_block_dict.values()))  # type: ignore
-        test_set = set(reduce(lambda x, y: x + y, test_block_dict.values()))  # type: ignore
+        train_set = set(reduce(lambda x, y: x + y, train_block_dict.values()))
+        val_set = set(reduce(lambda x, y: x + y, val_block_dict.values()))
+        test_set = set(reduce(lambda x, y: x + y, test_block_dict.values()))
         intersection_1 = train_set.intersection(test_set)
         intersection_2 = train_set.intersection(val_set)
         intersection_3 = val_set.intersection(test_set)
@@ -2074,13 +2072,13 @@ class ANDData:
 
 def _ensure_sinonym_detector():
     """Lazily import and initialize a process-level default detector."""
-    global _SINONYM_DETECTOR  # type: ignore
+    global _SINONYM_DETECTOR
     if _SINONYM_DETECTOR is not None:
         return _SINONYM_DETECTOR
     with _SINONYM_DETECTOR_LOCK:
         if _SINONYM_DETECTOR is None:
             try:
-                from sinonym.detector import ChineseNameDetector  # type: ignore
+                from sinonym.detector import ChineseNameDetector
             except Exception as e:  # pragma: no cover - optional dependency
                 raise ImportError(
                     "Sinonym is not installed or failed to import. Install 'sinonym' to enable this feature."
@@ -2252,7 +2250,7 @@ def sinonym_preprocess_papers_parallel(papers_dict: dict[str, Paper], n_jobs: in
     if n_jobs > 1:
         # Explicit platform policy to avoid implicit UniversalPool defaults at call sites.
         use_threads = platform.system() in ("Windows", "Darwin")
-        with UniversalPool(processes=n_jobs, use_threads=use_threads) as p:  # type: ignore
+        with UniversalPool(processes=n_jobs, use_threads=use_threads) as p:
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Sinonym: analyzing author batches") as pbar:
                 # Build a lightweight iterable to minimize serialization overhead
@@ -2305,7 +2303,7 @@ def _sinonym_preprocess_paper_light(item: tuple[str, list[tuple[int, str]]]) -> 
         return key, {}
 
     detector = _ensure_sinonym_detector()
-    results = detector.process_name_batch(names)  # type: ignore[attr-defined]
+    results = detector.process_name_batch(names)
 
     pos_to_norm: dict[int, Any] = {}
 
@@ -2570,7 +2568,7 @@ def preprocess_papers_parallel(
     use_pool_stage_1 = n_jobs > 1 and platform.system() == "Linux"
     if use_pool_stage_1:
         # Linux/WSL2: force process workers for CPU-bound paper 1 preprocessing.
-        with UniversalPool(processes=n_jobs, use_threads=False) as p:  # type: ignore
+        with UniversalPool(processes=n_jobs, use_threads=False) as p:
             _max = len(papers_dict)
             with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
                 func = partial(preprocess_paper_1, preprocess=preprocess)

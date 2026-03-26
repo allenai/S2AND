@@ -4,11 +4,11 @@ import inspect
 import warnings
 from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 from fastcluster import linkage
 from hyperopt import Trials, fmin, hp, space_eval, tpe
 from hyperopt.pyll import scope
+from lightgbm import LGBMClassifier
 from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
@@ -50,7 +50,7 @@ class PairwiseModeler:
         random_state: int = 42,
     ):
         if estimator is None:
-            self.estimator = lgb.LGBMClassifier(
+            self.estimator = LGBMClassifier(
                 objective="binary",
                 metric="auc",  # lightgbm doesn't do F1 directly
                 n_jobs=n_jobs,
@@ -79,7 +79,7 @@ class PairwiseModeler:
             self.search_space = search_space
 
         self.monotone_constraints = monotone_constraints
-        if self.monotone_constraints is not None and isinstance(self.estimator, lgb.LGBMClassifier):
+        if self.monotone_constraints is not None and isinstance(self.estimator, LGBMClassifier):
             self.estimator.set_params(monotone_constraints=self.monotone_constraints)
             self.estimator.set_params(monotone_constraints_method="advanced")
             self.search_space["monotone_penalty"] = hp.uniform("monotone_penalty", 0, 5)

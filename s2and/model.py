@@ -35,7 +35,7 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
     update_rust_cluster_seeds,
 )
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+from s2and.featurizer import FeaturizationInfo, many_pairs_featurize, resolve_cache_policy
 from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify
 from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
 from s2and.subblocking import make_subblocks
@@ -1561,6 +1561,7 @@ class Clusterer:
         incremental_dont_use_cluster_seeds: bool,
         constraint_backend: _IncrementalConstraintBackend,
     ) -> tuple[list[float], _ConstraintBatchTelemetry]:
+        cache_policy = resolve_cache_policy(self.use_cache)
         return _resolve_constraint_labels_batch(
             dataset,
             pair_ids,
@@ -1570,7 +1571,7 @@ class Clusterer:
             dont_merge_cluster_seeds=self.dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
             runtime_context=runtime_context,
-            use_cache=self.use_cache,
+            use_cache=cache_policy.rust_disk_cache_enabled,
             num_threads=self.n_jobs,
         )
 
@@ -1630,11 +1631,12 @@ class Clusterer:
         """
         if runtime_context is None:
             runtime_context = build_runtime_context("constraints")
+        cache_policy = resolve_cache_policy(self.use_cache)
         constraint_backend = _build_incremental_constraint_backend(
             dataset,
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
-            use_cache=self.use_cache,
+            use_cache=cache_policy.rust_disk_cache_enabled,
         )
 
         telemetry = _ConstraintTelemetryAccumulator()
@@ -1749,11 +1751,12 @@ class Clusterer:
         if not stage_uses_rust(runtime_context):
             raise ValueError("Rust chunk helper is only valid when runtime_context resolves to rust backend")
 
+        cache_policy = resolve_cache_policy(self.use_cache)
         constraint_backend = _build_incremental_constraint_backend(
             dataset,
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
-            use_cache=self.use_cache,
+            use_cache=cache_policy.rust_disk_cache_enabled,
         )
         rust_featurizer = constraint_backend.rust_featurizer
         constraint_api_mode = constraint_backend.constraint_api_mode
@@ -1764,7 +1767,7 @@ class Clusterer:
         used_fused_path = False
         use_fused_block_api = bool(
             self.use_default_constraints_as_supervision
-            and not self.use_cache
+            and not cache_policy.pair_feature_cache_enabled
             and constraint_api_mode == "indexed"
             and rust_featurizer is not None
             and signature_index_by_id is not None
@@ -1798,7 +1801,7 @@ class Clusterer:
                             num_threads=self.n_jobs,
                             featurizer=rust_featurizer,
                             runtime_context=runtime_context,
-                            use_cache=self.use_cache,
+                            use_cache=cache_policy.rust_disk_cache_enabled,
                         )
                     except Exception as exc:
                         _handle_rust_backend_exception(
@@ -1912,14 +1915,15 @@ class Clusterer:
         batch_label: int | str,
         total_ram_bytes: int | None = None,
     ) -> tuple[np.ndarray, float]:
+        cache_policy = resolve_cache_policy(self.use_cache)
         if chunk.block_signature_indices is not None and chunk.pair_ids is None:
-            if self.use_cache:
+            if cache_policy.pair_feature_cache_enabled:
                 raise RuntimeError("Fused Rust chunk path does not support use_cache=True")
             try:
                 rust_featurizer = _get_rust_featurizer(
                     dataset,
                     runtime_context=runtime_context,
-                    use_cache=self.use_cache,
+                    use_cache=cache_policy.rust_disk_cache_enabled,
                 )
                 selected_indices = _selected_feature_indices(self.featurizer_info)
                 batch_features = build_block_upper_triangle_feature_matrix_indexed_rust(
@@ -1931,7 +1935,7 @@ class Clusterer:
                     num_threads=self.n_jobs,
                     nan_value=np.nan,
                     runtime_context=runtime_context,
-                    use_cache=self.use_cache,
+                    use_cache=cache_policy.rust_disk_cache_enabled,
                     featurizer=rust_featurizer,
                 )
                 batch_labels = np.asarray(chunk.labels, dtype=np.float64)
@@ -1947,7 +1951,7 @@ class Clusterer:
                         num_threads=self.n_jobs,
                         nan_value=np.nan,
                         runtime_context=runtime_context,
-                        use_cache=self.use_cache,
+                        use_cache=cache_policy.rust_disk_cache_enabled,
                         featurizer=rust_featurizer,
                     )
             except Exception as exc:
@@ -1966,7 +1970,7 @@ class Clusterer:
                 dataset,
                 self.featurizer_info,
                 self.n_jobs,
-                use_cache=self.use_cache,
+                use_cache=cache_policy.pair_feature_cache_enabled,
                 chunk_size=DEFAULT_CHUNK_SIZE,
                 nameless_featurizer_info=self.nameless_featurizer_info,
                 runtime_context=runtime_context,
@@ -3631,7 +3635,7 @@ class Clusterer:
                     out = (
                         float(np.mean(mean_dists)),
                         int(support_count),
-                        float(np.mean(min_dists)),
+                        float(min(min_dists)),
                     )
                     for signature in incremental_cluster_signature_ids:
                         signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out

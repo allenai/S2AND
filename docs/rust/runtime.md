@@ -96,6 +96,15 @@ These gates must pass before promoting any Rust defaults further.
 
 ---
 
+## Cache semantics
+
+- Public `use_cache` remains the single persistent-cache knob across training and inference.
+- `use_cache=True` enables the pair-feature SQLite cache and Rust featurizer disk cache.
+- Same-process Rust featurizer reuse is independent of `use_cache`.
+- See [../caching.md](../caching.md) for the full cache layout and operational guidance.
+
+---
+
 ## Implementation notes
 
 Key design decisions and their rationale (in order of implementation):

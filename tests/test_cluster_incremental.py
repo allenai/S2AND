@@ -726,3 +726,62 @@ def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():
     consensus_enabled = _run("top1_consensus", consensus_top1_dists)
     assert never_consensus == {"0": ["seed0", "u1"], "1": ["seed1"], "2": ["u2"]}
     assert consensus_enabled == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
+
+
+def test_precluster_broadcast_preserves_min_score_semantics():
+    def _run(
+        *,
+        seed_score_mode: Literal["min", "mean_min_hybrid"],
+        mean_min_hybrid_weight: float = 0.5,
+    ) -> dict[str, list[str]]:
+        clusterer = _build_minimal_incremental_clusterer()
+        clusterer.incremental_precluster_broadcast_mode = "always"
+        clusterer.incremental_seed_score_mode = seed_score_mode
+        clusterer.incremental_mean_min_hybrid_weight = mean_min_hybrid_weight
+
+        def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+            del dataset, partial_supervision, runtime_context, total_ram_bytes
+            if "incremental_unassigned" in block_dict:
+                return {"incremental_cluster": list(block_dict["incremental_unassigned"])}, None
+            if "block" in block_dict:
+                return {"singleton_cluster": list(block_dict["block"])}, None
+            raise AssertionError(f"Unexpected block_dict={block_dict}")
+
+        clusterer.predict_helper = cast(Any, fake_predict_helper)
+        dataset = cast(
+            ANDData,
+            type(
+                "IncrementalDataset",
+                (),
+                {
+                    "cluster_seeds_require": {"seed0": 0, "seed1": 1},
+                    "max_seed_cluster_id": 2,
+                    "signatures": {},
+                    "name_tuples": set(),
+                },
+            )(),
+        )
+        signature_to_cluster_to_average_dist = cast(
+            dict[str, dict[int | str, IncrementalDistStats]],
+            {
+                "u1": {0: (0.40, 1, 0.01), 1: (0.20, 1, 0.20)},
+                "u2": {0: (0.40, 1, 0.80), 1: (0.20, 1, 0.20)},
+            },
+        )
+        return clusterer._run_incremental_phases_bcd(
+            ["u1", "u2"],
+            dataset,
+            signature_to_cluster_to_average_dist,
+            dict(dataset.cluster_seeds_require),
+            {},
+            {0: ["seed0"], 1: ["seed1"]},
+            False,
+            {},
+            runtime_context=cast(Any, object()),
+        )
+
+    min_result = _run(seed_score_mode="min")
+    assert min_result == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}
+
+    hybrid_result = _run(seed_score_mode="mean_min_hybrid", mean_min_hybrid_weight=0.75)
+    assert hybrid_result == {"0": ["seed0", "u1", "u2"], "1": ["seed1"]}

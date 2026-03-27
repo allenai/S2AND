@@ -1,25 +1,48 @@
 # S2AND Docs
 
-This folder contains internal design + operational notes for working on S2AND.
+This directory holds both user-facing guides and internal engineering notes.
 
-## Start here (most used)
+## Start here
 
-- Current work plan (next steps): `docs/work_plan.md`
-- Rust runtime contract + verification commands: `docs/rust/runtime.md`
-- Rust benchmark baselines + promotion rules: `docs/rust/baselines.md`
-- Rust optimization frontier / backlog: `docs/work_plan.md` (Backlog section)
-- Stage-wise memory telemetry + prediction model: `docs/stage_memory_estimates.md`
-- Subclustering (subblocking) for large blocks: `docs/subclustering.md`
-- Cluster-summary retrieval experiment plan (production incremental routing): `docs/cluster_retrieval_experiment.md`
-- Training paper preprocessing (Rust training-mode bypass): `docs/rust/runtime.md` (Training-mode deferred paper preprocessing section)
-- Artifact divergence map + format migration (Bundle 5): `docs/rust/artifact_divergence.md`
-- Threading and parallelism (incl. preprocessing defaults): `docs/threading.md`
-- Environment variables (centralized reference): `docs/environment.md`
+- Install and setup: [install.md](install.md)
+- Production inference: [production_inference.md](production_inference.md)
+- Training and evaluation: [training.md](training.md)
+- Development workflow: [development.md](development.md)
+- Rust runtime contract and verification commands: [rust/runtime.md](rust/runtime.md)
+- Current work plan and backlog: [work_plan.md](work_plan.md)
 
-## Keep separate (not currently executing)
+## User guides
 
-- Normalization unification migration plan [BLOCKED]: `docs/normalization_migration_blocked.md`
+- Install and setup: [install.md](install.md)
+- Data download and config: [data.md](data.md)
+- Production inference: [production_inference.md](production_inference.md)
+- Training and evaluation: [training.md](training.md)
+- Development workflow: [development.md](development.md)
+- Reproducibility and paper-era notes: [reproducibility.md](reproducibility.md)
 
-## Where things go
+## Runtime and operations
 
-- New profiling refreshes: add dated snapshots under `docs/rust/profiling/` (indexed in `docs/rust/baselines.md`).
+- Rust runtime contract and verification commands: [rust/runtime.md](rust/runtime.md)
+- Environment variables: [environment.md](environment.md)
+- Cache semantics and layout: [caching.md](caching.md)
+- Threading and parallelism: [threading.md](threading.md)
+- Subblocking for large blocks: [subclustering.md](subclustering.md)
+- Rust promotion baselines and gate commands: [rust/baselines.md](rust/baselines.md)
+- Historical profiling snapshots: [rust/profiling/README.md](rust/profiling/README.md)
+
+## Deep dives and engineering notes
+
+- Single-letter giant-block behavior and historical retrieval alternative: [single_letter_signatures.md](single_letter_signatures.md)
+- Stage-wise memory telemetry notes: [stage_memory_estimates.md](stage_memory_estimates.md)
+
+## Planning and migration docs
+
+- Current work plan and backlog: [work_plan.md](work_plan.md)
+- Rust artifact divergence and migration plan: [rust/artifact_divergence.md](rust/artifact_divergence.md)
+- Normalization migration plan [blocked]: [normalization_migration_blocked.md](normalization_migration_blocked.md)
+
+## Scope notes
+
+- Runtime and operations docs describe current behavior, knobs, and verification commands.
+- Deep dives explain subsystem behavior or preserve historical context for active areas.
+- Planning and migration docs can describe proposed or blocked work that is not yet part of the runtime contract.

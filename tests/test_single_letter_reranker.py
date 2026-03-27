@@ -799,6 +799,127 @@ def test_flush_prepared_query_requests_materializes_rows(monkeypatch: pytest.Mon
     assert model_seconds == [0.25]
 
 
+def test_flush_prepared_query_requests_streams_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    query_case = reranker_utils.RerankerQueryCase(
+        source="labeled",
+        dataset="d1",
+        query_id="q1",
+        query_signature_id="q1",
+        block_key="b",
+        positive_component_keys=frozenset({"c1"}),
+        support_type="labeled",
+        block_size=3,
+        component_size=2,
+        sampling_info_bucket="initial_only",
+    )
+    prepared_request = reranker_build.PreparedQueryRowsRequest(
+        query_case=query_case,
+        block_component_count=2,
+        view_payloads=(
+            reranker_build.PreparedViewPayload(
+                query_view="initial_only",
+                query=build_query_features(has_coauthors=True, has_affiliations=True),
+                shortlist_component_keys=("c1", "c2"),
+                retrieval_scores={"c1": 0.8, "c2": 0.7},
+                retrieval_ranks={"c1": 1, "c2": 2},
+                retrieval_window_state={
+                    "scored_candidate_components": 2,
+                    "scored_candidate_signatures": 3,
+                    "orcid_filter_applied": 0,
+                    "middle_initial_filter_applied": 0,
+                    "year_range_filter_applied": 0,
+                },
+            ),
+        ),
+        union_summary_by_component={
+            "c1": build_cluster_summary(component_key="c1", size=2),
+            "c2": build_cluster_summary(component_key="c2", size=1),
+        },
+        retrieval_window_state_base={},
+        stats_request=reranker_utils.QueryClusterStatsRequest(
+            query_signature_id="q1",
+            shortlist_component_keys=("c1", "c2"),
+            candidate_signature_ids_by_component={"c1": ["s1", "s2"], "c2": ["s3"]},
+            retrieval_ranks={"c1": 1, "c2": 2},
+            retrieval_scores={"c1": 0.8, "c2": 0.7},
+            summary_by_component={
+                "c1": build_cluster_summary(component_key="c1", size=2),
+                "c2": build_cluster_summary(component_key="c2", size=1),
+            },
+        ),
+        estimated_pair_count=3,
+    )
+    stats_by_component = {
+        "c1": reranker_utils.ClusterPairwiseStats(
+            cluster_id="c1",
+            retrieval_rank=1,
+            retrieval_score=0.8,
+            cluster_size=2,
+            family_id="c1",
+            count=2,
+            sum_distance=0.4,
+            min_distance=0.1,
+            top_smallest_neg_heap=[-0.1, -0.3],
+        ),
+        "c2": reranker_utils.ClusterPairwiseStats(
+            cluster_id="c2",
+            retrieval_rank=2,
+            retrieval_score=0.7,
+            cluster_size=1,
+            family_id="c2",
+            count=1,
+            sum_distance=0.5,
+            min_distance=0.5,
+            top_smallest_neg_heap=[-0.5],
+        ),
+    }
+    monkeypatch.setattr(
+        reranker_build,
+        "compute_query_cluster_stats_batched",
+        lambda **_kwargs: [
+            (stats_by_component, {"pair_count": 3, "featurize_seconds": 1.5, "model_predict_seconds": 0.25})
+        ],
+    )
+
+    rows_output_path = tmp_path / "rows.csv"
+    query_groups_output_path = tmp_path / "query_groups.csv"
+    summary_accumulator = reranker_build._QueryGroupSummaryAccumulator()  # noqa: SLF001
+    pair_counts: list[int] = []
+    featurize_seconds: list[float] = []
+    model_seconds: list[float] = []
+
+    flushed_row_count, flushed_query_group_count = reranker_build._flush_prepared_query_requests(  # noqa: SLF001
+        clusterer=SimpleNamespace(),
+        dataset=SimpleNamespace(),
+        runtime_context=SimpleNamespace(),
+        constraint_backend=SimpleNamespace(),
+        prepared_requests=[prepared_request],
+        pair_batch_size=10,
+        max_top_k=5,
+        pair_counts=pair_counts,
+        featurize_seconds=featurize_seconds,
+        model_seconds=model_seconds,
+        rows_output_path=rows_output_path,
+        query_group_metadata_output_path=query_groups_output_path,
+        query_group_summary_accumulator=summary_accumulator,
+    )
+
+    streamed_rows = reranker_utils.read_rows_csv(rows_output_path)
+    streamed_metadata_rows = reranker_utils.read_query_group_metadata_csv(query_groups_output_path)
+
+    assert flushed_row_count == 2
+    assert flushed_query_group_count == 1
+    assert len(streamed_rows) == 2
+    assert len(streamed_metadata_rows) == 1
+    assert pair_counts == [3]
+    assert featurize_seconds == [1.5]
+    assert model_seconds == [0.25]
+    assert summary_accumulator.to_summary() == reranker_utils.summarize_dataset_rows(streamed_rows)
+
+
 def test_build_retrieval_window_supports_exemplar_method() -> None:
     query = build_query_features(specter=np.asarray([1.0, 0.0], dtype=np.float32))
     centroid_favorite = build_cluster_summary(
@@ -1231,6 +1352,43 @@ def test_select_reject_threshold_balances_positive_and_negative_dev_rows() -> No
     assert summary["per_view"]["initial_only"]["negative_reject_accuracy"] == pytest.approx(1.0)
 
 
+def test_select_reject_threshold_excludes_single_candidate_groups() -> None:
+    rows = [
+        {
+            "query_group_id": "p1",
+            "supervision_type": "positive_repeat_orcid",
+            "model_margin": 0.9,
+            "model_correct": 1,
+            "query_view": "full",
+            "has_runner_up": 1,
+        },
+        {
+            "query_group_id": "n1",
+            "supervision_type": "negative_singleton_orcid",
+            "model_margin": 0.2,
+            "model_correct": 0,
+            "query_view": "initial_only",
+            "has_runner_up": 1,
+        },
+        {
+            "query_group_id": "s1",
+            "supervision_type": "negative_singleton_orcid",
+            "model_margin": None,
+            "model_correct": 0,
+            "query_view": "full",
+            "has_runner_up": 0,
+        },
+    ]
+
+    summary = s2and_ranker_eval._select_reject_threshold(rows)  # noqa: SLF001
+
+    assert summary["queries"] == 3
+    assert summary["eligible_queries"] == 2
+    assert summary["singleton_candidate_group_count"] == 1
+    assert summary["threshold"] == pytest.approx(0.2)
+    assert summary["per_view"]["full"]["singleton_candidate_group_count"] == 1
+
+
 def test_summarize_query_group_rows_exposes_cached_sampler_fields() -> None:
     rows = [
         _base_row(
@@ -1391,6 +1549,88 @@ def test_hard_blocks_sampler_filters_tiny_and_single_candidate_cases() -> None:
     assert summary["filtered_single_candidate_preview_count"] == 1
 
 
+def test_query_group_metadata_summary_matches_row_summary() -> None:
+    rows = [
+        _base_row(
+            query_group_id="g1",
+            query_id="q1",
+            query_view="full",
+            natural_query_view="full",
+            candidate_component_key="c1",
+            label=1,
+            retrieval_rank=1,
+            positive_candidate_count=1,
+            positive_candidate_keys="c1",
+            candidate_count=2,
+        ),
+        _base_row(
+            query_group_id="g1",
+            query_id="q1",
+            query_view="full",
+            natural_query_view="full",
+            candidate_component_key="c2",
+            label=0,
+            retrieval_rank=2,
+            best_competitor_component_key="c1",
+            positive_candidate_count=1,
+            positive_candidate_keys="c1",
+            candidate_count=2,
+        ),
+        _base_row(
+            query_group_id="g2",
+            query_id="q2",
+            query_view="initial_only",
+            candidate_component_key="c3",
+            label=0,
+            retrieval_rank=1,
+            positive_candidate_count=0,
+            positive_candidate_keys="",
+            group_has_positive=0,
+            best_positive_retrieval_rank=None,
+            candidate_count=2,
+        ),
+        _base_row(
+            query_group_id="g2",
+            query_id="q2",
+            query_view="initial_only",
+            candidate_component_key="c4",
+            label=0,
+            retrieval_rank=2,
+            best_competitor_component_key="c3",
+            positive_candidate_count=0,
+            positive_candidate_keys="",
+            group_has_positive=0,
+            best_positive_retrieval_rank=None,
+            candidate_count=2,
+        ),
+        _base_row(
+            query_group_id="g3",
+            query_id="q3",
+            query_view="full",
+            natural_query_view="full",
+            candidate_component_key="c5",
+            label=1,
+            retrieval_rank=1,
+            best_competitor_component_key=None,
+            candidate_count=1,
+            candidate_signatures=3,
+            scored_candidate_components=1,
+            scored_candidate_signatures=3,
+            positive_candidate_count=1,
+            positive_candidate_keys="c5",
+        ),
+    ]
+
+    metadata_rows = [
+        reranker_utils.summarize_query_group_rows(group_rows, block_component_count=3)
+        for group_rows in reranker_utils.group_rows(rows).values()
+    ]
+
+    assert reranker_build._summarize_query_group_metadata_rows(metadata_rows) == reranker_utils.summarize_dataset_rows(  # noqa: SLF001
+        rows
+    )
+
+
 def test_materialized_derived_rows_are_used_directly_by_feature_builder() -> None:
     rows = [
         _base_row(query_group_id="g1", candidate_component_key="c1", retrieval_rank=1),
@@ -1437,3 +1677,88 @@ def test_load_dataset_rows_prefers_derived_cache_and_selected_ids(tmp_path: Path
     assert len(rows) == 1
     assert rows[0]["query_group_id"] == "g1"
     assert rows[0]["override_slack_vs_top1"] == pytest.approx(77.0)
+
+
+def test_fit_ranker_for_split_keeps_mixed_views_on_same_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows: list[dict[str, Any]] = []
+    for query_id in ("q1", "q2", "q3", "q4"):
+        for query_view in ("full", "initial_only"):
+            group_id = f"d1:{query_id}:{query_view}"
+            rows.append(
+                _base_row(
+                    dataset="d1",
+                    query_id=query_id,
+                    query_group_id=group_id,
+                    query_view=query_view,
+                    natural_query_view=query_view,
+                    candidate_component_key=f"{query_id}:{query_view}:pos",
+                    label=1,
+                    retrieval_rank=1,
+                    positive_candidate_count=1,
+                    positive_candidate_keys=f"{query_id}:{query_view}:pos",
+                    best_competitor_component_key=f"{query_id}:{query_view}:neg",
+                )
+            )
+            rows.append(
+                _base_row(
+                    dataset="d1",
+                    query_id=query_id,
+                    query_group_id=group_id,
+                    query_view=query_view,
+                    natural_query_view=query_view,
+                    candidate_component_key=f"{query_id}:{query_view}:neg",
+                    label=0,
+                    retrieval_rank=2,
+                    best_competitor_component_key=f"{query_id}:{query_view}:pos",
+                )
+            )
+
+    real_build_training_matrix = reranker_utils.build_training_matrix
+    captured_training_base_ids: list[set[str]] = []
+    captured_validation_base_ids: set[str] = set()
+
+    def fake_build_training_matrix(input_rows: Any, **kwargs: Any) -> Any:
+        captured_training_base_ids.append(
+            {s2and_ranker_eval._query_base_group_id(row) for row in input_rows}  # noqa: SLF001
+        )
+        return real_build_training_matrix(input_rows, **kwargs)
+
+    class _FakeRanker:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def fit(self, *args: Any, **kwargs: Any) -> _FakeRanker:
+            del args, kwargs
+            return self
+
+    def fake_fit_ranker_with_hyperopt(
+        *,
+        validation_rows: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> tuple[Any, dict[str, Any]]:
+        del kwargs
+        captured_validation_base_ids.update(
+            {s2and_ranker_eval._query_base_group_id(row) for row in validation_rows}  # noqa: SLF001
+        )
+        return object(), {"best_params": {}, "train_seconds": 0.0}
+
+    monkeypatch.setattr(s2and_ranker_eval, "build_training_matrix", fake_build_training_matrix)
+    monkeypatch.setattr(s2and_ranker_eval, "_fit_ranker_with_hyperopt", fake_fit_ranker_with_hyperopt)  # noqa: SLF001
+    monkeypatch.setattr(s2and_ranker_eval, "LGBMRanker", _FakeRanker)
+
+    _model, train_summary = s2and_ranker_eval._fit_ranker_for_split(  # noqa: SLF001
+        train_rows=rows,
+        query_views=["full", "initial_only"],
+        window_size=2,
+        seed=7,
+        feature_preset="small_core_3",
+        enrichment_profile="none",
+        enrichment_rounds=0,
+        hyperopt_evals=0,
+        inner_validation_fraction=0.5,
+        n_jobs=1,
+    )
+
+    assert captured_training_base_ids
+    assert captured_training_base_ids[0].isdisjoint(captured_validation_base_ids)
+    assert train_summary["query_views"] == ["full", "initial_only"]

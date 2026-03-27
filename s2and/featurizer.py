@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import platform
-import tempfile
+import sqlite3
 import threading
 import time
 from collections import Counter
@@ -392,6 +392,27 @@ class RustBatchExecutionResult:
     rust_batch_adaptive_halvings: int
 
 
+@dataclass(frozen=True, slots=True)
+class CachePolicy:
+    """Resolved internal cache decisions for a public ``use_cache`` value."""
+
+    pair_feature_cache_enabled: bool
+    rust_disk_cache_enabled: bool
+
+    @property
+    def requires_full_feature_rows(self) -> bool:
+        return self.pair_feature_cache_enabled
+
+
+def resolve_cache_policy(use_cache: bool) -> CachePolicy:
+    """Resolve the public cache flag into the internal cache policy."""
+    enabled = bool(use_cache)
+    return CachePolicy(
+        pair_feature_cache_enabled=enabled,
+        rust_disk_cache_enabled=enabled,
+    )
+
+
 def _scatter_feature_row_from_source(
     *,
     feature_output: np.ndarray,
@@ -546,100 +567,15 @@ def _write_feature_row(
 
 
 # ── constants for cache writes ───────────────────────────
-INCREMENTAL_WRITE_THRESHOLD = 1000  # only write incrementally if we have at least this many new features
-_FEATURE_CACHE_LOCK_TIMEOUT_SECONDS = 30.0
-_FEATURE_CACHE_LOCK_POLL_SECONDS = 0.05
-_FEATURE_CACHE_LOCK_STALE_SECONDS = 120.0
-
-
-def _pid_is_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-@contextlib.contextmanager
-def _feature_cache_file_lock(cache_path: str):
-    lock_path = f"{cache_path}.lock"
-    deadline = time.monotonic() + _FEATURE_CACHE_LOCK_TIMEOUT_SECONDS
-    attempts = 0
-
-    while True:
-        attempts += 1
-        try:
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            try:
-                os.write(lock_fd, str(os.getpid()).encode("ascii", errors="ignore"))
-            finally:
-                os.close(lock_fd)
-            break
-        except (FileExistsError, PermissionError) as e:
-            if isinstance(e, PermissionError) and not os.path.exists(lock_path):
-                raise
-            try:
-                lock_age_seconds = time.time() - os.path.getmtime(lock_path)
-            except OSError:
-                lock_age_seconds = 0.0
-            if lock_age_seconds > _FEATURE_CACHE_LOCK_STALE_SECONDS:
-                lock_pid: int | None = None
-                try:
-                    with open(lock_path, encoding="ascii") as lock_file:
-                        pid_payload = lock_file.read().strip()
-                    if pid_payload:
-                        lock_pid = int(pid_payload)
-                except (OSError, ValueError):
-                    lock_pid = None
-                if lock_pid is not None and _pid_is_running(lock_pid):
-                    logger.warning(
-                        "Feature cache lock age exceeded stale threshold but owner is alive; continuing to wait "
-                        "(path=%s age_seconds=%.2f owner_pid=%d)",
-                        lock_path,
-                        lock_age_seconds,
-                        lock_pid,
-                    )
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            "Timed out waiting for feature cache lock held by a live owner "
-                            f"path={lock_path} owner_pid={lock_pid} attempts={attempts} "
-                            f"timeout_seconds={_FEATURE_CACHE_LOCK_TIMEOUT_SECONDS}"
-                        ) from e
-                    time.sleep(_FEATURE_CACHE_LOCK_POLL_SECONDS)
-                    continue
-                try:
-                    os.remove(lock_path)
-                    logger.warning(
-                        "Removed stale feature cache lock file path=%s age_seconds=%.2f owner_pid=%s",
-                        lock_path,
-                        lock_age_seconds,
-                        lock_pid,
-                    )
-                    continue
-                except OSError:
-                    pass
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "Timed out waiting for feature cache lock "
-                    f"path={lock_path} attempts={attempts} timeout_seconds={_FEATURE_CACHE_LOCK_TIMEOUT_SECONDS}"
-                ) from e
-            time.sleep(_FEATURE_CACHE_LOCK_POLL_SECONDS)
-
-    try:
-        yield
-    finally:
-        try:
-            os.remove(lock_path)
-        except FileNotFoundError:
-            pass
-        except OSError as e:
-            logger.warning("Failed to remove feature cache lock file path=%s error=%s", lock_path, e)
+INCREMENTAL_WRITE_THRESHOLD = 1000
+PAIR_FEATURE_CACHE_DB_FILENAME = "pair_features.sqlite3"
+PAIR_FEATURE_CACHE_SCHEMA_VERSION = 1
+PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES = 3
+PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS = 30.0
+PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS = 0.1
+_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION = "schema_version"
+_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT = "feature_count"
+_FEATURE_CACHE_METADATA_KEY_FEATURES_TO_USE_JSON = "features_to_use_json"
 
 
 def _signature_id_to_index_or_raise(signature_id_to_index: dict[Any, int], signature_id: Any) -> int:
@@ -887,7 +823,7 @@ class FeaturizationInfo:
 
     def cache_file_path(self, dataset_name: str) -> str:
         """
-        returns the file path for the features cache
+        returns the legacy JSON file path for the features cache
 
         Parameters
         ----------
@@ -903,9 +839,142 @@ class FeaturizationInfo:
             "all_features.json",
         )
 
+    def cache_db_path(self, dataset_name: str) -> str:
+        """
+        returns the SQLite database path for the features cache
+
+        Parameters
+        ----------
+        dataset_name: string
+            the name of the dataset
+
+        Returns
+        -------
+        string: the full file path for the SQLite cache database
+        """
+        return os.path.join(
+            self.cache_directory(dataset_name),
+            PAIR_FEATURE_CACHE_DB_FILENAME,
+        )
+
+    def cache_storage_key(self, dataset_name: str) -> str:
+        """Return the canonical in-memory cache key for a dataset cache."""
+        return self.cache_db_path(dataset_name)
+
+    def _fresh_cache_payload(self) -> dict[str, Any]:
+        return {
+            "features": {},
+            "features_to_use": list(self.features_to_use),
+            "__new_features__": {},
+        }
+
+    @staticmethod
+    def _sqlite_feature_blob(feature_output: np.ndarray | list[int | float]) -> sqlite3.Binary:
+        feature_array = np.asarray(feature_output, dtype=np.float64)
+        return sqlite3.Binary(feature_array.tobytes(order="C"))
+
+    @staticmethod
+    def _decode_sqlite_feature_blob(feature_blob: bytes | bytearray | memoryview) -> np.ndarray:
+        feature_view = np.frombuffer(feature_blob, dtype=np.float64)
+        if int(feature_view.shape[0]) != int(NUM_FEATURES):
+            raise ValueError(
+                "Pair-feature cache entry has unexpected width "
+                f"expected={NUM_FEATURES} got={int(feature_view.shape[0])}"
+            )
+        return feature_view.copy()
+
+    @staticmethod
+    def _configure_pair_feature_cache_connection(connection: sqlite3.Connection) -> None:
+        connection.execute(f"PRAGMA busy_timeout = {int(PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS * 1000)}")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+
+    @classmethod
+    def _initialize_pair_feature_cache_schema(cls, connection: sqlite3.Connection) -> None:
+        cls._configure_pair_feature_cache_connection(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pair_features (
+                cache_key TEXT PRIMARY KEY,
+                feature_blob BLOB NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+
+    def _load_legacy_json_cache(self, legacy_path: str) -> dict[str, Any]:
+        cached_features = self._fresh_cache_payload()
+        try:
+            with open(legacy_path, "rb") as cache_file:
+                payload = orjson.loads(cache_file.read())
+        except ValueError:
+            with open(legacy_path, encoding="utf-8") as cache_file:
+                payload = json.load(cache_file)
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid legacy pair-feature cache at {legacy_path}: expected object payload")
+        features = payload.get("features")
+        if not isinstance(features, dict):
+            raise ValueError(f"Invalid legacy pair-feature cache at {legacy_path}: missing features object")
+        cached_features["features"] = features
+        stored_features_to_use = payload.get("features_to_use")
+        if isinstance(stored_features_to_use, list) and all(isinstance(value, str) for value in stored_features_to_use):
+            cached_features["features_to_use"] = list(stored_features_to_use)
+        cached_features["__cache_backend__"] = "legacy_json"
+        cached_features["__legacy_cache_path__"] = legacy_path
+        return cached_features
+
+    def _load_sqlite_cache(self, db_path: str) -> dict[str, Any]:
+        cached_features = self._fresh_cache_payload()
+        with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
+            self._initialize_pair_feature_cache_schema(connection)
+            metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
+            schema_version_raw = metadata_rows.get(_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION)
+            if schema_version_raw is not None and int(schema_version_raw) != int(PAIR_FEATURE_CACHE_SCHEMA_VERSION):
+                raise RuntimeError(
+                    "Unsupported pair-feature cache schema version "
+                    f"path={db_path} expected={PAIR_FEATURE_CACHE_SCHEMA_VERSION} got={schema_version_raw}"
+                )
+            stored_features_to_use_json = metadata_rows.get(_FEATURE_CACHE_METADATA_KEY_FEATURES_TO_USE_JSON)
+            if stored_features_to_use_json is not None:
+                try:
+                    stored_features_to_use = json.loads(stored_features_to_use_json)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid pair-feature cache features_to_use metadata at {db_path}: {exc.msg}"
+                    ) from exc
+                if isinstance(stored_features_to_use, list) and all(
+                    isinstance(value, str) for value in stored_features_to_use
+                ):
+                    cached_features["features_to_use"] = list(stored_features_to_use)
+            for cache_key, feature_blob in connection.execute("SELECT cache_key, feature_blob FROM pair_features"):
+                cached_features["features"][str(cache_key)] = self._decode_sqlite_feature_blob(feature_blob)
+        cached_features["__cache_backend__"] = "sqlite"
+        cached_features["__cache_db_path__"] = db_path
+        return cached_features
+
+    def load_cache(self, dataset_name: str) -> dict[str, Any]:
+        """Load the persisted pair-feature cache for a dataset."""
+        db_path = self.cache_db_path(dataset_name)
+        legacy_path = self.cache_file_path(dataset_name)
+        if os.path.exists(db_path):
+            return self._load_sqlite_cache(db_path)
+        if os.path.exists(legacy_path):
+            return self._load_legacy_json_cache(legacy_path)
+        cached_features = self._fresh_cache_payload()
+        cached_features["__cache_backend__"] = "empty"
+        return cached_features
+
     def write_cache(self, cached_features: dict, dataset_name: str, incremental: bool = False):
         """
-        Writes the cached features to the features cache file
+        Writes the cached features to the SQLite-backed features cache
 
         Parameters
         ----------
@@ -918,63 +987,91 @@ class FeaturizationInfo:
 
         Returns
         -------
-        nothing, writes the cache file
+        nothing, writes the cache database
         """
-        path = self.cache_file_path(dataset_name)
-        cache_dir = os.path.dirname(path)
+        cache_dir = self.cache_directory(dataset_name)
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
+        db_path = self.cache_db_path(dataset_name)
+        full_features = cached_features.get("features", {})
+        if not isinstance(full_features, dict):
+            raise ValueError("cached_features['features'] must be a dictionary")
+        new_features = cached_features.get("__new_features__", {})
+        if not isinstance(new_features, dict):
+            raise ValueError("cached_features['__new_features__'] must be a dictionary")
 
-        clear_new_features_after_write = False
-        with _feature_cache_file_lock(path):
-            if incremental and "__new_features__" in cached_features:
-                # Load existing cache and merge with new features under an inter-process lock.
-                existing_cache: dict[str, Any] = {"features": {}}
-                if os.path.exists(path):
-                    try:
-                        with open(path, "rb") as fh:
-                            existing_cache = orjson.loads(fh.read())
-                    except (ValueError, orjson.JSONDecodeError):
-                        logger.warning("Could not load existing cache at %s, creating new cache", path)
-                        existing_cache = {"features": {}}
+        migrating_legacy_cache = cached_features.get("__cache_backend__") == "legacy_json"
+        replace_existing_rows = not incremental
+        if incremental:
+            features_to_persist = full_features if migrating_legacy_cache else new_features
+        else:
+            features_to_persist = full_features
+        if len(features_to_persist) <= 0:
+            return
 
-                existing_features = existing_cache.get("features")
-                if not isinstance(existing_features, dict):
-                    existing_features = {}
-                    existing_cache["features"] = existing_features
-
-                existing_features.update(cached_features.get("__new_features__", {}))
-                existing_cache["features_to_use"] = cached_features.get("features_to_use", [])
-                features_to_write = existing_cache
-                clear_new_features_after_write = True
-            else:
-                features_to_write = cached_features
-
-            # ---- atomic write using temp file with retry logic ----
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    json_bytes = orjson.dumps(
-                        features_to_write,
-                        option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_INDENT_2,
+        features_to_use_json = json.dumps(cached_features.get("features_to_use", []), separators=(",", ":"))
+        for attempt in range(PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES):
+            try:
+                with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
+                    self._initialize_pair_feature_cache_schema(connection)
+                    with connection:
+                        connection.execute(
+                            """
+                            INSERT OR REPLACE INTO cache_metadata(key, value)
+                            VALUES (?, ?)
+                            """,
+                            (_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION, str(PAIR_FEATURE_CACHE_SCHEMA_VERSION)),
+                        )
+                        connection.execute(
+                            """
+                            INSERT OR REPLACE INTO cache_metadata(key, value)
+                            VALUES (?, ?)
+                            """,
+                            (_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT, str(NUM_FEATURES)),
+                        )
+                        connection.execute(
+                            """
+                            INSERT OR REPLACE INTO cache_metadata(key, value)
+                            VALUES (?, ?)
+                            """,
+                            (_FEATURE_CACHE_METADATA_KEY_FEATURES_TO_USE_JSON, features_to_use_json),
+                        )
+                        if replace_existing_rows:
+                            connection.execute("DELETE FROM pair_features")
+                        connection.executemany(
+                            """
+                            INSERT INTO pair_features(cache_key, feature_blob)
+                            VALUES(?, ?)
+                            ON CONFLICT(cache_key) DO UPDATE SET feature_blob=excluded.feature_blob
+                            """,
+                            (
+                                (
+                                    str(cache_key),
+                                    self._sqlite_feature_blob(feature_output),
+                                )
+                                for cache_key, feature_output in features_to_persist.items()
+                            ),
+                        )
+                cached_features["__new_features__"] = {}
+                cached_features["__cache_backend__"] = "sqlite"
+                cached_features["__cache_db_path__"] = db_path
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and attempt < PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES - 1:
+                    logger.warning(
+                        "Pair-feature cache write attempt %d failed due to SQLite lock; retrying path=%s",
+                        attempt + 1,
+                        db_path,
                     )
-                    tmp_dir = cache_dir if cache_dir else None
-                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=tmp_dir) as tmp:
-                        tmp.write(json_bytes.decode("utf-8"))
-                        tmp_path = tmp.name
-
-                    # atomic; old cache either stays or is replaced in a single syscall
-                    os.replace(tmp_path, path)
-                    if clear_new_features_after_write:
-                        cached_features["__new_features__"] = {}
-                    return
-                except OSError as e:
-                    if attempt < max_retries - 1:
-                        logger.warning("Cache write attempt %d failed: %s, retrying...", attempt + 1, e)
-                        time.sleep(0.1 * (attempt + 1))  # Exponential backoff
-                    else:
-                        logger.error("Cache write failed after %d attempts: %s", max_retries, e)
-                        raise
+                    time.sleep(PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS * (attempt + 1))
+                    continue
+                logger.error(
+                    "Pair-feature cache write failed after %d attempts path=%s error=%s",
+                    PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES,
+                    db_path,
+                    exc,
+                )
+                raise
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
@@ -1325,7 +1422,7 @@ def _execute_rust_batch_featurization_phase(
     featurizer_info: FeaturizationInfo,
     runtime_context: RuntimeContext,
     n_jobs: int,
-    use_cache: bool,
+    cache_policy: CachePolicy,
     total_ram_bytes: int | None,
     rust_batch_total_ram_for_stage: int | None,
     rust_batch_rss_before_bytes: int,
@@ -1381,7 +1478,7 @@ def _execute_rust_batch_featurization_phase(
 
     rust_featurizer = feature_port._get_rust_featurizer(
         dataset,
-        use_cache=use_cache,
+        use_cache=cache_policy.rust_disk_cache_enabled,
         runtime_context=runtime_context,
     )
     use_indexed_pairs = bool(
@@ -1389,7 +1486,7 @@ def _execute_rust_batch_featurization_phase(
     )
     supports_matrix_api = bool(use_indexed_pairs or hasattr(rust_featurizer, "featurize_pairs_matrix"))
     rust_selected_indices: list[int] | None = None
-    if supports_matrix_api and not use_cache and len(indices_needed_for_compute) > 0:
+    if supports_matrix_api and not cache_policy.requires_full_feature_rows and len(indices_needed_for_compute) > 0:
         rust_selected_indices = indices_needed_for_compute
     signature_id_to_index: dict[Any, int] = {}
     if use_indexed_pairs:
@@ -1577,7 +1674,7 @@ def _execute_rust_batch_featurization_phase(
                 rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
                 chunk_indices = [index for _, index in chunk_work]
 
-                if use_cache:
+                if cache_policy.pair_feature_cache_enabled:
                     for row_offset, index in enumerate(chunk_indices):
                         new_features_count += _write_feature_row(
                             feature_output=rust_features_chunk[row_offset],
@@ -1585,7 +1682,7 @@ def _execute_rust_batch_featurization_phase(
                             signature_pairs=signature_pairs,
                             featurizer_info=featurizer_info,
                             cached_features=cached_features,
-                            use_cache=use_cache,
+                            use_cache=cache_policy.pair_feature_cache_enabled,
                             scatter_context=rust_scatter_context,
                             source_is_full=rust_chunk_is_full,
                         )
@@ -1688,6 +1785,7 @@ def many_pairs_featurize(
     backend_used = "cached_only"
     if runtime_context is None:
         runtime_context = build_runtime_context("featurization_run")
+    cache_policy = resolve_cache_policy(use_cache)
     signature_pairs = [(str(pair[0]), str(pair[1]), pair[2]) for pair in signature_pairs]
     _ensure_python_pair_signature_ngrams(dataset, signature_pairs, runtime_context)
 
@@ -1720,7 +1818,7 @@ def many_pairs_featurize(
                 # Prewarm so from_dataset build doesn't land inside the RSS measurement window.
                 feature_port._get_rust_featurizer(
                     dataset,
-                    use_cache=use_cache,
+                    use_cache=cache_policy.rust_disk_cache_enabled,
                     runtime_context=runtime_context,
                 )
             except Exception as exc:
@@ -1749,37 +1847,24 @@ def many_pairs_featurize(
         if rss_now > rust_batch_rss_peak_bytes:
             rust_batch_rss_peak_bytes = rss_now
 
-    if use_cache and getattr(dataset, "mode", "") == "inference":
-        logger.warning(
-            "use_cache=True with dataset.mode='inference': the Python feature pair cache "
-            "will read/write JSON to disk. This is independent of Rust featurizer disk cache "
-            "(which follows dataset lifecycle mode). Set use_cache=False for production inference."
-        )
-
-    if use_cache:
+    if cache_policy.pair_feature_cache_enabled:
         logger.info("Loading cache...")
         if not os.path.exists(featurizer_info.cache_directory(dataset.name)):
             os.makedirs(featurizer_info.cache_directory(dataset.name))
-        cache_path = featurizer_info.cache_file_path(dataset.name)
-        if os.path.exists(cache_path):
+        cache_storage_key = featurizer_info.cache_storage_key(dataset.name)
+        if os.path.exists(featurizer_info.cache_db_path(dataset.name)) or os.path.exists(
+            featurizer_info.cache_file_path(dataset.name)
+        ):
             with _CACHED_FEATURES_LOCK:
-                in_memory = CACHED_FEATURES.get(cache_path)
+                in_memory = CACHED_FEATURES.get(cache_storage_key)
             if in_memory is not None:
                 cached_features = in_memory
             else:
-                # fast path: orjson, fallback: stdlib json (handles legacy NaN)
-                try:
-                    with open(cache_path, "rb") as fh:
-                        cached_features = orjson.loads(fh.read())
-                except ValueError:
-                    with open(cache_path, encoding="utf-8") as fh:
-                        cached_features = json.load(fh)
+                cached_features = featurizer_info.load_cache(dataset.name)
                 logger.info("Cache loaded with %d keys", len(cached_features["features"]))
         else:
             logger.info("Cache initiated.")
-            cached_features = {}
-            cached_features["features"] = {}
-            cached_features["features_to_use"] = featurizer_info.features_to_use
+            cached_features = featurizer_info._fresh_cache_payload()
 
         # Initialize buffer for new features if not already present
         if "__new_features__" not in cached_features:
@@ -1845,7 +1930,7 @@ def many_pairs_featurize(
         if pair[2] < 0:
             continue
 
-        if use_cache:
+        if cache_policy.pair_feature_cache_enabled:
             cached_vector = None
             for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1])):
                 cached_vector = cached_features["features"].get(cache_key)
@@ -1891,7 +1976,7 @@ def many_pairs_featurize(
                     featurizer_info=featurizer_info,
                     runtime_context=runtime_context,
                     n_jobs=n_jobs,
-                    use_cache=use_cache,
+                    cache_policy=cache_policy,
                     total_ram_bytes=total_ram_bytes,
                     rust_batch_total_ram_for_stage=rust_batch_total_ram_for_stage,
                     rust_batch_rss_before_bytes=rust_batch_rss_before_bytes,
@@ -1935,7 +2020,7 @@ def many_pairs_featurize(
                 pieces_of_work=pieces_of_work,
                 n_jobs=n_jobs,
                 chunk_size=chunk_size,
-                use_cache=use_cache,
+                use_cache=cache_policy.pair_feature_cache_enabled,
                 signature_pairs=signature_pairs,
                 featurizer_info=featurizer_info,
                 scatter_context=default_scatter_context,
@@ -1947,7 +2032,7 @@ def many_pairs_featurize(
     else:
         logger.info("Featurization backend decision: skipped compute (all pairs were cached or pre-labeled)")
 
-    if use_cache and cache_changed:
+    if cache_policy.pair_feature_cache_enabled and cache_changed:
         # Only do incremental writes if we have enough new features to justify the overhead
         new_features_in_buffer = len(cached_features.get("__new_features__", {}))
 
@@ -1960,7 +2045,11 @@ def many_pairs_featurize(
             logger.info("Only %d new features - will write at end", new_features_in_buffer)
     _sample_rust_batch_rss_peak()
 
-    if use_cache and cache_changed and len(cached_features.get("__new_features__", {})) > 0:
+    if (
+        cache_policy.pair_feature_cache_enabled
+        and cache_changed
+        and len(cached_features.get("__new_features__", {})) > 0
+    ):
         # Always write any remaining new features at the end.
         # Have to do this before subselecting features.
         new_features_in_buffer = len(cached_features["__new_features__"])
@@ -1969,10 +2058,10 @@ def many_pairs_featurize(
         logger.info("Cache written with %d total keys.", len(cached_features["features"]))
     _sample_rust_batch_rss_peak()
 
-    if use_cache:
+    if cache_policy.pair_feature_cache_enabled:
         logger.info("Writing to in memory cache")
         # use the variable from above, to be sure we are using the same path
-        cache_path = featurizer_info.cache_file_path(dataset.name)
+        cache_path = featurizer_info.cache_storage_key(dataset.name)
         with _CACHED_FEATURES_LOCK:
             CACHED_FEATURES[cache_path] = cached_features
         logger.info("In memory cache written")

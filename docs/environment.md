@@ -16,8 +16,10 @@ Centralized reference for all S2AND environment variables.
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `S2AND_CACHE` | `<path>` | `~/.s2and` | Cache root directory (only used when `use_cache=True`). |
-| `S2AND_RUST_FEATURIZER_MAX_INMEM` | `<int>` | unbounded | Cap in-memory Rust featurizer entries (`0` = unbounded). Use `1` for single-dataset-per-process workloads; `2-3` if alternating among a few datasets. Only matters when `use_cache=True`. |
+| `S2AND_CACHE` | `<path>` | `~/.s2and` | Cache root directory for the pair-feature cache, Rust featurizer disk cache, and artifact downloads. |
+| `S2AND_RUST_FEATURIZER_MAX_INMEM` | `<int>` | unbounded | Cap in-memory Rust featurizer entries (`0` = unbounded). Use `1` for single-dataset-per-process workloads; `2-3` if alternating among a few datasets. Applies even when `use_cache=False` because same-process Rust reuse stays enabled. |
+
+See [caching.md](caching.md) for cache semantics and on-disk layout.
 
 ---
 

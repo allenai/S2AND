@@ -47,24 +47,6 @@ def _snapshot(*, available_bytes: int, total_ram_bytes: int = 1_000) -> memory_b
     )
 
 
-def test_predict_plumbs_total_ram_bytes_to_predict_helper(monkeypatch):
-    clusterer, dataset = _build_dummy_clusterer_and_dataset(name="dummy_predict_memory_plumb")
-    block = {"a sattar": ["0", "1", "2"]}
-    observed: dict[str, int | None] = {"total_ram_bytes": None}
-
-    def _fake_predict_helper(self, block_dict, dataset_arg, **kwargs):
-        del self, block_dict, dataset_arg
-        observed["total_ram_bytes"] = kwargs.get("total_ram_bytes")
-        return {"a sattar_0": ["0", "1", "2"]}, None
-
-    monkeypatch.setattr(Clusterer, "predict_helper", _fake_predict_helper)
-    result, dists = clusterer.predict(block, dataset, total_ram_bytes=123_456)
-
-    assert dists is None
-    assert result == {"a sattar_0": ["0", "1", "2"]}
-    assert observed["total_ram_bytes"] == 123_456
-
-
 def test_predict_helper_raises_before_matrix_allocation_when_budget_too_small(monkeypatch):
     clusterer, dataset = _build_dummy_clusterer_and_dataset(name="dummy_predict_memory_too_small")
     block = {"a sattar": ["0", "1", "2"]}

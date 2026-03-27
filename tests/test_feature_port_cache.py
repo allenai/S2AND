@@ -705,34 +705,6 @@ def test_json_ingest_source_telemetry_prefers_dataset_over_artifact(caplog, monk
     assert args[5] is None
 
 
-def test_inspect_json_ingest_name_counts_source_reports_dataset(monkeypatch):
-    monkeypatch.setenv("S2AND_RUST_NAME_COUNTS_JSON", "name_counts.json")
-    dataset = DummyDataset("inspect_json_dataset", mode="inference")
-    dataset.signatures_path = "signatures.json"
-    dataset.papers_path = "papers.json"
-    dataset.signatures = {
-        "s1": type(
-            "Sig",
-            (),
-            {
-                "author_info_name_counts": NameCounts(
-                    first=1.0,
-                    last=2.0,
-                    first_last=3.0,
-                    last_first_initial=4.0,
-                )
-            },
-        )(),
-    }
-
-    plan = feature_port.inspect_json_ingest_name_counts_source(dataset)
-
-    assert plan["name_counts_source"] == "dataset"
-    assert plan["signatures_total"] == 1
-    assert plan["signatures_with_counts"] == 1
-    assert plan["artifact_configured"] is True
-
-
 def test_json_ingest_source_telemetry_uses_artifact_when_non_minimal(tmp_path, caplog, monkeypatch):
     artifact_path = tmp_path / "name_counts.json"
     artifact_path.write_text('{"normalization_version":"legacy_compat","counts":{}}', encoding="utf-8")

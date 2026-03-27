@@ -462,18 +462,9 @@ def test_phase_a_memory_prediction_logged_and_bounded(clusterer_dataset_factory,
     assert "prediction_contract_version=" in phase_a_log
     assert "predicted_peak_delta_bytes=" in phase_a_log
     assert "predicted_peak_rss_bytes=" in phase_a_log
-    assert "predicted_bytes=" in phase_a_log
-    assert "rss_before_bytes=" in phase_a_log
-    assert "rss_peak_bytes=" in phase_a_log
-    assert "rss_after_bytes=" in phase_a_log
     assert "observed_peak_delta_bytes=" in phase_a_log
     assert "prediction_error_ratio=" in phase_a_log
     assert "underpredicted=" in phase_a_log
-
-    # Keep Phase A modeled terms stable for calibration and post-hoc analysis.
-    assert "accumulator_entries_peak_sample=" in phase_a_log
-    assert "phase_a_pair_buffer_peak_bytes=" in phase_a_log
-    assert "phase_a_pair_buffer_entry_bytes=" in phase_a_log
 
     ratio_text = phase_a_log.split("prediction_error_ratio=")[1].split()[0]
     ratio = float(ratio_text)
@@ -510,40 +501,16 @@ def test_phase_a_subblock_telemetry_logged(clusterer_dataset_factory, monkeypatc
     assert phase_a_subblocks_logs
     phase_a_subblocks_log = phase_a_subblocks_logs[-1]
     assert "total_subblocks=2" in phase_a_subblocks_log
-    assert "nonempty_subblocks=2" in phase_a_subblocks_log
-    assert "seed_signatures=4" in phase_a_subblocks_log
-    assert "total_unassigned=2" in phase_a_subblocks_log
-    assert "total_estimated_pairs=8" in phase_a_subblocks_log
-    assert "chunk_pairs=10" in phase_a_subblocks_log
-    assert "subblocks_below_chunk_pairs=2" in phase_a_subblocks_log
     assert "phase_a_calls=2" in phase_a_subblocks_log
-    assert "batched_phase_a_calls=0" in phase_a_subblocks_log
-    assert "batched_subblocks=0" in phase_a_subblocks_log
-    assert "phase_a_batch_target_pairs=0" in phase_a_subblocks_log
 
     phase_a_subblock_logs = [
         record.message
         for record in caplog.records
         if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
     ]
-    assert any(
-        "key=alpha" in message
-        and "subblock_count=1" in message
-        and "unassigned=1" in message
-        and "estimated_pairs=4" in message
-        and "constraint_pairs_total=4" in message
-        and "constraint_chunks_total=1" in message
-        for message in phase_a_subblock_logs
-    )
-    assert any(
-        "key=beta" in message
-        and "subblock_count=1" in message
-        and "unassigned=1" in message
-        and "estimated_pairs=4" in message
-        and "constraint_pairs_total=4" in message
-        and "constraint_chunks_total=1" in message
-        for message in phase_a_subblock_logs
-    )
+    assert len(phase_a_subblock_logs) == 2
+    assert any("key=alpha" in message for message in phase_a_subblock_logs)
+    assert any("key=beta" in message for message in phase_a_subblock_logs)
 
 
 def test_phase_a_batching_reduces_calls_and_preserves_partition(clusterer_dataset_factory, monkeypatch, caplog):

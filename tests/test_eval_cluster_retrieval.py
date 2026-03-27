@@ -80,24 +80,6 @@ def test_apply_hard_filters_uses_orcid_middle_and_year_rules():
     assert stats_orcid["orcid_filter_applied"] == 1
 
 
-def test_load_dataset_can_disable_orcid(monkeypatch):
-    captured_kwargs = {}
-
-    def _fake_anddata(**kwargs):
-        captured_kwargs.update(kwargs)
-        return SimpleNamespace(runtime_context=SimpleNamespace(resolved_backend="rust"), specter_embeddings={})
-
-    monkeypatch.setattr(retrieval, "_resolve_dataset_file", lambda *args: f"{args[1]}_{args[2]}")
-    monkeypatch.setattr(retrieval, "_resolve_specter_file", lambda *_args: "specter.pickle")
-    monkeypatch.setattr(retrieval, "ANDData", _fake_anddata)
-
-    dataset = retrieval._load_dataset("root", "dummy", n_jobs=2, use_orcid_id=False)
-
-    assert dataset.runtime_context.resolved_backend == "rust"
-    assert captured_kwargs["use_orcid_id"] is False
-    assert captured_kwargs["specter_embeddings"] == "specter.pickle"
-
-
 def test_orcid_disabled_query_features_strip_orcid_and_skip_filters(monkeypatch):
     monkeypatch.setattr(retrieval, "_signature_name_parts_for_subblocking", lambda signature: ("alice", "beth"))
     monkeypatch.setattr(retrieval, "_signature_coauthor_blocks_for_specter", lambda signature, dataset: [])

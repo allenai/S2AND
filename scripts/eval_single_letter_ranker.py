@@ -103,11 +103,7 @@ def _resolve_query_views(*, query_view: str, query_views: list[str] | None) -> l
 def _query_base_group_id(row: dict[str, Any]) -> str:
     """Return the base query identity used to keep mixed views together."""
 
-    return (
-        f"{str(row.get('query_source', row['source']))}:"
-        f"{str(row['dataset'])}:"
-        f"{str(row['query_id'])}"
-    )
+    return f"{str(row.get('query_source', row['source']))}:" f"{str(row['dataset'])}:" f"{str(row['query_id'])}"
 
 
 def _read_string_id_file(path: Path) -> set[str]:
@@ -464,11 +460,7 @@ def _summarize_training_source_rows(rows: list[dict[str, Any]]) -> dict[str, Any
 def _reject_threshold_eligible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return rows that have a real runner-up margin for thresholding."""
 
-    return [
-        row
-        for row in rows
-        if int(row.get("has_runner_up", 1)) == 1 and row.get("model_margin") is not None
-    ]
+    return [row for row in rows if int(row.get("has_runner_up", 1)) == 1 and row.get("model_margin") is not None]
 
 
 def _score_reject_threshold_core(rows: list[dict[str, Any]], *, threshold: float) -> dict[str, Any]:

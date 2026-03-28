@@ -9,7 +9,7 @@ This directory holds both user-facing guides and internal engineering notes.
 - Training and evaluation: [training.md](training.md)
 - Development workflow: [development.md](development.md)
 - Rust runtime contract and verification commands: [rust/runtime.md](rust/runtime.md)
-- Current work plan and backlog: [work_plan.md](work_plan.md)
+- Rust and platform backlog: [work_plan.md](work_plan.md)
 
 ## User guides
 
@@ -37,7 +37,7 @@ This directory holds both user-facing guides and internal engineering notes.
 
 ## Planning and migration docs
 
-- Current work plan and backlog: [work_plan.md](work_plan.md)
+- Rust and platform backlog: [work_plan.md](work_plan.md)
 - Rust artifact divergence and migration plan: [rust/artifact_divergence.md](rust/artifact_divergence.md)
 - Normalization migration plan [blocked]: [normalization_migration_blocked.md](normalization_migration_blocked.md)
 

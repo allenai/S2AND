@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import statistics
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,8 @@ try:
         DEFAULT_RETRIEVAL_APPROACH,
         QueryClusterStatsRequest,
         RerankerQueryCase,
+        append_query_group_metadata_csv,
+        append_rows_csv,
         block_size_bucket,
         build_component_summaries,
         build_labeled_query_cases,
@@ -73,6 +77,8 @@ except ImportError:  # pragma: no cover - direct script execution path
         DEFAULT_RETRIEVAL_APPROACH,
         QueryClusterStatsRequest,
         RerankerQueryCase,
+        append_query_group_metadata_csv,
+        append_rows_csv,
         block_size_bucket,
         build_component_summaries,
         build_labeled_query_cases,
@@ -110,6 +116,10 @@ from s2and.runtime import build_runtime_context
 
 DEFAULT_QUERY_BATCH_PAIR_LIMIT = 200_000
 H_WANG_QUERY_SOURCE_CHOICES = ("supported_single_letter", "orcid_any_input")
+PARTIAL_ROWS_FILENAME = "rows.partial.csv"
+PARTIAL_QUERY_GROUPS_FILENAME = "query_groups.partial.csv"
+BUILD_PROGRESS_FILENAME = "progress.json"
+BUILD_DONE_FILENAME = "done.json"
 
 
 @dataclass(frozen=True)
@@ -135,6 +145,230 @@ class PreparedQueryRowsRequest:
     retrieval_window_state_base: dict[str, int]
     stats_request: QueryClusterStatsRequest
     estimated_pair_count: int
+
+
+@dataclass
+class _QueryGroupSummaryAccumulator:
+    """Streaming summary state for one query-group metadata output."""
+
+    query_groups: int = 0
+    row_count: int = 0
+    positive_rows: int = 0
+    dropped_all_negative_group_count: int = 0
+    candidate_counts: list[int] = field(default_factory=list)
+    best_positive_retrieval_ranks: list[int] = field(default_factory=list)
+    per_supervision_type: dict[str, dict[str, int]] = field(default_factory=dict)
+    per_split: dict[str, dict[str, int]] = field(default_factory=dict)
+    per_view: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def _update_bucket(
+        self,
+        bucket: dict[str, dict[str, int]],
+        key: str,
+        *,
+        candidate_count: int,
+        positive_candidate_count: int,
+        group_has_positive: bool,
+        include_negative_count: bool = False,
+    ) -> None:
+        state = bucket.setdefault(
+            str(key),
+            {
+                "query_groups": 0,
+                "row_count": 0,
+                "positive_rows": 0,
+                "dropped_all_negative_group_count": 0,
+            },
+        )
+        state["query_groups"] += 1
+        state["row_count"] += int(candidate_count)
+        state["positive_rows"] += int(positive_candidate_count)
+        if include_negative_count and not group_has_positive:
+            state["dropped_all_negative_group_count"] += 1
+
+    def update(self, metadata_row: dict[str, Any]) -> None:
+        """Fold one persisted query-group metadata row into the summary."""
+
+        candidate_count = int(metadata_row["candidate_count"])
+        positive_candidate_count = int(metadata_row["positive_candidate_count"])
+        group_has_positive = bool(int(metadata_row["group_has_positive"]))
+        self.query_groups += 1
+        self.row_count += int(candidate_count)
+        self.positive_rows += int(positive_candidate_count)
+        self.dropped_all_negative_group_count += int(not group_has_positive)
+        self.candidate_counts.append(int(candidate_count))
+        if metadata_row["best_positive_retrieval_rank"] is not None:
+            self.best_positive_retrieval_ranks.append(int(metadata_row["best_positive_retrieval_rank"]))
+        self._update_bucket(
+            self.per_supervision_type,
+            str(metadata_row.get("supervision_type", "labeled")),
+            candidate_count=candidate_count,
+            positive_candidate_count=positive_candidate_count,
+            group_has_positive=group_has_positive,
+        )
+        self._update_bucket(
+            self.per_split,
+            str(metadata_row.get("split", "all")),
+            candidate_count=candidate_count,
+            positive_candidate_count=positive_candidate_count,
+            group_has_positive=group_has_positive,
+        )
+        self._update_bucket(
+            self.per_view,
+            str(metadata_row["query_view"]),
+            candidate_count=candidate_count,
+            positive_candidate_count=positive_candidate_count,
+            group_has_positive=group_has_positive,
+            include_negative_count=True,
+        )
+
+    def to_summary(self) -> dict[str, Any]:
+        """Return the persisted dataset summary from the accumulated metadata."""
+
+        summary = {
+            "query_groups": int(self.query_groups),
+            "row_count": int(self.row_count),
+            "positive_rows": int(self.positive_rows),
+            "positive_rate": round(float(self.positive_rows / max(1, self.row_count)), 6),
+            "dropped_all_negative_group_count": int(self.dropped_all_negative_group_count),
+            "candidate_window_coverage": round(
+                float((self.query_groups - self.dropped_all_negative_group_count) / max(1, self.query_groups)),
+                6,
+            ),
+            "candidate_count_mean": round(float(statistics.mean(self.candidate_counts)), 6)
+            if self.candidate_counts
+            else 0.0,
+            "candidate_count_median": round(float(statistics.median(self.candidate_counts)), 6)
+            if self.candidate_counts
+            else 0.0,
+            "best_positive_retrieval_rank_mean": round(float(statistics.mean(self.best_positive_retrieval_ranks)), 6)
+            if self.best_positive_retrieval_ranks
+            else None,
+            "per_supervision_type": {},
+            "per_split": {},
+            "per_view": {},
+        }
+        for supervision_type, bucket in sorted(self.per_supervision_type.items()):
+            summary["per_supervision_type"][str(supervision_type)] = {
+                "query_groups": int(bucket["query_groups"]),
+                "row_count": int(bucket["row_count"]),
+                "positive_rows": int(bucket["positive_rows"]),
+            }
+        for split, bucket in sorted(self.per_split.items()):
+            summary["per_split"][str(split)] = {
+                "query_groups": int(bucket["query_groups"]),
+                "row_count": int(bucket["row_count"]),
+                "positive_rows": int(bucket["positive_rows"]),
+            }
+        for query_view, bucket in sorted(self.per_view.items()):
+            summary["per_view"][str(query_view)] = {
+                "query_groups": int(bucket["query_groups"]),
+                "row_count": int(bucket["row_count"]),
+                "positive_rows": int(bucket["positive_rows"]),
+                "positive_rate": round(float(bucket["positive_rows"] / max(1, bucket["row_count"])), 6),
+                "dropped_all_negative_group_count": int(bucket["dropped_all_negative_group_count"]),
+                "candidate_window_coverage": round(
+                    float(
+                        (bucket["query_groups"] - bucket["dropped_all_negative_group_count"])
+                        / max(1, bucket["query_groups"])
+                    ),
+                    6,
+                ),
+            }
+        return summary
+
+
+def _summarize_query_group_metadata_rows(metadata_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize a dataset from query-group metadata rows."""
+
+    accumulator = _QueryGroupSummaryAccumulator()
+    for metadata_row in metadata_rows:
+        accumulator.update(metadata_row)
+    return accumulator.to_summary()
+
+
+def _utc_timestamp() -> str:
+    """Return an ISO-style UTC timestamp."""
+
+    return datetime.now(tz=UTC).isoformat(timespec="seconds")
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON atomically to avoid partially written watcher reads."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _current_rss_bytes() -> int | None:
+    """Return the current process RSS when available."""
+
+    try:
+        import psutil
+    except Exception:
+        return None
+    try:
+        return int(psutil.Process().memory_info().rss)
+    except Exception:
+        return None
+
+
+def _reset_h_wang_stream_outputs(output_dir: Path) -> tuple[Path, Path, Path, Path]:
+    """Reset managed streaming output files for one `h_wang` build."""
+
+    rows_partial_path = output_dir / PARTIAL_ROWS_FILENAME
+    query_groups_partial_path = output_dir / PARTIAL_QUERY_GROUPS_FILENAME
+    progress_path = output_dir / BUILD_PROGRESS_FILENAME
+    done_path = output_dir / BUILD_DONE_FILENAME
+    managed_paths = [
+        output_dir / "rows.csv",
+        output_dir / "query_groups.csv",
+        output_dir / "summary.json",
+        output_dir / "run_summary.json",
+        rows_partial_path,
+        query_groups_partial_path,
+        progress_path,
+        done_path,
+    ]
+    for managed_path in managed_paths:
+        if managed_path.exists():
+            managed_path.unlink()
+    write_rows_csv(rows_partial_path, [])
+    write_query_group_metadata_csv(query_groups_partial_path, [])
+    return rows_partial_path, query_groups_partial_path, progress_path, done_path
+
+
+def _write_h_wang_progress(
+    progress_path: Path,
+    *,
+    status: str,
+    query_source: str,
+    total_queries: int,
+    processed_queries: int,
+    written_rows: int,
+    written_query_groups: int,
+    last_query_id: str | None,
+    started_at: str,
+) -> None:
+    """Persist a lightweight progress heartbeat for the long-running build."""
+
+    _atomic_write_json(
+        progress_path,
+        {
+            "status": str(status),
+            "query_source": str(query_source),
+            "total_queries": int(total_queries),
+            "processed_queries": int(processed_queries),
+            "written_rows": int(written_rows),
+            "written_query_groups": int(written_query_groups),
+            "last_query_id": (str(last_query_id) if last_query_id is not None else None),
+            "started_at": str(started_at),
+            "updated_at": _utc_timestamp(),
+            "rss_bytes": _current_rss_bytes(),
+        },
+    )
 
 
 def _require_labeled_name_counts_source(dataset: Any, *, dataset_name: str) -> dict[str, Any]:
@@ -791,16 +1025,19 @@ def _flush_prepared_query_requests(
     prepared_requests: list[PreparedQueryRowsRequest],
     pair_batch_size: int,
     max_top_k: int,
-    rows: list[dict[str, Any]],
-    query_group_metadata_rows: list[dict[str, Any]],
     pair_counts: list[int],
     featurize_seconds: list[float],
     model_seconds: list[float],
-) -> None:
+    rows: list[dict[str, Any]] | None = None,
+    query_group_metadata_rows: list[dict[str, Any]] | None = None,
+    rows_output_path: Path | None = None,
+    query_group_metadata_output_path: Path | None = None,
+    query_group_summary_accumulator: _QueryGroupSummaryAccumulator | None = None,
+) -> tuple[int, int]:
     """Score and materialize one prepared-query batch."""
 
     if not prepared_requests:
-        return
+        return 0, 0
     batch_results = compute_query_cluster_stats_batched(
         clusterer=clusterer,
         dataset=dataset,
@@ -815,6 +1052,8 @@ def _flush_prepared_query_requests(
             "Prepared query batch size did not match scored results: "
             f"prepared={len(prepared_requests)} results={len(batch_results)}"
         )
+    batch_rows_to_write: list[dict[str, Any]] = []
+    batch_query_group_metadata_rows: list[dict[str, Any]] = []
     for prepared_request, (stats_by_component, pairwise_diagnostics) in zip(
         prepared_requests,
         batch_results,
@@ -824,17 +1063,27 @@ def _flush_prepared_query_requests(
             prepared_request,
             stats_by_component=stats_by_component,
         )
-        rows.extend(query_rows)
+        batch_rows_to_write.extend(query_rows)
         for query_group_rows in group_rows(query_rows).values():
-            query_group_metadata_rows.append(
-                summarize_query_group_rows(
-                    query_group_rows,
-                    block_component_count=int(prepared_request.block_component_count),
-                )
+            metadata_row = summarize_query_group_rows(
+                query_group_rows,
+                block_component_count=int(prepared_request.block_component_count),
             )
+            batch_query_group_metadata_rows.append(metadata_row)
+            if query_group_summary_accumulator is not None:
+                query_group_summary_accumulator.update(metadata_row)
         pair_counts.append(int(pairwise_diagnostics["pair_count"]))
         featurize_seconds.append(float(pairwise_diagnostics["featurize_seconds"]))
         model_seconds.append(float(pairwise_diagnostics["model_predict_seconds"]))
+    if rows is not None:
+        rows.extend(batch_rows_to_write)
+    if query_group_metadata_rows is not None:
+        query_group_metadata_rows.extend(batch_query_group_metadata_rows)
+    if rows_output_path is not None:
+        append_rows_csv(rows_output_path, batch_rows_to_write)
+    if query_group_metadata_output_path is not None:
+        append_query_group_metadata_csv(query_group_metadata_output_path, batch_query_group_metadata_rows)
+    return int(len(batch_rows_to_write)), int(len(batch_query_group_metadata_rows))
 
 
 def _build_labeled_master_for_dataset(
@@ -950,7 +1199,7 @@ def _build_labeled_master_for_dataset(
         prepared_requests.append(prepared_request)
         prepared_request_pair_count += int(prepared_request.estimated_pair_count)
         if prepared_request_pair_count >= int(query_batch_pair_limit):
-            _flush_prepared_query_requests(
+            _ = _flush_prepared_query_requests(
                 clusterer=clusterer,
                 dataset=dataset,
                 runtime_context=runtime_context,
@@ -967,7 +1216,7 @@ def _build_labeled_master_for_dataset(
             prepared_requests = []
             prepared_request_pair_count = 0
 
-    _flush_prepared_query_requests(
+    _ = _flush_prepared_query_requests(
         clusterer=clusterer,
         dataset=dataset,
         runtime_context=runtime_context,
@@ -1096,8 +1345,8 @@ def _build_h_wang_rows(
         raise ValueError(f"Unsupported h_wang query_source: {query_source}")
 
     summary_by_component = {summary.component_key: summary for summary in seed_summary_list}
-    rows: list[dict[str, Any]] = []
-    query_group_metadata_rows: list[dict[str, Any]] = []
+    rows_partial_path, query_groups_partial_path, progress_path, done_path = _reset_h_wang_stream_outputs(output_dir)
+    summary_accumulator = _QueryGroupSummaryAccumulator()
     pair_counts: list[int] = []
     featurize_seconds: list[float] = []
     model_seconds: list[float] = []
@@ -1106,6 +1355,21 @@ def _build_h_wang_rows(
     feature_cache: dict[str, retrieval.QueryFeatures] = {}
     raw_candidate_summaries = list(seed_summary_list)
     residual_summary_cache: dict[tuple[str, str], retrieval.ClusterSummary] = {}
+    processed_queries = 0
+    written_rows = 0
+    written_query_groups = 0
+    started_at = _utc_timestamp()
+    _write_h_wang_progress(
+        progress_path,
+        status="running",
+        query_source=str(query_source),
+        total_queries=int(len(query_cases)),
+        processed_queries=int(processed_queries),
+        written_rows=int(written_rows),
+        written_query_groups=int(written_query_groups),
+        last_query_id=None,
+        started_at=started_at,
+    )
 
     for query_case in query_cases:
         base_query = retrieval.extract_query_features(
@@ -1182,7 +1446,7 @@ def _build_h_wang_rows(
         prepared_requests.append(prepared_request)
         prepared_request_pair_count += int(prepared_request.estimated_pair_count)
         if prepared_request_pair_count >= int(query_batch_pair_limit):
-            _flush_prepared_query_requests(
+            flushed_row_count, flushed_query_group_count = _flush_prepared_query_requests(
                 clusterer=clusterer,
                 dataset=dataset,
                 runtime_context=runtime_context,
@@ -1190,16 +1454,31 @@ def _build_h_wang_rows(
                 prepared_requests=prepared_requests,
                 pair_batch_size=pair_batch_size,
                 max_top_k=max_top_k,
-                rows=rows,
-                query_group_metadata_rows=query_group_metadata_rows,
                 pair_counts=pair_counts,
                 featurize_seconds=featurize_seconds,
                 model_seconds=model_seconds,
+                rows_output_path=rows_partial_path,
+                query_group_metadata_output_path=query_groups_partial_path,
+                query_group_summary_accumulator=summary_accumulator,
+            )
+            processed_queries += int(len(prepared_requests))
+            written_rows += int(flushed_row_count)
+            written_query_groups += int(flushed_query_group_count)
+            _write_h_wang_progress(
+                progress_path,
+                status="running",
+                query_source=str(query_source),
+                total_queries=int(len(query_cases)),
+                processed_queries=int(processed_queries),
+                written_rows=int(written_rows),
+                written_query_groups=int(written_query_groups),
+                last_query_id=str(prepared_requests[-1].query_case.query_id),
+                started_at=started_at,
             )
             prepared_requests = []
             prepared_request_pair_count = 0
 
-    _flush_prepared_query_requests(
+    flushed_row_count, flushed_query_group_count = _flush_prepared_query_requests(
         clusterer=clusterer,
         dataset=dataset,
         runtime_context=runtime_context,
@@ -1207,16 +1486,18 @@ def _build_h_wang_rows(
         prepared_requests=prepared_requests,
         pair_batch_size=pair_batch_size,
         max_top_k=max_top_k,
-        rows=rows,
-        query_group_metadata_rows=query_group_metadata_rows,
         pair_counts=pair_counts,
         featurize_seconds=featurize_seconds,
         model_seconds=model_seconds,
+        rows_output_path=rows_partial_path,
+        query_group_metadata_output_path=query_groups_partial_path,
+        query_group_summary_accumulator=summary_accumulator,
     )
-
-    write_rows_csv(output_dir / "rows.csv", rows)
-    write_query_group_metadata_csv(output_dir / "query_groups.csv", query_group_metadata_rows)
-    summary = summarize_dataset_rows(rows)
+    if prepared_requests:
+        processed_queries += int(len(prepared_requests))
+        written_rows += int(flushed_row_count)
+        written_query_groups += int(flushed_query_group_count)
+    summary = summary_accumulator.to_summary()
     summary.update(
         {
             "dataset": "h_wang",
@@ -1224,7 +1505,7 @@ def _build_h_wang_rows(
             "dataset_load_ms": round(float(dataset_load_ms), 6),
             "seed_summary_build_ms": round(float(seed_summary_build_ms), 6),
             "query_count": int(len(query_cases)),
-            "query_group_metadata_count": int(len(query_group_metadata_rows)),
+            "query_group_metadata_count": int(written_query_groups),
             "query_source_summary": query_source_summary,
             "pair_count_mean": round(float(statistics.mean(pair_counts)), 6) if pair_counts else 0.0,
             "pair_count_p95": round(float(np.percentile(pair_counts, 95)), 6) if pair_counts else 0.0,
@@ -1236,7 +1517,31 @@ def _build_h_wang_rows(
             "max_top_k": int(max_top_k),
         }
     )
-    write_json(output_dir / "summary.json", summary)
+    _write_h_wang_progress(
+        progress_path,
+        status="completed",
+        query_source=str(query_source),
+        total_queries=int(len(query_cases)),
+        processed_queries=int(processed_queries),
+        written_rows=int(written_rows),
+        written_query_groups=int(written_query_groups),
+        last_query_id=(str(query_cases[-1].query_id) if query_cases else None),
+        started_at=started_at,
+    )
+    rows_partial_path.replace(output_dir / "rows.csv")
+    query_groups_partial_path.replace(output_dir / "query_groups.csv")
+    _atomic_write_json(output_dir / "summary.json", summary)
+    _atomic_write_json(
+        done_path,
+        {
+            "status": "completed",
+            "query_source": str(query_source),
+            "query_count": int(len(query_cases)),
+            "row_count": int(summary["row_count"]),
+            "query_group_metadata_count": int(written_query_groups),
+            "completed_at": _utc_timestamp(),
+        },
+    )
     return summary
 
 

@@ -44,6 +44,18 @@
 | `get_name_counts.py` | Documentation for how name counts metadata was collected (internal data) |
 | `get_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |
 
+### Giant-block reranker experiments
+
+| Script | What it does |
+|---|---|
+| `build_single_letter_reranker_dataset.py` | Build persisted candidate rows and `query_groups.csv` for labeled datasets and `h_wang` giant-block runs |
+| `eval_single_letter_ranker.py` | Train and evaluate the chooser, including `s2and_only`, `h_wang_only`, and `mixed` source-mode comparisons |
+| `eval_cluster_retrieval.py` | Run retrieval-only pilots for candidate-generation checks |
+| `giant_block_cluster_retrieval_task.py` | Build the step-2 giant-block seed artifact used upstream of the chooser experiments |
+
+Retired experiment-only scripts from the old fixed-slice phase now live under
+[`scratch/retired_experiment_scripts/`](../scratch/retired_experiment_scripts/).
+
 ### Testing
 
 | Script | What it does |
@@ -79,4 +91,4 @@ Scripts in `archive/` are historical and generally not intended to be rerun.
 
 ## Notes
 
-**`transfer_experiment_seed_paper.py`**: Assumes S2AND data is in `<code root>/data/`. If not, modify `"main_data_dir"` in `data/path_config.json`. If you have limited RAM, don't use `--use_cache` — it's slower without the cache but won't try to fit all feature data into memory.
+**`transfer_experiment_seed_paper.py`**: Assumes S2AND data is in `<code root>/data/`. If not, modify `"main_data_dir"` in `data/path_config.json`. For one-shot large runs, leave `--use_cache` off unless you expect to rerun the same workload and reuse cached pair features. With `--use_cache`, S2AND now writes the SQLite-backed pair-feature cache plus Rust featurizer disk cache, and a loaded pair-feature cache is also kept in process memory, so it still adds extra IO and can add RAM pressure when the cache will not be reused.

@@ -1,72 +1,89 @@
-# Work Plan (Next Steps + Backlog)
+# Work Plan (Rust/Platform Backlog)
 
-Status date: 2026-03-02
+Status date: 2026-03-27
 
-This doc is intentionally short and forward-looking (no execution logs).
-The long-term backlog also lives here under the `Backlog` section.
+This doc is not the active giant-block experiment plan. Active `h_wang` work lives in
+`TODO.md` and `TASK.md`.
+
+This file only tracks Rust/platform items that are still open and worth revisiting later.
+It intentionally excludes items that are already done.
 
 Start here:
-- Threading + preprocessing defaults: `docs/threading.md`
-- Rust runtime contract + verification commands: `docs/rust/runtime.md`
-- Rust gate commands (write JSON to `scratch/`): `docs/rust/baselines.md`
-- Artifact divergence + migration plan: `docs/rust/artifact_divergence.md`
-- Stage-wise memory telemetry + predictors: `docs/stage_memory_estimates.md`
+- Threading and preprocessing defaults: `docs/threading.md`
+- Rust runtime contract and verification commands: `docs/rust/runtime.md`
+- Rust gate commands: `docs/rust/baselines.md`
+- Artifact divergence and migration plan: `docs/rust/artifact_divergence.md`
+- Environment variables: `docs/environment.md`
+- Stage-wise memory telemetry: `docs/stage_memory_estimates.md`
 
-## Next work (active)
+## Partial
 
-### Bundle: artifact format unification (Ask-first)
+### Artifact format unification (Ask-first)
 
-Goal: remove the remaining Rust/Python artifact divergences **without changing normalization policy**.
+Status:
+- Still open. Python and Rust artifact handling have converged somewhat, but they are not unified.
 
-Scope (recommended order):
-1. `name_counts`: Python pickle + Rust JSON → one MessagePack artifact readable natively by both.
-2. `specter`: pickle → safetensors (eliminate hidden Python FFI dependency in Rust ingest).
-3. `name_tuples`: collapse runtime to one default variant (keep other variants as explicit offline inputs).
+What remains:
+- `name_counts` still diverges between Python pickle handling and Rust JSON ingest.
+- `specter` still depends on pickle-era artifact assumptions in parts of the stack.
+- `name_tuples` still has more runtime variation than we likely want.
 
-Work style:
-- Start with dual-read loaders + tiny fixtures.
-- Defer regenerating huge artifacts until dual-read is proven.
+When to consider it:
+- After the current giant-block chooser work, or sooner if artifact drift blocks parity or debugging.
 
-
-## Decisions (need explicit call)
+Verification bar:
+- Dual-read loaders first.
+- Tiny fixture round-trips before any large artifact regeneration.
+- Gate with the existing Rust baseline commands.
 
 ### Reference-features deprecation
 
-Guardrails:
-- Keep the full **39-dim feature index contract** stable; reserve legacy reference slots at indices `16..21` (filled with `NaN` when refs are disabled).
+Status:
+- Effectively soft-deprecated in production, but not removed from the codebase.
 
-Choose one:
-- Hard-deprecate: any model that requests `reference_features` fails fast.
-- Soft-deprecate: keep the legacy reference data + preprocessing path until all such models are retired.
+Current state:
+- The 39-dim feature contract still reserves reference-feature slots at indices `16..21`.
+- Current production paths do not rely on reference features.
+- Legacy training, reproducibility paths, and tests still support them.
 
-## Separate tracks
+Open decision:
+- Hard-deprecate and fail fast for any model that requests `reference_features`.
+- Or keep soft-deprecate behavior until every such model is retired.
 
-- Normalization migration [BLOCKED]: `docs/normalization_migration_blocked.md`
-
-## Backlog
-
-Ask-first / long-term ideas. Keep this section high-level; when something becomes active work, move it into
-`Next work (active)` above with explicit verification gates.
-
-### Rust frontier ideas (Ask-first)
-
-1. **Fused constraint + featurize pipeline in Rust**
-   - Replace the per-pair Python generator loop with "one Rust call per block/batch" that evaluates constraints internally, featurizes survivors, and returns a feature matrix (or distances).
-   - Primary risks: constraint semantics drift, determinism regressions, rollout/rollback complexity.
-
-2. **Vec-backed internal storage refactor (Rust)**
-   - Reduce per-pair hash-map overhead in Rust hot loops via index-native Vec-backed internal stores.
-   - Only pursue if profiling shows per-pair map overhead dominates after existing batching wins plateau.
-
-### Refactor candidates (keep small, staged)
-
-- `s2and/model.py`: consider splitting clusterer/incremental/constraints/pairwise responsibilities.
-- `s2and/featurizer.py`: keep `many_pairs_featurize` as an orchestrator; extract cache lifecycle + worklist construction + telemetry finalize.
-- `s2and/data.py`: extract `ANDData.__init__` stages; flatten deep nesting in signature preprocessing.
-- `s2and/feature_port.py`: separate runtime gating/build selection/cache IO/constraints/batch bridge logic.
-- `s2and_rust/src/lib.rs`: factor shared stages between `from_dataset` and `from_json_paths` to reduce duplication.
+Guardrail:
+- Preserve the feature index contract unless there is an explicit migration plan.
 
 ### Configuration surface cleanup
 
-- Centralize env var parsing/validation to reduce drift across modules.
-- Prefer explicit parameters (API/CLI) over ambient env vars for reproducibility where possible.
+Status:
+- Partially improved, not finished.
+
+What remains:
+- Env var parsing and validation are still spread across multiple modules and scripts.
+- Some scripts still set runtime knobs through ambient env vars instead of explicit parameters.
+
+Why it matters:
+- Reproducibility is better when run-critical settings live in CLI or typed API surfaces instead of implicit process state.
+
+## Backlog
+
+### Rust frontier ideas (Ask-first)
+
+1. **Fused constraint and featurize pipeline in Rust**
+   - Replace the remaining Python-side per-pair orchestration with one Rust batch call that applies constraints internally and returns features or distances.
+   - Only revisit this if fresh profiling shows Python orchestration is still a real bottleneck after the current batching wins.
+
+2. **Further Vec-backed internal storage refactors**
+   - Some hot-path Rust structures already moved in this direction; do more only if profiling shows the remaining hash-map overhead is still material.
+
+### Small refactor candidates
+
+- `s2and/model.py`: further separate clusterer, incremental assignment, constraints, and pairwise orchestration responsibilities.
+- `s2and/featurizer.py`: keep `many_pairs_featurize` as the public orchestrator but continue extracting cache lifecycle and worklist construction pieces.
+- `s2and/data.py`: keep breaking up `ANDData.__init__` stages and flatten deeply nested preprocessing.
+- `s2and/feature_port.py`: further separate runtime gating, artifact selection, cache IO, constraints, and batch bridge logic.
+- `s2and_rust/src/lib.rs`: reduce duplication between `from_dataset` and `from_json_paths` when there is clear shared stage logic.
+
+### Separate blocked track
+
+- Normalization migration remains blocked: `docs/normalization_migration_blocked.md`

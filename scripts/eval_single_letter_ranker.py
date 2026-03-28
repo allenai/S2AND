@@ -100,6 +100,16 @@ def _resolve_query_views(*, query_view: str, query_views: list[str] | None) -> l
     return ordered
 
 
+def _query_base_group_id(row: dict[str, Any]) -> str:
+    """Return the base query identity used to keep mixed views together."""
+
+    return (
+        f"{str(row.get('query_source', row['source']))}:"
+        f"{str(row['dataset'])}:"
+        f"{str(row['query_id'])}"
+    )
+
+
 def _read_string_id_file(path: Path) -> set[str]:
     """Read a newline-delimited query-group selection file."""
 
@@ -300,7 +310,8 @@ def _evaluate_rows(
         )
         top3_hit = int(any(int(row["label"]) == 1 for _score, row in ranked_pairs[:3]))
         chosen_score, chosen_row = ranked_pairs[0]
-        second_score = float(ranked_pairs[1][0]) if len(ranked_pairs) > 1 else 0.0
+        has_runner_up = int(len(ranked_pairs) > 1)
+        second_score = float(ranked_pairs[1][0]) if has_runner_up else None
         retrieval_top1 = choose_retrieval_top1(eligible_rows, window_size=window_size)
         heuristic_choice, _heuristic_score = choose_generic_heuristic(eligible_rows, window_size=window_size)
         per_group_rows.append(
@@ -329,7 +340,10 @@ def _evaluate_rows(
                 "model_correct": int(chosen_row["label"]),
                 "model_top3_hit": int(top3_hit),
                 "model_score": round(float(chosen_score), 6),
-                "model_margin": round(float(chosen_score - second_score), 6),
+                "model_margin": (
+                    round(float(chosen_score - float(second_score)), 6) if second_score is not None else None
+                ),
+                "has_runner_up": int(has_runner_up),
                 "retrieval_top1_prediction": retrieval_top1,
                 "retrieval_top1_correct": int(
                     any(
@@ -447,12 +461,23 @@ def _summarize_training_source_rows(rows: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def _reject_threshold_eligible_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return rows that have a real runner-up margin for thresholding."""
+
+    return [
+        row
+        for row in rows
+        if int(row.get("has_runner_up", 1)) == 1 and row.get("model_margin") is not None
+    ]
+
+
 def _score_reject_threshold_core(rows: list[dict[str, Any]], *, threshold: float) -> dict[str, Any]:
     """Score one reject-all threshold over dev per-group rows."""
 
-    positives = [row for row in rows if str(row["supervision_type"]) == "positive_repeat_orcid"]
-    negatives = [row for row in rows if str(row["supervision_type"]) == "negative_singleton_orcid"]
-    accepted = {str(row["query_group_id"]): float(row["model_margin"]) > float(threshold) for row in rows}
+    eligible_rows = _reject_threshold_eligible_rows(rows)
+    positives = [row for row in eligible_rows if str(row["supervision_type"]) == "positive_repeat_orcid"]
+    negatives = [row for row in eligible_rows if str(row["supervision_type"]) == "negative_singleton_orcid"]
+    accepted = {str(row["query_group_id"]): float(row["model_margin"]) > float(threshold) for row in eligible_rows}
     positive_correct = sum(
         int(accepted[str(row["query_group_id"])] and int(row["model_correct"]) == 1) for row in positives
     )
@@ -471,17 +496,19 @@ def _score_reject_threshold_core(rows: list[dict[str, Any]], *, threshold: float
     return {
         "threshold": round(float(threshold), 6),
         "queries": int(len(rows)),
+        "eligible_queries": int(len(eligible_rows)),
+        "singleton_candidate_group_count": int(len(rows) - len(eligible_rows)),
         "positive_queries": int(len(positives)),
         "negative_queries": int(len(negatives)),
         "balanced_accuracy": round(float(balanced_accuracy), 6),
-        "overall_accuracy": round(float(total_correct / len(rows)), 6) if rows else 0.0,
+        "overall_accuracy": round(float(total_correct / len(eligible_rows)), 6) if eligible_rows else 0.0,
         "positive_accuracy": round(float(positive_accuracy), 6) if positives else None,
         "negative_reject_accuracy": round(float(negative_reject_accuracy), 6) if negatives else None,
         "rejection_rate": round(
-            float(sum(int(not accepted[str(row["query_group_id"])]) for row in rows) / len(rows)),
+            float(sum(int(not accepted[str(row["query_group_id"])]) for row in eligible_rows) / len(eligible_rows)),
             6,
         )
-        if rows
+        if eligible_rows
         else 0.0,
         "positive_accept_rate": round(
             float(sum(int(accepted[str(row["query_group_id"])]) for row in positives) / len(positives)),
@@ -499,6 +526,8 @@ def _select_reject_threshold(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "threshold": 0.0,
             "queries": 0,
+            "eligible_queries": 0,
+            "singleton_candidate_group_count": 0,
             "positive_queries": 0,
             "negative_queries": 0,
             "balanced_accuracy": 0.0,
@@ -509,7 +538,18 @@ def _select_reject_threshold(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "positive_accept_rate": None,
             "per_view": {},
         }
-    margins = sorted({float(row["model_margin"]) for row in rows})
+    eligible_rows = _reject_threshold_eligible_rows(rows)
+    if not eligible_rows:
+        summary = _score_reject_threshold_core(rows, threshold=0.0)
+        summary["per_view"] = {
+            query_view: _score_reject_threshold_core(
+                [row for row in rows if str(row["query_view"]) == query_view],
+                threshold=0.0,
+            )
+            for query_view in sorted({str(row["query_view"]) for row in rows})
+        }
+        return summary
+    margins = sorted({float(row["model_margin"]) for row in eligible_rows})
     epsilon = 1e-6
     candidate_thresholds = [margins[0] - epsilon, *margins, margins[-1] + epsilon]
     best_metrics: dict[str, Any] | None = None
@@ -538,9 +578,16 @@ def _select_reject_threshold(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _summarize_negative_singletons(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize singleton-negative dev groups."""
 
+    eligible_rows = _reject_threshold_eligible_rows(rows)
     return {
         "queries": int(len(rows)),
-        "mean_margin": round(float(statistics.mean(float(row["model_margin"]) for row in rows)), 6) if rows else 0.0,
+        "eligible_margin_queries": int(len(eligible_rows)),
+        "singleton_candidate_group_count": int(len(rows) - len(eligible_rows)),
+        "mean_margin": (
+            round(float(statistics.mean(float(row["model_margin"]) for row in eligible_rows)), 6)
+            if eligible_rows
+            else None
+        ),
         "mean_candidate_count": round(float(statistics.mean(int(row["candidate_count"]) for row in rows)), 6)
         if rows
         else 0.0,
@@ -727,9 +774,9 @@ def _fit_ranker_for_split(
 ) -> tuple[Any, dict[str, Any]]:
     filtered_rows = select_rows(train_rows, query_views=query_views, window_size=window_size)
     grouped = group_rows(filtered_rows)
-    group_ids = sorted(grouped)
-    if len(group_ids) < 2:
-        raise RuntimeError(f"Need at least two train groups for ranker fit; found {len(group_ids)}")
+    base_group_ids = sorted({_query_base_group_id(group_rows_for_id[0]) for group_rows_for_id in grouped.values()})
+    if len(base_group_ids) < 2:
+        raise RuntimeError(f"Need at least two base train groups for ranker fit; found {len(base_group_ids)}")
     inner_splitter = GroupShuffleSplit(
         n_splits=1,
         test_size=float(inner_validation_fraction),
@@ -737,15 +784,15 @@ def _fit_ranker_for_split(
     )
     inner_train_index, inner_validation_index = next(
         inner_splitter.split(
-            [[0]] * len(group_ids),
-            [0] * len(group_ids),
-            groups=group_ids,
+            [[0]] * len(base_group_ids),
+            [0] * len(base_group_ids),
+            groups=base_group_ids,
         )
     )
-    inner_train_ids = {str(group_ids[idx]) for idx in inner_train_index}
-    inner_validation_ids = {str(group_ids[idx]) for idx in inner_validation_index}
-    search_train_rows = [row for row in filtered_rows if str(row["query_group_id"]) in inner_train_ids]
-    search_validation_rows = [row for row in filtered_rows if str(row["query_group_id"]) in inner_validation_ids]
+    inner_train_ids = {str(base_group_ids[idx]) for idx in inner_train_index}
+    inner_validation_ids = {str(base_group_ids[idx]) for idx in inner_validation_index}
+    search_train_rows = [row for row in filtered_rows if _query_base_group_id(row) in inner_train_ids]
+    search_validation_rows = [row for row in filtered_rows if _query_base_group_id(row) in inner_validation_ids]
     feature_columns = resolve_feature_columns(feature_preset=feature_preset)
 
     search_training_matrix = build_training_matrix(

@@ -1629,6 +1629,21 @@ def write_dict_rows_csv(path: Path, rows: Sequence[dict[str, Any]], *, fieldname
             writer.writerow({key: row.get(key) for key in fieldnames})
 
 
+def append_dict_rows_csv(path: Path, rows: Sequence[dict[str, Any]], *, fieldnames: Sequence[str]) -> None:
+    """Append dictionaries to CSV with an explicit stable field order."""
+
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    needs_header = (not path.exists()) or path.stat().st_size == 0
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=[str(value) for value in fieldnames])
+        if needs_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key) for key in fieldnames})
+
+
 def _read_typed_rows_csv(
     path: Path,
     *,
@@ -1663,6 +1678,12 @@ def write_rows_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     write_dict_rows_csv(path, rows, fieldnames=ROW_COLUMNS)
 
 
+def append_rows_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    """Append candidate rows to a CSV file with a stable column order."""
+
+    append_dict_rows_csv(path, rows, fieldnames=ROW_COLUMNS)
+
+
 def read_rows_csv(path: Path) -> list[dict[str, Any]]:
     """Read persisted reranker rows from ``path``."""
 
@@ -1673,6 +1694,12 @@ def write_query_group_metadata_csv(path: Path, rows: Sequence[dict[str, Any]]) -
     """Write one row per query group for cached sampler selection."""
 
     write_dict_rows_csv(path, rows, fieldnames=QUERY_GROUP_METADATA_COLUMNS)
+
+
+def append_query_group_metadata_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    """Append one row per query group for cached sampler selection."""
+
+    append_dict_rows_csv(path, rows, fieldnames=QUERY_GROUP_METADATA_COLUMNS)
 
 
 def read_query_group_metadata_csv(path: Path) -> list[dict[str, Any]]:

@@ -45,10 +45,18 @@ except ImportError:  # pragma: no cover - direct script execution path
 
 try:
     import scripts.eval_cluster_retrieval as retrieval
-    from scripts.single_letter_retrieval_utils import rank_top_summaries
+    from scripts.single_letter_retrieval_utils import (
+        RustHybridCentroidRetrieverHandle,
+        rank_top_summaries,
+        rank_top_summaries_rust_hybrid_centroid,
+    )
 except ImportError:  # pragma: no cover - direct script execution path
     import eval_cluster_retrieval as retrieval  # type: ignore
-    from single_letter_retrieval_utils import rank_top_summaries  # type: ignore
+    from single_letter_retrieval_utils import (  # type: ignore
+        RustHybridCentroidRetrieverHandle,
+        rank_top_summaries,
+        rank_top_summaries_rust_hybrid_centroid,
+    )
 
 DEFAULT_LABELED_DATASETS = (
     "arnetminer",
@@ -976,8 +984,34 @@ def _rank_method_window(
     candidate_summaries: list[retrieval.ClusterSummary],
     max_block_component_size: int,
     max_ranked_clusters: int,
+    rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None = None,
+    rust_num_threads: int | None = None,
 ) -> list[tuple[float, retrieval.ClusterSummary]]:
     """Rank one retrieval method over the filtered candidate summaries."""
+
+    if method == "hybrid_centroid" and rust_hybrid_centroid_retriever is not None:
+        override_summary: retrieval.ClusterSummary | None = None
+        component_keys: list[str] = []
+        for summary in candidate_summaries:
+            component_key = str(summary.component_key)
+            base_summary = rust_hybrid_centroid_retriever.summary_by_component.get(component_key)
+            if base_summary is None:
+                break
+            component_keys.append(component_key)
+            if summary is not base_summary:
+                if override_summary is not None:
+                    break
+                override_summary = summary
+        else:
+            return rank_top_summaries_rust_hybrid_centroid(
+                query=query,
+                max_ranked_clusters=max_ranked_clusters,
+                retriever=rust_hybrid_centroid_retriever,
+                component_keys=component_keys,
+                max_block_component_size=max_block_component_size,
+                override_summary=override_summary,
+                num_threads=rust_num_threads,
+            )
 
     return rank_top_summaries(
         method=method,
@@ -1061,14 +1095,18 @@ def build_retrieval_window(
     max_block_component_size: int,
     retrieval_approach: str,
     max_ranked_clusters: int,
+    rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None = None,
+    rust_num_threads: int | None = None,
 ) -> tuple[list[str], dict[str, float], dict[str, int], dict[str, int]]:
     """Rank candidate summaries under the fixed retrieval operating point."""
 
     approach_spec = _parse_retrieval_approach(retrieval_approach)
     candidate_summaries, filter_state = retrieval.apply_hard_filters(query, raw_candidate_summaries)
-    profiles_by_component = {
-        str(summary.component_key): build_cluster_profile(summary) for summary in candidate_summaries
-    }
+    profiles_by_component: dict[str, ClusterProfile] = {}
+    if approach_spec.mode == "ambiguous_union":
+        profiles_by_component = {
+            str(summary.component_key): build_cluster_profile(summary) for summary in candidate_summaries
+        }
     ranked_by_method = {
         method: _rank_method_window(
             method=method,
@@ -1076,6 +1114,8 @@ def build_retrieval_window(
             candidate_summaries=candidate_summaries,
             max_block_component_size=max_block_component_size,
             max_ranked_clusters=max_ranked_clusters,
+            rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
+            rust_num_threads=rust_num_threads,
         )
         for method in approach_spec.methods
     }

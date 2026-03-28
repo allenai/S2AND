@@ -1,13 +1,13 @@
-"""Shared helpers for single-letter retrieval and chooser experiments.
+"""Shared helpers for single-letter retrieval candidate generation.
 
-These utilities sit below the experiment runners so giant-block and `h_wang`
-evaluators can share the same candidate-summary and ranking behavior without
-depending on one another's private helpers.
+These helpers keep deterministic query selection, seed-summary construction,
+and top-k retrieval ranking out of the larger reranker pipeline module.
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -16,6 +16,19 @@ try:
     import scripts.eval_cluster_retrieval as retrieval
 except ImportError:  # pragma: no cover - direct script execution path
     import eval_cluster_retrieval as retrieval  # type: ignore
+
+try:
+    import s2and_rust
+except ImportError:  # pragma: no cover - Rust extension optional
+    s2and_rust = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
+class RustHybridCentroidRetrieverHandle:
+    """Cached Python + Rust state for exact `hybrid_centroid` retrieval."""
+
+    retriever: Any
+    summary_by_component: dict[str, retrieval.ClusterSummary]
 
 
 def select_query_ids(
@@ -106,58 +119,54 @@ def rank_top_summaries(
     return [(float(scores[idx]), candidate_summaries[idx]) for idx in top_indices]
 
 
-def hit_any_supported_at_k(ranked_cluster_ids: list[str], supported_cluster_ids: frozenset[str], k: int) -> int:
-    """Return whether any supported cluster appears within the first `k` ranks."""
+def build_rust_hybrid_centroid_retriever(
+    candidate_summaries: list[retrieval.ClusterSummary],
+) -> RustHybridCentroidRetrieverHandle:
+    """Build the optional Rust-backed exact retriever for `hybrid_centroid`."""
 
-    return int(any(cluster_id in supported_cluster_ids for cluster_id in ranked_cluster_ids[:k]))
-
-
-def hit_any_supported_within_signature_budget(
-    ranked_cluster_ids: list[str],
-    cluster_sizes: dict[str, int],
-    supported_cluster_ids: frozenset[str],
-    signature_budget: int,
-) -> int:
-    """Return whether any supported cluster appears before the signature budget is exhausted."""
-
-    if signature_budget <= 0:
-        return 0
-    materialized_signatures = 0
-    for cluster_id in ranked_cluster_ids:
-        next_total = materialized_signatures + int(cluster_sizes[cluster_id])
-        if next_total > signature_budget:
-            break
-        materialized_signatures = next_total
-        if cluster_id in supported_cluster_ids:
-            return 1
-    return 0
+    if s2and_rust is None or not hasattr(s2and_rust, "RustHybridCentroidRetriever"):
+        raise RuntimeError("RustHybridCentroidRetriever is unavailable; build/install s2and_rust first")
+    return RustHybridCentroidRetrieverHandle(
+        retriever=s2and_rust.RustHybridCentroidRetriever(candidate_summaries),
+        summary_by_component={str(summary.component_key): summary for summary in candidate_summaries},
+    )
 
 
-def materialized_signature_count_at_k(
-    ranked_cluster_ids: list[str],
-    cluster_sizes: dict[str, int],
-    k: int,
-) -> int:
-    """Return how many signatures are materialized in the first `k` clusters."""
+def rank_top_summaries_rust_hybrid_centroid(
+    *,
+    query: retrieval.QueryFeatures,
+    max_ranked_clusters: int,
+    retriever: RustHybridCentroidRetrieverHandle,
+    component_keys: list[str] | None = None,
+    max_block_component_size: int | None = None,
+    override_summary: retrieval.ClusterSummary | None = None,
+    num_threads: int | None = None,
+) -> list[tuple[float, retrieval.ClusterSummary]]:
+    """Score and rank candidate summaries with the optional Rust `hybrid_centroid` path."""
 
-    return sum(int(cluster_sizes[cluster_id]) for cluster_id in ranked_cluster_ids[:k])
-
-
-def prefix_count_within_signature_budget(
-    ranked_cluster_ids: list[str],
-    cluster_sizes: dict[str, int],
-    signature_budget: int,
-) -> int:
-    """Return the largest ranked prefix that fits within the signature budget."""
-
-    if signature_budget <= 0:
-        return 0
-    materialized_signatures = 0
-    cluster_count = 0
-    for cluster_id in ranked_cluster_ids:
-        next_total = materialized_signatures + int(cluster_sizes[cluster_id])
-        if next_total > signature_budget:
-            break
-        materialized_signatures = next_total
-        cluster_count += 1
-    return int(cluster_count)
+    if max_ranked_clusters <= 0:
+        raise ValueError("max_ranked_clusters must be positive")
+    if component_keys is None:
+        ranked_component_keys, scores = retriever.retriever.top_k_hybrid_centroid(
+            query,
+            top_k=int(max_ranked_clusters),
+            num_threads=None if num_threads is None else int(num_threads),
+        )
+    else:
+        if max_block_component_size is None:
+            raise ValueError("max_block_component_size is required when component_keys are provided")
+        ranked_component_keys, scores = retriever.retriever.top_k_hybrid_centroid_subset(
+            query,
+            component_keys,
+            top_k=int(max_ranked_clusters),
+            max_block_component_size=int(max_block_component_size),
+            num_threads=None if num_threads is None else int(num_threads),
+            override_summary=override_summary,
+        )
+    summary_by_component = dict(retriever.summary_by_component)
+    if override_summary is not None:
+        summary_by_component[str(override_summary.component_key)] = override_summary
+    return [
+        (float(score), summary_by_component[str(component_key)])
+        for component_key, score in zip(ranked_component_keys, scores, strict=True)
+    ]

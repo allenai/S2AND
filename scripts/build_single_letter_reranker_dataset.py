@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import statistics
 import time
 from collections import Counter, defaultdict
@@ -53,14 +54,10 @@ try:
         write_rows_csv,
     )
     from scripts.single_letter_retrieval_utils import (
+        build_rust_hybrid_centroid_retriever,
         build_seed_summaries,
         invert_signature_to_cluster_id,
         select_query_ids,
-    )
-    from scripts.supported_seed_query_utils import (
-        build_orcid_seed_cluster_counts,
-        extract_signature_orcid,
-        load_query_metadata,
     )
 except ImportError:  # pragma: no cover - direct script execution path
     import eval_cluster_retrieval as retrieval  # type: ignore
@@ -100,26 +97,76 @@ except ImportError:  # pragma: no cover - direct script execution path
         write_rows_csv,
     )
     from single_letter_retrieval_utils import (  # type: ignore
+        build_rust_hybrid_centroid_retriever,
         build_seed_summaries,
         invert_signature_to_cluster_id,
         select_query_ids,
-    )
-    from supported_seed_query_utils import (  # type: ignore
-        build_orcid_seed_cluster_counts,
-        extract_signature_orcid,
-        load_query_metadata,
     )
 
 from s2and.feature_port import inspect_json_ingest_name_counts_source
 from s2and.model import _apply_dataset_name_count_semantics_for_prediction, _build_incremental_constraint_backend
 from s2and.runtime import build_runtime_context
 
+ORCID_PATTERN = re.compile(r"(\d{4}-?\d{4}-?\d{4}-?[\dXx]{4})")
 DEFAULT_QUERY_BATCH_PAIR_LIMIT = 200_000
 H_WANG_QUERY_SOURCE_CHOICES = ("supported_single_letter", "orcid_any_input")
 PARTIAL_ROWS_FILENAME = "rows.partial.csv"
 PARTIAL_QUERY_GROUPS_FILENAME = "query_groups.partial.csv"
 BUILD_PROGRESS_FILENAME = "progress.json"
 BUILD_DONE_FILENAME = "done.json"
+
+
+def _normalize_orcid(orcid: str | None) -> str | None:
+    """Normalize ORCID to the compact uppercase 16-character form."""
+
+    if not orcid:
+        return None
+    matches = ORCID_PATTERN.findall(str(orcid))
+    if not matches:
+        return None
+    return matches[0].upper().replace("-", "")
+
+
+def extract_signature_orcid(signature_payload: dict[str, Any]) -> str | None:
+    """Return the normalized ORCID for a raw extracted signature payload."""
+
+    author_info = signature_payload.get("author_info", {})
+    if str(author_info.get("source_id_source", "")) != "ORCID":
+        return None
+    source_ids = author_info.get("source_ids") or []
+    if len(source_ids) == 0:
+        return None
+    return _normalize_orcid(str(source_ids[0]))
+
+
+def load_query_metadata(path: Path) -> dict[str, dict[str, Any]]:
+    """Load the supported-query metadata payload keyed by query ID."""
+
+    with path.open("r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    rows = payload.get("query_rows")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Invalid query-set payload at {path}: expected list under 'query_rows'")
+    return {str(row["query_id"]): dict(row) for row in rows}
+
+
+def build_orcid_seed_cluster_counts(
+    *,
+    raw_signatures: dict[str, Any],
+    signature_to_cluster_id: dict[str, str],
+) -> dict[str, Counter[str]]:
+    """Count supported seed-cluster memberships by normalized ORCID."""
+
+    counts_by_orcid: dict[str, Counter[str]] = defaultdict(Counter)
+    for signature_id, cluster_id in signature_to_cluster_id.items():
+        signature_payload = raw_signatures.get(str(signature_id))
+        if not isinstance(signature_payload, dict):
+            continue
+        normalized_orcid = extract_signature_orcid(signature_payload)
+        if normalized_orcid is None:
+            continue
+        counts_by_orcid[normalized_orcid][str(cluster_id)] += 1
+    return counts_by_orcid
 
 
 @dataclass(frozen=True)
@@ -907,6 +954,7 @@ def _prepare_query_rows_request(
     retrieval_approach: str,
     window_size: int,
     retrieval_window_state_base: dict[str, int] | None = None,
+    rust_hybrid_centroid_retriever: Any | None = None,
 ) -> PreparedQueryRowsRequest:
     """Prepare one query request for later batched pairwise scoring."""
 
@@ -921,6 +969,7 @@ def _prepare_query_rows_request(
             max_block_component_size=max_block_component_size,
             retrieval_approach=retrieval_approach,
             max_ranked_clusters=window_size,
+            rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
         )
         shortlist_component_keys = tuple(str(component_key) for component_key in ranked_component_keys[:window_size])
         union_component_keys.update(shortlist_component_keys)
@@ -1318,6 +1367,12 @@ def _build_h_wang_rows(
         block_key=str(load_info["target_block"]),
         max_exemplars=max_exemplars,
     )
+    rust_hybrid_centroid_retriever = None
+    if "hybrid_centroid" in {str(value) for value in str(retrieval_approach).split("__")}:
+        try:
+            rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(seed_summary_list)
+        except RuntimeError:
+            rust_hybrid_centroid_retriever = None
     if str(query_source) == "supported_single_letter":
         if targets_dir is None:
             raise ValueError("supported_single_letter `h_wang` rows require --targets-dir")
@@ -1442,6 +1497,7 @@ def _build_h_wang_rows(
             retrieval_approach=retrieval_approach,
             window_size=window_size,
             retrieval_window_state_base=retrieval_window_state_base,
+            rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
         )
         prepared_requests.append(prepared_request)
         prepared_request_pair_count += int(prepared_request.estimated_pair_count)

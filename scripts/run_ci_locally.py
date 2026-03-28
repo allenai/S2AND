@@ -140,6 +140,8 @@ def sync_deps(*, lock_present: bool, lane: str) -> None:
         args.extend(["--extra", "rust"])
     if lock_present:
         args.append("--frozen")
+    if lane == "rust-enabled":
+        args.extend(["--no-install-package", "s2and-rust"])
     run_uv(args)
 
 

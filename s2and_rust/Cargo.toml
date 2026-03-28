@@ -22,4 +22,3 @@ pyo3 = "0.24.2"
 
 [patch.crates-io]
 cld2 = { path = "vendor/cld2" }
-cld2-sys = { path = "vendor/cld2-sys" }

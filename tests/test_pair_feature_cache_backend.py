@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,7 @@ from tests.helpers import build_dummy_dataset
 
 
 @pytest.fixture(autouse=True)
-def _clear_pair_feature_cache_state() -> None:
+def _clear_pair_feature_cache_state() -> Iterator[None]:
     with featurizer_mod._CACHED_FEATURES_LOCK:
         featurizer_mod.CACHED_FEATURES.clear()
     yield

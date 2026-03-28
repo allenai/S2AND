@@ -204,12 +204,26 @@ def _set_runtime_env(
     *,
     backend: str,
     n_jobs: int,
-) -> None:
+) -> dict[str, str | None]:
     if backend not in {"python", "rust", "auto"}:
         raise ValueError(f"Unsupported backend={backend}")
+    prior_values = {
+        "S2AND_BACKEND": os.environ.get("S2AND_BACKEND"),
+        "S2AND_SKIP_FASTTEXT": os.environ.get("S2AND_SKIP_FASTTEXT"),
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+    }
     os.environ["S2AND_BACKEND"] = backend
     os.environ["S2AND_SKIP_FASTTEXT"] = "1"
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
+    return prior_values
+
+
+def _restore_runtime_env(prior_values: dict[str, str | None]) -> None:
+    for name, prior_value in prior_values.items():
+        if prior_value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prior_value
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -299,12 +313,7 @@ def _summarize_incremental_seed_state(
     }
 
 
-def _run_single(args: argparse.Namespace) -> dict[str, Any]:
-    _set_runtime_env(
-        backend=args.backend,
-        n_jobs=int(args.n_jobs),
-    )
-
+def _run_single_impl(args: argparse.Namespace) -> dict[str, Any]:
     from s2and import model as model_module
     from s2and.data import ANDData
     from s2and.serialization import load_pickle_with_verified_label_encoder_compat
@@ -480,6 +489,17 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             json.dump(result, outfile, indent=2, sort_keys=True)
         print(f"Wrote single-run JSON: {output_path}")
     return result
+
+
+def _run_single(args: argparse.Namespace) -> dict[str, Any]:
+    prior_runtime_env = _set_runtime_env(
+        backend=args.backend,
+        n_jobs=int(args.n_jobs),
+    )
+    try:
+        return _run_single_impl(args)
+    finally:
+        _restore_runtime_env(prior_runtime_env)
 
 
 def _extract_single_result(stdout_text: str) -> dict[str, Any]:

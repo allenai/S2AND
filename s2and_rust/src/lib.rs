@@ -134,6 +134,112 @@ struct RustFeaturizer {
     cluster_seeds_disallow_index: OnceLock<HashMap<String, HashSet<String>>>,
 }
 
+#[derive(Clone)]
+struct RetrievalSummaryData {
+    component_key: String,
+    size: usize,
+    first_name_counts: Vec<(String, f32)>,
+    middle_initial_counts: Option<CounterData>,
+    coauthor_counts: Option<CounterData>,
+    affiliation_counts: Option<CounterData>,
+    venue_counts: Option<CounterData>,
+    year_min: Option<i64>,
+    year_max: Option<i64>,
+    year_mean: Option<f64>,
+    orcid_hashes: Vec<u64>,
+    specter_centroid: Option<Vec<f32>>,
+    specter_centroid_norm: Option<f64>,
+}
+
+struct RetrievalQueryData {
+    first: String,
+    middle_initial_hashes: Vec<u64>,
+    coauthor_hashes: Vec<u64>,
+    affiliation_hashes: Vec<u64>,
+    venue_hashes: Vec<u64>,
+    year: Option<i64>,
+    orcid_hash: Option<u64>,
+    specter: Option<Vec<f32>>,
+    specter_norm: Option<f64>,
+}
+
+#[pyclass]
+struct RustHybridCentroidRetriever {
+    summaries: Vec<RetrievalSummaryData>,
+    max_block_component_size: usize,
+    component_index_by_key: HashMap<String, usize>,
+}
+
+impl RustHybridCentroidRetriever {
+    fn score_top_k_candidate_indices(
+        &self,
+        py: Python<'_>,
+        query_data: &RetrievalQueryData,
+        candidate_indices: &[usize],
+        top_k: usize,
+        max_block_component_size: usize,
+        num_threads: Option<usize>,
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if candidate_indices.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut scored: Vec<(usize, f32)> = py.allow_threads(|| {
+            let compute = || {
+                candidate_indices
+                    .par_iter()
+                    .map(|idx| {
+                        let summary = match (override_index, override_summary) {
+                            (Some(replaced_idx), Some(replaced_summary)) if *idx == replaced_idx => replaced_summary,
+                            _ => &self.summaries[*idx],
+                        };
+                        (
+                            *idx,
+                            score_hybrid_centroid_query(query_data, summary, max_block_component_size),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        scored.sort_unstable_by(|(left_idx, left_score), (right_idx, right_score)| {
+            let left_component_key = match (override_index, override_summary) {
+                (Some(replaced_idx), Some(replaced_summary)) if *left_idx == replaced_idx => {
+                    replaced_summary.component_key.as_str()
+                }
+                _ => self.summaries[*left_idx].component_key.as_str(),
+            };
+            let right_component_key = match (override_index, override_summary) {
+                (Some(replaced_idx), Some(replaced_summary)) if *right_idx == replaced_idx => {
+                    replaced_summary.component_key.as_str()
+                }
+                _ => self.summaries[*right_idx].component_key.as_str(),
+            };
+            right_score
+                .partial_cmp(left_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left_component_key.cmp(right_component_key))
+        });
+        let limit = top_k.min(scored.len());
+        scored.truncate(limit);
+
+        let component_keys = scored
+            .iter()
+            .map(|(idx, _)| match (override_index, override_summary) {
+                (Some(replaced_idx), Some(replaced_summary)) if *idx == replaced_idx => {
+                    replaced_summary.component_key.clone()
+                }
+                _ => self.summaries[*idx].component_key.clone(),
+            })
+            .collect();
+        let scores = scored.iter().map(|(_, score)| *score).collect();
+        Ok((component_keys, scores))
+    }
+}
+
 #[derive(Clone, Default)]
 struct JsonIngestTelemetry {
     json_parse_seconds: f64,
@@ -952,6 +1058,271 @@ fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
         out.push(v as f32);
     }
     Ok(Some(out))
+}
+
+fn extract_string_count_pairs(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, f32)>> {
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+    let dict = obj.downcast::<PyDict>()?;
+    if dict.len() == 0 {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::with_capacity(dict.len());
+    for (k, v) in dict.iter() {
+        let key: String = k.extract()?;
+        let val: f64 = v.extract()?;
+        entries.push((key, val as f32));
+    }
+    Ok(entries)
+}
+
+fn extract_string_hashes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut hashes = Vec::new();
+    for item in PyIterator::from_object(obj)? {
+        let value: String = item?.extract()?;
+        hashes.push(fnv64(value.as_bytes()));
+    }
+    hashes.sort_unstable();
+    hashes.dedup();
+    Ok(hashes)
+}
+
+fn extract_optional_string_hash(obj: &Bound<'_, PyAny>) -> PyResult<Option<u64>> {
+    if obj.is_none() {
+        return Ok(None);
+    }
+    let value: String = obj.extract()?;
+    Ok(Some(fnv64(value.as_bytes())))
+}
+
+fn same_prefix_tokens_compat(a: &str, b: &str) -> bool {
+    let ta: Vec<&str> = a.split_whitespace().collect();
+    let tb: Vec<&str> = b.split_whitespace().collect();
+    for (x, y) in ta.iter().zip(tb.iter()) {
+        if !(x.starts_with(y) || y.starts_with(x)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn counter_query_overlap_hashes(query_hashes: &[u64], counter: &Option<CounterData>, size: usize) -> f64 {
+    let Some(counter_data) = counter.as_ref() else {
+        return 0.0;
+    };
+    if size == 0 || query_hashes.is_empty() || counter_data.entries.is_empty() {
+        return 0.0;
+    }
+    let mut overlap = 0.0f64;
+    for query_hash in query_hashes {
+        if let Ok(index) = counter_data.entries.binary_search_by_key(query_hash, |entry| entry.0) {
+            overlap += (counter_data.entries[index].1 as f64) / (size as f64);
+        }
+    }
+    overlap / (query_hashes.len() as f64)
+}
+
+fn middle_initial_score_hashes(query_hashes: &[u64], counter: &Option<CounterData>, size: usize) -> f64 {
+    let Some(counter_data) = counter.as_ref() else {
+        return 0.0;
+    };
+    if size == 0 || query_hashes.is_empty() || counter_data.entries.is_empty() {
+        return 0.0;
+    }
+    let mut overlap = 0.0f64;
+    let mut overlap_found = false;
+    for query_hash in query_hashes {
+        if let Ok(index) = counter_data.entries.binary_search_by_key(query_hash, |entry| entry.0) {
+            overlap += (counter_data.entries[index].1 as f64) / (size as f64);
+            overlap_found = true;
+        }
+    }
+    if overlap_found {
+        overlap / (query_hashes.len() as f64)
+    } else {
+        -0.25
+    }
+}
+
+fn first_name_score_prefix(query_first: &str, counts: &[(String, f32)], size: usize) -> f64 {
+    if size == 0 || py_len(query_first) <= 1 || counts.is_empty() {
+        return 0.0;
+    }
+    let mut best = 0.0f64;
+    for (first_name, count) in counts.iter() {
+        if py_len(first_name) <= 1 {
+            continue;
+        }
+        if same_prefix_tokens_compat(query_first, first_name) {
+            best = best.max((*count as f64) / (size as f64));
+        }
+    }
+    best
+}
+
+fn retrieval_year_score(query_year: Option<i64>, summary: &RetrievalSummaryData) -> f64 {
+    let Some(query_year_value) = query_year else {
+        return 0.0;
+    };
+    let Some(summary_year_mean) = summary.year_mean else {
+        return 0.0;
+    };
+    let distance = (query_year_value as f64 - summary_year_mean).abs();
+    let mut score = (1.0 - (distance / 15.0)).max(0.0);
+    if let (Some(year_min), Some(year_max)) = (summary.year_min, summary.year_max) {
+        if query_year_value < year_min - 10 || query_year_value > year_max + 10 {
+            score -= 0.15;
+        }
+    }
+    score
+}
+
+fn retrieval_size_prior(size: usize, max_block_component_size: usize) -> f64 {
+    if size == 0 || max_block_component_size == 0 {
+        return 0.0;
+    }
+    ((size as f64) + 1.0).ln() / ((max_block_component_size as f64) + 1.0).ln()
+}
+
+fn contains_hashed_value(sorted_hashes: &[u64], target: u64) -> bool {
+    sorted_hashes.binary_search(&target).is_ok()
+}
+
+fn has_middle_initial_conflict(query_hashes: &[u64], counter: &Option<CounterData>) -> bool {
+    let Some(counter_data) = counter.as_ref() else {
+        return false;
+    };
+    if query_hashes.is_empty() || counter_data.entries.is_empty() {
+        return false;
+    }
+    !query_hashes
+        .iter()
+        .any(|query_hash| counter_data.entries.binary_search_by_key(query_hash, |entry| entry.0).is_ok())
+}
+
+fn has_impossible_year_conflict(query_year: Option<i64>, summary: &RetrievalSummaryData, max_year_gap: i64) -> bool {
+    let Some(query_year_value) = query_year else {
+        return false;
+    };
+    let (Some(year_min), Some(year_max)) = (summary.year_min, summary.year_max) else {
+        return false;
+    };
+    query_year_value < year_min - max_year_gap || query_year_value > year_max + max_year_gap
+}
+
+fn extract_retrieval_summary(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalSummaryData> {
+    let component_key: String = obj.getattr("component_key")?.extract()?;
+    let size: usize = obj.getattr("size")?.extract()?;
+    let first_name_counts = extract_string_count_pairs(&obj.getattr("first_name_counts")?)?;
+    let middle_initial_counts = extract_counter(&obj.getattr("middle_initial_counts")?)?;
+    let coauthor_counts = extract_counter(&obj.getattr("coauthor_counts")?)?;
+    let affiliation_counts = extract_counter(&obj.getattr("affiliation_counts")?)?;
+    let venue_counts = extract_counter(&obj.getattr("venue_counts")?)?;
+    let year_min: Option<i64> = obj.getattr("year_min")?.extract()?;
+    let year_max: Option<i64> = obj.getattr("year_max")?.extract()?;
+    let year_mean: Option<f64> = obj.getattr("year_mean")?.extract()?;
+    let orcid_hashes = extract_string_hashes(&obj.getattr("orcid_values")?)?;
+    let specter_centroid = extract_specter_vec(&obj.getattr("specter_centroid")?)?;
+    let specter_centroid_norm = specter_centroid.as_ref().map(|values| {
+        values
+            .iter()
+            .map(|value| {
+                let val = *value as f64;
+                val * val
+            })
+            .sum::<f64>()
+            .sqrt()
+    });
+
+    Ok(RetrievalSummaryData {
+        component_key,
+        size,
+        first_name_counts,
+        middle_initial_counts,
+        coauthor_counts,
+        affiliation_counts,
+        venue_counts,
+        year_min,
+        year_max,
+        year_mean,
+        orcid_hashes,
+        specter_centroid,
+        specter_centroid_norm,
+    })
+}
+
+fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryData> {
+    let first: String = obj.getattr("first")?.extract()?;
+    let middle_initial_hashes = extract_string_hashes(&obj.getattr("middle_initials")?)?;
+    let coauthor_hashes = extract_string_hashes(&obj.getattr("coauthor_blocks")?)?;
+    let affiliation_hashes = extract_string_hashes(&obj.getattr("affiliation_terms")?)?;
+    let venue_hashes = extract_string_hashes(&obj.getattr("venue_terms")?)?;
+    let year: Option<i64> = obj.getattr("year")?.extract()?;
+    let orcid_hash = extract_optional_string_hash(&obj.getattr("orcid")?)?;
+    let specter = extract_specter_vec(&obj.getattr("specter")?)?;
+    let specter_norm = specter.as_ref().map(|values| {
+        values
+            .iter()
+            .map(|value| {
+                let val = *value as f64;
+                val * val
+            })
+            .sum::<f64>()
+            .sqrt()
+    });
+
+    Ok(RetrievalQueryData {
+        first,
+        middle_initial_hashes,
+        coauthor_hashes,
+        affiliation_hashes,
+        venue_hashes,
+        year,
+        orcid_hash,
+        specter,
+        specter_norm,
+    })
+}
+
+fn score_hybrid_centroid_query(
+    query: &RetrievalQueryData,
+    summary: &RetrievalSummaryData,
+    max_block_component_size: usize,
+) -> f32 {
+    let size_prior = retrieval_size_prior(summary.size, max_block_component_size);
+    let coauthor_score = counter_query_overlap_hashes(&query.coauthor_hashes, &summary.coauthor_counts, summary.size);
+    let affiliation_score =
+        counter_query_overlap_hashes(&query.affiliation_hashes, &summary.affiliation_counts, summary.size);
+    let venue_score = counter_query_overlap_hashes(&query.venue_hashes, &summary.venue_counts, summary.size);
+    let middle_score =
+        middle_initial_score_hashes(&query.middle_initial_hashes, &summary.middle_initial_counts, summary.size);
+    let first_name_score = first_name_score_prefix(&query.first, &summary.first_name_counts, summary.size);
+    let year_score = retrieval_year_score(query.year, summary);
+    let centroid_score = match (
+        query.specter.as_ref(),
+        query.specter_norm,
+        summary.specter_centroid.as_ref(),
+        summary.specter_centroid_norm,
+    ) {
+        (Some(query_specter), Some(query_norm), Some(summary_specter), Some(summary_norm)) => {
+            cosine_sim_with_norms(query_specter, query_norm, summary_specter, summary_norm)
+        }
+        _ => 0.0,
+    };
+    (
+        0.42 * centroid_score
+            + 0.23 * coauthor_score
+            + 0.12 * affiliation_score
+            + 0.06 * venue_score
+            + 0.05 * middle_score
+            + 0.07 * first_name_score
+            + 0.03 * year_score
+            + 0.02 * size_prior
+    ) as f32
 }
 
 fn specter_payload_to_dict<'py>(
@@ -4769,6 +5140,149 @@ impl RustFeaturizer {
     }
 }
 
+#[pymethods]
+impl RustHybridCentroidRetriever {
+    #[new]
+    fn new(summaries: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut packed_summaries = Vec::new();
+        let mut component_index_by_key = HashMap::new();
+        for item in PyIterator::from_object(summaries)? {
+            let summary_obj = item?;
+            let summary = extract_retrieval_summary(&summary_obj)?;
+            component_index_by_key.insert(summary.component_key.clone(), packed_summaries.len());
+            packed_summaries.push(summary);
+        }
+        let max_block_component_size = packed_summaries.iter().map(|summary| summary.size).max().unwrap_or(0);
+        Ok(Self {
+            summaries: packed_summaries,
+            max_block_component_size,
+            component_index_by_key,
+        })
+    }
+
+    fn summary_count(&self) -> usize {
+        self.summaries.len()
+    }
+
+    #[pyo3(signature = (query, top_k, num_threads = None))]
+    fn top_k_hybrid_centroid(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        top_k: usize,
+        num_threads: Option<usize>,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if top_k == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err("top_k must be positive"));
+        }
+        let query_data = extract_retrieval_query(query)?;
+
+        let mut candidate_indices: Vec<usize> = (0..self.summaries.len()).collect();
+
+        if let Some(orcid_hash) = query_data.orcid_hash {
+            let orcid_matches: Vec<usize> = candidate_indices
+                .iter()
+                .copied()
+                .filter(|idx| contains_hashed_value(&self.summaries[*idx].orcid_hashes, orcid_hash))
+                .collect();
+            if !orcid_matches.is_empty() {
+                candidate_indices = orcid_matches;
+            }
+        }
+
+        let middle_filtered: Vec<usize> = candidate_indices
+            .iter()
+            .copied()
+            .filter(|idx| !has_middle_initial_conflict(&query_data.middle_initial_hashes, &self.summaries[*idx].middle_initial_counts))
+            .collect();
+        if !middle_filtered.is_empty() {
+            candidate_indices = middle_filtered;
+        }
+
+        let year_filtered: Vec<usize> = candidate_indices
+            .iter()
+            .copied()
+            .filter(|idx| !has_impossible_year_conflict(query_data.year, &self.summaries[*idx], 35))
+            .collect();
+        if !year_filtered.is_empty() {
+            candidate_indices = year_filtered;
+        }
+
+        if candidate_indices.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        self.score_top_k_candidate_indices(
+            py,
+            &query_data,
+            &candidate_indices,
+            top_k,
+            self.max_block_component_size,
+            num_threads,
+            None,
+            None,
+        )
+    }
+
+    #[pyo3(signature = (query, component_keys, top_k, max_block_component_size, num_threads = None, override_summary = None))]
+    fn top_k_hybrid_centroid_subset(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        component_keys: &Bound<'_, PyAny>,
+        top_k: usize,
+        max_block_component_size: usize,
+        num_threads: Option<usize>,
+        override_summary: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if top_k == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err("top_k must be positive"));
+        }
+
+        let query_data = extract_retrieval_query(query)?;
+        let mut candidate_indices = Vec::new();
+        for item in PyIterator::from_object(component_keys)? {
+            let component_key: String = item?.extract()?;
+            let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown component_key for RustHybridCentroidRetriever: {component_key}"
+                )));
+            };
+            candidate_indices.push(*candidate_index);
+        }
+
+        let override_data = override_summary.map(extract_retrieval_summary).transpose()?;
+        let override_index = if let Some(override_summary_data) = override_data.as_ref() {
+            let Some(candidate_index) = self.component_index_by_key.get(&override_summary_data.component_key) else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown override component_key for RustHybridCentroidRetriever: {}",
+                    override_summary_data.component_key
+                )));
+            };
+            if !candidate_indices.contains(candidate_index) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "override_summary component_key {} was not present in component_keys",
+                    override_summary_data.component_key
+                )));
+            }
+            Some(*candidate_index)
+        } else {
+            None
+        };
+
+        self.score_top_k_candidate_indices(
+            py,
+            &query_data,
+            &candidate_indices,
+            top_k,
+            max_block_component_size,
+            num_threads,
+            override_index,
+            override_data.as_ref(),
+        )
+    }
+}
+
 #[pyfunction]
 fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     let build_info = PyDict::new(py);
@@ -4811,5 +5325,6 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_last_json_ingest_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(reset_last_json_ingest_telemetry, m)?)?;
     m.add_class::<RustFeaturizer>()?;
+    m.add_class::<RustHybridCentroidRetriever>()?;
     Ok(())
 }

@@ -954,6 +954,31 @@ def test_build_retrieval_window_supports_exemplar_method() -> None:
     assert exemplar_ranked == ["c2", "c1"]
 
 
+def test_build_retrieval_window_plain_all_skips_profile_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = build_query_features(specter=np.asarray([1.0, 0.0], dtype=np.float32))
+    candidate_rows = [
+        build_cluster_summary(component_key="c1", size=4, specter_centroid=np.asarray([1.0, 0.0], dtype=np.float32)),
+        build_cluster_summary(component_key="c2", size=4, specter_centroid=np.asarray([0.0, 1.0], dtype=np.float32)),
+    ]
+
+    def fail_profile_build(_summary: Any) -> Any:
+        raise AssertionError("build_cluster_profile should not run for all__hybrid_centroid")
+
+    monkeypatch.setattr(reranker_utils, "build_cluster_profile", fail_profile_build)
+
+    ranked_component_keys, _scores, _ranks, _state = reranker_utils.build_retrieval_window(
+        query=query,
+        raw_candidate_summaries=candidate_rows,
+        max_block_component_size=4,
+        retrieval_approach="all__hybrid_centroid",
+        max_ranked_clusters=2,
+    )
+
+    assert ranked_component_keys == ["c1", "c2"]
+
+
 def test_build_retrieval_window_all_union_preserves_both_lanes() -> None:
     query = build_query_features(specter=np.asarray([1.0, 0.0], dtype=np.float32))
     centroid_favorite = build_cluster_summary(

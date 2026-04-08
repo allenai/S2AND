@@ -207,7 +207,7 @@ Artifact: `scratch/big_block/compare_phase_split_10k_seed43_python_20260224.json
 | Input | Default | Effect |
 |---|---|---|
 | `predict_incremental(..., total_ram_bytes=<int>)` | unset | Optional explicit RAM input for Phase A/B budget derivation. |
-| `predict_incremental(..., max_chunk_pairs=<int>)` | `1000000` | Optional explicit cap on Phase A `chunk_pairs` (pair buffer size). If None, uses `PHASE_A_MAX_CHUNK_PAIRS_DEFAULT` (1M). Set to 0 to disable cap and rely solely on memory-budget-derived limits. Can be increased (e.g., 100M) for large-RAM machines. |
+| `predict_incremental(..., max_chunk_pairs=<int>)` | `100000000` | Optional explicit cap on Phase A `chunk_pairs` (pair buffer size). If None, uses `PHASE_A_MAX_CHUNK_PAIRS_DEFAULT` (100M). Set to 0 to disable cap and rely solely on memory-budget-derived limits. |
 | RAM autodetect safety factor | `0.8` | Applied to detected cgroup/host RAM before deriving budgets. |
 
 ## Residual risks (what can still surprise you)

@@ -24,7 +24,7 @@ RUST_BATCH_PERSISTENT_ROW_OVERHEAD_BYTES = 52
 RUST_BATCH_FIXED_OVERHEAD_BYTES = 16 * (1 << 20)
 PHASE_A_FIXED_OVERHEAD_BYTES = 2 * (1 << 20)
 PHASE_A_PAIR_BUFFER_ENTRY_BYTES = 80
-PHASE_A_MAX_CHUNK_PAIRS_DEFAULT = 1_000_000
+PHASE_A_MAX_CHUNK_PAIRS_DEFAULT = 100_000_000
 # Defensive upper bound on accumulator entries when no memory limits are provided.
 # ~2 GB at 200 bytes/entry. Prevents unbounded growth if chunk_limits is None.
 FALLBACK_ACCUMULATOR_MAX_ENTRIES = 10_000_000

@@ -93,7 +93,7 @@ def test_compute_incremental_limits_uses_available_bytes():
 def test_compute_incremental_limits_uses_default_phase_a_chunk_cap():
     limits = memory_budget.compute_incremental_phase_split_limits(
         num_features=1,
-        total_ram_bytes=10_000_000_000,
+        total_ram_bytes=100_000_000_000,
         detect_cgroup_fn=lambda: (None, "unavailable"),
         detect_total_fn=lambda: (None, "unavailable"),
         current_rss_fn=lambda _total: (10_000_000, "rss:test"),

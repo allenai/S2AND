@@ -25,7 +25,9 @@ def test_plotting_utils_import_does_not_read_path_config(monkeypatch):
 
 
 def test_plotting_utils_deferred_config_load_raises_when_missing(monkeypatch):
-    monkeypatch.setattr(plotting_utils, "CONFIG_LOCATION", "/definitely/missing/path_config.json")
-    plotting_utils._PLOTTING_CONFIG = None
+    import s2and.consts as consts_module
+
+    monkeypatch.setattr(consts_module, "CONFIG_LOCATION", "/definitely/missing/path_config.json")
+    monkeypatch.setattr(consts_module, "_CONFIG", None)
     with pytest.raises(FileNotFoundError):
         plotting_utils._experiment_dir()

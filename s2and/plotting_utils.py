@@ -7,21 +7,11 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
-_PLOTTING_CONFIG: dict | None = None
-
-
-def _load_plotting_config() -> dict:
-    global _PLOTTING_CONFIG
-    if _PLOTTING_CONFIG is None:
-        with open(CONFIG_LOCATION, encoding="utf-8") as json_file:
-            _PLOTTING_CONFIG = json.load(json_file)
-    return _PLOTTING_CONFIG
+from s2and.consts import CONFIG
 
 
 def _experiment_dir() -> str:
-    config = _load_plotting_config()
-    return os.path.join(config["internal_data_dir"], "experiments/paper_experiments_baseline_save_facets_w_gen_eth/")
+    return os.path.join(CONFIG["internal_data_dir"], "experiments/paper_experiments_baseline_save_facets_w_gen_eth/")
 
 
 def plot_box(s2and_performance: dict, s2_performance: dict, figs_path: str, title: str, total_bins: int = 5):

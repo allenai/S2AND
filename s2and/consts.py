@@ -15,8 +15,12 @@ try:
 except NameError:
     PROJECT_ROOT_PATH = os.path.abspath(os.path.join(os.getcwd()))
 
+# Package-level data directory (s2and/data/) ships with pip install
+_PACKAGE_DIR = os.path.abspath(os.path.dirname(__file__))
+_PACKAGE_DATA_DIR = os.path.join(_PACKAGE_DIR, "data")
+
 CONFIG_LOCATION_ENV = "S2AND_PATH_CONFIG"
-CONFIG_LOCATION = os.path.join(PROJECT_ROOT_PATH, "data", "path_config.json")
+CONFIG_LOCATION = os.path.join(_PACKAGE_DATA_DIR, "path_config.json")
 _MAIN_DATA_DIR_PLACEHOLDER = "absolute path of wherever you downloaded the data to"
 _NAME_COUNTS_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/name_counts.pickle"
 _FASTTEXT_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/lid.176.bin"
@@ -39,7 +43,7 @@ def _load_config() -> dict[str, Any]:
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             f"Could not find S2AND path config at {config_location!r}. "
-            f"Set {CONFIG_LOCATION_ENV} or create data/path_config.json."
+            f"Set {CONFIG_LOCATION_ENV} or ensure s2and/data/path_config.json exists in the package."
         ) from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in S2AND path config {config_location!r}: {exc.msg}") from exc
@@ -54,14 +58,15 @@ def _load_config() -> dict[str, Any]:
 
     if main_data_dir == _MAIN_DATA_DIR_PLACEHOLDER:
         logger.warning(
-            "You haven't set `main_data_dir` in data/path_config.json! Using data/ as default data directory."
+            "You haven't set `main_data_dir` in s2and/data/path_config.json! "
+            "Using package data/ as default data directory."
         )
-        main_data_dir = os.path.join(PROJECT_ROOT_PATH, "data")
+        main_data_dir = _PACKAGE_DATA_DIR
 
     resolved_main_data_dir = os.path.abspath(str(main_data_dir))
     if not os.path.exists(resolved_main_data_dir):
         raise FileNotFoundError(
-            "The `main_data_dir` specified in data/path_config.json doesn't exist: " f"{resolved_main_data_dir!r}."
+            "The `main_data_dir` specified in path_config.json doesn't exist: " f"{resolved_main_data_dir!r}."
         )
     config["main_data_dir"] = resolved_main_data_dir
     return config

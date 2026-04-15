@@ -79,4 +79,4 @@ Scripts in `archive/` are historical and generally not intended to be rerun.
 
 ## Notes
 
-**`transfer_experiment_seed_paper.py`**: Assumes S2AND data is in `<code root>/data/`. If not, modify `"main_data_dir"` in `data/path_config.json`. If you have limited RAM, don't use `--use_cache` — it's slower without the cache but won't try to fit all feature data into memory.
+**`transfer_experiment_seed_paper.py`**: Uses `main_data_dir` from `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). If you have limited RAM, don't use `--use_cache` — it's slower without the cache but won't try to fit all feature data into memory.

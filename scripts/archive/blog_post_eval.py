@@ -15,15 +15,10 @@ python scripts/blog_post_eval.py --random_seed 42 --experiment_name dont_use_nam
   --feature_groups_to_skip name_counts
 """
 
-import json
 import os
 from typing import Any
 
-CONFIG_LOCATION = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
-)
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
+from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "8"
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")

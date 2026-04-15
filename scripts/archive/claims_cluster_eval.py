@@ -9,11 +9,7 @@ pulled from Semantic Scholar for), and runs clustering and prints metrics out
 import json
 import os
 
-CONFIG_LOCATION = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
-)
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
+from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "8"
 

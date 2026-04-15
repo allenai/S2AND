@@ -426,7 +426,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "s2and_rust"
-version = "0.48.1"
+version = "0.49.0"
 dependencies = [
  "bincode",
  "cld2",

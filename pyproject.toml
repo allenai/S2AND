@@ -56,12 +56,21 @@ dev = [
   "ipykernel",
 ]
 rust = [
-  "s2and-rust>=0.48.1",
+  "s2and-rust==0.49.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["s2and*"]
 exclude = ["s2and_rust*"]
+
+[tool.setuptools.package-data]
+s2and = [
+  "data/path_config.json",
+  "data/first_k_letter_counts_from_orcid.json",
+  "data/s2and_name_tuples.txt",
+  "data/s2and_name_tuples_filtered.txt",
+  "data/s2and_unnormalized_filtered_name_tuples.txt",
+]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

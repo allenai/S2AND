@@ -18,11 +18,11 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from s2and.consts import (
+    _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
     LARGE_DISTANCE,
     NAME_COUNTS_PATH,
     NUMPY_NAN,
-    PROJECT_ROOT_PATH,
 )
 from s2and.file_cache import cached_path
 from s2and.mp import UniversalPool
@@ -116,7 +116,7 @@ def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str
 
 def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
     resolved: set[tuple[str, str]] = set()
-    with open(os.path.join(PROJECT_ROOT_PATH, "data", filename), encoding="utf-8") as tuples_file:
+    with open(os.path.join(_PACKAGE_DATA_DIR, filename), encoding="utf-8") as tuples_file:
         for line in tuples_file:
             line_split = line.strip().split(",")
             if len(line_split) >= 2:

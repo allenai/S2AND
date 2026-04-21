@@ -4,11 +4,7 @@ import json
 import os
 from typing import Any
 
-CONFIG_LOCATION = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
-)
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
+from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "1"
 

@@ -1184,12 +1184,12 @@ fn load_raw_name_counts_from_json_path(
 
 fn default_name_tuples_path(py: Python<'_>) -> PyResult<String> {
     let consts = py.import("s2and.consts")?;
-    let project_root: String = consts.getattr("PROJECT_ROOT_PATH")?.extract()?;
+    let package_data_dir: String = consts.getattr("_PACKAGE_DATA_DIR")?.extract()?;
     let pathlib = py.import("pathlib")?;
     let path_obj = pathlib
         .getattr("Path")?
-        .call1((project_root,))?
-        .call_method1("joinpath", ("data", "s2and_name_tuples_filtered.txt"))?;
+        .call1((package_data_dir,))?
+        .call_method1("joinpath", ("s2and_name_tuples_filtered.txt",))?;
     path_obj.call_method0("as_posix")?.extract()
 }
 

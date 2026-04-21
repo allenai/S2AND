@@ -133,7 +133,7 @@ aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production
 ```
 
 ## Configuration
-Modify the config file at `data/path_config.json`. This file should look like this
+Modify the config file at `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). This file should look like this
 ```
 {
     "main_data_dir": "absolute path to wherever you downloaded the data to",
@@ -681,7 +681,7 @@ git config core.hooksPath .githooks
 Workflow:
 ```bash
 # 1) edit VERSION
-echo 0.48.1 > VERSION
+echo 0.49.0 > VERSION
 
 # 2) sync manifests
 uv run python scripts/sync_version.py

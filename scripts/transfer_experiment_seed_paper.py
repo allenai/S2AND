@@ -3,14 +3,9 @@
 import json
 import os
 
-CONFIG_LOCATION = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir, "data", "path_config.json"))
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
+from s2and.consts import CONFIG
 
 DATA_DIR = CONFIG["main_data_dir"]
-if not os.path.exists(DATA_DIR):
-    PROJECT_ROOT_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DATA_DIR = os.path.join(PROJECT_ROOT_PATH, "data")
 
 os.environ["S2AND_CACHE"] = os.path.join(DATA_DIR, ".feature_cache")
 os.environ["OMP_NUM_THREADS"] = "8"

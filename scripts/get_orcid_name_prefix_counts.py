@@ -6,7 +6,7 @@ TODO(s2and): This JSON was generated with legacy normalization (single-token fir
              special_case_apostrophes=True for first). When we finalize the new unified normalization
              (hyphen-aware, consistent apostrophe handling), rewrite this script to call
              s2and.text.split_first_middle_hyphen_aware (or its eventual unified equivalent) and regenerate
-             data/first_k_letter_counts_from_orcid.json. Until then, runtime lookups use a first-token fallback
+             s2and/data/first_k_letter_counts_from_orcid.json. Until then, runtime lookups use a first-token fallback
              for compatibility.
 """
 
@@ -17,7 +17,7 @@ from itertools import combinations
 
 from pys2.pys2 import _evaluate_redshift_query
 
-from s2and.consts import PROJECT_ROOT_PATH
+from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.text import NAME_PREFIXES, normalize_text, same_prefix_tokens
 
 """
@@ -91,7 +91,7 @@ orcids = df_all[["cluster_block_key", "orcid", "first_norm", "middle_norm"]]
 Step 2: Get name pairs that are included in S2AND
 """
 name_tuples = set()
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "s2and_name_tuples_filtered.txt")) as f2:
+with open(os.path.join(_PACKAGE_DATA_DIR, "s2and_name_tuples_filtered.txt")) as f2:
     for line in f2:
         line_split = line.strip().split(",")
         name_tuples.add((line_split[0], line_split[1]))
@@ -172,5 +172,5 @@ for name_tuple, count in name_tuples_first_k_letter_counts.items():
             already_in += 1
 
 # save it
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json"), "w") as f:
+with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.json"), "w") as f:
     json.dump(merged_first_k_letter_counts_sorted, f)

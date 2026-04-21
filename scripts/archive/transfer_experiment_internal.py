@@ -13,21 +13,16 @@ specterV2           0.743       0.897    0.931  0.961  0.966   0.920  0.948   0.
 import json
 import os
 
+from s2and.consts import CONFIG
+
 # this is from when we updated S2AND with SPECTER2 and also with S2AFF outputs
 SPECTER_SUFFIX = ["_specter.pickle", "_specter2.pkl"][0]
 SIGNATURES_SUFFIX = ["_signatures.json", "_signatures_with_s2aff.json"][0]
 NAME_TUPLES_VARIANT = ["original", "filtered"][1]
 
-CONFIG_LOCATION = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
-)
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
-
 DATA_DIR = CONFIG["internal_data_dir"]
 if not os.path.exists(DATA_DIR):
-    PROJECT_ROOT_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    DATA_DIR = os.path.join(PROJECT_ROOT_PATH, "data")
+    DATA_DIR = CONFIG["main_data_dir"]
 
 os.environ["S2AND_CACHE"] = os.path.join(DATA_DIR, ".feature_cache")
 os.environ["OMP_NUM_THREADS"] = "8"

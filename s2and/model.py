@@ -4036,6 +4036,8 @@ class Clusterer:
         )
 
         logger.info("Performing pairwise classification")
+        _ensure_lightgbm_fitted(self.classifier)
+        _ensure_lightgbm_fitted(self.nameless_classifier)
         # Get predictions where there isn't partial supervision,
         # and fill the rest from partial supervision labels.
         batch_predictions, model_predict_seconds = _predict_and_combine(

@@ -53,13 +53,13 @@ from s2and.data import ANDData
 from s2and.feature_port import RUST_BUILD_PATH_ENV, clear_rust_featurizer_cache
 from s2and.model import _apply_dataset_name_count_semantics_for_prediction, _build_incremental_constraint_backend
 from s2and.runtime import build_runtime_context, detect_rust_runtime_capabilities
-from s2and.text import normalize_text
 from scripts.giant_block_cluster_retrieval_task import load_clusterer
 from scripts.joint_safe_link_initial_only_rereview import (
     InitialOnlyRereviewDecision,
     read_initial_only_rereview_decisions,
     resolve_reviewed_safe_component_keys,
 )
+from scripts.reranker_dataset.raw_similarity import RawSimilarityFeatureCache, raw_similarity_features_by_component
 from scripts.reranker_dataset.rows import generate_candidate_rows
 from scripts.single_letter_reranker_utils import (
     DERIVED_FEATURE_COLUMNS,
@@ -126,33 +126,6 @@ def _configure_official_rust_backend(*, n_jobs: int) -> None:
 
 
 FILE_REPLACE_MAX_DELAY_SECONDS = 5.0
-RAW_TEXT_STOPWORDS = {
-    "and",
-    "the",
-    "for",
-    "with",
-    "from",
-    "that",
-    "this",
-    "using",
-    "based",
-    "into",
-    "over",
-    "under",
-    "between",
-    "without",
-    "within",
-    "study",
-    "analysis",
-    "approach",
-    "method",
-    "methods",
-    "result",
-    "results",
-    "paper",
-    "system",
-    "systems",
-}
 OFFICIAL_CLASSIC_TRAIN_ROW_RELATIVE_PATH = Path("training") / (
     "classic_train_union21_plus_s_lee_raw_plus_public_loo_q100_seed71_"
     "neg100_plus_reviewed_splitpos_hardneg_rows.csv.gz"
@@ -230,10 +203,7 @@ class DatasetResources:
     constraint_backend: Any
     component_signatures: dict[str, list[str]]
     raw_paper_text_by_id: dict[str, str]
-    raw_affiliation_tokens_by_signature_id: dict[str, frozenset[str]] = field(default_factory=dict)
-    raw_coauthor_names_by_paper_and_last: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
-    raw_title_tokens_by_paper_id: dict[str, frozenset[str]] = field(default_factory=dict)
-    raw_text_tokens_by_paper_id: dict[str, frozenset[str]] = field(default_factory=dict)
+    raw_similarity_feature_cache: RawSimilarityFeatureCache = field(default_factory=RawSimilarityFeatureCache)
 
 
 @dataclass
@@ -1181,193 +1151,21 @@ def _load_raw_paper_text_by_id(dataset_name: str, *, needed_paper_ids: set[str])
     return text_by_id
 
 
-def _raw_tokens(value: Any) -> frozenset[str]:
-    """Tokenize raw evidence text for label-free Jaccard features."""
-
-    normalized = normalize_text(str(value or ""))
-    if not normalized:
-        return frozenset()
-    return frozenset(token for token in normalized.split() if len(token) >= 3 and token not in RAW_TEXT_STOPWORDS)
-
-
-def _raw_jaccard(left: frozenset[str], right: frozenset[str]) -> float:
-    if not left or not right:
-        return 0.0
-    return float(len(left & right) / len(left | right))
-
-
-def _signature_last_token(signature: Any) -> str:
-    tokens = normalize_text(str(getattr(signature, "author_info_last", "") or "")).split()
-    return str(tokens[-1]) if tokens else ""
-
-
-def _signature_affiliation_tokens(signature: Any) -> frozenset[str]:
-    affiliations = getattr(signature, "author_info_affiliations", None) or []
-    return _raw_tokens(" ".join(str(value) for value in affiliations if value))
-
-
-def _cached_signature_affiliation_tokens(
-    resources: DatasetResources,
-    *,
-    signature_id: str,
-    signature: Any,
-) -> frozenset[str]:
-    cached = resources.raw_affiliation_tokens_by_signature_id.get(str(signature_id))
-    if cached is not None:
-        return cached
-    tokens = _signature_affiliation_tokens(signature)
-    resources.raw_affiliation_tokens_by_signature_id[str(signature_id)] = tokens
-    return tokens
-
-
-def _paper_author_name_set(paper: Any, *, excluded_last_token: str) -> frozenset[str]:
-    if paper is None:
-        return frozenset()
-    names: set[str] = set()
-    for author in getattr(paper, "authors", []) or []:
-        name = normalize_text(str(getattr(author, "author_name", "") or ""))
-        if not name:
-            continue
-        name_tokens = name.split()
-        if excluded_last_token and excluded_last_token in name_tokens:
-            continue
-        names.add(" ".join(name_tokens))
-    return frozenset(names)
-
-
-def _cached_paper_author_name_set(
-    resources: DatasetResources,
-    paper: Any,
-    *,
-    excluded_last_token: str,
-) -> frozenset[str]:
-    if paper is None:
-        return frozenset()
-    paper_id = str(getattr(paper, "paper_id", "") or "")
-    if not paper_id:
-        return _paper_author_name_set(paper, excluded_last_token=excluded_last_token)
-    key = (paper_id, str(excluded_last_token))
-    cached = resources.raw_coauthor_names_by_paper_and_last.get(key)
-    if cached is not None:
-        return cached
-    names = _paper_author_name_set(paper, excluded_last_token=excluded_last_token)
-    resources.raw_coauthor_names_by_paper_and_last[key] = names
-    return names
-
-
-def _paper_title_tokens(paper: Any) -> frozenset[str]:
-    if paper is None:
-        return frozenset()
-    return _raw_tokens(getattr(paper, "title", None))
-
-
-def _cached_paper_title_tokens(resources: DatasetResources, paper: Any) -> frozenset[str]:
-    if paper is None:
-        return frozenset()
-    paper_id = str(getattr(paper, "paper_id", "") or "")
-    if not paper_id:
-        return _paper_title_tokens(paper)
-    cached = resources.raw_title_tokens_by_paper_id.get(paper_id)
-    if cached is not None:
-        return cached
-    tokens = _paper_title_tokens(paper)
-    resources.raw_title_tokens_by_paper_id[paper_id] = tokens
-    return tokens
-
-
-def _paper_text_tokens(resources: DatasetResources, paper: Any) -> frozenset[str]:
-    if paper is None:
-        return frozenset()
-    paper_id = str(getattr(paper, "paper_id", "") or "")
-    return _raw_tokens(resources.raw_paper_text_by_id.get(paper_id, getattr(paper, "title", "") or ""))
-
-
-def _cached_paper_text_tokens(resources: DatasetResources, paper: Any) -> frozenset[str]:
-    if paper is None:
-        return frozenset()
-    paper_id = str(getattr(paper, "paper_id", "") or "")
-    if not paper_id:
-        return _paper_text_tokens(resources, paper)
-    cached = resources.raw_text_tokens_by_paper_id.get(paper_id)
-    if cached is not None:
-        return cached
-    tokens = _paper_text_tokens(resources, paper)
-    resources.raw_text_tokens_by_paper_id[paper_id] = tokens
-    return tokens
-
-
-def _raw_similarity_feature_zeros() -> dict[str, float]:
-    return {feature_name: 0.0 for feature_name in RAW_METADATA_SIMILARITY_FEATURE_COLUMNS}
-
-
 def _raw_similarity_features_by_component(
     resources: DatasetResources,
     *,
     query_signature_id: str,
     candidate_signature_ids_by_component: dict[str, list[str]],
 ) -> dict[str, dict[str, float]]:
-    """Compute max raw-metadata similarities, excluding the query signature from candidates."""
+    """Compatibility wrapper around the shared raw-similarity implementation."""
 
-    query_signature = resources.dataset.signatures.get(str(query_signature_id))
-    if query_signature is None:
-        return {
-            component_key: _raw_similarity_feature_zeros() for component_key in candidate_signature_ids_by_component
-        }
-    query_paper = resources.dataset.papers.get(str(query_signature.paper_id))
-    query_last = _signature_last_token(query_signature)
-    query_affiliation_tokens = _cached_signature_affiliation_tokens(
-        resources,
-        signature_id=str(query_signature_id),
-        signature=query_signature,
+    return raw_similarity_features_by_component(
+        dataset=resources.dataset,
+        query_signature_id=str(query_signature_id),
+        candidate_signature_ids_by_component=candidate_signature_ids_by_component,
+        raw_paper_text_by_id=resources.raw_paper_text_by_id,
+        cache=resources.raw_similarity_feature_cache,
     )
-    query_coauthor_names = _cached_paper_author_name_set(resources, query_paper, excluded_last_token=query_last)
-    query_title_tokens = _cached_paper_title_tokens(resources, query_paper)
-    query_text_tokens = _cached_paper_text_tokens(resources, query_paper)
-
-    features_by_component: dict[str, dict[str, float]] = {}
-    for component_key, candidate_signature_ids in candidate_signature_ids_by_component.items():
-        max_affiliation = 0.0
-        max_coauthor = 0.0
-        max_title = 0.0
-        max_text = 0.0
-        for signature_id in candidate_signature_ids:
-            if str(signature_id) == str(query_signature_id):
-                continue
-            candidate_signature = resources.dataset.signatures.get(str(signature_id))
-            if candidate_signature is None:
-                continue
-            candidate_paper = resources.dataset.papers.get(str(candidate_signature.paper_id))
-            max_affiliation = max(
-                max_affiliation,
-                _raw_jaccard(
-                    query_affiliation_tokens,
-                    _cached_signature_affiliation_tokens(
-                        resources,
-                        signature_id=str(signature_id),
-                        signature=candidate_signature,
-                    ),
-                ),
-            )
-            max_coauthor = max(
-                max_coauthor,
-                _raw_jaccard(
-                    query_coauthor_names,
-                    _cached_paper_author_name_set(resources, candidate_paper, excluded_last_token=query_last),
-                ),
-            )
-            max_title = max(
-                max_title, _raw_jaccard(query_title_tokens, _cached_paper_title_tokens(resources, candidate_paper))
-            )
-            max_text = max(
-                max_text, _raw_jaccard(query_text_tokens, _cached_paper_text_tokens(resources, candidate_paper))
-            )
-        features_by_component[str(component_key)] = {
-            "raw_max_affiliation_jaccard": round(float(max_affiliation), 6),
-            "raw_max_coauthor_jaccard": round(float(max_coauthor), 6),
-            "raw_max_title_jaccard": round(float(max_title), 6),
-            "raw_max_text_jaccard": round(float(max_text), 6),
-        }
-    return features_by_component
 
 
 def _component_contains_query_signature(

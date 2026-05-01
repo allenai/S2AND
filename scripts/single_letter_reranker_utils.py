@@ -2363,6 +2363,38 @@ def _best_competitor_component_key(
     return None
 
 
+def _validate_raw_similarity_features_for_components(
+    *,
+    kept_component_keys: Sequence[str],
+    raw_similarity_features_by_component: dict[str, dict[str, float]] | None,
+) -> None:
+    """Require explicit raw metadata similarity features for emitted rows."""
+
+    if not kept_component_keys:
+        return
+    required_features = set(RAW_METADATA_SIMILARITY_FEATURE_COLUMNS)
+    missing_components: list[str] = []
+    missing_features_by_component: dict[str, list[str]] = {}
+    for component_key in kept_component_keys:
+        component_key = str(component_key)
+        component_features = (
+            raw_similarity_features_by_component.get(component_key)
+            if raw_similarity_features_by_component is not None
+            else None
+        )
+        if component_features is None:
+            missing_components.append(component_key)
+            continue
+        missing_features = sorted(required_features - set(component_features))
+        if missing_features:
+            missing_features_by_component[component_key] = missing_features
+    if missing_components or missing_features_by_component:
+        raise ValueError(
+            "Missing raw metadata similarity features for candidate row generation: "
+            f"missing_components={missing_components} missing_features={missing_features_by_component}"
+        )
+
+
 def make_candidate_rows(
     *,
     query_case: RerankerQueryCase,
@@ -2376,6 +2408,7 @@ def make_candidate_rows(
     stats_by_component: dict[str, ClusterPairwiseStats],
     rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None = None,
     raw_similarity_features_by_component: dict[str, dict[str, float]] | None = None,
+    strict_raw_similarity_features: bool = False,
 ) -> list[dict[str, Any]]:
     """Convert one retrieved candidate window into persisted reranker rows."""
 
@@ -2396,6 +2429,11 @@ def make_candidate_rows(
     kept_component_keys = list(hard_disallow_filter.kept_component_keys)
     if not kept_component_keys:
         return []
+    if strict_raw_similarity_features:
+        _validate_raw_similarity_features_for_components(
+            kept_component_keys=kept_component_keys,
+            raw_similarity_features_by_component=raw_similarity_features_by_component,
+        )
     top1_component_key = kept_component_keys[0]
     top1_stats = stats_by_component[top1_component_key]
     # Reranker supervision must come from labeled positives only; pairwise

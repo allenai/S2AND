@@ -22,6 +22,75 @@ from s2and.data import NameCounts
 from tests.helpers import build_cluster_summary, build_query_features
 
 
+def _raw_similarity_features_for_components(*component_keys: str) -> dict[str, dict[str, float]]:
+    return {
+        str(component_key): {
+            feature_name: 0.0 for feature_name in reranker_utils.RAW_METADATA_SIMILARITY_FEATURE_COLUMNS
+        }
+        for component_key in component_keys
+    }
+
+
+def _raw_similarity_candidate_row_kwargs() -> dict[str, Any]:
+    query = build_query_features(has_coauthors=True, has_affiliations=True)
+    summary_by_component = {
+        "c1": build_cluster_summary(component_key="c1", size=3),
+        "c2": build_cluster_summary(component_key="c2", size=2),
+    }
+    stats_by_component = {
+        "c1": reranker_utils.ClusterPairwiseStats(
+            cluster_id="c1",
+            retrieval_rank=1,
+            retrieval_score=0.8,
+            cluster_size=3,
+            count=3,
+            sum_distance=0.6,
+            min_distance=0.1,
+            top_smallest_neg_heap=[-0.1, -0.2, -0.3],
+        ),
+        "c2": reranker_utils.ClusterPairwiseStats(
+            cluster_id="c2",
+            retrieval_rank=2,
+            retrieval_score=0.7,
+            cluster_size=2,
+            disallow_pair_count=1,
+            count=2,
+            sum_distance=0.8,
+            min_distance=0.3,
+            top_smallest_neg_heap=[-0.3, -0.5],
+        ),
+    }
+    query_case = reranker_utils.RerankerQueryCase(
+        source="labeled",
+        dataset="d1",
+        query_id="q1",
+        query_signature_id="q1",
+        block_key="b",
+        positive_component_keys=frozenset({"c1"}),
+        support_type="labeled",
+        block_size=5,
+        component_size=3,
+        sampling_info_bucket="rich",
+    )
+    return {
+        "query_case": query_case,
+        "query_view": "initial_only",
+        "query_features": query,
+        "shortlist_component_keys": ["c1", "c2"],
+        "retrieval_scores": {"c1": 0.8, "c2": 0.7},
+        "retrieval_ranks": {"c1": 1, "c2": 2},
+        "retrieval_window_state": {
+            "scored_candidate_components": 2,
+            "scored_candidate_signatures": 5,
+            "orcid_filter_applied": 0,
+            "middle_initial_filter_applied": 0,
+            "year_range_filter_applied": 0,
+        },
+        "summary_by_component": summary_by_component,
+        "stats_by_component": stats_by_component,
+    }
+
+
 def _base_row(**overrides: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "source": "labeled",
@@ -806,6 +875,96 @@ def test_make_candidate_rows_materializes_raw_similarity_features() -> None:
         feature_columns=reranker_utils.RAW_METADATA_SIMILARITY_FEATURE_COLUMNS,
     )
     assert feature_matrix.tolist()[0] == pytest.approx([0.125, 0.25, 0.333333, 0.5])
+
+
+def test_make_candidate_rows_strict_raw_similarity_features_requires_kept_components() -> None:
+    row_kwargs = _raw_similarity_candidate_row_kwargs()
+    raw_similarity_features_by_component = _raw_similarity_features_for_components("c2")
+
+    with pytest.raises(
+        ValueError,
+        match="missing_components=\\['c1'\\]",
+    ):
+        reranker_utils.make_candidate_rows(
+            **row_kwargs,
+            raw_similarity_features_by_component=raw_similarity_features_by_component,
+            strict_raw_similarity_features=True,
+        )
+
+
+def test_make_candidate_rows_strict_raw_similarity_features_requires_every_feature() -> None:
+    row_kwargs = _raw_similarity_candidate_row_kwargs()
+    raw_similarity_features_by_component = _raw_similarity_features_for_components("c1")
+    raw_similarity_features_by_component["c1"].pop("raw_max_text_jaccard")
+
+    with pytest.raises(
+        ValueError,
+        match="raw_max_text_jaccard",
+    ):
+        reranker_utils.make_candidate_rows(
+            **row_kwargs,
+            raw_similarity_features_by_component=raw_similarity_features_by_component,
+            strict_raw_similarity_features=True,
+        )
+
+
+def test_make_candidate_rows_strict_raw_similarity_features_ignores_filtered_components() -> None:
+    row_kwargs = _raw_similarity_candidate_row_kwargs()
+
+    rows = reranker_utils.make_candidate_rows(
+        **row_kwargs,
+        raw_similarity_features_by_component=_raw_similarity_features_for_components("c1"),
+        strict_raw_similarity_features=True,
+    )
+
+    assert [row["candidate_component_key"] for row in rows] == ["c1"]
+
+
+def test_reranker_dataset_bridge_requires_raw_similarity_features_for_kept_components() -> None:
+    query = build_query_features(has_coauthors=True, has_affiliations=True)
+    summary = build_cluster_summary(component_key="c1", size=3)
+    stats = reranker_utils.ClusterPairwiseStats(
+        cluster_id="c1",
+        retrieval_rank=1,
+        retrieval_score=0.8,
+        cluster_size=3,
+        count=3,
+        sum_distance=0.6,
+        min_distance=0.1,
+        top_smallest_neg_heap=[-0.1, -0.2, -0.3],
+    )
+    query_case = reranker_utils.RerankerQueryCase(
+        source="labeled",
+        dataset="d1",
+        query_id="q1",
+        query_signature_id="q1",
+        block_key="b",
+        positive_component_keys=frozenset({"c1"}),
+        support_type="labeled",
+        block_size=3,
+        component_size=3,
+        sampling_info_bucket="rich",
+    )
+
+    with pytest.raises(ValueError, match="Missing raw metadata similarity features"):
+        reranker_dataset.generate_candidate_rows(
+            query_case=query_case,
+            query_view="initial_only",
+            query_features=query,
+            shortlist_component_keys=["c1"],
+            retrieval_scores={"c1": 0.8},
+            retrieval_ranks={"c1": 1},
+            retrieval_window_state={
+                "scored_candidate_components": 1,
+                "scored_candidate_signatures": 3,
+                "orcid_filter_applied": 0,
+                "middle_initial_filter_applied": 0,
+                "year_range_filter_applied": 0,
+            },
+            summary_by_component={"c1": summary},
+            stats_by_component={"c1": stats},
+            raw_similarity_features_by_component={},
+        )
 
 
 def test_reranker_dataset_bridge_candidate_rows_match_legacy_csv_bytes(tmp_path: Path) -> None:
@@ -1987,6 +2146,7 @@ def test_flush_prepared_query_requests_materializes_rows(monkeypatch: pytest.Mon
             },
         ),
         estimated_pair_count=3,
+        raw_similarity_features_by_component=_raw_similarity_features_for_components("c1", "c2"),
     )
     stats_by_component = {
         "c1": reranker_utils.ClusterPairwiseStats(
@@ -2207,6 +2367,7 @@ def test_flush_prepared_query_requests_streams_rows(
             },
         ),
         estimated_pair_count=3,
+        raw_similarity_features_by_component=_raw_similarity_features_for_components("c1", "c2"),
     )
     stats_by_component = {
         "c1": reranker_utils.ClusterPairwiseStats(

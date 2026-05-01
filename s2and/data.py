@@ -77,8 +77,8 @@ def _lasts_equivalent_for_constraint(l1: str, l2: str) -> bool:
 
     Examples: "ou yang" == "ouyang"; strictly unequal strings otherwise.
 
-    TODO(s2and): Remove when canonicalization is unified end-to-end and constraints
-    operate on canonical forms only.
+    TODO(s2and): Remove only after the canonical-artifact rollout gate in
+    docs/normalization_migration_blocked.md is satisfied.
     """
     if l1 == l2:
         return True
@@ -91,7 +91,8 @@ def _canonicalize_last_for_counts(raw_last: str | None, normalized_last: str) ->
     Join internal spaces for hyphen/compound surnames so historical single-token
     count keys still match (e.g., "ou yang" -> "ouyang").
 
-    TODO(s2and): Remove once name count tables are regenerated with hyphen-aware surnames.
+    TODO(s2and): Remove only after the canonical-artifact rollout gate in
+    docs/normalization_migration_blocked.md is satisfied.
     """
     if (raw_last is not None and "-" in raw_last) or (" " in normalized_last):
         return (normalized_last or "").replace(" ", "")
@@ -851,7 +852,8 @@ class ANDData:
         #   for hyphenated Chinese given names (e.g., "qi xin"). For counts only, we heuristically
         #   join internal spaces to form a single token ("qixin") IF the raw first contained a hyphen.
         # - This preserves old behavior for most names while improving lookups for hyphenated cases.
-        # TODO: revisit once we re-extract name_counts using Sinonym-aware canonicalization.
+        # TODO(s2and): revisit after the canonical-artifact rollout gate in
+        # docs/normalization_migration_blocked.md is satisfied.
         counts_first_without_apostrophe = first_without_apostrophe
         counts_last_normalized = last_normalized
         if counts_first_without_apostrophe is None or counts_last_normalized is None:
@@ -871,7 +873,8 @@ class ANDData:
         # - Historically, last names were single tokens; normalization turns hyphens into spaces
         #   (e.g., "ou-yang" -> "ou yang"). For counts only, treat space/hyphen variants as the
         #   same token by joining internal spaces ("ouyang").
-        # TODO(s2and): remove this once name_counts are regenerated with hyphen-aware surnames.
+        # TODO(s2and): remove after the canonical-artifact rollout gate in
+        # docs/normalization_migration_blocked.md is satisfied.
         last_for_counts = _canonicalize_last_for_counts(signature.author_info_last, counts_last_normalized)
 
         first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
@@ -986,9 +989,9 @@ class ANDData:
                             #   given names together).
                             # - Surname: for downstream lookups/constraints we also treat hyphen/space variants
                             #   equivalently.
-                            # TODO(s2and): Once name_counts/name_tuples are regenerated with Sinonym-aware
-                            #              canonicalization, remove the backward-compat shims added below for
-                            #              last-name counts/constraints.
+                            # TODO(s2and): Remove the backward-compat shims added below for last-name
+                            #              counts/constraints after the canonical-artifact rollout gate in
+                            #              docs/normalization_migration_blocked.md is satisfied.
                             # Default normalization (keeps legacy behavior for counts/lookups)
                             first_normalized = normalize_text(first_raw)
                             middle_normalized = normalize_text(middle_raw)
@@ -1472,7 +1475,8 @@ class ANDData:
         elif not suppress_orcid and orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
             return low_value
         # just-in-case last name constraint: if last names are different (hyphen/space-insensitive), then disallow
-        # TODO(s2and): remove hyphen/space-insensitive shim once canonicalization is unified end-to-end
+        # TODO(s2and): remove after the canonical-artifact rollout gate in
+        # docs/normalization_migration_blocked.md is satisfied.
         elif not _lasts_equivalent_for_constraint(
             _materialize_constraint_last_normalized(signature_1),
             _materialize_constraint_last_normalized(signature_2),
@@ -1488,7 +1492,8 @@ class ANDData:
             # Backward-compatibility: `first_1`/`first_2` can now be multi-token (Sinonym output).
             # Legacy name_tuples were curated over single-token first names. To remain compatible,
             # try multiple forms for alias membership: exact, joined-without-spaces, and first-token only.
-            # TODO: revisit once we re-extract name_tuples aligned with Sinonym canonicalization.
+            # TODO(s2and): remove after the canonical-artifact rollout gate in
+            # docs/normalization_migration_blocked.md is satisfied.
             first_1_parts = first_1.split()
             first_2_parts = first_2.split()
             f1_join = "".join(first_1_parts)

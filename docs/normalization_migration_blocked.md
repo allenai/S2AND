@@ -152,7 +152,8 @@ References in code (as of this migration doc)
 
 Tests (current)
 - `tests/test_surname_hyphen_aware.py`
-  - Transitional regression coverage for surname count canonicalization, last-name constraint equivalence, and block compaction behavior under Sinonym overwrites.
+  - Transitional regression coverage for surname count canonicalization, last-name constraint equivalence,
+    name-tuple compatibility forms, and block compaction behavior under Sinonym overwrites.
 
 Tests (required for end state)
 - Canonical first-name equivalence cases from the frozen example table.

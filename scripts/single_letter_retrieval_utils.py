@@ -21,6 +21,11 @@ except ImportError:  # pragma: no cover - direct script execution path
     import eval_cluster_retrieval as retrieval  # type: ignore
 
 try:
+    from scripts import retrieval_policy
+except ImportError:  # pragma: no cover - direct script execution path
+    import retrieval_policy  # type: ignore
+
+try:
     import s2and_rust
 except ImportError:  # pragma: no cover - Rust extension optional
     s2and_rust = None  # type: ignore[assignment]
@@ -28,12 +33,6 @@ except ImportError:  # pragma: no cover - Rust extension optional
 RAW_SIGNATURE_TO_CLUSTER_ID_FILENAME = "signature_to_cluster_id.json"
 RECONCILED_SIGNATURE_TO_CLUSTER_ID_FILENAME = "reconciled_signature_to_cluster_id.json"
 RECONCILED_SIGNATURE_TO_CLUSTER_ID_SUMMARY_FILENAME = "reconciled_signature_to_cluster_id.summary.json"
-
-
-def _rust_default_tuple(name: str, fallback: tuple[Any, ...]) -> tuple[Any, ...]:
-    if s2and_rust is None or not hasattr(s2and_rust, name):
-        return fallback
-    return tuple(getattr(s2and_rust, name))
 
 
 def _read_json(path: Path) -> Any:
@@ -164,16 +163,8 @@ class FrozenRustHybridCentroidPolicy:
         }
 
 
-RUST_HYBRID_CENTROID_FEATURE_ORDER = tuple(
-    str(value) for value in _rust_default_tuple("RETRIEVAL_FEATURE_ORDER", retrieval.HYBRID_FEATURE_ORDER)
-)
-DEFAULT_RUST_HYBRID_CENTROID_WEIGHTS = tuple(
-    float(value)
-    for value in _rust_default_tuple(
-        "DEFAULT_HYBRID_CENTROID_WEIGHTS",
-        retrieval.DEFAULT_HYBRID_CENTROID_WEIGHTS,
-    )
-)
+RUST_HYBRID_CENTROID_FEATURE_ORDER = retrieval_policy.HYBRID_FEATURE_ORDER
+DEFAULT_RUST_HYBRID_CENTROID_WEIGHTS = retrieval_policy.DEFAULT_HYBRID_CENTROID_WEIGHTS
 FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME = "h_wang_any_input_v2"
 FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY = FrozenRustHybridCentroidPolicy(
     full_weights=(0.527232, 0.223412, 0.146909, 0.009439, 0.093007),

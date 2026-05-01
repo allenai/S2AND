@@ -36,9 +36,9 @@ from s2and.subblocking import (
 from s2and.text import normalize_text, same_prefix_tokens
 
 try:
-    import s2and_rust
-except ImportError:  # pragma: no cover - Rust extension optional for pure-Python helpers
-    s2and_rust = None  # type: ignore[assignment]
+    from scripts import retrieval_policy
+except ImportError:  # pragma: no cover - direct script execution path
+    import retrieval_policy  # type: ignore
 
 TOP_KS = (1, 5, 10, 20, 50, 100)
 DEFAULT_SIGNATURE_BUDGETS = (25, 50, 100, 250, 500, 1000)
@@ -62,45 +62,14 @@ __all__ = [
     "score_summary",
 ]
 _ORIGINAL_COMPUTE_BLOCK: Callable[[str], str] = s2and_data_module.compute_block
-_DEFAULT_HYBRID_FEATURE_ORDER_FALLBACK = ("centroid", "coauthor", "affiliation", "middle", "first_name")
-_DEFAULT_HYBRID_CENTROID_WEIGHTS_FALLBACK = (0.42, 0.23, 0.12, 0.05, 0.07)
-_DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS_FALLBACK = (0.40, 0.23, 0.12, 0.05, 0.07)
-
-
-def _rust_default_tuple(name: str, fallback: tuple[Any, ...]) -> tuple[Any, ...]:
-    if s2and_rust is None or not hasattr(s2and_rust, name):
-        return fallback
-    return tuple(getattr(s2and_rust, name))
-
-
-def _rust_default_float(name: str, fallback: float) -> float:
-    if s2and_rust is None or not hasattr(s2and_rust, name):
-        return fallback
-    return float(getattr(s2and_rust, name))
-
-
-def _rust_default_int(name: str, fallback: int) -> int:
-    if s2and_rust is None or not hasattr(s2and_rust, name):
-        return fallback
-    return int(getattr(s2and_rust, name))
-
-
-HYBRID_FEATURE_ORDER = tuple(
-    str(value) for value in _rust_default_tuple("RETRIEVAL_FEATURE_ORDER", _DEFAULT_HYBRID_FEATURE_ORDER_FALLBACK)
-)
-DEFAULT_HYBRID_CENTROID_WEIGHTS = tuple(
-    float(value)
-    for value in _rust_default_tuple("DEFAULT_HYBRID_CENTROID_WEIGHTS", _DEFAULT_HYBRID_CENTROID_WEIGHTS_FALLBACK)
-)
-DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS = tuple(
-    float(value)
-    for value in _rust_default_tuple("DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS", _DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS_FALLBACK)
-)
-RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE = _rust_default_float("RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE", -0.25)
-RETRIEVAL_YEAR_SCORE_DECAY_YEARS = _rust_default_float("RETRIEVAL_YEAR_SCORE_DECAY_YEARS", 15.0)
-RETRIEVAL_YEAR_SCORE_RANGE_GAP = _rust_default_int("RETRIEVAL_YEAR_SCORE_RANGE_GAP", 10)
-RETRIEVAL_YEAR_SCORE_RANGE_PENALTY = _rust_default_float("RETRIEVAL_YEAR_SCORE_RANGE_PENALTY", 0.15)
-RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP = _rust_default_int("RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP", 35)
+HYBRID_FEATURE_ORDER = retrieval_policy.HYBRID_FEATURE_ORDER
+DEFAULT_HYBRID_CENTROID_WEIGHTS = retrieval_policy.DEFAULT_HYBRID_CENTROID_WEIGHTS
+DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS = retrieval_policy.DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS
+RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE = retrieval_policy.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
+RETRIEVAL_YEAR_SCORE_DECAY_YEARS = retrieval_policy.RETRIEVAL_YEAR_SCORE_DECAY_YEARS
+RETRIEVAL_YEAR_SCORE_RANGE_GAP = retrieval_policy.RETRIEVAL_YEAR_SCORE_RANGE_GAP
+RETRIEVAL_YEAR_SCORE_RANGE_PENALTY = retrieval_policy.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY
+RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP = retrieval_policy.RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP
 
 
 def _safe_compute_block(name: str) -> str:

@@ -56,7 +56,12 @@ from scripts.joint_safe_link_initial_only_rereview import (
     read_initial_only_rereview_decisions,
     resolve_reviewed_safe_component_keys,
 )
-from scripts.reranker_dataset.raw_similarity import RawSimilarityFeatureCache, raw_similarity_features_by_component
+from scripts.reranker_dataset.raw_similarity import (
+    RawSimilarityFeatureCache,
+)
+from scripts.reranker_dataset.raw_similarity import (
+    raw_similarity_features_by_component as build_raw_similarity_features_by_component,
+)
 from scripts.reranker_dataset.rows import generate_candidate_rows
 from scripts.reranker_dataset.staging import (
     FileRepairSummaryState,
@@ -69,28 +74,13 @@ from scripts.reranker_dataset.staging import (
     decompress_rows as _decompress_rows,
 )
 from scripts.reranker_dataset.staging import (
-    fieldnames_with_materialized_derived_columns as _staging_fieldnames_with_materialized_derived_columns,
-)
-from scripts.reranker_dataset.staging import (
-    hydrate_stage_summaries_from_spool as _staging_hydrate_stage_summaries_from_spool,
-)
-from scripts.reranker_dataset.staging import (
     is_s2and_eval_row_path as _staging_is_s2and_eval_row_path,
-)
-from scripts.reranker_dataset.staging import (
-    load_selected_row_headers as _staging_load_selected_row_headers,
 )
 from scripts.reranker_dataset.staging import (
     load_staged_input_groups_from_spool as _staging_load_staged_input_groups_from_spool,
 )
 from scripts.reranker_dataset.staging import (
     normalize_bundle_relpath as _normalize_bundle_relpath,
-)
-from scripts.reranker_dataset.staging import (
-    preflight_s2and_full_relabel_decisions as _staging_preflight_s2and_full_relabel_decisions,
-)
-from scripts.reranker_dataset.staging import (
-    source_rows_path_for_rebuild as _staging_source_rows_path_for_rebuild,
 )
 from scripts.reranker_dataset.staging import (
     stage_input_groups as _staging_stage_input_groups,
@@ -328,22 +318,8 @@ def _stage_input_groups_config() -> StageInputGroupsConfig:
     )
 
 
-def _is_s2and_eval_row_path(path_like: str | Path) -> bool:
-    return _staging_is_s2and_eval_row_path(path_like, config=_stage_input_groups_config())
-
-
 def _is_s2and_rescue_reviewed_row_path(path_like: str | Path) -> bool:
     return _normalize_bundle_relpath(path_like) == _normalize_bundle_relpath(S2AND_RESCUE_REVIEWED_ROW_RELATIVE_PATH)
-
-
-def _source_rows_path_for_rebuild(relative_path: Path) -> Path:
-    """Return the row source used for one rebuild input.
-
-    S2AND eval needs the manually reviewed pre-self-filter candidate surface;
-    the active row file no longer contains many reviewed positive candidates.
-    """
-
-    return _staging_source_rows_path_for_rebuild(relative_path, config=_stage_input_groups_config())
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -676,63 +652,12 @@ def _apply_s2and_full_relabel_to_group(
     return relabeled_rows
 
 
-def _preflight_s2and_full_relabel_decisions(
-    *,
-    selected_row_paths: tuple[Path, ...],
-    decisions: dict[str, S2ANDFullRelabelDecision],
-    sample_size: int = 10,
-) -> None:
-    _staging_preflight_s2and_full_relabel_decisions(
-        selected_row_paths=selected_row_paths,
-        decisions=decisions,
-        config=_stage_input_groups_config(),
-        sample_size=sample_size,
-    )
-
-
 def _source_path_placeholders(source_paths: list[str] | tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
     normalized_paths = tuple(str(path) for path in source_paths)
     if not normalized_paths:
         raise ValueError("At least one source path is required.")
     placeholders = ", ".join("?" for _ in normalized_paths)
     return placeholders, normalized_paths
-
-
-def _load_selected_row_headers(
-    selected_row_paths: tuple[Path, ...],
-) -> tuple[dict[str, list[str]], dict[str, FileRepairSummaryState], list[str]]:
-    return _staging_load_selected_row_headers(selected_row_paths, config=_stage_input_groups_config())
-
-
-def _fieldnames_with_materialized_derived_columns(fieldnames: list[str]) -> list[str]:
-    """Return CSV fieldnames with every official materialized feature preserved."""
-
-    return _staging_fieldnames_with_materialized_derived_columns(fieldnames)
-
-
-def _hydrate_stage_summaries_from_spool(
-    connection: sqlite3.Connection,
-    *,
-    file_summaries: dict[str, FileRepairSummaryState],
-    ordered_source_paths: list[str],
-) -> None:
-    _staging_hydrate_stage_summaries_from_spool(
-        connection,
-        file_summaries=file_summaries,
-        ordered_source_paths=ordered_source_paths,
-    )
-
-
-def _load_staged_input_groups_from_spool(
-    connection: sqlite3.Connection,
-    *,
-    selected_row_paths: tuple[Path, ...],
-) -> tuple[dict[str, list[str]], dict[str, FileRepairSummaryState], list[str]]:
-    return _staging_load_staged_input_groups_from_spool(
-        connection,
-        selected_row_paths=selected_row_paths,
-        config=_stage_input_groups_config(),
-    )
 
 
 def _selected_datasets(connection: sqlite3.Connection, *, ordered_source_paths: list[str]) -> list[str]:
@@ -1046,23 +971,6 @@ def _load_raw_paper_text_by_id(dataset_name: str, *, needed_paper_ids: set[str])
     return text_by_id
 
 
-def _raw_similarity_features_by_component(
-    resources: DatasetResources,
-    *,
-    query_signature_id: str,
-    candidate_signature_ids_by_component: dict[str, list[str]],
-) -> dict[str, dict[str, float]]:
-    """Compatibility wrapper around the shared raw-similarity implementation."""
-
-    return raw_similarity_features_by_component(
-        dataset=resources.dataset,
-        query_signature_id=str(query_signature_id),
-        candidate_signature_ids_by_component=candidate_signature_ids_by_component,
-        raw_paper_text_by_id=resources.raw_paper_text_by_id,
-        cache=resources.raw_similarity_feature_cache,
-    )
-
-
 def _component_contains_query_signature(
     resources: DatasetResources,
     *,
@@ -1079,7 +987,7 @@ def _should_keep_self_containing_positive_as_residual_loo(*, source_path: str, r
     """Return whether a self-containing positive row should be materialized as residual LOO."""
 
     return _to_int(row.get("label")) == 1 and (
-        _is_s2and_eval_row_path(source_path)
+        _staging_is_s2and_eval_row_path(source_path, config=_stage_input_groups_config())
         or _is_s2and_rescue_reviewed_row_path(source_path)
         or str(row.get("source", "")) in {"labeled_loo", "s2and_rescue_manual_review"}
     )
@@ -1330,20 +1238,6 @@ def _run_dataset_worker_subprocess(
     )
 
 
-def _stage_input_groups(
-    *,
-    connection: sqlite3.Connection,
-    selected_row_paths: tuple[Path, ...],
-    limit_groups_per_file: int | None,
-) -> tuple[dict[str, list[str]], dict[str, FileRepairSummaryState], list[str]]:
-    return _staging_stage_input_groups(
-        connection=connection,
-        selected_row_paths=selected_row_paths,
-        limit_groups_per_file=limit_groups_per_file,
-        config=_stage_input_groups_config(),
-    )
-
-
 def _prepare_existing_group(
     *,
     source_path: str,
@@ -1486,10 +1380,12 @@ def _prepare_existing_group(
         )
         for component_key in shortlist_component_keys
     }
-    raw_similarity_features_by_component = _raw_similarity_features_by_component(
-        resources,
+    raw_similarity_features_by_component = build_raw_similarity_features_by_component(
+        dataset=resources.dataset,
         query_signature_id=str(query_signature_id),
         candidate_signature_ids_by_component=candidate_signature_ids_by_component,
+        raw_paper_text_by_id=resources.raw_paper_text_by_id,
+        cache=resources.raw_similarity_feature_cache,
     )
     seed_bypass_component_keys = seed_constraint_bypass_component_keys(
         dataset=resources.dataset,
@@ -2220,7 +2116,8 @@ def _refresh_s2and_stratified_split_from_reviews(
 ) -> dict[str, Any] | None:
     """Refresh promoted split assignments for S2AND eval after row rematerialization."""
 
-    if not any(_is_s2and_eval_row_path(path) for path in selected_row_paths):
+    staging_config = _stage_input_groups_config()
+    if not any(_staging_is_s2and_eval_row_path(path, config=staging_config) for path in selected_row_paths):
         return None
     split_root = DEST_BUNDLE_ROOT / "calibration" / "stratified_eval_test_split"
     assignments_path = split_root / "combined_query_split_assignments.csv"
@@ -2919,16 +2816,19 @@ def main() -> None:
 
     connection = _connect_spool_db(spool_db_path)
     try:
+        staging_config = _stage_input_groups_config()
         if resuming_from_spool:
-            fieldnames_by_path, file_summary_states, ordered_source_paths = _load_staged_input_groups_from_spool(
+            fieldnames_by_path, file_summary_states, ordered_source_paths = _staging_load_staged_input_groups_from_spool(
                 connection,
                 selected_row_paths=selected_row_paths,
+                config=staging_config,
             )
         else:
-            fieldnames_by_path, file_summary_states, ordered_source_paths = _stage_input_groups(
+            fieldnames_by_path, file_summary_states, ordered_source_paths = _staging_stage_input_groups(
                 connection=connection,
                 selected_row_paths=selected_row_paths,
                 limit_groups_per_file=args.limit_groups_per_file,
+                config=staging_config,
             )
         datasets = _selected_datasets(connection, ordered_source_paths=ordered_source_paths)
         print(json.dumps({"event": "staged_datasets", "datasets": datasets}), flush=True)

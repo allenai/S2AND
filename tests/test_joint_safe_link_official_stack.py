@@ -15,6 +15,7 @@ import pytest
 
 import scripts.rebuild_joint_safe_link_official_stack as rebuild_stack
 import scripts.reranker_dataset.official_rows as promote_name_compat
+import scripts.reranker_dataset.staging as reranker_staging
 import scripts.validate_joint_safe_link_official_stack as validate_stack
 from scripts.joint_safe_link_dataset_contract import (
     NAME_COMPAT_MANUAL_POSITIVE_CORRECTIONS_RELATIVE_PATH,
@@ -55,6 +56,7 @@ from scripts.joint_safe_link_official_stack import (
     format_classic_selected_gate_tables,
     load_bundle,
 )
+from scripts.reranker_dataset.raw_similarity import raw_similarity_features_by_component
 from scripts.sync_joint_safe_link_official_bundle_metadata import sync_bundle_metadata
 from scripts.validate_joint_safe_link_official_stack import (
     _feature_coverage_failures,
@@ -954,72 +956,6 @@ def test_s2and_full_relabel_updates_group_labels_and_metadata() -> None:
     assert [row["label"] for row in relabeled] == ["0", "1"]
     assert {row["positive_candidate_keys"] for row in relabeled} == {"c2"}
     assert {row["best_positive_retrieval_rank"] for row in relabeled} == {"2"}
-
-
-def test_s2and_relabel_preflight_catches_missing_decisions_before_staging(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Missing S2AND relabel decisions should fail before group materialization starts."""
-
-    pre_filter_rows_path = tmp_path / "s2and_eval_rows.csv.gz"
-    rows = [
-        {
-            "dataset": "arnetminer",
-            "query_group_id": "arnetminer:1:full",
-            "candidate_component_key": "c1",
-            "retrieval_rank": "1",
-            "label": "1",
-        },
-        {
-            "dataset": "arnetminer",
-            "query_group_id": "arnetminer:2:full",
-            "candidate_component_key": "c2",
-            "retrieval_rank": "1",
-            "label": "0",
-        },
-    ]
-    with gzip.open(pre_filter_rows_path, "wt", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-    monkeypatch.setattr(rebuild_stack, "S2AND_FULL_RELABEL_PRE_FILTER_ROWS_PATH", pre_filter_rows_path)
-    monkeypatch.setattr(rebuild_stack, "read_initial_only_rereview_decisions", lambda: {})
-    monkeypatch.setattr(
-        rebuild_stack,
-        "_read_s2and_full_relabel_decisions",
-        lambda: {
-            "arnetminer:1:full": rebuild_stack.S2ANDFullRelabelDecision(
-                safe_component_keys=("c1",),
-                split="test",
-                correction_type="",
-            )
-        },
-    )
-
-    def fail_if_materialized(
-        rows: list[dict[str, object]],
-        *,
-        decisions: dict[str, rebuild_stack.S2ANDFullRelabelDecision],
-    ) -> list[dict[str, object]]:
-        del rows, decisions
-        raise AssertionError("S2AND relabel materialization should not run after a failed preflight")
-
-    monkeypatch.setattr(rebuild_stack, "_apply_s2and_full_relabel_to_group", fail_if_materialized)
-    connection = rebuild_stack._connect_spool_db(tmp_path / "spool.sqlite3")
-    try:
-        with pytest.raises(ValueError, match="Missing S2AND full relabel decisions"):
-            rebuild_stack._stage_input_groups(
-                connection=connection,
-                selected_row_paths=(rebuild_stack.S2AND_ROW_RELATIVE_PATH,),
-                limit_groups_per_file=None,
-            )
-        staged_count = connection.execute("SELECT COUNT(*) FROM staged_groups").fetchone()[0]
-    finally:
-        connection.close()
-
-    assert staged_count == 0
 
 
 def test_s2and_assignment_rows_use_review_split_and_active_labels() -> None:
@@ -2770,51 +2706,6 @@ def test_classic_feature_matrix_rejects_missing_feature_cells() -> None:
         _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
 
 
-def test_file_repair_summary_state_merges_worker_results() -> None:
-    """Parent summary state should merge worker result payloads without changing before-counts."""
-
-    parent = rebuild_stack.FileRepairSummaryState(path=r"test\demo_rows.csv.gz")
-    parent.record_stage(dataset_name="demo", rows_before=3, positive_rows_before=1)
-
-    worker = rebuild_stack.FileRepairSummaryState(path=r"test\demo_rows.csv.gz")
-    worker.record_result(
-        rows_before=3,
-        positive_rows_before=1,
-        rebuilt_rows=[{"label": 1}, {"label": 0}],
-        group_summary={"query_group_id": "q1", "dataset": "demo"},
-    )
-
-    parent.merge_result_payload(worker.to_result_payload())
-    payload = parent.to_payload()
-
-    assert payload["rows_before"] == 3
-    assert payload["rows_after"] == 2
-    assert payload["rows_dropped"] == 1
-    assert payload["groups_before"] == 1
-    assert payload["groups_after"] == 1
-    assert payload["positive_rows_before"] == 1
-    assert payload["positive_rows_after"] == 1
-    assert payload["groups_with_dropped_rows"] == 1
-    assert payload["sample_dropped_groups"][0]["query_group_id"] == "q1"
-
-
-def test_rebuild_headers_preserve_materialized_derived_columns() -> None:
-    """Rebuilt row CSVs should not drop derived columns recomputed in memory."""
-
-    fieldnames = ["query_group_id", "candidate_component_key", "label"]
-
-    out = rebuild_stack._fieldnames_with_materialized_derived_columns(fieldnames)
-
-    assert out[: len(fieldnames)] == fieldnames
-    assert "top3_distance_best_gap" in out
-    assert "top3_gap_to_heuristic_choice" in out
-    assert "raw_max_affiliation_jaccard" in out
-    assert "raw_max_coauthor_jaccard" in out
-    assert "raw_max_title_jaccard" in out
-    assert "raw_max_text_jaccard" in out
-    assert len(out) == len(set(out))
-
-
 def test_raw_similarity_features_exclude_query_signature_from_candidate_component() -> None:
     """Raw metadata features must not leak self-similarity from residual LOO rows."""
 
@@ -2881,10 +2772,12 @@ def test_raw_similarity_features_exclude_query_signature_from_candidate_componen
         },
     )
 
-    features = rebuild_stack._raw_similarity_features_by_component(
-        resources,
+    features = raw_similarity_features_by_component(
+        dataset=resources.dataset,
         query_signature_id="q",
         candidate_signature_ids_by_component={"c1": ["q", "m", "n"]},
+        raw_paper_text_by_id=resources.raw_paper_text_by_id,
+        cache=resources.raw_similarity_feature_cache,
     )
 
     assert features["c1"]["raw_max_affiliation_jaccard"] == pytest.approx(0.25)
@@ -3975,7 +3868,7 @@ def test_resume_helpers_reuse_saved_spool_outputs(tmp_path, monkeypatch) -> None
                 1,
                 2,
                 1,
-                rebuild_stack.sqlite3.Binary(rebuild_stack._compress_rows(original_rows)),
+                sqlite3.Binary(reranker_staging.compress_rows(original_rows)),
             ),
         )
         connection.execute(
@@ -3983,14 +3876,28 @@ def test_resume_helpers_reuse_saved_spool_outputs(tmp_path, monkeypatch) -> None
             (
                 source_path,
                 1,
-                rebuild_stack.sqlite3.Binary(rebuild_stack._compress_rows([original_rows[0]])),
+                sqlite3.Binary(reranker_staging.compress_rows([original_rows[0]])),
             ),
         )
         connection.commit()
 
-        fieldnames_by_path, file_summaries, ordered_source_paths = rebuild_stack._load_staged_input_groups_from_spool(
-            connection,
-            selected_row_paths=(relative_path,),
+        staging_config = reranker_staging.StageInputGroupsConfig(
+            source_bundle_root=source_root,
+            s2and_row_relative_path=rebuild_stack.S2AND_ROW_RELATIVE_PATH,
+            s2and_full_relabel_pre_filter_rows_path=source_root / "missing_pre_filter.csv.gz",
+            window_size=rebuild_stack.WINDOW_SIZE,
+            read_initial_only_rereview_decisions=lambda: {},
+            read_s2and_full_relabel_decisions=lambda: {},
+            merge_initial_only_rereview_into_s2and_decisions=lambda decisions, _initial_only: decisions,
+            apply_initial_only_rereview_to_group=lambda rows, *, decision: list(rows),
+            apply_s2and_full_relabel_to_group=lambda rows, *, decisions: list(rows),
+        )
+        fieldnames_by_path, file_summaries, ordered_source_paths = (
+            reranker_staging.load_staged_input_groups_from_spool(
+                connection,
+                selected_row_paths=(relative_path,),
+                config=staging_config,
+            )
         )
         assert fieldnames_by_path[source_path][: len(original_rows[0])] == list(original_rows[0])
         assert "top3_distance_best_gap" in fieldnames_by_path[source_path]
@@ -4007,7 +3914,7 @@ def test_resume_helpers_reuse_saved_spool_outputs(tmp_path, monkeypatch) -> None
     finally:
         connection.close()
 
-    worker_summary = rebuild_stack.FileRepairSummaryState(path=source_path)
+    worker_summary = reranker_staging.FileRepairSummaryState(path=source_path)
     worker_summary.record_result(
         rows_before=2,
         positive_rows_before=1,

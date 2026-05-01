@@ -197,6 +197,56 @@ def test_stage_input_groups_writes_window_capped_spool_rows(tmp_path: Path) -> N
     assert [row["candidate_component_key"] for row in decompress_rows(bytes(staged[8]))] == ["c1", "c2"]
 
 
+def test_stage_input_groups_preflights_s2and_relabel_decisions(tmp_path: Path) -> None:
+    pre_filter_rows_path = tmp_path / "s2and_eval_rows.csv.gz"
+    rows = [
+        {
+            "dataset": "arnetminer",
+            "query_group_id": "arnetminer:1:full",
+            "candidate_component_key": "c1",
+            "retrieval_rank": "1",
+            "label": "1",
+        },
+        {
+            "dataset": "arnetminer",
+            "query_group_id": "arnetminer:2:full",
+            "candidate_component_key": "c2",
+            "retrieval_rank": "1",
+            "label": "0",
+        },
+    ]
+    _write_gzip_rows(pre_filter_rows_path, rows)
+    config = StageInputGroupsConfig(
+        source_bundle_root=tmp_path / "source",
+        s2and_row_relative_path=Path("test") / "s2and_eval_rows.csv.gz",
+        s2and_full_relabel_pre_filter_rows_path=pre_filter_rows_path,
+        window_size=25,
+        read_initial_only_rereview_decisions=lambda: {},
+        read_s2and_full_relabel_decisions=lambda: {"arnetminer:1:full": object()},
+        merge_initial_only_rereview_into_s2and_decisions=lambda decisions, _initial_only: decisions,
+        apply_initial_only_rereview_to_group=lambda rows, *, decision: list(rows),
+        apply_s2and_full_relabel_to_group=lambda rows, *, decisions: (_ for _ in ()).throw(
+            AssertionError("S2AND relabel materialization should not run after a failed preflight")
+        ),
+    )
+    connection = sqlite3.connect(tmp_path / "spool.sqlite3")
+    try:
+        _create_staged_groups_table(connection)
+
+        with pytest.raises(ValueError, match="Missing S2AND full relabel decisions"):
+            stage_input_groups(
+                connection=connection,
+                selected_row_paths=(Path("test") / "s2and_eval_rows.csv.gz",),
+                limit_groups_per_file=None,
+                config=config,
+            )
+        staged_count = connection.execute("SELECT COUNT(*) FROM staged_groups").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert staged_count == 0
+
+
 def test_artifact_cache_key_invalidation_inputs_change_digest() -> None:
     base = ArtifactCacheKey.build(
         namespace="pairwise",

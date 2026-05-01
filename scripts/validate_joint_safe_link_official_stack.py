@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 import json
+import pickle
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ except ImportError:  # pragma: no cover - direct script execution path
     )
     from joint_safe_link_official_stack import load_bundle  # type: ignore
 
-from scripts.reranker_dataset.bundle import RerankerBundleContract
+from scripts.reranker_dataset.bundle import CLASSIC_GATE_ONLY_CALIBRATION_SURFACE, RerankerBundleContract
 from scripts.reranker_dataset.schema import FeatureSchema
 from scripts.single_letter_retrieval_utils import invert_signature_to_cluster_id, load_preferred_signature_to_cluster_id
 
@@ -726,6 +727,8 @@ def _summarize_reranker_bundle_contracts(bundle_root: Path) -> dict[str, Any]:
 
     feature_schema_path = bundle_root / "feature_schema.json"
     bundle_contract_path = bundle_root / "bundle_contract.json"
+    calibrator_path = bundle_root / "calibrator.pkl"
+    calibrator_summary_path = bundle_root / "calibrator_summary.json"
     feature_schema = (
         FeatureSchema.from_json_dict(json.loads(feature_schema_path.read_text(encoding="utf-8")))
         if feature_schema_path.exists()
@@ -734,6 +737,53 @@ def _summarize_reranker_bundle_contracts(bundle_root: Path) -> dict[str, Any]:
     bundle_contract = RerankerBundleContract.read_json(bundle_contract_path) if bundle_contract_path.exists() else None
     if feature_schema is not None and bundle_contract is not None:
         feature_schema.assert_matches(bundle_contract.feature_schema.feature_columns)
+
+    if calibrator_summary_path.exists() != calibrator_path.exists():
+        raise ValueError("Reranker calibrator artifacts must include both calibrator.pkl and calibrator_summary.json")
+    if (
+        bundle_contract is not None
+        and bundle_contract.calibration_surface != CLASSIC_GATE_ONLY_CALIBRATION_SURFACE
+        and not calibrator_path.exists()
+    ):
+        raise ValueError(
+            "Reranker calibrator artifacts are required when calibration_surface is "
+            f"{bundle_contract.calibration_surface!r}"
+        )
+
+    calibrator_feature_schema: FeatureSchema | None = None
+    calibrator_metadata: dict[str, Any] | None = None
+    calibrator_summary: dict[str, Any] | None = None
+    if calibrator_path.exists():
+        if feature_schema is None or bundle_contract is None:
+            raise ValueError("Reranker calibrator artifacts require feature_schema.json and bundle_contract.json")
+        with calibrator_path.open("rb") as handle:
+            calibrator_payload = pickle.load(handle)  # noqa: S301
+        if not isinstance(calibrator_payload, dict):
+            raise ValueError("calibrator.pkl must contain a metadata dictionary")
+        calibrator_feature_schema = FeatureSchema.from_json_dict(dict(calibrator_payload["feature_schema"]))
+        feature_schema.assert_matches(calibrator_feature_schema.feature_columns)
+        calibrator_metadata = dict(calibrator_payload.get("calibration", {}))
+        calibrator_summary = json.loads(calibrator_summary_path.read_text(encoding="utf-8"))
+        if not isinstance(calibrator_summary, dict):
+            raise ValueError("calibrator_summary.json must contain an object")
+        if calibrator_summary != calibrator_metadata:
+            raise ValueError("calibrator_summary.json does not match calibrator.pkl calibration metadata")
+        calibrator_schema_digest = str(calibrator_metadata.get("feature_schema_digest", ""))
+        if calibrator_schema_digest != calibrator_feature_schema.digest:
+            raise ValueError(
+                "Calibrator feature schema digest mismatch: "
+                f"metadata={calibrator_schema_digest!r} schema={calibrator_feature_schema.digest!r}"
+            )
+        calibrator_surface = str(calibrator_metadata.get("surface", ""))
+        if calibrator_surface != bundle_contract.calibration_surface:
+            raise ValueError(
+                "Calibrator surface mismatch: "
+                f"metadata={calibrator_surface!r} bundle_contract={bundle_contract.calibration_surface!r}"
+            )
+        overlap = calibrator_metadata.get("inner_split_group_overlap_with_training")
+        if overlap is not None and int(overlap) != 0:
+            raise ValueError(f"Calibrator inner split overlaps training groups: {overlap}")
+
     return {
         "feature_schema_present": feature_schema is not None,
         "bundle_contract_present": bundle_contract is not None,
@@ -742,6 +792,15 @@ def _summarize_reranker_bundle_contracts(bundle_root: Path) -> dict[str, Any]:
             bundle_contract.feature_schema.digest if bundle_contract is not None else None
         ),
         "calibration_surface": bundle_contract.calibration_surface if bundle_contract is not None else None,
+        "calibrator_present": calibrator_path.exists(),
+        "calibrator_summary_present": calibrator_summary_path.exists(),
+        "calibrator_feature_schema_digest": (
+            calibrator_feature_schema.digest if calibrator_feature_schema is not None else None
+        ),
+        "calibrator_summary_feature_schema_digest": (
+            str(calibrator_summary["feature_schema_digest"]) if calibrator_summary is not None else None
+        ),
+        "calibrator_surface": str(calibrator_metadata["surface"]) if calibrator_metadata is not None else None,
     }
 
 

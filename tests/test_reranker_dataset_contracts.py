@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 
 import pytest
 
@@ -143,6 +144,110 @@ def test_validator_validates_optional_reranker_contract_artifacts(tmp_path) -> N
     assert summary["feature_schema_digest"] == schema.digest
     assert summary["bundle_contract_feature_schema_digest"] == schema.digest
     assert summary["calibration_surface"] == "classic_gate_only"
+    assert summary["calibrator_present"] is False
+
+
+def test_validator_validates_optional_calibrator_artifacts(tmp_path) -> None:
+    schema = FeatureSchema.from_columns(("retrieval_rank", "retrieval_score"), preset="preset_a")
+    calibration = {
+        "enabled": True,
+        "mode": "heldout",
+        "surface": "ranker_heldout",
+        "method": "isotonic",
+        "feature_schema_digest": schema.digest,
+        "inner_split_group_overlap_with_training": 0,
+    }
+    (tmp_path / "feature_schema.json").write_text(
+        json.dumps(schema.to_json_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    RerankerBundleContract(
+        feature_schema=schema,
+        calibration_surface="ranker_heldout",
+    ).write_json(tmp_path / "bundle_contract.json")
+    (tmp_path / "calibrator.pkl").write_bytes(
+        pickle.dumps(
+            {
+                "calibrator": "placeholder",
+                "feature_schema": schema.to_json_dict(),
+                "calibration": calibration,
+            }
+        )
+    )
+    (tmp_path / "calibrator_summary.json").write_text(json.dumps(calibration), encoding="utf-8")
+
+    summary = _summarize_reranker_bundle_contracts(tmp_path)
+
+    assert summary["calibrator_present"] is True
+    assert summary["calibrator_summary_present"] is True
+    assert summary["calibrator_feature_schema_digest"] == schema.digest
+    assert summary["calibrator_summary_feature_schema_digest"] == schema.digest
+    assert summary["calibrator_surface"] == "ranker_heldout"
+
+
+def test_validator_requires_calibrator_for_ranker_calibration_surface(tmp_path) -> None:
+    schema = FeatureSchema.from_columns(("retrieval_rank", "retrieval_score"), preset="preset_a")
+    (tmp_path / "feature_schema.json").write_text(json.dumps(schema.to_json_dict()), encoding="utf-8")
+    RerankerBundleContract(feature_schema=schema, calibration_surface="ranker_heldout").write_json(
+        tmp_path / "bundle_contract.json"
+    )
+
+    with pytest.raises(ValueError, match="calibrator artifacts are required"):
+        _summarize_reranker_bundle_contracts(tmp_path)
+
+
+def test_validator_rejects_calibrator_schema_digest_mismatch(tmp_path) -> None:
+    schema = FeatureSchema.from_columns(("retrieval_rank", "retrieval_score"), preset="preset_a")
+    calibration = {
+        "enabled": True,
+        "surface": "ranker_heldout",
+        "feature_schema_digest": "bad",
+        "inner_split_group_overlap_with_training": 0,
+    }
+    (tmp_path / "feature_schema.json").write_text(json.dumps(schema.to_json_dict()), encoding="utf-8")
+    RerankerBundleContract(feature_schema=schema, calibration_surface="ranker_heldout").write_json(
+        tmp_path / "bundle_contract.json"
+    )
+    (tmp_path / "calibrator.pkl").write_bytes(
+        pickle.dumps(
+            {
+                "calibrator": "placeholder",
+                "feature_schema": schema.to_json_dict(),
+                "calibration": calibration,
+            }
+        )
+    )
+    (tmp_path / "calibrator_summary.json").write_text(json.dumps(calibration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Calibrator feature schema digest mismatch"):
+        _summarize_reranker_bundle_contracts(tmp_path)
+
+
+def test_validator_rejects_calibrator_training_overlap(tmp_path) -> None:
+    schema = FeatureSchema.from_columns(("retrieval_rank", "retrieval_score"), preset="preset_a")
+    calibration = {
+        "enabled": True,
+        "surface": "ranker_heldout",
+        "feature_schema_digest": schema.digest,
+        "inner_split_group_overlap_with_training": 1,
+    }
+    (tmp_path / "feature_schema.json").write_text(json.dumps(schema.to_json_dict()), encoding="utf-8")
+    RerankerBundleContract(feature_schema=schema, calibration_surface="ranker_heldout").write_json(
+        tmp_path / "bundle_contract.json"
+    )
+    (tmp_path / "calibrator.pkl").write_bytes(
+        pickle.dumps(
+            {
+                "calibrator": "placeholder",
+                "feature_schema": schema.to_json_dict(),
+                "calibration": calibration,
+            }
+        )
+    )
+    (tmp_path / "calibrator_summary.json").write_text(json.dumps(calibration), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Calibrator inner split overlaps training groups"):
+        _summarize_reranker_bundle_contracts(tmp_path)
 
 
 def test_validator_rejects_corrupt_optional_feature_schema_digest(tmp_path) -> None:

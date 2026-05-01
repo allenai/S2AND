@@ -203,5 +203,5 @@ feature, not the full answer.
 - this is why `all__hybrid_centroid` became the retrieval baseline
 - it does not answer the current any-input `h_wang` question directly
 - the current work in [../TODO.md](../TODO.md) and [../TASK.md](../TASK.md) is
-  using that retrieval baseline while testing chooser behavior and reject-all
-  logic on real `h_wang` data
+  using that retrieval baseline while testing the frozen `title_fast_v1`
+  chooser and the first-pass reject-all logic on real `h_wang` data

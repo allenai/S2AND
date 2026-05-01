@@ -40,6 +40,7 @@ class TestClusterer(unittest.TestCase):
         assert [NUMPY_NAN] * 4 == name_text_features("", cast(Any, None))
         assert [0.0, 0.0, 0.0, 1.0] == name_text_features("text", "text")
         assert all([s >= 0.0 and s <= 1.0 for s in name_text_features("textual", "txt")])
+        assert all([s >= 0.0 and s <= 1.0 for s in name_text_features("a", "alice")])
 
     def test_cosine_sim(self):
         random_vec_1 = np.array([random.uniform(-1000, 1000) for i in range(1000)])
@@ -205,3 +206,14 @@ def test_fasttext_model_lazy_load_is_thread_safe(monkeypatch):
     assert load_calls["count"] == 1
     assert len(outputs) == 8
     assert all(model is fake_model for model in outputs)
+
+
+def test_fasttext_skip_overrides_cached_model(monkeypatch):
+    import s2and.text as text_module
+
+    text_module._FASTTEXT_MODEL = object()
+    text_module._FASTTEXT_MODEL_INITIALIZED = True
+    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
+
+    assert text_module._get_fasttext_model() is None
+    assert text_module._FASTTEXT_MODEL is None

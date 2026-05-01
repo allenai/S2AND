@@ -18,13 +18,33 @@ from typing import Any
 import numpy as np
 from hyperopt import Trials, fmin, space_eval, tpe
 from lightgbm import LGBMRanker
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import brier_score_loss
 from sklearn.model_selection import GroupShuffleSplit
 
 from s2and import shap_utils
 from s2and.model_pairwise import PairwiseModeler, intify
 
 try:
+    from scripts.reranker_dataset.bundle import RerankerBundleContract
+    from scripts.reranker_dataset.schema import FeatureSchema
+except ImportError:  # pragma: no cover - direct script execution path
+    from reranker_dataset.bundle import RerankerBundleContract  # type: ignore
+    from reranker_dataset.schema import FeatureSchema  # type: ignore
+
+POSITIVE_REPEAT_ORCID_SUPERVISION_TYPE = "positive_repeat_orcid"
+UNLABELED_SINGLETON_ORCID_SUPERVISION_TYPE = "unlabeled_singleton_orcid"
+TRUE_NEGATIVE_SUPERVISION_TYPES = frozenset(
+    {
+        "manual_no_positive",
+        "reviewed_no_positive",
+        "negative_reviewed_no_positive",
+    }
+)
+
+try:
     from scripts.single_letter_reranker_utils import (
+        DEFAULT_FEATURE_PRESET,
         DEFAULT_H_WANG_WINDOW_SENSITIVITY,
         DEFAULT_LABELED_DATASETS,
         ENRICHMENT_PROFILES,
@@ -42,6 +62,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script execution path
     from single_letter_reranker_utils import (  # type: ignore
+        DEFAULT_FEATURE_PRESET,
         DEFAULT_H_WANG_WINDOW_SENSITIVITY,
         DEFAULT_LABELED_DATASETS,
         ENRICHMENT_PROFILES,
@@ -65,6 +86,7 @@ warnings.filterwarnings(
 )
 
 TRAINING_SOURCE_MODES = ("s2and_only", "h_wang_only", "mixed")
+CALIBRATOR_MODES = ("none", "heldout")
 
 
 def _rank_bucket(rank: int | None) -> str:
@@ -104,6 +126,55 @@ def _query_base_group_id(row: dict[str, Any]) -> str:
     """Return the base query identity used to keep mixed views together."""
 
     return f"{str(row.get('query_source', row['source']))}:" f"{str(row['dataset'])}:" f"{str(row['query_id'])}"
+
+
+def _inner_split_group_id(row: dict[str, Any]) -> str:
+    """Return the identity used to keep same-ORCID queries on one inner split side."""
+
+    dataset = str(row["dataset"])
+    normalized_orcid = row.get("_audit_normalized_orcid")
+    if normalized_orcid is not None and str(normalized_orcid).strip():
+        return f"{dataset}:orcid:{str(normalized_orcid)}"
+    return f"{dataset}:query:{str(row['query_id'])}"
+
+
+def _write_ranker_contracts(model_dir: Path, train_summary: dict[str, Any]) -> None:
+    """Write additive schema/bundle contract artifacts next to a saved ranker."""
+
+    feature_schema = FeatureSchema.from_json_dict(dict(train_summary["feature_schema"]))
+    calibration_summary = dict(train_summary.get("calibration", {}))
+    calibration_surface = str(calibration_summary.get("surface", "classic_gate_only"))
+    write_json(model_dir / "feature_schema.json", feature_schema.to_json_dict())
+    RerankerBundleContract(
+        feature_schema=feature_schema,
+        calibration_surface=calibration_surface,
+        migration_manifest={
+            "row_engine": "legacy_bridge",
+            "calibration_surface": calibration_surface,
+        },
+    ).write_json(model_dir / "bundle_contract.json")
+
+
+def _write_calibrator_artifact(model_dir: Path, model: Any, train_summary: dict[str, Any]) -> None:
+    """Write the optional held-out calibrator artifact next to a saved ranker."""
+
+    calibration_summary = dict(train_summary.get("calibration", {}))
+    if not bool(calibration_summary.get("enabled", False)):
+        return
+    calibrator = getattr(model, "s2and_score_calibrator_", None)
+    if calibrator is None:
+        raise RuntimeError("Calibration summary is enabled but model has no s2and_score_calibrator_")
+    feature_schema = FeatureSchema.from_json_dict(dict(train_summary["feature_schema"]))
+    with (model_dir / "calibrator.pkl").open("wb") as handle:
+        pickle.dump(
+            {
+                "calibrator": calibrator,
+                "feature_schema": feature_schema.to_json_dict(),
+                "calibration": calibration_summary,
+            },
+            handle,
+        )
+    write_json(model_dir / "calibrator_summary.json", calibration_summary)
 
 
 def _read_string_id_file(path: Path) -> set[str]:
@@ -168,10 +239,76 @@ def _training_matrix_group_sizes(training_matrix: Any) -> list[int]:
     return sizes
 
 
-def _predict_scores(model: Any, features: np.ndarray) -> np.ndarray:
+def _raw_predict_scores(model: Any, features: np.ndarray) -> np.ndarray:
     if hasattr(model, "predict_proba"):
         return np.asarray(model.predict_proba(features)[:, 1], dtype=np.float64)
     return np.asarray(model.predict(features), dtype=np.float64)
+
+
+def _predict_scores(model: Any, features: np.ndarray) -> np.ndarray:
+    scores = _raw_predict_scores(model, features)
+    calibrator = getattr(model, "s2and_score_calibrator_", None)
+    if calibrator is None:
+        return scores
+    return np.asarray(calibrator.predict(scores), dtype=np.float64)
+
+
+def _split_group_ids(
+    group_ids: list[str],
+    *,
+    test_fraction: float,
+    seed: int,
+) -> tuple[set[str], set[str]]:
+    splitter = GroupShuffleSplit(
+        n_splits=1,
+        test_size=float(test_fraction),
+        random_state=int(seed),
+    )
+    train_index, test_index = next(
+        splitter.split(
+            [[0]] * len(group_ids),
+            [0] * len(group_ids),
+            groups=group_ids,
+        )
+    )
+    train_ids = {str(group_ids[idx]) for idx in train_index}
+    test_ids = {str(group_ids[idx]) for idx in test_index}
+    return train_ids, test_ids
+
+
+def _fit_score_calibrator(
+    *,
+    model: Any,
+    calibration_rows: list[dict[str, Any]],
+    feature_columns: tuple[str, ...],
+    feature_schema: FeatureSchema,
+    training_inner_split_ids: set[str],
+) -> dict[str, Any]:
+    calibration_ordered_rows, _calibration_group_sizes, calibration_group_ids = _ordered_group_rows(calibration_rows)
+    calibration_features = build_feature_matrix(calibration_ordered_rows, feature_columns=feature_columns)
+    calibration_labels = np.asarray([int(row["label"]) for row in calibration_ordered_rows], dtype=np.int32)
+    raw_scores = _raw_predict_scores(model, calibration_features)
+    calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    calibrator.fit(raw_scores, calibration_labels)
+    calibrated_scores = np.asarray(calibrator.predict(raw_scores), dtype=np.float64)
+    model.s2and_score_calibrator_ = calibrator
+
+    calibration_inner_split_ids = {_inner_split_group_id(row) for row in calibration_ordered_rows}
+    overlap = calibration_inner_split_ids & set(training_inner_split_ids)
+    return {
+        "enabled": True,
+        "mode": "heldout",
+        "surface": "ranker_heldout",
+        "method": "isotonic",
+        "feature_schema_digest": feature_schema.digest,
+        "rows": int(len(calibration_ordered_rows)),
+        "groups": int(len(calibration_group_ids)),
+        "inner_split_group_overlap_with_training": int(len(overlap)),
+        "positive_rows": int(calibration_labels.sum()),
+        "positive_rate": round(float(calibration_labels.mean()), 6),
+        "brier_raw": round(float(brier_score_loss(calibration_labels, np.clip(raw_scores, 0.0, 1.0))), 6),
+        "brier_calibrated": round(float(brier_score_loss(calibration_labels, calibrated_scores)), 6),
+    }
 
 
 def _top1_accuracy(scores: np.ndarray, labels: np.ndarray, group_sizes: list[int]) -> float:
@@ -463,12 +600,27 @@ def _reject_threshold_eligible_rows(rows: list[dict[str, Any]]) -> list[dict[str
     return [row for row in rows if int(row.get("has_runner_up", 1)) == 1 and row.get("model_margin") is not None]
 
 
+def _supervised_reject_threshold_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return eligible rows whose query-level label is observed enough for threshold fitting."""
+
+    return [
+        row
+        for row in _reject_threshold_eligible_rows(rows)
+        if str(row["supervision_type"]) == POSITIVE_REPEAT_ORCID_SUPERVISION_TYPE
+        or str(row["supervision_type"]) in TRUE_NEGATIVE_SUPERVISION_TYPES
+    ]
+
+
 def _score_reject_threshold_core(rows: list[dict[str, Any]], *, threshold: float) -> dict[str, Any]:
     """Score one reject-all threshold over dev per-group rows."""
 
-    eligible_rows = _reject_threshold_eligible_rows(rows)
-    positives = [row for row in eligible_rows if str(row["supervision_type"]) == "positive_repeat_orcid"]
-    negatives = [row for row in eligible_rows if str(row["supervision_type"]) == "negative_singleton_orcid"]
+    candidate_eligible_rows = _reject_threshold_eligible_rows(rows)
+    eligible_rows = _supervised_reject_threshold_rows(rows)
+    positives = [row for row in eligible_rows if str(row["supervision_type"]) == POSITIVE_REPEAT_ORCID_SUPERVISION_TYPE]
+    negatives = [row for row in eligible_rows if str(row["supervision_type"]) in TRUE_NEGATIVE_SUPERVISION_TYPES]
+    unlabeled_singletons = [
+        row for row in rows if str(row["supervision_type"]) == UNLABELED_SINGLETON_ORCID_SUPERVISION_TYPE
+    ]
     accepted = {str(row["query_group_id"]): float(row["model_margin"]) > float(threshold) for row in eligible_rows}
     positive_correct = sum(
         int(accepted[str(row["query_group_id"])] and int(row["model_correct"]) == 1) for row in positives
@@ -489,9 +641,18 @@ def _score_reject_threshold_core(rows: list[dict[str, Any]], *, threshold: float
         "threshold": round(float(threshold), 6),
         "queries": int(len(rows)),
         "eligible_queries": int(len(eligible_rows)),
-        "singleton_candidate_group_count": int(len(rows) - len(eligible_rows)),
+        "candidate_margin_eligible_queries": int(len(candidate_eligible_rows)),
+        "singleton_candidate_group_count": int(len(rows) - len(candidate_eligible_rows)),
         "positive_queries": int(len(positives)),
         "negative_queries": int(len(negatives)),
+        "unlabeled_singleton_queries": int(len(unlabeled_singletons)),
+        "unlabeled_singleton_margin_eligible_queries": int(
+            sum(
+                int(row.get("has_runner_up", 1)) == 1 and row.get("model_margin") is not None
+                for row in unlabeled_singletons
+            )
+        ),
+        "true_negative_supervision_types": sorted(TRUE_NEGATIVE_SUPERVISION_TYPES),
         "balanced_accuracy": round(float(balanced_accuracy), 6),
         "overall_accuracy": round(float(total_correct / len(eligible_rows)), 6) if eligible_rows else 0.0,
         "positive_accuracy": round(float(positive_accuracy), 6) if positives else None,
@@ -519,9 +680,13 @@ def _select_reject_threshold(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "threshold": 0.0,
             "queries": 0,
             "eligible_queries": 0,
+            "candidate_margin_eligible_queries": 0,
             "singleton_candidate_group_count": 0,
             "positive_queries": 0,
             "negative_queries": 0,
+            "unlabeled_singleton_queries": 0,
+            "unlabeled_singleton_margin_eligible_queries": 0,
+            "true_negative_supervision_types": sorted(TRUE_NEGATIVE_SUPERVISION_TYPES),
             "balanced_accuracy": 0.0,
             "overall_accuracy": 0.0,
             "positive_accuracy": None,
@@ -530,7 +695,7 @@ def _select_reject_threshold(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "positive_accept_rate": None,
             "per_view": {},
         }
-    eligible_rows = _reject_threshold_eligible_rows(rows)
+    eligible_rows = _supervised_reject_threshold_rows(rows)
     if not eligible_rows:
         summary = _score_reject_threshold_core(rows, threshold=0.0)
         summary["per_view"] = {
@@ -567,8 +732,8 @@ def _select_reject_threshold(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return best_metrics
 
 
-def _summarize_negative_singletons(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize singleton-negative dev groups."""
+def _summarize_unlabeled_singletons(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize singleton ORCID dev groups without treating them as true negatives."""
 
     eligible_rows = _reject_threshold_eligible_rows(rows)
     return {
@@ -583,6 +748,7 @@ def _summarize_negative_singletons(rows: list[dict[str, Any]]) -> dict[str, Any]
         "mean_candidate_count": round(float(statistics.mean(int(row["candidate_count"]) for row in rows)), 6)
         if rows
         else 0.0,
+        "used_as_true_negative": False,
     }
 
 
@@ -763,29 +929,51 @@ def _fit_ranker_for_split(
     hyperopt_evals: int,
     inner_validation_fraction: float,
     n_jobs: int,
+    calibrator_mode: str = "none",
 ) -> tuple[Any, dict[str, Any]]:
+    if str(calibrator_mode) not in CALIBRATOR_MODES:
+        raise ValueError(f"Unsupported calibrator_mode {calibrator_mode!r}")
     filtered_rows = select_rows(train_rows, query_views=query_views, window_size=window_size)
     grouped = group_rows(filtered_rows)
-    base_group_ids = sorted({_query_base_group_id(group_rows_for_id[0]) for group_rows_for_id in grouped.values()})
-    if len(base_group_ids) < 2:
-        raise RuntimeError(f"Need at least two base train groups for ranker fit; found {len(base_group_ids)}")
-    inner_splitter = GroupShuffleSplit(
-        n_splits=1,
-        test_size=float(inner_validation_fraction),
-        random_state=int(seed),
+    inner_split_group_ids = sorted(
+        {_inner_split_group_id(group_rows_for_id[0]) for group_rows_for_id in grouped.values()}
     )
-    inner_train_index, inner_validation_index = next(
-        inner_splitter.split(
-            [[0]] * len(base_group_ids),
-            [0] * len(base_group_ids),
-            groups=base_group_ids,
+    if len(inner_split_group_ids) < 2:
+        raise RuntimeError(
+            f"Need at least two inner-split train groups for ranker fit; found {len(inner_split_group_ids)}"
         )
+    calibration_ids: set[str] = set()
+    fit_pool_ids = set(inner_split_group_ids)
+    calibration_rows: list[dict[str, Any]] = []
+    if str(calibrator_mode) == "heldout":
+        fit_pool_ids, calibration_ids = _split_group_ids(
+            inner_split_group_ids,
+            test_fraction=float(inner_validation_fraction),
+            seed=int(seed),
+        )
+        if len(fit_pool_ids) < 2:
+            raise RuntimeError(
+                "Need at least two non-calibration inner-split groups for ranker fit; " f"found {len(fit_pool_ids)}"
+            )
+        calibration_rows = [row for row in filtered_rows if _inner_split_group_id(row) in calibration_ids]
+        if not calibration_rows:
+            raise RuntimeError("No held-out calibration rows were selected")
+
+    search_pool_ids = sorted(fit_pool_ids)
+    inner_train_ids, inner_validation_ids = _split_group_ids(
+        search_pool_ids,
+        test_fraction=float(inner_validation_fraction),
+        seed=int(seed) + (1 if str(calibrator_mode) == "heldout" else 0),
     )
-    inner_train_ids = {str(base_group_ids[idx]) for idx in inner_train_index}
-    inner_validation_ids = {str(base_group_ids[idx]) for idx in inner_validation_index}
-    search_train_rows = [row for row in filtered_rows if _query_base_group_id(row) in inner_train_ids]
-    search_validation_rows = [row for row in filtered_rows if _query_base_group_id(row) in inner_validation_ids]
+    search_train_rows = [row for row in filtered_rows if _inner_split_group_id(row) in inner_train_ids]
+    search_validation_rows = [row for row in filtered_rows if _inner_split_group_id(row) in inner_validation_ids]
+    final_train_rows = (
+        [row for row in filtered_rows if _inner_split_group_id(row) in fit_pool_ids]
+        if str(calibrator_mode) == "heldout"
+        else filtered_rows
+    )
     feature_columns = resolve_feature_columns(feature_preset=feature_preset)
+    feature_schema = FeatureSchema.from_columns(feature_columns, preset=str(feature_preset))
 
     search_training_matrix = build_training_matrix(
         search_train_rows,
@@ -798,7 +986,7 @@ def _fit_ranker_for_split(
         raise RuntimeError("No trainable rows remained in search training matrix")
 
     outer_training_matrix = build_training_matrix(
-        filtered_rows,
+        final_train_rows,
         seed=int(seed),
         feature_columns=feature_columns,
         enrichment_profile=enrichment_profile,
@@ -834,16 +1022,37 @@ def _fit_ranker_for_split(
         group=_training_matrix_group_sizes(outer_training_matrix),
         sample_weight=outer_training_matrix.sample_weights,
     )
+    if str(calibrator_mode) == "heldout":
+        calibration_summary = _fit_score_calibrator(
+            model=ranker,
+            calibration_rows=calibration_rows,
+            feature_columns=feature_columns,
+            feature_schema=feature_schema,
+            training_inner_split_ids=set(fit_pool_ids),
+        )
+    else:
+        calibration_summary = {
+            "enabled": False,
+            "mode": "none",
+            "surface": "classic_gate_only",
+            "feature_schema_digest": feature_schema.digest,
+        }
     train_summary = {
         "query_views": [str(value) for value in query_views],
         "window_size": int(window_size),
         "feature_preset": str(feature_preset),
         "feature_columns": list(feature_columns),
+        "feature_schema": feature_schema.to_json_dict(),
+        "feature_schema_digest": feature_schema.digest,
         "enrichment_profile": str(enrichment_profile),
         "enrichment_rounds": int(enrichment_rounds),
         "rows_seen": int(len(filtered_rows)),
         "rows_used": int(outer_training_matrix.features.shape[0]),
+        "rows_reserved_for_calibration": int(len(calibration_rows)),
         "groups_used": int(len(outer_training_matrix.group_ids)),
+        "inner_split_group_policy": "dataset_orcid_or_query_id",
+        "inner_split_group_count": int(len(inner_split_group_ids)),
+        "calibration_inner_split_group_count": int(len(calibration_ids)),
         "dropped_all_negative_group_count": int(len(outer_training_matrix.dropped_all_negative_group_ids)),
         "groups_with_extra_copies": int(outer_training_matrix.groups_with_extra_copies),
         "extra_group_copies": int(outer_training_matrix.extra_group_copies),
@@ -852,6 +1061,7 @@ def _fit_ranker_for_split(
         "mean_group_size": round(float(statistics.mean(outer_training_matrix.kept_group_sizes.values())), 6),
         "hyperopt": dict(hyperopt_summary),
         "best_params": best_params,
+        "calibration": calibration_summary,
         "train_seconds": float(hyperopt_summary["train_seconds"]),
     }
     return ranker, train_summary
@@ -866,7 +1076,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=13)
-    parser.add_argument("--feature-preset", default="generalized_v8", choices=sorted(FEATURE_PRESETS))
+    parser.add_argument("--feature-preset", default=DEFAULT_FEATURE_PRESET, choices=sorted(FEATURE_PRESETS))
     parser.add_argument("--enrichment-profile", default="none", choices=list(ENRICHMENT_PROFILES))
     parser.add_argument("--enrichment-rounds", type=int, default=0)
     parser.add_argument("--training-source-mode", choices=TRAINING_SOURCE_MODES, default="s2and_only")
@@ -875,6 +1085,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rows-source", choices=("auto", "base", "derived"), default="auto")
     parser.add_argument("--selected-query-groups-file", type=Path, default=None)
     parser.add_argument("--inner-validation-fraction", type=float, default=0.2)
+    parser.add_argument("--calibrator-mode", choices=CALIBRATOR_MODES, default="none")
     parser.add_argument("--n-jobs", type=int, default=8)
     parser.add_argument("--h-wang-row-file", type=Path, default=None)
     parser.add_argument("--h-wang-window-sizes", nargs="+", type=int, default=list(DEFAULT_H_WANG_WINDOW_SENSITIVITY))
@@ -940,6 +1151,7 @@ def main() -> None:
             hyperopt_evals=int(resolved_hyperopt_evals),
             inner_validation_fraction=float(args.inner_validation_fraction),
             n_jobs=int(args.n_jobs),
+            calibrator_mode=str(args.calibrator_mode),
         )
         per_group_rows = _evaluate_rows(
             model=model,
@@ -976,11 +1188,14 @@ def main() -> None:
                         "window_size": int(args.window_size),
                         "query_views": list(query_views),
                         "training_source_mode": str(args.training_source_mode),
+                        "calibrator_mode": str(args.calibrator_mode),
                         "training_source_summary": _summarize_training_source_rows(train_rows),
                         "datasets": [str(value) for value in train_datasets],
                     },
                     handle,
                 )
+            _write_ranker_contracts(model_dir, train_summary)
+            _write_calibrator_artifact(model_dir, model, train_summary)
 
     summary: dict[str, Any] = {
         "config": {
@@ -998,6 +1213,7 @@ def main() -> None:
             "rows_source_by_dataset": dict(rows_source_by_dataset),
             "selected_query_group_filter_applied": bool(selected_query_group_ids is not None),
             "inner_validation_fraction": float(args.inner_validation_fraction),
+            "calibrator_mode": str(args.calibrator_mode),
             "n_jobs": int(args.n_jobs),
             "objective": "lambdarank",
             "search_space_source": "s2and.model_pairwise.PairwiseModeler",
@@ -1033,17 +1249,23 @@ def main() -> None:
             hyperopt_evals=int(resolved_hyperopt_evals),
             inner_validation_fraction=float(args.inner_validation_fraction),
             n_jobs=int(args.n_jobs),
+            calibrator_mode=str(args.calibrator_mode),
         )
         h_wang_summary: dict[str, Any] = {
             "train_summary": final_train_summary,
             "training_source_summary": _summarize_training_source_rows(full_train_rows),
         }
         if h_wang_any_input_rows:
+            h_wang_eval_supervision_types = [
+                POSITIVE_REPEAT_ORCID_SUPERVISION_TYPE,
+                UNLABELED_SINGLETON_ORCID_SUPERVISION_TYPE,
+                *sorted(TRUE_NEGATIVE_SUPERVISION_TYPES),
+            ]
             dev_rows = _select_h_wang_any_input_rows(
                 h_wang_rows,
                 query_views=query_views,
                 splits=["dev"],
-                supervision_types=["positive_repeat_orcid", "negative_singleton_orcid"],
+                supervision_types=h_wang_eval_supervision_types,
             )
             unresolved_dev_rows = _select_h_wang_any_input_rows(
                 h_wang_rows,
@@ -1078,13 +1300,21 @@ def main() -> None:
             }
             for window_size in [int(value) for value in args.h_wang_window_sizes]:
                 window_rows = [row for row in h_wang_per_group_rows if int(row["window_size"]) == int(window_size)]
-                positive_rows = [row for row in window_rows if str(row["supervision_type"]) == "positive_repeat_orcid"]
-                negative_rows = [
-                    row for row in window_rows if str(row["supervision_type"]) == "negative_singleton_orcid"
+                positive_rows = [
+                    row for row in window_rows if str(row["supervision_type"]) == POSITIVE_REPEAT_ORCID_SUPERVISION_TYPE
+                ]
+                true_negative_rows = [
+                    row for row in window_rows if str(row["supervision_type"]) in TRUE_NEGATIVE_SUPERVISION_TYPES
+                ]
+                unlabeled_rows = [
+                    row
+                    for row in window_rows
+                    if str(row["supervision_type"]) == UNLABELED_SINGLETON_ORCID_SUPERVISION_TYPE
                 ]
                 h_wang_summary["evaluation"]["by_window"][str(window_size)] = {
-                    "positive_repeat_orcid": _summarize_per_group_rows(positive_rows),
-                    "negative_singleton_orcid": _summarize_negative_singletons(negative_rows),
+                    POSITIVE_REPEAT_ORCID_SUPERVISION_TYPE: _summarize_per_group_rows(positive_rows),
+                    "reviewed_no_positive": _summarize_per_group_rows(true_negative_rows),
+                    UNLABELED_SINGLETON_ORCID_SUPERVISION_TYPE: _summarize_unlabeled_singletons(unlabeled_rows),
                     "reject_threshold": _select_reject_threshold(window_rows),
                 }
             regressions = [
@@ -1144,11 +1374,14 @@ def main() -> None:
                         "window_size": int(args.window_size),
                         "query_views": list(query_views),
                         "training_source_mode": str(args.training_source_mode),
+                        "calibrator_mode": str(args.calibrator_mode),
                         "training_source_summary": _summarize_training_source_rows(full_train_rows),
                         "datasets": [str(value) for value in args.datasets],
                     },
                     handle,
                 )
+            _write_ranker_contracts(final_model_dir, final_train_summary)
+            _write_calibrator_artifact(final_model_dir, final_model, final_train_summary)
 
     write_json(args.output_dir / "summary.json", summary)
 

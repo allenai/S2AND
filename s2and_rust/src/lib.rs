@@ -143,24 +143,109 @@ struct RetrievalSummaryData {
     coauthor_counts: Option<CounterData>,
     affiliation_counts: Option<CounterData>,
     venue_counts: Option<CounterData>,
+    title_counts: Option<CounterData>,
     year_min: Option<i64>,
     year_max: Option<i64>,
     year_mean: Option<f64>,
     orcid_hashes: Vec<u64>,
     specter_centroid: Option<Vec<f32>>,
     specter_centroid_norm: Option<f64>,
+    exemplar_vectors: Vec<Vec<f32>>,
+    exemplar_norms: Vec<f64>,
+}
+
+#[derive(Clone, Copy)]
+struct RetrievalQueryTerm {
+    hash: u64,
+    token_count: u8,
 }
 
 struct RetrievalQueryData {
     first: String,
     middle_initial_hashes: Vec<u64>,
     coauthor_hashes: Vec<u64>,
+    coauthor_terms: Vec<RetrievalQueryTerm>,
     affiliation_hashes: Vec<u64>,
+    affiliation_terms: Vec<RetrievalQueryTerm>,
     venue_hashes: Vec<u64>,
+    title_hashes: Vec<u64>,
     year: Option<i64>,
     orcid_hash: Option<u64>,
     specter: Option<Vec<f32>>,
     specter_norm: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+struct RetrievalHybridWeights {
+    centroid: f64,
+    coauthor: f64,
+    affiliation: f64,
+    middle: f64,
+    first_name: f64,
+}
+
+const RETRIEVAL_FEATURE_ORDER: [&str; 5] = [
+    "centroid",
+    "coauthor",
+    "affiliation",
+    "middle",
+    "first_name",
+];
+const DEFAULT_HYBRID_CENTROID_WEIGHTS: [f64; 5] = [0.42, 0.23, 0.12, 0.05, 0.07];
+const DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS: [f64; 5] = [0.40, 0.23, 0.12, 0.05, 0.07];
+const RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE: f64 = -0.25;
+const RETRIEVAL_YEAR_SCORE_DECAY_YEARS: f64 = 15.0;
+const RETRIEVAL_YEAR_SCORE_RANGE_GAP: i64 = 10;
+const RETRIEVAL_YEAR_SCORE_RANGE_PENALTY: f64 = 0.15;
+const RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP: i64 = 35;
+
+impl RetrievalHybridWeights {
+    fn from_array(weights: [f64; 5]) -> Self {
+        Self {
+            centroid: weights[0],
+            coauthor: weights[1],
+            affiliation: weights[2],
+            middle: weights[3],
+            first_name: weights[4],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RetrievalFirstNameMode {
+    Prefix,
+    ExactOnly,
+    ExactThenPrefixHalf,
+    PrefixLengthRatio,
+    ExactThenPrefixLengthRatio,
+}
+
+#[derive(Clone, Copy)]
+enum RetrievalSpecterMode {
+    Centroid,
+    ExemplarMax,
+    CentroidExemplar50_50,
+    CentroidExemplar25_75,
+    CentroidExemplar75_25,
+    MaxOfCentroidExemplar,
+}
+
+#[derive(Clone, Copy)]
+struct RetrievalOverlapConfig {
+    use_idf: bool,
+    per_term_cap: Option<f64>,
+    total_cap: Option<f64>,
+    min_token_count: u8,
+    unigram_weight: f64,
+    multi_token_weight: f64,
+}
+
+#[derive(Clone, Copy)]
+struct RetrievalExperimentalConfig {
+    first_name_mode: RetrievalFirstNameMode,
+    specter_mode: RetrievalSpecterMode,
+    coauthor: RetrievalOverlapConfig,
+    affiliation: RetrievalOverlapConfig,
 }
 
 #[pyclass]
@@ -168,10 +253,24 @@ struct RustHybridCentroidRetriever {
     summaries: Vec<RetrievalSummaryData>,
     max_block_component_size: usize,
     component_index_by_key: HashMap<String, usize>,
+    coauthor_cluster_df: HashMap<u64, usize>,
+    affiliation_cluster_df: HashMap<u64, usize>,
+}
+
+#[pyclass]
+struct RustNameCompatibleSubblockSelector {
+    signature_to_subblock: HashMap<String, String>,
+    subblock_to_components: HashMap<String, Vec<String>>,
+    subblock_tokens_by_subblock: HashMap<String, Vec<String>>,
+    name_tuples: HashMap<String, HashSet<String>>,
 }
 
 impl RustHybridCentroidRetriever {
-    fn score_top_k_candidate_indices(
+    fn default_hybrid_weights() -> RetrievalHybridWeights {
+        RetrievalHybridWeights::from_array(DEFAULT_HYBRID_CENTROID_WEIGHTS)
+    }
+
+    fn score_top_k_candidate_indices_experimental(
         &self,
         py: Python<'_>,
         query_data: &RetrievalQueryData,
@@ -181,6 +280,8 @@ impl RustHybridCentroidRetriever {
         num_threads: Option<usize>,
         override_index: Option<usize>,
         override_summary: Option<&RetrievalSummaryData>,
+        weights: RetrievalHybridWeights,
+        config: RetrievalExperimentalConfig,
     ) -> PyResult<(Vec<String>, Vec<f32>)> {
         if candidate_indices.is_empty() {
             return Ok((Vec::new(), Vec::new()));
@@ -192,12 +293,103 @@ impl RustHybridCentroidRetriever {
                     .par_iter()
                     .map(|idx| {
                         let summary = match (override_index, override_summary) {
-                            (Some(replaced_idx), Some(replaced_summary)) if *idx == replaced_idx => replaced_summary,
+                            (Some(replaced_idx), Some(replaced_summary))
+                                if *idx == replaced_idx =>
+                            {
+                                replaced_summary
+                            }
                             _ => &self.summaries[*idx],
                         };
                         (
                             *idx,
-                            score_hybrid_centroid_query(query_data, summary, max_block_component_size),
+                            score_experimental_hybrid_centroid_query(
+                                query_data,
+                                summary,
+                                max_block_component_size,
+                                weights,
+                                config,
+                                &self.coauthor_cluster_df,
+                                &self.affiliation_cluster_df,
+                                self.summaries.len(),
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        scored.sort_unstable_by(|(left_idx, left_score), (right_idx, right_score)| {
+            let left_component_key = match (override_index, override_summary) {
+                (Some(replaced_idx), Some(replaced_summary)) if *left_idx == replaced_idx => {
+                    replaced_summary.component_key.as_str()
+                }
+                _ => self.summaries[*left_idx].component_key.as_str(),
+            };
+            let right_component_key = match (override_index, override_summary) {
+                (Some(replaced_idx), Some(replaced_summary)) if *right_idx == replaced_idx => {
+                    replaced_summary.component_key.as_str()
+                }
+                _ => self.summaries[*right_idx].component_key.as_str(),
+            };
+            right_score
+                .partial_cmp(left_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left_component_key.cmp(right_component_key))
+        });
+        let limit = top_k.min(scored.len());
+        scored.truncate(limit);
+
+        let component_keys = scored
+            .iter()
+            .map(|(idx, _)| match (override_index, override_summary) {
+                (Some(replaced_idx), Some(replaced_summary)) if *idx == replaced_idx => {
+                    replaced_summary.component_key.clone()
+                }
+                _ => self.summaries[*idx].component_key.clone(),
+            })
+            .collect();
+        let scores = scored.iter().map(|(_, score)| *score).collect();
+        Ok((component_keys, scores))
+    }
+
+    fn score_top_k_candidate_indices(
+        &self,
+        py: Python<'_>,
+        query_data: &RetrievalQueryData,
+        candidate_indices: &[usize],
+        top_k: usize,
+        max_block_component_size: usize,
+        num_threads: Option<usize>,
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+        weights: RetrievalHybridWeights,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if candidate_indices.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut scored: Vec<(usize, f32)> = py.allow_threads(|| {
+            let compute = || {
+                candidate_indices
+                    .par_iter()
+                    .map(|idx| {
+                        let summary = match (override_index, override_summary) {
+                            (Some(replaced_idx), Some(replaced_summary))
+                                if *idx == replaced_idx =>
+                            {
+                                replaced_summary
+                            }
+                            _ => &self.summaries[*idx],
+                        };
+                        (
+                            *idx,
+                            score_hybrid_centroid_query(
+                                query_data,
+                                summary,
+                                max_block_component_size,
+                                weights,
+                            ),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1060,6 +1252,19 @@ fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
     Ok(Some(out))
 }
 
+fn extract_specter_vec_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut vectors = Vec::new();
+    for item in PyIterator::from_object(obj)? {
+        if let Some(vector) = extract_specter_vec(&item?)? {
+            vectors.push(vector);
+        }
+    }
+    Ok(vectors)
+}
+
 fn extract_string_count_pairs(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, f32)>> {
     if obj.is_none() {
         return Ok(Vec::new());
@@ -1077,6 +1282,14 @@ fn extract_string_count_pairs(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, f
     Ok(entries)
 }
 
+fn term_token_count(value: &str) -> u8 {
+    value
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .count()
+        .min(u8::MAX as usize) as u8
+}
+
 fn extract_string_hashes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
     if obj.is_none() {
         return Ok(Vec::new());
@@ -1089,6 +1302,23 @@ fn extract_string_hashes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
     hashes.sort_unstable();
     hashes.dedup();
     Ok(hashes)
+}
+
+fn extract_query_terms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RetrievalQueryTerm>> {
+    if obj.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut terms = Vec::new();
+    for item in PyIterator::from_object(obj)? {
+        let value: String = item?.extract()?;
+        terms.push(RetrievalQueryTerm {
+            hash: fnv64(value.as_bytes()),
+            token_count: term_token_count(&value),
+        });
+    }
+    terms.sort_unstable_by_key(|term| term.hash);
+    terms.dedup_by_key(|term| term.hash);
+    Ok(terms)
 }
 
 fn extract_optional_string_hash(obj: &Bound<'_, PyAny>) -> PyResult<Option<u64>> {
@@ -1110,7 +1340,15 @@ fn same_prefix_tokens_compat(a: &str, b: &str) -> bool {
     true
 }
 
-fn counter_query_overlap_hashes(query_hashes: &[u64], counter: &Option<CounterData>, size: usize) -> f64 {
+fn exact_name_match_compat(a: &str, b: &str) -> bool {
+    !a.is_empty() && a == b
+}
+
+fn counter_query_overlap_hashes(
+    query_hashes: &[u64],
+    counter: &Option<CounterData>,
+    size: usize,
+) -> f64 {
     let Some(counter_data) = counter.as_ref() else {
         return 0.0;
     };
@@ -1119,14 +1357,89 @@ fn counter_query_overlap_hashes(query_hashes: &[u64], counter: &Option<CounterDa
     }
     let mut overlap = 0.0f64;
     for query_hash in query_hashes {
-        if let Ok(index) = counter_data.entries.binary_search_by_key(query_hash, |entry| entry.0) {
+        if let Ok(index) = counter_data
+            .entries
+            .binary_search_by_key(query_hash, |entry| entry.0)
+        {
             overlap += (counter_data.entries[index].1 as f64) / (size as f64);
         }
     }
     overlap / (query_hashes.len() as f64)
 }
 
-fn middle_initial_score_hashes(query_hashes: &[u64], counter: &Option<CounterData>, size: usize) -> f64 {
+fn overlap_idf_weight(df_map: &HashMap<u64, usize>, hash: u64, total_summary_count: usize) -> f64 {
+    let df = df_map.get(&hash).copied().unwrap_or(0) as f64;
+    (((total_summary_count as f64) + 1.0) / (df + 1.0)).ln() + 1.0
+}
+
+fn overlap_query_term_weight(
+    term: &RetrievalQueryTerm,
+    df_map: &HashMap<u64, usize>,
+    total_summary_count: usize,
+    config: RetrievalOverlapConfig,
+) -> f64 {
+    if term.token_count < config.min_token_count {
+        return 0.0;
+    }
+    let mut weight = if term.token_count <= 1 {
+        config.unigram_weight
+    } else {
+        config.multi_token_weight
+    };
+    if config.use_idf {
+        weight *= overlap_idf_weight(df_map, term.hash, total_summary_count);
+    }
+    weight.max(0.0)
+}
+
+fn weighted_counter_query_overlap(
+    query_terms: &[RetrievalQueryTerm],
+    counter: &Option<CounterData>,
+    size: usize,
+    df_map: &HashMap<u64, usize>,
+    total_summary_count: usize,
+    config: RetrievalOverlapConfig,
+) -> f64 {
+    let Some(counter_data) = counter.as_ref() else {
+        return 0.0;
+    };
+    if size == 0 || query_terms.is_empty() || counter_data.entries.is_empty() {
+        return 0.0;
+    }
+    let mut numerator = 0.0f64;
+    let mut denominator = 0.0f64;
+    for term in query_terms {
+        let query_weight = overlap_query_term_weight(term, df_map, total_summary_count, config);
+        if query_weight <= 0.0 {
+            continue;
+        }
+        denominator += query_weight;
+        if let Ok(index) = counter_data
+            .entries
+            .binary_search_by_key(&term.hash, |entry| entry.0)
+        {
+            let mut contribution = (counter_data.entries[index].1 as f64) / (size as f64);
+            if let Some(cap) = config.per_term_cap {
+                contribution = contribution.min(cap);
+            }
+            numerator += query_weight * contribution;
+        }
+    }
+    if denominator <= 0.0 {
+        return 0.0;
+    }
+    let mut score = numerator / denominator;
+    if let Some(cap) = config.total_cap {
+        score = score.min(cap);
+    }
+    score
+}
+
+fn middle_initial_score_hashes(
+    query_hashes: &[u64],
+    counter: &Option<CounterData>,
+    size: usize,
+) -> f64 {
     let Some(counter_data) = counter.as_ref() else {
         return 0.0;
     };
@@ -1136,7 +1449,10 @@ fn middle_initial_score_hashes(query_hashes: &[u64], counter: &Option<CounterDat
     let mut overlap = 0.0f64;
     let mut overlap_found = false;
     for query_hash in query_hashes {
-        if let Ok(index) = counter_data.entries.binary_search_by_key(query_hash, |entry| entry.0) {
+        if let Ok(index) = counter_data
+            .entries
+            .binary_search_by_key(query_hash, |entry| entry.0)
+        {
             overlap += (counter_data.entries[index].1 as f64) / (size as f64);
             overlap_found = true;
         }
@@ -1144,7 +1460,7 @@ fn middle_initial_score_hashes(query_hashes: &[u64], counter: &Option<CounterDat
     if overlap_found {
         overlap / (query_hashes.len() as f64)
     } else {
-        -0.25
+        RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
     }
 }
 
@@ -1164,28 +1480,88 @@ fn first_name_score_prefix(query_first: &str, counts: &[(String, f32)], size: us
     best
 }
 
-fn retrieval_year_score(query_year: Option<i64>, summary: &RetrievalSummaryData) -> f64 {
+fn first_name_score_mode(
+    query_first: &str,
+    counts: &[(String, f32)],
+    size: usize,
+    mode: RetrievalFirstNameMode,
+) -> f64 {
+    if size == 0 || py_len(query_first) <= 1 || counts.is_empty() {
+        return 0.0;
+    }
+    let mut best = 0.0f64;
+    for (first_name, count) in counts.iter() {
+        if py_len(first_name) <= 1 {
+            continue;
+        }
+        let share = (*count as f64) / (size as f64);
+        let candidate = match mode {
+            RetrievalFirstNameMode::Prefix => {
+                if same_prefix_tokens_compat(query_first, first_name) {
+                    share
+                } else {
+                    0.0
+                }
+            }
+            RetrievalFirstNameMode::ExactOnly => {
+                if exact_name_match_compat(query_first, first_name) {
+                    share
+                } else {
+                    0.0
+                }
+            }
+            RetrievalFirstNameMode::ExactThenPrefixHalf => {
+                if exact_name_match_compat(query_first, first_name) {
+                    share
+                } else if same_prefix_tokens_compat(query_first, first_name) {
+                    share * 0.5
+                } else {
+                    0.0
+                }
+            }
+            RetrievalFirstNameMode::PrefixLengthRatio => {
+                if same_prefix_tokens_compat(query_first, first_name) {
+                    let query_len = py_len(query_first) as f64;
+                    let candidate_len = py_len(first_name) as f64;
+                    share * (query_len.min(candidate_len) / query_len.max(candidate_len))
+                } else {
+                    0.0
+                }
+            }
+            RetrievalFirstNameMode::ExactThenPrefixLengthRatio => {
+                if exact_name_match_compat(query_first, first_name) {
+                    share
+                } else if same_prefix_tokens_compat(query_first, first_name) {
+                    let query_len = py_len(query_first) as f64;
+                    let candidate_len = py_len(first_name) as f64;
+                    share * (query_len.min(candidate_len) / query_len.max(candidate_len)) * 0.75
+                } else {
+                    0.0
+                }
+            }
+        };
+        best = best.max(candidate);
+    }
+    best
+}
+
+fn year_score(query_year: Option<i64>, summary: &RetrievalSummaryData) -> f64 {
     let Some(query_year_value) = query_year else {
         return 0.0;
     };
-    let Some(summary_year_mean) = summary.year_mean else {
+    let Some(year_mean) = summary.year_mean else {
         return 0.0;
     };
-    let distance = (query_year_value as f64 - summary_year_mean).abs();
-    let mut score = (1.0 - (distance / 15.0)).max(0.0);
+    let distance = ((query_year_value as f64) - year_mean).abs();
+    let mut score = (1.0 - (distance / RETRIEVAL_YEAR_SCORE_DECAY_YEARS)).max(0.0);
     if let (Some(year_min), Some(year_max)) = (summary.year_min, summary.year_max) {
-        if query_year_value < year_min - 10 || query_year_value > year_max + 10 {
-            score -= 0.15;
+        if query_year_value < year_min - RETRIEVAL_YEAR_SCORE_RANGE_GAP
+            || query_year_value > year_max + RETRIEVAL_YEAR_SCORE_RANGE_GAP
+        {
+            score -= RETRIEVAL_YEAR_SCORE_RANGE_PENALTY;
         }
     }
     score
-}
-
-fn retrieval_size_prior(size: usize, max_block_component_size: usize) -> f64 {
-    if size == 0 || max_block_component_size == 0 {
-        return 0.0;
-    }
-    ((size as f64) + 1.0).ln() / ((max_block_component_size as f64) + 1.0).ln()
 }
 
 fn contains_hashed_value(sorted_hashes: &[u64], target: u64) -> bool {
@@ -1199,12 +1575,19 @@ fn has_middle_initial_conflict(query_hashes: &[u64], counter: &Option<CounterDat
     if query_hashes.is_empty() || counter_data.entries.is_empty() {
         return false;
     }
-    !query_hashes
-        .iter()
-        .any(|query_hash| counter_data.entries.binary_search_by_key(query_hash, |entry| entry.0).is_ok())
+    !query_hashes.iter().any(|query_hash| {
+        counter_data
+            .entries
+            .binary_search_by_key(query_hash, |entry| entry.0)
+            .is_ok()
+    })
 }
 
-fn has_impossible_year_conflict(query_year: Option<i64>, summary: &RetrievalSummaryData, max_year_gap: i64) -> bool {
+fn has_impossible_year_conflict(
+    query_year: Option<i64>,
+    summary: &RetrievalSummaryData,
+    max_year_gap: i64,
+) -> bool {
     let Some(query_year_value) = query_year else {
         return false;
     };
@@ -1214,7 +1597,10 @@ fn has_impossible_year_conflict(query_year: Option<i64>, summary: &RetrievalSumm
     query_year_value < year_min - max_year_gap || query_year_value > year_max + max_year_gap
 }
 
-fn extract_retrieval_summary(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalSummaryData> {
+fn extract_retrieval_summary(
+    obj: &Bound<'_, PyAny>,
+    include_exemplars: bool,
+) -> PyResult<RetrievalSummaryData> {
     let component_key: String = obj.getattr("component_key")?.extract()?;
     let size: usize = obj.getattr("size")?.extract()?;
     let first_name_counts = extract_string_count_pairs(&obj.getattr("first_name_counts")?)?;
@@ -1222,6 +1608,7 @@ fn extract_retrieval_summary(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalSummar
     let coauthor_counts = extract_counter(&obj.getattr("coauthor_counts")?)?;
     let affiliation_counts = extract_counter(&obj.getattr("affiliation_counts")?)?;
     let venue_counts = extract_counter(&obj.getattr("venue_counts")?)?;
+    let title_counts = extract_counter(&obj.getattr("title_counts")?)?;
     let year_min: Option<i64> = obj.getattr("year_min")?.extract()?;
     let year_max: Option<i64> = obj.getattr("year_max")?.extract()?;
     let year_mean: Option<f64> = obj.getattr("year_mean")?.extract()?;
@@ -1237,6 +1624,24 @@ fn extract_retrieval_summary(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalSummar
             .sum::<f64>()
             .sqrt()
     });
+    let exemplar_vectors = if include_exemplars {
+        extract_specter_vec_list(&obj.getattr("exemplar_vectors")?)?
+    } else {
+        Vec::new()
+    };
+    let exemplar_norms = exemplar_vectors
+        .iter()
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    let val = *value as f64;
+                    val * val
+                })
+                .sum::<f64>()
+                .sqrt()
+        })
+        .collect();
 
     Ok(RetrievalSummaryData {
         component_key,
@@ -1246,21 +1651,27 @@ fn extract_retrieval_summary(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalSummar
         coauthor_counts,
         affiliation_counts,
         venue_counts,
+        title_counts,
         year_min,
         year_max,
         year_mean,
         orcid_hashes,
         specter_centroid,
         specter_centroid_norm,
+        exemplar_vectors,
+        exemplar_norms,
     })
 }
 
 fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryData> {
     let first: String = obj.getattr("first")?.extract()?;
     let middle_initial_hashes = extract_string_hashes(&obj.getattr("middle_initials")?)?;
-    let coauthor_hashes = extract_string_hashes(&obj.getattr("coauthor_blocks")?)?;
-    let affiliation_hashes = extract_string_hashes(&obj.getattr("affiliation_terms")?)?;
+    let coauthor_terms = extract_query_terms(&obj.getattr("coauthor_blocks")?)?;
+    let coauthor_hashes = coauthor_terms.iter().map(|term| term.hash).collect();
+    let affiliation_terms = extract_query_terms(&obj.getattr("affiliation_terms")?)?;
+    let affiliation_hashes = affiliation_terms.iter().map(|term| term.hash).collect();
     let venue_hashes = extract_string_hashes(&obj.getattr("venue_terms")?)?;
+    let title_hashes = extract_string_hashes(&obj.getattr("title_terms")?)?;
     let year: Option<i64> = obj.getattr("year")?.extract()?;
     let orcid_hash = extract_optional_string_hash(&obj.getattr("orcid")?)?;
     let specter = extract_specter_vec(&obj.getattr("specter")?)?;
@@ -1279,8 +1690,11 @@ fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryDat
         first,
         middle_initial_hashes,
         coauthor_hashes,
+        coauthor_terms,
         affiliation_hashes,
+        affiliation_terms,
         venue_hashes,
+        title_hashes,
         year,
         orcid_hash,
         specter,
@@ -1288,20 +1702,140 @@ fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryDat
     })
 }
 
+fn extract_retrieval_weights(weights: Vec<f64>) -> PyResult<RetrievalHybridWeights> {
+    if weights.len() != 5 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Expected 5 retrieval weights, got {}",
+            weights.len()
+        )));
+    }
+    if weights.iter().any(|value| !value.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Retrieval weights must all be finite",
+        ));
+    }
+    Ok(RetrievalHybridWeights::from_array([
+        weights[0], weights[1], weights[2], weights[3], weights[4],
+    ]))
+}
+
+fn default_overlap_config() -> RetrievalOverlapConfig {
+    RetrievalOverlapConfig {
+        use_idf: false,
+        per_term_cap: None,
+        total_cap: None,
+        min_token_count: 1,
+        unigram_weight: 1.0,
+        multi_token_weight: 1.0,
+    }
+}
+
+fn parse_first_name_mode(mode: &str) -> PyResult<RetrievalFirstNameMode> {
+    match mode {
+        "prefix" => Ok(RetrievalFirstNameMode::Prefix),
+        "exact_only" => Ok(RetrievalFirstNameMode::ExactOnly),
+        "exact_then_prefix_half" => Ok(RetrievalFirstNameMode::ExactThenPrefixHalf),
+        "prefix_length_ratio" => Ok(RetrievalFirstNameMode::PrefixLengthRatio),
+        "exact_then_prefix_length_ratio" => Ok(RetrievalFirstNameMode::ExactThenPrefixLengthRatio),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown first_name_mode: {mode}"
+        ))),
+    }
+}
+
+fn parse_specter_mode(mode: &str) -> PyResult<RetrievalSpecterMode> {
+    match mode {
+        "centroid" => Ok(RetrievalSpecterMode::Centroid),
+        "exemplar_max" => Ok(RetrievalSpecterMode::ExemplarMax),
+        "centroid_exemplar_50_50" => Ok(RetrievalSpecterMode::CentroidExemplar50_50),
+        "centroid_exemplar_25_75" => Ok(RetrievalSpecterMode::CentroidExemplar25_75),
+        "centroid_exemplar_75_25" => Ok(RetrievalSpecterMode::CentroidExemplar75_25),
+        "max_centroid_exemplar" => Ok(RetrievalSpecterMode::MaxOfCentroidExemplar),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown specter_mode: {mode}"
+        ))),
+    }
+}
+
+fn build_experimental_config(
+    first_name_mode: &str,
+    specter_mode: &str,
+    coauthor_use_idf: bool,
+    coauthor_per_term_cap: Option<f64>,
+    coauthor_total_cap: Option<f64>,
+    affiliation_use_idf: bool,
+    affiliation_per_term_cap: Option<f64>,
+    affiliation_total_cap: Option<f64>,
+    affiliation_min_token_count: usize,
+    affiliation_unigram_weight: f64,
+    affiliation_multi_token_weight: f64,
+) -> PyResult<RetrievalExperimentalConfig> {
+    if affiliation_min_token_count == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "affiliation_min_token_count must be positive",
+        ));
+    }
+    if !affiliation_unigram_weight.is_finite() || !affiliation_multi_token_weight.is_finite() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Affiliation structure weights must be finite",
+        ));
+    }
+    Ok(RetrievalExperimentalConfig {
+        first_name_mode: parse_first_name_mode(first_name_mode)?,
+        specter_mode: parse_specter_mode(specter_mode)?,
+        coauthor: RetrievalOverlapConfig {
+            use_idf: coauthor_use_idf,
+            per_term_cap: coauthor_per_term_cap,
+            total_cap: coauthor_total_cap,
+            ..default_overlap_config()
+        },
+        affiliation: RetrievalOverlapConfig {
+            use_idf: affiliation_use_idf,
+            per_term_cap: affiliation_per_term_cap,
+            total_cap: affiliation_total_cap,
+            min_token_count: affiliation_min_token_count.min(u8::MAX as usize) as u8,
+            unigram_weight: affiliation_unigram_weight,
+            multi_token_weight: affiliation_multi_token_weight,
+        },
+    })
+}
+
+fn specter_exemplar_score(query: &RetrievalQueryData, summary: &RetrievalSummaryData) -> f64 {
+    let (Some(query_specter), Some(query_norm)) = (query.specter.as_ref(), query.specter_norm)
+    else {
+        return 0.0;
+    };
+    summary
+        .exemplar_vectors
+        .iter()
+        .zip(summary.exemplar_norms.iter())
+        .map(|(vector, norm)| cosine_sim_with_norms(query_specter, query_norm, vector, *norm))
+        .fold(0.0f64, f64::max)
+}
+
 fn score_hybrid_centroid_query(
     query: &RetrievalQueryData,
     summary: &RetrievalSummaryData,
-    max_block_component_size: usize,
+    _max_block_component_size: usize,
+    weights: RetrievalHybridWeights,
 ) -> f32 {
-    let size_prior = retrieval_size_prior(summary.size, max_block_component_size);
-    let coauthor_score = counter_query_overlap_hashes(&query.coauthor_hashes, &summary.coauthor_counts, summary.size);
-    let affiliation_score =
-        counter_query_overlap_hashes(&query.affiliation_hashes, &summary.affiliation_counts, summary.size);
-    let venue_score = counter_query_overlap_hashes(&query.venue_hashes, &summary.venue_counts, summary.size);
-    let middle_score =
-        middle_initial_score_hashes(&query.middle_initial_hashes, &summary.middle_initial_counts, summary.size);
-    let first_name_score = first_name_score_prefix(&query.first, &summary.first_name_counts, summary.size);
-    let year_score = retrieval_year_score(query.year, summary);
+    let coauthor_score = counter_query_overlap_hashes(
+        &query.coauthor_hashes,
+        &summary.coauthor_counts,
+        summary.size,
+    );
+    let affiliation_score = counter_query_overlap_hashes(
+        &query.affiliation_hashes,
+        &summary.affiliation_counts,
+        summary.size,
+    );
+    let middle_score = middle_initial_score_hashes(
+        &query.middle_initial_hashes,
+        &summary.middle_initial_counts,
+        summary.size,
+    );
+    let first_name_score =
+        first_name_score_prefix(&query.first, &summary.first_name_counts, summary.size);
     let centroid_score = match (
         query.specter.as_ref(),
         query.specter_norm,
@@ -1313,16 +1847,145 @@ fn score_hybrid_centroid_query(
         }
         _ => 0.0,
     };
-    (
-        0.42 * centroid_score
-            + 0.23 * coauthor_score
-            + 0.12 * affiliation_score
-            + 0.06 * venue_score
-            + 0.05 * middle_score
-            + 0.07 * first_name_score
-            + 0.03 * year_score
-            + 0.02 * size_prior
-    ) as f32
+    (weights.centroid * centroid_score
+        + weights.coauthor * coauthor_score
+        + weights.affiliation * affiliation_score
+        + weights.middle * middle_score
+        + weights.first_name * first_name_score) as f32
+}
+
+fn score_experimental_hybrid_centroid_query(
+    query: &RetrievalQueryData,
+    summary: &RetrievalSummaryData,
+    _max_block_component_size: usize,
+    weights: RetrievalHybridWeights,
+    config: RetrievalExperimentalConfig,
+    coauthor_cluster_df: &HashMap<u64, usize>,
+    affiliation_cluster_df: &HashMap<u64, usize>,
+    total_summary_count: usize,
+) -> f32 {
+    let coauthor_score = weighted_counter_query_overlap(
+        &query.coauthor_terms,
+        &summary.coauthor_counts,
+        summary.size,
+        coauthor_cluster_df,
+        total_summary_count,
+        config.coauthor,
+    );
+    let affiliation_score = weighted_counter_query_overlap(
+        &query.affiliation_terms,
+        &summary.affiliation_counts,
+        summary.size,
+        affiliation_cluster_df,
+        total_summary_count,
+        config.affiliation,
+    );
+    let middle_score = middle_initial_score_hashes(
+        &query.middle_initial_hashes,
+        &summary.middle_initial_counts,
+        summary.size,
+    );
+    let first_name_score = first_name_score_mode(
+        &query.first,
+        &summary.first_name_counts,
+        summary.size,
+        config.first_name_mode,
+    );
+    let centroid_score = match (
+        query.specter.as_ref(),
+        query.specter_norm,
+        summary.specter_centroid.as_ref(),
+        summary.specter_centroid_norm,
+    ) {
+        (Some(query_specter), Some(query_norm), Some(summary_specter), Some(summary_norm)) => {
+            cosine_sim_with_norms(query_specter, query_norm, summary_specter, summary_norm)
+        }
+        _ => 0.0,
+    };
+    let exemplar_score = specter_exemplar_score(query, summary);
+    let specter_score = match config.specter_mode {
+        RetrievalSpecterMode::Centroid => centroid_score,
+        RetrievalSpecterMode::ExemplarMax => exemplar_score,
+        RetrievalSpecterMode::CentroidExemplar50_50 => 0.5 * centroid_score + 0.5 * exemplar_score,
+        RetrievalSpecterMode::CentroidExemplar25_75 => {
+            0.25 * centroid_score + 0.75 * exemplar_score
+        }
+        RetrievalSpecterMode::CentroidExemplar75_25 => {
+            0.75 * centroid_score + 0.25 * exemplar_score
+        }
+        RetrievalSpecterMode::MaxOfCentroidExemplar => centroid_score.max(exemplar_score),
+    };
+    (weights.centroid * specter_score
+        + weights.coauthor * coauthor_score
+        + weights.affiliation * affiliation_score
+        + weights.middle * middle_score
+        + weights.first_name * first_name_score) as f32
+}
+
+fn chooser_summary_features(
+    query: &RetrievalQueryData,
+    summary: &RetrievalSummaryData,
+) -> [f32; 8] {
+    let middle_score = middle_initial_score_hashes(
+        &query.middle_initial_hashes,
+        &summary.middle_initial_counts,
+        summary.size,
+    ) as f32;
+    let affiliation_score = counter_query_overlap_hashes(
+        &query.affiliation_hashes,
+        &summary.affiliation_counts,
+        summary.size,
+    ) as f32;
+    let coauthor_score = counter_query_overlap_hashes(
+        &query.coauthor_hashes,
+        &summary.coauthor_counts,
+        summary.size,
+    ) as f32;
+    let venue_score =
+        counter_query_overlap_hashes(&query.venue_hashes, &summary.venue_counts, summary.size)
+            as f32;
+    let year_score_value = year_score(query.year, summary) as f32;
+    let title_score =
+        counter_query_overlap_hashes(&query.title_hashes, &summary.title_counts, summary.size)
+            as f32;
+    let specter_centroid_score = match (
+        query.specter.as_ref(),
+        query.specter_norm,
+        summary.specter_centroid.as_ref(),
+        summary.specter_centroid_norm,
+    ) {
+        (Some(query_specter), Some(query_norm), Some(summary_specter), Some(summary_norm)) => {
+            cosine_sim_with_norms(query_specter, query_norm, summary_specter, summary_norm) as f32
+        }
+        _ => 0.0,
+    };
+    let specter_exemplar_score = specter_exemplar_score(query, summary) as f32;
+    [
+        middle_score,
+        affiliation_score,
+        coauthor_score,
+        venue_score,
+        year_score_value,
+        title_score,
+        specter_centroid_score,
+        specter_exemplar_score,
+    ]
+}
+
+fn update_cluster_df_from_counter(
+    obj: &Bound<'_, PyAny>,
+    df_map: &mut HashMap<u64, usize>,
+) -> PyResult<()> {
+    if obj.is_none() {
+        return Ok(());
+    }
+    let dict = obj.downcast::<PyDict>()?;
+    for (key_obj, _value_obj) in dict.iter() {
+        let key: String = key_obj.extract()?;
+        let hash = fnv64(key.as_bytes());
+        *df_map.entry(hash).or_insert(0) += 1;
+    }
+    Ok(())
 }
 
 fn specter_payload_to_dict<'py>(
@@ -1716,6 +2379,82 @@ fn name_tuple_contains(map: &HashMap<String, HashSet<String>>, a: &str, b: &str)
     map.get(a).map_or(false, |vals| vals.contains(b))
 }
 
+fn first_name_forms(value: &str) -> (String, String, String) {
+    let normalized = value.trim().to_lowercase();
+    let parts: Vec<&str> = normalized.split_whitespace().collect();
+    let joined = parts.join("");
+    let token = parts
+        .first()
+        .map_or_else(|| normalized.clone(), |part| (*part).to_string());
+    (normalized, joined, token)
+}
+
+fn first_names_name_compatible(
+    first_1: &str,
+    first_2: &str,
+    name_tuples: &HashMap<String, HashSet<String>>,
+) -> bool {
+    let first_1 = first_1.trim().to_lowercase();
+    let first_2 = first_2.trim().to_lowercase();
+    if first_1.is_empty() || first_2.is_empty() {
+        return true;
+    }
+    if first_1.chars().next() != first_2.chars().next() {
+        return false;
+    }
+    if same_prefix_tokens(&first_1, &first_2) {
+        return true;
+    }
+    let forms_1 = first_name_forms(&first_1);
+    let forms_2 = first_name_forms(&first_2);
+    name_tuple_contains(name_tuples, &forms_1.0, &forms_2.0)
+        || name_tuple_contains(name_tuples, &forms_1.1, &forms_2.1)
+        || name_tuple_contains(name_tuples, &forms_1.2, &forms_2.2)
+}
+
+fn subblock_tokens_from_key(subblock_key: &str) -> Vec<String> {
+    let local_key = subblock_key
+        .rsplit_once("::")
+        .map_or(subblock_key, |(_prefix, suffix)| suffix);
+    let mut values = HashSet::new();
+    for raw_token in local_key.split(',') {
+        let token = raw_token
+            .trim()
+            .split_once('|')
+            .map_or(raw_token.trim(), |(token, _rest)| token.trim())
+            .to_lowercase();
+        if py_len(&token) > 1 {
+            values.insert(token);
+        }
+    }
+    let mut out: Vec<String> = values.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+fn extract_string_string_map(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, String>> {
+    let dict = obj.downcast::<PyDict>()?;
+    let mut out = HashMap::with_capacity(dict.len());
+    for (key, value) in dict.iter() {
+        out.insert(key.extract()?, value.extract()?);
+    }
+    Ok(out)
+}
+
+fn extract_string_vec_map(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, Vec<String>>> {
+    let dict = obj.downcast::<PyDict>()?;
+    let mut out = HashMap::with_capacity(dict.len());
+    for (key, value) in dict.iter() {
+        let key_text: String = key.extract()?;
+        let mut values = Vec::new();
+        for item in PyIterator::from_object(&value)? {
+            values.push(item?.extract()?);
+        }
+        out.insert(key_text, values);
+    }
+    Ok(out)
+}
+
 fn filter_text_for_char_ngrams(text: &str, stopwords: Option<&HashSet<String>>) -> String {
     let Some(stopwords_set) = stopwords else {
         return text.to_string();
@@ -2088,7 +2827,11 @@ fn middle_initials_overlap(name1: Option<&str>, name2: Option<&str>) -> f64 {
         return f64::NAN;
     }
     let score = (intersection_sum as f64) / (union_sum as f64);
-    if score > 1.0 { 1.0 } else { score }
+    if score > 1.0 {
+        1.0
+    } else {
+        score
+    }
 }
 
 fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f64 {
@@ -2117,14 +2860,22 @@ fn middle_one_missing(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let len1 = py_len(n1);
     let len2 = py_len(n2);
     let val = (len1 == 0 && len2 != 0) || (len2 == 0 && len1 != 0);
-    if val { 1.0 } else { 0.0 }
+    if val {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn single_char_first(name1: Option<&str>, name2: Option<&str>) -> f64 {
     let n1 = name1.unwrap_or("");
     let n2 = name2.unwrap_or("");
     let val = py_len(n1) == 1 || py_len(n2) == 1;
-    if val { 1.0 } else { 0.0 }
+    if val {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f64 {
@@ -2145,7 +2896,11 @@ fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f64 {
             }
         }
     }
-    if val { 1.0 } else { 0.0 }
+    if val {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn email_parts(email: &str) -> (String, String) {
@@ -2446,7 +3201,7 @@ fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f64; 4] {
     let (Some(n1), Some(n2)) = (name1, name2) else {
         return [f64::NAN; 4];
     };
-    if py_len(n1) <= 1 || py_len(n2) <= 1 {
+    if py_len(n1) == 0 || py_len(n2) == 0 {
         return [f64::NAN; 4];
     }
     let lev = levenshtein_distance(n1, n2) as f64 / (py_len(n1).max(py_len(n2)) as f64);
@@ -2733,14 +3488,17 @@ impl RustFeaturizer {
         sig_id2: &str,
         s1: &SignatureData,
         s2: &SignatureData,
-        p1: &PaperData,
-        p2: &PaperData,
+        _p1: &PaperData,
+        _p2: &PaperData,
         low_value: f64,
         high_value: f64,
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
+        suppress_orcid: bool,
     ) -> Option<f64> {
-        if self.cluster_seeds_disallow_contains(sig_id1, sig_id2) {
+        if !incremental_dont_use_cluster_seeds
+            && self.cluster_seeds_disallow_contains(sig_id1, sig_id2)
+        {
             return Some(self.cluster_seed_disallow_value);
         }
 
@@ -2755,7 +3513,7 @@ impl RustFeaturizer {
             }
         }
 
-        if dont_merge_cluster_seeds {
+        if dont_merge_cluster_seeds && !incremental_dont_use_cluster_seeds {
             if let (Some(c1), Some(c2)) = (
                 self.cluster_seeds_require.get(sig_id1),
                 self.cluster_seeds_require.get(sig_id2),
@@ -2766,9 +3524,11 @@ impl RustFeaturizer {
             }
         }
 
-        if let (Some(o1), Some(o2)) = (s1.orcid.as_deref(), s2.orcid.as_deref()) {
-            if o1 == o2 {
-                return Some(low_value);
+        if !suppress_orcid {
+            if let (Some(o1), Some(o2)) = (s1.orcid.as_deref(), s2.orcid.as_deref()) {
+                if o1 == o2 {
+                    return Some(low_value);
+                }
             }
         }
 
@@ -2785,14 +3545,6 @@ impl RustFeaturizer {
                 if c1 != c2 {
                     return Some(high_value);
                 }
-            }
-        }
-
-        if p1.is_reliable && p2.is_reliable {
-            let l1 = p1.predicted_language.as_deref();
-            let l2 = p2.predicted_language.as_deref();
-            if l1 != l2 {
-                return Some(high_value);
             }
         }
 
@@ -2886,7 +3638,6 @@ impl RustFeaturizer {
                 }
             }
         }
-
         None
     }
 
@@ -2898,6 +3649,7 @@ impl RustFeaturizer {
         high_value: f64,
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
+        suppress_orcid: bool,
     ) -> PyResult<Option<f64>> {
         let s1 = self
             .signatures
@@ -2926,6 +3678,7 @@ impl RustFeaturizer {
             high_value,
             dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds,
+            suppress_orcid,
         ))
     }
 
@@ -2995,7 +3748,8 @@ impl RustFeaturizer {
         let text_module = py.import("s2and.text")?;
         let unidecode = text_module.getattr("unidecode")?;
         let stop_words = extract_required_string_set(&text_module.getattr("STOPWORDS")?)?;
-        let venue_stop_words = extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
+        let venue_stop_words =
+            extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
@@ -4455,7 +5209,8 @@ impl RustFeaturizer {
             low_value = 0.0,
             high_value = 10000.0,
             dont_merge_cluster_seeds = true,
-            incremental_dont_use_cluster_seeds = false
+            incremental_dont_use_cluster_seeds = false,
+            suppress_orcid = false
         )
     )]
     fn get_constraint(
@@ -4466,6 +5221,7 @@ impl RustFeaturizer {
         high_value: f64,
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
+        suppress_orcid: bool,
     ) -> PyResult<Option<f64>> {
         self.get_constraint_value_for_pair(
             sig_id1,
@@ -4474,6 +5230,7 @@ impl RustFeaturizer {
             high_value,
             dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds,
+            suppress_orcid,
         )
     }
 
@@ -4484,7 +5241,8 @@ impl RustFeaturizer {
             high_value = 10000.0,
             dont_merge_cluster_seeds = true,
             incremental_dont_use_cluster_seeds = false,
-            num_threads = None
+            num_threads = None,
+            suppress_orcid = false
         )
     )]
     fn get_constraints_matrix(
@@ -4496,6 +5254,7 @@ impl RustFeaturizer {
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
         num_threads: Option<usize>,
+        suppress_orcid: bool,
     ) -> PyResult<Vec<Option<f64>>> {
         if pairs.is_empty() {
             return Ok(Vec::new());
@@ -4533,6 +5292,7 @@ impl RustFeaturizer {
                             high_value,
                             dont_merge_cluster_seeds,
                             incremental_dont_use_cluster_seeds,
+                            suppress_orcid,
                         ))
                     })
                     .collect::<PyResult<Vec<_>>>()
@@ -4549,7 +5309,8 @@ impl RustFeaturizer {
             high_value = 10000.0,
             dont_merge_cluster_seeds = true,
             incremental_dont_use_cluster_seeds = false,
-            num_threads = None
+            num_threads = None,
+            suppress_orcid = false
         )
     )]
     fn get_constraints_matrix_indexed(
@@ -4561,6 +5322,7 @@ impl RustFeaturizer {
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
         num_threads: Option<usize>,
+        suppress_orcid: bool,
     ) -> PyResult<Vec<Option<f64>>> {
         if pairs.is_empty() {
             return Ok(Vec::new());
@@ -4610,6 +5372,7 @@ impl RustFeaturizer {
                             high_value,
                             dont_merge_cluster_seeds,
                             incremental_dont_use_cluster_seeds,
+                            suppress_orcid,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -4629,7 +5392,8 @@ impl RustFeaturizer {
             high_value = 10000.0,
             dont_merge_cluster_seeds = true,
             incremental_dont_use_cluster_seeds = false,
-            num_threads = None
+            num_threads = None,
+            suppress_orcid = false
         )
     )]
     fn get_constraints_block_upper_triangle_indexed(
@@ -4643,6 +5407,7 @@ impl RustFeaturizer {
         dont_merge_cluster_seeds: bool,
         incremental_dont_use_cluster_seeds: bool,
         num_threads: Option<usize>,
+        suppress_orcid: bool,
     ) -> PyResult<(Vec<u32>, Vec<u32>, Vec<Option<f64>>)> {
         if block_signature_indices.len() <= 1 {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
@@ -4701,6 +5466,7 @@ impl RustFeaturizer {
                             high_value,
                             dont_merge_cluster_seeds,
                             incremental_dont_use_cluster_seeds,
+                            suppress_orcid,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -5141,22 +5907,125 @@ impl RustFeaturizer {
 }
 
 #[pymethods]
+impl RustNameCompatibleSubblockSelector {
+    #[new]
+    #[pyo3(signature = (retrieval_subblock_index, name_tuples_path = None))]
+    fn new(
+        py: Python<'_>,
+        retrieval_subblock_index: &Bound<'_, PyAny>,
+        name_tuples_path: Option<String>,
+    ) -> PyResult<Self> {
+        let signature_to_subblock = extract_string_string_map(
+            &retrieval_subblock_index.get_item("signature_to_subblock")?,
+        )?;
+        let subblock_to_components =
+            extract_string_vec_map(&retrieval_subblock_index.get_item("subblock_to_components")?)?;
+        let subblock_tokens_by_subblock =
+            match retrieval_subblock_index.get_item("subblock_tokens_by_subblock") {
+                Ok(tokens_obj) => extract_string_vec_map(&tokens_obj)?,
+                Err(_) => subblock_to_components
+                    .keys()
+                    .map(|subblock| (subblock.clone(), subblock_tokens_from_key(subblock)))
+                    .collect(),
+            };
+        let name_tuples = load_name_tuples_from_text_path(py, name_tuples_path.as_deref())?;
+        Ok(Self {
+            signature_to_subblock,
+            subblock_to_components,
+            subblock_tokens_by_subblock,
+            name_tuples,
+        })
+    }
+
+    #[pyo3(signature = (query_signature_id, query_first, component_keys, global_backfill_count = 0))]
+    fn select(
+        &self,
+        query_signature_id: &str,
+        query_first: &str,
+        component_keys: &Bound<'_, PyAny>,
+        global_backfill_count: usize,
+    ) -> PyResult<Option<Vec<String>>> {
+        let Some(query_subblock) = self.signature_to_subblock.get(query_signature_id) else {
+            return Ok(None);
+        };
+        let ordered_component_keys: Vec<String> = PyIterator::from_object(component_keys)?
+            .map(|item| item.and_then(|value| value.extract()))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let mut allowed_components: HashSet<String> = HashSet::new();
+        if let Some(components) = self.subblock_to_components.get(query_subblock) {
+            allowed_components.extend(components.iter().cloned());
+        }
+        for (subblock, tokens) in self.subblock_tokens_by_subblock.iter() {
+            if tokens
+                .iter()
+                .any(|token| first_names_name_compatible(query_first, token, &self.name_tuples))
+            {
+                if let Some(components) = self.subblock_to_components.get(subblock) {
+                    allowed_components.extend(components.iter().cloned());
+                }
+            }
+        }
+
+        let mut selected: Vec<String> = ordered_component_keys
+            .iter()
+            .filter(|component_key| allowed_components.contains(*component_key))
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            return Ok(None);
+        }
+        if global_backfill_count > 0 {
+            let mut selected_set: HashSet<String> = selected.iter().cloned().collect();
+            let mut remaining = global_backfill_count;
+            for component_key in ordered_component_keys {
+                if remaining == 0 {
+                    break;
+                }
+                if selected_set.insert(component_key.clone()) {
+                    selected.push(component_key);
+                    remaining -= 1;
+                }
+            }
+        }
+        Ok(Some(selected))
+    }
+}
+
+#[pymethods]
 impl RustHybridCentroidRetriever {
     #[new]
-    fn new(summaries: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (summaries, include_exemplars = false))]
+    fn new(summaries: &Bound<'_, PyAny>, include_exemplars: bool) -> PyResult<Self> {
         let mut packed_summaries = Vec::new();
         let mut component_index_by_key = HashMap::new();
+        let mut coauthor_cluster_df = HashMap::new();
+        let mut affiliation_cluster_df = HashMap::new();
         for item in PyIterator::from_object(summaries)? {
             let summary_obj = item?;
-            let summary = extract_retrieval_summary(&summary_obj)?;
+            update_cluster_df_from_counter(
+                &summary_obj.getattr("coauthor_counts")?,
+                &mut coauthor_cluster_df,
+            )?;
+            update_cluster_df_from_counter(
+                &summary_obj.getattr("affiliation_counts")?,
+                &mut affiliation_cluster_df,
+            )?;
+            let summary = extract_retrieval_summary(&summary_obj, include_exemplars)?;
             component_index_by_key.insert(summary.component_key.clone(), packed_summaries.len());
             packed_summaries.push(summary);
         }
-        let max_block_component_size = packed_summaries.iter().map(|summary| summary.size).max().unwrap_or(0);
+        let max_block_component_size = packed_summaries
+            .iter()
+            .map(|summary| summary.size)
+            .max()
+            .unwrap_or(0);
         Ok(Self {
             summaries: packed_summaries,
             max_block_component_size,
             component_index_by_key,
+            coauthor_cluster_df,
+            affiliation_cluster_df,
         })
     }
 
@@ -5173,7 +6042,9 @@ impl RustHybridCentroidRetriever {
         num_threads: Option<usize>,
     ) -> PyResult<(Vec<String>, Vec<f32>)> {
         if top_k == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err("top_k must be positive"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must be positive",
+            ));
         }
         let query_data = extract_retrieval_query(query)?;
 
@@ -5193,7 +6064,12 @@ impl RustHybridCentroidRetriever {
         let middle_filtered: Vec<usize> = candidate_indices
             .iter()
             .copied()
-            .filter(|idx| !has_middle_initial_conflict(&query_data.middle_initial_hashes, &self.summaries[*idx].middle_initial_counts))
+            .filter(|idx| {
+                !has_middle_initial_conflict(
+                    &query_data.middle_initial_hashes,
+                    &self.summaries[*idx].middle_initial_counts,
+                )
+            })
             .collect();
         if !middle_filtered.is_empty() {
             candidate_indices = middle_filtered;
@@ -5202,7 +6078,13 @@ impl RustHybridCentroidRetriever {
         let year_filtered: Vec<usize> = candidate_indices
             .iter()
             .copied()
-            .filter(|idx| !has_impossible_year_conflict(query_data.year, &self.summaries[*idx], 35))
+            .filter(|idx| {
+                !has_impossible_year_conflict(
+                    query_data.year,
+                    &self.summaries[*idx],
+                    RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+                )
+            })
             .collect();
         if !year_filtered.is_empty() {
             candidate_indices = year_filtered;
@@ -5221,6 +6103,83 @@ impl RustHybridCentroidRetriever {
             num_threads,
             None,
             None,
+            Self::default_hybrid_weights(),
+        )
+    }
+
+    #[pyo3(signature = (query, top_k, weights, num_threads = None))]
+    fn top_k_weighted_hybrid_centroid(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        top_k: usize,
+        weights: Vec<f64>,
+        num_threads: Option<usize>,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if top_k == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must be positive",
+            ));
+        }
+        let query_data = extract_retrieval_query(query)?;
+        let weights_data = extract_retrieval_weights(weights)?;
+
+        let mut candidate_indices: Vec<usize> = (0..self.summaries.len()).collect();
+
+        if let Some(orcid_hash) = query_data.orcid_hash {
+            let orcid_matches: Vec<usize> = candidate_indices
+                .iter()
+                .copied()
+                .filter(|idx| contains_hashed_value(&self.summaries[*idx].orcid_hashes, orcid_hash))
+                .collect();
+            if !orcid_matches.is_empty() {
+                candidate_indices = orcid_matches;
+            }
+        }
+
+        let middle_filtered: Vec<usize> = candidate_indices
+            .iter()
+            .copied()
+            .filter(|idx| {
+                !has_middle_initial_conflict(
+                    &query_data.middle_initial_hashes,
+                    &self.summaries[*idx].middle_initial_counts,
+                )
+            })
+            .collect();
+        if !middle_filtered.is_empty() {
+            candidate_indices = middle_filtered;
+        }
+
+        let year_filtered: Vec<usize> = candidate_indices
+            .iter()
+            .copied()
+            .filter(|idx| {
+                !has_impossible_year_conflict(
+                    query_data.year,
+                    &self.summaries[*idx],
+                    RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+                )
+            })
+            .collect();
+        if !year_filtered.is_empty() {
+            candidate_indices = year_filtered;
+        }
+
+        if candidate_indices.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        self.score_top_k_candidate_indices(
+            py,
+            &query_data,
+            &candidate_indices,
+            top_k,
+            self.max_block_component_size,
+            num_threads,
+            None,
+            None,
+            weights_data,
         )
     }
 
@@ -5236,7 +6195,9 @@ impl RustHybridCentroidRetriever {
         override_summary: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(Vec<String>, Vec<f32>)> {
         if top_k == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err("top_k must be positive"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must be positive",
+            ));
         }
 
         let query_data = extract_retrieval_query(query)?;
@@ -5251,9 +6212,14 @@ impl RustHybridCentroidRetriever {
             candidate_indices.push(*candidate_index);
         }
 
-        let override_data = override_summary.map(extract_retrieval_summary).transpose()?;
+        let override_data = override_summary
+            .map(|value| extract_retrieval_summary(value, false))
+            .transpose()?;
         let override_index = if let Some(override_summary_data) = override_data.as_ref() {
-            let Some(candidate_index) = self.component_index_by_key.get(&override_summary_data.component_key) else {
+            let Some(candidate_index) = self
+                .component_index_by_key
+                .get(&override_summary_data.component_key)
+            else {
                 return Err(pyo3::exceptions::PyKeyError::new_err(format!(
                     "Unknown override component_key for RustHybridCentroidRetriever: {}",
                     override_summary_data.component_key
@@ -5279,7 +6245,265 @@ impl RustHybridCentroidRetriever {
             num_threads,
             override_index,
             override_data.as_ref(),
+            Self::default_hybrid_weights(),
         )
+    }
+
+    #[pyo3(signature = (query, component_keys, top_k, max_block_component_size, weights, num_threads = None, override_summary = None))]
+    fn top_k_weighted_hybrid_centroid_subset(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        component_keys: &Bound<'_, PyAny>,
+        top_k: usize,
+        max_block_component_size: usize,
+        weights: Vec<f64>,
+        num_threads: Option<usize>,
+        override_summary: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if top_k == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must be positive",
+            ));
+        }
+
+        let query_data = extract_retrieval_query(query)?;
+        let weights_data = extract_retrieval_weights(weights)?;
+        let mut candidate_indices = Vec::new();
+        for item in PyIterator::from_object(component_keys)? {
+            let component_key: String = item?.extract()?;
+            let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown component_key for RustHybridCentroidRetriever: {component_key}"
+                )));
+            };
+            candidate_indices.push(*candidate_index);
+        }
+
+        let override_data = override_summary
+            .map(|value| extract_retrieval_summary(value, false))
+            .transpose()?;
+        let override_index = if let Some(override_summary_data) = override_data.as_ref() {
+            let Some(candidate_index) = self
+                .component_index_by_key
+                .get(&override_summary_data.component_key)
+            else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown override component_key for RustHybridCentroidRetriever: {}",
+                    override_summary_data.component_key
+                )));
+            };
+            if !candidate_indices.contains(candidate_index) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "override_summary component_key {} was not present in component_keys",
+                    override_summary_data.component_key
+                )));
+            }
+            Some(*candidate_index)
+        } else {
+            None
+        };
+
+        self.score_top_k_candidate_indices(
+            py,
+            &query_data,
+            &candidate_indices,
+            top_k,
+            max_block_component_size,
+            num_threads,
+            override_index,
+            override_data.as_ref(),
+            weights_data,
+        )
+    }
+
+    #[pyo3(
+        signature = (
+            query,
+            component_keys,
+            top_k,
+            max_block_component_size,
+            weights,
+            first_name_mode = "prefix",
+            specter_mode = "centroid",
+            coauthor_use_idf = false,
+            coauthor_per_term_cap = None,
+            coauthor_total_cap = None,
+            affiliation_use_idf = false,
+            affiliation_per_term_cap = None,
+            affiliation_total_cap = None,
+            affiliation_min_token_count = 1,
+            affiliation_unigram_weight = 1.0,
+            affiliation_multi_token_weight = 1.0,
+            num_threads = None,
+            override_summary = None
+        )
+    )]
+    fn top_k_experimental_weighted_hybrid_centroid_subset(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        component_keys: &Bound<'_, PyAny>,
+        top_k: usize,
+        max_block_component_size: usize,
+        weights: Vec<f64>,
+        first_name_mode: &str,
+        specter_mode: &str,
+        coauthor_use_idf: bool,
+        coauthor_per_term_cap: Option<f64>,
+        coauthor_total_cap: Option<f64>,
+        affiliation_use_idf: bool,
+        affiliation_per_term_cap: Option<f64>,
+        affiliation_total_cap: Option<f64>,
+        affiliation_min_token_count: usize,
+        affiliation_unigram_weight: f64,
+        affiliation_multi_token_weight: f64,
+        num_threads: Option<usize>,
+        override_summary: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Vec<String>, Vec<f32>)> {
+        if top_k == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must be positive",
+            ));
+        }
+
+        let query_data = extract_retrieval_query(query)?;
+        let weights_data = extract_retrieval_weights(weights)?;
+        let config = build_experimental_config(
+            first_name_mode,
+            specter_mode,
+            coauthor_use_idf,
+            coauthor_per_term_cap,
+            coauthor_total_cap,
+            affiliation_use_idf,
+            affiliation_per_term_cap,
+            affiliation_total_cap,
+            affiliation_min_token_count,
+            affiliation_unigram_weight,
+            affiliation_multi_token_weight,
+        )?;
+        let mut candidate_indices = Vec::new();
+        for item in PyIterator::from_object(component_keys)? {
+            let component_key: String = item?.extract()?;
+            let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown component_key for RustHybridCentroidRetriever: {component_key}"
+                )));
+            };
+            candidate_indices.push(*candidate_index);
+        }
+
+        let override_data = override_summary
+            .map(|value| {
+                extract_retrieval_summary(
+                    value,
+                    !matches!(config.specter_mode, RetrievalSpecterMode::Centroid),
+                )
+            })
+            .transpose()?;
+        let override_index = if let Some(override_summary_data) = override_data.as_ref() {
+            let Some(candidate_index) = self
+                .component_index_by_key
+                .get(&override_summary_data.component_key)
+            else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown override component_key for RustHybridCentroidRetriever: {}",
+                    override_summary_data.component_key
+                )));
+            };
+            if !candidate_indices.contains(candidate_index) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "override_summary component_key {} was not present in component_keys",
+                    override_summary_data.component_key
+                )));
+            }
+            Some(*candidate_index)
+        } else {
+            None
+        };
+
+        self.score_top_k_candidate_indices_experimental(
+            py,
+            &query_data,
+            &candidate_indices,
+            top_k,
+            max_block_component_size,
+            num_threads,
+            override_index,
+            override_data.as_ref(),
+            weights_data,
+            config,
+        )
+    }
+
+    #[pyo3(signature = (query, component_keys, num_threads = None, override_summary = None))]
+    fn chooser_feature_rows_subset(
+        &self,
+        py: Python<'_>,
+        query: &Bound<'_, PyAny>,
+        component_keys: &Bound<'_, PyAny>,
+        num_threads: Option<usize>,
+        override_summary: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyDict>> {
+        let _resolved_num_threads = num_threads;
+        let query_data = extract_retrieval_query(query)?;
+        let mut candidate_indices = Vec::new();
+        for item in PyIterator::from_object(component_keys)? {
+            let component_key: String = item?.extract()?;
+            let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown component_key for RustHybridCentroidRetriever: {component_key}"
+                )));
+            };
+            candidate_indices.push(*candidate_index);
+        }
+
+        let override_data = override_summary
+            .map(|value| extract_retrieval_summary(value, true))
+            .transpose()?;
+        let override_index = if let Some(override_summary_data) = override_data.as_ref() {
+            let Some(candidate_index) = self
+                .component_index_by_key
+                .get(&override_summary_data.component_key)
+            else {
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "Unknown override component_key for RustHybridCentroidRetriever: {}",
+                    override_summary_data.component_key
+                )));
+            };
+            if !candidate_indices.contains(candidate_index) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "override_summary component_key {} was not present in component_keys",
+                    override_summary_data.component_key
+                )));
+            }
+            Some(*candidate_index)
+        } else {
+            None
+        };
+
+        let payload = PyDict::new(py);
+        for candidate_index in candidate_indices {
+            let summary = if override_index == Some(candidate_index) {
+                override_data
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!("override_index implies override_data"))
+            } else {
+                &self.summaries[candidate_index]
+            };
+            let feature_values = chooser_summary_features(&query_data, summary);
+            let feature_dict = PyDict::new(py);
+            feature_dict.set_item("middle_initial_compatibility", feature_values[0])?;
+            feature_dict.set_item("affiliation_overlap", feature_values[1])?;
+            feature_dict.set_item("coauthor_overlap", feature_values[2])?;
+            feature_dict.set_item("venue_overlap", feature_values[3])?;
+            feature_dict.set_item("year_compatibility", feature_values[4])?;
+            feature_dict.set_item("title_overlap", feature_values[5])?;
+            feature_dict.set_item("specter_centroid_similarity", feature_values[6])?;
+            feature_dict.set_item("specter_exemplar_similarity", feature_values[7])?;
+            payload.set_item(summary.component_key.as_str(), feature_dict)?;
+        }
+        Ok(payload.unbind())
     }
 }
 
@@ -5320,11 +6544,41 @@ mod tests {
 #[pymodule]
 fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("RETRIEVAL_FEATURE_ORDER", RETRIEVAL_FEATURE_ORDER.to_vec())?;
+    m.add(
+        "DEFAULT_HYBRID_CENTROID_WEIGHTS",
+        DEFAULT_HYBRID_CENTROID_WEIGHTS.to_vec(),
+    )?;
+    m.add(
+        "DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS",
+        DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS.to_vec(),
+    )?;
+    m.add(
+        "RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE",
+        RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE,
+    )?;
+    m.add(
+        "RETRIEVAL_YEAR_SCORE_DECAY_YEARS",
+        RETRIEVAL_YEAR_SCORE_DECAY_YEARS,
+    )?;
+    m.add(
+        "RETRIEVAL_YEAR_SCORE_RANGE_GAP",
+        RETRIEVAL_YEAR_SCORE_RANGE_GAP,
+    )?;
+    m.add(
+        "RETRIEVAL_YEAR_SCORE_RANGE_PENALTY",
+        RETRIEVAL_YEAR_SCORE_RANGE_PENALTY,
+    )?;
+    m.add(
+        "RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP",
+        RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+    )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
     m.add_function(wrap_pyfunction!(signature_ngrams_batch, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_json_ingest_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(reset_last_json_ingest_telemetry, m)?)?;
     m.add_class::<RustFeaturizer>()?;
     m.add_class::<RustHybridCentroidRetriever>()?;
+    m.add_class::<RustNameCompatibleSubblockSelector>()?;
     Ok(())
 }

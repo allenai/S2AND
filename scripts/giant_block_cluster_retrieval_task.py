@@ -342,8 +342,18 @@ def _classify_subblocks(
     single_letter: dict[str, list[str]] = {}
     for subblock_key in sorted(subblocks):
         signature_ids = list(subblocks[subblock_key])
-        first_signature = dataset.signatures[signature_ids[0]]
-        if len(_signature_first_for_rules(first_signature)) <= 1:
+        full_first_signature_ids: list[str] = []
+        initial_or_empty_signature_ids: list[str] = []
+        for signature_id in signature_ids:
+            signature = dataset.signatures[signature_id]
+            if len(_signature_first_for_rules(signature)) <= 1:
+                initial_or_empty_signature_ids.append(signature_id)
+            else:
+                full_first_signature_ids.append(signature_id)
+        if full_first_signature_ids and initial_or_empty_signature_ids:
+            multi_letter[f"{subblock_key}::multi_letter"] = full_first_signature_ids
+            single_letter[f"{subblock_key}::single_letter"] = initial_or_empty_signature_ids
+        elif initial_or_empty_signature_ids:
             single_letter[subblock_key] = signature_ids
         else:
             multi_letter[subblock_key] = signature_ids

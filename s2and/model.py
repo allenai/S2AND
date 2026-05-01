@@ -707,6 +707,7 @@ def _get_constraint_value(
     use_rust_constraints: bool | None = None,
     runtime_context: RuntimeContext | None = None,
     use_cache: bool = False,
+    suppress_orcid: bool = False,
 ):
     if runtime_context is None:
         runtime_context = build_runtime_context("constraints")
@@ -723,12 +724,14 @@ def _get_constraint_value(
                 featurizer=rust_featurizer,
                 runtime_context=runtime_context,
                 use_cache=use_cache,
+                suppress_orcid=suppress_orcid,
             ),
             fallback_fn=lambda: dataset.get_constraint(
                 sig_id_1,
                 sig_id_2,
                 dont_merge_cluster_seeds=dont_merge_cluster_seeds,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                suppress_orcid=suppress_orcid,
             ),
             runtime_context=runtime_context,
             label="constraint evaluation",
@@ -741,6 +744,7 @@ def _get_constraint_value(
         sig_id_2,
         dont_merge_cluster_seeds=dont_merge_cluster_seeds,
         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+        suppress_orcid=suppress_orcid,
     )
 
 
@@ -862,6 +866,7 @@ def _build_incremental_constraint_backend(
     use_default_constraints_as_supervision: bool,
     runtime_context: RuntimeContext,
     use_cache: bool = False,
+    suppress_orcid: bool = False,
 ) -> _IncrementalConstraintBackend:
     """Build Phase A constraint backend state once for reuse across subblocks."""
     rust_featurizer, use_rust_constraints = _initialize_incremental_constraint_backend(
@@ -893,6 +898,7 @@ def _build_incremental_constraint_backend(
         use_rust_constraints=use_rust_constraints,
         constraint_api_mode=constraint_api_mode,
         signature_index_by_id=signature_index_by_id,
+        suppress_orcid=suppress_orcid,
     )
 
 
@@ -912,10 +918,12 @@ def _resolve_constraint_labels_batch(
     num_threads: int | None = None,
     constraint_api_mode: str | None = None,
     signature_index_by_id: dict[str, int] | None = None,
+    suppress_orcid: bool = False,
 ) -> tuple[list[float], _ConstraintBatchTelemetry]:
     if constraint_backend is not None:
         rust_featurizer = constraint_backend.rust_featurizer
         use_rust_constraints = constraint_backend.use_rust_constraints
+        suppress_orcid = constraint_backend.suppress_orcid
         if constraint_api_mode is None:
             constraint_api_mode = constraint_backend.constraint_api_mode
         if signature_index_by_id is None:
@@ -963,6 +971,7 @@ def _resolve_constraint_labels_batch(
                 s2,
                 dont_merge_cluster_seeds=dont_merge_cluster_seeds,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+                suppress_orcid=suppress_orcid,
             )
             for s1, s2 in unresolved_pairs
         ]
@@ -983,6 +992,7 @@ def _resolve_constraint_labels_batch(
                 featurizer=rust_featurizer,
                 runtime_context=runtime_context,
                 use_cache=use_cache,
+                suppress_orcid=suppress_orcid,
             )
 
         def _resolve_values_python_fallback() -> list[float | None]:
@@ -1233,6 +1243,7 @@ class _IncrementalConstraintBackend:
     use_rust_constraints: bool | None
     constraint_api_mode: str
     signature_index_by_id: dict[str, int] | None
+    suppress_orcid: bool = False
 
 
 @dataclass(frozen=True)
@@ -1399,6 +1410,8 @@ class Clusterer:
             whether to enforce "disallow" constraints for signatures in different required seed clusters
         batch_size: int
             batch size for featurization, lower means less memory, but slower
+        suppress_orcid: bool
+            Whether default constraint resolution should ignore same-ORCID must-link constraints.
     """
 
     def __init__(
@@ -1417,6 +1430,7 @@ class Clusterer:
         nameless_featurizer_info: FeaturizationInfo | None = None,
         dont_merge_cluster_seeds: bool = True,
         batch_size: int = 1000000,
+        suppress_orcid: bool = False,
     ):
         self.featurizer_info = featurizer_info
         self.nameless_featurizer_info = nameless_featurizer_info
@@ -1430,6 +1444,7 @@ class Clusterer:
         self.use_cache = use_cache
         self.use_default_constraints_as_supervision = use_default_constraints_as_supervision
         self.dont_merge_cluster_seeds = dont_merge_cluster_seeds
+        self.suppress_orcid = suppress_orcid
         if cluster_model is None:
             self.cluster_model = FastCluster(linkage="average")
         else:
@@ -1637,6 +1652,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             use_cache=cache_policy.rust_disk_cache_enabled,
+            suppress_orcid=getattr(self, "suppress_orcid", False),
         )
 
         telemetry = _ConstraintTelemetryAccumulator()
@@ -1757,6 +1773,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             use_cache=cache_policy.rust_disk_cache_enabled,
+            suppress_orcid=getattr(self, "suppress_orcid", False),
         )
         rust_featurizer = constraint_backend.rust_featurizer
         constraint_api_mode = constraint_backend.constraint_api_mode
@@ -1802,6 +1819,7 @@ class Clusterer:
                             featurizer=rust_featurizer,
                             runtime_context=runtime_context,
                             use_cache=cache_policy.rust_disk_cache_enabled,
+                            suppress_orcid=constraint_backend.suppress_orcid,
                         )
                     except Exception as exc:
                         _handle_rust_backend_exception(
@@ -3393,6 +3411,7 @@ class Clusterer:
                 use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
                 runtime_context=runtime_context,
                 use_cache=self.use_cache,
+                suppress_orcid=getattr(self, "suppress_orcid", False),
             )
         constraint_telemetry = _ConstraintTelemetryAccumulator()
         total_ram_for_phase = total_ram_bytes
@@ -3880,6 +3899,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             use_cache=self.use_cache,
+            suppress_orcid=getattr(self, "suppress_orcid", False),
         )
 
         for phase_a_batch_index, phase_a_batch in enumerate(phase_a_batches, start=1):
@@ -4272,6 +4292,7 @@ class Clusterer:
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
             runtime_context=runtime_context,
             use_cache=self.use_cache,
+            suppress_orcid=getattr(self, "suppress_orcid", False),
         )
         signature_to_cluster_to_average_dist: dict[str, dict[int | str, IncrementalDistStats]] = defaultdict(
             lambda: defaultdict(lambda: (0.0, 0, float("inf")))

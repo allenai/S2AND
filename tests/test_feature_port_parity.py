@@ -135,6 +135,21 @@ def _reset_featurizer_env_caches():
     featurizer_mod.__dict__["_RUST_BATCH_MAX_CHUNK_MB_CACHE"] = None
 
 
+@contextmanager
+def _temporary_env(**values):
+    original = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            os.environ[name] = value
+        yield
+    finally:
+        for name, value in original.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _build_labeled_pairs(sig_ids, count=20, seed=123):
     rng = random.Random(seed)
     pairs = []
@@ -149,16 +164,13 @@ def _build_labeled_pairs(sig_ids, count=20, seed=123):
 
 @pytest.fixture(scope="session")
 def dataset():
-    # Speed/safety: skip fastText (optional) to avoid large model loads in tests
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
-    # Force python reference featurizer for parity tests
-    os.environ["S2AND_BACKEND"] = "python"
-    # Avoid reusing stale process-level env caches between parity fixtures.
-    _reset_featurizer_env_caches()
+    with _temporary_env(S2AND_SKIP_FASTTEXT="1", S2AND_BACKEND="python"):
+        # Avoid reusing stale process-level env caches between parity fixtures.
+        _reset_featurizer_env_caches()
 
-    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-    ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
-    ds = _attach_fake_specter_embeddings(ds)
+        data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+        ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
+        ds = _attach_fake_specter_embeddings(ds)
     # set global for _single_pair_featurize
     featurizer_mod.global_dataset = ds
     return ds
@@ -166,15 +178,12 @@ def dataset():
 
 @pytest.fixture(scope="session")
 def dataset_with_refs():
-    # Speed/safety: skip fastText (optional) to avoid large model loads in tests
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
-    # Force python reference featurizer for parity tests
-    os.environ.setdefault("S2AND_BACKEND", "python")
-    # Avoid reusing stale process-level env caches between parity fixtures.
-    _reset_featurizer_env_caches()
+    with _temporary_env(S2AND_SKIP_FASTTEXT="1", S2AND_BACKEND="python"):
+        # Avoid reusing stale process-level env caches between parity fixtures.
+        _reset_featurizer_env_caches()
 
-    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "qian")
-    ds = _load_dataset_from_dir(data_dir, "qian_parity_session", compute_reference_features=True)
+        data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "qian")
+        ds = _load_dataset_from_dir(data_dir, "qian_parity_session", compute_reference_features=True)
     return ds
 
 
@@ -326,6 +335,103 @@ def test_rust_featurizer_supports_string_paper_ids():
     assert constraint is None or isinstance(constraint, int | float)
 
 
+def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    _reset_featurizer_env_caches()
+    signatures = {
+        "s1": {
+            "signature_id": "s1",
+            "paper_id": "app:1",
+            "author_info": {
+                "position": 0,
+                "block": "a_smith",
+                "first": "A",
+                "middle": "",
+                "last": "Smith",
+                "suffix": None,
+                "email": None,
+                "affiliations": [],
+                "given_block": "a_smith",
+            },
+        },
+        "s2": {
+            "signature_id": "s2",
+            "paper_id": "app:2",
+            "author_info": {
+                "position": 0,
+                "block": "alice_smith",
+                "first": "Alice",
+                "middle": "",
+                "last": "Smith",
+                "suffix": None,
+                "email": None,
+                "affiliations": [],
+                "given_block": "alice_smith",
+            },
+        },
+    }
+    papers = {
+        "app:1": {
+            "paper_id": "app:1",
+            "title": "A",
+            "abstract": "",
+            "authors": [{"author_name": "A Smith", "position": 0}],
+            "venue": "",
+            "journal_name": "",
+            "year": 2020,
+            "references": [],
+        },
+        "app:2": {
+            "paper_id": "app:2",
+            "title": "B",
+            "abstract": "",
+            "authors": [{"author_name": "Alice Smith", "position": 0}],
+            "venue": "",
+            "journal_name": "",
+            "year": 2021,
+            "references": [],
+        },
+    }
+    ds = ANDData(
+        signatures=signatures,
+        papers=papers,
+        name="single_initial_name_text_parity",
+        mode="train",
+        specter_embeddings=None,
+        clusters={"c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1}},
+        cluster_seeds=None,
+        block_type="s2",
+        train_pairs=None,
+        val_pairs=None,
+        test_pairs=None,
+        train_pairs_size=10,
+        val_pairs_size=10,
+        test_pairs_size=10,
+        n_jobs=1,
+        load_name_counts=False,
+        preprocess=True,
+        random_seed=42,
+        name_tuples="filtered",
+        use_orcid_id=True,
+        use_sinonym_overwrite=False,
+        compute_reference_features=False,
+    )
+    original_global_dataset = getattr(featurizer_mod, "global_dataset", None)
+    featurizer_mod.global_dataset = ds
+    try:
+        ref_features, _ = _single_pair_featurize(("s1", "s2"))
+    finally:
+        featurizer_mod.global_dataset = original_global_dataset
+    rust_features = featurize_pair_rust(ds, "s1", "s2")
+    feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
+
+    assert ds.get_constraint("s1", "s2") is None
+    for feature_name in ("levenshtein", "prefix", "lcs", "jaro"):
+        idx = feature_names.index(feature_name)
+        assert not math.isnan(ref_features[idx])
+        assert equalish(ref_features[idx], rust_features[idx])
+
+
 def test_featurize_pair_rust_parity(dataset, sample_pairs):
     for s1, s2 in sample_pairs:
         ref_features, _ = _single_pair_featurize((s1, s2))
@@ -348,15 +454,20 @@ def test_featurize_pair_rust_parity_with_deferred_signature_ngrams(dataset, samp
         assert signature.author_info_affiliations_n_grams is None
         assert signature.author_info_coauthor_n_grams is None
 
+    original_global_dataset = featurizer_mod.global_dataset
     featurizer_mod.global_dataset = dataset
-    for s1, s2 in sample_pairs[:5]:
-        ref_features, _ = _single_pair_featurize((s1, s2))
-        rust_features = featurize_pair_rust(ds_rust, s1, s2)
-        assert len(ref_features) == len(rust_features)
-        for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
-            assert equalish(ref_val, got_val), (
-                f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
-            )
+    try:
+        for s1, s2 in sample_pairs[:5]:
+            ref_features, _ = _single_pair_featurize((s1, s2))
+            rust_features = featurize_pair_rust(ds_rust, s1, s2)
+            assert len(ref_features) == len(rust_features)
+            for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
+                assert equalish(ref_val, got_val), (
+                    f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: "
+                    f"ref={ref_val}, got={got_val}"
+                )
+    finally:
+        featurizer_mod.global_dataset = original_global_dataset
 
 
 def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch):
@@ -418,6 +529,39 @@ def test_get_constraint_rust_parity(dataset, constraint_pairs):
             assert ref_val is None and got_val is None
         else:
             assert ref_val == got_val, f"Constraint mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
+
+
+def test_get_constraint_rust_ignores_reliable_language_mismatch():
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+    ds = _load_dataset_from_dir(data_dir, "dummy_language_constraint_removed")
+
+    s1 = "0"
+    s2 = "2"
+    paper_id_1 = str(ds.signatures[s1].paper_id)
+    paper_id_2 = str(ds.signatures[s2].paper_id)
+
+    ds.papers[paper_id_1] = ds.papers[paper_id_1]._replace(predicted_language="en", is_reliable=True)
+    ds.papers[paper_id_2] = ds.papers[paper_id_2]._replace(predicted_language="fr", is_reliable=True)
+
+    ref_val = ds.get_constraint(s1, s2)
+    got_val = get_constraint_rust(ds, s1, s2)
+
+    assert ref_val is None
+    assert got_val is None
+
+    rust_featurizer = _get_rust_featurizer(ds)
+    signature_ids = list(rust_featurizer.signature_ids())
+    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
+
+    got_string = get_constraints_matrix_rust(ds, [(s1, s2)], featurizer=rust_featurizer)
+    got_indexed = get_constraints_matrix_indexed_rust(
+        ds,
+        [(signature_index[s1], signature_index[s2])],
+        featurizer=rust_featurizer,
+    )
+
+    assert got_string == [None]
+    assert got_indexed == [None]
 
 
 def test_get_constraints_matrix_rust_parity(dataset, constraint_pairs):
@@ -596,6 +740,47 @@ def test_get_constraint_rust_parity_incremental_flag(dataset):
         assert ref_val is None and got_val is None
     else:
         assert ref_val == got_val, f"Incremental constraint mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
+
+
+def test_get_constraint_rust_parity_incremental_flag_ignores_explicit_disallow(dataset):
+    s1 = "0"
+    s2 = "1"
+    if s1 not in dataset.signatures or s2 not in dataset.signatures:
+        raise pytest.skip.Exception("Dummy parity dataset is missing the explicit disallow pair 0/1")
+    require_map = {}
+    disallow_set = {(s1, s2)}
+    with _temporary_cluster_seeds(dataset, require_map, disallow_set):
+        ref_val = dataset.get_constraint(s1, s2, incremental_dont_use_cluster_seeds=True)
+        got_val = get_constraint_rust(dataset, s1, s2, incremental_dont_use_cluster_seeds=True)
+    assert ref_val is None
+    assert (
+        got_val == ref_val
+    ), f"Explicit disallow incremental mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
+
+
+def test_get_constraint_rust_parity_incremental_flag_ignores_cross_required_cluster_disallow(dataset):
+    s1 = "0"
+    s2 = "1"
+    if s1 not in dataset.signatures or s2 not in dataset.signatures:
+        raise pytest.skip.Exception("Dummy parity dataset is missing the explicit disallow pair 0/1")
+    require_map = {s1: "cluster_a", s2: "cluster_b"}
+    disallow_set = set()
+    with _temporary_cluster_seeds(dataset, require_map, disallow_set):
+        ref_val = dataset.get_constraint(
+            s1,
+            s2,
+            incremental_dont_use_cluster_seeds=True,
+        )
+        got_val = get_constraint_rust(
+            dataset,
+            s1,
+            s2,
+            incremental_dont_use_cluster_seeds=True,
+        )
+    assert ref_val is None
+    assert (
+        got_val == ref_val
+    ), f"Cross-required-cluster incremental mismatch for pair {s1},{s2}: ref={ref_val}, got={got_val}"
 
 
 def test_get_constraint_rust_parity_dont_merge_cluster_seeds_false(dataset):

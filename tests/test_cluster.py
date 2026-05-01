@@ -55,6 +55,18 @@ class TestClusterer(unittest.TestCase):
         self.assertIs(constraint_3, 0)
         self.assertIs(constraint_4, 0)
 
+    def test_incremental_dont_use_cluster_seeds_ignores_cross_seed_disallow(self):
+        self.dummy_dataset.cluster_seeds_disallow = {("0", "1")}
+        self.dummy_dataset.cluster_seeds_require = {"0": 0, "1": 1}
+        constraint = self.dummy_dataset.get_constraint(
+            "0",
+            "1",
+            low_value=0,
+            high_value=2,
+            incremental_dont_use_cluster_seeds=True,
+        )
+        self.assertIsNone(constraint)
+
     def test_make_distance_matrix_fastcluster(self):
         block = {
             "a sattar": ["0", "1", "2"],

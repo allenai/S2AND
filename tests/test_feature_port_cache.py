@@ -119,6 +119,7 @@ def _reset_feature_port_state(monkeypatch, tmp_path):
     )
     monkeypatch.delenv("S2AND_RUST_FEATURIZER_MAX_INMEM", raising=False)
     monkeypatch.delenv("S2AND_RUST_NAME_COUNTS_JSON", raising=False)
+    monkeypatch.delenv("S2AND_RUST_BUILD_PATH", raising=False)
     yield
     feature_port.clear_rust_featurizer_cache()
 
@@ -584,6 +585,26 @@ def test_json_ingest_routes_canonical_payload(monkeypatch):
         None,
         False,
     )
+
+
+def test_rust_build_path_env_forces_from_dataset(monkeypatch):
+    dataset = DummyDataset("inference_dataset", mode="inference")
+    dataset.signatures_path = "signatures.json"
+    dataset.papers_path = "papers.json"
+    monkeypatch.setenv(feature_port.RUST_BUILD_PATH_ENV, "from_dataset")
+
+    feature_port._get_rust_featurizer(dataset)
+
+    assert DummyRustFeaturizer.created == ["inference_dataset"]
+    assert DummyRustFeaturizer.from_json_created == []
+
+
+def test_rust_build_path_env_rejects_unknown_value(monkeypatch):
+    dataset = DummyDataset("inference_dataset", mode="inference")
+    monkeypatch.setenv(feature_port.RUST_BUILD_PATH_ENV, "surprise")
+
+    with pytest.raises(ValueError, match="S2AND_RUST_BUILD_PATH"):
+        feature_port._get_rust_featurizer(dataset)
 
 
 def test_featurizer_telemetry_logs_runtime_callsite(caplog):

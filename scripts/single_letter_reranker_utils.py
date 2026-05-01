@@ -25,6 +25,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +33,13 @@ import numpy as np
 
 import s2and.data as s2and_data_module
 import s2and.subblocking as s2and_subblocking_module
-from s2and.consts import DEFAULT_CHUNK_SIZE
+from s2and.consts import DEFAULT_CHUNK_SIZE, LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import many_pairs_featurize
 from s2and.model import _predict_and_combine
-from s2and.text import normalize_text
+from s2and.subblocking import make_subblocks_with_telemetry
+from s2and.text import name_counts as pairwise_name_counts
+from s2and.text import normalize_text, same_prefix_tokens
 
 try:
     from scripts.name_count_loading import LoadNameCountsMode, resolve_load_name_counts
@@ -45,15 +48,23 @@ except ImportError:  # pragma: no cover - direct script execution path
 
 try:
     import scripts.eval_cluster_retrieval as retrieval
+    from scripts.joint_safe_link_dataset_contract import apply_hard_disallow_component_filter
     from scripts.single_letter_retrieval_utils import (
+        FrozenRustHybridCentroidPolicy,
         RustHybridCentroidRetrieverHandle,
+        build_rust_name_compatible_subblock_selector,
+        compute_chooser_summary_features_rust_hybrid_centroid,
         rank_top_summaries,
         rank_top_summaries_rust_hybrid_centroid,
     )
 except ImportError:  # pragma: no cover - direct script execution path
     import eval_cluster_retrieval as retrieval  # type: ignore
+    from joint_safe_link_dataset_contract import apply_hard_disallow_component_filter  # type: ignore
     from single_letter_retrieval_utils import (  # type: ignore
+        FrozenRustHybridCentroidPolicy,
         RustHybridCentroidRetrieverHandle,
+        build_rust_name_compatible_subblock_selector,
+        compute_chooser_summary_features_rust_hybrid_centroid,
         rank_top_summaries,
         rank_top_summaries_rust_hybrid_centroid,
     )
@@ -67,21 +78,36 @@ DEFAULT_LABELED_DATASETS = (
     "zbmath",
 )
 DEFAULT_QUERY_VIEWS = (
+    "full",
     "initial_only",
-    "initial_only_no_specter",
-    "initial_only_sparse_metadata",
 )
 DEFAULT_RETRIEVAL_APPROACH = "all__hybrid_centroid"
 SUPPORTED_RETRIEVAL_METHODS = frozenset({"hybrid_centroid", "hybrid_exemplar_4"})
+RETRIEVAL_ENGINE_CHOICES = frozenset({"auto", "python", "rust"})
 RETRIEVAL_AMBIGUITY_SCORE_GAP = 0.02
 RETRIEVAL_AMBIGUITY_SAME_FAMILY_GAP = 0.05
-DEFAULT_RETRIEVAL_WINDOW_SIZE = 100
-DEFAULT_CANDIDATE_WINDOW_SENSITIVITY = (10, 25, 50, 100)
-DEFAULT_H_WANG_WINDOW_SENSITIVITY = (25, 50, 100)
+DEFAULT_RETRIEVAL_WINDOW_SIZE = 25
+DEFAULT_CANDIDATE_WINDOW_SENSITIVITY = (5, 25)
+DEFAULT_H_WANG_WINDOW_SENSITIVITY = (5, 25)
+DEFAULT_CHOOSER_CACHE_MAX_TOP_K = 25
+RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_KEY = "_rust_name_compatible_subblock_selector"
+RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_FALLBACK_COUNT_KEY = "_rust_name_compatible_subblock_selector_fallback_count"
+RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_FALLBACK_REASON_KEY = "_rust_name_compatible_subblock_selector_fallback_reason"
+STRICT_RUST_NAME_COMPAT_ENV = "S2AND_STRICT_RUST_NAME_COMPAT"
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+COUNT_NORMALIZED_CONFIDENCE_TOP_K = 5
+COUNT_NORMALIZED_CONFIDENCE_SUPPORT_GAMMA = 0.5
+CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE = 192.0
 GENERIC_HEURISTIC_OVERRIDE_MARGIN = 0.01
-GENERIC_CROSS_FAMILY_EXTRA_MARGIN = 0.03
+GENERIC_CROSS_FAMILY_EXTRA_MARGIN = 0.04
 GENERIC_FAMILY_MIN_COUNT = 3
 GENERIC_FAMILY_MIN_RATIO = 0.6
+EXACT_TITLE_ANCHOR_THRESHOLD = 0.95
+ANCHOR_SUPPORT_OVERLAP_THRESHOLD = 0.05
+ANCHOR_YEAR_COMPATIBILITY_THRESHOLD = 0.85
+NEAR_TIED_RETRIEVAL_SCORE_GAP = 0.02
+PLAUSIBLE_CONFLICT_RETRIEVAL_GAP = 0.05
+SEVERE_CONTRADICTION_THRESHOLD = 0.75
 CALIBRATION_BIN_COUNT = 10
 BASELINE_FEATURE_COLUMNS = (
     "retrieval_rank",
@@ -102,15 +128,15 @@ BASELINE_FEATURE_COLUMNS = (
     "top5_mean_delta_vs_best_competitor",
     "cluster_size_ratio_vs_best_competitor",
     "same_family_vs_best_competitor",
-    "dominant_name_ratio",
-    "named_signature_count",
-    "confident_family_flag",
     "same_family_as_top1",
     "middle_initial_compatibility",
     "affiliation_overlap",
     "coauthor_overlap",
     "venue_overlap",
     "year_compatibility",
+    "title_overlap",
+    "specter_centroid_similarity",
+    "specter_exemplar_similarity",
     "family_instability_flag",
     "fragment_flag",
     "query_has_specter",
@@ -118,6 +144,33 @@ BASELINE_FEATURE_COLUMNS = (
     "query_has_affiliations",
     "query_has_middle",
     "query_has_full_first",
+)
+RAW_METADATA_SIMILARITY_FEATURE_COLUMNS = (
+    "raw_max_affiliation_jaccard",
+    "raw_max_coauthor_jaccard",
+    "raw_max_title_jaccard",
+    "raw_max_text_jaccard",
+)
+PAIRWISE_NAME_COUNT_FEATURE_NAMES = (
+    "first_name_count_min",
+    "last_first_name_count_min",
+    "last_name_count_min",
+    "last_first_initial_count_min",
+    "first_name_count_max",
+    "last_first_name_count_max",
+)
+NAME_COUNT_RARITY_FEATURE_COLUMNS = (
+    "first_name_count_min_rarity",
+    "last_first_name_count_min_rarity",
+    "last_name_count_min_rarity",
+    "last_first_initial_count_min_rarity",
+    "first_name_count_max_rarity",
+    "last_first_name_count_max_rarity",
+    "first_prefix_x_last_first_name_count_min_rarity",
+    "candidate_first_name_count_min_rarity",
+    "candidate_last_first_name_count_min_rarity",
+    "candidate_last_name_count_min_rarity",
+    "candidate_last_first_initial_count_min_rarity",
 )
 PAIRWISE_TRANSFER_FEATURE_COLUMNS = (
     "min_distance",
@@ -135,18 +188,22 @@ PAIRWISE_TRANSFER_FEATURE_COLUMNS = (
     "count_normalized_confidence",
     "distance_spread_top5_minus_min",
     "distance_spread_mean_minus_top5",
-    "dominant_name_ratio",
-    "confident_family_flag",
     "same_family_as_best_top5",
     "middle_initial_compatibility",
     "affiliation_overlap",
     "coauthor_overlap",
     "venue_overlap",
     "year_compatibility",
+    "title_overlap",
+    "specter_centroid_similarity",
+    "specter_exemplar_similarity",
     "affiliation_overlap_rank_fraction",
     "coauthor_overlap_rank_fraction",
     "venue_overlap_rank_fraction",
     "year_compatibility_rank_fraction",
+    "title_overlap_rank_fraction",
+    "specter_centroid_rank_fraction",
+    "specter_exemplar_rank_fraction",
     "family_instability_flag",
     "query_has_specter",
     "query_has_coauthors",
@@ -229,7 +286,6 @@ GENERALIZED_V8_FEATURE_COLUMNS = (
 GENERALIZED_V9_DROPPED_COLUMNS = frozenset(
     {
         "beats_top1_after_penalty",
-        "confident_family_flag",
         "family_instability_flag",
         "heuristic_cross_family_top1_vs_best_top5",
         "heuristic_margin_slack",
@@ -251,6 +307,76 @@ SMALL_CORE_3_FEATURE_COLUMNS = (
     "top3_distance_rank_fraction",
     "is_heuristic_choice",
 )
+SMALL_CORE_6_FEATURE_COLUMNS = (
+    *SMALL_CORE_3_FEATURE_COLUMNS,
+    "is_retrieval_top1",
+    "affiliation_overlap",
+    "count_normalized_confidence",
+)
+TITLE_FAST_V1_FEATURE_COLUMNS = (
+    "min_distance_rank_fraction",
+    "top3_distance_rank_fraction",
+    "is_heuristic_choice",
+    "is_retrieval_top1",
+    "affiliation_overlap",
+    "count_normalized_confidence",
+    "venue_overlap_rank_fraction",
+    "same_family_as_top1",
+    "top5_gap_to_retrieval_top1",
+    "heuristic_margin_slack",
+    "heuristic_prefers_top1",
+    "affiliation_overlap_rank_fraction",
+    "specter_exemplar_rank_fraction",
+    "year_compatibility",
+    "title_overlap_rank_fraction",
+    "coauthor_overlap",
+    "venue_overlap",
+    "middle_initial_compatibility",
+    "title_overlap",
+    "coauthor_overlap_rank_fraction",
+)
+CLASSIC_SHORTLIST_INVARIANT_V1_FEATURE_COLUMNS = (
+    "affiliation_overlap",
+    "affiliation_contradiction_severity",
+    "venue_overlap",
+    "coauthor_overlap",
+    "middle_initial_compatibility",
+    "title_overlap",
+    "exact_anchor_evidence_flag",
+    "year_compatibility",
+    "year_mismatch_severity",
+    "specter_exemplar_similarity",
+    "specter_centroid_similarity",
+    "cluster_size_log_capped",
+    "top5_mean_distance",
+    "min_distance",
+    "distance_spread_top5_minus_min",
+    "query_view__full",
+    "query_view__initial_only",
+)
+CLASSIC_BEST21_FEATURE_COLUMNS = (
+    "min_distance",
+    "top3_distance_best_gap",
+    "retrieval_rank",
+    "top20_mean_distance",
+    "top3_gap_to_heuristic_choice",
+    "top1_strongest_contradiction",
+    "retrieval_score",
+    "title_overlap",
+    "retrieval_top1_score",
+    "specter_exemplar_similarity",
+    "initial_only_x_venue_overlap",
+    "count_normalized_confidence",
+    "distance_spread_mean_minus_top5",
+    "affiliation_contradiction_severity",
+    "cluster_size_log_capped",
+    "coauthor_gap_to_best_same_coarse_family",
+    "near_tied_alternative_count",
+    "pair_count",
+    "retrieval_score_rank_fraction",
+    "top3_distance_rank_fraction",
+    "middle_initial_compatibility",
+)
 FEATURE_PRESETS = {
     "baseline": BASELINE_FEATURE_COLUMNS,
     "generalized_v1": GENERALIZED_V1_FEATURE_COLUMNS,
@@ -263,9 +389,18 @@ FEATURE_PRESETS = {
     "generalized_v8": GENERALIZED_V8_FEATURE_COLUMNS,
     "generalized_v9": GENERALIZED_V9_FEATURE_COLUMNS,
     "small_core_3": SMALL_CORE_3_FEATURE_COLUMNS,
+    "small_core_6": SMALL_CORE_6_FEATURE_COLUMNS,
+    "title_fast_v1": TITLE_FAST_V1_FEATURE_COLUMNS,
+    "classic_shortlist_invariant_v1": CLASSIC_SHORTLIST_INVARIANT_V1_FEATURE_COLUMNS,
+    "classic_best21": CLASSIC_BEST21_FEATURE_COLUMNS,
 }
-DEFAULT_FEATURE_PRESET = "generalized_v3"
+DEFAULT_FEATURE_PRESET = "classic_best21"
 FEATURE_COLUMNS = FEATURE_PRESETS[DEFAULT_FEATURE_PRESET]
+AUDIT_ORCID_METADATA_COLUMNS = (
+    "_audit_normalized_orcid",
+    "_audit_orcid_group_size",
+    "_audit_orcid_group_size_bucket",
+)
 ENRICHMENT_PROFILES = (
     "none",
     "heuristic_error_regions_v1",
@@ -281,9 +416,10 @@ ROW_COLUMNS = (
     "query_group_id",
     "query_id",
     "query_signature_id",
-    "normalized_orcid",
-    "orcid_group_size",
-    "orcid_group_size_bucket",
+    "query_first_token",
+    "query_first_initial",
+    "query_year",
+    *AUDIT_ORCID_METADATA_COLUMNS,
     "split",
     "block_key",
     "block_size",
@@ -301,6 +437,8 @@ ROW_COLUMNS = (
     "best_competitor_component_key",
     "family_id",
     "dominant_first_name",
+    "candidate_year_min",
+    "candidate_year_max",
     "label",
     "candidate_count",
     "candidate_signatures",
@@ -326,15 +464,17 @@ ROW_COLUMNS = (
     "top5_mean_delta_vs_best_competitor",
     "cluster_size_ratio_vs_best_competitor",
     "same_family_vs_best_competitor",
-    "dominant_name_ratio",
-    "named_signature_count",
-    "confident_family_flag",
     "same_family_as_top1",
     "middle_initial_compatibility",
     "affiliation_overlap",
     "coauthor_overlap",
     "venue_overlap",
     "year_compatibility",
+    "title_overlap",
+    *RAW_METADATA_SIMILARITY_FEATURE_COLUMNS,
+    *NAME_COUNT_RARITY_FEATURE_COLUMNS,
+    "specter_centroid_similarity",
+    "specter_exemplar_similarity",
     "family_instability_flag",
     "fragment_flag",
     "query_has_specter",
@@ -344,7 +484,8 @@ ROW_COLUMNS = (
     "query_has_full_first",
 )
 INT_COLUMNS = {
-    "orcid_group_size",
+    "query_year",
+    "_audit_orcid_group_size",
     "block_size",
     "component_size",
     "positive_candidate_count",
@@ -354,6 +495,8 @@ INT_COLUMNS = {
     "label",
     "candidate_count",
     "candidate_signatures",
+    "candidate_year_min",
+    "candidate_year_max",
     "scored_candidate_components",
     "scored_candidate_signatures",
     "orcid_filter_applied",
@@ -362,8 +505,6 @@ INT_COLUMNS = {
     "retrieval_rank",
     "cluster_size",
     "pair_count",
-    "named_signature_count",
-    "confident_family_flag",
     "same_family_as_top1",
     "same_family_vs_best_competitor",
     "family_instability_flag",
@@ -388,12 +529,16 @@ FLOAT_COLUMNS = {
     "top3_mean_delta_vs_best_competitor",
     "top5_mean_delta_vs_best_competitor",
     "cluster_size_ratio_vs_best_competitor",
-    "dominant_name_ratio",
     "middle_initial_compatibility",
     "affiliation_overlap",
     "coauthor_overlap",
     "venue_overlap",
     "year_compatibility",
+    "title_overlap",
+    *RAW_METADATA_SIMILARITY_FEATURE_COLUMNS,
+    *NAME_COUNT_RARITY_FEATURE_COLUMNS,
+    "specter_centroid_similarity",
+    "specter_exemplar_similarity",
 }
 QUERY_GROUP_METADATA_COLUMNS = (
     "source",
@@ -404,9 +549,7 @@ QUERY_GROUP_METADATA_COLUMNS = (
     "query_group_id",
     "query_id",
     "query_signature_id",
-    "normalized_orcid",
-    "orcid_group_size",
-    "orcid_group_size_bucket",
+    *AUDIT_ORCID_METADATA_COLUMNS,
     "split",
     "block_key",
     "block_size",
@@ -431,7 +574,7 @@ QUERY_GROUP_METADATA_COLUMNS = (
     "cross_family_top1_vs_positive",
 )
 QUERY_GROUP_METADATA_INT_COLUMNS = {
-    "orcid_group_size",
+    "_audit_orcid_group_size",
     "block_size",
     "block_component_count",
     "component_size",
@@ -462,6 +605,7 @@ DERIVED_FEATURE_COLUMNS = {
     "distance_spread_top5_minus_min",
     "distance_spread_mean_minus_top5",
     "distance_spread_top20_minus_top5",
+    "cluster_size_log_capped",
     "same_family_as_best_top5",
     "same_family_as_heuristic_choice",
     "coarse_family_pair_count_top50",
@@ -472,6 +616,9 @@ DERIVED_FEATURE_COLUMNS = {
     "coauthor_overlap_rank_fraction",
     "venue_overlap_rank_fraction",
     "year_compatibility_rank_fraction",
+    "title_overlap_rank_fraction",
+    "specter_centroid_rank_fraction",
+    "specter_exemplar_rank_fraction",
     "is_retrieval_top1",
     "is_best_top3",
     "is_best_top5",
@@ -488,8 +635,44 @@ DERIVED_FEATURE_COLUMNS = {
     "cross_family_with_top1",
     "override_slack_vs_top1",
     "beats_top1_after_penalty",
+    "retrieval_top1_score",
+    "retrieval_top1_margin",
+    "near_tied_alternative_count",
+    "exact_anchor_evidence_flag",
+    "top1_exact_anchor_evidence_flag",
+    "top1_minus_runnerup_retrieval_score",
+    "top1_minus_runnerup_title_overlap",
+    "top1_minus_runnerup_coauthor_overlap",
+    "top1_minus_runnerup_venue_overlap",
+    "top1_minus_runnerup_year_compatibility",
+    "top1_minus_runnerup_retrieval_rank",
+    "top1_minus_runnerup_count_normalized_confidence",
+    "top1_minus_runnerup_cluster_size",
+    "year_mismatch_severity",
+    "affiliation_contradiction_severity",
+    "initial_only_x_title_overlap",
+    "initial_only_x_coauthor_overlap",
+    "initial_only_x_venue_overlap",
+    "candidate_contradiction_count",
+    "candidate_contradiction_score",
+    "exact_title_identity_conflict_flag",
+    "top1_contradiction_count",
+    "top1_strongest_contradiction",
+    "top1_exact_title_identity_conflict_flag",
+    "plausible_conflicting_candidate_count",
+    "anchor_evidence_count",
+    "strong_positive_anchor_score",
+    "weak_residual_anchor_score",
+    "sparse_relative_winner_score",
+    "query_view__full",
+    "query_view__initial_only",
 }
-NUMERIC_FEATURE_COLUMNS = set(BASELINE_FEATURE_COLUMNS) | DERIVED_FEATURE_COLUMNS
+NUMERIC_FEATURE_COLUMNS = (
+    set(BASELINE_FEATURE_COLUMNS)
+    | set(RAW_METADATA_SIMILARITY_FEATURE_COLUMNS)
+    | set(NAME_COUNT_RARITY_FEATURE_COLUMNS)
+    | DERIVED_FEATURE_COLUMNS
+)
 MATERIALIZED_DERIVED_ROW_COLUMNS = (*ROW_COLUMNS, *sorted(DERIVED_FEATURE_COLUMNS))
 
 _ORIGINAL_COMPUTE_BLOCK = s2and_data_module.compute_block
@@ -526,8 +709,8 @@ class ClusterProfile:
     cluster_id: str
     family_id: str
     dominant_first_name: str | None
-    dominant_name_ratio: float
-    named_signature_count: int
+    family_dominance_ratio: float
+    family_named_count: int
 
 
 @dataclass(frozen=True)
@@ -536,6 +719,375 @@ class RetrievalApproachSpec:
 
     mode: str
     methods: tuple[str, ...]
+
+
+def _subblock_tokens(subblock_key: str) -> list[str]:
+    """Extract normalized first-name tokens from one subblock key."""
+
+    values: set[str] = set()
+    for raw_token in str(subblock_key).split(","):
+        token = str(raw_token).strip().split("|", 1)[0].strip()
+        if len(token) > 1:
+            values.add(token)
+    return sorted(values)
+
+
+def load_retrieval_subblock_index(step2_dir: Path) -> dict[str, Any]:
+    """Load the minimal subblock index needed for frozen full-query candidate gating."""
+
+    manifest = json.loads((step2_dir / "subblock_manifest.json").read_text(encoding="utf-8"))
+    predicted_clusters = json.loads((step2_dir / "predicted_clusters.json").read_text(encoding="utf-8"))
+    signature_to_subblock: dict[str, str] = {}
+    for subblock_key, signature_ids in dict(manifest["subblocks"]).items():
+        for signature_id in signature_ids:
+            signature_to_subblock[str(signature_id)] = str(subblock_key)
+    subblock_to_components: dict[str, set[str]] = defaultdict(set)
+    subblock_tokens_by_subblock: dict[str, list[str]] = {}
+    prefix_to_subblocks: dict[int, dict[str, set[str]]] = {
+        2: defaultdict(set),
+        3: defaultdict(set),
+        4: defaultdict(set),
+    }
+    for subblock_key, clusters in dict(predicted_clusters).items():
+        subblock = str(subblock_key)
+        for component_key in dict(clusters).keys():
+            subblock_to_components[subblock].add(str(component_key))
+        tokens = _subblock_tokens(subblock)
+        subblock_tokens_by_subblock[subblock] = tokens
+        for token in tokens:
+            for prefix_len in (2, 3, 4):
+                prefix = token[: min(len(token), prefix_len)]
+                if len(prefix) >= 2:
+                    prefix_to_subblocks[prefix_len][prefix].add(subblock)
+    return {
+        "signature_to_subblock": signature_to_subblock,
+        "subblock_to_components": {key: sorted(value) for key, value in subblock_to_components.items()},
+        "subblock_tokens_by_subblock": subblock_tokens_by_subblock,
+        "prefix_to_subblocks": {
+            prefix_len: {key: sorted(value) for key, value in mapping.items()}
+            for prefix_len, mapping in prefix_to_subblocks.items()
+        },
+    }
+
+
+def build_labeled_retrieval_subblock_index(
+    *,
+    dataset: ANDData,
+    block_to_component_keys: dict[str, list[str]],
+    component_signatures: dict[str, list[str]],
+    maximum_size: int = 15_000,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the frozen full-query candidate-gate index for labeled datasets."""
+
+    signature_to_subblock: dict[str, str] = {}
+    subblock_to_components: dict[str, set[str]] = defaultdict(set)
+    subblock_tokens_by_subblock: dict[str, list[str]] = {}
+    prefix_to_subblocks: dict[int, dict[str, set[str]]] = {
+        2: defaultdict(set),
+        3: defaultdict(set),
+        4: defaultdict(set),
+    }
+    telemetry_rows: list[dict[str, Any]] = []
+
+    for block_key, component_keys in block_to_component_keys.items():
+        block_signature_ids = sorted(
+            {
+                str(signature_id)
+                for component_key in component_keys
+                for signature_id in component_signatures[str(component_key)]
+            }
+        )
+        subblocks, telemetry = make_subblocks_with_telemetry(
+            block_signature_ids,
+            dataset,
+            maximum_size=int(maximum_size),
+        )
+        local_signature_to_subblock: dict[str, str] = {}
+        for local_subblock_key, signature_ids in dict(subblocks).items():
+            global_subblock_key = f"{block_key}::{local_subblock_key}"
+            for signature_id in signature_ids:
+                local_signature_to_subblock[str(signature_id)] = global_subblock_key
+                signature_to_subblock[str(signature_id)] = global_subblock_key
+            tokens = _subblock_tokens(str(local_subblock_key))
+            subblock_tokens_by_subblock[global_subblock_key] = tokens
+            for token in tokens:
+                for prefix_len in (2, 3, 4):
+                    prefix = token[: min(len(token), prefix_len)]
+                    if len(prefix) >= 2:
+                        prefix_to_subblocks[prefix_len][prefix].add(global_subblock_key)
+        for component_key in component_keys:
+            for signature_id in component_signatures[str(component_key)]:
+                subblock_key = local_signature_to_subblock.get(str(signature_id))
+                if subblock_key is not None:
+                    subblock_to_components[subblock_key].add(str(component_key))
+        telemetry_rows.append(
+            {
+                "block_key": str(block_key),
+                "input_signature_count": int(telemetry["input_signature_count"]),
+                "final_subblock_count": int(telemetry["final_subblock_count"]),
+                "final_specter_labeled_subblock_count": int(telemetry["final_specter_labeled_subblock_count"]),
+                "specter_invocation_count": int(telemetry["specter_invocation_count"]),
+            }
+        )
+
+    diagnostics = {
+        "blocks": int(len(block_to_component_keys)),
+        "subblocks": int(len(subblock_to_components)),
+        "mean_final_subblock_count_per_block": round(
+            float(statistics.mean(int(row["final_subblock_count"]) for row in telemetry_rows)),
+            6,
+        )
+        if telemetry_rows
+        else 0.0,
+        "blocks_with_specter_subblocks": int(
+            sum(1 for row in telemetry_rows if int(row["final_specter_labeled_subblock_count"]) > 0)
+        ),
+        "blocks_with_specter_invocations": int(
+            sum(1 for row in telemetry_rows if int(row["specter_invocation_count"]) > 0)
+        ),
+    }
+    index = {
+        "signature_to_subblock": signature_to_subblock,
+        "subblock_to_components": {key: sorted(value) for key, value in subblock_to_components.items()},
+        "subblock_tokens_by_subblock": subblock_tokens_by_subblock,
+        "prefix_to_subblocks": {
+            prefix_len: {key: sorted(value) for key, value in mapping.items()}
+            for prefix_len, mapping in prefix_to_subblocks.items()
+        },
+    }
+    return index, diagnostics
+
+
+def _ordered_component_subset(component_keys: list[str], allowed: set[str]) -> list[str]:
+    """Preserve original component ordering while applying one allowed set."""
+
+    return [component_key for component_key in component_keys if component_key in allowed]
+
+
+def _split_global_backfill_candidate_strategy(strategy: str) -> tuple[str, int]:
+    """Split ``familyN_plus_global_backfillM`` into its prefix strategy and global backfill count."""
+
+    marker = "_plus_global_backfill"
+    if marker not in str(strategy):
+        return str(strategy), 0
+    base_strategy, backfill_count_text = str(strategy).rsplit(marker, 1)
+    if not backfill_count_text.isdigit():
+        raise ValueError(f"Invalid frozen full_candidate_strategy global backfill count: {strategy!r}")
+    if base_strategy.startswith("family") and not base_strategy.endswith("_only"):
+        base_strategy = f"{base_strategy}_only"
+    return base_strategy, int(backfill_count_text)
+
+
+def _append_global_backfill(
+    *,
+    component_keys: list[str],
+    selected_component_keys: list[str],
+    global_backfill_count: int,
+) -> list[str]:
+    """Append a bounded global fallback without removing the prefix-selected candidates."""
+
+    if global_backfill_count <= 0:
+        return selected_component_keys
+    selected = set(selected_component_keys)
+    backfill = [component_key for component_key in component_keys if component_key not in selected][
+        : int(global_backfill_count)
+    ]
+    return [*selected_component_keys, *backfill]
+
+
+@lru_cache(maxsize=1)
+def _filtered_name_tuples() -> frozenset[tuple[str, str]]:
+    """Load the filtered S2AND first-name alias tuples for Python fallback selection."""
+
+    path = Path(__file__).resolve().parents[1] / "data" / "s2and_name_tuples_filtered.txt"
+    pairs: set[tuple[str, str]] = set()
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            parts = [part.strip().lower() for part in line.split(",")]
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                pairs.add((parts[0], parts[1]))
+    return frozenset(pairs)
+
+
+def _first_name_forms(value: str) -> tuple[str, str, str]:
+    first = str(value or "").strip().lower()
+    parts = first.split()
+    joined = "".join(parts)
+    token = parts[0] if parts else first
+    return first, joined, token
+
+
+def _first_names_name_compatible(first_1: str, first_2: str) -> bool:
+    """Mirror the first-name part of ANDData.get_constraint."""
+
+    first_1 = str(first_1 or "").strip().lower()
+    first_2 = str(first_2 or "").strip().lower()
+    if not first_1 or not first_2:
+        return True
+    if first_1[0] != first_2[0]:
+        return False
+    if same_prefix_tokens(first_1, first_2):
+        return True
+    first_1_forms = _first_name_forms(first_1)
+    first_2_forms = _first_name_forms(first_2)
+    name_tuples = _filtered_name_tuples()
+    return any((left, right) in name_tuples for left, right in zip(first_1_forms, first_2_forms, strict=True))
+
+
+def _python_select_name_compatible_component_keys(
+    *,
+    query_first: str,
+    query_subblock: str,
+    component_keys: list[str],
+    retrieval_subblock_index: dict[str, Any],
+    global_backfill_count: int,
+) -> list[str]:
+    """Select strict name-compatible components without the Rust extension."""
+
+    subblock_to_components = dict(retrieval_subblock_index["subblock_to_components"])
+    subblock_tokens_by_subblock = dict(retrieval_subblock_index.get("subblock_tokens_by_subblock", {}))
+    same_subblock = set(str(value) for value in subblock_to_components.get(str(query_subblock), []))
+    allowed: set[str] = set(same_subblock)
+    for subblock, raw_tokens in subblock_tokens_by_subblock.items():
+        tokens = [str(token) for token in raw_tokens]
+        if any(_first_names_name_compatible(str(query_first), token) for token in tokens):
+            allowed.update(str(value) for value in subblock_to_components.get(str(subblock), []))
+    selected = _ordered_component_subset(component_keys, allowed)
+    return (
+        _append_global_backfill(
+            component_keys=component_keys,
+            selected_component_keys=selected,
+            global_backfill_count=global_backfill_count,
+        )
+        if selected
+        else component_keys
+    )
+
+
+def _rust_name_compatible_subblock_selector(
+    retrieval_subblock_index: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> Any | None:
+    """Return the cached Rust selector for name-compatible subblock gating when available."""
+
+    if RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_KEY not in retrieval_subblock_index:
+        try:
+            retrieval_subblock_index[RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_KEY] = (
+                build_rust_name_compatible_subblock_selector(retrieval_subblock_index)
+            )
+        except RuntimeError as exc:
+            if strict or os.environ.get(STRICT_RUST_NAME_COMPAT_ENV, "").strip().lower() in TRUE_ENV_VALUES:
+                raise
+            retrieval_subblock_index[RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_FALLBACK_COUNT_KEY] = (
+                int(retrieval_subblock_index.get(RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_FALLBACK_COUNT_KEY, 0) or 0) + 1
+            )
+            retrieval_subblock_index[RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_FALLBACK_REASON_KEY] = repr(exc)
+            retrieval_subblock_index[RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_KEY] = None
+    return retrieval_subblock_index[RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_KEY]
+
+
+def _select_name_compatible_component_keys(
+    *,
+    query: retrieval.QueryFeatures,
+    query_signature_id: str,
+    query_subblock: str,
+    component_keys: list[str],
+    retrieval_subblock_index: dict[str, Any],
+    global_backfill_count: int,
+    strict_name_compat: bool = False,
+) -> list[str]:
+    """Select components from name-compatible subblocks, preserving same-subblock and backfill."""
+
+    query_first = str(getattr(query, "first", "") or "")
+    selector = _rust_name_compatible_subblock_selector(
+        retrieval_subblock_index,
+        strict=bool(strict_name_compat),
+    )
+    if selector is not None:
+        selected = selector.select(
+            str(query_signature_id),
+            query_first,
+            component_keys,
+            global_backfill_count=int(global_backfill_count),
+        )
+        return list(selected) if selected else component_keys
+    return _python_select_name_compatible_component_keys(
+        query_first=query_first,
+        query_subblock=query_subblock,
+        component_keys=component_keys,
+        retrieval_subblock_index=retrieval_subblock_index,
+        global_backfill_count=global_backfill_count,
+    )
+
+
+def _select_component_keys_for_candidate_strategy(
+    *,
+    query: retrieval.QueryFeatures,
+    query_signature_id: str | None,
+    component_keys: list[str],
+    strategy: str,
+    retrieval_subblock_index: dict[str, Any] | None,
+    max_ranked_clusters: int,
+    strict_name_compat: bool = False,
+) -> list[str]:
+    """Select candidate component keys for one frozen full-query candidate strategy."""
+
+    strategy, global_backfill_count = _split_global_backfill_candidate_strategy(str(strategy))
+    if not bool(query.has_full_first) or str(strategy) == "global":
+        return component_keys
+    if query_signature_id is None or retrieval_subblock_index is None:
+        return component_keys
+    query_subblock = dict(retrieval_subblock_index["signature_to_subblock"]).get(str(query_signature_id))
+    if query_subblock is None:
+        return component_keys
+    subblock_to_components = dict(retrieval_subblock_index["subblock_to_components"])
+    same_subblock = set(str(value) for value in subblock_to_components.get(str(query_subblock), []))
+    same_keys = _ordered_component_subset(component_keys, same_subblock)
+    if str(strategy) == "same_subblock_only":
+        return (
+            _append_global_backfill(
+                component_keys=component_keys,
+                selected_component_keys=same_keys,
+                global_backfill_count=global_backfill_count,
+            )
+            if same_keys
+            else component_keys
+        )
+    if str(strategy) == "same_if_small_else_family3":
+        if 0 < len(same_keys) <= int(max_ranked_clusters):
+            return same_keys
+        strategy = "family3_only"
+    if str(strategy) in {"name_compat", "name_compat_only"}:
+        return _select_name_compatible_component_keys(
+            query=query,
+            query_signature_id=str(query_signature_id),
+            query_subblock=str(query_subblock),
+            component_keys=component_keys,
+            retrieval_subblock_index=retrieval_subblock_index,
+            global_backfill_count=global_backfill_count,
+            strict_name_compat=bool(strict_name_compat),
+        )
+    if str(strategy).startswith("family") and str(strategy).endswith("_only"):
+        prefix_len = int(str(strategy)[len("family")])
+        query_first = str(getattr(query, "first", "") or "")
+        prefix = query_first[: min(len(query_first), prefix_len)]
+        if len(prefix) < 2:
+            return same_keys if same_keys else component_keys
+        allowed: set[str] = set()
+        for subblock in dict(retrieval_subblock_index["prefix_to_subblocks"]).get(prefix_len, {}).get(prefix, []):
+            allowed.update(str(value) for value in subblock_to_components.get(str(subblock), []))
+        selected = _ordered_component_subset(component_keys, allowed)
+        return (
+            _append_global_backfill(
+                component_keys=component_keys,
+                selected_component_keys=selected,
+                global_backfill_count=global_backfill_count,
+            )
+            if selected
+            else component_keys
+        )
+    raise ValueError(f"Unknown frozen full_candidate_strategy: {strategy!r}")
 
 
 @dataclass
@@ -548,8 +1100,10 @@ class ClusterPairwiseStats:
     cluster_size: int
     family_id: str = ""
     dominant_first_name: str | None = None
-    dominant_name_ratio: float = 0.0
-    named_signature_count: int = 0
+    family_dominance_ratio: float = 0.0
+    family_named_count: int = 0
+    disallow_pair_count: int = 0
+    require_pair_count: int = 0
     count: int = 0
     sum_distance: float = 0.0
     min_distance: float = field(default_factory=lambda: float("inf"))
@@ -602,6 +1156,69 @@ class QueryClusterStatsRequest:
     retrieval_ranks: dict[str, int]
     retrieval_scores: dict[str, float]
     summary_by_component: dict[str, retrieval.ClusterSummary]
+    incremental_dont_use_cluster_seeds_component_keys: frozenset[str] = frozenset()
+    ignore_disallow_constraints_component_keys: frozenset[str] = frozenset()
+
+
+def _dataset_has_cluster_seed_constraints(dataset: Any) -> bool:
+    return bool(getattr(dataset, "cluster_seeds_require", None)) or bool(
+        getattr(dataset, "cluster_seeds_disallow", None)
+    )
+
+
+def _query_case_allows_seed_constraint_bypass(query_case: RerankerQueryCase) -> bool:
+    return (
+        bool(query_case.query_in_seed_before_holdout)
+        or "loo" in str(query_case.source).lower()
+        or "loo" in str(query_case.split).lower()
+        or "loo" in str(query_case.support_type).lower()
+        or "self" in str(query_case.support_type).lower()
+    )
+
+
+def _has_query_seed_connection(
+    dataset: Any,
+    *,
+    query_signature_id: str,
+    candidate_signature_ids: Sequence[str],
+) -> bool:
+    query_signature_id = str(query_signature_id)
+    require = getattr(dataset, "cluster_seeds_require", {}) or {}
+    disallow = getattr(dataset, "cluster_seeds_disallow", set()) or set()
+    query_required_cluster = require.get(query_signature_id)
+    for candidate_signature_id in candidate_signature_ids:
+        candidate_signature_id = str(candidate_signature_id)
+        if (query_signature_id, candidate_signature_id) in disallow or (
+            candidate_signature_id,
+            query_signature_id,
+        ) in disallow:
+            return True
+        if query_required_cluster is not None and require.get(candidate_signature_id) == query_required_cluster:
+            return True
+    return False
+
+
+def seed_constraint_bypass_component_keys(
+    *,
+    dataset: Any,
+    query_case: RerankerQueryCase,
+    candidate_signature_ids_by_component: dict[str, list[str]],
+) -> frozenset[str]:
+    """Return candidate components eligible for held-out seed constraint bypass."""
+
+    if not _dataset_has_cluster_seed_constraints(dataset):
+        return frozenset()
+    if not _query_case_allows_seed_constraint_bypass(query_case):
+        return frozenset()
+    return frozenset(
+        str(component_key)
+        for component_key, signature_ids in candidate_signature_ids_by_component.items()
+        if _has_query_seed_connection(
+            dataset,
+            query_signature_id=str(query_case.query_signature_id),
+            candidate_signature_ids=signature_ids,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -643,6 +1260,8 @@ def configure_runtime_environment(*, n_jobs: int, backend: str = "rust") -> None
 
     os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
     os.environ["S2AND_BACKEND"] = backend
+    if str(backend).strip().lower() == "rust":
+        os.environ[STRICT_RUST_NAME_COMPAT_ENV] = "1"
     thread_count = str(max(1, int(n_jobs)))
     os.environ["OMP_NUM_THREADS"] = thread_count
     os.environ["RAYON_NUM_THREADS"] = thread_count
@@ -934,17 +1553,17 @@ def build_component_summaries(
 def build_cluster_profile(summary: retrieval.ClusterSummary) -> ClusterProfile:
     """Build generic family metadata from a retrieval summary."""
 
-    named_signature_count = int(sum(summary.first_name_counts.values()))
+    family_named_count = int(sum(summary.first_name_counts.values()))
     dominant_first_name = None
-    dominant_name_ratio = 0.0
+    family_dominance_ratio = 0.0
     family_id = str(summary.component_key)
-    if summary.first_name_counts and named_signature_count > 0:
+    if summary.first_name_counts and family_named_count > 0:
         dominant_first_name, dominant_count = max(
             summary.first_name_counts.items(),
             key=lambda item: (int(item[1]), str(item[0])),
         )
-        dominant_name_ratio = float(dominant_count / named_signature_count)
-        if int(named_signature_count) >= int(GENERIC_FAMILY_MIN_COUNT) and float(dominant_name_ratio) >= float(
+        family_dominance_ratio = float(dominant_count / family_named_count)
+        if int(family_named_count) >= int(GENERIC_FAMILY_MIN_COUNT) and float(family_dominance_ratio) >= float(
             GENERIC_FAMILY_MIN_RATIO
         ):
             family_id = str(dominant_first_name)
@@ -952,8 +1571,8 @@ def build_cluster_profile(summary: retrieval.ClusterSummary) -> ClusterProfile:
         cluster_id=str(summary.component_key),
         family_id=str(family_id),
         dominant_first_name=str(dominant_first_name) if dominant_first_name is not None else None,
-        dominant_name_ratio=float(dominant_name_ratio),
-        named_signature_count=int(named_signature_count),
+        family_dominance_ratio=float(family_dominance_ratio),
+        family_named_count=int(family_named_count),
     )
 
 
@@ -986,39 +1605,80 @@ def _rank_method_window(
     max_ranked_clusters: int,
     rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None = None,
     rust_num_threads: int | None = None,
-) -> list[tuple[float, retrieval.ClusterSummary]]:
+    frozen_rust_hybrid_centroid_policy: FrozenRustHybridCentroidPolicy | None = None,
+    retrieval_engine: str = "auto",
+) -> tuple[list[tuple[float, retrieval.ClusterSummary]], str, int]:
     """Rank one retrieval method over the filtered candidate summaries."""
+
+    engine = str(retrieval_engine)
+    if engine not in RETRIEVAL_ENGINE_CHOICES:
+        raise ValueError(f"Unsupported retrieval_engine {retrieval_engine!r}")
+    if engine == "rust" and method != "hybrid_centroid":
+        raise ValueError(f"retrieval_engine='rust' does not support method {method!r}")
+    if engine == "python" and frozen_rust_hybrid_centroid_policy is not None:
+        raise ValueError("Frozen Rust retrieval policy requires retrieval_engine='auto' or 'rust'")
 
     if method == "hybrid_centroid" and rust_hybrid_centroid_retriever is not None:
         override_summary: retrieval.ClusterSummary | None = None
         component_keys: list[str] = []
+        fallback_reason = ""
         for summary in candidate_summaries:
             component_key = str(summary.component_key)
             base_summary = rust_hybrid_centroid_retriever.summary_by_component.get(component_key)
             if base_summary is None:
+                fallback_reason = f"component {component_key!r} is missing from Rust retriever"
                 break
             component_keys.append(component_key)
             if summary is not base_summary:
                 if override_summary is not None:
+                    fallback_reason = "more than one candidate summary differs from the Rust retriever snapshot"
                     break
                 override_summary = summary
         else:
-            return rank_top_summaries_rust_hybrid_centroid(
-                query=query,
-                max_ranked_clusters=max_ranked_clusters,
-                retriever=rust_hybrid_centroid_retriever,
-                component_keys=component_keys,
-                max_block_component_size=max_block_component_size,
-                override_summary=override_summary,
-                num_threads=rust_num_threads,
-            )
+            if engine != "python":
+                return (
+                    rank_top_summaries_rust_hybrid_centroid(
+                        query=query,
+                        max_ranked_clusters=max_ranked_clusters,
+                        retriever=rust_hybrid_centroid_retriever,
+                        component_keys=component_keys,
+                        max_block_component_size=max_block_component_size,
+                        override_summary=override_summary,
+                        num_threads=rust_num_threads,
+                        weights=(
+                            frozen_rust_hybrid_centroid_policy.weights_for_query(query)
+                            if frozen_rust_hybrid_centroid_policy is not None
+                            else None
+                        ),
+                        scoring_config=(
+                            frozen_rust_hybrid_centroid_policy.scoring_config_for_query(query)
+                            if frozen_rust_hybrid_centroid_policy is not None
+                            else None
+                        ),
+                    ),
+                    "rust",
+                    0,
+                )
+        if engine == "rust":
+            raise ValueError(f"Strict Rust retrieval cannot rank hybrid_centroid: {fallback_reason}")
+        fallback_count = 1 if engine == "auto" and fallback_reason else 0
+    elif method == "hybrid_centroid" and engine == "rust":
+        raise ValueError("Strict Rust retrieval requires a Rust hybrid-centroid retriever handle")
+    else:
+        fallback_count = 0
+    if method == "hybrid_centroid" and frozen_rust_hybrid_centroid_policy is not None:
+        raise ValueError("Frozen Rust retrieval policy requires a Rust hybrid-centroid retriever handle")
 
-    return rank_top_summaries(
-        method=method,
-        query=query,
-        candidate_summaries=candidate_summaries,
-        max_block_component_size=max_block_component_size,
-        max_ranked_clusters=max_ranked_clusters,
+    return (
+        rank_top_summaries(
+            method=method,
+            query=query,
+            candidate_summaries=candidate_summaries,
+            max_block_component_size=max_block_component_size,
+            max_ranked_clusters=max_ranked_clusters,
+        ),
+        "python",
+        int(fallback_count),
     )
 
 
@@ -1097,18 +1757,44 @@ def build_retrieval_window(
     max_ranked_clusters: int,
     rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None = None,
     rust_num_threads: int | None = None,
+    frozen_rust_hybrid_centroid_policy: FrozenRustHybridCentroidPolicy | None = None,
+    query_signature_id: str | None = None,
+    retrieval_subblock_index: dict[str, Any] | None = None,
+    retrieval_engine: str = "auto",
 ) -> tuple[list[str], dict[str, float], dict[str, int], dict[str, int]]:
     """Rank candidate summaries under the fixed retrieval operating point."""
 
+    engine = str(retrieval_engine)
+    if engine not in RETRIEVAL_ENGINE_CHOICES:
+        raise ValueError(f"Unsupported retrieval_engine {retrieval_engine!r}")
     approach_spec = _parse_retrieval_approach(retrieval_approach)
-    candidate_summaries, filter_state = retrieval.apply_hard_filters(query, raw_candidate_summaries)
+    candidate_summaries_pre_filter = list(raw_candidate_summaries)
+    if frozen_rust_hybrid_centroid_policy is not None:
+        selected_component_keys = _select_component_keys_for_candidate_strategy(
+            query=query,
+            query_signature_id=query_signature_id,
+            component_keys=[str(summary.component_key) for summary in raw_candidate_summaries],
+            strategy=str(frozen_rust_hybrid_centroid_policy.full_candidate_strategy),
+            retrieval_subblock_index=retrieval_subblock_index,
+            max_ranked_clusters=max_ranked_clusters,
+            strict_name_compat=engine == "rust",
+        )
+        selected_set = set(selected_component_keys)
+        candidate_summaries_pre_filter = [
+            summary for summary in raw_candidate_summaries if str(summary.component_key) in selected_set
+        ]
+    candidate_summaries, filter_state = retrieval.apply_hard_filters(query, candidate_summaries_pre_filter)
     profiles_by_component: dict[str, ClusterProfile] = {}
     if approach_spec.mode == "ambiguous_union":
         profiles_by_component = {
             str(summary.component_key): build_cluster_profile(summary) for summary in candidate_summaries
         }
-    ranked_by_method = {
-        method: _rank_method_window(
+    ranked_by_method: dict[str, list[tuple[float, retrieval.ClusterSummary]]] = {}
+    retrieval_engine_rust_method_count = 0
+    retrieval_engine_python_method_count = 0
+    retrieval_engine_fallback_count = 0
+    for method in approach_spec.methods:
+        ranked, method_engine, method_fallback_count = _rank_method_window(
             method=method,
             query=query,
             candidate_summaries=candidate_summaries,
@@ -1116,9 +1802,13 @@ def build_retrieval_window(
             max_ranked_clusters=max_ranked_clusters,
             rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
             rust_num_threads=rust_num_threads,
+            frozen_rust_hybrid_centroid_policy=frozen_rust_hybrid_centroid_policy,
+            retrieval_engine=engine,
         )
-        for method in approach_spec.methods
-    }
+        ranked_by_method[method] = ranked
+        retrieval_engine_rust_method_count += int(method_engine == "rust")
+        retrieval_engine_python_method_count += int(method_engine == "python")
+        retrieval_engine_fallback_count += int(method_fallback_count)
     if approach_spec.mode == "all":
         primary_method = approach_spec.methods[0]
         ranked = ranked_by_method[primary_method]
@@ -1158,12 +1848,22 @@ def build_retrieval_window(
         {
             "candidate_components": int(len(raw_candidate_summaries)),
             "candidate_signatures": int(sum(summary.size for summary in raw_candidate_summaries)),
+            "preselected_candidate_components": int(len(candidate_summaries_pre_filter)),
+            "preselected_candidate_signatures": int(sum(summary.size for summary in candidate_summaries_pre_filter)),
             "scored_candidate_components": int(filter_state["scored_candidate_components"]),
             "scored_candidate_signatures": int(filter_state["scored_candidate_signatures"]),
             "orcid_filter_applied": int(filter_state["orcid_filter_applied"]),
             "middle_initial_filter_applied": int(filter_state["middle_initial_filter_applied"]),
             "year_range_filter_applied": int(filter_state["year_range_filter_applied"]),
             "ambiguity_expanded": int(ambiguity_expanded),
+            "retrieval_engine_rust_method_count": int(retrieval_engine_rust_method_count),
+            "retrieval_engine_python_method_count": int(retrieval_engine_python_method_count),
+            "retrieval_engine_fallback_count": int(retrieval_engine_fallback_count),
+            "name_compat_selector_fallback_count": int(
+                retrieval_subblock_index.get(RUST_NAME_COMPATIBLE_SUBBLOCK_SELECTOR_FALLBACK_COUNT_KEY, 0) or 0
+            )
+            if retrieval_subblock_index is not None
+            else 0,
         },
     )
 
@@ -1233,10 +1933,26 @@ def _initialize_query_cluster_stats(
             cluster_size=int(summary.size),
             family_id=str(profile.family_id),
             dominant_first_name=profile.dominant_first_name,
-            dominant_name_ratio=float(profile.dominant_name_ratio),
-            named_signature_count=int(profile.named_signature_count),
+            family_dominance_ratio=float(profile.family_dominance_ratio),
+            family_named_count=int(profile.family_named_count),
         )
     return stats_by_cluster_id
+
+
+def _constraint_label_is_disallow(label: float) -> bool:
+    """Return whether one offset constraint label encodes a hard disallow."""
+
+    if math.isnan(float(label)):
+        return False
+    return float(label) + float(LARGE_INTEGER) >= float(LARGE_DISTANCE)
+
+
+def _constraint_label_is_require(label: float) -> bool:
+    """Return whether one offset constraint label encodes a hard require."""
+
+    if math.isnan(float(label)):
+        return False
+    return abs(float(label) + float(LARGE_INTEGER)) <= 1e-9
 
 
 def _update_query_cluster_stats_from_multi_query_batch(
@@ -1248,6 +1964,8 @@ def _update_query_cluster_stats_from_multi_query_batch(
     batch_pairs: list[tuple[str, str]],
     batch_request_indices: list[int],
     batch_cluster_ids: list[str],
+    batch_incremental_dont_use_cluster_seeds: list[bool],
+    batch_ignore_disallow_constraints: list[bool],
     stats_by_request: list[dict[str, ClusterPairwiseStats]],
     diagnostics_by_request: list[dict[str, float]],
     max_top_k: int,
@@ -1264,6 +1982,31 @@ def _update_query_cluster_stats_from_multi_query_batch(
         incremental_dont_use_cluster_seeds=False,
         constraint_backend=constraint_backend,
     )
+    override_indices = [
+        index for index, should_override in enumerate(batch_incremental_dont_use_cluster_seeds) if bool(should_override)
+    ]
+    if override_indices:
+        override_pairs = [batch_pairs[index] for index in override_indices]
+        override_labels, _override_telemetry = clusterer._resolve_constraint_batch(  # noqa: SLF001
+            dataset,
+            override_pairs,
+            partial_supervision={},
+            runtime_context=runtime_context,
+            incremental_dont_use_cluster_seeds=True,
+            constraint_backend=constraint_backend,
+        )
+        for index, override_label in zip(override_indices, override_labels, strict=True):
+            labels[index] = float(override_label)
+    for index, label in enumerate(labels):
+        request_index = int(batch_request_indices[index])
+        cluster_id = str(batch_cluster_ids[index])
+        if _constraint_label_is_require(float(label)):
+            stats_by_request[request_index][cluster_id].require_pair_count += 1
+        if _constraint_label_is_disallow(float(label)) and not bool(batch_ignore_disallow_constraints[index]):
+            stats_by_request[request_index][cluster_id].disallow_pair_count += 1
+    for index, should_ignore_disallow in enumerate(batch_ignore_disallow_constraints):
+        if bool(should_ignore_disallow) and _constraint_label_is_disallow(float(labels[index])):
+            labels[index] = float(np.nan)
     featurize_start = time.perf_counter()
     all_pairs = [(left, right, label) for (left, right), label in zip(batch_pairs, labels, strict=True)]
     batch_features, batch_labels, batch_nameless_features = many_pairs_featurize(
@@ -1311,7 +2054,7 @@ def compute_query_cluster_stats_batched(
     constraint_backend: Any,
     requests: Sequence[QueryClusterStatsRequest],
     pair_batch_size: int,
-    max_top_k: int = 5,
+    max_top_k: int = DEFAULT_CHOOSER_CACHE_MAX_TOP_K,
 ) -> list[tuple[dict[str, ClusterPairwiseStats], dict[str, Any]]]:
     """Aggregate query-to-cluster stats for many query windows at once."""
 
@@ -1330,11 +2073,15 @@ def compute_query_cluster_stats_batched(
     batch_pairs: list[tuple[str, str]] = []
     batch_request_indices: list[int] = []
     batch_cluster_ids: list[str] = []
+    batch_incremental_dont_use_cluster_seeds: list[bool] = []
+    batch_ignore_disallow_constraints: list[bool] = []
 
     def flush_batch() -> None:
         nonlocal batch_pairs
         nonlocal batch_request_indices
         nonlocal batch_cluster_ids
+        nonlocal batch_incremental_dont_use_cluster_seeds
+        nonlocal batch_ignore_disallow_constraints
         _update_query_cluster_stats_from_multi_query_batch(
             clusterer=clusterer,
             dataset=dataset,
@@ -1343,6 +2090,8 @@ def compute_query_cluster_stats_batched(
             batch_pairs=batch_pairs,
             batch_request_indices=batch_request_indices,
             batch_cluster_ids=batch_cluster_ids,
+            batch_incremental_dont_use_cluster_seeds=batch_incremental_dont_use_cluster_seeds,
+            batch_ignore_disallow_constraints=batch_ignore_disallow_constraints,
             stats_by_request=stats_by_request,
             diagnostics_by_request=diagnostics_by_request,
             max_top_k=max_top_k,
@@ -1350,14 +2099,24 @@ def compute_query_cluster_stats_batched(
         batch_pairs = []
         batch_request_indices = []
         batch_cluster_ids = []
+        batch_incremental_dont_use_cluster_seeds = []
+        batch_ignore_disallow_constraints = []
 
     for request_index, request in enumerate(requests):
         for component_key in request.shortlist_component_keys:
             signature_ids = request.candidate_signature_ids_by_component[component_key]
+            should_bypass_cluster_seeds = (
+                str(component_key) in request.incremental_dont_use_cluster_seeds_component_keys
+            )
+            should_ignore_disallow_constraints = (
+                str(component_key) in request.ignore_disallow_constraints_component_keys
+            )
             for signature_id in signature_ids:
                 batch_pairs.append((str(request.query_signature_id), str(signature_id)))
                 batch_request_indices.append(int(request_index))
                 batch_cluster_ids.append(str(component_key))
+                batch_incremental_dont_use_cluster_seeds.append(bool(should_bypass_cluster_seeds))
+                batch_ignore_disallow_constraints.append(bool(should_ignore_disallow_constraints))
                 if len(batch_pairs) >= int(pair_batch_size):
                     flush_batch()
     if batch_pairs:
@@ -1379,55 +2138,6 @@ def compute_query_cluster_stats_batched(
     ]
 
 
-def compute_query_cluster_stats(
-    *,
-    clusterer: Any,
-    dataset: Any,
-    runtime_context: Any,
-    constraint_backend: Any,
-    query_signature_id: str,
-    shortlist_component_keys: list[str],
-    candidate_signature_ids_by_component: dict[str, list[str]],
-    retrieval_ranks: dict[str, int],
-    retrieval_scores: dict[str, float],
-    summary_by_component: dict[str, retrieval.ClusterSummary],
-    pair_batch_size: int,
-    max_top_k: int = 5,
-) -> tuple[dict[str, ClusterPairwiseStats], dict[str, Any]]:
-    """Aggregate pairwise query-to-cluster stats for the retrieved window."""
-    request = QueryClusterStatsRequest(
-        query_signature_id=str(query_signature_id),
-        shortlist_component_keys=tuple(str(component_key) for component_key in shortlist_component_keys),
-        candidate_signature_ids_by_component={
-            str(component_key): [
-                str(signature_id) for signature_id in candidate_signature_ids_by_component[component_key]
-            ]
-            for component_key in shortlist_component_keys
-        },
-        retrieval_ranks={
-            str(component_key): int(retrieval_ranks[component_key]) for component_key in shortlist_component_keys
-        },
-        retrieval_scores={
-            str(component_key): float(retrieval_scores[component_key]) for component_key in shortlist_component_keys
-        },
-        summary_by_component={
-            str(component_key): summary_by_component[component_key] for component_key in shortlist_component_keys
-        },
-    )
-    batch_results = compute_query_cluster_stats_batched(
-        clusterer=clusterer,
-        dataset=dataset,
-        runtime_context=runtime_context,
-        constraint_backend=constraint_backend,
-        requests=[request],
-        pair_batch_size=int(pair_batch_size),
-        max_top_k=int(max_top_k),
-    )
-    if len(batch_results) != 1:
-        raise RuntimeError(f"Expected one batched query result, got {len(batch_results)}")
-    return batch_results[0]
-
-
 def _counter_query_overlap(query_values: frozenset[str], counter: Counter[str], size: int) -> float:
     if size <= 0 or not query_values or not counter:
         return 0.0
@@ -1444,18 +2154,178 @@ def _middle_initial_compatibility(query: retrieval.QueryFeatures, summary: retri
             sum(float(summary.middle_initial_counts[value]) / float(summary.size) for value in overlap)
             / float(len(query.middle_initials))
         )
-    return -0.25
+    return retrieval.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
 
 
 def _year_compatibility(query_year: int | None, summary: retrieval.ClusterSummary) -> float:
     if query_year is None or summary.year_mean is None:
         return 0.0
     distance = abs(float(query_year) - float(summary.year_mean))
-    score = max(0.0, 1.0 - (distance / 15.0))
+    score = max(0.0, 1.0 - (distance / retrieval.RETRIEVAL_YEAR_SCORE_DECAY_YEARS))
     if summary.year_min is not None and summary.year_max is not None:
-        if query_year < int(summary.year_min) - 10 or query_year > int(summary.year_max) + 10:
-            score -= 0.15
+        if (
+            query_year < int(summary.year_min) - retrieval.RETRIEVAL_YEAR_SCORE_RANGE_GAP
+            or query_year > int(summary.year_max) + retrieval.RETRIEVAL_YEAR_SCORE_RANGE_GAP
+        ):
+            score -= retrieval.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY
     return float(score)
+
+
+def _title_overlap(query: retrieval.QueryFeatures, summary: retrieval.ClusterSummary) -> float:
+    return float(_counter_query_overlap(query.title_terms, summary.title_counts, summary.size))
+
+
+def _specter_centroid_similarity(query: retrieval.QueryFeatures, summary: retrieval.ClusterSummary) -> float:
+    query_vector = getattr(query, "specter", None)
+    summary_vector = getattr(summary, "specter_centroid", None)
+    if query_vector is None or summary_vector is None:
+        return 0.0
+    denom = float(np.linalg.norm(query_vector) * np.linalg.norm(summary_vector))
+    if denom <= 0.0:
+        return 0.0
+    return float(np.dot(query_vector, summary_vector) / denom)
+
+
+def _specter_exemplar_similarity(query: retrieval.QueryFeatures, summary: retrieval.ClusterSummary) -> float:
+    query_vector = getattr(query, "specter", None)
+    exemplar_vectors = list(getattr(summary, "exemplar_vectors", []) or [])
+    if query_vector is None or not exemplar_vectors:
+        return 0.0
+    query_norm = float(np.linalg.norm(query_vector))
+    if query_norm <= 0.0:
+        return 0.0
+    best = 0.0
+    for exemplar in exemplar_vectors:
+        exemplar_norm = float(np.linalg.norm(exemplar))
+        if exemplar_norm <= 0.0:
+            continue
+        best = max(best, float(np.dot(query_vector, exemplar) / float(query_norm * exemplar_norm)))
+    return float(best)
+
+
+def _name_count_rarity(value: Any) -> float:
+    """Convert an S2 corpus name count into a finite rarity score."""
+
+    if value is None:
+        return 0.0
+    try:
+        count = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(count) or count <= 0.0:
+        return 0.0
+    return float(1.0 / math.sqrt(count))
+
+
+def _name_count_attr(value: Any, field_name: str) -> float | None:
+    """Return one numeric field from a NameCounts-like object."""
+
+    raw_value = getattr(value, field_name, None)
+    if raw_value is None:
+        return None
+    try:
+        numeric = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        return None
+    return numeric
+
+
+def _candidate_name_count_rarity_features(summary: retrieval.ClusterSummary) -> dict[str, float]:
+    """Return visible candidate-component rarity from candidate signature counts."""
+
+    minima: dict[str, float] = {}
+    for candidate_name_counts in tuple(getattr(summary, "name_counts_values", ()) or ()):
+        for field_name in ("first", "first_last", "last", "last_first_initial"):
+            value = _name_count_attr(candidate_name_counts, field_name)
+            if value is None:
+                continue
+            minima[field_name] = min(value, minima.get(field_name, value))
+
+    return {
+        "candidate_first_name_count_min_rarity": round(_name_count_rarity(minima.get("first")), 6),
+        "candidate_last_first_name_count_min_rarity": round(_name_count_rarity(minima.get("first_last")), 6),
+        "candidate_last_name_count_min_rarity": round(_name_count_rarity(minima.get("last")), 6),
+        "candidate_last_first_initial_count_min_rarity": round(
+            _name_count_rarity(minima.get("last_first_initial")),
+            6,
+        ),
+    }
+
+
+def _name_count_rarity_features(
+    query: retrieval.QueryFeatures,
+    summary: retrieval.ClusterSummary,
+) -> dict[str, float]:
+    """Return component-level rarity features from the pairwise name-count block."""
+
+    candidate_features = _candidate_name_count_rarity_features(summary)
+    query_name_counts = getattr(query, "name_counts", None)
+    candidate_name_counts_values = tuple(getattr(summary, "name_counts_values", ()) or ())
+    if query_name_counts is None or not candidate_name_counts_values:
+        return {
+            **{column: 0.0 for column in NAME_COUNT_RARITY_FEATURE_COLUMNS if column not in candidate_features},
+            **candidate_features,
+        }
+
+    observed_minima: dict[str, float] = {}
+    for candidate_name_counts in candidate_name_counts_values:
+        if candidate_name_counts is None:
+            continue
+        values = pairwise_name_counts(query_name_counts, candidate_name_counts)
+        for feature_name, raw_value in zip(PAIRWISE_NAME_COUNT_FEATURE_NAMES, values, strict=True):
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value) or value <= 0.0:
+                continue
+            observed_minima[feature_name] = min(value, observed_minima.get(feature_name, value))
+
+    features = {
+        f"{feature_name}_rarity": round(_name_count_rarity(observed_minima.get(feature_name)), 6)
+        for feature_name in PAIRWISE_NAME_COUNT_FEATURE_NAMES
+    }
+    if not bool(query.has_full_first):
+        for column in (
+            "first_name_count_min_rarity",
+            "last_first_name_count_min_rarity",
+            "last_first_initial_count_min_rarity",
+            "first_name_count_max_rarity",
+            "last_first_name_count_max_rarity",
+        ):
+            features[column] = 0.0
+    first_prefix_match = 0.0
+    query_first = str(query.first or "")
+    if len(query_first) > 1 and int(summary.size) > 0:
+        for candidate_first, count in summary.first_name_counts.items():
+            if len(candidate_first) > 1 and same_prefix_tokens(query_first, candidate_first):
+                first_prefix_match = max(first_prefix_match, float(count) / float(summary.size))
+    features["first_prefix_x_last_first_name_count_min_rarity"] = round(
+        float(first_prefix_match) * float(features["last_first_name_count_min_rarity"]),
+        6,
+    )
+    return {**features, **candidate_features}
+
+
+def _rust_summary_feature_overrides(
+    *,
+    query_features: retrieval.QueryFeatures,
+    shortlist_component_keys: list[str],
+    summary_by_component: dict[str, retrieval.ClusterSummary],
+    rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None,
+) -> dict[str, dict[str, float]]:
+    """Resolve Rust-backed chooser summary features when the retriever supports them."""
+
+    if rust_hybrid_centroid_retriever is None:
+        return {}
+    return compute_chooser_summary_features_rust_hybrid_centroid(
+        query=query_features,
+        component_keys=[str(component_key) for component_key in shortlist_component_keys],
+        summary_by_component=summary_by_component,
+        retriever=rust_hybrid_centroid_retriever,
+    )
 
 
 def count_normalized_confidence(stats: ClusterPairwiseStats, *, max_pair_count_in_group: int) -> float:
@@ -1463,12 +2333,23 @@ def count_normalized_confidence(stats: ClusterPairwiseStats, *, max_pair_count_i
 
     if stats.count <= 0 or max_pair_count_in_group <= 0:
         return 0.0
-    top3_distance = stats.topk_mean_distance(3)
-    if not math.isfinite(top3_distance):
+    topk_distance = stats.topk_mean_distance(int(COUNT_NORMALIZED_CONFIDENCE_TOP_K))
+    if not math.isfinite(topk_distance):
         return 0.0
     support = math.log1p(float(stats.count)) / math.log1p(float(max_pair_count_in_group))
-    quality = max(0.0, 1.0 - float(top3_distance))
+    support = float(support) ** float(COUNT_NORMALIZED_CONFIDENCE_SUPPORT_GAMMA)
+    quality = max(0.0, 1.0 - float(topk_distance))
     return float(support * quality)
+
+
+def cluster_size_log_capped(cluster_size: Any) -> float:
+    """Return a capped log-size prior anchored to the train p95 component size."""
+
+    size = max(0.0, float(cluster_size or 0.0))
+    if size <= 0.0:
+        return 0.0
+    reference = float(CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE)
+    return float(min(1.0, math.log1p(size) / math.log1p(reference)))
 
 
 def _best_competitor_component_key(
@@ -1493,6 +2374,8 @@ def make_candidate_rows(
     retrieval_window_state: dict[str, int],
     summary_by_component: dict[str, retrieval.ClusterSummary],
     stats_by_component: dict[str, ClusterPairwiseStats],
+    rust_hybrid_centroid_retriever: RustHybridCentroidRetrieverHandle | None = None,
+    raw_similarity_features_by_component: dict[str, dict[str, float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert one retrieved candidate window into persisted reranker rows."""
 
@@ -1502,23 +2385,46 @@ def make_candidate_rows(
         shortlist_component_keys,
         key=lambda component_key: (int(retrieval_ranks[component_key]), str(component_key)),
     )
-    top1_component_key = sorted_component_keys[0]
+    hard_disallow_filter = apply_hard_disallow_component_filter(
+        sorted_component_keys,
+        disallow_pair_count_by_component={
+            str(component_key): int(stats_by_component[component_key].disallow_pair_count)
+            for component_key in sorted_component_keys
+        },
+        preserve_component_keys=query_case.positive_component_keys,
+    )
+    kept_component_keys = list(hard_disallow_filter.kept_component_keys)
+    if not kept_component_keys:
+        return []
+    top1_component_key = kept_component_keys[0]
     top1_stats = stats_by_component[top1_component_key]
+    # Reranker supervision must come from labeled positives only; pairwise
+    # constraints are retrieval/scoring context, not a source of target labels.
     positive_component_keys = frozenset(
-        component_key for component_key in sorted_component_keys if component_key in query_case.positive_component_keys
+        component_key for component_key in kept_component_keys if component_key in query_case.positive_component_keys
     )
     best_positive_retrieval_rank = (
         min(int(retrieval_ranks[component_key]) for component_key in positive_component_keys)
         if positive_component_keys
         else None
     )
-    max_pair_count_in_group = max((int(stats.count) for stats in stats_by_component.values()), default=0)
+    max_pair_count_in_group = max((int(stats_by_component[key].count) for key in kept_component_keys), default=0)
+    rust_feature_overrides = _rust_summary_feature_overrides(
+        query_features=query_features,
+        shortlist_component_keys=kept_component_keys,
+        summary_by_component=summary_by_component,
+        rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
+    )
     rows: list[dict[str, Any]] = []
-    for component_key in sorted_component_keys:
+    raw_similarity_features_by_component = raw_similarity_features_by_component or {}
+    for component_key in kept_component_keys:
         summary = summary_by_component[component_key]
         stats = stats_by_component[component_key]
+        rust_features = rust_feature_overrides.get(str(component_key), {})
+        raw_similarity_features = raw_similarity_features_by_component.get(str(component_key), {})
+        name_count_rarity_features = _name_count_rarity_features(query_features, summary)
         best_competitor_component_key = _best_competitor_component_key(
-            sorted_component_keys,
+            kept_component_keys,
             current_component_key=component_key,
         )
         if best_competitor_component_key is None:
@@ -1542,8 +2448,8 @@ def make_candidate_rows(
             bool(stats.family_id) and bool(top1_stats.family_id) and str(stats.family_id) == str(top1_stats.family_id)
         )
         family_instability_flag = int(
-            int(stats.named_signature_count) >= int(GENERIC_FAMILY_MIN_COUNT)
-            and float(stats.dominant_name_ratio) < float(GENERIC_FAMILY_MIN_RATIO)
+            int(stats.family_named_count) >= int(GENERIC_FAMILY_MIN_COUNT)
+            and float(stats.family_dominance_ratio) < float(GENERIC_FAMILY_MIN_RATIO)
         )
         fragment_flag = int(
             int(summary.size) <= 2 and int(same_family_as_top1) == 1 and str(component_key) != str(top1_component_key)
@@ -1557,9 +2463,16 @@ def make_candidate_rows(
             "query_group_id": f"{query_case.dataset}:{query_case.query_id}:{query_view}",
             "query_id": str(query_case.query_id),
             "query_signature_id": str(query_case.query_signature_id),
-            "normalized_orcid": (str(query_case.normalized_orcid) if query_case.normalized_orcid is not None else None),
-            "orcid_group_size": (int(query_case.orcid_group_size) if query_case.orcid_group_size is not None else None),
-            "orcid_group_size_bucket": (
+            "query_first_token": str(query_features.first) if query_features.first else None,
+            "query_first_initial": str(query_features.first_initial) if query_features.first_initial else None,
+            "query_year": (int(query_features.year) if query_features.year is not None else None),
+            "_audit_normalized_orcid": (
+                str(query_case.normalized_orcid) if query_case.normalized_orcid is not None else None
+            ),
+            "_audit_orcid_group_size": (
+                int(query_case.orcid_group_size) if query_case.orcid_group_size is not None else None
+            ),
+            "_audit_orcid_group_size_bucket": (
                 str(query_case.orcid_group_size_bucket) if query_case.orcid_group_size_bucket is not None else None
             ),
             "split": str(query_case.split),
@@ -1583,9 +2496,11 @@ def make_candidate_rows(
             ),
             "family_id": str(stats.family_id),
             "dominant_first_name": (str(stats.dominant_first_name) if stats.dominant_first_name is not None else None),
-            "label": int(component_key in query_case.positive_component_keys),
-            "candidate_count": int(len(shortlist_component_keys)),
-            "candidate_signatures": int(sum(summary_by_component[key].size for key in shortlist_component_keys)),
+            "candidate_year_min": (int(summary.year_min) if summary.year_min is not None else None),
+            "candidate_year_max": (int(summary.year_max) if summary.year_max is not None else None),
+            "label": int(component_key in positive_component_keys),
+            "candidate_count": int(len(kept_component_keys)),
+            "candidate_signatures": int(sum(summary_by_component[key].size for key in kept_component_keys)),
             "scored_candidate_components": int(retrieval_window_state["scored_candidate_components"]),
             "scored_candidate_signatures": int(retrieval_window_state["scored_candidate_signatures"]),
             "orcid_filter_applied": int(retrieval_window_state["orcid_filter_applied"]),
@@ -1622,30 +2537,77 @@ def make_candidate_rows(
                 6,
             ),
             "same_family_vs_best_competitor": int(same_family_vs_best_competitor),
-            "dominant_name_ratio": round(float(stats.dominant_name_ratio), 6),
-            "named_signature_count": int(stats.named_signature_count),
-            "confident_family_flag": int(str(stats.family_id) != str(component_key)),
             "same_family_as_top1": int(same_family_as_top1),
-            "middle_initial_compatibility": round(float(_middle_initial_compatibility(query_features, summary)), 6),
+            "middle_initial_compatibility": round(
+                float(
+                    rust_features.get(
+                        "middle_initial_compatibility", _middle_initial_compatibility(query_features, summary)
+                    )
+                ),
+                6,
+            ),
             "affiliation_overlap": round(
                 float(
-                    _counter_query_overlap(
-                        query_features.affiliation_terms,
-                        summary.affiliation_counts,
-                        summary.size,
+                    rust_features.get(
+                        "affiliation_overlap",
+                        _counter_query_overlap(
+                            query_features.affiliation_terms,
+                            summary.affiliation_counts,
+                            summary.size,
+                        ),
                     )
                 ),
                 6,
             ),
             "coauthor_overlap": round(
-                float(_counter_query_overlap(query_features.coauthor_blocks, summary.coauthor_counts, summary.size)),
+                float(
+                    rust_features.get(
+                        "coauthor_overlap",
+                        _counter_query_overlap(query_features.coauthor_blocks, summary.coauthor_counts, summary.size),
+                    )
+                ),
                 6,
             ),
             "venue_overlap": round(
-                float(_counter_query_overlap(query_features.venue_terms, summary.venue_counts, summary.size)),
+                float(
+                    rust_features.get(
+                        "venue_overlap",
+                        _counter_query_overlap(query_features.venue_terms, summary.venue_counts, summary.size),
+                    )
+                ),
                 6,
             ),
-            "year_compatibility": round(float(_year_compatibility(query_features.year, summary)), 6),
+            "year_compatibility": round(
+                float(rust_features.get("year_compatibility", _year_compatibility(query_features.year, summary))),
+                6,
+            ),
+            "title_overlap": round(
+                float(rust_features.get("title_overlap", _title_overlap(query_features, summary))),
+                6,
+            ),
+            **{
+                feature_name: round(float(raw_similarity_features.get(feature_name, 0.0) or 0.0), 6)
+                for feature_name in RAW_METADATA_SIMILARITY_FEATURE_COLUMNS
+            },
+            **name_count_rarity_features,
+            "specter_centroid_similarity": round(
+                float(
+                    rust_features.get(
+                        "specter_centroid_similarity",
+                        _specter_centroid_similarity(query_features, summary),
+                    )
+                ),
+                6,
+            ),
+            "specter_exemplar_similarity": round(
+                float(
+                    rust_features.get(
+                        "specter_exemplar_similarity",
+                        _specter_exemplar_similarity(query_features, summary),
+                    )
+                ),
+                6,
+            ),
             "family_instability_flag": int(family_instability_flag),
             "fragment_flag": int(fragment_flag),
             "query_has_specter": int(query_features.has_specter),
@@ -1880,11 +2842,9 @@ def summarize_query_group_rows(
         int(best_positive_retrieval_rank == 1) if best_positive_retrieval_rank is not None else 0
     )
     cross_family_top1_vs_positive = 0
-    if positive_rows and not retrieval_top1_is_positive and int(retrieval_top1_row["confident_family_flag"]) == 1:
+    if positive_rows and not retrieval_top1_is_positive and _has_confident_family_assignment(retrieval_top1_row):
         positive_family_ids = {
-            str(row["family_id"])
-            for row in positive_rows
-            if int(row["confident_family_flag"]) == 1 and row["family_id"]
+            str(row["family_id"]) for row in positive_rows if _has_confident_family_assignment(row) and row["family_id"]
         }
         if positive_family_ids:
             cross_family_top1_vs_positive = int(str(retrieval_top1_row["family_id"]) not in positive_family_ids)
@@ -1897,14 +2857,16 @@ def summarize_query_group_rows(
         "query_group_id": str(first_row["query_group_id"]),
         "query_id": str(first_row["query_id"]),
         "query_signature_id": str(first_row["query_signature_id"]),
-        "normalized_orcid": (
-            str(first_row["normalized_orcid"]) if first_row.get("normalized_orcid") is not None else None
+        "_audit_normalized_orcid": (
+            str(first_row["_audit_normalized_orcid"]) if first_row.get("_audit_normalized_orcid") is not None else None
         ),
-        "orcid_group_size": (
-            int(first_row["orcid_group_size"]) if first_row.get("orcid_group_size") is not None else None
+        "_audit_orcid_group_size": (
+            int(first_row["_audit_orcid_group_size"]) if first_row.get("_audit_orcid_group_size") is not None else None
         ),
-        "orcid_group_size_bucket": (
-            str(first_row["orcid_group_size_bucket"]) if first_row.get("orcid_group_size_bucket") is not None else None
+        "_audit_orcid_group_size_bucket": (
+            str(first_row["_audit_orcid_group_size_bucket"])
+            if first_row.get("_audit_orcid_group_size_bucket") is not None
+            else None
         ),
         "split": str(first_row.get("split", "all")),
         "block_key": str(first_row["block_key"]),
@@ -1975,22 +2937,259 @@ def _coarse_family_key(row: dict[str, Any]) -> str:
     return ""
 
 
+def _has_confident_family_assignment(row: dict[str, Any]) -> bool:
+    family_id = str(row.get("family_id", "") or "")
+    component_key = str(row.get("candidate_component_key", "") or "")
+    return bool(family_id) and family_id != component_key
+
+
+def _normalized_alpha(value: Any) -> str:
+    """Collapse an arbitrary value down to lowercase alphabetic characters."""
+
+    normalized = normalize_text(str(value or ""))
+    return "".join(character for character in normalized if character.isalpha())
+
+
+def _query_first_initial_from_row(row: dict[str, Any]) -> str:
+    """Return the query first-initial signal available in a persisted row."""
+
+    explicit_initial = _normalized_alpha(row.get("query_first_initial"))
+    if explicit_initial:
+        return explicit_initial[0]
+    explicit_token = _normalized_alpha(row.get("query_first_token"))
+    if explicit_token:
+        return explicit_token[0]
+    block_tokens = [_normalized_alpha(token) for token in str(row.get("block_key", "")).split()]
+    for token in block_tokens:
+        if token:
+            return token[0]
+    return ""
+
+
+def _first_name_candidate_compatibility(row: dict[str, Any]) -> float:
+    """Score whether a candidate family name is compatible with the query first-name signal."""
+
+    candidate_first = _normalized_alpha(row.get("dominant_first_name"))
+    if not candidate_first:
+        return 0.0
+    query_first = _normalized_alpha(row.get("query_first_token"))
+    if query_first:
+        if candidate_first == query_first:
+            return 1.0
+        if candidate_first.startswith(query_first) or query_first.startswith(candidate_first):
+            return 1.0
+    query_initial = _query_first_initial_from_row(row)
+    if query_initial and candidate_first.startswith(query_initial):
+        return 1.0
+    return 0.0
+
+
+def _year_mismatch_severity(row: dict[str, Any]) -> float:
+    """Return a larger value for stronger year-range contradictions."""
+
+    query_year = row.get("query_year")
+    candidate_year_min = row.get("candidate_year_min")
+    candidate_year_max = row.get("candidate_year_max")
+    if query_year in (None, "") or candidate_year_min in (None, "") or candidate_year_max in (None, ""):
+        return 0.0
+    query_year_int = int(query_year)
+    year_min_int = int(candidate_year_min)
+    year_max_int = int(candidate_year_max)
+    if query_year_int < year_min_int:
+        return round(float(min(1.0, (year_min_int - query_year_int) / 10.0)), 6)
+    if query_year_int > year_max_int:
+        return round(float(min(1.0, (query_year_int - year_max_int) / 10.0)), 6)
+    return 0.0
+
+
+def _affiliation_contradiction_severity(row: dict[str, Any]) -> float:
+    """Return a larger value for stronger affiliation contradictions."""
+
+    if int(row.get("query_has_affiliations", 0) or 0) == 0:
+        return 0.0
+    return round(float(max(0.0, 1.0 - float(row.get("affiliation_overlap", 0.0) or 0.0))), 6)
+
+
+def _exact_anchor_evidence_flag(row: dict[str, Any]) -> int:
+    """Flag exact-title anchor evidence that should strongly support linking."""
+
+    title_overlap = float(row.get("title_overlap", 0.0) or 0.0)
+    coauthor_overlap = float(row.get("coauthor_overlap", 0.0) or 0.0)
+    affiliation_overlap = float(row.get("affiliation_overlap", 0.0) or 0.0)
+    year_compatibility = float(row.get("year_compatibility", 0.0) or 0.0)
+    return int(
+        title_overlap >= float(EXACT_TITLE_ANCHOR_THRESHOLD)
+        and (
+            coauthor_overlap >= float(ANCHOR_SUPPORT_OVERLAP_THRESHOLD)
+            or affiliation_overlap >= float(ANCHOR_SUPPORT_OVERLAP_THRESHOLD)
+            or year_compatibility >= float(ANCHOR_YEAR_COMPATIBILITY_THRESHOLD)
+        )
+    )
+
+
+def _candidate_contradiction_signals(row: dict[str, Any]) -> tuple[int, float, int]:
+    """Return count, strength, and exact-title-conflict flag for one candidate row."""
+
+    title_overlap = float(row.get("title_overlap", 0.0) or 0.0)
+    year_mismatch_severity = _year_mismatch_severity(row)
+    affiliation_contradiction_severity = _affiliation_contradiction_severity(row)
+    first_name_compatibility = _first_name_candidate_compatibility(row)
+    first_name_contradiction = 0.0 if first_name_compatibility > 0.0 else 1.0
+    coauthor_contradiction = 0.0
+    if int(row.get("query_has_coauthors", 0) or 0) == 1:
+        coauthor_contradiction = max(0.0, 1.0 - float(row.get("coauthor_overlap", 0.0) or 0.0))
+    contradiction_count = int(year_mismatch_severity >= float(SEVERE_CONTRADICTION_THRESHOLD))
+    contradiction_count += int(affiliation_contradiction_severity >= float(SEVERE_CONTRADICTION_THRESHOLD))
+    contradiction_count += int(
+        coauthor_contradiction >= float(SEVERE_CONTRADICTION_THRESHOLD)
+        and title_overlap >= float(EXACT_TITLE_ANCHOR_THRESHOLD)
+    )
+    contradiction_count += int(first_name_contradiction >= 1.0 and title_overlap >= float(EXACT_TITLE_ANCHOR_THRESHOLD))
+    exact_title_identity_conflict_flag = int(
+        title_overlap >= float(EXACT_TITLE_ANCHOR_THRESHOLD)
+        and (
+            year_mismatch_severity >= float(SEVERE_CONTRADICTION_THRESHOLD)
+            or affiliation_contradiction_severity >= float(SEVERE_CONTRADICTION_THRESHOLD)
+            or first_name_contradiction >= 1.0
+        )
+    )
+    title_anchor = title_overlap >= float(EXACT_TITLE_ANCHOR_THRESHOLD)
+    contradiction_score = round(
+        float(
+            max(
+                year_mismatch_severity,
+                affiliation_contradiction_severity,
+                coauthor_contradiction if title_anchor else 0.0,
+                first_name_contradiction if title_anchor else 0.0,
+            )
+        ),
+        6,
+    )
+    return contradiction_count, contradiction_score, exact_title_identity_conflict_flag
+
+
+def _float_feature(row: dict[str, Any], column: str, *, default: float = 0.0) -> float:
+    """Return one numeric row feature with a stable fallback for derived formulas."""
+
+    value = row.get(column)
+    if value is None or value == "":
+        return float(default)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(numeric):
+        return float(default)
+    return float(numeric)
+
+
+def _clip01(value: float) -> float:
+    return float(min(1.0, max(0.0, value)))
+
+
+def _anchor_evidence_features(
+    row: dict[str, Any],
+    *,
+    candidate_pair_share_within_coarse_family: float,
+    candidate_contradiction_score: float,
+) -> dict[str, float]:
+    """Return anchor-support features that separate sparse true components from false winners."""
+
+    min_distance = _float_feature(row, "min_distance", default=10000.0)
+    specter = _float_feature(row, "specter_exemplar_similarity")
+    title = _float_feature(row, "title_overlap")
+    coauthor = _float_feature(row, "coauthor_overlap")
+    affiliation = _float_feature(row, "affiliation_overlap")
+    venue = _float_feature(row, "venue_overlap")
+    year = _float_feature(row, "year_compatibility")
+    retrieval_gap = _float_feature(row, "retrieval_score_gap_vs_best_competitor")
+    same_top1 = _clip01(_float_feature(row, "same_family_as_top1"))
+    cluster_size = _float_feature(row, "cluster_size")
+    named_signature_count = _float_feature(row, "named_signature_count")
+    retrieval_rank = _float_feature(row, "retrieval_rank", default=99.0)
+    contradiction = _clip01(float(candidate_contradiction_score))
+    candidate_pair_share = _clip01(float(candidate_pair_share_within_coarse_family))
+
+    anchor_count = int(min_distance <= 0.15)
+    anchor_count += int(specter >= 0.70)
+    anchor_count += int(title >= 0.20)
+    anchor_count += int(coauthor >= 0.25)
+    anchor_count += int(affiliation >= 0.25)
+    anchor_count += int(venue >= 0.20)
+    anchor_count += int(year >= 0.90)
+    anchor_count += int(retrieval_gap >= 0.02)
+
+    support_strength = (
+        0.20 * (1.0 - _clip01(min_distance))
+        + 0.20 * _clip01(specter)
+        + 0.18 * _clip01(title)
+        + 0.18 * _clip01(coauthor)
+        + 0.12 * _clip01(affiliation)
+        + 0.06 * _clip01(venue)
+        + 0.06 * _clip01(year)
+    )
+    strong_positive_anchor_score = (
+        _clip01(support_strength) * (0.5 + 0.5 * same_top1) * (0.35 + 0.65 * _clip01(1.0 - contradiction))
+    )
+
+    retrieval_gap_scaled = _clip01((min(0.3, max(-0.2, retrieval_gap)) + 0.2) / 0.5)
+    residual_support = (
+        0.28 * (1.0 - _clip01(min_distance))
+        + 0.20 * _clip01(specter)
+        + 0.20 * _clip01(coauthor)
+        + 0.14 * _clip01(title)
+        + 0.10 * _clip01(year)
+        + 0.08 * retrieval_gap_scaled
+    )
+    tiny_candidate = float(cluster_size <= 2.0 or named_signature_count <= 2.0)
+    weak_residual_anchor_score = tiny_candidate * same_top1 * _clip01(residual_support)
+    sparse_relative_winner_score = (
+        float(retrieval_rank <= 1.0)
+        * same_top1
+        * _clip01(min(0.3, max(0.0, retrieval_gap)) / 0.3)
+        * (1.0 - candidate_pair_share)
+        * _clip01(residual_support)
+    )
+    return {
+        "anchor_evidence_count": float(anchor_count),
+        "strong_positive_anchor_score": round(float(strong_positive_anchor_score), 6),
+        "weak_residual_anchor_score": round(float(weak_residual_anchor_score), 6),
+        "sparse_relative_winner_score": round(float(sparse_relative_winner_score), 6),
+    }
+
+
 def _rank_fraction_map(
     rows: Sequence[dict[str, Any]],
     *,
     column: str,
     higher_is_better: bool,
 ) -> dict[tuple[str, str], float]:
+    if not rows:
+        return {}
+    normalized_values = {_row_identity(row): round(float(row.get(column, 0.0) or 0.0), 12) for row in rows}
+    if len(set(normalized_values.values())) == 1:
+        return {_row_identity(row): 0.5 for row in rows}
     ordered = sorted(
         rows,
         key=lambda row: (
-            -float(row[column]) if higher_is_better else float(row[column]),
+            -normalized_values[_row_identity(row)] if higher_is_better else normalized_values[_row_identity(row)],
             int(row["retrieval_rank"]),
             str(row["candidate_component_key"]),
         ),
     )
     denominator = max(1, len(ordered) - 1)
-    return {_row_identity(row): round(float(index / denominator), 6) for index, row in enumerate(ordered)}
+    fractions: dict[tuple[str, str], float] = {}
+    start = 0
+    while start < len(ordered):
+        start_value = normalized_values[_row_identity(ordered[start])]
+        end = start + 1
+        while end < len(ordered) and normalized_values[_row_identity(ordered[end])] == start_value:
+            end += 1
+        tied_fraction = round(float(((start + end - 1) / 2) / denominator), 6)
+        for index in range(start, end):
+            fractions[_row_identity(ordered[index])] = tied_fraction
+        start = end
+    return fractions
 
 
 def _build_group_feature_cache(
@@ -1998,13 +3197,15 @@ def _build_group_feature_cache(
     *,
     feature_columns: Sequence[str],
 ) -> dict[tuple[str, str], dict[str, float]]:
-    retrieval_top1_row = min(
+    ordered_by_retrieval = sorted(
         rows,
         key=lambda row: (
             int(row["retrieval_rank"]),
             str(row["candidate_component_key"]),
         ),
     )
+    retrieval_top1_row = ordered_by_retrieval[0]
+    retrieval_runner_up_row = ordered_by_retrieval[1] if len(ordered_by_retrieval) > 1 else ordered_by_retrieval[0]
     best_top3_row = min(
         rows,
         key=lambda row: (
@@ -2087,14 +3288,60 @@ def _build_group_feature_cache(
             column="year_compatibility",
             higher_is_better=True,
         ),
+        "title_overlap_rank_fraction": _rank_fraction_map(rows, column="title_overlap", higher_is_better=True),
+        "specter_centroid_rank_fraction": _rank_fraction_map(
+            rows,
+            column="specter_centroid_similarity",
+            higher_is_better=True,
+        ),
+        "specter_exemplar_rank_fraction": _rank_fraction_map(
+            rows,
+            column="specter_exemplar_similarity",
+            higher_is_better=True,
+        ),
     }
+    top1_retrieval_score = float(retrieval_top1_row["retrieval_score"])
+    runner_up_retrieval_score = float(retrieval_runner_up_row["retrieval_score"])
+    near_tied_alternative_count = int(
+        sum(
+            1
+            for candidate_row in ordered_by_retrieval[1:]
+            if float(top1_retrieval_score - float(candidate_row["retrieval_score"]))
+            <= float(NEAR_TIED_RETRIEVAL_SCORE_GAP)
+        )
+    )
+    top1_contradiction_count, top1_contradiction_score, top1_exact_title_identity_conflict_flag = (
+        _candidate_contradiction_signals(retrieval_top1_row)
+    )
+    top1_exact_anchor_evidence_flag = _exact_anchor_evidence_flag(retrieval_top1_row)
+
     cache: dict[tuple[str, str], dict[str, float]] = {}
+    candidate_contradiction_payload: dict[tuple[str, str], tuple[int, float, int]] = {}
+    exact_anchor_flag_by_row: dict[tuple[str, str], int] = {}
+    for row in rows:
+        row_id = _row_identity(row)
+        candidate_contradiction_payload[row_id] = _candidate_contradiction_signals(row)
+        exact_anchor_flag_by_row[row_id] = _exact_anchor_evidence_flag(row)
+    plausible_conflicting_candidate_count = int(
+        sum(
+            1
+            for row in rows
+            if _row_identity(row) != _row_identity(retrieval_top1_row)
+            and (
+                float(row["retrieval_score"]) >= float(top1_retrieval_score - PLAUSIBLE_CONFLICT_RETRIEVAL_GAP)
+                or float(row["title_overlap"]) >= float(EXACT_TITLE_ANCHOR_THRESHOLD)
+                or float(row["count_normalized_confidence"]) >= 0.5
+            )
+            and candidate_contradiction_payload[_row_identity(row)][1] >= 0.5
+        )
+    )
     for row in rows:
         row_id = _row_identity(row)
         candidate_count = max(1, int(row["candidate_count"]))
         cross_family_with_top1 = int(_rows_are_cross_family(retrieval_top1_row, row))
         coarse_family_key = _coarse_family_key(row)
         coarse_family_pair_count = int(coarse_family_pair_count_top50.get(coarse_family_key, int(row["pair_count"])))
+        candidate_pair_share = float(float(row["pair_count"]) / max(1, coarse_family_pair_count))
         best_same_coarse_family_row = coarse_family_best_top5_row.get(coarse_family_key, row)
         top20_mean_distance = (
             float(row["top20_mean_distance"])
@@ -2108,6 +3355,16 @@ def _build_group_feature_cache(
                 float(GENERIC_HEURISTIC_OVERRIDE_MARGIN)
                 + (float(GENERIC_CROSS_FAMILY_EXTRA_MARGIN) if cross_family_with_top1 == 1 else 0.0)
             )
+        )
+        candidate_contradiction_count, candidate_contradiction_score, exact_title_identity_conflict_flag = (
+            candidate_contradiction_payload[row_id]
+        )
+        year_mismatch_severity = _year_mismatch_severity(row)
+        affiliation_contradiction_severity = _affiliation_contradiction_severity(row)
+        anchor_evidence_features = _anchor_evidence_features(
+            row,
+            candidate_pair_share_within_coarse_family=candidate_pair_share,
+            candidate_contradiction_score=candidate_contradiction_score,
         )
         cache[row_id] = {
             "retrieval_rank_fraction": round(float((int(row["retrieval_rank"]) - 1) / max(1, candidate_count - 1)), 6),
@@ -2139,6 +3396,7 @@ def _build_group_feature_cache(
                 float(top20_mean_distance - float(row["top5_mean_distance"])),
                 6,
             ),
+            "cluster_size_log_capped": round(float(cluster_size_log_capped(row.get("cluster_size"))), 6),
             "is_retrieval_top1": int(_row_identity(row) == _row_identity(retrieval_top1_row)),
             "is_best_top3": int(_row_identity(row) == _row_identity(best_top3_row)),
             "is_best_top5": int(_row_identity(row) == _row_identity(best_top5_row)),
@@ -2153,7 +3411,7 @@ def _build_group_feature_cache(
             ),
             "coarse_family_pair_count_top50": float(coarse_family_pair_count),
             "candidate_pair_share_within_coarse_family": round(
-                float(float(row["pair_count"]) / max(1, coarse_family_pair_count)),
+                float(candidate_pair_share),
                 6,
             ),
             "coarse_family_top5_best_gap": round(
@@ -2188,10 +3446,82 @@ def _build_group_feature_cache(
             "cross_family_with_top1": int(cross_family_with_top1),
             "override_slack_vs_top1": round(float(override_slack_vs_top1), 6),
             "beats_top1_after_penalty": int(override_slack_vs_top1 > 0.0),
+            "retrieval_top1_score": round(float(top1_retrieval_score), 6),
+            "retrieval_top1_margin": round(float(top1_retrieval_score - runner_up_retrieval_score), 6),
+            "near_tied_alternative_count": float(near_tied_alternative_count),
+            "exact_anchor_evidence_flag": float(exact_anchor_flag_by_row[row_id]),
+            "top1_exact_anchor_evidence_flag": float(top1_exact_anchor_evidence_flag),
+            "top1_minus_runnerup_retrieval_score": round(
+                float(top1_retrieval_score - runner_up_retrieval_score),
+                6,
+            ),
+            "top1_minus_runnerup_title_overlap": round(
+                float(float(retrieval_top1_row["title_overlap"]) - float(retrieval_runner_up_row["title_overlap"])),
+                6,
+            ),
+            "top1_minus_runnerup_coauthor_overlap": round(
+                float(
+                    float(retrieval_top1_row["coauthor_overlap"]) - float(retrieval_runner_up_row["coauthor_overlap"])
+                ),
+                6,
+            ),
+            "top1_minus_runnerup_venue_overlap": round(
+                float(float(retrieval_top1_row["venue_overlap"]) - float(retrieval_runner_up_row["venue_overlap"])),
+                6,
+            ),
+            "top1_minus_runnerup_year_compatibility": round(
+                float(
+                    float(retrieval_top1_row["year_compatibility"])
+                    - float(retrieval_runner_up_row["year_compatibility"])
+                ),
+                6,
+            ),
+            "top1_minus_runnerup_retrieval_rank": round(
+                float(int(retrieval_top1_row["retrieval_rank"]) - int(retrieval_runner_up_row["retrieval_rank"])),
+                6,
+            ),
+            "top1_minus_runnerup_count_normalized_confidence": round(
+                float(
+                    float(retrieval_top1_row["count_normalized_confidence"])
+                    - float(retrieval_runner_up_row["count_normalized_confidence"])
+                ),
+                6,
+            ),
+            "top1_minus_runnerup_cluster_size": round(
+                float(float(retrieval_top1_row["cluster_size"]) - float(retrieval_runner_up_row["cluster_size"])),
+                6,
+            ),
+            "year_mismatch_severity": round(float(year_mismatch_severity), 6),
+            "affiliation_contradiction_severity": round(float(affiliation_contradiction_severity), 6),
+            "initial_only_x_title_overlap": round(
+                float(float(row["title_overlap"]) if str(row.get("query_view", "")) == "initial_only" else 0.0),
+                6,
+            ),
+            "initial_only_x_coauthor_overlap": round(
+                float(float(row["coauthor_overlap"]) if str(row.get("query_view", "")) == "initial_only" else 0.0),
+                6,
+            ),
+            "initial_only_x_venue_overlap": round(
+                float(float(row["venue_overlap"]) if str(row.get("query_view", "")) == "initial_only" else 0.0),
+                6,
+            ),
+            "candidate_contradiction_count": float(candidate_contradiction_count),
+            "candidate_contradiction_score": round(float(candidate_contradiction_score), 6),
+            "exact_title_identity_conflict_flag": float(exact_title_identity_conflict_flag),
+            "top1_contradiction_count": float(top1_contradiction_count),
+            "top1_strongest_contradiction": round(float(top1_contradiction_score), 6),
+            "top1_exact_title_identity_conflict_flag": float(top1_exact_title_identity_conflict_flag),
+            "plausible_conflicting_candidate_count": float(plausible_conflicting_candidate_count),
+            **anchor_evidence_features,
+            "query_view__full": float(str(row.get("query_view", "")) == "full"),
+            "query_view__initial_only": float(str(row.get("query_view", "")) == "initial_only"),
             "affiliation_overlap_rank_fraction": rank_maps["affiliation_overlap_rank_fraction"][row_id],
             "coauthor_overlap_rank_fraction": rank_maps["coauthor_overlap_rank_fraction"][row_id],
             "venue_overlap_rank_fraction": rank_maps["venue_overlap_rank_fraction"][row_id],
             "year_compatibility_rank_fraction": rank_maps["year_compatibility_rank_fraction"][row_id],
+            "title_overlap_rank_fraction": rank_maps["title_overlap_rank_fraction"][row_id],
+            "specter_centroid_rank_fraction": rank_maps["specter_centroid_rank_fraction"][row_id],
+            "specter_exemplar_rank_fraction": rank_maps["specter_exemplar_rank_fraction"][row_id],
         }
     return cache
 
@@ -2316,7 +3646,7 @@ def _positive_row_enrichment_score(
                 score = max(score, 0.4 if cross_family == 1 else 0.3)
         if retrieval_rank >= 2 and top5_gap_to_top1 <= -0.01:
             score = max(score, 0.75 if cross_family == 1 else 0.65)
-        if int(row["confident_family_flag"]) == 0 and retrieval_rank >= 2:
+        if not _has_confident_family_assignment(row) and retrieval_rank >= 2:
             score = max(score, 0.25)
         return float(min(1.0, score))
     # Region 1: clear heuristic overrides are underrepresented in the labeled data
@@ -2430,8 +3760,8 @@ def choose_retrieval_top1(rows: Sequence[dict[str, Any]], *, window_size: int) -
 
 def _rows_are_cross_family(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return (
-        int(left["confident_family_flag"]) == 1
-        and int(right["confident_family_flag"]) == 1
+        _has_confident_family_assignment(left)
+        and _has_confident_family_assignment(right)
         and str(left["family_id"]) != str(right["family_id"])
     )
 

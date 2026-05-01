@@ -19,7 +19,6 @@ import argparse
 import json
 import os
 import pickle
-import re
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -29,17 +28,10 @@ from typing import Any
 
 import numpy as np
 
-SIGNATURES_START = '  "signatures" : [ {'
-PAPERS_START = '  "papers" : [ {'
-PAPER_EMBEDDINGS_START = '  "paper_embeddings" : {'
-OBJECT_SEPARATOR = "  }, {"
-OBJECT_SECTION_END = re.compile(r"^  }\s*],?$")
-EMBEDDING_SECTION_END = re.compile(r"^  },?$")
-EMBEDDING_ENTRY = re.compile(r'^    "([^"]+)" : (\[.*\]),?$')
-
 SIGNATURE_LOG_INTERVAL = 25_000
 PAPER_LOG_INTERVAL = 25_000
 EMBEDDING_LOG_INTERVAL = 25_000
+STREAM_CHUNK_SIZE = 1 << 20
 
 
 @dataclass(slots=True)
@@ -91,79 +83,247 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Refusing unbounded extraction without explicit confirmation. Use --full-run.")
 
 
-def _section_for_line(line: str) -> str | None:
-    """Return the section name for a top-level section start line."""
-    if line == SIGNATURES_START:
-        return "signatures"
-    if line == PAPERS_START:
-        return "papers"
-    if line == PAPER_EMBEDDINGS_START:
-        return "paper_embeddings"
-    return None
+class JsonStream:
+    """Incrementally read JSON tokens from a text file without loading it all."""
 
+    def __init__(self, path: Path, *, chunk_size: int | None = None) -> None:
+        self.path = path
+        self.chunk_size = STREAM_CHUNK_SIZE if chunk_size is None else chunk_size
+        self._buffer = ""
+        self._position = 0
+        self._eof = False
+        self._infile = path.open("r", encoding="utf-8")
 
-def _parse_json_object(lines: list[str]) -> dict[str, Any]:
-    """Parse one top-level signature or paper object."""
-    return json.loads("\n".join(lines))
+    def close(self) -> None:
+        """Close the underlying file handle."""
+        self._infile.close()
 
+    def __enter__(self) -> JsonStream:
+        """Enter the stream context."""
+        return self
 
-def _parse_embedding_line(line: str) -> tuple[str, np.ndarray]:
-    """Parse one `paper_embeddings` entry."""
-    match = EMBEDDING_ENTRY.match(line)
-    if match is None:
-        raise ValueError(f"Malformed embedding line: {line[:200]}")
-    key = match.group(1)
-    vector = np.fromstring(match.group(2).strip()[1:-1], sep=",", dtype=np.float32)
-    return key, vector
+    def __exit__(self, exc_type, exc, tb) -> None:
+        """Close the stream context."""
+        self.close()
 
+    def _fill(self) -> None:
+        """Append more text to the buffer if the file has remaining content."""
+        if self._eof:
+            return
+        chunk = self._infile.read(self.chunk_size)
+        if chunk == "":
+            self._eof = True
+            return
+        self._buffer += chunk
 
-def iter_monolith_records(path: Path) -> Iterator[tuple[str, Any]]:
-    """Yield signature objects, paper objects, and embedding rows from the monolith."""
-    active_object_section: str | None = None
-    current_object_lines: list[str] | None = None
-    active_section: str | None = None
+    def _compact(self) -> None:
+        """Drop already-consumed bytes so the buffer stays bounded."""
+        if self._position == 0:
+            return
+        if self._position >= self.chunk_size or self._position == len(self._buffer):
+            self._buffer = self._buffer[self._position :]
+            self._position = 0
 
-    with path.open("r", encoding="utf-8") as infile:
-        for raw_line in infile:
-            line = raw_line.rstrip("\n")
+    def _ensure_available(self) -> None:
+        """Ensure there is at least one character available or the stream is at EOF."""
+        while self._position >= len(self._buffer) and not self._eof:
+            self._fill()
 
-            if active_object_section is None:
-                maybe_section = _section_for_line(line)
-                if maybe_section in {"signatures", "papers"}:
-                    active_object_section = maybe_section
-                    active_section = maybe_section
-                    current_object_lines = ["{"]
-                    continue
-                if maybe_section == "paper_embeddings":
-                    active_section = maybe_section
-                    continue
+    def _skip_whitespace(self) -> None:
+        """Advance past JSON whitespace."""
+        while True:
+            self._ensure_available()
+            while self._position < len(self._buffer) and self._buffer[self._position].isspace():
+                self._position += 1
+            if self._position < len(self._buffer) or self._eof:
+                break
+        self._compact()
 
-            if active_object_section is not None:
-                if line == OBJECT_SEPARATOR:
-                    assert current_object_lines is not None
-                    current_object_lines.append("}")
-                    yield active_object_section, _parse_json_object(current_object_lines)
-                    current_object_lines = ["{"]
-                    continue
-                if OBJECT_SECTION_END.match(line):
-                    assert current_object_lines is not None
-                    current_object_lines.append("}")
-                    yield active_object_section, _parse_json_object(current_object_lines)
-                    current_object_lines = None
-                    active_object_section = None
-                    active_section = None
-                    continue
-                assert current_object_lines is not None
-                current_object_lines.append(line)
+    def peek(self) -> str:
+        """Return the next non-whitespace character without consuming it."""
+        self._skip_whitespace()
+        self._ensure_available()
+        if self._position >= len(self._buffer):
+            raise EOFError(f"Unexpected end of file while reading {self.path}")
+        return self._buffer[self._position]
+
+    def read_char(self, expected: str | None = None) -> str:
+        """Consume and return the next non-whitespace character."""
+        char = self.peek()
+        if expected is not None and char != expected:
+            raise ValueError(f"Expected {expected!r}, found {char!r} in {self.path}")
+        self._position += 1
+        self._compact()
+        return char
+
+    def read_json_value_text(self) -> str:
+        """Read the next JSON value and return its source text."""
+        self._skip_whitespace()
+        self._ensure_available()
+        if self._position >= len(self._buffer):
+            raise EOFError(f"Unexpected end of file while reading {self.path}")
+
+        start = self._position
+        token = self._buffer[self._position]
+        if token in "[{":
+            return self._read_balanced_value(start)
+        if token == '"':
+            return self._read_string_value(start)
+        return self._read_scalar_value(start)
+
+    def _read_balanced_value(self, start: int) -> str:
+        """Read an object or array, preserving nested content."""
+        closing_by_open = {"{": "}", "[": "]"}
+        stack: list[str] = [closing_by_open[self._buffer[start]]]
+        in_string = False
+        escaped = False
+        self._position = start + 1
+
+        while stack:
+            self._ensure_available()
+            if self._position >= len(self._buffer):
+                raise EOFError(f"Unexpected end of file while reading structured JSON in {self.path}")
+
+            char = self._buffer[self._position]
+            self._position += 1
+
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
                 continue
 
-            if active_section == "paper_embeddings":
-                if EMBEDDING_SECTION_END.match(line):
-                    active_section = None
-                    continue
-                if not line.startswith("    "):
-                    continue
-                yield "paper_embedding", _parse_embedding_line(line)
+            if char == '"':
+                in_string = True
+            elif char in closing_by_open:
+                stack.append(closing_by_open[char])
+            elif char in {"}", "]"}:
+                expected = stack.pop()
+                if char != expected:
+                    raise ValueError(f"Malformed JSON nesting in {self.path}: expected {expected!r}, found {char!r}")
+
+        value_text = self._buffer[start : self._position]
+        self._compact()
+        return value_text
+
+    def _read_string_value(self, start: int) -> str:
+        """Read a JSON string token."""
+        escaped = False
+        self._position = start + 1
+
+        while True:
+            self._ensure_available()
+            if self._position >= len(self._buffer):
+                raise EOFError(f"Unexpected end of file while reading string JSON in {self.path}")
+
+            char = self._buffer[self._position]
+            self._position += 1
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == '"':
+                value_text = self._buffer[start : self._position]
+                self._compact()
+                return value_text
+
+    def _read_scalar_value(self, start: int) -> str:
+        """Read a JSON scalar such as a number, boolean, or null."""
+        while True:
+            self._ensure_available()
+            if self._position >= len(self._buffer):
+                break
+            char = self._buffer[self._position]
+            if char in {",", "]", "}"} or char.isspace():
+                break
+            self._position += 1
+
+        value_text = self._buffer[start : self._position]
+        self._compact()
+        return value_text
+
+
+def _read_json_string(stream: JsonStream) -> str:
+    """Read one JSON string token and decode it."""
+    value = json.loads(stream.read_json_value_text())
+    if not isinstance(value, str):
+        raise ValueError(f"Expected a JSON string in {stream.path}, found {type(value).__name__}")
+    return value
+
+
+def _consume_delimited_sequence_end(stream: JsonStream, *, separator: str, end: str) -> bool:
+    """Consume a separator or closing delimiter and report whether more items remain."""
+    token = stream.peek()
+    if token == separator:
+        stream.read_char(separator)
+        return True
+    if token == end:
+        stream.read_char(end)
+        return False
+    raise ValueError(f"Expected {separator!r} or {end!r}, found {token!r} in {stream.path}")
+
+
+def _iter_object_section(stream: JsonStream, record_type: str) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield objects from a top-level JSON array."""
+    stream.read_char("[")
+    if stream.peek() == "]":
+        stream.read_char("]")
+        return
+
+    while True:
+        payload = json.loads(stream.read_json_value_text())
+        if not isinstance(payload, dict):
+            raise ValueError(f"Expected object entries in {record_type}, found {type(payload).__name__}")
+        yield record_type, payload
+        if not _consume_delimited_sequence_end(stream, separator=",", end="]"):
+            return
+
+
+def _iter_embedding_section(stream: JsonStream) -> Iterator[tuple[str, tuple[str, np.ndarray]]]:
+    """Yield `(paper_id, vector)` rows from the top-level embedding mapping."""
+    stream.read_char("{")
+    if stream.peek() == "}":
+        stream.read_char("}")
+        return
+
+    while True:
+        key = _read_json_string(stream)
+        stream.read_char(":")
+        vector_text = stream.read_json_value_text().strip()
+        if not (vector_text.startswith("[") and vector_text.endswith("]")):
+            raise ValueError(f"Expected embedding array for paper_id={key!r} in {stream.path}")
+        vector = np.fromstring(vector_text[1:-1], sep=",", dtype=np.float32)
+        yield "paper_embedding", (key, vector)
+        if not _consume_delimited_sequence_end(stream, separator=",", end="}"):
+            return
+
+
+def iter_monolith_records(path: Path, *, chunk_size: int | None = None) -> Iterator[tuple[str, Any]]:
+    """Yield signature objects, paper objects, and embedding rows from the monolith."""
+    with JsonStream(path, chunk_size=chunk_size) as stream:
+        stream.read_char("{")
+        if stream.peek() == "}":
+            stream.read_char("}")
+            return
+
+        while True:
+            section_name = _read_json_string(stream)
+            stream.read_char(":")
+
+            if section_name in {"signatures", "papers"}:
+                yield from _iter_object_section(stream, section_name)
+            elif section_name == "paper_embeddings":
+                yield from _iter_embedding_section(stream)
+            else:
+                stream.read_json_value_text()
+
+            if not _consume_delimited_sequence_end(stream, separator=",", end="}"):
+                return
 
 
 def census_monolith(path: Path, *, limit_signatures: int | None = None) -> MonolithCensus:

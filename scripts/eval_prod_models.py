@@ -75,9 +75,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate prod S2AND models (SPECTER1 vs SPECTER2)")
     parser.add_argument(
         "--dataset",
-        choices=["inventors_s2and", "mini"],
-        default="inventors_s2and",
-        help="Which dataset(s) to evaluate on (default: inventors_s2and)",
+        choices=["inventors_s2and", "mini", "full"],
+        default="full",
+        help="Which dataset(s) to evaluate on (default: full)",
     )
     parser.add_argument(
         "--seed",
@@ -163,6 +163,9 @@ def main() -> None:
     if args.dataset == "mini":
         data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
         # aminer has too much variance; medline is pairwise only
+        datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
+    elif args.dataset == "full":
+        data_original = os.path.join(PROJECT_ROOT_PATH, "data")
         datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
     else:
         data_original = os.path.join(PROJECT_ROOT_PATH, "data")

@@ -3,6 +3,7 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from scripts.extract_big_block_dataset import (
     census_monolith,
@@ -79,13 +80,22 @@ MONOLITH_FIXTURE = """{
 """
 
 
-def _write_fixture(path: Path) -> None:
-    path.write_text(MONOLITH_FIXTURE, encoding="utf-8")
+def _minify_fixture(pretty_fixture: str) -> str:
+    return json.dumps(json.loads(pretty_fixture), separators=(",", ":"))
 
 
-def test_iter_monolith_records_yields_expected_sequence(tmp_path):
+@pytest.fixture(params=[MONOLITH_FIXTURE, _minify_fixture(MONOLITH_FIXTURE)], ids=["pretty", "minified"])
+def monolith_fixture_text(request) -> str:
+    return request.param
+
+
+def _write_fixture(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
+def test_iter_monolith_records_yields_expected_sequence(tmp_path, monolith_fixture_text):
     input_path = tmp_path / "big_block_fixture.json"
-    _write_fixture(input_path)
+    _write_fixture(input_path, monolith_fixture_text)
 
     records = list(iter_monolith_records(input_path))
 
@@ -103,9 +113,25 @@ def test_iter_monolith_records_yields_expected_sequence(tmp_path):
     np.testing.assert_allclose(records[4][1][1], np.array([0.1, 0.2, 0.3], dtype=np.float32))
 
 
-def test_census_monolith_respects_limit_signatures(tmp_path):
+def test_iter_monolith_records_handles_minified_chunk_boundaries(tmp_path):
     input_path = tmp_path / "big_block_fixture.json"
-    _write_fixture(input_path)
+    _write_fixture(input_path, _minify_fixture(MONOLITH_FIXTURE))
+
+    records = list(iter_monolith_records(input_path, chunk_size=64))
+
+    assert [record_type for record_type, _ in records] == [
+        "signatures",
+        "signatures",
+        "papers",
+        "papers",
+        "paper_embedding",
+        "paper_embedding",
+    ]
+
+
+def test_census_monolith_respects_limit_signatures(tmp_path, monolith_fixture_text):
+    input_path = tmp_path / "big_block_fixture.json"
+    _write_fixture(input_path, monolith_fixture_text)
 
     census = census_monolith(input_path, limit_signatures=1)
 
@@ -117,10 +143,10 @@ def test_census_monolith_respects_limit_signatures(tmp_path):
     assert census.block_counts == {"h wang": 1}
 
 
-def test_extract_monolith_dataset_writes_anddata_friendly_outputs(tmp_path):
+def test_extract_monolith_dataset_writes_anddata_friendly_outputs(tmp_path, monolith_fixture_text):
     input_path = tmp_path / "big_block_fixture.json"
     output_dir = tmp_path / "h_wang"
-    _write_fixture(input_path)
+    _write_fixture(input_path, monolith_fixture_text)
 
     meta = extract_monolith_dataset(input_path, output_dir, limit_signatures=1)
 

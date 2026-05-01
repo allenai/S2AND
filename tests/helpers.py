@@ -85,10 +85,15 @@ def build_query_features(
     year: int | None = None,
     orcid: str | None = None,
     specter: Any | None = None,
+    coauthor_blocks: frozenset[str] | None = None,
+    affiliation_terms: frozenset[str] | None = None,
+    venue_terms: frozenset[str] | None = None,
     has_coauthors: bool = False,
     has_affiliations: bool = False,
     has_full_first: bool = False,
     has_middle: bool = False,
+    title_terms: frozenset[str] = frozenset(),
+    name_counts: Any | None = None,
 ) -> retrieval.QueryFeatures:
     """Build a compact `QueryFeatures` fixture for retrieval tests."""
 
@@ -97,9 +102,17 @@ def build_query_features(
         middle="",
         first_initial=first[:1] if first else "",
         middle_initials=middle_initials,
-        coauthor_blocks=frozenset({"a smith"}) if has_coauthors else frozenset(),
-        affiliation_terms=frozenset({"lab"}) if has_affiliations else frozenset(),
-        venue_terms=frozenset(),
+        coauthor_blocks=(
+            coauthor_blocks
+            if coauthor_blocks is not None
+            else (frozenset({"a smith"}) if has_coauthors else frozenset())
+        ),
+        affiliation_terms=(
+            affiliation_terms
+            if affiliation_terms is not None
+            else (frozenset({"lab"}) if has_affiliations else frozenset())
+        ),
+        venue_terms=venue_terms if venue_terms is not None else frozenset(),
         year=year,
         orcid=orcid,
         specter=specter,
@@ -108,6 +121,8 @@ def build_query_features(
         has_affiliations=has_affiliations,
         has_full_first=has_full_first,
         has_middle=has_middle,
+        title_terms=title_terms,
+        name_counts=name_counts,
     )
 
 
@@ -126,6 +141,8 @@ def build_cluster_summary(
     orcid_values: frozenset[str] = frozenset(),
     specter_centroid: Any | None = None,
     exemplar_vectors: list[Any] | None = None,
+    title_counts: Counter[str] | None = None,
+    name_counts_values: tuple[Any, ...] = (),
 ) -> retrieval.ClusterSummary:
     """Build a compact `ClusterSummary` fixture for retrieval tests."""
 
@@ -146,4 +163,6 @@ def build_cluster_summary(
         orcid_values=orcid_values,
         specter_centroid=specter_centroid,
         exemplar_vectors=[] if exemplar_vectors is None else exemplar_vectors,
+        title_counts=title_counts or Counter(),
+        name_counts_values=name_counts_values,
     )

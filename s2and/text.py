@@ -35,15 +35,19 @@ def _get_fasttext_model():
 
     global _FASTTEXT_MODEL
     global _FASTTEXT_MODEL_INITIALIZED
+    if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
+        _FASTTEXT_MODEL = None
+        _FASTTEXT_MODEL_INITIALIZED = True
+        return None
     if _FASTTEXT_MODEL_INITIALIZED:
         return _FASTTEXT_MODEL
     with _FASTTEXT_MODEL_LOCK:
-        if _FASTTEXT_MODEL_INITIALIZED:
-            return _FASTTEXT_MODEL
         if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
             _FASTTEXT_MODEL = None
             _FASTTEXT_MODEL_INITIALIZED = True
             return None
+        if _FASTTEXT_MODEL_INITIALIZED:
+            return _FASTTEXT_MODEL
         try:
             _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
         except Exception:
@@ -428,7 +432,7 @@ def name_text_features(
     List[float]: a list of the various similarity scores for the two names
     """
     scores = []
-    if name_1 is None or name_2 is None or len(name_1) <= 1 or len(name_2) <= 1:
+    if name_1 is None or name_2 is None or len(name_1) == 0 or len(name_2) == 0:
         return [default_val] * len(TEXT_FUNCTIONS)
 
     for function, function_name in TEXT_FUNCTIONS:

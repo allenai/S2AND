@@ -18,7 +18,7 @@ import statistics
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -35,8 +35,14 @@ from s2and.subblocking import (
 )
 from s2and.text import normalize_text, same_prefix_tokens
 
+try:
+    import s2and_rust
+except ImportError:  # pragma: no cover - Rust extension optional for pure-Python helpers
+    s2and_rust = None  # type: ignore[assignment]
+
 TOP_KS = (1, 5, 10, 20, 50, 100)
 DEFAULT_SIGNATURE_BUDGETS = (25, 50, 100, 250, 500, 1000)
+ORCID_MODE_CHOICES = ("disabled", "oracle")
 QUERY_VIEW_INFORMATION_PRIORITY = {
     "initial_only_nearly_empty": 0,
     "initial_only_sparse_metadata": 1,
@@ -56,6 +62,45 @@ __all__ = [
     "score_summary",
 ]
 _ORIGINAL_COMPUTE_BLOCK: Callable[[str], str] = s2and_data_module.compute_block
+_DEFAULT_HYBRID_FEATURE_ORDER_FALLBACK = ("centroid", "coauthor", "affiliation", "middle", "first_name")
+_DEFAULT_HYBRID_CENTROID_WEIGHTS_FALLBACK = (0.42, 0.23, 0.12, 0.05, 0.07)
+_DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS_FALLBACK = (0.40, 0.23, 0.12, 0.05, 0.07)
+
+
+def _rust_default_tuple(name: str, fallback: tuple[Any, ...]) -> tuple[Any, ...]:
+    if s2and_rust is None or not hasattr(s2and_rust, name):
+        return fallback
+    return tuple(getattr(s2and_rust, name))
+
+
+def _rust_default_float(name: str, fallback: float) -> float:
+    if s2and_rust is None or not hasattr(s2and_rust, name):
+        return fallback
+    return float(getattr(s2and_rust, name))
+
+
+def _rust_default_int(name: str, fallback: int) -> int:
+    if s2and_rust is None or not hasattr(s2and_rust, name):
+        return fallback
+    return int(getattr(s2and_rust, name))
+
+
+HYBRID_FEATURE_ORDER = tuple(
+    str(value) for value in _rust_default_tuple("RETRIEVAL_FEATURE_ORDER", _DEFAULT_HYBRID_FEATURE_ORDER_FALLBACK)
+)
+DEFAULT_HYBRID_CENTROID_WEIGHTS = tuple(
+    float(value)
+    for value in _rust_default_tuple("DEFAULT_HYBRID_CENTROID_WEIGHTS", _DEFAULT_HYBRID_CENTROID_WEIGHTS_FALLBACK)
+)
+DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS = tuple(
+    float(value)
+    for value in _rust_default_tuple("DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS", _DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS_FALLBACK)
+)
+RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE = _rust_default_float("RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE", -0.25)
+RETRIEVAL_YEAR_SCORE_DECAY_YEARS = _rust_default_float("RETRIEVAL_YEAR_SCORE_DECAY_YEARS", 15.0)
+RETRIEVAL_YEAR_SCORE_RANGE_GAP = _rust_default_int("RETRIEVAL_YEAR_SCORE_RANGE_GAP", 10)
+RETRIEVAL_YEAR_SCORE_RANGE_PENALTY = _rust_default_float("RETRIEVAL_YEAR_SCORE_RANGE_PENALTY", 0.15)
+RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP = _rust_default_int("RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP", 35)
 
 
 def _safe_compute_block(name: str) -> str:
@@ -101,6 +146,8 @@ class QueryFeatures:
     has_affiliations: bool
     has_full_first: bool
     has_middle: bool
+    title_terms: frozenset[str] = EMPTY_STRING_SET
+    name_counts: Any | None = None
 
 
 @dataclass
@@ -121,6 +168,8 @@ class ClusterSummary:
     orcid_values: frozenset[str]
     specter_centroid: np.ndarray | None
     exemplar_vectors: list[np.ndarray]
+    title_counts: Counter[str] = field(default_factory=Counter)
+    name_counts_values: tuple[Any, ...] = field(default_factory=tuple)
 
 
 def _resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str, fallback_name: str) -> str:
@@ -177,7 +226,7 @@ def _middle_initial_score(query_initials: frozenset[str], counter: Counter[str],
     overlap = query_initials.intersection(counter.keys())
     if overlap:
         return sum(float(counter[value]) / float(size) for value in overlap) / float(len(query_initials))
-    return -0.25
+    return RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
 
 
 def _first_name_score(query_first: str, counter: Counter[str], size: int) -> float:
@@ -196,10 +245,13 @@ def _year_score(query_year: int | None, summary: ClusterSummary) -> float:
     if query_year is None or summary.year_mean is None:
         return 0.0
     distance = abs(float(query_year) - float(summary.year_mean))
-    score = max(0.0, 1.0 - (distance / 15.0))
+    score = max(0.0, 1.0 - (distance / RETRIEVAL_YEAR_SCORE_DECAY_YEARS))
     if summary.year_min is not None and summary.year_max is not None:
-        if query_year < summary.year_min - 10 or query_year > summary.year_max + 10:
-            score -= 0.15
+        if (
+            query_year < summary.year_min - RETRIEVAL_YEAR_SCORE_RANGE_GAP
+            or query_year > summary.year_max + RETRIEVAL_YEAR_SCORE_RANGE_GAP
+        ):
+            score -= RETRIEVAL_YEAR_SCORE_RANGE_PENALTY
     return score
 
 
@@ -257,7 +309,7 @@ def extract_query_features(
     signature_id: str,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
-    orcid_enabled: bool = True,
+    orcid_enabled: bool = False,
 ) -> QueryFeatures:
     if feature_cache is not None and signature_id in feature_cache:
         features = feature_cache[signature_id]
@@ -268,9 +320,11 @@ def extract_query_features(
         affiliation_terms = _nonempty_feature_values(_signature_affiliation_feature_keys(signature))
         paper = dataset.papers.get(str(signature.paper_id))
         venue_terms = frozenset()
+        title_terms = frozenset()
         year = None
         if paper is not None:
             venue_terms = _normalize_term_set(" ".join(part for part in [paper.venue, paper.journal_name] if part))
+            title_terms = _normalize_term_set(getattr(paper, "title", None))
             year = paper.year
         specter = _get_specter_vector(dataset, signature.paper_id)
         middle_tokens = [token for token in middle.split() if token]
@@ -291,6 +345,8 @@ def extract_query_features(
             has_affiliations=bool(affiliation_terms),
             has_full_first=len(first) > 1,
             has_middle=bool(middle_tokens),
+            title_terms=title_terms,
+            name_counts=getattr(signature, "author_info_name_counts", None),
         )
         if feature_cache is not None:
             feature_cache[signature_id] = features
@@ -300,7 +356,7 @@ def extract_query_features(
     return replace(features, orcid=None)
 
 
-def mask_query_features(base: QueryFeatures, view: str, *, orcid_enabled: bool = True) -> QueryFeatures:
+def mask_query_features(base: QueryFeatures, view: str, *, orcid_enabled: bool = False) -> QueryFeatures:
     if view == "full":
         return base if orcid_enabled else replace(base, orcid=None)
 
@@ -321,6 +377,8 @@ def mask_query_features(base: QueryFeatures, view: str, *, orcid_enabled: bool =
         has_affiliations=base.has_affiliations,
         has_full_first=False,
         has_middle=False,
+        title_terms=base.title_terms,
+        name_counts=base.name_counts,
     )
     if view == "initial_only":
         return masked
@@ -382,16 +440,18 @@ def build_cluster_summary(
     max_exemplars: int,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
-    orcid_enabled: bool = True,
+    orcid_enabled: bool = False,
 ) -> ClusterSummary:
     first_name_counts: Counter[str] = Counter()
     middle_initial_counts: Counter[str] = Counter()
     coauthor_counts: Counter[str] = Counter()
     affiliation_counts: Counter[str] = Counter()
     venue_counts: Counter[str] = Counter()
+    title_counts: Counter[str] = Counter()
     year_values: list[int] = []
     orcid_values: set[str] = set()
     specter_vectors: list[np.ndarray] = []
+    name_counts_values: list[Any] = []
 
     for signature_id in signature_ids:
         features = extract_query_features(
@@ -410,12 +470,16 @@ def build_cluster_summary(
             affiliation_counts[term] += 1
         for term in features.venue_terms:
             venue_counts[term] += 1
+        for term in features.title_terms:
+            title_counts[term] += 1
         if features.year is not None:
             year_values.append(int(features.year))
         if features.orcid is not None:
             orcid_values.add(features.orcid)
         if features.specter is not None:
             specter_vectors.append(features.specter)
+        if features.name_counts is not None:
+            name_counts_values.append(features.name_counts)
 
     centroid = None
     if specter_vectors:
@@ -438,6 +502,8 @@ def build_cluster_summary(
         orcid_values=frozenset(orcid_values),
         specter_centroid=centroid,
         exemplar_vectors=_select_exemplars(specter_vectors, max_exemplars=max_exemplars),
+        title_counts=title_counts,
+        name_counts_values=tuple(name_counts_values),
     )
 
 
@@ -445,10 +511,8 @@ def score_summary(method: str, query: QueryFeatures, summary: ClusterSummary, ma
     size_prior = _size_prior(summary.size, max_block_component_size)
     coauthor_score = _counter_query_overlap(query.coauthor_blocks, summary.coauthor_counts, summary.size)
     affiliation_score = _counter_query_overlap(query.affiliation_terms, summary.affiliation_counts, summary.size)
-    venue_score = _counter_query_overlap(query.venue_terms, summary.venue_counts, summary.size)
     middle_score = _middle_initial_score(query.middle_initials, summary.middle_initial_counts, summary.size)
     first_name_score = _first_name_score(query.first, summary.first_name_counts, summary.size)
-    year_score = _year_score(query.year, summary)
     centroid_score = _cosine_similarity(query.specter, summary.specter_centroid)
     exemplar_score = max(
         (_cosine_similarity(query.specter, vector) for vector in summary.exemplar_vectors),
@@ -463,25 +527,19 @@ def score_summary(method: str, query: QueryFeatures, summary: ClusterSummary, ma
         return centroid_score
     if method == "hybrid_centroid":
         return (
-            0.42 * centroid_score
-            + 0.23 * coauthor_score
-            + 0.12 * affiliation_score
-            + 0.06 * venue_score
-            + 0.05 * middle_score
-            + 0.07 * first_name_score
-            + 0.03 * year_score
-            + 0.02 * size_prior
+            DEFAULT_HYBRID_CENTROID_WEIGHTS[0] * centroid_score
+            + DEFAULT_HYBRID_CENTROID_WEIGHTS[1] * coauthor_score
+            + DEFAULT_HYBRID_CENTROID_WEIGHTS[2] * affiliation_score
+            + DEFAULT_HYBRID_CENTROID_WEIGHTS[3] * middle_score
+            + DEFAULT_HYBRID_CENTROID_WEIGHTS[4] * first_name_score
         )
     if method == "hybrid_exemplar_4":
         return (
-            0.40 * exemplar_score
-            + 0.23 * coauthor_score
-            + 0.12 * affiliation_score
-            + 0.06 * venue_score
-            + 0.05 * middle_score
-            + 0.07 * first_name_score
-            + 0.05 * year_score
-            + 0.02 * size_prior
+            DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS[0] * exemplar_score
+            + DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS[1] * coauthor_score
+            + DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS[2] * affiliation_score
+            + DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS[3] * middle_score
+            + DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS[4] * first_name_score
         )
     raise ValueError(f"Unknown method: {method}")
 
@@ -494,7 +552,11 @@ def _has_middle_initial_conflict(query: QueryFeatures, summary: ClusterSummary) 
     )
 
 
-def _has_impossible_year_conflict(query: QueryFeatures, summary: ClusterSummary, max_year_gap: int = 35) -> bool:
+def _has_impossible_year_conflict(
+    query: QueryFeatures,
+    summary: ClusterSummary,
+    max_year_gap: int = RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+) -> bool:
     if query.year is None or summary.year_min is None or summary.year_max is None:
         return False
     return query.year < summary.year_min - max_year_gap or query.year > summary.year_max + max_year_gap
@@ -659,7 +721,7 @@ def _compute_signature_feature_counts(
     dataset: ANDData,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
-    orcid_enabled: bool = True,
+    orcid_enabled: bool = False,
 ) -> dict[str, int]:
     counts = {
         "full_first": 0,
@@ -696,7 +758,7 @@ def _build_query_cases(
     sampling_query_view: str,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
-    orcid_enabled: bool = True,
+    orcid_enabled: bool = False,
 ) -> tuple[list[QueryCase], dict[str, Any], dict[str, list[str]], dict[str, list[str]]]:
     if dataset.clusters is None:
         raise RuntimeError(f"Dataset '{dataset_name}' has no clusters.")
@@ -939,7 +1001,14 @@ def _build_summary_payload(
             "sampling_query_view": str(args.sampling_query_view),
             "signature_budgets": [int(budget) for budget in args.signature_budgets],
             "backend_env": os.environ.get("S2AND_BACKEND", "auto"),
-            "orcid_enabled": bool(getattr(args, "orcid_enabled", not bool(getattr(args, "disable_orcid_id", False)))),
+            "orcid_mode": str(
+                getattr(
+                    args,
+                    "orcid_mode",
+                    "oracle" if bool(getattr(args, "orcid_enabled", False)) else "disabled",
+                )
+            ),
+            "orcid_enabled": bool(getattr(args, "orcid_enabled", False)),
             "latency_definition": (
                 "query_features + view_mask + hard_filters + ranking; " "excludes summary build and persisted-index I/O"
             ),
@@ -999,7 +1068,7 @@ def _write_progress(
     return summary
 
 
-def _load_dataset(data_root: str, dataset_name: str, n_jobs: int, *, use_orcid_id: bool = True) -> ANDData:
+def _load_dataset(data_root: str, dataset_name: str, n_jobs: int, *, use_orcid_id: bool = False) -> ANDData:
     _install_safe_compute_block_patch()
     signatures_path = _resolve_dataset_file(
         data_root,
@@ -1040,7 +1109,7 @@ def _evaluate_dataset(
     sampling_query_view: str,
     signature_budgets: tuple[int, ...],
     *,
-    orcid_enabled: bool = True,
+    orcid_enabled: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     feature_cache: dict[str, QueryFeatures] = {}
     query_cases, census, block_to_component_keys, full_component_signatures = _build_query_cases(
@@ -1236,9 +1305,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--signature-budgets", nargs="+", type=int, default=list(DEFAULT_SIGNATURE_BUDGETS))
     parser.add_argument("--data-root", type=str, default=os.path.join(PROJECT_ROOT_PATH, "data"))
     parser.add_argument(
+        "--orcid-mode",
+        choices=ORCID_MODE_CHOICES,
+        default="disabled",
+        help=(
+            "How to handle ORCID IDs. The default disables ORCID features and hard filters; "
+            "'oracle' keeps the legacy ORCID-assisted evaluation mode."
+        ),
+    )
+    parser.add_argument(
         "--disable-orcid-id",
         action="store_true",
-        help="Disable ORCID in loaded data, query features, summaries, and hard filters.",
+        help="Deprecated alias for --orcid-mode disabled.",
     )
     parser.add_argument(
         "--output-dir",
@@ -1252,7 +1330,9 @@ def main() -> None:
     args = parse_args()
     args.sampling_query_view = _resolve_sampling_query_view(list(args.query_views), args.sampling_query_view)
     args.signature_budgets = list(_normalize_signature_budgets(args.signature_budgets))
-    args.orcid_enabled = not bool(args.disable_orcid_id)
+    if bool(args.disable_orcid_id):
+        args.orcid_mode = "disabled"
+    args.orcid_enabled = str(args.orcid_mode) == "oracle"
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1266,6 +1346,7 @@ def main() -> None:
         f"limit_queries={args.limit_queries} "
         f"query_views={args.query_views} "
         f"sampling_query_view={args.sampling_query_view} "
+        f"orcid_mode={args.orcid_mode} "
         f"orcid_enabled={args.orcid_enabled} "
         f"signature_budgets={args.signature_budgets} "
         f"methods={args.methods}"

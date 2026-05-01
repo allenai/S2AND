@@ -216,8 +216,12 @@ def test_from_dataset_raw_papers_match_preprocessed_for_language_and_coauthors()
     assert len(expected_features) == len(observed_features)
     for idx, (expected, observed) in enumerate(zip(expected_features, observed_features, strict=True)):
         assert equalish(expected, observed), f"Mismatch idx={idx}: expected={expected} observed={observed}"
-    assert equalish(expected_constraint, observed_constraint)
-    assert not math.isnan(float(expected_constraint))
+    if expected_constraint is None or observed_constraint is None:
+        assert expected_constraint is None
+        assert observed_constraint is None
+    else:
+        assert equalish(expected_constraint, observed_constraint)
+        assert not math.isnan(float(expected_constraint))
 
 
 def test_from_dataset_rejects_namedtuple_field_order_mismatch():

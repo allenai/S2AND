@@ -39,7 +39,7 @@
 | `make_inventors_s2and_subset.py` | Create inventors S2AND subset (defaults output to `scratch/inventors_s2and`) |
 | `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults output to `scratch/inventors`) |
 | `make_inventors_hf_specter_embeddings.py` | Generate SPECTER embeddings for inventors dataset (defaults to `scratch/inventors_s2and`) |
-| `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files |
+| `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files; supports both pretty-printed and minified JSON exports |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 | `get_name_counts.py` | Documentation for how name counts metadata was collected (internal data) |
 | `get_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |
@@ -48,13 +48,15 @@
 
 | Script | What it does |
 |---|---|
-| `build_single_letter_reranker_dataset.py` | Build persisted candidate rows and `query_groups.csv` for labeled datasets and `h_wang` giant-block runs |
+| `python -m scripts.reranker_dataset.build` | Build persisted candidate rows and `query_groups.csv` for labeled datasets and giant-block runs such as `h_wang` or `s_park`; giant-block runs can drop singleton retrieval groups with `--min-candidates-per-query-group 2` |
 | `eval_single_letter_ranker.py` | Train and evaluate the chooser, including `s2and_only`, `h_wang_only`, and `mixed` source-mode comparisons |
 | `eval_cluster_retrieval.py` | Run retrieval-only pilots for candidate-generation checks |
 | `giant_block_cluster_retrieval_task.py` | Build the step-2 giant-block seed artifact used upstream of the chooser experiments |
 
 Retired experiment-only scripts from the old fixed-slice phase now live under
 [`scratch/retired_experiment_scripts/`](../scratch/retired_experiment_scripts/).
+Retired joint-safe-link promotion/relabeling cleanup scripts and their old tests now live under
+[`scratch/archived_joint_safe_link_cleanup_20260425/`](../scratch/archived_joint_safe_link_cleanup_20260425/).
 
 ### Testing
 

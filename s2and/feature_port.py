@@ -76,6 +76,7 @@ _RUST_FEATURIZER_INFLIGHT_BUILDS: "weakref.WeakKeyDictionary[ANDData, _InFlightF
 _RUST_FEATURIZER_ACCESS_COUNTER = 0
 RUST_FEATURIZER_CACHE_VERSION = 6
 _RUST_BUILD_ERROR = "s2and_rust extension not built. Build with: maturin develop -m s2and_rust/Cargo.toml"
+RUST_BUILD_PATH_ENV = "S2AND_RUST_BUILD_PATH"
 _SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE = 2048
 _RUST_FEATURIZER_CACHE_METADATA_SCHEMA_VERSION = 1
 # Default remains "legacy_compat" until canonical artifacts (name counts, name tuples,
@@ -701,6 +702,17 @@ def _resolve_requested_build_path(
     *,
     dataset_mode: str,
 ) -> RustBuildPath:
+    configured_build_path = os.environ.get(RUST_BUILD_PATH_ENV)
+    if configured_build_path is not None:
+        configured_build_path = configured_build_path.strip()
+        if configured_build_path not in {"from_dataset", "from_json_paths"}:
+            raise ValueError(
+                f"{RUST_BUILD_PATH_ENV} must be one of from_dataset/from_json_paths; " f"got {configured_build_path!r}."
+            )
+        if configured_build_path == "from_dataset":
+            return "from_dataset"
+        return "from_json_paths"
+
     dataset_mode_normalized = dataset_mode.strip().lower()
     has_signatures_path = bool(dataset.signatures_path)
     has_papers_path = bool(dataset.papers_path)
@@ -1085,6 +1097,7 @@ def get_constraint_rust(
     featurizer: Any | None = None,
     runtime_context: Any | None = None,
     use_cache: bool = False,
+    suppress_orcid: bool = False,
 ):
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
@@ -1095,6 +1108,7 @@ def get_constraint_rust(
         high_value,
         dont_merge_cluster_seeds,
         incremental_dont_use_cluster_seeds,
+        suppress_orcid=suppress_orcid,
     )
 
 
@@ -1109,6 +1123,7 @@ def get_constraints_matrix_rust(
     featurizer: Any | None = None,
     runtime_context: Any | None = None,
     use_cache: bool = False,
+    suppress_orcid: bool = False,
 ) -> list[float | None]:
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
@@ -1124,6 +1139,7 @@ def get_constraints_matrix_rust(
             dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds,
             num_threads,
+            suppress_orcid=suppress_orcid,
         )
     )
 
@@ -1139,6 +1155,7 @@ def get_constraints_matrix_indexed_rust(
     featurizer: Any | None = None,
     runtime_context: Any | None = None,
     use_cache: bool = False,
+    suppress_orcid: bool = False,
 ) -> list[float | None]:
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
@@ -1151,6 +1168,7 @@ def get_constraints_matrix_indexed_rust(
             dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds,
             num_threads,
+            suppress_orcid=suppress_orcid,
         )
     )
 
@@ -1168,6 +1186,7 @@ def get_constraints_block_upper_triangle_indexed_rust(
     featurizer: Any | None = None,
     runtime_context: Any | None = None,
     use_cache: bool = False,
+    suppress_orcid: bool = False,
 ) -> tuple[list[int], list[int], list[float | None]]:
     if featurizer is None:
         featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
@@ -1188,6 +1207,7 @@ def get_constraints_block_upper_triangle_indexed_rust(
         dont_merge_cluster_seeds,
         incremental_dont_use_cluster_seeds,
         num_threads,
+        suppress_orcid=suppress_orcid,
     )
     return (
         [int(value) for value in left_indices],

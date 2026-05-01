@@ -5,9 +5,48 @@ from collections import Counter
 from types import SimpleNamespace
 from typing import cast
 
+import numpy as np
+import pytest
+
 import scripts.eval_cluster_retrieval as retrieval
-from s2and.data import ANDData
+from s2and.data import ANDData, NameCounts
 from tests.helpers import build_cluster_summary, build_query_features
+
+
+def test_hybrid_centroid_default_ranking_matches_golden_scores():
+    query = build_query_features(
+        first="alice",
+        middle_initials=frozenset({"b"}),
+        specter=np.asarray([1.0, 0.0], dtype=np.float32),
+        coauthor_blocks=frozenset({"a smith"}),
+        affiliation_terms=frozenset({"lab"}),
+    )
+    winner = build_cluster_summary(
+        component_key="winner",
+        size=4,
+        first_name_counts=Counter({"alice": 4}),
+        middle_initial_counts=Counter({"b": 4}),
+        coauthor_counts=Counter({"a smith": 3}),
+        affiliation_counts=Counter({"lab": 2}),
+        specter_centroid=np.asarray([1.0, 0.0], dtype=np.float32),
+    )
+    runner_up = build_cluster_summary(
+        component_key="runner_up",
+        size=4,
+        first_name_counts=Counter({"alice": 4}),
+        middle_initial_counts=Counter({"c": 4}),
+        specter_centroid=np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+
+    ranked = retrieval.rank_summaries(
+        "hybrid_centroid",
+        query,
+        [runner_up, winner],
+        max_block_component_size=4,
+    )
+
+    assert [summary.component_key for _score, summary in ranked] == ["winner", "runner_up"]
+    assert [score for score, _summary in ranked] == pytest.approx([0.7725, 0.0575])
 
 
 def test_hybrid_scores_penalize_middle_initial_conflict():
@@ -96,11 +135,25 @@ def test_orcid_disabled_query_features_strip_orcid_and_skip_filters(monkeypatch)
 
     enabled = retrieval.extract_query_features(dataset, "s1", orcid_enabled=True)
     disabled = retrieval.extract_query_features(dataset, "s1", orcid_enabled=False)
+    default_disabled = retrieval.extract_query_features(dataset, "s1")
 
     assert enabled.orcid == "0000-0001"
     assert disabled.orcid is None
+    assert default_disabled.orcid is None
+    assert retrieval.mask_query_features(enabled, "full").orcid is None
     assert retrieval.mask_query_features(enabled, "full", orcid_enabled=False).orcid is None
     assert retrieval.mask_query_features(enabled, "initial_only", orcid_enabled=False).orcid is None
+    assert (
+        retrieval.build_cluster_summary(
+            dataset=dataset,
+            block_key="b",
+            cluster_id="c",
+            component_key="b::c",
+            signature_ids=["s1"],
+            max_exemplars=1,
+        ).orcid_values
+        == frozenset()
+    )
 
     matching = build_cluster_summary(component_key="matching", size=2, orcid_values=frozenset({"0000-0001"}))
     non_matching = build_cluster_summary(component_key="other", size=2, orcid_values=frozenset({"0000-0002"}))
@@ -108,6 +161,21 @@ def test_orcid_disabled_query_features_strip_orcid_and_skip_filters(monkeypatch)
 
     assert [summary.component_key for summary in filtered] == ["matching", "other"]
     assert stats["orcid_filter_applied"] == 0
+
+
+def test_mask_query_features_preserves_name_counts_for_rarity_features():
+    name_counts = NameCounts(first=10, first_last=3, last=100, last_first_initial=12)
+    query = build_query_features(
+        first="alice",
+        middle_initials=frozenset({"b"}),
+        name_counts=name_counts,
+    )
+
+    masked = retrieval.mask_query_features(query, "initial_only")
+
+    assert masked.first == "a"
+    assert masked.middle_initials == frozenset()
+    assert masked.name_counts == name_counts
 
 
 def test_extract_query_features_cache_keeps_canonical_orcid_across_modes(monkeypatch):
@@ -393,6 +461,7 @@ def test_build_summary_payload_reports_candidate_floor_slice():
         summary["overall"]["hybrid_centroid::initial_only"]["materialized_signature_fraction"]["5"]["mean"] == 0.833333
     )
     assert summary["config"]["orcid_enabled"] is False
+    assert summary["config"]["orcid_mode"] == "disabled"
 
 
 def test_failure_and_census_artifact_helpers():

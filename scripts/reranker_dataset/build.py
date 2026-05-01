@@ -24,11 +24,16 @@ try:
         _required_file,
         load_clusterer,
     )
-    from scripts.giant_block_cluster_retrieval_task import load_dataset as load_h_wang_dataset
+    from scripts.giant_block_cluster_retrieval_task import load_dataset as load_giant_block_dataset
+    from scripts.reranker_dataset.rows import generate_candidate_rows
     from scripts.single_letter_reranker_utils import (
+        DEFAULT_CHOOSER_CACHE_MAX_TOP_K,
         DEFAULT_LABELED_DATASETS,
         DEFAULT_QUERY_VIEWS,
         DEFAULT_RETRIEVAL_APPROACH,
+        DEFAULT_RETRIEVAL_WINDOW_SIZE,
+        RAW_METADATA_SIMILARITY_FEATURE_COLUMNS,
+        RETRIEVAL_ENGINE_CHOICES,
         QueryClusterStatsRequest,
         RerankerQueryCase,
         append_query_group_metadata_csv,
@@ -36,16 +41,18 @@ try:
         block_size_bucket,
         build_component_summaries,
         build_labeled_query_cases,
+        build_labeled_retrieval_subblock_index,
         build_retrieval_window,
         component_size_bucket,
         compute_query_cluster_stats_batched,
         configure_runtime_environment,
         group_rows,
         load_labeled_dataset,
-        make_candidate_rows,
+        load_retrieval_subblock_index,
         materialize_derived_rows,
         read_query_group_metadata_csv,
         read_rows_csv,
+        seed_constraint_bypass_component_keys,
         summarize_dataset_rows,
         summarize_query_group_rows,
         write_json,
@@ -54,9 +61,12 @@ try:
         write_rows_csv,
     )
     from scripts.single_letter_retrieval_utils import (
+        FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY,
+        FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME,
         build_rust_hybrid_centroid_retriever,
         build_seed_summaries,
         invert_signature_to_cluster_id,
+        load_preferred_signature_to_cluster_id,
         select_query_ids,
     )
 except ImportError:  # pragma: no cover - direct script execution path
@@ -67,11 +77,16 @@ except ImportError:  # pragma: no cover - direct script execution path
         _required_file,
         load_clusterer,
     )
-    from giant_block_cluster_retrieval_task import load_dataset as load_h_wang_dataset  # type: ignore
+    from giant_block_cluster_retrieval_task import load_dataset as load_giant_block_dataset  # type: ignore
+    from reranker_dataset.rows import generate_candidate_rows  # type: ignore
     from single_letter_reranker_utils import (  # type: ignore
+        DEFAULT_CHOOSER_CACHE_MAX_TOP_K,
         DEFAULT_LABELED_DATASETS,
         DEFAULT_QUERY_VIEWS,
         DEFAULT_RETRIEVAL_APPROACH,
+        DEFAULT_RETRIEVAL_WINDOW_SIZE,
+        RAW_METADATA_SIMILARITY_FEATURE_COLUMNS,
+        RETRIEVAL_ENGINE_CHOICES,
         QueryClusterStatsRequest,
         RerankerQueryCase,
         append_query_group_metadata_csv,
@@ -79,16 +94,18 @@ except ImportError:  # pragma: no cover - direct script execution path
         block_size_bucket,
         build_component_summaries,
         build_labeled_query_cases,
+        build_labeled_retrieval_subblock_index,
         build_retrieval_window,
         component_size_bucket,
         compute_query_cluster_stats_batched,
         configure_runtime_environment,
         group_rows,
         load_labeled_dataset,
-        make_candidate_rows,
+        load_retrieval_subblock_index,
         materialize_derived_rows,
         read_query_group_metadata_csv,
         read_rows_csv,
+        seed_constraint_bypass_component_keys,
         summarize_dataset_rows,
         summarize_query_group_rows,
         write_json,
@@ -97,23 +114,54 @@ except ImportError:  # pragma: no cover - direct script execution path
         write_rows_csv,
     )
     from single_letter_retrieval_utils import (  # type: ignore
+        FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY,
+        FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME,
         build_rust_hybrid_centroid_retriever,
         build_seed_summaries,
         invert_signature_to_cluster_id,
+        load_preferred_signature_to_cluster_id,
         select_query_ids,
     )
 
 from s2and.feature_port import inspect_json_ingest_name_counts_source
 from s2and.model import _apply_dataset_name_count_semantics_for_prediction, _build_incremental_constraint_backend
 from s2and.runtime import build_runtime_context
+from s2and.text import normalize_text
 
 ORCID_PATTERN = re.compile(r"(\d{4}-?\d{4}-?\d{4}-?[\dXx]{4})")
 DEFAULT_QUERY_BATCH_PAIR_LIMIT = 200_000
-H_WANG_QUERY_SOURCE_CHOICES = ("supported_single_letter", "orcid_any_input")
+GIANT_BLOCK_QUERY_SOURCE_CHOICES = ("supported_single_letter", "orcid_any_input")
 PARTIAL_ROWS_FILENAME = "rows.partial.csv"
 PARTIAL_QUERY_GROUPS_FILENAME = "query_groups.partial.csv"
 BUILD_PROGRESS_FILENAME = "progress.json"
 BUILD_DONE_FILENAME = "done.json"
+RAW_TEXT_STOPWORDS = {
+    "and",
+    "the",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "using",
+    "based",
+    "into",
+    "over",
+    "under",
+    "between",
+    "without",
+    "within",
+    "study",
+    "analysis",
+    "approach",
+    "method",
+    "methods",
+    "result",
+    "results",
+    "paper",
+    "system",
+    "systems",
+}
 
 
 def _normalize_orcid(orcid: str | None) -> str | None:
@@ -147,7 +195,18 @@ def load_query_metadata(path: Path) -> dict[str, dict[str, Any]]:
     rows = payload.get("query_rows")
     if not isinstance(rows, list):
         raise RuntimeError(f"Invalid query-set payload at {path}: expected list under 'query_rows'")
-    return {str(row["query_id"]): dict(row) for row in rows}
+    required_keys = {"query_id", "_audit_normalized_orcid", "_audit_orcid_group_size", "query_subblock_key"}
+    metadata_by_id: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise RuntimeError(f"Invalid query-set payload at {path}: query_rows[{index}] is not an object")
+        missing_keys = sorted(required_keys - set(row))
+        if missing_keys:
+            raise RuntimeError(
+                f"Invalid query-set payload at {path}: query_rows[{index}] missing required keys {missing_keys}"
+            )
+        metadata_by_id[str(row["query_id"])] = dict(row)
+    return metadata_by_id
 
 
 def build_orcid_seed_cluster_counts(
@@ -192,6 +251,17 @@ class PreparedQueryRowsRequest:
     retrieval_window_state_base: dict[str, int]
     stats_request: QueryClusterStatsRequest
     estimated_pair_count: int
+    raw_similarity_features_by_component: dict[str, dict[str, float]] = field(default_factory=dict)
+
+
+@dataclass
+class _RawSimilarityFeatureCache:
+    """Token caches used while generating raw metadata similarity features."""
+
+    affiliation_tokens_by_signature_id: dict[str, frozenset[str]] = field(default_factory=dict)
+    coauthor_names_by_paper_and_last: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
+    title_tokens_by_paper_id: dict[str, frozenset[str]] = field(default_factory=dict)
+    text_tokens_by_paper_id: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -362,8 +432,17 @@ def _current_rss_bytes() -> int | None:
         return None
 
 
-def _reset_h_wang_stream_outputs(output_dir: Path) -> tuple[Path, Path, Path, Path]:
-    """Reset managed streaming output files for one `h_wang` build."""
+def _normalize_giant_block_dataset_label(value: str) -> str:
+    """Return a stable dataset label for one giant-block build."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+    if not normalized:
+        raise ValueError(f"Could not derive a giant-block dataset label from {value!r}")
+    return normalized
+
+
+def _reset_giant_block_stream_outputs(output_dir: Path) -> tuple[Path, Path, Path, Path]:
+    """Reset managed streaming output files for one giant-block build."""
 
     rows_partial_path = output_dir / PARTIAL_ROWS_FILENAME
     query_groups_partial_path = output_dir / PARTIAL_QUERY_GROUPS_FILENAME
@@ -387,7 +466,7 @@ def _reset_h_wang_stream_outputs(output_dir: Path) -> tuple[Path, Path, Path, Pa
     return rows_partial_path, query_groups_partial_path, progress_path, done_path
 
 
-def _write_h_wang_progress(
+def _write_giant_block_progress(
     progress_path: Path,
     *,
     status: str,
@@ -465,6 +544,198 @@ def _filter_query_sequence_by_id_set(queries: list[Any], *, selected_query_ids: 
     if unknown_query_ids:
         raise ValueError(f"Unknown query IDs requested: {unknown_query_ids[:10]}")
     return [query_id_to_query[query_id] for query_id in sorted(selected_query_ids)]
+
+
+def _load_raw_paper_text_by_id(papers_path: Path, *, needed_paper_ids: set[str]) -> dict[str, str]:
+    """Load title-plus-abstract raw text for papers retained by the active dataset."""
+
+    if not needed_paper_ids:
+        return {}
+    raw_papers = _read_json(papers_path)
+    text_by_id: dict[str, str] = {}
+    for paper_id in needed_paper_ids:
+        paper = raw_papers.get(str(paper_id))
+        if not isinstance(paper, dict):
+            continue
+        text_by_id[str(paper_id)] = f"{paper.get('title') or ''} {paper.get('abstract') or ''}"
+    return text_by_id
+
+
+def _raw_tokens(value: Any) -> frozenset[str]:
+    """Tokenize raw evidence text for label-free Jaccard features."""
+
+    normalized = normalize_text(str(value or ""))
+    if not normalized:
+        return frozenset()
+    return frozenset(token for token in normalized.split() if len(token) >= 3 and token not in RAW_TEXT_STOPWORDS)
+
+
+def _raw_jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return float(len(left & right) / len(left | right))
+
+
+def _signature_last_token(signature: Any) -> str:
+    tokens = normalize_text(str(getattr(signature, "author_info_last", "") or "")).split()
+    return str(tokens[-1]) if tokens else ""
+
+
+def _cached_signature_affiliation_tokens(
+    cache: _RawSimilarityFeatureCache,
+    *,
+    signature_id: str,
+    signature: Any,
+) -> frozenset[str]:
+    cached = cache.affiliation_tokens_by_signature_id.get(str(signature_id))
+    if cached is not None:
+        return cached
+    affiliations = getattr(signature, "author_info_affiliations", None) or []
+    tokens = _raw_tokens(" ".join(str(value) for value in affiliations if value))
+    cache.affiliation_tokens_by_signature_id[str(signature_id)] = tokens
+    return tokens
+
+
+def _cached_paper_author_name_set(
+    cache: _RawSimilarityFeatureCache,
+    paper: Any,
+    *,
+    excluded_last_token: str,
+) -> frozenset[str]:
+    if paper is None:
+        return frozenset()
+    paper_id = str(getattr(paper, "paper_id", "") or "")
+    key = (paper_id, str(excluded_last_token))
+    cached = cache.coauthor_names_by_paper_and_last.get(key)
+    if cached is not None:
+        return cached
+    names: set[str] = set()
+    for author in getattr(paper, "authors", []) or []:
+        name = normalize_text(str(getattr(author, "author_name", "") or ""))
+        if not name:
+            continue
+        name_tokens = name.split()
+        if excluded_last_token and excluded_last_token in name_tokens:
+            continue
+        names.add(" ".join(name_tokens))
+    result = frozenset(names)
+    if paper_id:
+        cache.coauthor_names_by_paper_and_last[key] = result
+    return result
+
+
+def _cached_paper_title_tokens(cache: _RawSimilarityFeatureCache, paper: Any) -> frozenset[str]:
+    if paper is None:
+        return frozenset()
+    paper_id = str(getattr(paper, "paper_id", "") or "")
+    cached = cache.title_tokens_by_paper_id.get(paper_id)
+    if cached is not None:
+        return cached
+    tokens = _raw_tokens(getattr(paper, "title", None))
+    if paper_id:
+        cache.title_tokens_by_paper_id[paper_id] = tokens
+    return tokens
+
+
+def _cached_paper_text_tokens(
+    cache: _RawSimilarityFeatureCache,
+    paper: Any,
+    *,
+    raw_paper_text_by_id: dict[str, str],
+) -> frozenset[str]:
+    if paper is None:
+        return frozenset()
+    paper_id = str(getattr(paper, "paper_id", "") or "")
+    cached = cache.text_tokens_by_paper_id.get(paper_id)
+    if cached is not None:
+        return cached
+    tokens = _raw_tokens(raw_paper_text_by_id.get(paper_id, getattr(paper, "title", "") or ""))
+    if paper_id:
+        cache.text_tokens_by_paper_id[paper_id] = tokens
+    return tokens
+
+
+def _raw_similarity_feature_zeros() -> dict[str, float]:
+    return {feature_name: 0.0 for feature_name in RAW_METADATA_SIMILARITY_FEATURE_COLUMNS}
+
+
+def _raw_similarity_features_by_component(
+    *,
+    dataset: Any,
+    query_signature_id: str,
+    candidate_signature_ids_by_component: dict[str, list[str]],
+    raw_paper_text_by_id: dict[str, str] | None = None,
+    cache: _RawSimilarityFeatureCache | None = None,
+) -> dict[str, dict[str, float]]:
+    """Compute max raw-metadata similarities, excluding the query signature from candidates."""
+
+    cache = cache or _RawSimilarityFeatureCache()
+    raw_paper_text_by_id = raw_paper_text_by_id or {}
+    query_signature = dataset.signatures.get(str(query_signature_id))
+    if query_signature is None:
+        return {
+            component_key: _raw_similarity_feature_zeros() for component_key in candidate_signature_ids_by_component
+        }
+    query_paper = dataset.papers.get(str(query_signature.paper_id))
+    query_last = _signature_last_token(query_signature)
+    query_affiliation_tokens = _cached_signature_affiliation_tokens(
+        cache,
+        signature_id=str(query_signature_id),
+        signature=query_signature,
+    )
+    query_coauthor_names = _cached_paper_author_name_set(cache, query_paper, excluded_last_token=query_last)
+    query_title_tokens = _cached_paper_title_tokens(cache, query_paper)
+    query_text_tokens = _cached_paper_text_tokens(cache, query_paper, raw_paper_text_by_id=raw_paper_text_by_id)
+
+    features_by_component: dict[str, dict[str, float]] = {}
+    for component_key, candidate_signature_ids in candidate_signature_ids_by_component.items():
+        max_affiliation = 0.0
+        max_coauthor = 0.0
+        max_title = 0.0
+        max_text = 0.0
+        for signature_id in candidate_signature_ids:
+            if str(signature_id) == str(query_signature_id):
+                continue
+            candidate_signature = dataset.signatures.get(str(signature_id))
+            if candidate_signature is None:
+                continue
+            candidate_paper = dataset.papers.get(str(candidate_signature.paper_id))
+            max_affiliation = max(
+                max_affiliation,
+                _raw_jaccard(
+                    query_affiliation_tokens,
+                    _cached_signature_affiliation_tokens(
+                        cache,
+                        signature_id=str(signature_id),
+                        signature=candidate_signature,
+                    ),
+                ),
+            )
+            max_coauthor = max(
+                max_coauthor,
+                _raw_jaccard(
+                    query_coauthor_names,
+                    _cached_paper_author_name_set(cache, candidate_paper, excluded_last_token=query_last),
+                ),
+            )
+            max_title = max(
+                max_title,
+                _raw_jaccard(query_title_tokens, _cached_paper_title_tokens(cache, candidate_paper)),
+            )
+            max_text = max(
+                max_text,
+                _raw_jaccard(
+                    query_text_tokens,
+                    _cached_paper_text_tokens(cache, candidate_paper, raw_paper_text_by_id=raw_paper_text_by_id),
+                ),
+            )
+        features_by_component[str(component_key)] = {
+            "raw_max_affiliation_jaccard": round(float(max_affiliation), 6),
+            "raw_max_coauthor_jaccard": round(float(max_coauthor), 6),
+            "raw_max_title_jaccard": round(float(max_title), 6),
+            "raw_max_text_jaccard": round(float(max_text), 6),
+        }
+    return features_by_component
 
 
 def _residual_summary(
@@ -545,12 +816,12 @@ def _orcid_group_size_bucket(orcid_group_size: int) -> str:
 
 
 def _any_input_query_view(base_query: retrieval.QueryFeatures) -> str:
-    """Return the natural runtime query view for one `h_wang` query."""
+    """Return the natural runtime query view for one giant-block query."""
 
     return "full" if bool(base_query.has_full_first) else "initial_only"
 
 
-def _split_orcid_groups_for_h_wang(
+def _split_orcid_groups_for_giant_block(
     query_metadata_by_id: dict[str, dict[str, Any]],
     *,
     seed: int,
@@ -560,7 +831,7 @@ def _split_orcid_groups_for_h_wang(
 
     orcid_group_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for query_meta in query_metadata_by_id.values():
-        orcid_group_rows[str(query_meta["normalized_orcid"])].append(dict(query_meta))
+        orcid_group_rows[str(query_meta["_audit_normalized_orcid"])].append(dict(query_meta))
 
     grouped_orcids: dict[tuple[str, str], list[str]] = defaultdict(list)
     for normalized_orcid, rows in orcid_group_rows.items():
@@ -569,7 +840,7 @@ def _split_orcid_groups_for_h_wang(
             view_bucket = next(iter(natural_views))
         else:
             view_bucket = "mixed"
-        size_bucket = str(rows[0]["orcid_group_size_bucket"])
+        size_bucket = str(rows[0]["_audit_orcid_group_size_bucket"])
         grouped_orcids[(view_bucket, size_bucket)].append(str(normalized_orcid))
 
     rng = random.Random(int(seed))
@@ -589,8 +860,9 @@ def _split_orcid_groups_for_h_wang(
     return split_by_orcid
 
 
-def _build_h_wang_any_input_query_cases(
+def _build_giant_block_any_input_query_cases(
     *,
+    dataset_label: str,
     raw_signatures: dict[str, Any],
     dataset: Any,
     target_block: str,
@@ -600,7 +872,7 @@ def _build_h_wang_any_input_query_cases(
     query_id_file: Path | None,
     seed: int,
 ) -> tuple[list[RerankerQueryCase], dict[str, Any]]:
-    """Build weakly supervised `h_wang` query cases for any-input development."""
+    """Build weakly supervised giant-block query cases for any-input development."""
 
     explicit_query_ids = _read_string_id_file(query_id_file) if query_id_file is not None else None
     feature_cache: dict[str, retrieval.QueryFeatures] = {}
@@ -644,8 +916,8 @@ def _build_h_wang_any_input_query_cases(
                 str(cluster_id) for cluster_id in positive_support if int(positive_support[cluster_id]) > 0
             )
             if orcid_group_size == 1:
-                supervision_type = "negative_singleton_orcid"
-                support_type = "none"
+                supervision_type = "unlabeled_singleton_orcid"
+                support_type = "unlabeled"
             elif positive_component_keys:
                 supervision_type = "positive_repeat_orcid"
                 support_type = "unique" if len(positive_component_keys) == 1 else "ambiguous"
@@ -653,8 +925,8 @@ def _build_h_wang_any_input_query_cases(
                 supervision_type = "unresolved_repeat_orcid"
                 support_type = "unresolved"
             query_case = RerankerQueryCase(
-                source="h_wang",
-                dataset="h_wang",
+                source=str(dataset_label),
+                dataset=str(dataset_label),
                 query_source="orcid_any_input",
                 query_id=str(query_id),
                 query_signature_id=str(query_id),
@@ -674,9 +946,9 @@ def _build_h_wang_any_input_query_cases(
             )
             query_cases.append(query_case)
             query_metadata_by_id[str(query_id)] = {
-                "normalized_orcid": str(normalized_orcid),
-                "orcid_group_size": int(orcid_group_size),
-                "orcid_group_size_bucket": str(group_size_bucket),
+                "_audit_normalized_orcid": str(normalized_orcid),
+                "_audit_orcid_group_size": int(orcid_group_size),
+                "_audit_orcid_group_size_bucket": str(group_size_bucket),
                 "natural_query_view": str(natural_query_view),
             }
 
@@ -693,7 +965,7 @@ def _build_h_wang_any_input_query_cases(
             query_id: metadata for query_id, metadata in query_metadata_by_id.items() if query_id in selected_query_ids
         }
 
-    split_by_orcid = _split_orcid_groups_for_h_wang(query_metadata_by_id, seed=seed)
+    split_by_orcid = _split_orcid_groups_for_giant_block(query_metadata_by_id, seed=seed)
     query_cases = [
         RerankerQueryCase(
             source=query_case.source,
@@ -730,8 +1002,9 @@ def _build_h_wang_any_input_query_cases(
     }
 
 
-def _build_h_wang_supported_query_cases(
+def _build_giant_block_supported_query_cases(
     *,
+    dataset_label: str,
     query_metadata: dict[str, dict[str, Any]],
     signature_to_cluster_id: dict[str, str],
     seed_cluster_counts_by_orcid: dict[str, Counter[str]],
@@ -739,14 +1012,14 @@ def _build_h_wang_supported_query_cases(
     query_id_file: Path | None,
     seed: int,
 ) -> tuple[list[RerankerQueryCase], dict[str, Any]]:
-    """Build the supported single-letter `h_wang` query cases."""
+    """Build supported single-letter giant-block query cases."""
 
     explicit_query_ids = _read_string_id_file(query_id_file) if query_id_file is not None else None
     query_cases: list[RerankerQueryCase] = []
     support_type_counts: Counter[str] = Counter()
 
     for query_id, query_meta in sorted(query_metadata.items()):
-        normalized_orcid = str(query_meta["normalized_orcid"])
+        normalized_orcid = str(query_meta["_audit_normalized_orcid"])
         positive_support = Counter(seed_cluster_counts_by_orcid.get(normalized_orcid, Counter()))
         query_in_seed_before_holdout = str(query_id) in signature_to_cluster_id
         if query_in_seed_before_holdout:
@@ -764,14 +1037,14 @@ def _build_h_wang_supported_query_cases(
         support_type_counts[support_type] += 1
         query_cases.append(
             RerankerQueryCase(
-                source="h_wang",
-                dataset="h_wang",
+                source=str(dataset_label),
+                dataset=str(dataset_label),
                 query_source="supported_single_letter",
                 query_id=str(query_id),
                 query_signature_id=str(query_id),
                 normalized_orcid=normalized_orcid,
-                orcid_group_size=int(query_meta["orcid_group_size"]),
-                orcid_group_size_bucket=_orcid_group_size_bucket(int(query_meta["orcid_group_size"])),
+                orcid_group_size=int(query_meta["_audit_orcid_group_size"]),
+                orcid_group_size_bucket=_orcid_group_size_bucket(int(query_meta["_audit_orcid_group_size"])),
                 split="all",
                 block_key=str(query_meta["query_subblock_key"]),
                 positive_component_keys=positive_component_keys,
@@ -944,6 +1217,7 @@ def _select_query_group_metadata_rows(
 
 def _prepare_query_rows_request(
     *,
+    dataset: Any,
     query_case: RerankerQueryCase,
     block_component_count: int,
     base_query: retrieval.QueryFeatures,
@@ -952,9 +1226,14 @@ def _prepare_query_rows_request(
     summary_by_component: dict[str, retrieval.ClusterSummary],
     candidate_signature_ids_by_component: dict[str, list[str]],
     retrieval_approach: str,
+    retrieval_engine: str,
     window_size: int,
     retrieval_window_state_base: dict[str, int] | None = None,
     rust_hybrid_centroid_retriever: Any | None = None,
+    frozen_rust_hybrid_centroid_policy: Any | None = None,
+    retrieval_subblock_index: dict[str, Any] | None = None,
+    raw_paper_text_by_id: dict[str, str] | None = None,
+    raw_similarity_feature_cache: _RawSimilarityFeatureCache | None = None,
 ) -> PreparedQueryRowsRequest:
     """Prepare one query request for later batched pairwise scoring."""
 
@@ -968,8 +1247,12 @@ def _prepare_query_rows_request(
             raw_candidate_summaries=raw_candidate_summaries,
             max_block_component_size=max_block_component_size,
             retrieval_approach=retrieval_approach,
+            retrieval_engine=retrieval_engine,
             max_ranked_clusters=window_size,
             rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
+            frozen_rust_hybrid_centroid_policy=frozen_rust_hybrid_centroid_policy,
+            query_signature_id=str(query_case.query_signature_id),
+            retrieval_subblock_index=retrieval_subblock_index,
         )
         shortlist_component_keys = tuple(str(component_key) for component_key in ranked_component_keys[:window_size])
         union_component_keys.update(shortlist_component_keys)
@@ -1010,7 +1293,19 @@ def _prepare_query_rows_request(
         )
         for component_key in union_component_keys_ordered
     }
+    seed_bypass_component_keys = seed_constraint_bypass_component_keys(
+        dataset=dataset,
+        query_case=query_case,
+        candidate_signature_ids_by_component=union_signature_ids_by_component,
+    )
     estimated_pair_count = sum(len(signature_ids) for signature_ids in union_signature_ids_by_component.values())
+    raw_similarity_features_by_component = _raw_similarity_features_by_component(
+        dataset=dataset,
+        query_signature_id=str(query_case.query_signature_id),
+        candidate_signature_ids_by_component=union_signature_ids_by_component,
+        raw_paper_text_by_id=raw_paper_text_by_id,
+        cache=raw_similarity_feature_cache,
+    )
     return PreparedQueryRowsRequest(
         query_case=query_case,
         block_component_count=int(block_component_count),
@@ -1024,8 +1319,11 @@ def _prepare_query_rows_request(
             retrieval_ranks=union_retrieval_ranks,
             retrieval_scores=union_retrieval_scores,
             summary_by_component=union_summary_by_component,
+            incremental_dont_use_cluster_seeds_component_keys=seed_bypass_component_keys,
+            ignore_disallow_constraints_component_keys=seed_bypass_component_keys,
         ),
         estimated_pair_count=int(estimated_pair_count),
+        raw_similarity_features_by_component=raw_similarity_features_by_component,
     )
 
 
@@ -1033,6 +1331,7 @@ def _materialize_query_rows_from_prepared(
     prepared_request: PreparedQueryRowsRequest,
     *,
     stats_by_component: dict[str, Any],
+    rust_hybrid_centroid_retriever: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Materialize candidate rows for one prepared query after batch scoring."""
 
@@ -1047,10 +1346,15 @@ def _materialize_query_rows_from_prepared(
         shortlist_stats_by_component = {
             component_key: stats_by_component[component_key] for component_key in shortlist_component_keys
         }
+        shortlist_raw_similarity_features_by_component = {
+            component_key: prepared_request.raw_similarity_features_by_component[component_key]
+            for component_key in shortlist_component_keys
+            if component_key in prepared_request.raw_similarity_features_by_component
+        }
         retrieval_window_state = dict(retrieval_state_prefix)
         retrieval_window_state.update(payload.retrieval_window_state)
         rows.extend(
-            make_candidate_rows(
+            generate_candidate_rows(
                 query_case=prepared_request.query_case,
                 query_view=str(payload.query_view),
                 query_features=payload.query,
@@ -1060,6 +1364,8 @@ def _materialize_query_rows_from_prepared(
                 retrieval_window_state=retrieval_window_state,
                 summary_by_component=shortlist_summary_by_component,
                 stats_by_component=shortlist_stats_by_component,
+                rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
+                raw_similarity_features_by_component=shortlist_raw_similarity_features_by_component,
             )
         )
     return rows
@@ -1077,16 +1383,21 @@ def _flush_prepared_query_requests(
     pair_counts: list[int],
     featurize_seconds: list[float],
     model_seconds: list[float],
+    rust_hybrid_centroid_retriever: Any | None = None,
     rows: list[dict[str, Any]] | None = None,
     query_group_metadata_rows: list[dict[str, Any]] | None = None,
     rows_output_path: Path | None = None,
     query_group_metadata_output_path: Path | None = None,
     query_group_summary_accumulator: _QueryGroupSummaryAccumulator | None = None,
+    min_candidates_per_query_group: int = 1,
+    filtered_query_group_stats: dict[str, int] | None = None,
 ) -> tuple[int, int]:
     """Score and materialize one prepared-query batch."""
 
     if not prepared_requests:
         return 0, 0
+    if int(min_candidates_per_query_group) <= 0:
+        raise ValueError(f"min_candidates_per_query_group must be positive, got {min_candidates_per_query_group}")
     batch_results = compute_query_cluster_stats_batched(
         clusterer=clusterer,
         dataset=dataset,
@@ -1111,13 +1422,23 @@ def _flush_prepared_query_requests(
         query_rows = _materialize_query_rows_from_prepared(
             prepared_request,
             stats_by_component=stats_by_component,
+            rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
         )
-        batch_rows_to_write.extend(query_rows)
         for query_group_rows in group_rows(query_rows).values():
             metadata_row = summarize_query_group_rows(
                 query_group_rows,
                 block_component_count=int(prepared_request.block_component_count),
             )
+            if int(metadata_row["candidate_count"]) < int(min_candidates_per_query_group):
+                if filtered_query_group_stats is not None:
+                    filtered_query_group_stats["query_groups"] = (
+                        int(filtered_query_group_stats.get("query_groups", 0)) + 1
+                    )
+                    filtered_query_group_stats["rows"] = int(filtered_query_group_stats.get("rows", 0)) + int(
+                        len(query_group_rows)
+                    )
+                continue
+            batch_rows_to_write.extend(query_group_rows)
             batch_query_group_metadata_rows.append(metadata_row)
             if query_group_summary_accumulator is not None:
                 query_group_summary_accumulator.update(metadata_row)
@@ -1143,6 +1464,7 @@ def _build_labeled_master_for_dataset(
     output_dir: Path,
     query_views: list[str],
     retrieval_approach: str,
+    retrieval_engine: str,
     window_size: int,
     max_exemplars: int,
     limit_queries: int | None,
@@ -1174,6 +1496,7 @@ def _build_labeled_master_for_dataset(
         use_default_constraints_as_supervision=clusterer.use_default_constraints_as_supervision,
         runtime_context=runtime_context,
         use_cache=clusterer.use_cache,
+        suppress_orcid=True,
     )
     query_cases, census, block_to_component_keys, component_signatures = build_labeled_query_cases(
         dataset_name,
@@ -1189,6 +1512,28 @@ def _build_labeled_master_for_dataset(
         component_signatures,
         max_exemplars=max_exemplars,
     )
+    frozen_rust_hybrid_centroid_policy = None
+    rust_hybrid_centroid_retriever = None
+    retrieval_subblock_index = None
+    retrieval_subblock_index_build_ms = 0.0
+    retrieval_subblock_index_diagnostics = None
+    if "hybrid_centroid" in {str(value) for value in str(retrieval_approach).split("__")}:
+        frozen_rust_hybrid_centroid_policy = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY
+        if str(frozen_rust_hybrid_centroid_policy.full_candidate_strategy) != "global":
+            subblock_index_start = time.perf_counter()
+            retrieval_subblock_index, retrieval_subblock_index_diagnostics = build_labeled_retrieval_subblock_index(
+                dataset=dataset,
+                block_to_component_keys=block_to_component_keys,
+                component_signatures=component_signatures,
+            )
+            retrieval_subblock_index_build_ms = (time.perf_counter() - subblock_index_start) * 1000.0
+        try:
+            rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(
+                list(full_summaries.values()),
+                include_exemplars=frozen_rust_hybrid_centroid_policy.uses_exemplar_scoring(),
+            )
+        except RuntimeError as exc:
+            raise RuntimeError("The frozen Rust hybrid-centroid retriever is required for labeled row builds") from exc
 
     residual_cache: dict[tuple[str, str], retrieval.ClusterSummary] = {}
     rows: list[dict[str, Any]] = []
@@ -1198,6 +1543,7 @@ def _build_labeled_master_for_dataset(
     model_seconds: list[float] = []
     prepared_requests: list[PreparedQueryRowsRequest] = []
     prepared_request_pair_count = 0
+    raw_similarity_feature_cache = _RawSimilarityFeatureCache()
 
     for query_case in query_cases:
         base_query = retrieval.extract_query_features(
@@ -1235,6 +1581,7 @@ def _build_labeled_master_for_dataset(
             candidate_signature_ids_by_component[component_key] = list(signature_ids)
 
         prepared_request = _prepare_query_rows_request(
+            dataset=dataset,
             query_case=query_case,
             block_component_count=len(component_keys_in_block),
             base_query=base_query,
@@ -1243,7 +1590,12 @@ def _build_labeled_master_for_dataset(
             summary_by_component=summary_by_component,
             candidate_signature_ids_by_component=candidate_signature_ids_by_component,
             retrieval_approach=retrieval_approach,
+            retrieval_engine=retrieval_engine,
             window_size=window_size,
+            rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
+            frozen_rust_hybrid_centroid_policy=frozen_rust_hybrid_centroid_policy,
+            retrieval_subblock_index=retrieval_subblock_index,
+            raw_similarity_feature_cache=raw_similarity_feature_cache,
         )
         prepared_requests.append(prepared_request)
         prepared_request_pair_count += int(prepared_request.estimated_pair_count)
@@ -1256,6 +1608,7 @@ def _build_labeled_master_for_dataset(
                 prepared_requests=prepared_requests,
                 pair_batch_size=pair_batch_size,
                 max_top_k=max_top_k,
+                rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
                 rows=rows,
                 query_group_metadata_rows=query_group_metadata_rows,
                 pair_counts=pair_counts,
@@ -1273,6 +1626,7 @@ def _build_labeled_master_for_dataset(
         prepared_requests=prepared_requests,
         pair_batch_size=pair_batch_size,
         max_top_k=max_top_k,
+        rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
         rows=rows,
         query_group_metadata_rows=query_group_metadata_rows,
         pair_counts=pair_counts,
@@ -1294,6 +1648,7 @@ def _build_labeled_master_for_dataset(
             "dataset": dataset_name,
             "dataset_load_ms": round(float(dataset_load_ms), 6),
             "full_summary_build_ms": round(float(full_summary_build_ms), 6),
+            "retrieval_subblock_index_build_ms": round(float(retrieval_subblock_index_build_ms), 6),
             "query_case_count": int(len(query_cases)),
             "query_group_metadata_count": int(len(query_group_metadata_rows)),
             "pair_count_mean": round(float(statistics.mean(pair_counts)), 6) if pair_counts else 0.0,
@@ -1310,22 +1665,32 @@ def _build_labeled_master_for_dataset(
             "query_batch_pair_limit": int(query_batch_pair_limit),
             "max_top_k": int(max_top_k),
             "write_derived_cache": bool(write_derived_cache),
+            "retrieval_subblock_index": retrieval_subblock_index_diagnostics,
+            "frozen_retrieval_policy": (
+                frozen_rust_hybrid_centroid_policy.to_summary_payload(
+                    policy_name=FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME
+                )
+                if frozen_rust_hybrid_centroid_policy is not None
+                else None
+            ),
         }
     )
     write_json(dataset_output_dir / "summary.json", summary)
     return summary
 
 
-def _build_h_wang_rows(
+def _build_giant_block_rows(
     *,
     data_dir: Path,
     step2_dir: Path,
     targets_dir: Path | None,
+    dataset_label: str | None,
     clusterer: Any,
     output_dir: Path,
     query_views: list[str],
     query_source: str,
     retrieval_approach: str,
+    retrieval_engine: str,
     window_size: int,
     max_exemplars: int,
     limit_queries: int | None,
@@ -1335,30 +1700,36 @@ def _build_h_wang_rows(
     pair_batch_size: int,
     query_batch_pair_limit: int,
     max_top_k: int,
+    min_candidates_per_query_group: int,
 ) -> dict[str, Any]:
-    """Build the requested `h_wang` reranker rows."""
+    """Build reranker rows for one extracted giant block."""
 
     configure_runtime_environment(n_jobs=n_jobs, backend="rust")
     raw_signatures = _read_json(_required_file(data_dir, "signatures.json"))
-    signature_to_cluster_id = _read_json(_required_file(step2_dir, "signature_to_cluster_id.json"))
-    signature_to_cluster_id = {
-        str(signature_id): str(cluster_id) for signature_id, cluster_id in signature_to_cluster_id.items()
-    }
+    signature_to_cluster_id, step2_assignment_info = load_preferred_signature_to_cluster_id(step2_dir)
     seed_cluster_counts_by_orcid = build_orcid_seed_cluster_counts(
         raw_signatures=raw_signatures,
         signature_to_cluster_id=signature_to_cluster_id,
     )
 
     dataset_start = time.perf_counter()
-    dataset, load_info = load_h_wang_dataset(data_dir, block_key=None, n_jobs=n_jobs, clusterer=clusterer)
+    dataset, load_info = load_giant_block_dataset(data_dir, block_key=None, n_jobs=n_jobs, clusterer=clusterer)
     dataset_load_ms = (time.perf_counter() - dataset_start) * 1000.0
+    raw_paper_text_by_id = _load_raw_paper_text_by_id(
+        _required_file(data_dir, "papers.json"),
+        needed_paper_ids={str(paper_id) for paper_id in dataset.papers},
+    )
+    resolved_dataset_label = _normalize_giant_block_dataset_label(
+        dataset_label if dataset_label is not None else str(load_info["target_block"])
+    )
     _apply_dataset_name_count_semantics_for_prediction(clusterer, dataset)
-    runtime_context = build_runtime_context("single_letter_reranker_h_wang")
+    runtime_context = build_runtime_context("single_letter_reranker_giant_block")
     constraint_backend = _build_incremental_constraint_backend(
         dataset,
         use_default_constraints_as_supervision=clusterer.use_default_constraints_as_supervision,
         runtime_context=runtime_context,
         use_cache=clusterer.use_cache,
+        suppress_orcid=True,
     )
     seed_clusters = invert_signature_to_cluster_id(signature_to_cluster_id)
     seed_summary_list, cluster_sizes, seed_summary_build_ms = build_seed_summaries(
@@ -1367,17 +1738,32 @@ def _build_h_wang_rows(
         block_key=str(load_info["target_block"]),
         max_exemplars=max_exemplars,
     )
+    frozen_rust_hybrid_centroid_policy = None
+    retrieval_subblock_index = None
+    if "hybrid_centroid" in {str(value) for value in str(retrieval_approach).split("__")}:
+        frozen_rust_hybrid_centroid_policy = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY
+        if str(frozen_rust_hybrid_centroid_policy.full_candidate_strategy) != "global":
+            retrieval_subblock_index = load_retrieval_subblock_index(step2_dir)
+    include_rust_exemplars = bool(
+        frozen_rust_hybrid_centroid_policy is not None and frozen_rust_hybrid_centroid_policy.uses_exemplar_scoring()
+    )
     rust_hybrid_centroid_retriever = None
     if "hybrid_centroid" in {str(value) for value in str(retrieval_approach).split("__")}:
         try:
-            rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(seed_summary_list)
+            rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(
+                seed_summary_list,
+                include_exemplars=include_rust_exemplars,
+            )
         except RuntimeError:
             rust_hybrid_centroid_retriever = None
+    if frozen_rust_hybrid_centroid_policy is not None and rust_hybrid_centroid_retriever is None:
+        raise RuntimeError("The frozen Rust hybrid-centroid retriever is required for giant-block row builds")
     if str(query_source) == "supported_single_letter":
         if targets_dir is None:
-            raise ValueError("supported_single_letter `h_wang` rows require --targets-dir")
+            raise ValueError("supported_single_letter giant-block rows require --targets-dir")
         query_metadata = load_query_metadata(_required_file(targets_dir, "query_set.json"))
-        query_cases, query_source_summary = _build_h_wang_supported_query_cases(
+        query_cases, query_source_summary = _build_giant_block_supported_query_cases(
+            dataset_label=resolved_dataset_label,
             query_metadata=query_metadata,
             signature_to_cluster_id=signature_to_cluster_id,
             seed_cluster_counts_by_orcid=seed_cluster_counts_by_orcid,
@@ -1386,7 +1772,8 @@ def _build_h_wang_rows(
             seed=seed,
         )
     elif str(query_source) == "orcid_any_input":
-        query_cases, query_source_summary = _build_h_wang_any_input_query_cases(
+        query_cases, query_source_summary = _build_giant_block_any_input_query_cases(
+            dataset_label=resolved_dataset_label,
             raw_signatures=raw_signatures,
             dataset=dataset,
             target_block=str(load_info["target_block"]),
@@ -1397,24 +1784,28 @@ def _build_h_wang_rows(
             seed=seed,
         )
     else:
-        raise ValueError(f"Unsupported h_wang query_source: {query_source}")
+        raise ValueError(f"Unsupported giant-block query_source: {query_source}")
 
     summary_by_component = {summary.component_key: summary for summary in seed_summary_list}
-    rows_partial_path, query_groups_partial_path, progress_path, done_path = _reset_h_wang_stream_outputs(output_dir)
+    rows_partial_path, query_groups_partial_path, progress_path, done_path = _reset_giant_block_stream_outputs(
+        output_dir
+    )
     summary_accumulator = _QueryGroupSummaryAccumulator()
     pair_counts: list[int] = []
     featurize_seconds: list[float] = []
     model_seconds: list[float] = []
+    filtered_query_group_stats = {"query_groups": 0, "rows": 0}
     prepared_requests: list[PreparedQueryRowsRequest] = []
     prepared_request_pair_count = 0
     feature_cache: dict[str, retrieval.QueryFeatures] = {}
+    raw_similarity_feature_cache = _RawSimilarityFeatureCache()
     raw_candidate_summaries = list(seed_summary_list)
     residual_summary_cache: dict[tuple[str, str], retrieval.ClusterSummary] = {}
     processed_queries = 0
     written_rows = 0
     written_query_groups = 0
     started_at = _utc_timestamp()
-    _write_h_wang_progress(
+    _write_giant_block_progress(
         progress_path,
         status="running",
         query_source=str(query_source),
@@ -1487,6 +1878,7 @@ def _build_h_wang_rows(
             sampling_info_bucket=str(query_views_for_case[0]),
         )
         prepared_request = _prepare_query_rows_request(
+            dataset=dataset,
             query_case=resolved_query_case,
             block_component_count=int(len(query_candidate_summaries)),
             base_query=base_query,
@@ -1495,9 +1887,14 @@ def _build_h_wang_rows(
             summary_by_component=query_summary_by_component,
             candidate_signature_ids_by_component=candidate_signature_ids_by_component,
             retrieval_approach=retrieval_approach,
+            retrieval_engine=retrieval_engine,
             window_size=window_size,
             retrieval_window_state_base=retrieval_window_state_base,
             rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
+            frozen_rust_hybrid_centroid_policy=frozen_rust_hybrid_centroid_policy,
+            retrieval_subblock_index=retrieval_subblock_index,
+            raw_paper_text_by_id=raw_paper_text_by_id,
+            raw_similarity_feature_cache=raw_similarity_feature_cache,
         )
         prepared_requests.append(prepared_request)
         prepared_request_pair_count += int(prepared_request.estimated_pair_count)
@@ -1510,17 +1907,20 @@ def _build_h_wang_rows(
                 prepared_requests=prepared_requests,
                 pair_batch_size=pair_batch_size,
                 max_top_k=max_top_k,
+                rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
                 pair_counts=pair_counts,
                 featurize_seconds=featurize_seconds,
                 model_seconds=model_seconds,
                 rows_output_path=rows_partial_path,
                 query_group_metadata_output_path=query_groups_partial_path,
                 query_group_summary_accumulator=summary_accumulator,
+                min_candidates_per_query_group=int(min_candidates_per_query_group),
+                filtered_query_group_stats=filtered_query_group_stats,
             )
             processed_queries += int(len(prepared_requests))
             written_rows += int(flushed_row_count)
             written_query_groups += int(flushed_query_group_count)
-            _write_h_wang_progress(
+            _write_giant_block_progress(
                 progress_path,
                 status="running",
                 query_source=str(query_source),
@@ -1542,12 +1942,15 @@ def _build_h_wang_rows(
         prepared_requests=prepared_requests,
         pair_batch_size=pair_batch_size,
         max_top_k=max_top_k,
+        rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
         pair_counts=pair_counts,
         featurize_seconds=featurize_seconds,
         model_seconds=model_seconds,
         rows_output_path=rows_partial_path,
         query_group_metadata_output_path=query_groups_partial_path,
         query_group_summary_accumulator=summary_accumulator,
+        min_candidates_per_query_group=int(min_candidates_per_query_group),
+        filtered_query_group_stats=filtered_query_group_stats,
     )
     if prepared_requests:
         processed_queries += int(len(prepared_requests))
@@ -1556,13 +1959,17 @@ def _build_h_wang_rows(
     summary = summary_accumulator.to_summary()
     summary.update(
         {
-            "dataset": "h_wang",
+            "dataset": resolved_dataset_label,
+            "target_block": str(load_info["target_block"]),
             "query_source": str(query_source),
             "dataset_load_ms": round(float(dataset_load_ms), 6),
             "seed_summary_build_ms": round(float(seed_summary_build_ms), 6),
             "query_count": int(len(query_cases)),
             "query_group_metadata_count": int(written_query_groups),
             "query_source_summary": query_source_summary,
+            "min_candidates_per_query_group": int(min_candidates_per_query_group),
+            "filtered_query_groups_min_candidates_count": int(filtered_query_group_stats["query_groups"]),
+            "filtered_rows_min_candidates_count": int(filtered_query_group_stats["rows"]),
             "pair_count_mean": round(float(statistics.mean(pair_counts)), 6) if pair_counts else 0.0,
             "pair_count_p95": round(float(np.percentile(pair_counts, 95)), 6) if pair_counts else 0.0,
             "pair_featurize_seconds_mean": round(float(statistics.mean(featurize_seconds)), 6)
@@ -1571,9 +1978,17 @@ def _build_h_wang_rows(
             "pair_model_seconds_mean": round(float(statistics.mean(model_seconds)), 6) if model_seconds else 0.0,
             "query_batch_pair_limit": int(query_batch_pair_limit),
             "max_top_k": int(max_top_k),
+            "step2_assignment": dict(step2_assignment_info),
+            "frozen_retrieval_policy": (
+                frozen_rust_hybrid_centroid_policy.to_summary_payload(
+                    policy_name=FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME
+                )
+                if frozen_rust_hybrid_centroid_policy is not None
+                else None
+            ),
         }
     )
-    _write_h_wang_progress(
+    _write_giant_block_progress(
         progress_path,
         status="completed",
         query_source=str(query_source),
@@ -1727,6 +2142,25 @@ def parse_args() -> argparse.Namespace:
     materialize_parser.add_argument("--output-dir", type=Path, required=True)
     materialize_parser.add_argument("--selected-query-groups-file", type=Path, default=None)
 
+    giant_block_parser = subparsers.add_parser("giant_block", help="Build generic giant-block reranker rows.")
+    giant_block_parser.add_argument("--data-dir", type=Path, required=True)
+    giant_block_parser.add_argument("--step2-dir", type=Path, required=True)
+    giant_block_parser.add_argument("--targets-dir", type=Path, default=None)
+    giant_block_parser.add_argument("--output-dir", type=Path, required=True)
+    giant_block_parser.add_argument("--query-id-file", type=Path, default=None)
+    giant_block_parser.add_argument(
+        "--query-source",
+        choices=GIANT_BLOCK_QUERY_SOURCE_CHOICES,
+        default="supported_single_letter",
+    )
+    giant_block_parser.add_argument(
+        "--dataset-label",
+        type=str,
+        default=None,
+        help="Optional dataset/source label for emitted rows. Defaults to the normalized target block.",
+    )
+    giant_block_parser.add_argument("--min-candidates-per-query-group", type=int, default=1)
+
     h_wang_parser = subparsers.add_parser("h_wang", help="Build `h_wang` reranker rows.")
     h_wang_parser.add_argument("--data-dir", type=Path, required=True)
     h_wang_parser.add_argument("--step2-dir", type=Path, required=True)
@@ -1735,16 +2169,18 @@ def parse_args() -> argparse.Namespace:
     h_wang_parser.add_argument("--query-id-file", type=Path, default=None)
     h_wang_parser.add_argument(
         "--query-source",
-        choices=H_WANG_QUERY_SOURCE_CHOICES,
+        choices=GIANT_BLOCK_QUERY_SOURCE_CHOICES,
         default="supported_single_letter",
     )
+    h_wang_parser.add_argument("--min-candidates-per-query-group", type=int, default=1)
 
-    for subparser in (labeled_parser, h_wang_parser):
+    for subparser in (labeled_parser, giant_block_parser, h_wang_parser):
         subparser.add_argument("--query-views", nargs="+", default=list(DEFAULT_QUERY_VIEWS))
         subparser.add_argument("--retrieval-approach", default=DEFAULT_RETRIEVAL_APPROACH)
-        subparser.add_argument("--window-size", type=int, default=100)
+        subparser.add_argument("--retrieval-engine", choices=sorted(RETRIEVAL_ENGINE_CHOICES), default="auto")
+        subparser.add_argument("--window-size", type=int, default=DEFAULT_RETRIEVAL_WINDOW_SIZE)
         subparser.add_argument("--max-exemplars", type=int, default=4)
-        subparser.add_argument("--max-top-k", type=int, default=5)
+        subparser.add_argument("--max-top-k", type=int, default=DEFAULT_CHOOSER_CACHE_MAX_TOP_K)
         subparser.add_argument("--limit-queries", type=int, default=None)
         subparser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
         subparser.add_argument("--n-jobs", type=int, default=8)
@@ -1787,16 +2223,26 @@ def main() -> None:
         return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    if args.mode in {"labeled", "h_wang"} and args.limit_queries is not None and args.query_id_file is not None:
-        raise ValueError(f"Use either --limit-queries or --query-id-file for `{args.mode}`, not both")
-    if args.mode == "h_wang" and str(args.query_source) == "supported_single_letter" and args.targets_dir is None:
-        raise ValueError("`h_wang` supported_single_letter mode requires --targets-dir")
     if (
-        args.mode == "h_wang"
+        args.mode in {"labeled", "giant_block", "h_wang"}
+        and args.limit_queries is not None
+        and args.query_id_file is not None
+    ):
+        raise ValueError(f"Use either --limit-queries or --query-id-file for `{args.mode}`, not both")
+    if (
+        args.mode in {"giant_block", "h_wang"}
+        and str(args.query_source) == "supported_single_letter"
+        and args.targets_dir is None
+    ):
+        raise ValueError(f"`{args.mode}` supported_single_letter mode requires --targets-dir")
+    if (
+        args.mode in {"giant_block", "h_wang"}
         and str(args.query_source) == "orcid_any_input"
         and list(args.query_views) != list(DEFAULT_QUERY_VIEWS)
     ):
-        raise ValueError("`h_wang` orcid_any_input queries use their natural view; do not pass custom --query-views")
+        raise ValueError(
+            f"`{args.mode}` orcid_any_input queries use their natural view; do not pass custom --query-views"
+        )
 
     clusterer = load_clusterer(args.model_path, n_jobs=args.n_jobs)
     clusterer.use_cache = bool(args.use_cache)
@@ -1804,6 +2250,8 @@ def main() -> None:
     query_batch_pair_limit = int(args.query_batch_pair_limit)
     if query_batch_pair_limit <= 0:
         raise ValueError(f"query_batch_pair_limit must be positive, got {query_batch_pair_limit}")
+    if args.mode in {"giant_block", "h_wang"} and int(args.min_candidates_per_query_group) <= 0:
+        raise ValueError(f"min_candidates_per_query_group must be positive, got {args.min_candidates_per_query_group}")
 
     if args.mode == "labeled":
         dataset_summaries = {}
@@ -1815,6 +2263,7 @@ def main() -> None:
                 output_dir=args.output_dir,
                 query_views=[str(value) for value in args.query_views],
                 retrieval_approach=str(args.retrieval_approach),
+                retrieval_engine=str(args.retrieval_engine),
                 window_size=int(args.window_size),
                 max_exemplars=int(args.max_exemplars),
                 limit_queries=args.limit_queries,
@@ -1834,6 +2283,7 @@ def main() -> None:
                 "datasets": dataset_summaries,
                 "query_views": [str(value) for value in args.query_views],
                 "window_size": int(args.window_size),
+                "max_top_k": int(args.max_top_k),
                 "pair_batch_size": int(pair_batch_size),
                 "query_batch_pair_limit": int(query_batch_pair_limit),
                 "use_cache": bool(clusterer.use_cache),
@@ -1842,15 +2292,17 @@ def main() -> None:
         )
         return
 
-    summary = _build_h_wang_rows(
+    summary = _build_giant_block_rows(
         data_dir=args.data_dir,
         step2_dir=args.step2_dir,
         targets_dir=args.targets_dir,
+        dataset_label=("h_wang" if args.mode == "h_wang" else args.dataset_label),
         clusterer=clusterer,
         output_dir=args.output_dir,
         query_views=[str(value) for value in args.query_views],
         query_source=str(args.query_source),
         retrieval_approach=str(args.retrieval_approach),
+        retrieval_engine=str(args.retrieval_engine),
         window_size=int(args.window_size),
         max_exemplars=int(args.max_exemplars),
         limit_queries=args.limit_queries,
@@ -1860,6 +2312,7 @@ def main() -> None:
         pair_batch_size=pair_batch_size,
         query_batch_pair_limit=query_batch_pair_limit,
         max_top_k=int(args.max_top_k),
+        min_candidates_per_query_group=int(args.min_candidates_per_query_group),
     )
     write_json(args.output_dir / "run_summary.json", summary)
 

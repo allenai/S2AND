@@ -111,7 +111,7 @@ def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str
         if _NAME_COUNTS_CACHE is None:
             with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
                 _NAME_COUNTS_CACHE = pickle.load(f)
-    return _NAME_COUNTS_CACHE
+    return cast(tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]], _NAME_COUNTS_CACHE)
 
 
 def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
@@ -1376,21 +1376,24 @@ class ANDData:
         high_value: float | int = LARGE_DISTANCE,
         dont_merge_cluster_seeds: bool = True,
         incremental_dont_use_cluster_seeds: bool = False,
+        suppress_orcid: bool = False,
     ) -> float | None:
-        """Applies cluster_seeds and generates the default
-        constraints which are:
+        """Apply pairwise hard constraints for a signature pair.
 
-        First we apply the passed-in cluster_seeds, then:
+        Precedence:
+        1) Apply passed-in cluster seed constraints first (`disallow`/`require`).
+        2) Optionally disallow merging signatures that belong to different
+           required-seed groups when `dont_merge_cluster_seeds` is enabled.
+        3) If both ORCIDs are present and equal and `suppress_orcid` is false, return `low_value`.
+        4) Return `high_value` for deterministic conflicts:
+           - normalized last names disagree (hyphen/space-insensitive)
+           - first initials disagree
+           - first names are neither compatible prefixes nor known aliases
+             from `self.name_tuples`
+           - middle-name evidence is mutually conflicting (initials or full
+             middle tokens)
 
-        (1) if not a.prefix(b) or b.prefix(a) and (a, b) not in self.name_tuples:
-            distance(a, b) = high_value
-
-        (2) if len(a_middle) > 0 and len(b_middle) > 0 and
-            intersection(a_middle_chars, b_middle_chars) == 0:
-            distance(a, b) = high_value
-
-        There is currently no rule to assign low_value but it would be good
-        to potentially add an ORCID rule to use low_value
+        If no hard rule applies, return `None`.
 
         Parameters
         ----------
@@ -1407,6 +1410,8 @@ class ANDData:
             as well as "must merge" constraints
         incremental_dont_use_cluster_seeds: bool
             Are we clustering in incremental mode? If so, don't use the cluster seeds that came with the dataset
+        suppress_orcid: bool
+            If true, do not use same-ORCID equality as a must-link constraint.
 
         Returns
         -------
@@ -1438,17 +1443,18 @@ class ANDData:
         first_2, middle_2_text = _materialize_constraint_name_parts(signature_2)
         middle_1 = middle_1_text.split()
 
-        paper_1 = self.papers[str(signature_1.paper_id)]
-        paper_2 = self.papers[str(signature_2.paper_id)]
-
         orcid_1 = signature_1.author_info_orcid
         orcid_2 = signature_2.author_info_orcid
 
         # cluster seeds have precedence
-        if (signature_id_1, signature_id_2) in self.cluster_seeds_disallow or (
-            signature_id_2,
-            signature_id_1,
-        ) in self.cluster_seeds_disallow:
+        if (not incremental_dont_use_cluster_seeds) and (
+            (signature_id_1, signature_id_2) in self.cluster_seeds_disallow
+            or (
+                signature_id_2,
+                signature_id_1,
+            )
+            in self.cluster_seeds_disallow
+        ):
             return CLUSTER_SEEDS_LOOKUP["disallow"]
         elif (
             self.cluster_seeds_require.get(signature_id_1, -1) == self.cluster_seeds_require.get(signature_id_2, -2)
@@ -1456,13 +1462,14 @@ class ANDData:
             return CLUSTER_SEEDS_LOOKUP["require"]
         elif (
             dont_merge_cluster_seeds
+            and (not incremental_dont_use_cluster_seeds)
             and (signature_id_1 in self.cluster_seeds_require and signature_id_2 in self.cluster_seeds_require)
             and (self.cluster_seeds_require[signature_id_1] != self.cluster_seeds_require[signature_id_2])
         ):
             return CLUSTER_SEEDS_LOOKUP["disallow"]
         # orcid is a very reliable indicator: if 2 orcids are present and equal, then they are the same person
         # but if they are not equal, we can't say much
-        elif orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
+        elif not suppress_orcid and orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
             return low_value
         # just-in-case last name constraint: if last names are different (hyphen/space-insensitive), then disallow
         # TODO(s2and): remove hyphen/space-insensitive shim once canonicalization is unified end-to-end
@@ -1473,11 +1480,6 @@ class ANDData:
             return high_value
         # just-in-case first initial constraint: if first initials are different, then disallow
         elif len(first_1) > 0 and len(first_2) > 0 and first_1[0] != first_2[0]:
-            return high_value
-        # and then language constraints
-        elif (paper_1.is_reliable and paper_2.is_reliable) and (
-            paper_1.predicted_language != paper_2.predicted_language
-        ):
             return high_value
         # and then name based constraints
         else:

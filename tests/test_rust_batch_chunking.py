@@ -33,6 +33,16 @@ def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> dict[str, int | str 
     }
 
 
+def _pin_stable_rss(monkeypatch, rss_bytes: int = 256 * 1024 * 1024) -> None:
+    """Keep chunk-size contract tests independent from live process RSS movement."""
+
+    monkeypatch.setattr(
+        memory_budget,
+        "current_rss_bytes_best_effort",
+        lambda _total_ram_bytes: (int(rss_bytes), "test"),
+    )
+
+
 def _build_pairs(count: int) -> list[tuple[str, str, float]]:
     signature_ids = [str(i) for i in range(9)]
     pairs: list[tuple[str, str, float]] = []
@@ -124,6 +134,7 @@ def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
 def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    _pin_stable_rss(monkeypatch)
 
     call_sizes = []
 
@@ -168,6 +179,7 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
 def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking_indexed", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+    _pin_stable_rss(monkeypatch)
 
     indexed_call_sizes = []
     selected_indices_seen: list[list[int] | None] = []

@@ -3040,6 +3040,20 @@ def _year_mismatch_severity(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _year_missing_flags(row: dict[str, Any]) -> dict[str, int]:
+    """Return row-level missing-year indicators without changing feature columns."""
+
+    query_year_missing = int(row.get("query_year") in (None, ""))
+    candidate_year_range_missing = int(
+        row.get("candidate_year_min") in (None, "") or row.get("candidate_year_max") in (None, "")
+    )
+    return {
+        "query_year_missing": query_year_missing,
+        "candidate_year_range_missing": candidate_year_range_missing,
+        "any_year_missing": int(query_year_missing or candidate_year_range_missing),
+    }
+
+
 def _affiliation_contradiction_severity(row: dict[str, Any]) -> float:
     """Return a larger value for stronger affiliation contradictions."""
 

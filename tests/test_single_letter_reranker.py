@@ -214,6 +214,50 @@ def test_chooser_compatibility_helpers_use_retrieval_constants(monkeypatch: pyte
     assert reranker_utils._year_compatibility(2010, dated_summary) == pytest.approx(0.3)  # noqa: SLF001
 
 
+def test_year_compatibility_neutralizes_missing_year_inputs() -> None:
+    dated_summary = build_cluster_summary(
+        component_key="dated",
+        size=4,
+        year_min=2000,
+        year_max=2002,
+        year_mean=2000.0,
+    )
+    undated_summary = build_cluster_summary(
+        component_key="undated",
+        size=4,
+        year_min=None,
+        year_max=None,
+        year_mean=None,
+    )
+
+    assert reranker_utils._year_compatibility(None, dated_summary) == pytest.approx(0.0)  # noqa: SLF001
+    assert reranker_utils._year_compatibility(2001, undated_summary) == pytest.approx(0.0)  # noqa: SLF001
+
+
+def test_year_missing_flags_are_available_without_feature_schema_changes() -> None:
+    complete = _base_row(query_year=2000, candidate_year_min=1999, candidate_year_max=2001)
+    missing_query = _base_row(query_year="", candidate_year_min=1999, candidate_year_max=2001)
+    missing_candidate = _base_row(query_year=2000, candidate_year_min="", candidate_year_max=2001)
+
+    assert reranker_utils._year_missing_flags(complete) == {  # noqa: SLF001
+        "query_year_missing": 0,
+        "candidate_year_range_missing": 0,
+        "any_year_missing": 0,
+    }
+    assert reranker_utils._year_missing_flags(missing_query) == {  # noqa: SLF001
+        "query_year_missing": 1,
+        "candidate_year_range_missing": 0,
+        "any_year_missing": 1,
+    }
+    assert reranker_utils._year_missing_flags(missing_candidate) == {  # noqa: SLF001
+        "query_year_missing": 0,
+        "candidate_year_range_missing": 1,
+        "any_year_missing": 1,
+    }
+    assert "any_year_missing" not in reranker_utils.NUMERIC_FEATURE_COLUMNS
+    assert "any_year_missing" not in reranker_utils.ROW_COLUMNS
+
+
 def test_classify_subblocks_partitions_mixed_first_name_lengths() -> None:
     dataset = SimpleNamespace(
         signatures={

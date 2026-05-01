@@ -810,7 +810,6 @@ def _summarize_active_feature_coverage(
     feature_columns: tuple[str, ...],
     datasets: tuple[str, ...],
     chunksize: int | None = None,
-    summarize_unmatched_rows_as: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Summarize active classic feature completeness for selected datasets in one row file."""
 
@@ -844,15 +843,9 @@ def _summarize_active_feature_coverage(
                 dataset_rows,
                 present_feature_columns=present_feature_columns,
             )
-    if summarize_unmatched_rows_as is not None and accumulators[summarize_unmatched_rows_as]["rows"] == 0:
-        fallback_reader = pd.read_csv(path, **read_kwargs)
-        fallback_frames = fallback_reader if chunksize is not None else (fallback_reader,)
-        for frame in fallback_frames:
-            _accumulate_feature_coverage(
-                accumulators[summarize_unmatched_rows_as],
-                frame,
-                present_feature_columns=present_feature_columns,
-            )
+    unmatched_datasets = [dataset for dataset, accumulator in accumulators.items() if int(accumulator["rows"]) == 0]
+    if unmatched_datasets:
+        raise ValueError(f"Dataset filter matched zero rows in {path}: datasets={unmatched_datasets}")
     return _finalize_feature_coverage(accumulators)
 
 
@@ -910,7 +903,6 @@ def build_validation_payload(bundle_root: Path = BUNDLE_ROOT) -> dict[str, objec
             _resolve_local_bundle_path(bundle.root, str(path_like)),
             feature_columns=feature_columns,
             datasets=(str(dataset),),
-            summarize_unmatched_rows_as=str(dataset),
         )[str(dataset)]
         for dataset, path_like in extra_eval_paths.items()
     }

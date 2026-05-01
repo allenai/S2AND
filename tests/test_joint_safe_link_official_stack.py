@@ -3155,8 +3155,8 @@ def test_validator_reports_absent_columns_separately_from_missing_cells(tmp_path
     ]
 
 
-def test_validator_can_summarize_synthetic_extra_eval_sources(tmp_path: Path) -> None:
-    """Synthetic extra eval files may preserve original dataset names in rows."""
+def test_validator_rejects_zero_row_dataset_filter(tmp_path: Path) -> None:
+    """Dataset filters that match no rows should fail instead of summarizing the whole file."""
 
     path = tmp_path / "rows.csv"
     pd.DataFrame(
@@ -3174,16 +3174,12 @@ def test_validator_can_summarize_synthetic_extra_eval_sources(tmp_path: Path) ->
         ]
     ).to_csv(path, index=False)
 
-    coverage = _summarize_active_feature_coverage(
-        path,
-        feature_columns=("title_overlap",),
-        datasets=("training_s2and_source_reviewed",),
-        summarize_unmatched_rows_as="training_s2and_source_reviewed",
-    )
-
-    assert coverage["training_s2and_source_reviewed"]["rows"] == 2
-    assert coverage["training_s2and_source_reviewed"]["queries"] == 2
-    assert coverage["training_s2and_source_reviewed"]["columns_with_missing"] == []
+    with pytest.raises(ValueError, match="training_s2and_source_reviewed"):
+        _summarize_active_feature_coverage(
+            path,
+            feature_columns=("title_overlap",),
+            datasets=("training_s2and_source_reviewed",),
+        )
 
 
 def test_extra_eval_paths_support_dynamic_dataset_mapping() -> None:

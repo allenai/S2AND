@@ -6,6 +6,88 @@ train/eval/calibration, and core constraint/feature behavior in `s2and/data.py` 
 
 ---
 
+## 0. Current status (2026-05-01)
+
+This file is now a historical proposal/audit plus a status record. The original
+sections below are preserved for provenance; use this section as the current
+readout. This status includes the current branch and the cleanup work from the
+recent refactor review pass.
+
+### Done enough
+
+These items are no longer active refactor blockers:
+
+| Item | Current readout |
+| --- | --- |
+| B1 / Phase 1 ORCID constraint-feature leak | Done. ORCID suppression is plumbed through the Python and Rust constraint paths, wrapper call sites, and parity tests. |
+| H1 / Phase 7 train/eval split | Done. Inner split selection prefers normalized audit ORCID where available. |
+| H3 / Phase 6 bypass scope | Done enough. The bypass is no longer positive-only keyed. |
+| M3 single-letter name feature NaNs | Done. Single-letter name comparisons now produce finite features for cases such as `("A", "Alice")`. |
+| M4 held-out query leakage | Done enough. Current row engines exclude the held-out query from candidate signature lists. |
+| M5 / L3 wrapper/import fork debt | Stale by deletion. The specific legacy wrapper/import-fork scripts called out here are absent. |
+| M7 zero-row dataset handling | Done. Validator coverage now rejects zero-row official datasets. |
+| M9 fallback telemetry | Done enough. Strict mode and telemetry make fallback usage visible. |
+| M11 / Phase 2 audit ORCID columns | Done. Audit-only ORCID columns exist separately from feature surfaces. |
+| L1 ORCID-off retrieval defaults | Done enough. Retrieval policy defaults are centralized and ORCID-off. |
+| L4 compatibility shims | Done enough for now. Compatibility shims are documented and covered while normalization migration remains blocked. |
+
+### Partially done
+
+These are useful improvements, but they are not fully closed:
+
+| Item | Current readout | Focused next step |
+| --- | --- | --- |
+| B2 / Phase 4 single row engine | `scripts/reranker_dataset/` exists and old build entry points are gone, but `rows.py` still delegates some row construction to legacy helpers and `rebuild_joint_safe_link_official_stack.py` still owns large staging/materialization logic. | Continue extracting stable row/materialization units out of the rebuild script and retarget tests to those modules. |
+| H2 / Phase 5 calibration contract | Schema/calibrator artifact validation exists, but `--calibrator-mode` still defaults to `none`, and ranker training does not consume `classic_gate_source` through a shared calibration contract. | Decide the intended calibration surface before changing defaults. |
+| H5 raw similarity zeroing | Bridge validation and strict mode exist, but legacy direct calls can still omit strict mode. | Keep moving callers onto the shared raw-similarity helper and remove permissive paths once coverage is complete. |
+| M2 / L2 retrieval constants | Python constants are centralized in `scripts/retrieval_policy.py`, but Rust constants and the Python mirror both still exist. | Treat the mirror as an explicit cross-language contract or generate/check it. |
+| M6 relabel preflight | The official staging path now validates before relabeling, but future entry points could bypass `_stage_input_groups`. | Reuse the preflight at any new staging/relabel boundary. |
+| M10 missing-year features | Conservative helper behavior is covered, but missing-year state is not yet a first-class schema feature. | Only add columns through an explicit schema/digest migration. |
+| Phase 3b artifact store | `FilesystemArtifactStore` exists with focused tests, but it is not yet integrated into the official pipeline. | Integrate behind explicit cache controls, then verify cold/warm parity and invalidation. |
+| Phase 8 cleanup | Several legacy scripts are gone or moved, but `rebuild_joint_safe_link_official_stack.py` remains a large orchestrator. | Shrink it incrementally as stable helper modules take over. |
+
+### Not done enough
+
+These remain real work if the goal is to finish the refactor rather than just
+stabilize the current branch:
+
+- Finish the B2 row-engine collapse so the rebuild script stops owning core row
+  construction behavior.
+- Define the H2 calibration contract and only then decide whether heldout
+  calibration should become the default.
+- Integrate the artifact store into the official pipeline with explicit
+  opt-in/opt-out cache controls and regression tests for cold/warm parity.
+- Decide whether M10 missing-year state is worth adding to the schema. If yes,
+  do it as a deliberate schema and digest migration.
+
+### Should not do now
+
+These changes would be premature or harmful in the current branch:
+
+- Do not remove the normalization compatibility shims until
+  `docs/normalization_migration_blocked.md` says the migration gate is clear.
+- Do not delete `scripts/rebuild_joint_safe_link_official_stack.py` yet. It is
+  still the official orchestrator and is heavily covered by tests.
+- Do not delete `scripts/run_joint_safe_link_official_classic.py` or
+  `scripts/sync_joint_safe_link_official_bundle_metadata.py` as part of this
+  cleanup. Harden/configure them instead if they stay in the branch.
+- Do not default calibration to heldout until the shared calibration surface is
+  explicit and schema-stamped.
+- Do not add missing-year feature columns casually; that requires a schema and
+  artifact compatibility decision.
+- Do not treat the original sections below as current implementation guidance
+  without checking this status section first.
+
+### Stale or archival material
+
+- The original "no code changes yet" language below is stale. The proposal has
+  mostly been implemented or narrowed into the remaining items above.
+- The detailed references to deleted legacy build scripts are historical.
+- The cleanup docs `docs/joint_safe_link_recent_failure_report_20260413.md` and
+  `docs/how_to_clean_cluster_data.md` were moved out to `scratch/`.
+
+---
+
 ## 1. Executive summary
 
 The pipeline mostly works and has good test coverage, but it has accumulated four

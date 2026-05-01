@@ -956,6 +956,72 @@ def test_s2and_full_relabel_updates_group_labels_and_metadata() -> None:
     assert {row["best_positive_retrieval_rank"] for row in relabeled} == {"2"}
 
 
+def test_s2and_relabel_preflight_catches_missing_decisions_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing S2AND relabel decisions should fail before group materialization starts."""
+
+    pre_filter_rows_path = tmp_path / "s2and_eval_rows.csv.gz"
+    rows = [
+        {
+            "dataset": "arnetminer",
+            "query_group_id": "arnetminer:1:full",
+            "candidate_component_key": "c1",
+            "retrieval_rank": "1",
+            "label": "1",
+        },
+        {
+            "dataset": "arnetminer",
+            "query_group_id": "arnetminer:2:full",
+            "candidate_component_key": "c2",
+            "retrieval_rank": "1",
+            "label": "0",
+        },
+    ]
+    with gzip.open(pre_filter_rows_path, "wt", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    monkeypatch.setattr(rebuild_stack, "S2AND_FULL_RELABEL_PRE_FILTER_ROWS_PATH", pre_filter_rows_path)
+    monkeypatch.setattr(rebuild_stack, "read_initial_only_rereview_decisions", lambda: {})
+    monkeypatch.setattr(
+        rebuild_stack,
+        "_read_s2and_full_relabel_decisions",
+        lambda: {
+            "arnetminer:1:full": rebuild_stack.S2ANDFullRelabelDecision(
+                safe_component_keys=("c1",),
+                split="test",
+                correction_type="",
+            )
+        },
+    )
+
+    def fail_if_materialized(
+        rows: list[dict[str, object]],
+        *,
+        decisions: dict[str, rebuild_stack.S2ANDFullRelabelDecision],
+    ) -> list[dict[str, object]]:
+        del rows, decisions
+        raise AssertionError("S2AND relabel materialization should not run after a failed preflight")
+
+    monkeypatch.setattr(rebuild_stack, "_apply_s2and_full_relabel_to_group", fail_if_materialized)
+    connection = rebuild_stack._connect_spool_db(tmp_path / "spool.sqlite3")
+    try:
+        with pytest.raises(ValueError, match="Missing S2AND full relabel decisions"):
+            rebuild_stack._stage_input_groups(
+                connection=connection,
+                selected_row_paths=(rebuild_stack.S2AND_ROW_RELATIVE_PATH,),
+                limit_groups_per_file=None,
+            )
+        staged_count = connection.execute("SELECT COUNT(*) FROM staged_groups").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert staged_count == 0
+
+
 def test_s2and_assignment_rows_use_review_split_and_active_labels() -> None:
     """Promoted split assignments should be reconstructed for rematerialized S2AND queries."""
 

@@ -21,6 +21,7 @@ data/inventors_s2and/
 data/name_counts_rust.json
 data/lid.176.bin
 data/LICENSE.txt
+data/joint_*/
 pypitoken
 
 # C extensions

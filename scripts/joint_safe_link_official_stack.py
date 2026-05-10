@@ -20,7 +20,7 @@ from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.contracts import INCREMENTAL_LINKING_RUST_CAPABILITIES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PACKAGE_DIR = REPO_ROOT / "data" / "joint_safe_link_featureless_self_contained_20260506a"
+DEFAULT_PACKAGE_DIR = REPO_ROOT / "s2and" / "data" / "joint_safe_link_featureless_self_contained_20260506a"
 CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE = 192.0
 _ANCHOR_EVIDENCE_FEATURE_COLUMNS = (
     "anchor_evidence_count",

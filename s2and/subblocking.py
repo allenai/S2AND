@@ -12,7 +12,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MultiLabelBinarizer
 
-from s2and.consts import PROJECT_ROOT_PATH, SPECTER_DIM
+from s2and.consts import _PACKAGE_DATA_DIR, SPECTER_DIM
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
     compute_block,
@@ -24,7 +24,7 @@ from s2and.text import (
 logger = logging.getLogger("s2and")
 
 
-with open(os.path.join(PROJECT_ROOT_PATH, "data", "first_k_letter_counts_from_orcid.json")) as f:
+with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.json")) as f:
     FIRST_K_LETTER_COUNTS = json.load(f)
 
 

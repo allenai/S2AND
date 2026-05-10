@@ -39,15 +39,17 @@ def _make_core_rust_featurizer(*, supports_from_dataset_paper_preprocess: bool =
 
 
 def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatch):
-    rust_featurizer_cls = _make_core_rust_featurizer()
+    RustFeaturizer = _make_core_rust_featurizer()
 
     class ShimModule:
         __version__ = None
-        RustFeaturizer = rust_featurizer_cls
+
+    ShimModule.RustFeaturizer = RustFeaturizer
 
     class NativeModule:
-        __version__ = "0.40.0"
-        RustFeaturizer = rust_featurizer_cls
+        __version__ = "0.49.0"
+
+    NativeModule.RustFeaturizer = RustFeaturizer
 
     def _fake_import_module(name: str):
         if name == "s2and_rust":
@@ -72,8 +74,9 @@ def test_detect_rust_runtime_capabilities_requires_core_markers():
             return None
 
     class Module:
-        __version__ = "0.40.0"
-        RustFeaturizer = MissingMarkerRustFeaturizer
+        __version__ = "0.49.0"
+
+    Module.RustFeaturizer = MissingMarkerRustFeaturizer
 
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert capabilities.extension_importable is True
@@ -82,11 +85,12 @@ def test_detect_rust_runtime_capabilities_requires_core_markers():
 
 
 def test_detect_rust_runtime_capabilities_rejects_old_version():
-    rust_featurizer_cls = _make_core_rust_featurizer()
+    RustFeaturizer = _make_core_rust_featurizer()
 
     class Module:
         __version__ = "0.39.9"
-        RustFeaturizer = rust_featurizer_cls
+
+    Module.RustFeaturizer = RustFeaturizer
 
     blocked = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert blocked.core_runtime_available is False
@@ -94,11 +98,12 @@ def test_detect_rust_runtime_capabilities_rejects_old_version():
 
 
 def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
-    rust_featurizer_cls = _make_core_rust_featurizer()
+    RustFeaturizer = _make_core_rust_featurizer()
 
     class Module:
         __version__ = "dev-local"
-        RustFeaturizer = rust_featurizer_cls
+
+    Module.RustFeaturizer = RustFeaturizer
 
     blocked = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert blocked.core_runtime_available is False
@@ -106,11 +111,12 @@ def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
 
 
 def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_marker():
-    rust_featurizer_cls = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
+    RustFeaturizer = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
 
     class Module:
-        __version__ = "0.40.0"
-        RustFeaturizer = rust_featurizer_cls
+        __version__ = "0.49.0"
+
+    Module.RustFeaturizer = RustFeaturizer
 
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
     assert capabilities.core_runtime_available is True
@@ -145,7 +151,7 @@ def test_detect_rust_runtime_capabilities_reports_incremental_linker_names():
         top_k_hybrid_centroid_pair_plan = PairPlanMethod()
 
     class Module:
-        __version__ = "0.40.0"
+        __version__ = "0.49.0"
         RustFeaturizer = NamedRustFeaturizer
         RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever
 
@@ -179,7 +185,7 @@ def test_detect_rust_runtime_capabilities_rejects_stale_incremental_pair_plan_ab
         top_k_hybrid_centroid_pair_plan = StalePairPlanMethod()
 
     class Module:
-        __version__ = "0.40.0"
+        __version__ = "0.49.0"
         RustFeaturizer = NamedRustFeaturizer
         RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever
 

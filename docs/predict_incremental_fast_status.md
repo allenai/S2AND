@@ -10,7 +10,7 @@ This is the live implementation checklist for
 - Rust backend selection routes `Clusterer.predict_incremental(...)` through
   the promoted linker when the Rust extension, artifact, and capabilities are
   available.
-- The released linker artifact is `data/production_incremental_linker_v1.2/`
+- The checked-in released linker artifact is `s2and/data/production_incremental_linker_v1.2/`
   with `booster.lgb`, `metadata.json`, and `training_target.json`.
 - Training replay defaults to
   `data/joint_safe_link_minimal_raw_specter_20260507a` plus the tracked target

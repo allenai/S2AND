@@ -57,12 +57,27 @@ dev = [
   "ipykernel",
 ]
 rust = [
-  "s2and-rust>=0.47.0",
+  "s2and-rust==0.49.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["s2and*"]
 exclude = ["s2and_rust*"]
+
+[tool.setuptools.package-data]
+s2and = [
+  "data/path_config.json",
+  "data/first_k_letter_counts_from_orcid.json",
+  "data/s2and_name_tuples.txt",
+  "data/s2and_name_tuples_filtered.txt",
+  "data/s2and_unnormalized_filtered_name_tuples.txt",
+  "data/production_model_v1.0.pickle",
+  "data/production_model_v1.1.pickle",
+  "data/production_model_v1.2.pickle",
+  "data/production_incremental_linker_v1.2/booster.lgb",
+  "data/production_incremental_linker_v1.2/metadata.json",
+  "data/production_incremental_linker_v1.2/training_target.json",
+]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

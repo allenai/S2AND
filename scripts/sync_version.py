@@ -23,7 +23,7 @@ FILES = {
 }
 
 PATTERNS = {
-    "pyproject_rust_extra": r'(?m)^\s+"s2and-rust>=([0-9]+\.[0-9]+\.[0-9]+)",\s*$',
+    "pyproject_rust_extra": r'(?m)^\s+"s2and-rust(?:==|>=)([0-9]+\.[0-9]+\.[0-9]+)",\s*$',
     "rust_pyproject": r'(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"\s*$',
     "cargo_toml": r'(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"\s*$',
 }
@@ -61,7 +61,7 @@ def sync_version(version: str) -> None:
     replace_once(
         FILES["pyproject_rust_extra"],
         PATTERNS["pyproject_rust_extra"],
-        f'  "s2and-rust>={version}",',
+        f'  "s2and-rust=={version}",',
     )
     replace_once(
         FILES["rust_pyproject"],

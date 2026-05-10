@@ -59,7 +59,9 @@ Model-only download:
 aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle data/
 ```
 
-If your data lives outside the repo, set `data/path_config.json`:
+## Configuration
+
+Modify the config file at `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). This file should look like this:
 
 ```json
 {
@@ -277,7 +279,63 @@ uv run ruff format .
 uv run ty check s2and
 ```
 
-For local CI mirroring, Python-only fast paths, and version bumping, see [docs/development.md](docs/development.md).
+To run the entire CI suite mimicking the GH Actions:
+```bash
+uv run python scripts/run_ci_locally.py
+```
+`scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
+- lint job (`ruff check` + `ruff format --check`)
+- `typecheck-and-test` matrix lanes (`py-only`, then `rust-enabled`)
+- Rust parity guardrail tests in the `rust-enabled` lane
+
+By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
+To override platform emulation locally, set `S2AND_CI_TY_PLATFORM` (for example, `windows`).
+
+To run CI checks locally without Rust extension compilation (faster iteration):
+```bash
+uv sync --active --extra dev --frozen
+uv run --active --no-project ruff format --check s2and scripts/*.py
+uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
+uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
+# macOS/Linux:
+PYTHONPATH=. uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
+# Windows PowerShell:
+$env:PYTHONPATH='.'; uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
+```
+
+### Version bumping
+Versioning is centralized in the `VERSION` file (single source of truth). When you update it, we sync the Python/Rust
+manifests and regenerate lockfiles.
+
+One-time setup for hooks (recommended):
+```bash
+git config core.hooksPath .githooks
+```
+
+Workflow:
+```bash
+# 1) edit VERSION
+echo 0.49.0 > VERSION
+
+# 2) sync manifests
+uv run python scripts/sync_version.py
+
+# 3) regenerate lockfiles
+uv sync --extra dev
+uv run --active --no-project cargo generate-lockfile --manifest-path s2and_rust/Cargo.toml
+```
+
+Notes:
+- The pre-commit hook only runs when `VERSION` is staged and will auto-sync + regenerate lockfiles if needed.
+- `uv.lock` and `s2and_rust/Cargo.lock` are generated files and will contain the version after syncing.
+
+### Docs
+
+- Index (start here): `docs/README.md`
+- Next steps: `docs/work_plan.md`
+- Backlog: `docs/work_plan.md` (Backlog section)
+
+---
 
 ## Reproducibility
 

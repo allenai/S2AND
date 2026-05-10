@@ -3,6 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 .claude/
+pypitoken
+*.pickle
+!tests/qian/specter.pickle
+!s2and/data/production_model_v1.0.pickle
+!s2and/data/production_model_v1.1.pickle
+!s2and/data/production_model_v1.2.pickle
+
 data/aminer/
 data/arnetminer/
 data/inspire/
@@ -22,7 +29,7 @@ data/name_counts_rust.json
 data/lid.176.bin
 data/LICENSE.txt
 data/joint_*/
-pypitoken
+
 
 # C extensions
 *.so
@@ -153,11 +160,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-*.pickle
-!tests/qian/specter.pickle
-!data/production_model_v1.0.pickle
-!data/production_model_v1.1.pickle
-!data/production_model_v1.2.pickle
 .vscode
 foo-*
 *.dat

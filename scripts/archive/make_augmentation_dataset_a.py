@@ -1,15 +1,8 @@
 # ruff: noqa: E402
 
 import json
-import os
-
-CONFIG_LOCATION = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "data", "path_config.json")
-)
-with open(CONFIG_LOCATION) as _json_file:
-    CONFIG = json.load(_json_file)
-
 import json as json_module
+import os
 import pickle
 import urllib.error
 import urllib.parse
@@ -17,6 +10,7 @@ import urllib.request
 
 import pandas as pd
 
+from s2and.consts import CONFIG
 from s2and.data import ANDData
 
 """

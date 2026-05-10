@@ -43,7 +43,7 @@ def test_promoted_training_defaults_to_minimal_raw_specter_source() -> None:
 
     assert promoted_train.DEFAULT_SOURCE_BUNDLE_ROOT.name == "joint_safe_link_minimal_raw_specter_20260507a"
     assert promoted_train.DEFAULT_TARGET_JSON.relative_to(promoted_train.REPO_ROOT) == Path(
-        "data/production_incremental_linker_v1.2/training_target.json"
+        "s2and/data/production_incremental_linker_v1.2/training_target.json"
     )
     assert parser_defaults["feature_mode"] == "minimal-raw-rust"
     assert feature_mode_action.choices == ("minimal-raw-rust", "rust-recompute-pw")

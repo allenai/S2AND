@@ -61,9 +61,9 @@ the exact residual clustering tail.
 
 The release surface is:
 
-- `data/production_model_v1.2.pickle`
-- `data/production_incremental_linker_v1.2/`
-- `data/production_incremental_linker_v1.2/training_target.json`
+- `s2and/data/production_model_v1.2.pickle`
+- `s2and/data/production_incremental_linker_v1.2/`
+- `s2and/data/production_incremental_linker_v1.2/training_target.json`
 - `data/joint_safe_link_minimal_raw_specter_20260507a/`
 
 `training_target.json` is the portable target spec for replay: feature order,

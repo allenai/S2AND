@@ -60,7 +60,7 @@ class DummyRustFeaturizer:
 
 
 class DummyRustModule:
-    __version__ = "0.40.0"
+    __version__ = "0.48.0"
     RustFeaturizer = DummyRustFeaturizer
 
 

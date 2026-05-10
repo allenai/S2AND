@@ -136,14 +136,12 @@ def _resolve_workload(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
 # Helpers
 # ---------------------------------------------------------------------------
 def _resolve_data_dir() -> str:
-    project_root = str(PROJECT_ROOT)
-    config_path = os.path.join(project_root, "data", "path_config.json")
-    with open(config_path) as f:
-        config = json.load(f)
-    internal = config.get("internal_data_dir", "")
+    from s2and.consts import CONFIG
+
+    internal = CONFIG.get("internal_data_dir", "")
     if internal and os.path.exists(internal):
         return internal
-    return os.path.join(project_root, "data")
+    return CONFIG["main_data_dir"]
 
 
 def _fmt(seconds: float) -> str:

@@ -99,11 +99,12 @@ from scripts.joint_safe_link_official_stack import (  # noqa: E402
 os.environ.setdefault("S2AND_BACKEND", "rust")
 os.environ.setdefault("S2AND_RUST_FEATURIZER_MAX_INMEM", "1")
 
+PACKAGE_DATA_ROOT = REPO_ROOT / "s2and" / "data"
 DEFAULT_SOURCE_BUNDLE_ROOT = REPO_ROOT / "data" / "joint_safe_link_minimal_raw_specter_20260507a"
-DEFAULT_TARGET_JSON = REPO_ROOT / "data" / "production_incremental_linker_v1.2" / "training_target.json"
+DEFAULT_TARGET_JSON = PACKAGE_DATA_ROOT / "production_incremental_linker_v1.2" / "training_target.json"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "scratch" / "joint_safe_link_promoted_official_20260507"
-DEFAULT_PAIRWISE_MODEL_PATH = REPO_ROOT / "data" / "production_model_v1.2.pickle"
-DEFAULT_LINKER_ARTIFACT_DIR = REPO_ROOT / "data" / "production_incremental_linker_v1.2"
+DEFAULT_PAIRWISE_MODEL_PATH = PACKAGE_DATA_ROOT / "production_model_v1.2.pickle"
+DEFAULT_LINKER_ARTIFACT_DIR = PACKAGE_DATA_ROOT / "production_incremental_linker_v1.2"
 DEFAULT_GIANT_DATASET_ROOT = Path(r"D:\data")
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 GIANT_DATASETS = frozenset({"a_khan", "a_silva", "h_wang", "j_smith", "s_gupta", "s_lee", "s_park"})

@@ -34,9 +34,12 @@ It is used with `production_model_v1.2.pickle`.
 The directory includes `training_target.json`, which is the portable training
 target spec used by replay scripts.
 
-## Configuring `data/path_config.json`
+## Configuring `s2and/data/path_config.json`
 
-Some scripts look up the main data root through `data/path_config.json`.
+Some scripts look up the main data root through `s2and/data/path_config.json`
+or the `S2AND_PATH_CONFIG` environment variable. This config points at the
+downloaded benchmark dataset root; it is separate from the package data checked
+in under `s2and/data/`.
 
 Example:
 
@@ -51,7 +54,7 @@ Guidance:
 
 - Set `main_data_dir` to the directory containing your downloaded S2AND datasets.
 - `internal_data_dir` is only relevant for internal AI2 workflows and can be left empty.
-- If your data already lives in this repo's `data/` directory, many workflows do not need any config changes.
+- If your data lives in this repo's `data/` directory, set `main_data_dir` to that absolute path.
 
 ## Dataset file expectations
 

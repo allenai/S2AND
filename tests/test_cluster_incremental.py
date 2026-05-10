@@ -210,7 +210,7 @@ def test_predict_incremental_private_linker_mode_uses_seed_link_seam(clusterer_d
         dataset,
         batching_threshold=None,
         incremental_linker_private=True,
-        incremental_linker_artifact_path="data/production_incremental_linker_v1.2",
+        incremental_linker_artifact_path="s2and/data/production_incremental_linker_v1.2",
     )
 
     assert captured_inputs["query_signature_ids"] == ["5", "8"]

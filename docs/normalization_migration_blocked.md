@@ -94,7 +94,7 @@ Migration Plan (phased, verifiable)
 3) Regenerate artifacts with canonical logic
    - Regenerate name counts (`first`, `last`, `first_last`, `last_first_initial`).
    - Regenerate name tuples aligned with canonical forms.
-   - Regenerate `data/first_k_letter_counts_from_orcid.json` using canonical first names (no token fallback).
+   - Regenerate `s2and/data/first_k_letter_counts_from_orcid.json` using canonical first names (no token fallback).
    - Record reproducibility metadata: source snapshot, script/version hash, generation date.
 
 4) Cut over and remove compatibility code

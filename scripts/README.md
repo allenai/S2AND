@@ -83,4 +83,4 @@ Scripts in `archive/` are historical and generally not intended to be rerun.
 
 ## Notes
 
-**`transfer_experiment_seed_paper.py`**: Assumes S2AND data is in `<code root>/data/`. If not, modify `"main_data_dir"` in `data/path_config.json`. For one-shot large runs, leave `--use_cache` off unless you expect to rerun the same workload and reuse cached pair features. With `--use_cache`, S2AND now writes the SQLite-backed pair-feature cache plus Rust featurizer disk cache, and a loaded pair-feature cache is also kept in process memory, so it still adds extra IO and can add RAM pressure when the cache will not be reused.
+**`transfer_experiment_seed_paper.py`**: Uses `main_data_dir` from `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). For one-shot large runs, leave `--use_cache` off unless you expect to rerun the same workload and reuse cached pair features. With `--use_cache`, S2AND writes the SQLite-backed pair-feature cache plus Rust featurizer disk cache, and a loaded pair-feature cache is also kept in process memory, so it can add IO and RAM pressure when the cache will not be reused.

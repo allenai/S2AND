@@ -20,7 +20,7 @@ from sklearn.exceptions import EfficiencyWarning
 from tqdm import tqdm
 
 from s2and import memory_budget
-from s2and.consts import DEFAULT_CHUNK_SIZE, LARGE_INTEGER, PROJECT_ROOT_PATH
+from s2and.consts import _PACKAGE_DATA_DIR, DEFAULT_CHUNK_SIZE, LARGE_INTEGER
 from s2and.data import (
     NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
     NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
@@ -51,7 +51,7 @@ IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
 IncrementalDistStats = tuple[float, int, float]
 _TReturn = TypeVar("_TReturn")
 _MISSING = object()
-DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR = Path(PROJECT_ROOT_PATH) / "data" / "production_incremental_linker_v1.2"
+DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR = Path(_PACKAGE_DATA_DIR) / "production_incremental_linker_v1.2"
 
 # Keep canonical pickle import paths stable after splitting module internals.
 for _export in (FastCluster, PairwiseModeler, VotingClassifier, intify):
@@ -4726,7 +4726,7 @@ class Clusterer:
             slow-path semantics.
         incremental_linker_artifact_path: Optional[str]
             Artifact directory for the promoted linker. Defaults to the
-            released `data/production_incremental_linker_v1.2` artifact.
+            released `s2and/data/production_incremental_linker_v1.2` artifact.
         incremental_linker_query_view: str
             Query-view policy for the promoted linker.
         Returns
@@ -4914,6 +4914,8 @@ class Clusterer:
         )
 
         logger.info("Performing pairwise classification")
+        _ensure_lightgbm_fitted(self.classifier)
+        _ensure_lightgbm_fitted(self.nameless_classifier)
         # Get predictions where there isn't partial supervision,
         # and fill the rest from partial supervision labels.
         batch_predictions, model_predict_seconds = _predict_and_combine(

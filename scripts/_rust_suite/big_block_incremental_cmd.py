@@ -703,7 +703,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TOTAL_RAM_BYTES,
         help="RAM budget for phase-split Phase A chunking.",
     )
-    parser.add_argument("--model-path", default=str(PROJECT_ROOT / "data" / "production_model_v1.1.pickle"))
+    parser.add_argument(
+        "--model-path",
+        default=str(PROJECT_ROOT / "s2and" / "data" / "production_model_v1.1.pickle"),
+    )
     parser.add_argument(
         "--emit-signature-map",
         type=int,

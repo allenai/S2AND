@@ -64,7 +64,7 @@ The release surface is:
 - `s2and/data/production_model_v1.2.pickle`
 - `s2and/data/production_incremental_linker_v1.2/`
 - `s2and/data/production_incremental_linker_v1.2/training_target.json`
-- `data/joint_safe_link_minimal_raw_specter_20260507a/`
+- `s2and/data/joint_safe_link_minimal_raw_specter_20260507a/`
 
 `training_target.json` is the portable target spec for replay: feature order,
 LightGBM params, target metrics, status, and variant. Replay must not depend on
@@ -80,7 +80,7 @@ precomputed-feature bundle flow:
 2. Promote the materialized bundle only after it has relative paths, row counts,
    a target-spec digest, a feature-schema digest, and verification metrics.
 3. Store release candidates under a tracked or downloadable data path such as
-   `data/promoted_feature_bundles/<version>/`.
+   `s2and/data/promoted_feature_bundles/<version>/`.
 4. Add `--feature-mode precomputed-promoted` only with an explicit
    `--precomputed-feature-bundle-root`; do not ship a machine-local default.
 

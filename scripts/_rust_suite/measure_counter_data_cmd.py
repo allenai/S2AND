@@ -102,7 +102,7 @@ def _load_featurizer(path: str) -> Any:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="kisti")
-    parser.add_argument("--data-dir", default=str(PROJECT_ROOT / "data"))
+    parser.add_argument("--data-dir", default=str(PROJECT_ROOT / "s2and" / "data"))
     parser.add_argument("--n-jobs", type=int, default=1)
     args = parser.parse_args()
 

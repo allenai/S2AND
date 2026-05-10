@@ -468,7 +468,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=["compare", "single"], default="compare")
     parser.add_argument("--backend", choices=["python", "rust"], default="python")
-    parser.add_argument("--dataset", default="inspire", help="Dataset directory name under data/")
+    parser.add_argument("--dataset", default="inspire", help="Dataset directory name under s2and/data/")
     parser.add_argument("--limit", type=int, default=5000, help="Signature limit for quick stage checks")
     parser.add_argument("--pair-count", type=int, default=5000, help="Random pair count for featurization parity")
     parser.add_argument("--n-jobs", type=int, default=4, help="n_jobs for ANDData and featurization")

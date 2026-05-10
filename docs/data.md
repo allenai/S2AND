@@ -4,10 +4,10 @@ This document covers dataset download, model-only download, and `path_config.jso
 
 ## Full dataset download
 
-Download the full S2AND release into `data/`:
+Download the full S2AND release into `s2and/data/`:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
 ```
 
 Expected size is about `50.4 GiB`.
@@ -19,7 +19,7 @@ The release includes dataset files plus released model artifacts.
 If you only want the current pairwise production model, download just the pickle:
 
 ```bash
-aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle data/
+aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle s2and/data/
 ```
 
 This is enough for the quick-start path that uses the bundled `tests/qian` fixture.
@@ -27,7 +27,7 @@ This is enough for the quick-start path that uses the bundled `tests/qian` fixtu
 The promoted incremental linker is a directory artifact, not a pickle:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release/production_incremental_linker_v1.2 data/production_incremental_linker_v1.2
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release/production_incremental_linker_v1.2 s2and/data/production_incremental_linker_v1.2
 ```
 
 It is used with `production_model_v1.2.pickle`.
@@ -54,7 +54,7 @@ Guidance:
 
 - Set `main_data_dir` to the directory containing your downloaded S2AND datasets.
 - `internal_data_dir` is only relevant for internal AI2 workflows and can be left empty.
-- If your data lives in this repo's `data/` directory, set `main_data_dir` to that absolute path.
+- If your data lives in this repo's `s2and/data/` directory, the default placeholder config already resolves there.
 
 ## Dataset file expectations
 

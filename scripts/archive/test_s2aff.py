@@ -39,10 +39,10 @@ datasets = [
 ]
 
 # this is the prod 1.1 model
-clusterer = load_pickle_with_verified_label_encoder_compat("data/production_model_v1.1.pickle")["clusterer"]
+clusterer = load_pickle_with_verified_label_encoder_compat("s2and/data/production_model_v1.1.pickle")["clusterer"]
 clusterer.use_cache = False
 
-clusterer2 = load_pickle_with_verified_label_encoder_compat("data/model_dump_specter2.pickle")["clusterer"]
+clusterer2 = load_pickle_with_verified_label_encoder_compat("s2and/data/model_dump_specter2.pickle")["clusterer"]
 clusterer2.use_cache = False
 
 

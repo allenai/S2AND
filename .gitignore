@@ -10,25 +10,28 @@ pypitoken
 !s2and/data/production_model_v1.1.pickle
 !s2and/data/production_model_v1.2.pickle
 
-data/aminer/
-data/arnetminer/
-data/inspire/
-data/kisti/
-data/medline/
-data/pubmed/
-data/qian/
-data/temp/
-data/s2and_mini/
-data/augmented/
-data/orcid/
-data/test/
-data/zbmath/
-data/inventors*/
-data/inventors_s2and/
-data/name_counts_rust.json
-data/lid.176.bin
-data/LICENSE.txt
-data/joint_*/
+# Legacy top-level data root. Current downloads and local datasets live under s2and/data/.
+/data/
+
+s2and/data/aminer/
+s2and/data/arnetminer/
+s2and/data/inspire/
+s2and/data/kisti/
+s2and/data/medline/
+s2and/data/pubmed/
+s2and/data/qian/
+s2and/data/temp/
+s2and/data/s2and_mini/
+s2and/data/augmented/
+s2and/data/orcid/
+s2and/data/test/
+s2and/data/zbmath/
+s2and/data/inventors*/
+s2and/data/inventors_s2and/
+s2and/data/name_counts_rust.json
+s2and/data/lid.176.bin
+s2and/data/LICENSE.txt
+s2and/data/joint_*/
 
 
 # C extensions

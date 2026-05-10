@@ -59,7 +59,7 @@ def _load_config() -> dict[str, Any]:
     if main_data_dir == _MAIN_DATA_DIR_PLACEHOLDER:
         logger.warning(
             "You haven't set `main_data_dir` in s2and/data/path_config.json! "
-            "Using package data/ as default data directory."
+            "Using s2and/data/ as default data directory."
         )
         main_data_dir = _PACKAGE_DATA_DIR
 

@@ -13,7 +13,7 @@ This is the live implementation checklist for
 - The checked-in released linker artifact is `s2and/data/production_incremental_linker_v1.2/`
   with `booster.lgb`, `metadata.json`, and `training_target.json`.
 - Training replay defaults to
-  `data/joint_safe_link_minimal_raw_specter_20260507a` plus the tracked target
+  `s2and/data/joint_safe_link_minimal_raw_specter_20260507a` plus the tracked target
   spec.
 - Runtime code lives under `s2and/incremental_linking/` without importing
   `scripts.*`.

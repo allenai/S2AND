@@ -48,7 +48,7 @@ The Rust build step is optional and only needed when you want the native extensi
 Full dataset download:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release data/
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
 ```
 
 Expected size is about `50.4 GiB`.
@@ -56,7 +56,7 @@ Expected size is about `50.4 GiB`.
 Model-only download:
 
 ```bash
-aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle data/
+aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle s2and/data/
 ```
 
 ## Configuration
@@ -77,14 +77,14 @@ More on dataset layout, config, and model-only usage: [docs/data.md](docs/data.m
 This uses the bundled `tests/qian` fixture, so you do not need the full S2AND dataset. Download the current production model first:
 
 ```bash
-aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle data/
+aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle s2and/data/
 
 uv run --no-project python scripts/tutorial_for_predicting_with_the_prod_model.py \
   --use-rust 1 \
   --dataset qian \
   --data-root tests \
   --load-name-counts 0 \
-  --model-path data/production_model_v1.2.pickle
+  --model-path s2and/data/production_model_v1.2.pickle
 ```
 
 When running repo scripts, prefer `uv run --no-project` so imports resolve from the installed packages and compiled extension in `site-packages`. Avoid setting `PYTHONPATH` to the repo root.
@@ -148,7 +148,7 @@ from s2and.data import ANDData
 from s2and.serialization import load_pickle_with_verified_label_encoder_compat
 
 clusterer = load_pickle_with_verified_label_encoder_compat(
-    "data/production_model_v1.2.pickle"
+    "s2and/data/production_model_v1.2.pickle"
 )["clusterer"]
 
 dataset = ANDData(
@@ -182,7 +182,7 @@ from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 dataset_name = "pubmed"
-parent_dir = f"data/{dataset_name}"
+parent_dir = f"s2and/data/{dataset_name}"
 
 dataset = ANDData(
     signatures=join(parent_dir, f"{dataset_name}_signatures.json"),

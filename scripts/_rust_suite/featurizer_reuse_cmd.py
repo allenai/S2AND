@@ -14,7 +14,7 @@ from _rust_suite.common import RSSMonitor, collect_rust_extension_identity  # ty
 
 
 def _build_data_paths(project_root: str, dataset_name: str) -> dict[str, str]:
-    data_root = os.path.join(project_root, "data", "s2and_mini")
+    data_root = os.path.join(project_root, "s2and", "data", "s2and_mini")
     dataset_root = os.path.join(data_root, dataset_name)
     return {
         "signatures": os.path.join(dataset_root, f"{dataset_name}_signatures.json"),
@@ -84,7 +84,7 @@ def run_reuse_profile(
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing {key} path for dataset '{dataset_name}': {path}")
 
-    model_path = os.path.join(PROJECT_ROOT_PATH, "data", "production_model_v1.1.pickle")
+    model_path = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", "production_model_v1.1.pickle")
     clusterer = load_pickle_with_verified_label_encoder_compat(model_path)["clusterer"]
     clusterer.use_cache = False
     clusterer.n_jobs = n_jobs

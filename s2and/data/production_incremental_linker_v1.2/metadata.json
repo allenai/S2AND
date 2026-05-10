@@ -314,7 +314,7 @@
     },
     "target_status": "promoted",
     "target_variant": "promoted_70_redundant_drop_weighted_loss_block_local_pw",
-    "training_source_bundle": "data\\joint_safe_link_minimal_raw_specter_20260507a"
+    "training_source_bundle": "s2and\\data\\joint_safe_link_minimal_raw_specter_20260507a"
   },
   "booster_sha256": "72b158ae17161b20891abdb0583ec4d24db5763255c855d32e56a75a839b2968",
   "feature_columns": [

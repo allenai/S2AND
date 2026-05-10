@@ -23,8 +23,8 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 )
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
-DEFAULT_DATA_ROOT = os.path.join("data", "s2and_mini")
-DEFAULT_MODEL_PATH = os.path.join("data", "production_model_v1.1.pickle")
+DEFAULT_DATA_ROOT = os.path.join("s2and", "data", "s2and_mini")
+DEFAULT_MODEL_PATH = os.path.join("s2and", "data", "production_model_v1.1.pickle")
 
 
 def _as_triplet(metrics: dict[str, Any], key: str) -> tuple[float, float, float]:

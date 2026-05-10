@@ -71,10 +71,10 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 )
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("largest_block")
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = PROJECT_ROOT / "s2and" / "data"
 DEFAULT_MODEL_PATH = str(DATA_DIR / "production_model_v1.1.pickle")
 
-# All known dataset directories (top-level under data/)
+# All known dataset directories under s2and/data/.
 DATASET_CANDIDATES = [
     "aminer",
     "arnetminer",

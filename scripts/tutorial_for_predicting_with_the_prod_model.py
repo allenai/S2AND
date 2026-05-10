@@ -2,7 +2,7 @@
 """
 This script demonstrates how to use the production S2AND model (v1.1) for clustering.
 
-Default examples use `data/s2and_mini/*`.
+Default examples use `s2and/data/s2and_mini/*`.
 You can also point `--data-root` to `tests` and run `--dataset qian`.
 
 Examples:
@@ -121,7 +121,7 @@ def main() -> None:
     parser.add_argument(
         "--data-root",
         type=str,
-        default=os.path.join("data", "s2and_mini"),
+        default=os.path.join("s2and", "data", "s2and_mini"),
         help=(
             "Root directory containing per-dataset subfolders. "
             "Supports both <dataset>_*.json naming (mini) and plain *.json naming (tests fixtures)."
@@ -182,7 +182,7 @@ def main() -> None:
     parser.add_argument(
         "--model-path",
         type=str,
-        default=os.path.join("data", "production_model_v1.1.pickle"),
+        default=os.path.join("s2and", "data", "production_model_v1.1.pickle"),
         help="Model pickle path relative to repo root or absolute.",
     )
     args = parser.parse_args()

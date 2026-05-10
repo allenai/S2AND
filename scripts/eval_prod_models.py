@@ -161,14 +161,14 @@ def main() -> None:
     os.environ["OMP_NUM_THREADS"] = str(n_jobs)
 
     if args.dataset == "mini":
-        data_original = os.path.join(PROJECT_ROOT_PATH, "data", "s2and_mini")
+        data_original = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", "s2and_mini")
         # aminer has too much variance; medline is pairwise only
         datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
     elif args.dataset == "full":
-        data_original = os.path.join(PROJECT_ROOT_PATH, "data")
+        data_original = os.path.join(PROJECT_ROOT_PATH, "s2and", "data")
         datasets = ["arnetminer", "inspire", "kisti", "pubmed", "qian", "zbmath"]
     else:
-        data_original = os.path.join(PROJECT_ROOT_PATH, "data")
+        data_original = os.path.join(PROJECT_ROOT_PATH, "s2and", "data")
         datasets = ["inventors_s2and"]
 
     print(f"Config: dataset={args.dataset}, seed={random_seed}, n_jobs={n_jobs}, train={train_flag}")
@@ -181,11 +181,11 @@ def main() -> None:
 
         if not train_flag:
             model_name = MODELS[specter_suffix]
-            model_path = os.path.join(PROJECT_ROOT_PATH, "data", model_name)
+            model_path = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", model_name)
             if not os.path.exists(model_path):
                 raise FileNotFoundError(
                     f"Missing model artifact at {model_path}. "
-                    "Either use --train to retrain, or place the model pickle in data/."
+                    "Either use --train to retrain, or place the model pickle in s2and/data/."
                 )
             print(f"=== specter_suffix: {specter_suffix}, model: {model_name} ===")
             clusterer = load_pickle_with_verified_label_encoder_compat(model_path)["clusterer"]

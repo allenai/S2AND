@@ -110,8 +110,8 @@ S2AND supports two runtime semantics for the name-count feature key used by `las
 
 Compatibility rules:
 
-- `production_model_v1.1.pickle` and `production_model_v1.2.pickle` use `initial_char` with the checked-in
-  `data/name_counts.pickle`; that pickle stores keys like `smith j`, not `smith john`.
+- `production_model_v1.1.pickle` and `production_model_v1.2.pickle` use `initial_char` with
+  `s2and/data/name_counts.pickle`; that pickle stores keys like `smith j`, not `smith john`.
 - In `ANDData(..., mode="inference")`, prediction automatically applies the semantics expected by the loaded model via the stored feature contract.
 - Do not mix model artifacts and feature semantics without retraining.
 
@@ -122,7 +122,7 @@ from s2and.data import ANDData
 from s2and.serialization import load_pickle_with_verified_label_encoder_compat
 
 clusterer = load_pickle_with_verified_label_encoder_compat(
-    "data/production_model_v1.2.pickle"
+    "s2and/data/production_model_v1.2.pickle"
 )["clusterer"]
 
 dataset = ANDData(

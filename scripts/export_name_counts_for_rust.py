@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         default=str(Path(PROJECT_ROOT_PATH) / "scratch" / "name_counts_rust.json"),
         help=(
             "Path to output JSON artifact for Rust from_json_paths ingest "
-            "(use --output data/... explicitly if desired)."
+            "(use --output s2and/data/... explicitly if desired)."
         ),
     )
     parser.add_argument(

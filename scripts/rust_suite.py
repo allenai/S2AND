@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +9,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_DATA_ROOT = PROJECT_ROOT / "s2and" / "data"
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 
 # Ensure `scripts/_rust_suite` is importable even when this file is loaded via
@@ -85,8 +85,8 @@ def _single_run(
     dataset_name: str,
     n_jobs: int,
     profile_output_path: str,
-    model_path: str = os.path.join("data", "production_model_v1.1.pickle"),
-    data_root: str = os.path.join("data", "s2and_mini"),
+    model_path: str = str(PACKAGE_DATA_ROOT / "production_model_v1.1.pickle"),
+    data_root: str = str(PACKAGE_DATA_ROOT / "s2and_mini"),
     specter_file: str = "",
     rust_warm_featurizer_before_predict: int = 0,
     run_label: str | None = None,
@@ -115,8 +115,8 @@ def _run_single_subprocess(
     dataset_name: str,
     n_jobs: int,
     profile_output_path: str,
-    model_path: str = os.path.join("data", "production_model_v1.1.pickle"),
-    data_root: str = os.path.join("data", "s2and_mini"),
+    model_path: str = str(PACKAGE_DATA_ROOT / "production_model_v1.1.pickle"),
+    data_root: str = str(PACKAGE_DATA_ROOT / "s2and_mini"),
     specter_file: str = "",
     rust_warm_featurizer_before_predict: int = 0,
     single_write_json: str = "",

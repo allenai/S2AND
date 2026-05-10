@@ -8,11 +8,13 @@ import numpy as np
 import pytest
 
 import s2and.featurizer as featurizer_mod
-from s2and.consts import PROJECT_ROOT_PATH
+from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, PROJECT_ROOT_PATH
 from s2and.data import ANDData
 from s2and.feature_port import (
     _get_rust_featurizer,
+    build_linker_pair_distance_accumulators_rust,
     featurize_pair_rust,
+    get_constraint_labels_index_arrays_rust,
     get_constraint_rust,
     get_constraints_matrix_indexed_rust,
     get_constraints_matrix_rust,
@@ -463,8 +465,7 @@ def test_featurize_pair_rust_parity_with_deferred_signature_ngrams(dataset, samp
             assert len(ref_features) == len(rust_features)
             for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
                 assert equalish(ref_val, got_val), (
-                    f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: "
-                    f"ref={ref_val}, got={got_val}"
+                    f"Deferred ngram mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
                 )
     finally:
         featurizer_mod.global_dataset = original_global_dataset
@@ -585,6 +586,87 @@ def test_get_constraints_matrix_indexed_rust_parity(dataset, constraint_pairs):
         assert (
             string_val == indexed_val
         ), f"Batch indexed constraint mismatch for pair {pair}: string={string_val}, indexed={indexed_val}"
+
+
+def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(dataset, constraint_pairs):
+    rust_featurizer = _get_rust_featurizer(dataset)
+    if not hasattr(rust_featurizer, "linker_pair_index_arrays_constraint_labels"):
+        pytest.skip("linker_pair_index_arrays_constraint_labels is unavailable")
+
+    signature_ids = list(rust_featurizer.signature_ids())
+    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
+    base_pairs = list(constraint_pairs)
+    for left in signature_ids[:8]:
+        for right in signature_ids[:8]:
+            if left != right:
+                base_pairs.append((left, right))
+    pairs = [base_pairs[offset % len(base_pairs)] for offset in range(4096)]
+    indexed_pairs = [(signature_index[s1], signature_index[s2]) for s1, s2 in pairs]
+    left_indices = np.asarray([left for left, _right in indexed_pairs], dtype=np.uint32)
+    right_indices = np.asarray([right for _left, right in indexed_pairs], dtype=np.uint32)
+
+    expected_values = get_constraints_matrix_indexed_rust(dataset, indexed_pairs, featurizer=rust_featurizer)
+    expected_labels = np.asarray(
+        [np.nan if value is None else float(value - LARGE_INTEGER) for value in expected_values],
+        dtype=np.float64,
+    )
+    got_labels = get_constraint_labels_index_arrays_rust(
+        dataset,
+        left_indices,
+        right_indices,
+        featurizer=rust_featurizer,
+        num_threads=2,
+    )
+
+    np.testing.assert_allclose(got_labels, expected_labels, equal_nan=True)
+
+
+def test_linker_pair_distance_accumulators_match_python_large(dataset):
+    rust_featurizer = _get_rust_featurizer(dataset)
+    if not hasattr(rust_featurizer, "linker_pair_distance_accumulators"):
+        pytest.skip("linker_pair_distance_accumulators is unavailable")
+
+    rng = np.random.default_rng(20260509)
+    row_count = 503
+    pair_count = 12000
+    row_indices = rng.integers(0, row_count, size=pair_count, dtype=np.uint32)
+    model_distances = rng.random(pair_count, dtype=np.float64)
+    labels = np.full(pair_count, np.nan, dtype=np.float64)
+    labels[::17] = -float(LARGE_INTEGER)
+    labels[::29] = float(LARGE_DISTANCE - LARGE_INTEGER)
+
+    expected_counts = np.zeros(row_count, dtype=np.uint32)
+    expected_sums = np.zeros(row_count, dtype=np.float64)
+    expected_mins = np.full(row_count, np.inf, dtype=np.float64)
+    expected_top = np.full((row_count, 5), np.inf, dtype=np.float64)
+    expected_hard_disallow = 0
+    for row_raw, model_distance, label in zip(row_indices, model_distances, labels, strict=True):
+        row = int(row_raw)
+        value = float(model_distance if np.isnan(label) else label + LARGE_INTEGER)
+        expected_counts[row] += 1
+        expected_sums[row] += value
+        expected_mins[row] = min(expected_mins[row], value)
+        if value >= LARGE_DISTANCE:
+            expected_hard_disallow += 1
+        if value < expected_top[row, -1]:
+            expected_top[row, -1] = value
+            expected_top[row].sort()
+
+    counts, sums, mins, top, hard_disallow = build_linker_pair_distance_accumulators_rust(
+        dataset,
+        row_indices,
+        row_count,
+        model_distances,
+        pair_labels=labels,
+        featurizer=rust_featurizer,
+        num_threads=2,
+    )
+
+    np.testing.assert_array_equal(counts, expected_counts)
+    np.testing.assert_allclose(sums, expected_sums)
+    np.testing.assert_allclose(mins, expected_mins)
+    np.testing.assert_allclose(top, expected_top)
+    assert hard_disallow == expected_hard_disallow
 
 
 @pytest.mark.parametrize(

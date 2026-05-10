@@ -1,15 +1,14 @@
 //! Interfaces to the detector itself.
 
-use std::sync::Mutex;
-use std::ffi::{CString, CStr};
-use std::str::from_utf8;
 use std::default::Default;
+use std::ffi::{CStr, CString};
 use std::ptr::{null, null_mut};
+use std::str::from_utf8;
+use std::sync::Mutex;
 
-use libc::{c_int, c_double, c_char};
-use ffi::{CLDHints, Encoding, CLD2_ExtDetectLanguageSummary4,
-          CLD2_DetectLanguageVersion};
 use ffi::Language as LanguageId;
+use ffi::{CLD2_DetectLanguageVersion, CLD2_ExtDetectLanguageSummary4, CLDHints, Encoding};
+use libc::{c_char, c_double, c_int};
 
 use language::LanguageIdExt;
 use types::*;
@@ -25,6 +24,7 @@ use types::*;
 // possible.
 lazy_static! {
     static ref CLD2_VERSION_LOCK: Mutex<u8> = Mutex::new(0);
+    static ref CLD2_DETECT_LOCK: Mutex<u8> = Mutex::new(0);
 }
 
 /// Get the version of cld2 and its embedded data files as a string.
@@ -61,9 +61,7 @@ pub fn detector_version() -> String {
 /// assert_eq!((None, Unreliable),
 ///            detect_language("blah", Format::Html));
 /// ```
-pub fn detect_language(text: &str, format: Format) ->
-    (Option<Lang>, Reliability)
-{
+pub fn detect_language(text: &str, format: Format) -> (Option<Lang>, Reliability) {
     let result = detect_language_ext(text, format, &Default::default());
     (result.language, result.reliability)
 }
@@ -87,38 +85,53 @@ pub fn detect_language(text: &str, format: Format) ->
 ///
 /// let detected =
 ///   detect_language_ext(text, Format::Text, &Default::default());
-/// 
+///
 /// assert_eq!(Some(Lang("fr")), detected.language);
 /// ```
-pub fn detect_language_ext(text: &str, format: Format, hints: &Hints)
-    -> DetectionResult
-{
-    let mut language3 = [LanguageId::UNKNOWN_LANGUAGE,
-                         LanguageId::UNKNOWN_LANGUAGE,
-                         LanguageId::UNKNOWN_LANGUAGE];
+pub fn detect_language_ext(text: &str, format: Format, hints: &Hints) -> DetectionResult {
+    let mut language3 = [
+        LanguageId::UNKNOWN_LANGUAGE,
+        LanguageId::UNKNOWN_LANGUAGE,
+        LanguageId::UNKNOWN_LANGUAGE,
+    ];
     let mut percent3: [c_int; 3] = [0, 0, 0];
     let mut normalized_score3: [c_double; 3] = [0.0, 0.0, 0.0];
     let mut text_bytes: c_int = 0;
     let mut is_reliable: bool = false;
 
+    let text_len = text.len();
+    let mut guarded_text = Vec::with_capacity(text_len + 4);
+    guarded_text.extend_from_slice(text.as_bytes());
+    guarded_text.extend_from_slice(&[0, 0, 0, 0]);
+
     unsafe {
+        let _detect_guard = CLD2_DETECT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         hints.with_c_rep(|hints_ptr| {
             let lang = CLD2_ExtDetectLanguageSummary4(
-                text.as_ptr() as *const c_char, text.len() as c_int,
-                format == Format::Text, hints_ptr, 0,
+                guarded_text.as_ptr() as *const c_char,
+                text_len as c_int,
+                format == Format::Text,
+                hints_ptr,
+                0,
                 language3.as_mut_ptr(),
                 percent3.as_mut_ptr(),
                 normalized_score3.as_mut_ptr(),
-                null_mut(), &mut text_bytes, &mut is_reliable);
-            from_ffi(lang, &language3, &percent3, &normalized_score3,
-                     text_bytes, is_reliable)
+                null_mut(),
+                &mut text_bytes,
+                &mut is_reliable,
+            );
+            from_ffi(
+                lang,
+                &language3,
+                &percent3,
+                &normalized_score3,
+                text_bytes,
+                is_reliable,
+            )
         })
     }
-}
-
-fn to_c_str_or_null(s: Option<&str>) -> *const c_char {
-    let opt_c_str = s.map(|v| CString::new(v.as_bytes()).unwrap());
-    opt_c_str.map(|v| v.as_ptr()).unwrap_or(null())
 }
 
 /// A value which can be converted to type `R` for use with the FFI.
@@ -130,32 +143,48 @@ trait WithCRep<R> {
 
 impl<'a> WithCRep<*const CLDHints> for Hints<'a> {
     fn with_c_rep<T, F: FnOnce(*const CLDHints) -> T>(&self, body: F) -> T {
-        let clang_ptr = to_c_str_or_null(self.content_language);
-        let tld_ptr = to_c_str_or_null(self.tld);
-        let lang = self.language
+        let content_language = self
+            .content_language
+            .map(|v| CString::new(v.as_bytes()).unwrap());
+        let tld = self.tld.map(|v| CString::new(v.as_bytes()).unwrap());
+        let clang_ptr = content_language
+            .as_ref()
+            .map(|v| v.as_ptr())
+            .unwrap_or(null());
+        let tld_ptr = tld.as_ref().map(|v| v.as_ptr()).unwrap_or(null());
+        let lang = self
+            .language
             .map(|Lang(c)| LanguageIdExt::from_name(c))
             .unwrap_or(LanguageId::UNKNOWN_LANGUAGE);
-        let encoding = self.encoding
-            .unwrap_or(Encoding::UNKNOWN_ENCODING) as c_int;
-        let hints =
-            CLDHints{content_language_hint: clang_ptr, tld_hint: tld_ptr,
-                     encoding_hint: encoding, language_hint: lang};
+        let encoding = self.encoding.unwrap_or(Encoding::UNKNOWN_ENCODING) as c_int;
+        let hints = CLDHints {
+            content_language_hint: clang_ptr,
+            tld_hint: tld_ptr,
+            encoding_hint: encoding,
+            language_hint: lang,
+        };
         body(&hints)
     }
 }
 
-fn from_ffi(lang: LanguageId, language3: &[LanguageId; 3],
-            percent3: &[c_int; 3], normalized_score3: &[c_double; 3],
-            text_bytes: c_int, reliable: bool) -> DetectionResult
-{
-    let score_n = |n: usize| {
-        LanguageScore{language: language3[n].to_lang(),
-                      percent: percent3[n] as u8,
-                      normalized_score: normalized_score3[n]}
+fn from_ffi(
+    lang: LanguageId,
+    language3: &[LanguageId; 3],
+    percent3: &[c_int; 3],
+    normalized_score3: &[c_double; 3],
+    text_bytes: c_int,
+    reliable: bool,
+) -> DetectionResult {
+    let score_n = |n: usize| LanguageScore {
+        language: language3[n].to_lang(),
+        percent: percent3[n] as u8,
+        normalized_score: normalized_score3[n],
     };
 
-    DetectionResult::new(lang.to_lang(),
-                         [score_n(0), score_n(1), score_n(2)],
-                         text_bytes,
-                         Reliability::from_bool(reliable))
+    DetectionResult::new(
+        lang.to_lang(),
+        [score_n(0), score_n(1), score_n(2)],
+        text_bytes,
+        Reliability::from_bool(reliable),
+    )
 }

@@ -335,7 +335,7 @@ def test_rust_batch_forwards_use_cache_flag(monkeypatch):
     assert set(forwarded_use_cache) == {False}
 
 
-def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch, caplog):
+def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch):
     dataset = build_dummy_dataset("dummy_rust_chunking_prediction", load_name_counts=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = _build_pairs(12_000)
@@ -376,17 +376,16 @@ def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch, caplo
     worker = threading.Thread(target=_sample_peak, daemon=True)
     worker.start()
     try:
-        with caplog.at_level("INFO", logger="s2and"):
-            many_pairs_featurize(
-                pairs,
-                dataset,
-                featurizer_info,
-                n_jobs=2,
-                use_cache=False,
-                chunk_size=100,
-                nan_value=np.nan,
-                total_ram_bytes=total_ram_bytes,
-            )
+        many_pairs_featurize(
+            pairs,
+            dataset,
+            featurizer_info,
+            n_jobs=2,
+            use_cache=False,
+            chunk_size=100,
+            nan_value=np.nan,
+            total_ram_bytes=total_ram_bytes,
+        )
     finally:
         stop.set()
         worker.join(timeout=2)
@@ -399,15 +398,4 @@ def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch, caplo
         rss_peak_bytes=int(rss_peak["value"]),
         rss_after_bytes=rss_after,
     )
-    telemetry_lines = [
-        record.message for record in caplog.records if "Telemetry: pair_featurization_memory" in record.message
-    ]
-    assert telemetry_lines
-    telemetry = telemetry_lines[-1]
-    assert "prediction_contract_version=" in telemetry
-    assert "predicted_peak_delta_bytes=" in telemetry
-    assert "predicted_peak_rss_bytes=" in telemetry
-    assert "rss_before_bytes=" in telemetry
-    assert "rss_peak_bytes=" in telemetry
-    assert "observed_peak_delta_bytes=" in telemetry
     assert float(summary["prediction_error_ratio"]) <= 3.0

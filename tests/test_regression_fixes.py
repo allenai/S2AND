@@ -50,6 +50,19 @@ def _subblocking_signature(first_name: str, *, middle_name: str = "", orcid: str
     )
 
 
+def test_model_predict_class0_requires_num_threads_keyword_support():
+    class RejectsNumThreads:
+        def predict_proba(self, features):
+            return np.column_stack((np.zeros(len(features)), np.ones(len(features))))
+
+    with pytest.raises(TypeError, match="num_threads"):
+        model_module._predict_class0_with_runtime(
+            RejectsNumThreads(),
+            np.zeros((2, 1), dtype=np.float64),
+            num_threads=2,
+        )
+
+
 def _run_make_subblocks_with_fixed_first_pass(monkeypatch, signatures, first_pass_output, *, maximum_size: int):
     anddata = SimpleNamespace(signatures=signatures, random_seed=0)
     call_count = {"value": 0}

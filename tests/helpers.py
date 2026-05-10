@@ -7,8 +7,8 @@ from collections import Counter
 from importlib.machinery import PathFinder
 from typing import Any
 
-import scripts.eval_cluster_retrieval as retrieval
 from s2and.data import ANDData
+from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
 
 
 def equalish(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-3) -> bool:
@@ -94,10 +94,10 @@ def build_query_features(
     has_middle: bool = False,
     title_terms: frozenset[str] = frozenset(),
     name_counts: Any | None = None,
-) -> retrieval.QueryFeatures:
+) -> QueryFeatures:
     """Build a compact `QueryFeatures` fixture for retrieval tests."""
 
-    return retrieval.QueryFeatures(
+    return QueryFeatures(
         first=first,
         middle="",
         first_initial=first[:1] if first else "",
@@ -143,10 +143,10 @@ def build_cluster_summary(
     exemplar_vectors: list[Any] | None = None,
     title_counts: Counter[str] | None = None,
     name_counts_values: tuple[Any, ...] = (),
-) -> retrieval.ClusterSummary:
+) -> ClusterSummary:
     """Build a compact `ClusterSummary` fixture for retrieval tests."""
 
-    return retrieval.ClusterSummary(
+    return ClusterSummary(
         component_key=component_key,
         cluster_id=component_key,
         block_key="b",

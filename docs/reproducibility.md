@@ -33,4 +33,12 @@ For current work on `main`, prefer the versioned released models:
 - `production_model_v1.2.pickle`
 - `production_model_v1.1.pickle`
 
+The promoted incremental linker is versioned separately as a directory artifact:
+
+- `production_incremental_linker_v1.2/`
+
+Its `training_target.json` file is the tracked replay target for the promoted
+70-feature linker; replay scripts should not depend on machine-local analysis
+artifacts.
+
 See [production_inference.md](production_inference.md) for the current inference contract.

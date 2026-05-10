@@ -1,4 +1,3 @@
-import logging
 import os
 import random
 from contextlib import contextmanager
@@ -176,14 +175,6 @@ def test_subblocking_membership_parity_python_vs_rust():
     clusters_python = {tuple(sorted(subblock)) for subblock in output_python.values()}
     clusters_rust = {tuple(sorted(subblock)) for subblock in output_rust.values()}
     assert clusters_python == clusters_rust
-
-
-def test_signature_preprocess_backend_decision_logged(caplog):
-    with _temporary_env("S2AND_BACKEND", "rust"):
-        with caplog.at_level(logging.INFO, logger="s2and"):
-            build_dummy_dataset("dummy_signature_preprocess_backend_log")
-
-    assert any("Signature preprocessing backend decision:" in record.message for record in caplog.records)
 
 
 def test_rust_json_ingest_uses_minimal_python_paper_preprocess():

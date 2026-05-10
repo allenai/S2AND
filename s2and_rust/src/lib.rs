@@ -1,12 +1,13 @@
-use cld2::{detect_language as cld2_detect_language, Format as Cld2Format};
+use cld2::{detect_language_ext as cld2_detect_language_ext, Format as Cld2Format};
 use fasttext::FastText;
-use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, ToPyArray};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyModule, PyTuple};
 use pyo3::Bound;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
@@ -162,6 +163,7 @@ struct RetrievalQueryTerm {
 
 struct RetrievalQueryData {
     first: String,
+    has_full_first: bool,
     middle_initial_hashes: Vec<u64>,
     coauthor_hashes: Vec<u64>,
     coauthor_terms: Vec<RetrievalQueryTerm>,
@@ -191,7 +193,11 @@ const RETRIEVAL_FEATURE_ORDER: [&str; 5] = [
     "middle",
     "first_name",
 ];
-const DEFAULT_HYBRID_CENTROID_WEIGHTS: [f64; 5] = [0.42, 0.23, 0.12, 0.05, 0.07];
+const DEFAULT_HYBRID_CENTROID_POLICY_NAME: &str = "h_wang_any_input_v2";
+const DEFAULT_HYBRID_CENTROID_WEIGHTS: [f64; 5] =
+    [0.527232, 0.223412, 0.146909, 0.009439, 0.093007];
+const DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS: [f64; 5] =
+    [0.520012, 0.220264, 0.109278, 0.150447, 0.0];
 const DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS: [f64; 5] = [0.40, 0.23, 0.12, 0.05, 0.07];
 const RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE: f64 = -0.25;
 const RETRIEVAL_YEAR_SCORE_DECAY_YEARS: f64 = 15.0;
@@ -265,9 +271,408 @@ struct RustNameCompatibleSubblockSelector {
     name_tuples: HashMap<String, HashSet<String>>,
 }
 
+#[derive(Default)]
+struct RetrievalPairPlanQueryResult {
+    row_query_signature_indices: Vec<u32>,
+    row_component_keys: Vec<String>,
+    row_retrieval_scores: Vec<f32>,
+    row_retrieval_ranks: Vec<u16>,
+    row_component_sizes: Vec<u32>,
+    row_named_signature_counts: Vec<u32>,
+    row_dominant_first_names: Vec<String>,
+    row_candidate_year_min: Vec<i32>,
+    row_candidate_year_max: Vec<i32>,
+    row_candidate_year_range_missing: Vec<u8>,
+    row_query_first_tokens: Vec<String>,
+    row_query_years: Vec<i32>,
+    row_query_year_missing: Vec<u8>,
+    row_query_has_affiliations: Vec<u8>,
+    row_query_has_coauthors: Vec<u8>,
+    row_middle_initial_compatibility: Vec<f32>,
+    row_affiliation_overlap: Vec<f32>,
+    row_coauthor_overlap: Vec<f32>,
+    row_venue_overlap: Vec<f32>,
+    row_year_compatibility: Vec<f32>,
+    row_title_overlap: Vec<f32>,
+    row_specter_centroid_similarity: Vec<f32>,
+    row_specter_exemplar_similarity: Vec<f32>,
+    right_signature_indices_by_row: Vec<Vec<u32>>,
+}
+
+#[derive(Clone, Copy)]
+struct PairAggregateRowRange {
+    row_offset: usize,
+    start: usize,
+    stop: usize,
+}
+
+struct PairAggregateBuffers {
+    counts: Vec<u32>,
+    sums: Vec<f64>,
+    mins: Vec<f64>,
+    maxs: Vec<f64>,
+}
+
 impl RustHybridCentroidRetriever {
-    fn default_hybrid_weights() -> RetrievalHybridWeights {
-        RetrievalHybridWeights::from_array(DEFAULT_HYBRID_CENTROID_WEIGHTS)
+    fn default_hybrid_weights_for_query(query_data: &RetrievalQueryData) -> RetrievalHybridWeights {
+        if query_data.has_full_first {
+            RetrievalHybridWeights::from_array(DEFAULT_HYBRID_CENTROID_WEIGHTS)
+        } else {
+            RetrievalHybridWeights::from_array(DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS)
+        }
+    }
+
+    fn default_experimental_config_for_query(
+        query_data: &RetrievalQueryData,
+    ) -> RetrievalExperimentalConfig {
+        RetrievalExperimentalConfig {
+            first_name_mode: if query_data.has_full_first {
+                RetrievalFirstNameMode::ExactThenPrefixHalf
+            } else {
+                RetrievalFirstNameMode::Prefix
+            },
+            specter_mode: RetrievalSpecterMode::MaxOfCentroidExemplar,
+            coauthor: RetrievalOverlapConfig {
+                use_idf: true,
+                per_term_cap: Some(0.35),
+                ..default_overlap_config()
+            },
+            affiliation: RetrievalOverlapConfig {
+                use_idf: true,
+                ..default_overlap_config()
+            },
+        }
+    }
+
+    fn summary_for_candidate_index<'a>(
+        &'a self,
+        idx: usize,
+        override_index: Option<usize>,
+        override_summary: Option<&'a RetrievalSummaryData>,
+    ) -> &'a RetrievalSummaryData {
+        match (override_index, override_summary) {
+            (Some(replaced_idx), Some(replaced_summary)) if idx == replaced_idx => replaced_summary,
+            _ => &self.summaries[idx],
+        }
+    }
+
+    fn compare_scored_candidates(
+        &self,
+        left: &(usize, f32),
+        right: &(usize, f32),
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+    ) -> Ordering {
+        let left_component_key = self
+            .summary_for_candidate_index(left.0, override_index, override_summary)
+            .component_key
+            .as_str();
+        let right_component_key = self
+            .summary_for_candidate_index(right.0, override_index, override_summary)
+            .component_key
+            .as_str();
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left_component_key.cmp(right_component_key))
+    }
+
+    fn keep_sorted_top_k_scored_candidates(
+        &self,
+        scored: &mut Vec<(usize, f32)>,
+        top_k: usize,
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+    ) {
+        if top_k == 0 {
+            scored.clear();
+            return;
+        }
+        let limit = top_k.min(scored.len());
+        if limit < scored.len() {
+            scored.select_nth_unstable_by(limit - 1, |left, right| {
+                self.compare_scored_candidates(left, right, override_index, override_summary)
+            });
+            scored.truncate(limit);
+        }
+        scored.sort_unstable_by(|left, right| {
+            self.compare_scored_candidates(left, right, override_index, override_summary)
+        });
+    }
+
+    fn score_top_k_candidate_indices_default_inner(
+        &self,
+        query_data: &RetrievalQueryData,
+        candidate_indices: &[usize],
+        top_k: usize,
+        max_block_component_size: usize,
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+    ) -> Vec<(usize, f32)> {
+        let weights = Self::default_hybrid_weights_for_query(query_data);
+        let config = Self::default_experimental_config_for_query(query_data);
+        let mut scored = candidate_indices
+            .iter()
+            .map(|idx| {
+                let summary =
+                    self.summary_for_candidate_index(*idx, override_index, override_summary);
+                (
+                    *idx,
+                    score_experimental_hybrid_centroid_query(
+                        query_data,
+                        summary,
+                        max_block_component_size,
+                        weights,
+                        config,
+                        &self.coauthor_cluster_df,
+                        &self.affiliation_cluster_df,
+                        self.summaries.len(),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.keep_sorted_top_k_scored_candidates(
+            &mut scored,
+            top_k,
+            override_index,
+            override_summary,
+        );
+        scored
+    }
+
+    fn scored_candidates_to_keys_scores(
+        &self,
+        scored: Vec<(usize, f32)>,
+        override_index: Option<usize>,
+        override_summary: Option<&RetrievalSummaryData>,
+    ) -> (Vec<String>, Vec<f32>) {
+        let component_keys = scored
+            .iter()
+            .map(|(idx, _)| {
+                self.summary_for_candidate_index(*idx, override_index, override_summary)
+                    .component_key
+                    .clone()
+            })
+            .collect();
+        let scores = scored.iter().map(|(_, score)| *score).collect();
+        (component_keys, scores)
+    }
+
+    fn hard_filtered_candidate_indices_for_query(
+        &self,
+        query_data: &RetrievalQueryData,
+        mut candidate_indices: Vec<usize>,
+    ) -> Vec<usize> {
+        if let Some(orcid_hash) = query_data.orcid_hash {
+            let orcid_matches: Vec<usize> = candidate_indices
+                .iter()
+                .copied()
+                .filter(|idx| contains_hashed_value(&self.summaries[*idx].orcid_hashes, orcid_hash))
+                .collect();
+            if !orcid_matches.is_empty() {
+                candidate_indices = orcid_matches;
+            }
+        }
+
+        let middle_filtered: Vec<usize> = candidate_indices
+            .iter()
+            .copied()
+            .filter(|idx| {
+                !has_middle_initial_conflict(
+                    &query_data.middle_initial_hashes,
+                    &self.summaries[*idx].middle_initial_counts,
+                )
+            })
+            .collect();
+        if !middle_filtered.is_empty() {
+            candidate_indices = middle_filtered;
+        }
+
+        let year_filtered: Vec<usize> = candidate_indices
+            .iter()
+            .copied()
+            .filter(|idx| {
+                !has_impossible_year_conflict(
+                    query_data.year,
+                    &self.summaries[*idx],
+                    RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
+                )
+            })
+            .collect();
+        if !year_filtered.is_empty() {
+            candidate_indices = year_filtered;
+        }
+
+        candidate_indices
+    }
+
+    fn candidate_indices_for_pair_plan_query(
+        &self,
+        query_data: &RetrievalQueryData,
+        base_candidate_indices: Option<&[usize]>,
+        query_signature_id: Option<&str>,
+        selector: Option<&RustNameCompatibleSubblockSelector>,
+        global_backfill_count: usize,
+    ) -> Vec<usize> {
+        let selected = if query_data.has_full_first {
+            match (query_signature_id, selector) {
+                (Some(signature_id), Some(selector)) => selector
+                    .select_candidate_indices_for_summaries(
+                        signature_id,
+                        &query_data.first,
+                        &self.summaries,
+                        base_candidate_indices,
+                        global_backfill_count,
+                    ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let candidate_indices = selected.unwrap_or_else(|| {
+            base_candidate_indices.map_or_else(
+                || (0..self.summaries.len()).collect(),
+                |values| values.to_vec(),
+            )
+        });
+        self.hard_filtered_candidate_indices_for_query(query_data, candidate_indices)
+    }
+
+    fn build_pair_plan_query_result(
+        &self,
+        current_query: &RetrievalQueryData,
+        query_signature_index: u32,
+        base_candidate_indices: Option<&[usize]>,
+        query_signature_id: Option<&str>,
+        component_member_indices: &HashMap<String, Vec<u32>>,
+        top_k: usize,
+        selector: Option<&RustNameCompatibleSubblockSelector>,
+        global_backfill_count: usize,
+    ) -> Result<RetrievalPairPlanQueryResult, String> {
+        let candidate_indices = self.candidate_indices_for_pair_plan_query(
+            current_query,
+            base_candidate_indices,
+            query_signature_id,
+            selector,
+            global_backfill_count,
+        );
+        if candidate_indices.is_empty() {
+            return Ok(RetrievalPairPlanQueryResult::default());
+        }
+        let scored = self.score_top_k_candidate_indices_default_inner(
+            current_query,
+            &candidate_indices,
+            top_k,
+            self.max_block_component_size,
+            None,
+            None,
+        );
+
+        let mut result = RetrievalPairPlanQueryResult::default();
+        let query_year_missing = u8::from(current_query.year.is_none());
+        let query_year = current_query.year.unwrap_or(i32::MIN as i64) as i32;
+        let query_has_affiliations = u8::from(!current_query.affiliation_hashes.is_empty());
+        let query_has_coauthors = u8::from(!current_query.coauthor_hashes.is_empty());
+        for (rank_offset, (summary_index, score)) in scored.iter().enumerate() {
+            let summary = &self.summaries[*summary_index];
+            let Some(member_indices) = component_member_indices.get(&summary.component_key) else {
+                return Err(format!(
+                    "Missing component members for retrieved component_key: {}",
+                    summary.component_key
+                ));
+            };
+            let chooser_features = chooser_summary_features(current_query, summary);
+            let mut dominant_first_name = "";
+            let mut dominant_first_count = 0.0f32;
+            let mut named_signature_count = 0.0f32;
+            for (first_name, count) in summary.first_name_counts.iter() {
+                named_signature_count += *count;
+                if *count > dominant_first_count
+                    || (*count == dominant_first_count && first_name.as_str() > dominant_first_name)
+                {
+                    dominant_first_name = first_name.as_str();
+                    dominant_first_count = *count;
+                }
+            }
+
+            result
+                .row_query_signature_indices
+                .push(query_signature_index);
+            result
+                .row_component_keys
+                .push(summary.component_key.clone());
+            result.row_retrieval_scores.push(*score);
+            result
+                .row_retrieval_ranks
+                .push((rank_offset + 1).min(u16::MAX as usize) as u16);
+            result
+                .row_component_sizes
+                .push(summary.size.min(u32::MAX as usize) as u32);
+            result
+                .row_named_signature_counts
+                .push(named_signature_count.round().max(0.0) as u32);
+            result
+                .row_dominant_first_names
+                .push(dominant_first_name.to_string());
+            result
+                .row_candidate_year_min
+                .push(summary.year_min.unwrap_or(i32::MIN as i64) as i32);
+            result
+                .row_candidate_year_max
+                .push(summary.year_max.unwrap_or(i32::MIN as i64) as i32);
+            result.row_candidate_year_range_missing.push(u8::from(
+                summary.year_min.is_none() || summary.year_max.is_none(),
+            ));
+            result
+                .row_query_first_tokens
+                .push(current_query.first.clone());
+            result.row_query_years.push(query_year);
+            result.row_query_year_missing.push(query_year_missing);
+            result
+                .row_query_has_affiliations
+                .push(query_has_affiliations);
+            result.row_query_has_coauthors.push(query_has_coauthors);
+            result
+                .row_middle_initial_compatibility
+                .push(chooser_features[0]);
+            result.row_affiliation_overlap.push(chooser_features[1]);
+            result.row_coauthor_overlap.push(chooser_features[2]);
+            result.row_venue_overlap.push(chooser_features[3]);
+            result.row_year_compatibility.push(chooser_features[4]);
+            result.row_title_overlap.push(chooser_features[5]);
+            result
+                .row_specter_centroid_similarity
+                .push(chooser_features[6]);
+            result
+                .row_specter_exemplar_similarity
+                .push(chooser_features[7]);
+            result
+                .right_signature_indices_by_row
+                .push(member_indices.clone());
+        }
+        Ok(result)
+    }
+
+    fn extract_candidate_indices_by_query_signature_id(
+        &self,
+        obj: &Bound<'_, PyAny>,
+    ) -> PyResult<HashMap<String, Vec<usize>>> {
+        let candidate_keys_by_query = extract_string_vec_map(obj)?;
+        let mut out = HashMap::with_capacity(candidate_keys_by_query.len());
+        for (query_signature_id, component_keys) in candidate_keys_by_query {
+            let mut indices = Vec::with_capacity(component_keys.len());
+            for component_key in component_keys {
+                let Some(candidate_index) = self.component_index_by_key.get(&component_key) else {
+                    return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                        "Unknown component_key for RustHybridCentroidRetriever query window: {component_key}"
+                    )));
+                };
+                indices.push(*candidate_index);
+            }
+            out.insert(query_signature_id, indices);
+        }
+        Ok(out)
     }
 
     fn score_top_k_candidate_indices_experimental(
@@ -292,14 +697,11 @@ impl RustHybridCentroidRetriever {
                 candidate_indices
                     .par_iter()
                     .map(|idx| {
-                        let summary = match (override_index, override_summary) {
-                            (Some(replaced_idx), Some(replaced_summary))
-                                if *idx == replaced_idx =>
-                            {
-                                replaced_summary
-                            }
-                            _ => &self.summaries[*idx],
-                        };
+                        let summary = self.summary_for_candidate_index(
+                            *idx,
+                            override_index,
+                            override_summary,
+                        );
                         (
                             *idx,
                             score_experimental_hybrid_centroid_query(
@@ -318,39 +720,13 @@ impl RustHybridCentroidRetriever {
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
-
-        scored.sort_unstable_by(|(left_idx, left_score), (right_idx, right_score)| {
-            let left_component_key = match (override_index, override_summary) {
-                (Some(replaced_idx), Some(replaced_summary)) if *left_idx == replaced_idx => {
-                    replaced_summary.component_key.as_str()
-                }
-                _ => self.summaries[*left_idx].component_key.as_str(),
-            };
-            let right_component_key = match (override_index, override_summary) {
-                (Some(replaced_idx), Some(replaced_summary)) if *right_idx == replaced_idx => {
-                    replaced_summary.component_key.as_str()
-                }
-                _ => self.summaries[*right_idx].component_key.as_str(),
-            };
-            right_score
-                .partial_cmp(left_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left_component_key.cmp(right_component_key))
-        });
-        let limit = top_k.min(scored.len());
-        scored.truncate(limit);
-
-        let component_keys = scored
-            .iter()
-            .map(|(idx, _)| match (override_index, override_summary) {
-                (Some(replaced_idx), Some(replaced_summary)) if *idx == replaced_idx => {
-                    replaced_summary.component_key.clone()
-                }
-                _ => self.summaries[*idx].component_key.clone(),
-            })
-            .collect();
-        let scores = scored.iter().map(|(_, score)| *score).collect();
-        Ok((component_keys, scores))
+        self.keep_sorted_top_k_scored_candidates(
+            &mut scored,
+            top_k,
+            override_index,
+            override_summary,
+        );
+        Ok(self.scored_candidates_to_keys_scores(scored, override_index, override_summary))
     }
 
     fn score_top_k_candidate_indices(
@@ -369,19 +745,16 @@ impl RustHybridCentroidRetriever {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let mut scored: Vec<(usize, f32)> = py.allow_threads(|| {
+        let scored: Vec<(usize, f32)> = py.allow_threads(|| {
             let compute = || {
-                candidate_indices
+                let mut scored = candidate_indices
                     .par_iter()
                     .map(|idx| {
-                        let summary = match (override_index, override_summary) {
-                            (Some(replaced_idx), Some(replaced_summary))
-                                if *idx == replaced_idx =>
-                            {
-                                replaced_summary
-                            }
-                            _ => &self.summaries[*idx],
-                        };
+                        let summary = self.summary_for_candidate_index(
+                            *idx,
+                            override_index,
+                            override_summary,
+                        );
                         (
                             *idx,
                             score_hybrid_centroid_query(
@@ -392,43 +765,18 @@ impl RustHybridCentroidRetriever {
                             ),
                         )
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                self.keep_sorted_top_k_scored_candidates(
+                    &mut scored,
+                    top_k,
+                    override_index,
+                    override_summary,
+                );
+                scored
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
-
-        scored.sort_unstable_by(|(left_idx, left_score), (right_idx, right_score)| {
-            let left_component_key = match (override_index, override_summary) {
-                (Some(replaced_idx), Some(replaced_summary)) if *left_idx == replaced_idx => {
-                    replaced_summary.component_key.as_str()
-                }
-                _ => self.summaries[*left_idx].component_key.as_str(),
-            };
-            let right_component_key = match (override_index, override_summary) {
-                (Some(replaced_idx), Some(replaced_summary)) if *right_idx == replaced_idx => {
-                    replaced_summary.component_key.as_str()
-                }
-                _ => self.summaries[*right_idx].component_key.as_str(),
-            };
-            right_score
-                .partial_cmp(left_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left_component_key.cmp(right_component_key))
-        });
-        let limit = top_k.min(scored.len());
-        scored.truncate(limit);
-
-        let component_keys = scored
-            .iter()
-            .map(|(idx, _)| match (override_index, override_summary) {
-                (Some(replaced_idx), Some(replaced_summary)) if *idx == replaced_idx => {
-                    replaced_summary.component_key.clone()
-                }
-                _ => self.summaries[*idx].component_key.clone(),
-            })
-            .collect();
-        let scores = scored.iter().map(|(_, score)| *score).collect();
-        Ok((component_keys, scores))
+        Ok(self.scored_candidates_to_keys_scores(scored, override_index, override_summary))
     }
 }
 
@@ -439,6 +787,14 @@ struct JsonIngestTelemetry {
     reference_counter_seconds: f64,
     signature_preprocess_seconds: f64,
     cluster_seed_seconds: f64,
+    missing_specter_paper_count: usize,
+    defaulted_name_count_signature_count: usize,
+    defaulted_name_count_first_count: usize,
+    defaulted_name_count_first_last_count: usize,
+    defaulted_name_count_last_count: usize,
+    defaulted_name_count_last_first_initial_count: usize,
+    defaulted_signature_author_position_count: usize,
+    defaulted_paper_author_position_count: usize,
 }
 
 static LAST_JSON_INGEST_TELEMETRY: OnceLock<Mutex<Option<JsonIngestTelemetry>>> = OnceLock::new();
@@ -578,6 +934,40 @@ fn get_last_json_ingest_telemetry(py: Python<'_>) -> PyResult<Option<Py<PyDict>>
 
     let telemetry_dict = PyDict::new(py);
     telemetry_dict.set_item("stage_seconds", stage_seconds)?;
+    let counts = PyDict::new(py);
+    counts.set_item(
+        "missing_specter_paper_count",
+        telemetry.missing_specter_paper_count,
+    )?;
+    counts.set_item(
+        "defaulted_name_count_signature_count",
+        telemetry.defaulted_name_count_signature_count,
+    )?;
+    counts.set_item(
+        "defaulted_name_count_first_count",
+        telemetry.defaulted_name_count_first_count,
+    )?;
+    counts.set_item(
+        "defaulted_name_count_first_last_count",
+        telemetry.defaulted_name_count_first_last_count,
+    )?;
+    counts.set_item(
+        "defaulted_name_count_last_count",
+        telemetry.defaulted_name_count_last_count,
+    )?;
+    counts.set_item(
+        "defaulted_name_count_last_first_initial_count",
+        telemetry.defaulted_name_count_last_first_initial_count,
+    )?;
+    counts.set_item(
+        "defaulted_signature_author_position_count",
+        telemetry.defaulted_signature_author_position_count,
+    )?;
+    counts.set_item(
+        "defaulted_paper_author_position_count",
+        telemetry.defaulted_paper_author_position_count,
+    )?;
+    telemetry_dict.set_item("counts", counts)?;
     Ok(Some(telemetry_dict.unbind()))
 }
 
@@ -1088,7 +1478,8 @@ impl LanguageDetectorCompat {
             "un_ft".to_string()
         };
 
-        let mut predicted_language_2 = match cld2_detect_language(text, Cld2Format::Text).0 {
+        let cld2_result = cld2_detect_language_ext(text, Cld2Format::Text, &Default::default());
+        let mut predicted_language_2 = match cld2_result.scores[0].language {
             Some(lang) => lang.0.to_string(),
             None => "un_2".to_string(),
         };
@@ -1250,6 +1641,55 @@ fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<f32>>> {
         out.push(v as f32);
     }
     Ok(Some(out))
+}
+
+fn extract_u32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    if let Ok(arr) = obj.downcast::<PyArray1<u32>>() {
+        let readonly = arr.readonly();
+        return Ok(readonly.as_slice()?.to_vec());
+    }
+    if let Ok(arr) = obj.downcast::<PyArray1<u64>>() {
+        let readonly = arr.readonly();
+        return readonly
+            .as_slice()?
+            .iter()
+            .map(|value| {
+                u32::try_from(*value).map_err(|_| {
+                    pyo3::exceptions::PyOverflowError::new_err(format!(
+                        "component member signature index exceeds u32: {value}"
+                    ))
+                })
+            })
+            .collect();
+    }
+    let values: Vec<u64> = obj.extract()?;
+    values
+        .into_iter()
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err(format!(
+                    "component member signature index exceeds u32: {value}"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn extract_component_member_indices(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, Vec<u32>>> {
+    let mut out = HashMap::new();
+    let items = obj.call_method0("items")?;
+    for item in PyIterator::from_object(&items)? {
+        let tuple = item?.downcast_into::<PyTuple>()?;
+        if tuple.len() != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "component_member_indices_by_key.items() yielded a non-pair",
+            ));
+        }
+        let component_key: String = tuple.get_item(0)?.extract()?;
+        let members = extract_u32_vec(&tuple.get_item(1)?)?;
+        out.insert(component_key, members);
+    }
+    Ok(out)
 }
 
 fn extract_specter_vec_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<f32>>> {
@@ -1665,6 +2105,10 @@ fn extract_retrieval_summary(
 
 fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryData> {
     let first: String = obj.getattr("first")?.extract()?;
+    let has_full_first = match obj.getattr("has_full_first") {
+        Ok(value) => value.extract()?,
+        Err(_) => first.chars().count() > 1,
+    };
     let middle_initial_hashes = extract_string_hashes(&obj.getattr("middle_initials")?)?;
     let coauthor_terms = extract_query_terms(&obj.getattr("coauthor_blocks")?)?;
     let coauthor_hashes = coauthor_terms.iter().map(|term| term.hash).collect();
@@ -1688,6 +2132,7 @@ fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<RetrievalQueryDat
 
     Ok(RetrievalQueryData {
         first,
+        has_full_first,
         middle_initial_hashes,
         coauthor_hashes,
         coauthor_terms,
@@ -2274,6 +2719,25 @@ fn canonical_last_for_counts(raw_last: &str, normalized_last: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct NameCountsDefaultTelemetry {
+    first: bool,
+    first_last: bool,
+    last: bool,
+    last_first_initial: bool,
+}
+
+impl NameCountsDefaultTelemetry {
+    fn any(self) -> bool {
+        self.first || self.first_last || self.last || self.last_first_initial
+    }
+}
+
+struct NameCountsBuildResult {
+    data: Option<NameCountsData>,
+    telemetry: NameCountsDefaultTelemetry,
+}
+
 fn build_name_counts_data_from_artifact(
     raw_name_counts: &RawNameCountMaps,
     raw_first: &str,
@@ -2281,11 +2745,15 @@ fn build_name_counts_data_from_artifact(
     first_without_apostrophe: &str,
     raw_last: &str,
     last_normalized: &str,
-) -> Option<NameCountsData> {
+) -> NameCountsBuildResult {
     if !has_name_counts_artifact(raw_name_counts) {
-        return None;
+        return NameCountsBuildResult {
+            data: None,
+            telemetry: NameCountsDefaultTelemetry::default(),
+        };
     }
 
+    let mut telemetry = NameCountsDefaultTelemetry::default();
     let mut first_for_counts = first_normalized_token.to_string();
     if first_for_counts.is_empty() {
         first_for_counts = first_without_apostrophe
@@ -2315,30 +2783,54 @@ fn build_name_counts_data_from_artifact(
         .to_string();
 
     let first = if py_len(&first_for_counts) > 1 {
-        *raw_name_counts.first.get(&first_for_counts).unwrap_or(&1.0)
+        match raw_name_counts.first.get(&first_for_counts) {
+            Some(value) => *value,
+            None => {
+                telemetry.first = true;
+                1.0
+            }
+        }
     } else {
         f64::NAN
     };
     let first_last = if py_len(&first_for_counts) > 1 {
-        *raw_name_counts
-            .first_last
-            .get(&first_last_key)
-            .unwrap_or(&1.0)
+        match raw_name_counts.first_last.get(&first_last_key) {
+            Some(value) => *value,
+            None => {
+                telemetry.first_last = true;
+                1.0
+            }
+        }
     } else {
         f64::NAN
     };
-    let last = *raw_name_counts.last.get(&last_for_counts).unwrap_or(&1.0);
-    let last_first_initial = *raw_name_counts
+    let last = match raw_name_counts.last.get(&last_for_counts) {
+        Some(value) => *value,
+        None => {
+            telemetry.last = true;
+            1.0
+        }
+    };
+    let last_first_initial = match raw_name_counts
         .last_first_initial
         .get(&last_first_initial_key)
-        .unwrap_or(&1.0);
+    {
+        Some(value) => *value,
+        None => {
+            telemetry.last_first_initial = true;
+            1.0
+        }
+    };
 
-    Some(NameCountsData {
-        first,
-        first_last,
-        last,
-        last_first_initial,
-    })
+    NameCountsBuildResult {
+        data: Some(NameCountsData {
+            first,
+            first_last,
+            last,
+            last_first_initial,
+        }),
+        telemetry,
+    }
 }
 
 fn count_initials(s: &str) -> HashMap<char, usize> {
@@ -3720,6 +4212,183 @@ impl RustFeaturizer {
     fn full_feature_count(&self) -> usize {
         FULL_FEATURE_COUNT
     }
+
+    fn signature_paper_lookup(&self) -> PyResult<Vec<(&SignatureData, &PaperData)>> {
+        let signature_ids = self.signature_id_order();
+        let mut lookup: Vec<(&SignatureData, &PaperData)> = Vec::with_capacity(signature_ids.len());
+        for signature_id in signature_ids.iter() {
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            lookup.push((signature, paper));
+        }
+        Ok(lookup)
+    }
+
+    fn pair_aggregate_row_ranges(owner_row_indices: &[u32]) -> Option<Vec<PairAggregateRowRange>> {
+        if owner_row_indices.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut ranges = Vec::new();
+        let mut start = 0usize;
+        let mut previous = owner_row_indices[0];
+        for (offset, row_index) in owner_row_indices.iter().enumerate().skip(1) {
+            if *row_index < previous {
+                return None;
+            }
+            if *row_index != previous {
+                ranges.push(PairAggregateRowRange {
+                    row_offset: previous as usize,
+                    start,
+                    stop: offset,
+                });
+                start = offset;
+                previous = *row_index;
+            }
+        }
+        ranges.push(PairAggregateRowRange {
+            row_offset: previous as usize,
+            start,
+            stop: owner_row_indices.len(),
+        });
+        Some(ranges)
+    }
+
+    fn empty_pair_aggregate_buffers(
+        row_count: usize,
+        aggregate_cols: usize,
+    ) -> PairAggregateBuffers {
+        PairAggregateBuffers {
+            counts: vec![0_u32; row_count],
+            sums: vec![0.0_f64; row_count * aggregate_cols],
+            mins: vec![f64::INFINITY; row_count * aggregate_cols],
+            maxs: vec![f64::NEG_INFINITY; row_count * aggregate_cols],
+        }
+    }
+
+    fn aggregate_pair_index_arrays_grouped(
+        &self,
+        left_indices: &[u32],
+        right_indices: &[u32],
+        row_ranges: &[PairAggregateRowRange],
+        row_count: usize,
+        aggregate_indices: &[usize],
+        nan_value: f64,
+        lookup: &[(&SignatureData, &PaperData)],
+    ) -> PairAggregateBuffers {
+        let aggregate_cols = aggregate_indices.len();
+        let mut out = Self::empty_pair_aggregate_buffers(row_count, aggregate_cols);
+        if aggregate_cols == 0 {
+            for range in row_ranges.iter() {
+                out.counts[range.row_offset] =
+                    (range.stop - range.start).min(u32::MAX as usize) as u32;
+            }
+            return out;
+        }
+
+        let group_count = row_ranges.len();
+        let mut group_counts = vec![0_u32; group_count];
+        let mut group_sums = vec![0.0_f64; group_count * aggregate_cols];
+        let mut group_mins = vec![f64::INFINITY; group_count * aggregate_cols];
+        let mut group_maxs = vec![f64::NEG_INFINITY; group_count * aggregate_cols];
+        group_counts
+            .par_iter_mut()
+            .zip(group_sums.par_chunks_mut(aggregate_cols))
+            .zip(group_mins.par_chunks_mut(aggregate_cols))
+            .zip(group_maxs.par_chunks_mut(aggregate_cols))
+            .zip(row_ranges.par_iter())
+            .for_each(|((((count, sums_row), mins_row), maxs_row), range)| {
+                for pair_offset in range.start..range.stop {
+                    *count = count.saturating_add(1);
+                    let (s1, p1) = lookup[left_indices[pair_offset] as usize];
+                    let (s2, p2) = lookup[right_indices[pair_offset] as usize];
+                    let row = self.featurize_pair_data(s1, s2, p1, p2);
+                    for (aggregate_position, feature_index) in aggregate_indices.iter().enumerate()
+                    {
+                        let mut value = row[*feature_index];
+                        if value.is_nan() && !nan_value.is_nan() {
+                            value = nan_value;
+                        }
+                        sums_row[aggregate_position] += value;
+                        if value < mins_row[aggregate_position] {
+                            mins_row[aggregate_position] = value;
+                        }
+                        if value > maxs_row[aggregate_position] {
+                            maxs_row[aggregate_position] = value;
+                        }
+                    }
+                }
+            });
+
+        for (group_offset, range) in row_ranges.iter().enumerate() {
+            out.counts[range.row_offset] = group_counts[group_offset];
+            let source_start = group_offset * aggregate_cols;
+            let target_start = range.row_offset * aggregate_cols;
+            out.sums[target_start..target_start + aggregate_cols]
+                .copy_from_slice(&group_sums[source_start..source_start + aggregate_cols]);
+            out.mins[target_start..target_start + aggregate_cols]
+                .copy_from_slice(&group_mins[source_start..source_start + aggregate_cols]);
+            out.maxs[target_start..target_start + aggregate_cols]
+                .copy_from_slice(&group_maxs[source_start..source_start + aggregate_cols]);
+        }
+        out
+    }
+
+    fn aggregate_pair_index_arrays_sequential(
+        &self,
+        left_indices: &[u32],
+        right_indices: &[u32],
+        owner_row_indices: &[u32],
+        row_count: usize,
+        aggregate_indices: &[usize],
+        nan_value: f64,
+        lookup: &[(&SignatureData, &PaperData)],
+    ) -> PairAggregateBuffers {
+        let aggregate_cols = aggregate_indices.len();
+        let mut out = Self::empty_pair_aggregate_buffers(row_count, aggregate_cols);
+        if aggregate_cols == 0 {
+            for row_index in owner_row_indices.iter() {
+                out.counts[*row_index as usize] = out.counts[*row_index as usize].saturating_add(1);
+            }
+            return out;
+        }
+
+        for (pair_offset, row_index) in owner_row_indices.iter().enumerate() {
+            let row_offset = *row_index as usize;
+            out.counts[row_offset] = out.counts[row_offset].saturating_add(1);
+            let aggregate_row_start = row_offset * aggregate_cols;
+            let (s1, p1) = lookup[left_indices[pair_offset] as usize];
+            let (s2, p2) = lookup[right_indices[pair_offset] as usize];
+            let row = self.featurize_pair_data(s1, s2, p1, p2);
+            for (aggregate_position, feature_index) in aggregate_indices.iter().enumerate() {
+                let mut value = row[*feature_index];
+                if value.is_nan() && !nan_value.is_nan() {
+                    value = nan_value;
+                }
+                let stats_index = aggregate_row_start + aggregate_position;
+                out.sums[stats_index] += value;
+                if value < out.mins[stats_index] {
+                    out.mins[stats_index] = value;
+                }
+                if value > out.maxs[stats_index] {
+                    out.maxs[stats_index] = value;
+                }
+            }
+        }
+        out
+    }
+
+    fn update_top5_distance(row: &mut [f64], value: f64) {
+        if value >= row[4] {
+            return;
+        }
+        row[4] = value;
+        row.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    }
 }
 
 #[pymethods]
@@ -4519,6 +5188,7 @@ impl RustFeaturizer {
         let mut signature_inputs: Vec<SignatureInput> = Vec::with_capacity(signatures_obj.len());
         let mut paper_inputs: Vec<PaperInput> = Vec::new();
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
+        let mut defaulted_signature_author_position_count = 0usize;
         for (sig_id, sig_value) in signatures_obj.iter() {
             let sig_dict = json_as_object(sig_value, "signature entry")?;
             let paper_id_value = json_get_required(sig_dict, "paper_id", "signature entry")?;
@@ -4533,7 +5203,13 @@ impl RustFeaturizer {
             let raw_middle = json_get_string(author_info, "middle", "");
             let raw_last = json_get_string(author_info, "last", "");
             let email = json_get_optional_string(author_info, "email");
-            let position = json_get_i64_optional(author_info, "position").unwrap_or(0);
+            let position = match json_get_i64_optional(author_info, "position") {
+                Some(value) => value,
+                None => {
+                    defaulted_signature_author_position_count += 1;
+                    0
+                }
+            };
             let affiliation_values = json_get_string_list(author_info.get("affiliations"));
             let source_id_source = json_get_optional_string(author_info, "source_id_source");
             let source_ids = if source_id_source.as_deref() == Some("ORCID") {
@@ -4583,6 +5259,7 @@ impl RustFeaturizer {
 
         let papers_json = load_json_value(papers_path)?;
         let papers_obj = json_as_object(&papers_json, "papers payload")?;
+        let mut defaulted_paper_author_position_count = 0usize;
         for (_paper_key, paper_value) in papers_obj.iter() {
             let paper_dict = json_as_object(paper_value, "paper entry")?;
             let paper_id_value = json_get_required(paper_dict, "paper_id", "paper entry")?;
@@ -4609,7 +5286,13 @@ impl RustFeaturizer {
                     let Some(author_dict) = author_value.as_object() else {
                         continue;
                     };
-                    let position = json_get_i64_optional(author_dict, "position").unwrap_or(0);
+                    let position = match json_get_i64_optional(author_dict, "position") {
+                        Some(value) => value,
+                        None => {
+                            defaulted_paper_author_position_count += 1;
+                            0
+                        }
+                    };
                     let raw_author_name = json_get_string(author_dict, "author_name", "");
                     if preprocess {
                         ensure_unidecode_for_text(
@@ -4908,7 +5591,7 @@ impl RustFeaturizer {
                             None
                         };
 
-                        let name_counts = build_name_counts_data_from_artifact(
+                        let name_counts_result = build_name_counts_data_from_artifact(
                             &raw_name_counts,
                             &entry.raw_first,
                             &first_normalized_token,
@@ -4931,9 +5614,10 @@ impl RustFeaturizer {
                                 coauthors,
                                 position: entry.position,
                                 paper_id: entry.paper_id.clone(),
-                                name_counts,
+                                name_counts: name_counts_result.data,
                                 adv_name: Some(first_without_apostrophe),
                             },
+                            name_counts_result.telemetry,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -4942,7 +5626,27 @@ impl RustFeaturizer {
         });
         let mut signatures: HashMap<String, SignatureData> =
             HashMap::with_capacity(computed_signatures.len());
-        for (sig_id, signature) in computed_signatures {
+        let mut defaulted_name_count_signature_count = 0usize;
+        let mut defaulted_name_count_first_count = 0usize;
+        let mut defaulted_name_count_first_last_count = 0usize;
+        let mut defaulted_name_count_last_count = 0usize;
+        let mut defaulted_name_count_last_first_initial_count = 0usize;
+        for (sig_id, signature, name_count_telemetry) in computed_signatures {
+            if name_count_telemetry.any() {
+                defaulted_name_count_signature_count += 1;
+            }
+            if name_count_telemetry.first {
+                defaulted_name_count_first_count += 1;
+            }
+            if name_count_telemetry.first_last {
+                defaulted_name_count_first_last_count += 1;
+            }
+            if name_count_telemetry.last {
+                defaulted_name_count_last_count += 1;
+            }
+            if name_count_telemetry.last_first_initial {
+                defaulted_name_count_last_first_initial_count += 1;
+            }
             signatures.insert(sig_id, signature);
         }
         drop(signature_inputs);
@@ -4970,6 +5674,7 @@ impl RustFeaturizer {
         };
 
         let reference_counter_start = Instant::now();
+        let mut missing_specter_paper_count = 0usize;
         let mut papers: HashMap<PaperId, PaperData> =
             HashMap::with_capacity(preprocessed_papers.len());
         if compute_reference_features {
@@ -5059,6 +5764,9 @@ impl RustFeaturizer {
                 } else {
                     None
                 };
+                if specter.is_none() {
+                    missing_specter_paper_count += 1;
+                }
                 let specter_norm = specter.as_ref().map(|values| {
                     values
                         .iter()
@@ -5099,6 +5807,9 @@ impl RustFeaturizer {
                 } else {
                     None
                 };
+                if specter.is_none() {
+                    missing_specter_paper_count += 1;
+                }
                 let specter_norm = specter.as_ref().map(|values| {
                     values
                         .iter()
@@ -5174,6 +5885,14 @@ impl RustFeaturizer {
             reference_counter_seconds,
             signature_preprocess_seconds,
             cluster_seed_seconds,
+            missing_specter_paper_count,
+            defaulted_name_count_signature_count,
+            defaulted_name_count_first_count,
+            defaulted_name_count_first_last_count,
+            defaulted_name_count_last_count,
+            defaulted_name_count_last_first_initial_count,
+            defaulted_signature_author_position_count,
+            defaulted_paper_author_position_count,
         });
 
         Ok(RustFeaturizer {
@@ -5381,6 +6100,204 @@ impl RustFeaturizer {
         });
 
         Ok(values)
+    }
+
+    #[pyo3(
+        signature = (
+            left_signature_indices,
+            right_signature_indices,
+            low_value = 0.0,
+            high_value = 10000.0,
+            dont_merge_cluster_seeds = true,
+            incremental_dont_use_cluster_seeds = false,
+            num_threads = None,
+            suppress_orcid = false,
+            large_integer = 100000.0
+        )
+    )]
+    fn linker_pair_index_arrays_constraint_labels<'py>(
+        &self,
+        py: Python<'py>,
+        left_signature_indices: PyReadonlyArray1<'py, u32>,
+        right_signature_indices: PyReadonlyArray1<'py, u32>,
+        low_value: f64,
+        high_value: f64,
+        dont_merge_cluster_seeds: bool,
+        incremental_dont_use_cluster_seeds: bool,
+        num_threads: Option<usize>,
+        suppress_orcid: bool,
+        large_integer: f64,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let left_indices = left_signature_indices.as_slice()?;
+        let right_indices = right_signature_indices.as_slice()?;
+        let pair_count = left_indices.len();
+        if right_indices.len() != pair_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "left_signature_indices and right_signature_indices must have equal length: left={} right={}",
+                left_indices.len(),
+                right_indices.len()
+            )));
+        }
+
+        let signature_ids = self.signature_id_order();
+        for (left_idx, right_idx) in left_indices.iter().zip(right_indices.iter()) {
+            let left = *left_idx as usize;
+            let right = *right_idx as usize;
+            if left >= signature_ids.len() || right >= signature_ids.len() {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "pair index out of range: left={} right={} signature_count={}",
+                    left,
+                    right,
+                    signature_ids.len()
+                )));
+            }
+        }
+
+        let lookup = self.signature_paper_lookup()?;
+        let labels = py.allow_threads(|| {
+            let compute = || {
+                left_indices
+                    .par_iter()
+                    .zip(right_indices.par_iter())
+                    .map(|(left_idx, right_idx)| {
+                        let left = *left_idx as usize;
+                        let right = *right_idx as usize;
+                        let sig_id1 = signature_ids[left].as_str();
+                        let sig_id2 = signature_ids[right].as_str();
+                        let (s1, p1) = lookup[left];
+                        let (s2, p2) = lookup[right];
+                        match self.constraint_value_from_records(
+                            sig_id1,
+                            sig_id2,
+                            s1,
+                            s2,
+                            p1,
+                            p2,
+                            low_value,
+                            high_value,
+                            dont_merge_cluster_seeds,
+                            incremental_dont_use_cluster_seeds,
+                            suppress_orcid,
+                        ) {
+                            Some(value) => value - large_integer,
+                            None => f64::NAN,
+                        }
+                    })
+                    .collect::<Vec<f64>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+        Ok(numpy::ndarray::Array1::from_vec(labels).to_pyarray(py))
+    }
+
+    #[pyo3(
+        signature = (
+            row_indices,
+            row_count,
+            pair_distances,
+            pair_labels = None,
+            num_threads = None,
+            large_integer = 100000.0,
+            hard_disallow_distance = 10000.0
+        )
+    )]
+    fn linker_pair_distance_accumulators<'py>(
+        &self,
+        py: Python<'py>,
+        row_indices: PyReadonlyArray1<'py, u32>,
+        row_count: usize,
+        pair_distances: PyReadonlyArray1<'py, f64>,
+        pair_labels: Option<PyReadonlyArray1<'py, f64>>,
+        num_threads: Option<usize>,
+        large_integer: f64,
+        hard_disallow_distance: f64,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<u32>>,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray1<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        u64,
+    )> {
+        let _ = num_threads;
+        let owner_row_indices = row_indices.as_slice()?;
+        let model_distances = pair_distances.as_slice()?;
+        let pair_count = owner_row_indices.len();
+        if model_distances.len() != pair_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "row_indices and pair_distances must have equal length: rows={} distances={}",
+                owner_row_indices.len(),
+                model_distances.len()
+            )));
+        }
+        let labels = match pair_labels.as_ref() {
+            Some(values) => {
+                let slice = values.as_slice()?;
+                if slice.len() != pair_count {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "pair_labels length must match row_indices length: labels={} rows={}",
+                        slice.len(),
+                        pair_count
+                    )));
+                }
+                Some(slice)
+            }
+            None => None,
+        };
+        for row_index in owner_row_indices.iter() {
+            let bounded = *row_index as usize;
+            if bounded >= row_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "row index out of range: row_index={} row_count={}",
+                    bounded, row_count
+                )));
+            }
+        }
+
+        let mut counts = vec![0_u32; row_count];
+        let mut sums = vec![0.0_f64; row_count];
+        let mut mins = vec![f64::INFINITY; row_count];
+        let mut top_distances = vec![f64::INFINITY; row_count * 5];
+        let mut hard_disallow_pair_count = 0_u64;
+
+        for pair_offset in 0..pair_count {
+            let label = labels.map(|values| values[pair_offset]).unwrap_or(f64::NAN);
+            let value = if label.is_nan() {
+                model_distances[pair_offset]
+            } else {
+                label + large_integer
+            };
+            if value.is_nan() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "pairwise model returned NaN distance",
+                ));
+            }
+            let row = owner_row_indices[pair_offset] as usize;
+            counts[row] = counts[row].saturating_add(1);
+            sums[row] += value;
+            if value < mins[row] {
+                mins[row] = value;
+            }
+            if value >= hard_disallow_distance {
+                hard_disallow_pair_count = hard_disallow_pair_count.saturating_add(1);
+            }
+            let top_start = row * 5;
+            Self::update_top5_distance(&mut top_distances[top_start..top_start + 5], value);
+        }
+
+        let top_array = numpy::ndarray::Array2::from_shape_vec((row_count, 5), top_distances)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build top-distance matrix: {}",
+                    err
+                ))
+            })?;
+        Ok((
+            numpy::ndarray::Array1::from_vec(counts).to_pyarray(py),
+            numpy::ndarray::Array1::from_vec(sums).to_pyarray(py),
+            numpy::ndarray::Array1::from_vec(mins).to_pyarray(py),
+            top_array.to_pyarray(py),
+            hard_disallow_pair_count,
+        ))
     }
 
     #[pyo3(
@@ -5779,6 +6696,576 @@ impl RustFeaturizer {
 
     #[pyo3(
         signature = (
+            pairs,
+            row_indices,
+            row_count,
+            matrix_indices = None,
+            aggregate_indices = None,
+            num_threads = None,
+            nan_value = f64::NAN
+        )
+    )]
+    fn linker_pair_features_and_aggregate_stats_indexed<'py>(
+        &self,
+        py: Python<'py>,
+        pairs: Vec<(u32, u32)>,
+        row_indices: Vec<u32>,
+        row_count: usize,
+        matrix_indices: Option<Vec<usize>>,
+        aggregate_indices: Option<Vec<usize>>,
+        num_threads: Option<usize>,
+        nan_value: f64,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray1<u32>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+    )> {
+        let pair_count = pairs.len();
+        if row_indices.len() != pair_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "row_indices length must match pairs length: row_indices={} pairs={}",
+                row_indices.len(),
+                pair_count
+            )));
+        }
+
+        let full_cols = self.full_feature_count();
+        let resolved_matrix_indices: Vec<usize> =
+            matrix_indices.unwrap_or_else(|| (0..full_cols).collect());
+        for idx in resolved_matrix_indices.iter() {
+            if *idx >= full_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "matrix_indices contains out-of-range index {} for {} columns",
+                    idx, full_cols
+                )));
+            }
+        }
+
+        let resolved_aggregate_indices: Vec<usize> =
+            aggregate_indices.unwrap_or_else(|| resolved_matrix_indices.clone());
+        for idx in resolved_aggregate_indices.iter() {
+            if *idx >= full_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "aggregate_indices contains out-of-range index {} for {} columns",
+                    idx, full_cols
+                )));
+            }
+        }
+
+        let matrix_position_by_feature: HashMap<usize, usize> = resolved_matrix_indices
+            .iter()
+            .enumerate()
+            .map(|(position, feature_index)| (*feature_index, position))
+            .collect();
+        let mut aggregate_matrix_positions: Vec<usize> =
+            Vec::with_capacity(resolved_aggregate_indices.len());
+        for feature_index in resolved_aggregate_indices.iter() {
+            let Some(matrix_position) = matrix_position_by_feature.get(feature_index) else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "aggregate index {} is not present in matrix_indices; include it to avoid recomputation",
+                    feature_index
+                )));
+            };
+            aggregate_matrix_positions.push(*matrix_position);
+        }
+
+        let signature_ids = self.signature_id_order();
+        for (left_idx, right_idx) in pairs.iter() {
+            let left = *left_idx as usize;
+            let right = *right_idx as usize;
+            if left >= signature_ids.len() || right >= signature_ids.len() {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "pair index out of range: left={} right={} signature_count={}",
+                    left,
+                    right,
+                    signature_ids.len()
+                )));
+            }
+        }
+        for row_index in row_indices.iter() {
+            let bounded = *row_index as usize;
+            if bounded >= row_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "row index out of range: row_index={} row_count={}",
+                    bounded, row_count
+                )));
+            }
+        }
+
+        let mut lookup: Vec<(&SignatureData, &PaperData)> = Vec::with_capacity(signature_ids.len());
+        for signature_id in signature_ids.iter() {
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            lookup.push((signature, paper));
+        }
+
+        let out_cols = resolved_matrix_indices.len();
+        let aggregate_cols = resolved_aggregate_indices.len();
+        let matrix_buffer = py.allow_threads(|| {
+            let compute = || {
+                let mut buffer = vec![0.0_f64; pair_count * out_cols];
+                if out_cols == 0 {
+                    return buffer;
+                }
+                buffer
+                    .par_chunks_mut(out_cols)
+                    .zip(pairs.par_iter())
+                    .for_each(|(out_row, (left_idx, right_idx))| {
+                        let (s1, p1) = lookup[*left_idx as usize];
+                        let (s2, p2) = lookup[*right_idx as usize];
+                        let row = self.featurize_pair_data(s1, s2, p1, p2);
+                        for (dest, idx) in out_row.iter_mut().zip(resolved_matrix_indices.iter()) {
+                            let mut value = row[*idx];
+                            if value.is_nan() && !nan_value.is_nan() {
+                                value = nan_value;
+                            }
+                            *dest = value;
+                        }
+                    });
+                buffer
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        let mut counts = vec![0_u32; row_count];
+        let mut sums = vec![0.0_f64; row_count * aggregate_cols];
+        let mut mins = vec![f64::INFINITY; row_count * aggregate_cols];
+        let mut maxs = vec![f64::NEG_INFINITY; row_count * aggregate_cols];
+        if aggregate_cols > 0 {
+            for (pair_offset, row_index) in row_indices.iter().enumerate() {
+                let row_offset = *row_index as usize;
+                counts[row_offset] = counts[row_offset].saturating_add(1);
+                let matrix_row_start = pair_offset * out_cols;
+                let aggregate_row_start = row_offset * aggregate_cols;
+                for (aggregate_position, matrix_position) in
+                    aggregate_matrix_positions.iter().enumerate()
+                {
+                    let value = matrix_buffer[matrix_row_start + *matrix_position];
+                    let stats_index = aggregate_row_start + aggregate_position;
+                    sums[stats_index] += value;
+                    if value < mins[stats_index] {
+                        mins[stats_index] = value;
+                    }
+                    if value > maxs[stats_index] {
+                        maxs[stats_index] = value;
+                    }
+                }
+            }
+        } else {
+            for row_index in row_indices.iter() {
+                counts[*row_index as usize] = counts[*row_index as usize].saturating_add(1);
+            }
+        }
+
+        let matrix_array =
+            numpy::ndarray::Array2::from_shape_vec((pair_count, out_cols), matrix_buffer).map_err(
+                |err| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to build pair feature matrix: {}",
+                        err
+                    ))
+                },
+            )?;
+        let sums_array = numpy::ndarray::Array2::from_shape_vec((row_count, aggregate_cols), sums)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build aggregate sums matrix: {}",
+                    err
+                ))
+            })?;
+        let mins_array = numpy::ndarray::Array2::from_shape_vec((row_count, aggregate_cols), mins)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build aggregate mins matrix: {}",
+                    err
+                ))
+            })?;
+        let maxs_array = numpy::ndarray::Array2::from_shape_vec((row_count, aggregate_cols), maxs)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build aggregate maxs matrix: {}",
+                    err
+                ))
+            })?;
+        Ok((
+            matrix_array.to_pyarray(py),
+            numpy::ndarray::Array1::from_vec(counts).to_pyarray(py),
+            sums_array.to_pyarray(py),
+            mins_array.to_pyarray(py),
+            maxs_array.to_pyarray(py),
+        ))
+    }
+
+    #[pyo3(
+        signature = (
+            left_signature_indices,
+            right_signature_indices,
+            row_indices,
+            row_count,
+            matrix_indices = None,
+            aggregate_indices = None,
+            num_threads = None,
+            nan_value = f64::NAN,
+            aggregate_nan_value = None
+        )
+    )]
+    fn linker_pair_index_arrays_and_aggregate_stats<'py>(
+        &self,
+        py: Python<'py>,
+        left_signature_indices: PyReadonlyArray1<'py, u32>,
+        right_signature_indices: PyReadonlyArray1<'py, u32>,
+        row_indices: PyReadonlyArray1<'py, u32>,
+        row_count: usize,
+        matrix_indices: Option<Vec<usize>>,
+        aggregate_indices: Option<Vec<usize>>,
+        num_threads: Option<usize>,
+        nan_value: f64,
+        aggregate_nan_value: Option<f64>,
+    ) -> PyResult<(
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray1<u32>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+    )> {
+        let left_indices = left_signature_indices.as_slice()?;
+        let right_indices = right_signature_indices.as_slice()?;
+        let owner_row_indices = row_indices.as_slice()?;
+        let pair_count = left_indices.len();
+        if right_indices.len() != pair_count || owner_row_indices.len() != pair_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "left_signature_indices, right_signature_indices, and row_indices must have equal length: left={} right={} rows={}",
+                left_indices.len(),
+                right_indices.len(),
+                owner_row_indices.len()
+            )));
+        }
+
+        let full_cols = self.full_feature_count();
+        let resolved_matrix_indices: Vec<usize> =
+            matrix_indices.unwrap_or_else(|| (0..full_cols).collect());
+        for idx in resolved_matrix_indices.iter() {
+            if *idx >= full_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "matrix_indices contains out-of-range index {} for {} columns",
+                    idx, full_cols
+                )));
+            }
+        }
+
+        let resolved_aggregate_indices: Vec<usize> =
+            aggregate_indices.unwrap_or_else(|| resolved_matrix_indices.clone());
+        for idx in resolved_aggregate_indices.iter() {
+            if *idx >= full_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "aggregate_indices contains out-of-range index {} for {} columns",
+                    idx, full_cols
+                )));
+            }
+        }
+
+        let matrix_position_by_feature: HashMap<usize, usize> = resolved_matrix_indices
+            .iter()
+            .enumerate()
+            .map(|(position, feature_index)| (*feature_index, position))
+            .collect();
+        let mut aggregate_matrix_positions: Vec<usize> =
+            Vec::with_capacity(resolved_aggregate_indices.len());
+        for feature_index in resolved_aggregate_indices.iter() {
+            let Some(matrix_position) = matrix_position_by_feature.get(feature_index) else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "aggregate index {} is not present in matrix_indices; include it to avoid recomputation",
+                    feature_index
+                )));
+            };
+            aggregate_matrix_positions.push(*matrix_position);
+        }
+
+        let signature_ids = self.signature_id_order();
+        for (left_idx, right_idx) in left_indices.iter().zip(right_indices.iter()) {
+            let left = *left_idx as usize;
+            let right = *right_idx as usize;
+            if left >= signature_ids.len() || right >= signature_ids.len() {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "pair index out of range: left={} right={} signature_count={}",
+                    left,
+                    right,
+                    signature_ids.len()
+                )));
+            }
+        }
+        for row_index in owner_row_indices.iter() {
+            let bounded = *row_index as usize;
+            if bounded >= row_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "row index out of range: row_index={} row_count={}",
+                    bounded, row_count
+                )));
+            }
+        }
+
+        let mut lookup: Vec<(&SignatureData, &PaperData)> = Vec::with_capacity(signature_ids.len());
+        for signature_id in signature_ids.iter() {
+            let signature = self
+                .signatures
+                .get(signature_id)
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
+            })?;
+            lookup.push((signature, paper));
+        }
+
+        let out_cols = resolved_matrix_indices.len();
+        let aggregate_cols = resolved_aggregate_indices.len();
+        let resolved_aggregate_nan_value = aggregate_nan_value.unwrap_or(nan_value);
+        let matrix_buffer = py.allow_threads(|| {
+            let compute = || {
+                let mut buffer = vec![0.0_f64; pair_count * out_cols];
+                if out_cols == 0 {
+                    return buffer;
+                }
+                buffer
+                    .par_chunks_mut(out_cols)
+                    .zip(left_indices.par_iter().zip(right_indices.par_iter()))
+                    .for_each(|(out_row, (left_idx, right_idx))| {
+                        let (s1, p1) = lookup[*left_idx as usize];
+                        let (s2, p2) = lookup[*right_idx as usize];
+                        let row = self.featurize_pair_data(s1, s2, p1, p2);
+                        for (dest, idx) in out_row.iter_mut().zip(resolved_matrix_indices.iter()) {
+                            let mut value = row[*idx];
+                            if value.is_nan() && !nan_value.is_nan() {
+                                value = nan_value;
+                            }
+                            *dest = value;
+                        }
+                    });
+                buffer
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        let mut counts = vec![0_u32; row_count];
+        let mut sums = vec![0.0_f64; row_count * aggregate_cols];
+        let mut mins = vec![f64::INFINITY; row_count * aggregate_cols];
+        let mut maxs = vec![f64::NEG_INFINITY; row_count * aggregate_cols];
+        if aggregate_cols > 0 {
+            for (pair_offset, row_index) in owner_row_indices.iter().enumerate() {
+                let row_offset = *row_index as usize;
+                counts[row_offset] = counts[row_offset].saturating_add(1);
+                let matrix_row_start = pair_offset * out_cols;
+                let aggregate_row_start = row_offset * aggregate_cols;
+                for (aggregate_position, matrix_position) in
+                    aggregate_matrix_positions.iter().enumerate()
+                {
+                    let mut value = matrix_buffer[matrix_row_start + *matrix_position];
+                    if value.is_nan() && !resolved_aggregate_nan_value.is_nan() {
+                        value = resolved_aggregate_nan_value;
+                    }
+                    let stats_index = aggregate_row_start + aggregate_position;
+                    sums[stats_index] += value;
+                    if value < mins[stats_index] {
+                        mins[stats_index] = value;
+                    }
+                    if value > maxs[stats_index] {
+                        maxs[stats_index] = value;
+                    }
+                }
+            }
+        } else {
+            for row_index in owner_row_indices.iter() {
+                counts[*row_index as usize] = counts[*row_index as usize].saturating_add(1);
+            }
+        }
+
+        let matrix_array =
+            numpy::ndarray::Array2::from_shape_vec((pair_count, out_cols), matrix_buffer).map_err(
+                |err| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Failed to build pair feature matrix: {}",
+                        err
+                    ))
+                },
+            )?;
+        let sums_array = numpy::ndarray::Array2::from_shape_vec((row_count, aggregate_cols), sums)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build aggregate sums matrix: {}",
+                    err
+                ))
+            })?;
+        let mins_array = numpy::ndarray::Array2::from_shape_vec((row_count, aggregate_cols), mins)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build aggregate mins matrix: {}",
+                    err
+                ))
+            })?;
+        let maxs_array = numpy::ndarray::Array2::from_shape_vec((row_count, aggregate_cols), maxs)
+            .map_err(|err| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to build aggregate maxs matrix: {}",
+                    err
+                ))
+            })?;
+        Ok((
+            matrix_array.to_pyarray(py),
+            numpy::ndarray::Array1::from_vec(counts).to_pyarray(py),
+            sums_array.to_pyarray(py),
+            mins_array.to_pyarray(py),
+            maxs_array.to_pyarray(py),
+        ))
+    }
+
+    #[pyo3(
+        signature = (
+            left_signature_indices,
+            right_signature_indices,
+            row_indices,
+            row_count,
+            aggregate_indices = None,
+            num_threads = None,
+            nan_value = f64::NAN
+        )
+    )]
+    fn linker_pair_index_arrays_aggregate_stats<'py>(
+        &self,
+        py: Python<'py>,
+        left_signature_indices: PyReadonlyArray1<'py, u32>,
+        right_signature_indices: PyReadonlyArray1<'py, u32>,
+        row_indices: PyReadonlyArray1<'py, u32>,
+        row_count: usize,
+        aggregate_indices: Option<Vec<usize>>,
+        num_threads: Option<usize>,
+        nan_value: f64,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<u32>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+        Bound<'py, PyArray2<f64>>,
+    )> {
+        let left_indices = left_signature_indices.as_slice()?;
+        let right_indices = right_signature_indices.as_slice()?;
+        let owner_row_indices = row_indices.as_slice()?;
+        let pair_count = left_indices.len();
+        if right_indices.len() != pair_count || owner_row_indices.len() != pair_count {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "left_signature_indices, right_signature_indices, and row_indices must have equal length: left={} right={} rows={}",
+                left_indices.len(),
+                right_indices.len(),
+                owner_row_indices.len()
+            )));
+        }
+
+        let full_cols = self.full_feature_count();
+        let resolved_aggregate_indices: Vec<usize> =
+            aggregate_indices.unwrap_or_else(|| (0..full_cols).collect());
+        for idx in resolved_aggregate_indices.iter() {
+            if *idx >= full_cols {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "aggregate_indices contains out-of-range index {} for {} columns",
+                    idx, full_cols
+                )));
+            }
+        }
+
+        let signature_ids = self.signature_id_order();
+        for (left_idx, right_idx) in left_indices.iter().zip(right_indices.iter()) {
+            let left = *left_idx as usize;
+            let right = *right_idx as usize;
+            if left >= signature_ids.len() || right >= signature_ids.len() {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "pair index out of range: left={} right={} signature_count={}",
+                    left,
+                    right,
+                    signature_ids.len()
+                )));
+            }
+        }
+        for row_index in owner_row_indices.iter() {
+            let bounded = *row_index as usize;
+            if bounded >= row_count {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "row index out of range: row_index={} row_count={}",
+                    bounded, row_count
+                )));
+            }
+        }
+
+        let lookup = self.signature_paper_lookup()?;
+        let row_ranges = Self::pair_aggregate_row_ranges(owner_row_indices);
+        let aggregate_cols = resolved_aggregate_indices.len();
+        let aggregate_buffers = py.allow_threads(|| {
+            let compute = || match row_ranges.as_ref() {
+                Some(ranges) => self.aggregate_pair_index_arrays_grouped(
+                    left_indices,
+                    right_indices,
+                    ranges,
+                    row_count,
+                    &resolved_aggregate_indices,
+                    nan_value,
+                    &lookup,
+                ),
+                None => self.aggregate_pair_index_arrays_sequential(
+                    left_indices,
+                    right_indices,
+                    owner_row_indices,
+                    row_count,
+                    &resolved_aggregate_indices,
+                    nan_value,
+                    &lookup,
+                ),
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
+
+        let sums_array = numpy::ndarray::Array2::from_shape_vec(
+            (row_count, aggregate_cols),
+            aggregate_buffers.sums,
+        )
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to build aggregate sums matrix: {}",
+                err
+            ))
+        })?;
+        let mins_array = numpy::ndarray::Array2::from_shape_vec(
+            (row_count, aggregate_cols),
+            aggregate_buffers.mins,
+        )
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to build aggregate mins matrix: {}",
+                err
+            ))
+        })?;
+        let maxs_array = numpy::ndarray::Array2::from_shape_vec(
+            (row_count, aggregate_cols),
+            aggregate_buffers.maxs,
+        )
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to build aggregate maxs matrix: {}",
+                err
+            ))
+        })?;
+        Ok((
+            numpy::ndarray::Array1::from_vec(aggregate_buffers.counts).to_pyarray(py),
+            sums_array.to_pyarray(py),
+            mins_array.to_pyarray(py),
+            maxs_array.to_pyarray(py),
+        ))
+    }
+
+    #[pyo3(
+        signature = (
             block_signature_indices,
             start_offset = 0,
             max_pairs = None,
@@ -5906,11 +7393,8 @@ impl RustFeaturizer {
     }
 }
 
-#[pymethods]
 impl RustNameCompatibleSubblockSelector {
-    #[new]
-    #[pyo3(signature = (retrieval_subblock_index, name_tuples_path = None))]
-    fn new(
+    fn from_py(
         py: Python<'_>,
         retrieval_subblock_index: &Bound<'_, PyAny>,
         name_tuples_path: Option<String>,
@@ -5937,21 +7421,12 @@ impl RustNameCompatibleSubblockSelector {
         })
     }
 
-    #[pyo3(signature = (query_signature_id, query_first, component_keys, global_backfill_count = 0))]
-    fn select(
+    fn allowed_component_keys(
         &self,
         query_signature_id: &str,
         query_first: &str,
-        component_keys: &Bound<'_, PyAny>,
-        global_backfill_count: usize,
-    ) -> PyResult<Option<Vec<String>>> {
-        let Some(query_subblock) = self.signature_to_subblock.get(query_signature_id) else {
-            return Ok(None);
-        };
-        let ordered_component_keys: Vec<String> = PyIterator::from_object(component_keys)?
-            .map(|item| item.and_then(|value| value.extract()))
-            .collect::<PyResult<Vec<_>>>()?;
-
+    ) -> Option<HashSet<String>> {
+        let query_subblock = self.signature_to_subblock.get(query_signature_id)?;
         let mut allowed_components: HashSet<String> = HashSet::new();
         if let Some(components) = self.subblock_to_components.get(query_subblock) {
             allowed_components.extend(components.iter().cloned());
@@ -5966,14 +7441,24 @@ impl RustNameCompatibleSubblockSelector {
                 }
             }
         }
+        Some(allowed_components)
+    }
 
+    fn select_ordered_component_keys(
+        &self,
+        query_signature_id: &str,
+        query_first: &str,
+        ordered_component_keys: Vec<String>,
+        global_backfill_count: usize,
+    ) -> Option<Vec<String>> {
+        let allowed_components = self.allowed_component_keys(query_signature_id, query_first)?;
         let mut selected: Vec<String> = ordered_component_keys
             .iter()
             .filter(|component_key| allowed_components.contains(*component_key))
             .cloned()
             .collect();
         if selected.is_empty() {
-            return Ok(None);
+            return None;
         }
         if global_backfill_count > 0 {
             let mut selected_set: HashSet<String> = selected.iter().cloned().collect();
@@ -5988,7 +7473,78 @@ impl RustNameCompatibleSubblockSelector {
                 }
             }
         }
-        Ok(Some(selected))
+        Some(selected)
+    }
+
+    fn select_candidate_indices_for_summaries(
+        &self,
+        query_signature_id: &str,
+        query_first: &str,
+        summaries: &[RetrievalSummaryData],
+        base_candidate_indices: Option<&[usize]>,
+        global_backfill_count: usize,
+    ) -> Option<Vec<usize>> {
+        let allowed_components = self.allowed_component_keys(query_signature_id, query_first)?;
+        let ordered_indices: Vec<usize> = base_candidate_indices
+            .map_or_else(|| (0..summaries.len()).collect(), |values| values.to_vec());
+        let mut selected: Vec<usize> = ordered_indices
+            .iter()
+            .copied()
+            .filter(|index| allowed_components.contains(&summaries[*index].component_key))
+            .collect();
+        if selected.is_empty() {
+            return None;
+        }
+        if global_backfill_count > 0 {
+            let mut selected_set: HashSet<String> = selected
+                .iter()
+                .map(|index| summaries[*index].component_key.clone())
+                .collect();
+            let mut remaining = global_backfill_count;
+            for index in ordered_indices {
+                if remaining == 0 {
+                    break;
+                }
+                if selected_set.insert(summaries[index].component_key.clone()) {
+                    selected.push(index);
+                    remaining -= 1;
+                }
+            }
+        }
+        Some(selected)
+    }
+}
+
+#[pymethods]
+impl RustNameCompatibleSubblockSelector {
+    #[new]
+    #[pyo3(signature = (retrieval_subblock_index, name_tuples_path = None))]
+    fn new(
+        py: Python<'_>,
+        retrieval_subblock_index: &Bound<'_, PyAny>,
+        name_tuples_path: Option<String>,
+    ) -> PyResult<Self> {
+        Self::from_py(py, retrieval_subblock_index, name_tuples_path)
+    }
+
+    #[pyo3(signature = (query_signature_id, query_first, component_keys, global_backfill_count = 0))]
+    fn select(
+        &self,
+        query_signature_id: &str,
+        query_first: &str,
+        component_keys: &Bound<'_, PyAny>,
+        global_backfill_count: usize,
+    ) -> PyResult<Option<Vec<String>>> {
+        let ordered_component_keys: Vec<String> = PyIterator::from_object(component_keys)?
+            .map(|item| item.and_then(|value| value.extract()))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        Ok(self.select_ordered_component_keys(
+            query_signature_id,
+            query_first,
+            ordered_component_keys,
+            global_backfill_count,
+        ))
     }
 }
 
@@ -6094,7 +7650,7 @@ impl RustHybridCentroidRetriever {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        self.score_top_k_candidate_indices(
+        self.score_top_k_candidate_indices_experimental(
             py,
             &query_data,
             &candidate_indices,
@@ -6103,8 +7659,279 @@ impl RustHybridCentroidRetriever {
             num_threads,
             None,
             None,
-            Self::default_hybrid_weights(),
+            Self::default_hybrid_weights_for_query(&query_data),
+            Self::default_experimental_config_for_query(&query_data),
         )
+    }
+
+    #[pyo3(signature = (
+        queries,
+        query_signature_indices,
+        component_member_indices_by_key,
+        top_k,
+        num_threads = None,
+        query_signature_ids = None,
+        retrieval_subblock_index = None,
+        query_candidate_component_keys_by_signature_id = None,
+        full_first_global_backfill_count = 0
+    ))]
+    fn top_k_hybrid_centroid_pair_plan<'py>(
+        &self,
+        py: Python<'py>,
+        queries: &Bound<'py, PyAny>,
+        query_signature_indices: PyReadonlyArray1<'py, u32>,
+        component_member_indices_by_key: &Bound<'py, PyAny>,
+        top_k: usize,
+        num_threads: Option<usize>,
+        query_signature_ids: Option<&Bound<'py, PyAny>>,
+        retrieval_subblock_index: Option<&Bound<'py, PyAny>>,
+        query_candidate_component_keys_by_signature_id: Option<&Bound<'py, PyAny>>,
+        full_first_global_backfill_count: usize,
+    ) -> PyResult<Py<PyDict>> {
+        if top_k == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must be positive",
+            ));
+        }
+        let mut query_data = Vec::new();
+        for item in PyIterator::from_object(queries)? {
+            query_data.push(extract_retrieval_query(&item?)?);
+        }
+        let query_indices_slice = query_signature_indices.as_slice()?;
+        if query_data.len() != query_indices_slice.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "queries and query_signature_indices must have equal length: {} != {}",
+                query_data.len(),
+                query_indices_slice.len()
+            )));
+        }
+        let query_indices = query_indices_slice.to_vec();
+        let query_signature_ids = query_signature_ids
+            .map(|values| {
+                PyIterator::from_object(values)?
+                    .map(|item| item.and_then(|value| value.extract::<String>()))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
+        if let Some(values) = query_signature_ids.as_ref() {
+            if values.len() != query_data.len() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "queries and query_signature_ids must have equal length: {} != {}",
+                    query_data.len(),
+                    values.len()
+                )));
+            }
+        }
+        if retrieval_subblock_index.is_some() && query_signature_ids.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "query_signature_ids are required when retrieval_subblock_index is provided",
+            ));
+        }
+        if query_candidate_component_keys_by_signature_id.is_some() && query_signature_ids.is_none()
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "query_signature_ids are required when query candidate component keys are provided",
+            ));
+        }
+        let selector = retrieval_subblock_index
+            .map(|index| RustNameCompatibleSubblockSelector::from_py(py, index, None))
+            .transpose()?;
+        let query_candidate_indices_by_signature_id =
+            query_candidate_component_keys_by_signature_id
+                .map(|mapping| self.extract_candidate_indices_by_query_signature_id(mapping))
+                .transpose()?;
+        let component_member_indices =
+            extract_component_member_indices(component_member_indices_by_key)?;
+
+        let mut row_query_signature_indices = Vec::<u32>::new();
+        let mut row_component_keys = Vec::<String>::new();
+        let mut row_retrieval_scores = Vec::<f32>::new();
+        let mut row_retrieval_ranks = Vec::<u16>::new();
+        let mut row_component_sizes = Vec::<u32>::new();
+        let mut row_named_signature_counts = Vec::<u32>::new();
+        let mut row_dominant_first_names = Vec::<String>::new();
+        let mut row_candidate_year_min = Vec::<i32>::new();
+        let mut row_candidate_year_max = Vec::<i32>::new();
+        let mut row_candidate_year_range_missing = Vec::<u8>::new();
+        let mut row_query_first_tokens = Vec::<String>::new();
+        let mut row_query_years = Vec::<i32>::new();
+        let mut row_query_year_missing = Vec::<u8>::new();
+        let mut row_query_has_affiliations = Vec::<u8>::new();
+        let mut row_query_has_coauthors = Vec::<u8>::new();
+        let mut row_middle_initial_compatibility = Vec::<f32>::new();
+        let mut row_affiliation_overlap = Vec::<f32>::new();
+        let mut row_coauthor_overlap = Vec::<f32>::new();
+        let mut row_venue_overlap = Vec::<f32>::new();
+        let mut row_year_compatibility = Vec::<f32>::new();
+        let mut row_title_overlap = Vec::<f32>::new();
+        let mut row_specter_centroid_similarity = Vec::<f32>::new();
+        let mut row_specter_exemplar_similarity = Vec::<f32>::new();
+        let mut left_signature_indices = Vec::<u32>::new();
+        let mut right_signature_indices = Vec::<u32>::new();
+        let mut pair_row_indices = Vec::<u32>::new();
+
+        let query_results: Vec<Result<RetrievalPairPlanQueryResult, String>> =
+            py.allow_threads(|| {
+                let compute = || {
+                    query_data
+                        .par_iter()
+                        .enumerate()
+                        .map(|(query_offset, current_query)| {
+                            let query_signature_id = query_signature_ids
+                                .as_ref()
+                                .map(|values| values[query_offset].as_str());
+                            let base_candidate_indices =
+                                query_signature_id.and_then(|signature_id| {
+                                    query_candidate_indices_by_signature_id.as_ref().and_then(
+                                        |mapping| mapping.get(signature_id).map(Vec::as_slice),
+                                    )
+                                });
+                            self.build_pair_plan_query_result(
+                                current_query,
+                                query_indices[query_offset],
+                                base_candidate_indices,
+                                query_signature_id,
+                                &component_member_indices,
+                                top_k,
+                                selector.as_ref(),
+                                full_first_global_backfill_count,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                install_with_optional_rayon_pool(num_threads, compute)
+            });
+
+        for query_result in query_results {
+            let mut query_result = query_result.map_err(pyo3::exceptions::PyKeyError::new_err)?;
+            let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "retrieved candidate row count exceeds u32",
+                )
+            })?;
+            for (local_row_index, member_indices) in query_result
+                .right_signature_indices_by_row
+                .iter()
+                .enumerate()
+            {
+                let local_row_index = u32::try_from(local_row_index).map_err(|_| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "retrieved candidate row count exceeds u32",
+                    )
+                })?;
+                let row_index = base_row_index.checked_add(local_row_index).ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "retrieved candidate row count exceeds u32",
+                    )
+                })?;
+                let query_signature_index =
+                    query_result.row_query_signature_indices[local_row_index as usize];
+                for member_index in member_indices.iter() {
+                    left_signature_indices.push(query_signature_index);
+                    right_signature_indices.push(*member_index);
+                    pair_row_indices.push(row_index);
+                }
+            }
+            row_query_signature_indices.append(&mut query_result.row_query_signature_indices);
+            row_component_keys.append(&mut query_result.row_component_keys);
+            row_retrieval_scores.append(&mut query_result.row_retrieval_scores);
+            row_retrieval_ranks.append(&mut query_result.row_retrieval_ranks);
+            row_component_sizes.append(&mut query_result.row_component_sizes);
+            row_named_signature_counts.append(&mut query_result.row_named_signature_counts);
+            row_dominant_first_names.append(&mut query_result.row_dominant_first_names);
+            row_candidate_year_min.append(&mut query_result.row_candidate_year_min);
+            row_candidate_year_max.append(&mut query_result.row_candidate_year_max);
+            row_candidate_year_range_missing
+                .append(&mut query_result.row_candidate_year_range_missing);
+            row_query_first_tokens.append(&mut query_result.row_query_first_tokens);
+            row_query_years.append(&mut query_result.row_query_years);
+            row_query_year_missing.append(&mut query_result.row_query_year_missing);
+            row_query_has_affiliations.append(&mut query_result.row_query_has_affiliations);
+            row_query_has_coauthors.append(&mut query_result.row_query_has_coauthors);
+            row_middle_initial_compatibility
+                .append(&mut query_result.row_middle_initial_compatibility);
+            row_affiliation_overlap.append(&mut query_result.row_affiliation_overlap);
+            row_coauthor_overlap.append(&mut query_result.row_coauthor_overlap);
+            row_venue_overlap.append(&mut query_result.row_venue_overlap);
+            row_year_compatibility.append(&mut query_result.row_year_compatibility);
+            row_title_overlap.append(&mut query_result.row_title_overlap);
+            row_specter_centroid_similarity
+                .append(&mut query_result.row_specter_centroid_similarity);
+            row_specter_exemplar_similarity
+                .append(&mut query_result.row_specter_exemplar_similarity);
+        }
+
+        let payload = PyDict::new(py);
+        payload.set_item("row_count", row_component_keys.len())?;
+        payload.set_item(
+            "left_signature_indices",
+            left_signature_indices.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "right_signature_indices",
+            right_signature_indices.to_pyarray(py),
+        )?;
+        payload.set_item("pair_row_indices", pair_row_indices.to_pyarray(py))?;
+        payload.set_item(
+            "row_query_signature_indices",
+            row_query_signature_indices.to_pyarray(py),
+        )?;
+        payload.set_item("row_component_keys", row_component_keys)?;
+        payload.set_item("retrieval_scores", row_retrieval_scores.to_pyarray(py))?;
+        payload.set_item("retrieval_ranks", row_retrieval_ranks.to_pyarray(py))?;
+        payload.set_item("row_component_sizes", row_component_sizes.to_pyarray(py))?;
+        payload.set_item(
+            "row_named_signature_counts",
+            row_named_signature_counts.to_pyarray(py),
+        )?;
+        payload.set_item("row_dominant_first_names", row_dominant_first_names)?;
+        payload.set_item(
+            "row_candidate_year_min",
+            row_candidate_year_min.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_year_max",
+            row_candidate_year_max.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_candidate_year_range_missing",
+            row_candidate_year_range_missing.to_pyarray(py),
+        )?;
+        payload.set_item("row_query_first_tokens", row_query_first_tokens)?;
+        payload.set_item("row_query_years", row_query_years.to_pyarray(py))?;
+        payload.set_item(
+            "row_query_year_missing",
+            row_query_year_missing.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_query_has_affiliations",
+            row_query_has_affiliations.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "row_query_has_coauthors",
+            row_query_has_coauthors.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "middle_initial_compatibility",
+            row_middle_initial_compatibility.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "affiliation_overlap",
+            row_affiliation_overlap.to_pyarray(py),
+        )?;
+        payload.set_item("coauthor_overlap", row_coauthor_overlap.to_pyarray(py))?;
+        payload.set_item("venue_overlap", row_venue_overlap.to_pyarray(py))?;
+        payload.set_item("year_compatibility", row_year_compatibility.to_pyarray(py))?;
+        payload.set_item("title_overlap", row_title_overlap.to_pyarray(py))?;
+        payload.set_item(
+            "specter_centroid_similarity",
+            row_specter_centroid_similarity.to_pyarray(py),
+        )?;
+        payload.set_item(
+            "specter_exemplar_similarity",
+            row_specter_exemplar_similarity.to_pyarray(py),
+        )?;
+        Ok(payload.unbind())
     }
 
     #[pyo3(signature = (query, top_k, weights, num_threads = None))]
@@ -6213,7 +8040,7 @@ impl RustHybridCentroidRetriever {
         }
 
         let override_data = override_summary
-            .map(|value| extract_retrieval_summary(value, false))
+            .map(|value| extract_retrieval_summary(value, true))
             .transpose()?;
         let override_index = if let Some(override_summary_data) = override_data.as_ref() {
             let Some(candidate_index) = self
@@ -6236,7 +8063,7 @@ impl RustHybridCentroidRetriever {
             None
         };
 
-        self.score_top_k_candidate_indices(
+        self.score_top_k_candidate_indices_experimental(
             py,
             &query_data,
             &candidate_indices,
@@ -6245,7 +8072,8 @@ impl RustHybridCentroidRetriever {
             num_threads,
             override_index,
             override_data.as_ref(),
-            Self::default_hybrid_weights(),
+            Self::default_hybrid_weights_for_query(&query_data),
+            Self::default_experimental_config_for_query(&query_data),
         )
     }
 
@@ -6507,6 +8335,854 @@ impl RustHybridCentroidRetriever {
     }
 }
 
+const LINKER_CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE: f32 = 192.0;
+const LINKER_GENERIC_HEURISTIC_OVERRIDE_MARGIN: f32 = 0.01;
+const LINKER_GENERIC_CROSS_FAMILY_EXTRA_MARGIN: f32 = 0.04;
+const LINKER_GENERIC_FAMILY_MIN_COUNT: f32 = 3.0;
+const LINKER_GENERIC_FAMILY_MIN_RATIO: f32 = 0.6;
+const LINKER_EXACT_TITLE_ANCHOR_THRESHOLD: f32 = 0.95;
+const LINKER_ANCHOR_SUPPORT_OVERLAP_THRESHOLD: f32 = 0.05;
+const LINKER_ANCHOR_YEAR_COMPATIBILITY_THRESHOLD: f32 = 0.85;
+
+fn linker_round(value: f32, scale: f32) -> f32 {
+    (value * scale).round() / scale
+}
+
+fn linker_clip01(value: f32) -> f32 {
+    value.clamp(0.0, 1.0)
+}
+
+fn linker_bool(value: bool) -> f32 {
+    if value {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn linker_dict_item<'py>(dict: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    dict.get_item(key)?.ok_or_else(|| {
+        pyo3::exceptions::PyKeyError::new_err(format!("Missing linker row signal: {key}"))
+    })
+}
+
+fn linker_extract_f32_vec(
+    dict: &Bound<'_, PyDict>,
+    key: &str,
+    row_count: usize,
+) -> PyResult<Vec<f32>> {
+    let obj = linker_dict_item(dict, key)?;
+    let values = if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
+        arr.readonly().as_slice()?.to_vec()
+    } else if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
+        arr.readonly()
+            .as_slice()?
+            .iter()
+            .map(|value| *value as f32)
+            .collect()
+    } else if let Ok(arr) = obj.downcast::<PyArray1<u16>>() {
+        arr.readonly()
+            .as_slice()?
+            .iter()
+            .map(|value| *value as f32)
+            .collect()
+    } else if let Ok(arr) = obj.downcast::<PyArray1<u32>>() {
+        arr.readonly()
+            .as_slice()?
+            .iter()
+            .map(|value| *value as f32)
+            .collect()
+    } else if let Ok(arr) = obj.downcast::<PyArray1<i32>>() {
+        arr.readonly()
+            .as_slice()?
+            .iter()
+            .map(|value| *value as f32)
+            .collect()
+    } else if let Ok(arr) = obj.downcast::<PyArray1<u8>>() {
+        arr.readonly()
+            .as_slice()?
+            .iter()
+            .map(|value| *value as f32)
+            .collect()
+    } else {
+        let mut out = Vec::with_capacity(row_count);
+        for item in PyIterator::from_object(&obj)? {
+            out.push(item?.extract::<f64>()? as f32);
+        }
+        out
+    };
+    if values.len() != row_count {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Signal {key:?} must have row_count={row_count}, got {}",
+            values.len()
+        )));
+    }
+    if values.iter().any(|value| value.is_nan()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Signal {key:?} contains NaN values"
+        )));
+    }
+    Ok(values)
+}
+
+fn linker_extract_string_vec(
+    dict: &Bound<'_, PyDict>,
+    key: &str,
+    row_count: usize,
+) -> PyResult<Vec<String>> {
+    let obj = linker_dict_item(dict, key)?;
+    let mut values = Vec::with_capacity(row_count);
+    for item in PyIterator::from_object(&obj)? {
+        let current = item?;
+        if current.is_none() {
+            values.push(String::new());
+        } else {
+            values.push(current.extract::<String>()?);
+        }
+    }
+    if values.len() != row_count {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Signal {key:?} must have row_count={row_count}, got {}",
+            values.len()
+        )));
+    }
+    Ok(values)
+}
+
+fn linker_optional_string_vec(
+    dict: &Bound<'_, PyDict>,
+    key: &str,
+    row_count: usize,
+) -> PyResult<Option<Vec<String>>> {
+    if dict.get_item(key)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(linker_extract_string_vec(dict, key, row_count)?))
+}
+
+fn linker_groups(row_query_signature_indices: &[u32]) -> Vec<Vec<usize>> {
+    let mut ordered: Vec<usize> = (0..row_query_signature_indices.len()).collect();
+    ordered.sort_by_key(|index| row_query_signature_indices[*index]);
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    while start < ordered.len() {
+        let query_index = row_query_signature_indices[ordered[start]];
+        let mut end = start + 1;
+        while end < ordered.len() && row_query_signature_indices[ordered[end]] == query_index {
+            end += 1;
+        }
+        groups.push(ordered[start..end].to_vec());
+        start = end;
+    }
+    groups
+}
+
+fn linker_retrieval_ordered_groups(
+    groups: &[Vec<usize>],
+    retrieval_rank: &[f32],
+    component_keys: &[String],
+) -> Vec<Vec<usize>> {
+    let mut out = Vec::with_capacity(groups.len());
+    for group in groups {
+        let mut ordered = group.clone();
+        ordered.sort_by(|left, right| {
+            (retrieval_rank[*left] as i64)
+                .cmp(&(retrieval_rank[*right] as i64))
+                .then_with(|| component_keys[*left].cmp(&component_keys[*right]))
+        });
+        out.push(ordered);
+    }
+    out
+}
+
+fn linker_best_index_by_group(
+    primary: &[f32],
+    retrieval_rank: &[f32],
+    component_keys: &[String],
+    groups: &[Vec<usize>],
+    higher_is_better: bool,
+) -> Vec<usize> {
+    let mut out = vec![0usize; primary.len()];
+    for group in groups {
+        let mut best = group[0];
+        for index in group.iter().copied().skip(1) {
+            let current_key = if higher_is_better {
+                (
+                    -primary[index],
+                    retrieval_rank[index] as i64,
+                    component_keys[index].as_str(),
+                )
+            } else {
+                (
+                    primary[index],
+                    retrieval_rank[index] as i64,
+                    component_keys[index].as_str(),
+                )
+            };
+            let best_key = if higher_is_better {
+                (
+                    -primary[best],
+                    retrieval_rank[best] as i64,
+                    component_keys[best].as_str(),
+                )
+            } else {
+                (
+                    primary[best],
+                    retrieval_rank[best] as i64,
+                    component_keys[best].as_str(),
+                )
+            };
+            if current_key < best_key {
+                best = index;
+            }
+        }
+        for index in group {
+            out[*index] = best;
+        }
+    }
+    out
+}
+
+fn linker_normalize_alpha(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| character.to_lowercase())
+        .filter(|character| character.is_ascii_alphabetic())
+        .collect()
+}
+
+fn linker_normalized_alpha_vec(values: &[String]) -> Vec<String> {
+    let mut cache = HashMap::<String, String>::new();
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        if let Some(normalized) = cache.get(value) {
+            out.push(normalized.clone());
+        } else {
+            let normalized = linker_normalize_alpha(value);
+            cache.insert(value.clone(), normalized.clone());
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+fn linker_family_ids(
+    component_keys: &[String],
+    dominant_first_names: &[String],
+    named_signature_count: &[f32],
+    cluster_size: &[f32],
+) -> Vec<String> {
+    let mut out = component_keys.to_vec();
+    for index in 0..component_keys.len() {
+        let dominant = dominant_first_names[index].as_str();
+        let named_count = named_signature_count[index];
+        let dominance_ratio = named_count / cluster_size[index].max(1.0);
+        if !dominant.is_empty()
+            && named_count >= LINKER_GENERIC_FAMILY_MIN_COUNT
+            && dominance_ratio >= LINKER_GENERIC_FAMILY_MIN_RATIO
+        {
+            out[index] = dominant.to_string();
+        }
+    }
+    out
+}
+
+fn linker_confident_family_mask(family_ids: &[String], component_keys: &[String]) -> Vec<bool> {
+    family_ids
+        .iter()
+        .zip(component_keys.iter())
+        .map(|(family, component)| !family.is_empty() && family != component)
+        .collect()
+}
+
+fn linker_coarse_family_keys(
+    dominant_first_alpha: &[String],
+    family_alpha: &[String],
+    component_alpha: &[String],
+) -> Vec<String> {
+    dominant_first_alpha
+        .iter()
+        .zip(family_alpha.iter())
+        .zip(component_alpha.iter())
+        .map(|((dominant, family), component)| {
+            let source = if !dominant.is_empty() {
+                dominant
+            } else if !family.is_empty() {
+                family
+            } else {
+                component
+            };
+            source.chars().take(3).collect()
+        })
+        .collect()
+}
+
+fn linker_cross_family(
+    left: usize,
+    right: usize,
+    family_ids: &[String],
+    confident_family: &[bool],
+) -> bool {
+    confident_family[left] && confident_family[right] && family_ids[left] != family_ids[right]
+}
+
+struct LinkerGroupFeatures {
+    retrieval_score_gap_vs_best_competitor: Vec<f32>,
+    retrieval_score_best_gap: Vec<f32>,
+    same_family_as_top1: Vec<f32>,
+    same_family_as_best_top5: Vec<f32>,
+    same_family_as_heuristic_choice: Vec<f32>,
+    coarse_family_top5_best_gap: Vec<f32>,
+    candidate_pair_share_within_coarse_family: Vec<f32>,
+}
+
+fn linker_derive_group_features(
+    ordered_groups: &[Vec<usize>],
+    retrieval_score: &[f32],
+    retrieval_rank: &[f32],
+    component_keys: &[String],
+    family_ids: &[String],
+    confident_family: &[bool],
+    coarse_family_keys: &[String],
+    pair_count: &[f32],
+    top5_mean_distance: &[f32],
+) -> LinkerGroupFeatures {
+    let row_count = retrieval_score.len();
+    let mut retrieval_score_gap_vs_best_competitor = vec![0.0f32; row_count];
+    let mut retrieval_score_best_gap = vec![0.0f32; row_count];
+    let mut same_family_as_top1 = vec![0.0f32; row_count];
+    let mut same_family_as_best_top5 = vec![0.0f32; row_count];
+    let mut same_family_as_heuristic_choice = vec![0.0f32; row_count];
+    let mut coarse_family_top5_best_gap = vec![0.0f32; row_count];
+    let mut candidate_pair_share_within_coarse_family = vec![1.0f32; row_count];
+
+    for ordered in ordered_groups {
+        let top1 = ordered[0];
+        let runner_up = if ordered.len() > 1 {
+            ordered[1]
+        } else {
+            ordered[0]
+        };
+        let mut best_top5 = ordered[0];
+        for index in ordered.iter().copied().skip(1) {
+            let current_key = (
+                top5_mean_distance[index],
+                retrieval_rank[index] as i64,
+                component_keys[index].as_str(),
+            );
+            let best_key = (
+                top5_mean_distance[best_top5],
+                retrieval_rank[best_top5] as i64,
+                component_keys[best_top5].as_str(),
+            );
+            if current_key < best_key {
+                best_top5 = index;
+            }
+        }
+        let mut heuristic_choice = best_top5;
+        if best_top5 != top1 {
+            let mut effective_margin = LINKER_GENERIC_HEURISTIC_OVERRIDE_MARGIN;
+            if linker_cross_family(top1, best_top5, family_ids, confident_family) {
+                effective_margin += LINKER_GENERIC_CROSS_FAMILY_EXTRA_MARGIN;
+            }
+            if top5_mean_distance[best_top5] + effective_margin >= top5_mean_distance[top1] {
+                heuristic_choice = top1;
+            }
+        }
+        let best_score = ordered
+            .iter()
+            .map(|index| retrieval_score[*index])
+            .fold(f32::NEG_INFINITY, f32::max);
+        for index in ordered {
+            let competitor = if *index == top1 { runner_up } else { top1 };
+            retrieval_score_gap_vs_best_competitor[*index] = linker_round(
+                retrieval_score[*index] - retrieval_score[competitor],
+                1_000_000.0,
+            );
+            retrieval_score_best_gap[*index] =
+                linker_round(best_score - retrieval_score[*index], 1_000_000.0);
+            same_family_as_top1[*index] = linker_bool(
+                !family_ids[*index].is_empty() && family_ids[*index] == family_ids[top1],
+            );
+            same_family_as_best_top5[*index] = linker_bool(
+                !family_ids[*index].is_empty() && family_ids[*index] == family_ids[best_top5],
+            );
+            same_family_as_heuristic_choice[*index] = linker_bool(
+                !family_ids[*index].is_empty()
+                    && family_ids[*index] == family_ids[heuristic_choice],
+            );
+        }
+
+        let mut coarse_to_rows: HashMap<String, Vec<usize>> = HashMap::new();
+        for index in ordered {
+            coarse_to_rows
+                .entry(coarse_family_keys[*index].clone())
+                .or_default()
+                .push(*index);
+        }
+        for coarse_rows in coarse_to_rows.values() {
+            let total_pairs = coarse_rows
+                .iter()
+                .map(|index| pair_count[*index])
+                .sum::<f32>()
+                .max(1.0);
+            let mut best = coarse_rows[0];
+            for index in coarse_rows.iter().copied().skip(1) {
+                let current_key = (
+                    top5_mean_distance[index],
+                    retrieval_rank[index] as i64,
+                    component_keys[index].as_str(),
+                );
+                let best_key = (
+                    top5_mean_distance[best],
+                    retrieval_rank[best] as i64,
+                    component_keys[best].as_str(),
+                );
+                if current_key < best_key {
+                    best = index;
+                }
+            }
+            for index in coarse_rows {
+                coarse_family_top5_best_gap[*index] = linker_round(
+                    top5_mean_distance[*index] - top5_mean_distance[best],
+                    1_000_000.0,
+                );
+                candidate_pair_share_within_coarse_family[*index] =
+                    linker_round(pair_count[*index] / total_pairs, 1_000_000.0);
+            }
+        }
+    }
+
+    LinkerGroupFeatures {
+        retrieval_score_gap_vs_best_competitor,
+        retrieval_score_best_gap,
+        same_family_as_top1,
+        same_family_as_best_top5,
+        same_family_as_heuristic_choice,
+        coarse_family_top5_best_gap,
+        candidate_pair_share_within_coarse_family,
+    }
+}
+
+fn linker_year_mismatch_severity(
+    query_year: &[f32],
+    query_year_missing: &[f32],
+    candidate_year_min: &[f32],
+    candidate_year_max: &[f32],
+    candidate_year_range_missing: &[f32],
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; query_year.len()];
+    for index in 0..query_year.len() {
+        if query_year_missing[index] != 0.0 || candidate_year_range_missing[index] != 0.0 {
+            continue;
+        }
+        if query_year[index] < candidate_year_min[index] {
+            out[index] = linker_round(
+                ((candidate_year_min[index] - query_year[index]) / 10.0).min(1.0),
+                1_000_000.0,
+            );
+        } else if query_year[index] > candidate_year_max[index] {
+            out[index] = linker_round(
+                ((query_year[index] - candidate_year_max[index]) / 10.0).min(1.0),
+                1_000_000.0,
+            );
+        }
+    }
+    out
+}
+
+fn linker_set_f32_array<'py>(
+    py: Python<'py>,
+    payload: &Bound<'py, PyDict>,
+    key: &str,
+    values: Vec<f32>,
+) -> PyResult<()> {
+    payload.set_item(key, values.to_pyarray(py))?;
+    Ok(())
+}
+
+#[pyfunction]
+fn promoted_linker_non_pairwise_features<'py>(
+    py: Python<'py>,
+    signals: &Bound<'py, PyDict>,
+) -> PyResult<Py<PyDict>> {
+    let row_query_signature_indices_obj = linker_dict_item(signals, "row_query_signature_indices")?;
+    let row_query_signature_indices =
+        if let Ok(arr) = row_query_signature_indices_obj.downcast::<PyArray1<u32>>() {
+            arr.readonly().as_slice()?.to_vec()
+        } else {
+            let mut out = Vec::new();
+            for item in PyIterator::from_object(&row_query_signature_indices_obj)? {
+                out.push(item?.extract::<u32>()?);
+            }
+            out
+        };
+    let row_count = row_query_signature_indices.len();
+
+    let retrieval_score = linker_extract_f32_vec(signals, "retrieval_score", row_count)?;
+    let retrieval_rank = linker_extract_f32_vec(signals, "retrieval_rank", row_count)?;
+    let component_keys = linker_extract_string_vec(signals, "candidate_component_key", row_count)?;
+    let query_view = linker_extract_string_vec(signals, "query_view", row_count)?;
+    let cluster_size = linker_extract_f32_vec(signals, "cluster_size", row_count)?;
+    let named_signature_count =
+        linker_extract_f32_vec(signals, "named_signature_count", row_count)?;
+    let dominant_first_name = linker_extract_string_vec(signals, "dominant_first_name", row_count)?;
+    let candidate_year_min = linker_extract_f32_vec(signals, "candidate_year_min", row_count)?;
+    let candidate_year_max = linker_extract_f32_vec(signals, "candidate_year_max", row_count)?;
+    let candidate_year_range_missing =
+        linker_extract_f32_vec(signals, "candidate_year_range_missing", row_count)?;
+    let query_first_token = linker_extract_string_vec(signals, "query_first_token", row_count)?;
+    let query_year = linker_extract_f32_vec(signals, "query_year", row_count)?;
+    let query_year_missing = linker_extract_f32_vec(signals, "query_year_missing", row_count)?;
+    let query_has_affiliations =
+        linker_extract_f32_vec(signals, "query_has_affiliations", row_count)?;
+    let query_has_coauthors = linker_extract_f32_vec(signals, "query_has_coauthors", row_count)?;
+    let affiliation_overlap = linker_extract_f32_vec(signals, "affiliation_overlap", row_count)?;
+    let coauthor_overlap = linker_extract_f32_vec(signals, "coauthor_overlap", row_count)?;
+    let venue_overlap = linker_extract_f32_vec(signals, "venue_overlap", row_count)?;
+    let year_compatibility = linker_extract_f32_vec(signals, "year_compatibility", row_count)?;
+    let title_overlap = linker_extract_f32_vec(signals, "title_overlap", row_count)?;
+    let specter_exemplar_similarity =
+        linker_extract_f32_vec(signals, "specter_exemplar_similarity", row_count)?;
+    let min_distance = linker_extract_f32_vec(signals, "min_distance", row_count)?;
+    let top5_mean_distance = linker_extract_f32_vec(signals, "top5_mean_distance", row_count)?;
+    let pair_count = linker_extract_f32_vec(signals, "pair_count", row_count)?;
+    let last_name_count_min_rarity =
+        linker_extract_f32_vec(signals, "last_name_count_min_rarity", row_count)?;
+    let candidate_last_first_name_count_min_rarity = linker_extract_f32_vec(
+        signals,
+        "candidate_last_first_name_count_min_rarity",
+        row_count,
+    )?;
+    let last_first_name_count_min_rarity =
+        linker_extract_f32_vec(signals, "last_first_name_count_min_rarity", row_count)?;
+    let first_prefix_x_last_first_name_count_min_rarity = linker_extract_f32_vec(
+        signals,
+        "first_prefix_x_last_first_name_count_min_rarity",
+        row_count,
+    )?;
+
+    let groups = linker_groups(&row_query_signature_indices);
+    let ordered_groups = linker_retrieval_ordered_groups(&groups, &retrieval_rank, &component_keys);
+    let family_ids_from_signal = linker_optional_string_vec(signals, "family_id", row_count)?;
+    let generated_family_id_count = if family_ids_from_signal.is_some() {
+        0usize
+    } else {
+        row_count
+    };
+    let family_ids = family_ids_from_signal.unwrap_or_else(|| {
+        linker_family_ids(
+            &component_keys,
+            &dominant_first_name,
+            &named_signature_count,
+            &cluster_size,
+        )
+    });
+    let generic_family_override_count = family_ids
+        .iter()
+        .zip(component_keys.iter())
+        .filter(|(family, component)| !family.is_empty() && *family != *component)
+        .count();
+    let confident_family = linker_confident_family_mask(&family_ids, &component_keys);
+    let query_first_alpha = linker_normalized_alpha_vec(&query_first_token);
+    let dominant_first_alpha = linker_normalized_alpha_vec(&dominant_first_name);
+    let family_alpha = linker_normalized_alpha_vec(&family_ids);
+    let component_alpha = linker_normalized_alpha_vec(&component_keys);
+    let coarse_family_keys =
+        linker_coarse_family_keys(&dominant_first_alpha, &family_alpha, &component_alpha);
+    let best_top5_indices = linker_best_index_by_group(
+        &top5_mean_distance,
+        &retrieval_rank,
+        &component_keys,
+        &groups,
+        false,
+    );
+    let group_features = linker_derive_group_features(
+        &ordered_groups,
+        &retrieval_score,
+        &retrieval_rank,
+        &component_keys,
+        &family_ids,
+        &confident_family,
+        &coarse_family_keys,
+        &pair_count,
+        &top5_mean_distance,
+    );
+    let year_mismatch_severity = linker_year_mismatch_severity(
+        &query_year,
+        &query_year_missing,
+        &candidate_year_min,
+        &candidate_year_max,
+        &candidate_year_range_missing,
+    );
+
+    let mut affiliation_contradiction_severity = vec![0.0f32; row_count];
+    let mut first_name_compatibility = vec![0.0f32; row_count];
+    let mut coauthor_contradiction = vec![0.0f32; row_count];
+    let mut contradiction = vec![0.0f32; row_count];
+    let mut exact_anchor_evidence_flag = vec![0.0f32; row_count];
+    let mut anchor_evidence_count = vec![0.0f32; row_count];
+    let mut strong_positive_anchor_score = vec![0.0f32; row_count];
+    let mut weak_residual_anchor_score = vec![0.0f32; row_count];
+    let mut sparse_relative_winner_score = vec![0.0f32; row_count];
+    let mut query_first_prefix_match = vec![0.0f32; row_count];
+    let mut cluster_size_log_capped = vec![0.0f32; row_count];
+    let mut distance_spread_top5_minus_min = vec![0.0f32; row_count];
+    let mut query_view_initial_only = vec![0.0f32; row_count];
+    let mut top5_distance_best_gap = vec![0.0f32; row_count];
+
+    let log_reference = (1.0 + LINKER_CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE).ln();
+    for index in 0..row_count {
+        if query_has_affiliations[index] > 0.0 {
+            affiliation_contradiction_severity[index] =
+                linker_round((1.0 - affiliation_overlap[index]).max(0.0), 1_000_000.0);
+        }
+        let query_first = &query_first_alpha[index];
+        let dominant_first = &dominant_first_alpha[index];
+        if !dominant_first.is_empty()
+            && ((!query_first.is_empty()
+                && (query_first == dominant_first
+                    || query_first.starts_with(dominant_first)
+                    || dominant_first.starts_with(query_first)))
+                || (!query_first.is_empty() && dominant_first.starts_with(&query_first[0..1])))
+        {
+            first_name_compatibility[index] = 1.0;
+        }
+        if query_has_coauthors[index] > 0.0 {
+            coauthor_contradiction[index] = (1.0 - coauthor_overlap[index]).max(0.0);
+        }
+        let title_anchor = title_overlap[index] >= LINKER_EXACT_TITLE_ANCHOR_THRESHOLD;
+        contradiction[index] = year_mismatch_severity[index]
+            .max(affiliation_contradiction_severity[index])
+            .max(if title_anchor {
+                coauthor_contradiction[index]
+            } else {
+                0.0
+            })
+            .max(if title_anchor && first_name_compatibility[index] <= 0.0 {
+                1.0
+            } else {
+                0.0
+            });
+        exact_anchor_evidence_flag[index] = linker_bool(
+            title_overlap[index] >= LINKER_EXACT_TITLE_ANCHOR_THRESHOLD
+                && (coauthor_overlap[index] >= LINKER_ANCHOR_SUPPORT_OVERLAP_THRESHOLD
+                    || affiliation_overlap[index] >= LINKER_ANCHOR_SUPPORT_OVERLAP_THRESHOLD
+                    || year_compatibility[index] >= LINKER_ANCHOR_YEAR_COMPATIBILITY_THRESHOLD),
+        );
+        let retrieval_gap = group_features.retrieval_score_gap_vs_best_competitor[index];
+        anchor_evidence_count[index] = linker_bool(min_distance[index] <= 0.15)
+            + linker_bool(specter_exemplar_similarity[index] >= 0.70)
+            + linker_bool(title_overlap[index] >= 0.20)
+            + linker_bool(coauthor_overlap[index] >= 0.25)
+            + linker_bool(affiliation_overlap[index] >= 0.25)
+            + linker_bool(venue_overlap[index] >= 0.20)
+            + linker_bool(year_compatibility[index] >= 0.90)
+            + linker_bool(retrieval_gap >= 0.02);
+        let support_strength = 0.20 * (1.0 - linker_clip01(min_distance[index]))
+            + 0.20 * linker_clip01(specter_exemplar_similarity[index])
+            + 0.18 * linker_clip01(title_overlap[index])
+            + 0.18 * linker_clip01(coauthor_overlap[index])
+            + 0.12 * linker_clip01(affiliation_overlap[index])
+            + 0.06 * linker_clip01(venue_overlap[index])
+            + 0.06 * linker_clip01(year_compatibility[index]);
+        let same_top1 = group_features.same_family_as_top1[index];
+        strong_positive_anchor_score[index] = linker_round(
+            linker_clip01(support_strength)
+                * (0.5 + 0.5 * linker_clip01(same_top1))
+                * (0.35 + 0.65 * linker_clip01(1.0 - contradiction[index])),
+            1_000_000.0,
+        );
+        let retrieval_gap_scaled = linker_clip01((retrieval_gap.clamp(-0.2, 0.3) + 0.2) / 0.5);
+        let residual_support = 0.28 * (1.0 - linker_clip01(min_distance[index]))
+            + 0.20 * linker_clip01(specter_exemplar_similarity[index])
+            + 0.20 * linker_clip01(coauthor_overlap[index])
+            + 0.14 * linker_clip01(title_overlap[index])
+            + 0.10 * linker_clip01(year_compatibility[index])
+            + 0.08 * retrieval_gap_scaled;
+        let tiny_candidate =
+            linker_bool(cluster_size[index] <= 2.0 || named_signature_count[index] <= 2.0);
+        weak_residual_anchor_score[index] = linker_round(
+            tiny_candidate * same_top1 * linker_clip01(residual_support),
+            1_000_000.0,
+        );
+        sparse_relative_winner_score[index] = linker_round(
+            linker_bool(retrieval_rank[index] <= 1.0)
+                * same_top1
+                * linker_clip01(retrieval_gap.clamp(0.0, 0.3) / 0.3)
+                * (1.0
+                    - linker_clip01(
+                        group_features.candidate_pair_share_within_coarse_family[index],
+                    ))
+                * linker_clip01(residual_support),
+            1_000_000.0,
+        );
+        query_first_prefix_match[index] = linker_bool(
+            !query_first.is_empty()
+                && py_len(query_first) > 1
+                && !dominant_first.is_empty()
+                && (query_first.starts_with(dominant_first)
+                    || dominant_first.starts_with(query_first)),
+        );
+        if cluster_size[index] > 0.0 {
+            cluster_size_log_capped[index] =
+                ((1.0 + cluster_size[index]).ln() / log_reference).min(1.0);
+        }
+        distance_spread_top5_minus_min[index] =
+            linker_round(top5_mean_distance[index] - min_distance[index], 1_000_000.0);
+        query_view_initial_only[index] = linker_bool(query_view[index] == "initial_only");
+        top5_distance_best_gap[index] = linker_round(
+            top5_mean_distance[index] - top5_mean_distance[best_top5_indices[index]],
+            1_000_000.0,
+        );
+    }
+
+    let payload = PyDict::new(py);
+    linker_set_f32_array(py, &payload, "min_distance", min_distance.clone())?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "retrieval_score_gap_vs_best_competitor",
+        group_features.retrieval_score_gap_vs_best_competitor,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "top5_distance_best_gap",
+        top5_distance_best_gap,
+    )?;
+    linker_set_f32_array(py, &payload, "retrieval_score", retrieval_score.clone())?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "affiliation_contradiction_severity",
+        affiliation_contradiction_severity,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "coarse_family_top5_best_gap",
+        group_features.coarse_family_top5_best_gap,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "same_family_as_best_top5",
+        group_features.same_family_as_best_top5,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "same_family_as_heuristic_choice",
+        group_features.same_family_as_heuristic_choice,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "same_family_as_top1",
+        group_features.same_family_as_top1,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "query_first_prefix_match",
+        query_first_prefix_match,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "retrieval_score_best_gap",
+        group_features.retrieval_score_best_gap,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "cluster_size_log_capped",
+        cluster_size_log_capped,
+    )?;
+    linker_set_f32_array(py, &payload, "anchor_evidence_count", anchor_evidence_count)?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "strong_positive_anchor_score",
+        strong_positive_anchor_score,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "weak_residual_anchor_score",
+        weak_residual_anchor_score,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "sparse_relative_winner_score",
+        sparse_relative_winner_score,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "query_view__initial_only",
+        query_view_initial_only,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "last_name_count_min_rarity",
+        last_name_count_min_rarity,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "candidate_last_first_name_count_min_rarity",
+        candidate_last_first_name_count_min_rarity,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "last_first_name_count_min_rarity",
+        last_first_name_count_min_rarity,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "first_prefix_x_last_first_name_count_min_rarity",
+        first_prefix_x_last_first_name_count_min_rarity,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "exact_anchor_evidence_flag",
+        exact_anchor_evidence_flag,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "year_mismatch_severity",
+        year_mismatch_severity,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "top5_mean_distance",
+        top5_mean_distance.clone(),
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "distance_spread_top5_minus_min",
+        distance_spread_top5_minus_min,
+    )?;
+    let telemetry = PyDict::new(py);
+    telemetry.set_item("generated_family_id_count", generated_family_id_count)?;
+    telemetry.set_item(
+        "generic_family_override_count",
+        generic_family_override_count,
+    )?;
+    payload.set_item("telemetry", telemetry)?;
+    Ok(payload.unbind())
+}
+
 #[pyfunction]
 fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     let build_info = PyDict::new(py);
@@ -6546,8 +9222,16 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("RETRIEVAL_FEATURE_ORDER", RETRIEVAL_FEATURE_ORDER.to_vec())?;
     m.add(
+        "DEFAULT_HYBRID_CENTROID_POLICY_NAME",
+        DEFAULT_HYBRID_CENTROID_POLICY_NAME,
+    )?;
+    m.add(
         "DEFAULT_HYBRID_CENTROID_WEIGHTS",
         DEFAULT_HYBRID_CENTROID_WEIGHTS.to_vec(),
+    )?;
+    m.add(
+        "DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS",
+        DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS.to_vec(),
     )?;
     m.add(
         "DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS",
@@ -6574,6 +9258,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
     )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(promoted_linker_non_pairwise_features, m)?)?;
     m.add_function(wrap_pyfunction!(signature_ngrams_batch, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_json_ingest_telemetry, m)?)?;
     m.add_function(wrap_pyfunction!(reset_last_json_ingest_telemetry, m)?)?;

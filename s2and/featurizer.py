@@ -1118,12 +1118,9 @@ def _single_pair_featurize(work_input: tuple[str, str], index: int = -1) -> tupl
             )
             return features, index
         except Exception as exc:
-            if stage_uses_rust(runtime_context):
-                raise RuntimeError(
-                    "Rust pair featurization failed in strict rust backend "
-                    f"(run_id={runtime_context.run_id} pair={work_input} error={exc})"
-                ) from exc
-            logger.warning("Rust pair featurization failed, falling back to Python for this process: %s", exc)
+            raise RuntimeError(
+                "Rust pair featurization failed " f"(run_id={runtime_context.run_id} pair={work_input} error={exc})"
+            ) from exc
 
     signature_1 = dataset.signatures[work_input[0]]
     signature_2 = dataset.signatures[work_input[1]]
@@ -1822,12 +1819,9 @@ def many_pairs_featurize(
                     runtime_context=runtime_context,
                 )
             except Exception as exc:
-                if stage_uses_rust(runtime_context):
-                    raise RuntimeError(
-                        "Rust featurizer init failed in strict rust backend "
-                        f"(run_id={runtime_context.run_id} error={exc})"
-                    ) from exc
-                logger.warning("Rust featurizer init failed, falling back to Python: %s", exc)
+                raise RuntimeError(
+                    "Rust featurizer init failed " f"(run_id={runtime_context.run_id} error={exc})"
+                ) from exc
         try:
             rust_batch_total_ram_for_stage, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
             rust_batch_rss_before_bytes, rust_batch_rss_source = memory_budget.current_rss_bytes_best_effort(

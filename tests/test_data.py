@@ -7,6 +7,13 @@ import pytest
 from s2and.data import ANDData, _parse_sinonym_name
 
 
+def test_maybe_load_list_empty_file_returns_empty_list(tmp_path):
+    empty_path = tmp_path / "empty.txt"
+    empty_path.write_text("", encoding="utf-8")
+
+    assert ANDData.maybe_load_list(str(empty_path)) == []
+
+
 class TestData(unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -278,6 +285,24 @@ def test_compute_signature_name_counts_uses_single_character_initial():
         last_normalized="smith",
     )
     assert counts.last_first_initial == 17
+
+
+def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):
+    altered_path = tmp_path / "altered_cluster_signatures.txt"
+    altered_path.write_text("", encoding="utf-8")
+
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="empty_altered",
+        mode="inference",
+        cluster_seeds={"1": {"2": "require"}},
+        altered_cluster_signatures=str(altered_path),
+        load_name_counts=False,
+        preprocess=False,
+    )
+
+    assert dataset.altered_cluster_signatures == []
 
 
 def test_pair_sampling_invalid_configuration_raises_value_error():

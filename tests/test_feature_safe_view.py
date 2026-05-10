@@ -15,11 +15,9 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
 )
 from s2and.runtime import build_runtime_context
-from scripts import single_letter_reranker_utils as reranker_utils
-from tests.helpers import build_cluster_summary, build_query_features, import_s2and_rust
+from tests.helpers import import_s2and_rust
 
 _ORCID = "0000-0000-0000-0001"
-_NORMALIZED_ORCID = "0000000000000001"
 _HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust(required_method="from_dataset", prefer_site_packages=True)
 
 
@@ -198,74 +196,6 @@ def test_orcid_positive_label_count_unchanged() -> None:
 
     assert default_labels == [float(-LARGE_INTEGER)]
     assert math.isnan(suppressed_labels[0])
-
-    query_case = reranker_utils.RerankerQueryCase(
-        source="labeled",
-        dataset="h_wang_fixture",
-        query_id="q1",
-        query_signature_id="same_a",
-        block_key="a smith",
-        positive_component_keys=frozenset({"same_orcid_component"}),
-        support_type="orcid",
-        block_size=3,
-        component_size=1,
-        sampling_info_bucket="tiny",
-        normalized_orcid=_NORMALIZED_ORCID,
-        orcid_group_size=2,
-        orcid_group_size_bucket="2",
-    )
-    retrieval_window_state = {
-        "scored_candidate_components": 2,
-        "scored_candidate_signatures": 2,
-        "orcid_filter_applied": 0,
-        "middle_initial_filter_applied": 0,
-        "year_range_filter_applied": 0,
-    }
-
-    def _stats(component_key: str, distance: float, *, rank: int, score: float) -> reranker_utils.ClusterPairwiseStats:
-        return reranker_utils.ClusterPairwiseStats(
-            cluster_id=component_key,
-            retrieval_rank=rank,
-            retrieval_score=score,
-            cluster_size=1,
-            count=1,
-            sum_distance=distance,
-            min_distance=distance,
-            top_smallest_neg_heap=[-distance],
-        )
-
-    def _rows(positive_distance: float) -> list[dict[str, Any]]:
-        return reranker_utils.make_candidate_rows(
-            query_case=query_case,
-            query_view="full",
-            query_features=build_query_features(first="alice", orcid=_NORMALIZED_ORCID),
-            shortlist_component_keys=["same_orcid_component", "negative_component"],
-            retrieval_scores={"same_orcid_component": 0.9, "negative_component": 0.7},
-            retrieval_ranks={"same_orcid_component": 1, "negative_component": 2},
-            retrieval_window_state=retrieval_window_state,
-            summary_by_component={
-                "same_orcid_component": build_cluster_summary(component_key="same_orcid_component", size=1),
-                "negative_component": build_cluster_summary(component_key="negative_component", size=1),
-            },
-            stats_by_component={
-                "same_orcid_component": _stats(
-                    "same_orcid_component",
-                    positive_distance,
-                    rank=1,
-                    score=0.9,
-                ),
-                "negative_component": _stats("negative_component", 0.8, rank=2, score=0.7),
-            },
-        )
-
-    rows_before = _rows(0.0)
-    rows_after = _rows(0.6)
-
-    assert sum(int(row["label"]) for row in rows_before) == 1
-    assert sum(int(row["label"]) for row in rows_after) == 1
-    assert [row["positive_candidate_keys"] for row in rows_before] == [
-        row["positive_candidate_keys"] for row in rows_after
-    ]
 
 
 def test_other_constraints_intact_under_suppress_orcid() -> None:

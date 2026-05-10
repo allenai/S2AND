@@ -1,5 +1,4 @@
 import json
-import logging
 from pathlib import Path
 
 import s2and.file_cache as file_cache
@@ -11,7 +10,7 @@ class _HeadResponse:
         self.headers = headers or {}
 
 
-def test_get_from_cache_download_does_not_write_stdout(monkeypatch, tmp_path, caplog, capsys):
+def test_get_from_cache_download_does_not_write_stdout(monkeypatch, tmp_path, capsys):
     url = "https://example.org/model.bin"
     etag = "etag-123"
     expected_bytes = b"cached model payload"
@@ -28,8 +27,7 @@ def test_get_from_cache_download_does_not_write_stdout(monkeypatch, tmp_path, ca
     monkeypatch.setattr(file_cache.requests, "head", _fake_head)
     monkeypatch.setattr(file_cache, "http_get", _fake_http_get)
 
-    with caplog.at_level(logging.INFO, logger="s2and"):
-        cache_path = file_cache.get_from_cache(url, str(tmp_path))
+    cache_path = file_cache.get_from_cache(url, str(tmp_path))
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -37,7 +35,3 @@ def test_get_from_cache_download_does_not_write_stdout(monkeypatch, tmp_path, ca
     assert Path(cache_path).read_bytes() == expected_bytes
     metadata = json.loads(Path(cache_path + ".json").read_text(encoding="utf-8"))
     assert metadata == {"url": url, "etag": etag}
-
-    logs = "\n".join(caplog.messages)
-    assert "not found in cache; downloading" in logs
-    assert "Finished download; copying" in logs

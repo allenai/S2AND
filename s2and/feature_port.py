@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from s2and.consts import CACHE_ROOT, CLUSTER_SEEDS_LOOKUP, FEATURIZER_VERSION, LARGE_DISTANCE
+from s2and.consts import CACHE_ROOT, CLUSTER_SEEDS_LOOKUP, FEATURIZER_VERSION, LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.env import parse_bool_env
 from s2and.runtime import detect_rust_runtime_capabilities, load_s2and_rust_extension
@@ -36,22 +36,30 @@ _S2AND_RUST_LOAD_LOCK = threading.Lock()
 class _CacheEntry:
     """Composite cache entry: featurizer + LRU counter + build count in one slot."""
 
-    __slots__ = ("featurizer", "last_access", "build_count")
+    __slots__ = ("featurizer", "last_access", "build_count", "build_path")
 
-    def __init__(self, featurizer: Any, last_access: int = 0, build_count: int = 0):
+    def __init__(
+        self,
+        featurizer: Any,
+        last_access: int = 0,
+        build_count: int = 0,
+        build_path: RustBuildPath = "from_dataset",
+    ):
         self.featurizer = featurizer
         self.last_access = last_access
         self.build_count = build_count
+        self.build_path = build_path
 
 
 class _InFlightFeaturizerBuild:
     """Tracks a single in-flight Rust featurizer build for a dataset."""
 
-    __slots__ = ("event", "error")
+    __slots__ = ("event", "error", "build_path")
 
-    def __init__(self) -> None:
+    def __init__(self, build_path: RustBuildPath) -> None:
         self.event = threading.Event()
         self.error: Exception | None = None
+        self.build_path = build_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +85,6 @@ _RUST_FEATURIZER_ACCESS_COUNTER = 0
 RUST_FEATURIZER_CACHE_VERSION = 6
 _RUST_BUILD_ERROR = "s2and_rust extension not built. Build with: maturin develop -m s2and_rust/Cargo.toml"
 RUST_BUILD_PATH_ENV = "S2AND_RUST_BUILD_PATH"
-_SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE = 2048
 _RUST_FEATURIZER_CACHE_METADATA_SCHEMA_VERSION = 1
 # Default remains "legacy_compat" until canonical artifacts (name counts, name tuples,
 # ORCID prefix counts) are regenerated per docs/normalization_migration.md.
@@ -351,13 +358,6 @@ def _write_rust_cache_metadata_best_effort(cache_path: str, cache_metadata: dict
                 pass
 
 
-def _dataset_has_missing_signature_ngrams(dataset: ANDData) -> bool:
-    for signature in dataset.signatures.values():
-        if signature.author_info_affiliations_n_grams is None or signature.author_info_coauthor_n_grams is None:
-            return True
-    return False
-
-
 def _rust_name_counts_artifact_path() -> str | None:
     configured = os.environ.get("S2AND_RUST_NAME_COUNTS_JSON", "").strip()
     return configured or None
@@ -627,6 +627,40 @@ def _build_rust_featurizer_from_json_paths(
     args = contract.as_from_json_paths_args()
     featurizer = rust_featurizer_cls.from_json_paths(*args)
     ffi_seconds = time.perf_counter() - ffi_start
+    get_json_ingest_telemetry = getattr(rust_module, "get_last_json_ingest_telemetry", None)
+    if callable(get_json_ingest_telemetry):
+        telemetry = get_json_ingest_telemetry()
+        if telemetry is not None:
+            stage_seconds = dict(telemetry.get("stage_seconds", {}))
+            logger.info(
+                "Telemetry stage: stage=rust_json_ingest_stage_seconds "
+                "json_parse=%.3f paper_preprocess=%.3f signature_preprocess=%.3f "
+                "reference_counter=%.3f cluster_seed=%.3f dataset=%s",
+                float(stage_seconds.get("json_parse_seconds", 0.0)),
+                float(stage_seconds.get("paper_preprocess_seconds", 0.0)),
+                float(stage_seconds.get("signature_preprocess_seconds", 0.0)),
+                float(stage_seconds.get("reference_counter_seconds", 0.0)),
+                float(stage_seconds.get("cluster_seed_seconds", 0.0)),
+                _dataset_name_for_logs(dataset),
+            )
+            counts = dict(telemetry.get("counts", {}))
+            if counts:
+                logger.info(
+                    "Telemetry stage: stage=rust_json_ingest_default_counts "
+                    "missing_specter_papers=%d defaulted_name_count_signatures=%d "
+                    "defaulted_name_count_first=%d defaulted_name_count_first_last=%d "
+                    "defaulted_name_count_last=%d defaulted_name_count_last_first_initial=%d "
+                    "defaulted_signature_author_positions=%d defaulted_paper_author_positions=%d dataset=%s",
+                    int(counts.get("missing_specter_paper_count", 0)),
+                    int(counts.get("defaulted_name_count_signature_count", 0)),
+                    int(counts.get("defaulted_name_count_first_count", 0)),
+                    int(counts.get("defaulted_name_count_first_last_count", 0)),
+                    int(counts.get("defaulted_name_count_last_count", 0)),
+                    int(counts.get("defaulted_name_count_last_first_initial_count", 0)),
+                    int(counts.get("defaulted_signature_author_position_count", 0)),
+                    int(counts.get("defaulted_paper_author_position_count", 0)),
+                    _dataset_name_for_logs(dataset),
+                )
 
     post_build_seconds = 0.0
     if name_counts_source == "dataset":
@@ -667,15 +701,16 @@ def _build_rust_featurizer_from_dataset(
     signatures_path = dataset.signatures_path
     papers_path = dataset.papers_path
     if selected_build_path == "from_json_paths":
-        if signatures_path and papers_path:
-            outer_pre_build_seconds = time.perf_counter() - pre_build_start
-            featurizer, timings = _build_rust_featurizer_from_json_paths(dataset, num_threads)
-            timings["pre_build_seconds"] += outer_pre_build_seconds
-            return featurizer, "from_json_paths", timings
-        logger.info(
-            "Rust JSON ingest build path requested but unavailable; using from_dataset path "
-            "(missing signatures_path/papers_path)."
-        )
+        if not signatures_path or not papers_path:
+            raise RuntimeError(
+                "Rust JSON ingest build path requested but signatures_path/papers_path are missing "
+                f"(dataset={_dataset_name_for_logs(dataset)} signatures_path={signatures_path!r} "
+                f"papers_path={papers_path!r})."
+            )
+        outer_pre_build_seconds = time.perf_counter() - pre_build_start
+        featurizer, timings = _build_rust_featurizer_from_json_paths(dataset, num_threads)
+        timings["pre_build_seconds"] += outer_pre_build_seconds
+        return featurizer, "from_json_paths", timings
     pre_build_seconds = time.perf_counter() - pre_build_start
     ffi_seconds = 0.0
     ffi_start = time.perf_counter()
@@ -701,7 +736,15 @@ def _resolve_requested_build_path(
     dataset: ANDData,
     *,
     dataset_mode: str,
+    rust_build_path: RustBuildPath | None = None,
 ) -> RustBuildPath:
+    if rust_build_path is not None:
+        if rust_build_path not in {"from_dataset", "from_json_paths"}:
+            raise ValueError(
+                "rust_build_path must be one of from_dataset/from_json_paths; " f"got {rust_build_path!r}."
+            )
+        return rust_build_path
+
     configured_build_path = os.environ.get(RUST_BUILD_PATH_ENV)
     if configured_build_path is not None:
         configured_build_path = configured_build_path.strip()
@@ -770,39 +813,16 @@ def _try_load_rust_featurizer_from_disk_cache(
         return None, "attempted"
 
 
-def _build_rust_featurizer_with_retry_for_missing_signature_ngrams(
+def _build_rust_featurizer_strict(
     dataset: ANDData,
     *,
     requested_build_path: RustBuildPath,
 ) -> tuple[Any, RustBuildPath, dict[str, float], int, float]:
     build_start = time.perf_counter()
-    try:
-        featurizer, build_path, build_timings = _build_rust_featurizer_from_dataset(
-            dataset,
-            rust_build_path=requested_build_path,
-        )
-    except Exception as build_exc:
-        missing_signature_ngrams = _dataset_has_missing_signature_ngrams(dataset)
-        if missing_signature_ngrams and hasattr(dataset, "materialize_signature_ngrams_python"):
-            logger.warning(
-                "Rust featurizer build failed with deferred signature ngrams; "
-                "materializing Python signature ngrams and retrying once: %s",
-                build_exc,
-            )
-            try:
-                dataset.materialize_signature_ngrams_python(batch_size=_SIGNATURE_NGRAM_MATERIALIZE_BATCH_SIZE)
-            except Exception as materialize_exc:
-                logger.warning(
-                    "Failed to materialize Python signature ngrams for Rust featurizer retry: %s",
-                    materialize_exc,
-                )
-                raise
-            featurizer, build_path, build_timings = _build_rust_featurizer_from_dataset(
-                dataset,
-                rust_build_path=requested_build_path,
-            )
-        else:
-            raise
+    featurizer, build_path, build_timings = _build_rust_featurizer_from_dataset(
+        dataset,
+        rust_build_path=requested_build_path,
+    )
     build_count = _increment_rust_featurizer_build_count(dataset)
     return featurizer, build_path, build_timings, build_count, time.perf_counter() - build_start
 
@@ -843,7 +863,7 @@ def _get_or_wait_for_cached(
         # Rust featurizer reuse is independent from Python pair-feature caching.
         # Disk cache still follows use_cache.
         entry = _RUST_FEATURIZER_CACHE.get(dataset)
-        if entry is not None:
+        if entry is not None and entry.build_path == build_context.requested_build_path:
             logger.info(
                 "Telemetry: rust_featurizer_cache cache=hit dataset=%s mode=%s op=%s run=%s builds=%d",
                 build_context.dataset_name_for_logs,
@@ -854,10 +874,25 @@ def _get_or_wait_for_cached(
             )
             _touch_rust_featurizer(dataset)
             return entry.featurizer, None
+        if entry is not None:
+            logger.info(
+                "Telemetry: rust_featurizer_cache cache=build_path_miss dataset=%s mode=%s op=%s run=%s "
+                "cached_path=%s requested_path=%s",
+                build_context.dataset_name_for_logs,
+                build_context.dataset_mode,
+                build_context.operation,
+                build_context.run_id,
+                entry.build_path,
+                build_context.requested_build_path,
+            )
+            try:
+                del _RUST_FEATURIZER_CACHE[dataset]
+            except KeyError:
+                pass
 
         inflight_build = _RUST_FEATURIZER_INFLIGHT_BUILDS.get(dataset)
         if inflight_build is None:
-            inflight_build = _InFlightFeaturizerBuild()
+            inflight_build = _InFlightFeaturizerBuild(build_context.requested_build_path)
             _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset] = inflight_build
             logger.info(
                 "Telemetry: rust_featurizer_cache cache=miss dataset=%s mode=%s op=%s run=%s builds=%d",
@@ -870,20 +905,28 @@ def _get_or_wait_for_cached(
             return None, inflight_build
 
         logger.info(
-            "Telemetry: rust_featurizer_cache cache=wait dataset=%s mode=%s op=%s run=%s builds=%d",
+            "Telemetry: rust_featurizer_cache cache=wait dataset=%s mode=%s op=%s run=%s builds=%d "
+            "inflight_path=%s requested_path=%s",
             build_context.dataset_name_for_logs,
             build_context.dataset_mode,
             build_context.operation,
             build_context.run_id,
             0,
+            inflight_build.build_path,
+            build_context.requested_build_path,
         )
 
     inflight_build.event.wait()
     with _RUST_FEATURIZER_CACHE_LOCK:
         entry = _RUST_FEATURIZER_CACHE.get(dataset)
-        if entry is not None:
+        if entry is not None and entry.build_path == build_context.requested_build_path:
             _touch_rust_featurizer(dataset)
             return entry.featurizer, None
+        if entry is not None:
+            try:
+                del _RUST_FEATURIZER_CACHE[dataset]
+            except KeyError:
+                pass
         build_error = inflight_build.error
     if build_error is not None:
         raise RuntimeError(
@@ -925,11 +968,9 @@ def _build_and_cache_rust_featurizer(
             "post_build_seconds": 0.0,
         }
         if featurizer is None:
-            featurizer, build_path, build_timings, build_count, build_seconds = (
-                _build_rust_featurizer_with_retry_for_missing_signature_ngrams(
-                    dataset,
-                    requested_build_path=build_context.requested_build_path,
-                )
+            featurizer, build_path, build_timings, build_count, build_seconds = _build_rust_featurizer_strict(
+                dataset,
+                requested_build_path=build_context.requested_build_path,
             )
             logger.info(
                 "Telemetry: rust_core_build seconds=%.3f dataset=%s path=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
@@ -957,6 +998,7 @@ def _build_and_cache_rust_featurizer(
                 featurizer=featurizer,
                 last_access=_RUST_FEATURIZER_ACCESS_COUNTER,
                 build_count=build_count,
+                build_path=build_path,
             )
             cache_fill_source = "disk_cache" if disk_cache_status == "hit" else "build"
             logger.info(
@@ -994,11 +1036,16 @@ def _get_rust_featurizer(
     dataset: ANDData,
     runtime_context: Any | None = None,
     use_cache: bool = False,
+    rust_build_path: RustBuildPath | None = None,
 ) -> Any:
     _require_rust_runtime()
     operation, run_id = _runtime_callsite_for_logs(dataset, runtime_context)
     dataset_mode = _dataset_mode_for_logs(dataset)
-    requested_build_path = _resolve_requested_build_path(dataset, dataset_mode=dataset_mode)
+    requested_build_path = _resolve_requested_build_path(
+        dataset,
+        dataset_mode=dataset_mode,
+        rust_build_path=rust_build_path,
+    )
     ds_log = _dataset_name_for_logs(dataset)
     use_disk_cache = bool(use_cache)
     cache_path = _rust_cache_path(dataset) if use_disk_cache else None
@@ -1173,6 +1220,95 @@ def get_constraints_matrix_indexed_rust(
     )
 
 
+def get_constraint_labels_index_arrays_rust(
+    dataset: ANDData,
+    left_signature_indices: np.ndarray,
+    right_signature_indices: np.ndarray,
+    low_value: float = 0.0,
+    high_value: float = LARGE_DISTANCE,
+    dont_merge_cluster_seeds: bool = True,
+    incremental_dont_use_cluster_seeds: bool = False,
+    num_threads: int | None = None,
+    featurizer: Any | None = None,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+    suppress_orcid: bool = False,
+    large_integer: float = LARGE_INTEGER,
+) -> np.ndarray:
+    """Resolve constraint labels for numeric pair-index arrays in Rust.
+
+    Returned values use the existing pairwise-label convention:
+    ``NaN`` means unconstrained, otherwise ``constraint_distance - LARGE_INTEGER``.
+    """
+
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+
+    method = getattr(featurizer, "linker_pair_index_arrays_constraint_labels", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.linker_pair_index_arrays_constraint_labels is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+    return np.asarray(
+        method(
+            np.ascontiguousarray(left_signature_indices, dtype=np.uint32),
+            np.ascontiguousarray(right_signature_indices, dtype=np.uint32),
+            float(low_value),
+            float(high_value),
+            bool(dont_merge_cluster_seeds),
+            bool(incremental_dont_use_cluster_seeds),
+            num_threads,
+            bool(suppress_orcid),
+            float(large_integer),
+        ),
+        dtype=np.float64,
+    )
+
+
+def build_linker_pair_distance_accumulators_rust(
+    dataset: ANDData,
+    row_indices: np.ndarray,
+    row_count: int,
+    pair_distances: np.ndarray,
+    pair_labels: np.ndarray | None = None,
+    num_threads: int | None = None,
+    featurizer: Any | None = None,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+    large_integer: float = LARGE_INTEGER,
+    hard_disallow_distance: float = LARGE_DISTANCE,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Aggregate candidate pair distances into row-level accumulators in Rust."""
+
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+
+    method = getattr(featurizer, "linker_pair_distance_accumulators", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.linker_pair_distance_accumulators is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+    labels_arg = None if pair_labels is None else np.ascontiguousarray(pair_labels, dtype=np.float64)
+    counts, sums, mins, top_distances, hard_disallow_pair_count = method(
+        np.ascontiguousarray(row_indices, dtype=np.uint32),
+        int(row_count),
+        np.ascontiguousarray(pair_distances, dtype=np.float64),
+        labels_arg,
+        num_threads,
+        float(large_integer),
+        float(hard_disallow_distance),
+    )
+    return (
+        np.asarray(counts, dtype=np.uint32),
+        np.asarray(sums, dtype=np.float64),
+        np.asarray(mins, dtype=np.float64),
+        np.asarray(top_distances, dtype=np.float64),
+        int(hard_disallow_pair_count),
+    )
+
+
 def get_constraints_block_upper_triangle_indexed_rust(
     dataset: ANDData,
     block_signature_indices: list[int],
@@ -1246,6 +1382,138 @@ def build_pair_feature_matrix_rust(
         nan_value,
     )
     return np.asarray(matrix, dtype=np.float64)
+
+
+def build_linker_pair_features_and_aggregate_stats_indexed_rust(
+    dataset: ANDData,
+    pairs: list[tuple[int, int]],
+    row_indices: list[int],
+    row_count: int,
+    matrix_indices: list[int] | None = None,
+    aggregate_indices: list[int] | None = None,
+    num_threads: int | None = None,
+    nan_value: float = np.nan,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+    featurizer: Any | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build one indexed pair-feature chunk and row-level aggregate stats in one Rust pass."""
+
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+    method = getattr(featurizer, "linker_pair_features_and_aggregate_stats_indexed", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.linker_pair_features_and_aggregate_stats_indexed is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+    matrix, counts, sums, mins, maxs = method(
+        pairs,
+        row_indices,
+        int(row_count),
+        matrix_indices,
+        aggregate_indices,
+        num_threads,
+        nan_value,
+    )
+    return (
+        np.asarray(matrix, dtype=np.float64),
+        np.asarray(counts, dtype=np.uint32),
+        np.asarray(sums, dtype=np.float64),
+        np.asarray(mins, dtype=np.float64),
+        np.asarray(maxs, dtype=np.float64),
+    )
+
+
+def build_linker_pair_features_and_aggregate_stats_arrays_rust(
+    dataset: ANDData,
+    left_signature_indices: np.ndarray,
+    right_signature_indices: np.ndarray,
+    row_indices: np.ndarray,
+    row_count: int,
+    matrix_indices: list[int] | None = None,
+    aggregate_indices: list[int] | None = None,
+    num_threads: int | None = None,
+    nan_value: float = np.nan,
+    aggregate_nan_value: float | None = None,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+    featurizer: Any | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build pair features and row-level aggregate stats from numeric index arrays.
+
+    ``nan_value`` controls the pair-feature matrix returned for model prediction.
+    ``aggregate_nan_value`` can differ when callers need separate missing-value
+    policies for the pairwise model matrix and promoted ``pw_*`` aggregates.
+    """
+
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+    method = getattr(featurizer, "linker_pair_index_arrays_and_aggregate_stats", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.linker_pair_index_arrays_and_aggregate_stats is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+    resolved_aggregate_nan_value = nan_value if aggregate_nan_value is None else float(aggregate_nan_value)
+    matrix, counts, sums, mins, maxs = method(
+        np.ascontiguousarray(left_signature_indices, dtype=np.uint32),
+        np.ascontiguousarray(right_signature_indices, dtype=np.uint32),
+        np.ascontiguousarray(row_indices, dtype=np.uint32),
+        int(row_count),
+        matrix_indices,
+        aggregate_indices,
+        num_threads,
+        nan_value,
+        resolved_aggregate_nan_value,
+    )
+    return (
+        np.asarray(matrix, dtype=np.float64),
+        np.asarray(counts, dtype=np.uint32),
+        np.asarray(sums, dtype=np.float64),
+        np.asarray(mins, dtype=np.float64),
+        np.asarray(maxs, dtype=np.float64),
+    )
+
+
+def build_linker_pair_aggregate_stats_arrays_rust(
+    dataset: ANDData,
+    left_signature_indices: np.ndarray,
+    right_signature_indices: np.ndarray,
+    row_indices: np.ndarray,
+    row_count: int,
+    aggregate_indices: list[int] | None = None,
+    num_threads: int | None = None,
+    nan_value: float = np.nan,
+    runtime_context: Any | None = None,
+    use_cache: bool = False,
+    featurizer: Any | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build row-level aggregate stats from numeric pair index arrays without returning pair features."""
+
+    if featurizer is None:
+        featurizer = _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache)
+    method = getattr(featurizer, "linker_pair_index_arrays_aggregate_stats", None)
+    if not callable(method):
+        raise RuntimeError(
+            "RustFeaturizer.linker_pair_index_arrays_aggregate_stats is unavailable; "
+            "rebuild/install a newer s2and-rust extension."
+        )
+    counts, sums, mins, maxs = method(
+        np.ascontiguousarray(left_signature_indices, dtype=np.uint32),
+        np.ascontiguousarray(right_signature_indices, dtype=np.uint32),
+        np.ascontiguousarray(row_indices, dtype=np.uint32),
+        int(row_count),
+        aggregate_indices,
+        num_threads,
+        nan_value,
+    )
+    return (
+        np.asarray(counts, dtype=np.uint32),
+        np.asarray(sums, dtype=np.float64),
+        np.asarray(mins, dtype=np.float64),
+        np.asarray(maxs, dtype=np.float64),
+    )
 
 
 def build_block_upper_triangle_feature_matrix_indexed_rust(

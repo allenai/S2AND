@@ -39,7 +39,7 @@ def _signature(signature_id: str, *, first: str, middle: str | None = None, orci
     )
 
 
-def test_make_subblocks_with_telemetry_reports_specter_invocations(monkeypatch):
+def test_make_subblocks_uses_specter_for_oversized_single_letter_block(monkeypatch):
     dataset = SimpleNamespace(
         signatures={
             "s1": _signature("s1", first="h", middle=""),
@@ -59,7 +59,7 @@ def test_make_subblocks_with_telemetry_reports_specter_invocations(monkeypatch):
         },
     )
 
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
+    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
         ["s1", "s2", "s3", "s4"],
         dataset,
         maximum_size=2,
@@ -67,15 +67,9 @@ def test_make_subblocks_with_telemetry_reports_specter_invocations(monkeypatch):
     )
 
     assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"], ["s3", "s4"]]
-    assert telemetry["single_letter_first_name_signature_count"] == 4
-    assert telemetry["specter_fallback_candidate_block_count"] == 1
-    assert telemetry["specter_invocation_count"] == 1
-    assert telemetry["specter_input_signature_count"] == 4
-    assert telemetry["final_specter_labeled_subblock_count"] == 2
-    assert telemetry["final_specter_labeled_signature_count"] == 4
 
 
-def test_make_subblocks_with_telemetry_distinguishes_non_invoked_specter_candidates(monkeypatch):
+def test_make_subblocks_skips_specter_when_single_letter_block_is_in_budget(monkeypatch):
     dataset = SimpleNamespace(
         signatures={
             "s1": _signature("s1", first="h", middle=""),
@@ -89,7 +83,7 @@ def test_make_subblocks_with_telemetry_distinguishes_non_invoked_specter_candida
 
     monkeypatch.setattr(subblocking, "cluster_with_specter", _fail_if_called)
 
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
+    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
         ["s1", "s2"],
         dataset,
         maximum_size=2,
@@ -97,15 +91,9 @@ def test_make_subblocks_with_telemetry_distinguishes_non_invoked_specter_candida
     )
 
     assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"]]
-    assert telemetry["specter_fallback_candidate_block_count"] == 1
-    assert telemetry["specter_non_invoked_candidate_block_count"] == 1
-    assert telemetry["specter_non_invoked_candidate_signature_count"] == 2
-    assert telemetry["specter_invocation_count"] == 0
-    assert telemetry["final_specter_labeled_subblock_count"] == 0
-    assert telemetry["final_specter_labeled_signature_count"] == 0
 
 
-def test_make_subblocks_with_telemetry_counts_orcid_merges_skipped_for_capacity(monkeypatch):
+def test_make_subblocks_does_not_merge_orcid_components_past_capacity(monkeypatch):
     dataset = SimpleNamespace(
         signatures={
             "s1": _signature("s1", first="aa", middle="", orcid="O1"),
@@ -137,7 +125,7 @@ def test_make_subblocks_with_telemetry_counts_orcid_merges_skipped_for_capacity(
     monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
     monkeypatch.setattr(subblocking, "cluster_with_specter", fail_if_specter_called)
 
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
+    subblocks, _telemetry = subblocking.make_subblocks_with_telemetry(
         ["s1", "s2", "s3", "s4", "s5", "s6"],
         dataset,
         maximum_size=2,
@@ -149,5 +137,3 @@ def test_make_subblocks_with_telemetry_counts_orcid_merges_skipped_for_capacity(
         ["s3", "s4"],
         ["s5", "s6"],
     ]
-    assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == 2
-    assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == 4

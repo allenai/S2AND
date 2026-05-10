@@ -155,6 +155,9 @@ dmypy.json
 
 *.pickle
 !tests/qian/specter.pickle
+!data/production_model_v1.0.pickle
+!data/production_model_v1.1.pickle
+!data/production_model_v1.2.pickle
 .vscode
 foo-*
 *.dat

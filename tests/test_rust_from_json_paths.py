@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import math
 import os
 import random
 from collections import defaultdict
@@ -21,14 +23,6 @@ assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
 _S2AND_RUST = cast(Any, s2and_rust)
 
 _FEATURIZATION_INFO = FeaturizationInfo()
-
-EXPECTED_STAGE_SECONDS_KEYS = {
-    "json_parse_seconds",
-    "paper_preprocess_seconds",
-    "reference_counter_seconds",
-    "signature_preprocess_seconds",
-    "cluster_seed_seconds",
-}
 
 
 def _load_stress_module():
@@ -90,7 +84,12 @@ def _sample_pairs(signature_ids: list[str], count: int, seed: int) -> list[tuple
     return pairs
 
 
-def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bool):
+def _build_rust_from_json_paths(
+    data_dir: str,
+    *,
+    compute_reference_features: bool,
+    specter_embeddings: dict[str, list[float]] | None = None,
+):
     signatures_path = os.path.join(data_dir, "signatures.json")
     papers_path = os.path.join(data_dir, "papers.json")
     cluster_seeds_path = os.path.join(data_dir, "cluster_seeds.json")
@@ -99,7 +98,7 @@ def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bo
         signatures_path,
         papers_path,
         cluster_seeds_path_arg,
-        None,  # specter_embeddings
+        specter_embeddings,
         None,  # name_tuples_path
         None,  # name_counts_path
         True,  # preprocess
@@ -108,6 +107,198 @@ def _build_rust_from_json_paths(data_dir: str, *, compute_reference_features: bo
         10000.0,
         1,
     )
+
+
+def test_from_json_paths_language_matches_python_cld2_detail_for_beta_title(tmp_path: Path):
+    data_dir = tmp_path / "beta_language"
+    data_dir.mkdir()
+    signatures = {
+        "q": {
+            "signature_id": "q",
+            "paper_id": 1,
+            "given_name": "Seoyeon Lee",
+            "sourced_author_ids": [],
+            "sourced_author_source": None,
+            "author_info": {
+                "first": "Seoyeon",
+                "middle": None,
+                "last": "Lee",
+                "suffix": None,
+                "position": 0,
+                "email": None,
+                "affiliations": [],
+                "block": "s lee",
+                "given_block": "s lee",
+                "estimated_ethnicity": None,
+                "estimated_gender": None,
+            },
+        },
+        "m": {
+            "signature_id": "m",
+            "paper_id": 2,
+            "given_name": "Seo-Young Lee",
+            "sourced_author_ids": [],
+            "sourced_author_source": None,
+            "author_info": {
+                "first": "Seo-Young",
+                "middle": None,
+                "last": "Lee",
+                "suffix": None,
+                "position": 0,
+                "email": None,
+                "affiliations": [],
+                "block": "s lee",
+                "given_block": "s lee",
+                "estimated_ethnicity": None,
+                "estimated_gender": None,
+            },
+        },
+    }
+    papers = {
+        "1": {
+            "paper_id": 1,
+            "title": "Molecular programs of fibrotic change in aging human lung",
+            "abstract": "",
+            "journal_name": None,
+            "venue": None,
+            "year": 2024,
+            "sources": [],
+            "fields_of_study": [],
+            "authors": [{"position": 0, "author_name": "Seoyeon Lee"}],
+            "references": [],
+        },
+        "2": {
+            "paper_id": 2,
+            "title": (
+                "Fibroblast TGF-\u03b2 signaling defines spatial tumor ecosystems linked to "
+                "immune checkpoint blockade resistance"
+            ),
+            "abstract": "",
+            "journal_name": None,
+            "venue": None,
+            "year": 2024,
+            "sources": [],
+            "fields_of_study": [],
+            "authors": [{"position": 0, "author_name": "Seo-Young Lee"}],
+            "references": [],
+        },
+    }
+    clusters = {"1": {"cluster_id": "1", "signature_ids": ["q", "m"], "model_version": -1}}
+    (data_dir / "signatures.json").write_text(json.dumps(signatures), encoding="utf-8")
+    (data_dir / "papers.json").write_text(json.dumps(papers), encoding="utf-8")
+    (data_dir / "clusters.json").write_text(json.dumps(clusters), encoding="utf-8")
+
+    dataset = _load_dataset_from_dir(str(data_dir), "beta_language_from_dataset", compute_reference_features=False)
+    rust_from_dataset = _S2AND_RUST.RustFeaturizer.from_dataset(dataset, 0.0, 10000.0, 1)
+    rust_from_json = _build_rust_from_json_paths(
+        str(data_dir),
+        compute_reference_features=False,
+        specter_embeddings={"1": [1.0, 0.0], "2": [0.0, 1.0]},
+    )
+    ref_features = rust_from_dataset.featurize_pair("q", "m")
+    got_features = rust_from_json.featurize_pair("q", "m")
+    feature_names = _FEATURIZATION_INFO.get_feature_names()
+
+    for feature_name in ("english_count", "same_language", "language_reliability_count"):
+        feature_index = feature_names.index(feature_name)
+        assert got_features[feature_index] == ref_features[feature_index]
+    assert ref_features[feature_names.index("english_count")] == 1
+    assert ref_features[feature_names.index("same_language")] == 0
+    assert ref_features[feature_names.index("language_reliability_count")] == 2
+    assert math.isnan(got_features[feature_names.index("specter_cosine_sim")])
+
+
+def test_from_json_paths_reports_default_and_missing_input_counts(tmp_path: Path):
+    data_dir = tmp_path / "default_counts"
+    data_dir.mkdir()
+    signatures = {
+        "q": {
+            "signature_id": "q",
+            "paper_id": 1,
+            "author_info": {
+                "first": "Alice",
+                "middle": None,
+                "last": "Smith",
+                "suffix": None,
+                "email": None,
+                "affiliations": [],
+            },
+        },
+        "m": {
+            "signature_id": "m",
+            "paper_id": 2,
+            "author_info": {
+                "first": "Bob",
+                "middle": None,
+                "last": "Jones",
+                "suffix": None,
+                "position": 0,
+                "email": None,
+                "affiliations": [],
+            },
+        },
+    }
+    papers = {
+        "1": {
+            "paper_id": 1,
+            "title": "Shared topic one",
+            "abstract": "",
+            "journal_name": None,
+            "venue": None,
+            "year": 2024,
+            "authors": [{"author_name": "Alice Smith"}],
+            "references": [],
+        },
+        "2": {
+            "paper_id": 2,
+            "title": "Shared topic two",
+            "abstract": "",
+            "journal_name": None,
+            "venue": None,
+            "year": 2024,
+            "authors": [{"position": 0, "author_name": "Bob Jones"}],
+            "references": [],
+        },
+    }
+    name_counts = {
+        "normalization_version": "legacy_compat",
+        "first_dict": {"alice": 5.0, "bob": 6.0},
+        "last_dict": {"jones": 7.0},
+        "first_last_dict": {"bob jones": 8.0},
+        "last_first_initial_dict": {"smith a": 9.0, "jones b": 10.0},
+    }
+    (data_dir / "signatures.json").write_text(json.dumps(signatures), encoding="utf-8")
+    (data_dir / "papers.json").write_text(json.dumps(papers), encoding="utf-8")
+    name_counts_path = data_dir / "name_counts.json"
+    name_counts_path.write_text(json.dumps(name_counts), encoding="utf-8")
+
+    _S2AND_RUST.RustFeaturizer.from_json_paths(
+        str(data_dir / "signatures.json"),
+        str(data_dir / "papers.json"),
+        None,
+        {"1": [1.0, 0.0]},
+        None,
+        str(name_counts_path),
+        True,
+        False,
+        0.0,
+        10000.0,
+        1,
+        "legacy_compat",
+        False,
+    )
+
+    telemetry = _S2AND_RUST.get_last_json_ingest_telemetry()
+    assert telemetry is not None
+    counts = telemetry["counts"]
+    assert counts["missing_specter_paper_count"] == 1
+    assert counts["defaulted_signature_author_position_count"] == 1
+    assert counts["defaulted_paper_author_position_count"] == 1
+    assert counts["defaulted_name_count_signature_count"] == 1
+    assert counts["defaulted_name_count_first_count"] == 0
+    assert counts["defaulted_name_count_first_last_count"] == 1
+    assert counts["defaulted_name_count_last_count"] == 1
+    assert counts["defaulted_name_count_last_first_initial_count"] == 0
 
 
 def test_from_json_paths_feature_parity_vs_from_dataset_dummy():
@@ -175,26 +366,6 @@ def test_from_json_paths_reference_feature_parity_vs_from_dataset_qian():
             if idx not in reference_feature_indices:
                 continue
             assert equalish(ref, got), f"Reference mismatch idx={idx} pair=({s1},{s2}) ref={ref} got={got}"
-
-
-def test_from_json_paths_emits_telemetry_payload_dummy():
-    reset_fn = getattr(s2and_rust, "reset_last_json_ingest_telemetry", None)
-    get_fn = getattr(s2and_rust, "get_last_json_ingest_telemetry", None)
-    if not callable(reset_fn) or not callable(get_fn):
-        raise pytest.skip.Exception("json ingest telemetry helpers unavailable")
-
-    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-
-    reset_fn()
-    _build_rust_from_json_paths(data_dir, compute_reference_features=False)
-    telemetry = get_fn()
-
-    assert isinstance(telemetry, dict)
-    stage_seconds = telemetry.get("stage_seconds")
-    assert isinstance(stage_seconds, dict)
-    assert EXPECTED_STAGE_SECONDS_KEYS.issubset(stage_seconds.keys())
-    for key in EXPECTED_STAGE_SECONDS_KEYS:
-        assert float(stage_seconds[key]) >= 0.0
 
 
 def test_from_json_paths_signature_name_counts_overlay_parity_dummy():

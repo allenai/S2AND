@@ -6,18 +6,21 @@ import json
 import math
 import re
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
 
+from s2and.incremental_linking.artifact import save_incremental_linking_artifact
+from s2and.incremental_linking.contracts import INCREMENTAL_LINKING_RUST_CAPABILITIES
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PACKAGE_DIR = REPO_ROOT / "data" / "joint_safe_link_official_stack_20260428p"
-SCRATCH_DIR = REPO_ROOT / "scratch"
+DEFAULT_PACKAGE_DIR = REPO_ROOT / "data" / "joint_safe_link_featureless_self_contained_20260506a"
 CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE = 192.0
 _ANCHOR_EVIDENCE_FEATURE_COLUMNS = (
     "anchor_evidence_count",
@@ -49,7 +52,7 @@ _CLASSIC_DERIVABLE_FEATURE_PREREQUISITES: dict[str, tuple[str, ...]] = {
     "query_view__initial_only": ("query_view",),
 }
 
-for extra_path in (REPO_ROOT, SCRATCH_DIR, REPO_ROOT / "scripts"):
+for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
 
@@ -86,11 +89,26 @@ _TOTAL_ERROR_MARGIN_BUCKETS = (
     "multi_candidate|single_letter_first",
 )
 _DEFAULT_TOTAL_ERROR_LAMBDA_GRID = (0.0, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0)
+_DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS = {
+    "false_abstain": 0.25,
+    "false_link": 1.0,
+    "wrong_candidate_link": 1.5,
+}
+CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET = {
+    "a_khan": "a_khan_eval",
+    "a_silva": "a_silva_eval",
+    "h_wang": "hwang_eval",
+    "j_smith": "j_smith_eval",
+    "s_gupta": "s_gupta_eval",
+    "s_lee": "s_lee_eval",
+    "s_park": "s_park_eval",
+}
 
 
 def load_bundle(root: Path = DEFAULT_PACKAGE_DIR) -> OfficialBundle:
     """Load the official bundle metadata from the single bundle file."""
 
+    root = root.resolve()
     payload = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
     return OfficialBundle(
         root=root,
@@ -102,9 +120,15 @@ def load_bundle(root: Path = DEFAULT_PACKAGE_DIR) -> OfficialBundle:
 
 
 def _read_csv(path: Path, **kwargs: Any) -> pd.DataFrame:
+    if path.suffix == ".parquet":
+        parquet_kwargs: dict[str, Any] = {}
+        if "usecols" in kwargs:
+            parquet_kwargs["columns"] = kwargs["usecols"]
+        return pd.read_parquet(path, **parquet_kwargs)
     defaults = {"low_memory": False}
     defaults.update(kwargs)
-    return pd.read_csv(path, **defaults)
+    read_csv = cast(Any, pd.read_csv)
+    return read_csv(path, **defaults)
 
 
 def _resolve_path(bundle: OfficialBundle, path_like: str | Path) -> Path:
@@ -112,8 +136,17 @@ def _resolve_path(bundle: OfficialBundle, path_like: str | Path) -> Path:
 
     path = Path(path_like)
     if path.is_absolute():
-        return path
-    resolved = bundle.root / path
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(bundle.root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Bundle asset path escapes bundle root: {path_like}") from exc
+    else:
+        resolved = (bundle.root / path).resolve()
+        try:
+            resolved.relative_to(bundle.root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Bundle asset path escapes bundle root: {path_like}") from exc
     if not resolved.exists():
         raise FileNotFoundError(f"Bundle asset does not exist: {resolved}")
     return resolved
@@ -278,9 +311,7 @@ def _apply_classic_train_holdout_filter(
     removed = train_df[remove_mask].copy()
     filtered = train_df[~remove_mask].copy()
 
-    removed_labels = (
-        pd.to_numeric(removed["label"], errors="coerce").fillna(0) if "label" in removed else pd.Series()
-    )
+    removed_labels = pd.to_numeric(removed["label"], errors="coerce").fillna(0) if "label" in removed else pd.Series()
     filtered_labels = (
         pd.to_numeric(filtered["label"], errors="coerce").fillna(0) if "label" in filtered else pd.Series()
     )
@@ -290,9 +321,7 @@ def _apply_classic_train_holdout_filter(
         "rows_removed": int(len(removed)),
         "queries_before": queries_before,
         "queries_after": int(filtered["query_group_id"].astype(str).nunique()) if "query_group_id" in filtered else 0,
-        "queries_removed": int(removed["query_group_id"].astype(str).nunique())
-        if "query_group_id" in removed
-        else 0,
+        "queries_removed": int(removed["query_group_id"].astype(str).nunique()) if "query_group_id" in removed else 0,
         "positive_rows_before": positive_rows_before,
         "positive_rows_after": int(filtered_labels.sum()) if not filtered_labels.empty else 0,
         "positive_rows_removed": int(removed_labels.sum()) if not removed_labels.empty else 0,
@@ -401,52 +430,79 @@ def _derive_anchor_evidence_features(df: pd.DataFrame) -> pd.DataFrame:
     named_signature_count = _numeric_feature_series(out, "named_signature_count")
     retrieval_rank = _numeric_feature_series(out, "retrieval_rank", default=99.0)
 
+    min_distance_values = min_distance.to_numpy(dtype=np.float32, copy=False)
+    specter_values = specter.to_numpy(dtype=np.float32, copy=False)
+    title_values = title.to_numpy(dtype=np.float32, copy=False)
+    coauthor_values = coauthor.to_numpy(dtype=np.float32, copy=False)
+    affiliation_values = affiliation.to_numpy(dtype=np.float32, copy=False)
+    venue_values = venue.to_numpy(dtype=np.float32, copy=False)
+    year_values = year.to_numpy(dtype=np.float32, copy=False)
+    retrieval_gap_values = retrieval_gap.to_numpy(dtype=np.float32, copy=False)
+    contradiction_values = contradiction.to_numpy(dtype=np.float32, copy=False)
+    same_top1_values = same_top1.to_numpy(dtype=np.float32, copy=False)
+    candidate_pair_share_values = candidate_pair_share.to_numpy(dtype=np.float32, copy=False)
+    cluster_size_values = cluster_size.to_numpy(dtype=np.float32, copy=False)
+    named_signature_count_values = named_signature_count.to_numpy(dtype=np.float32, copy=False)
+    retrieval_rank_values = retrieval_rank.to_numpy(dtype=np.float32, copy=False)
+
+    min_distance_clip = np.clip(min_distance_values, 0.0, 1.0)
+    specter_clip = np.clip(specter_values, 0.0, 1.0)
+    title_clip = np.clip(title_values, 0.0, 1.0)
+    coauthor_clip = np.clip(coauthor_values, 0.0, 1.0)
+    affiliation_clip = np.clip(affiliation_values, 0.0, 1.0)
+    venue_clip = np.clip(venue_values, 0.0, 1.0)
+    year_clip = np.clip(year_values, 0.0, 1.0)
+    same_top1_clip = np.clip(same_top1_values, 0.0, 1.0)
+    retrieval_gap_positive = np.clip(retrieval_gap_values, 0.0, 0.3) / 0.3
+    retrieval_gap_normalized = np.clip((np.clip(retrieval_gap_values, -0.2, 0.3) + 0.2) / 0.5, 0.0, 1.0)
+    candidate_pair_share_clip = np.clip(candidate_pair_share_values, 0.0, 1.0)
+
     out["anchor_evidence_count"] = (
-        (min_distance <= 0.15).astype(np.float32)
-        + (specter >= 0.70).astype(np.float32)
-        + (title >= 0.20).astype(np.float32)
-        + (coauthor >= 0.25).astype(np.float32)
-        + (affiliation >= 0.25).astype(np.float32)
-        + (venue >= 0.20).astype(np.float32)
-        + (year >= 0.90).astype(np.float32)
-        + (retrieval_gap >= 0.02).astype(np.float32)
+        (min_distance_values <= 0.15).astype(np.float32)
+        + (specter_values >= 0.70).astype(np.float32)
+        + (title_values >= 0.20).astype(np.float32)
+        + (coauthor_values >= 0.25).astype(np.float32)
+        + (affiliation_values >= 0.25).astype(np.float32)
+        + (venue_values >= 0.20).astype(np.float32)
+        + (year_values >= 0.90).astype(np.float32)
+        + (retrieval_gap_values >= 0.02).astype(np.float32)
     ).astype(np.float32)
 
     support_strength = (
-        0.20 * (1.0 - min_distance.clip(0.0, 1.0))
-        + 0.20 * specter.clip(0.0, 1.0)
-        + 0.18 * title.clip(0.0, 1.0)
-        + 0.18 * coauthor.clip(0.0, 1.0)
-        + 0.12 * affiliation.clip(0.0, 1.0)
-        + 0.06 * venue.clip(0.0, 1.0)
-        + 0.06 * year.clip(0.0, 1.0)
+        0.20 * (1.0 - min_distance_clip)
+        + 0.20 * specter_clip
+        + 0.18 * title_clip
+        + 0.18 * coauthor_clip
+        + 0.12 * affiliation_clip
+        + 0.06 * venue_clip
+        + 0.06 * year_clip
     )
-    low_contradiction_multiplier = (1.0 - contradiction.clip(0.0, 1.0)).clip(0.0, 1.0)
+    low_contradiction_multiplier = np.clip(1.0 - np.clip(contradiction_values, 0.0, 1.0), 0.0, 1.0)
     out["strong_positive_anchor_score"] = (
-        support_strength.clip(0.0, 1.0)
-        * (0.5 + 0.5 * same_top1.clip(0.0, 1.0))
+        np.clip(support_strength, 0.0, 1.0)
+        * (0.5 + 0.5 * same_top1_clip)
         * (0.35 + 0.65 * low_contradiction_multiplier)
     ).astype(np.float32)
 
-    tiny_candidate = ((cluster_size <= 2.0) | (named_signature_count <= 2.0)).astype(np.float32)
+    tiny_candidate = ((cluster_size_values <= 2.0) | (named_signature_count_values <= 2.0)).astype(np.float32)
     residual_support = (
-        0.28 * (1.0 - min_distance.clip(0.0, 1.0))
-        + 0.20 * specter.clip(0.0, 1.0)
-        + 0.20 * coauthor.clip(0.0, 1.0)
-        + 0.14 * title.clip(0.0, 1.0)
-        + 0.10 * year.clip(0.0, 1.0)
-        + 0.08 * retrieval_gap.clip(-0.2, 0.3).add(0.2).div(0.5).clip(0.0, 1.0)
+        0.28 * (1.0 - min_distance_clip)
+        + 0.20 * specter_clip
+        + 0.20 * coauthor_clip
+        + 0.14 * title_clip
+        + 0.10 * year_clip
+        + 0.08 * retrieval_gap_normalized
     )
-    out["weak_residual_anchor_score"] = (
-        tiny_candidate * same_top1.clip(0.0, 1.0) * residual_support.clip(0.0, 1.0)
-    ).astype(np.float32)
+    out["weak_residual_anchor_score"] = (tiny_candidate * same_top1_clip * np.clip(residual_support, 0.0, 1.0)).astype(
+        np.float32
+    )
 
     out["sparse_relative_winner_score"] = (
-        (retrieval_rank <= 1.0).astype(np.float32)
-        * same_top1.clip(0.0, 1.0)
-        * retrieval_gap.clip(0.0, 0.3).div(0.3).clip(0.0, 1.0)
-        * (1.0 - candidate_pair_share.clip(0.0, 1.0))
-        * residual_support.clip(0.0, 1.0)
+        (retrieval_rank_values <= 1.0).astype(np.float32)
+        * same_top1_clip
+        * np.clip(retrieval_gap_positive, 0.0, 1.0)
+        * (1.0 - candidate_pair_share_clip)
+        * np.clip(residual_support, 0.0, 1.0)
     ).astype(np.float32)
     return out
 
@@ -557,7 +613,46 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
     out["fit_split"] = str(out.get("fit_split", "calibration_fit"))
     out["selection_split"] = str(out.get("selection_split", "calibration_check"))
     out["test_split"] = str(out.get("test_split", "test"))
+    out["selection_metric"] = str(out.get("selection_metric", "weighted_average_error"))
+    if out["selection_metric"] != "weighted_average_error":
+        raise ValueError("classic.promoted_stratified_gate.selection_metric must be weighted_average_error")
+    out["error_weights"] = dict(_DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS)
     return out
+
+
+def _weighted_error_metrics(
+    *,
+    n_queries: int,
+    false_abstain: int,
+    false_link: int,
+    wrong_candidate_link: int,
+    error_weights: Mapping[str, float] = _DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS,
+) -> dict[str, Any]:
+    false_abstain_error_rate = float(false_abstain) / float(n_queries) if n_queries else 0.0
+    false_link_error_rate = float(false_link) / float(n_queries) if n_queries else 0.0
+    wrong_link_error_rate = float(wrong_candidate_link) / float(n_queries) if n_queries else 0.0
+    weight_total = float(sum(float(value) for value in error_weights.values()))
+    weighted_average_error = (
+        (
+            float(error_weights["false_abstain"]) * false_abstain_error_rate
+            + float(error_weights["false_link"]) * false_link_error_rate
+            + float(error_weights["wrong_candidate_link"]) * wrong_link_error_rate
+        )
+        / weight_total
+        if weight_total
+        else 0.0
+    )
+    return {
+        "false_abstain_error_rate": false_abstain_error_rate,
+        "false_link_error_rate": false_link_error_rate,
+        "wrong_link_error_rate": wrong_link_error_rate,
+        "weighted_average_error": weighted_average_error,
+        "weighted_average_error_weights": {
+            "false_abstain_error_rate": float(error_weights["false_abstain"]),
+            "false_link_error_rate": float(error_weights["false_link"]),
+            "wrong_link_error_rate": float(error_weights["wrong_candidate_link"]),
+        },
+    }
 
 
 def _summarize_predictions(predictions: pd.DataFrame) -> dict[str, Any]:
@@ -584,7 +679,7 @@ def _summarize_predictions(predictions: pd.DataFrame) -> dict[str, Any]:
     link_precision = float(tp / (tp + fp)) if (tp + fp) else 0.0
     link_recall = float(tp / (tp + fn)) if (tp + fn) else 0.0
     errors = int((predictions["correct"] == 0).sum())
-    return {
+    summary = {
         "target_semantics": "query_safe_target_with_explicit_source",
         "n_queries": int(len(predictions)),
         "n_positive_queries": int(len(positives)),
@@ -609,6 +704,15 @@ def _summarize_predictions(predictions: pd.DataFrame) -> dict[str, Any]:
         "tn": tn,
         "fn": fn,
     }
+    summary.update(
+        _weighted_error_metrics(
+            n_queries=int(len(predictions)),
+            false_abstain=int(false_abstain.sum()),
+            false_link=int(false_link.sum()),
+            wrong_candidate_link=int(wrong_candidate_link.sum()),
+        )
+    )
+    return summary
 
 
 def _normalize_augmented_feature_frame(df: pd.DataFrame, feature_columns: tuple[str, ...]) -> pd.DataFrame:
@@ -703,14 +807,26 @@ def _validate_classic_feature_inputs(df: pd.DataFrame, feature_columns: tuple[st
 
 
 def _coerce_classic_feature_matrix(features: pd.DataFrame, feature_columns: tuple[str, ...]) -> pd.DataFrame:
-    """Coerce the final classic feature matrix and fail on missing cells."""
+    """Coerce the final classic feature matrix while preserving numeric NaNs."""
 
     out = features.loc[:, list(feature_columns)].copy()
+    non_numeric_cells: dict[str, int] = {}
     for column in feature_columns:
-        out[column] = pd.to_numeric(out[column], errors="coerce")
-    missing_cells = {column: int(out[column].isna().sum()) for column in feature_columns if out[column].isna().any()}
-    if missing_cells:
-        raise ValueError(f"Classic feature matrix contains missing/non-numeric feature values: {missing_cells}")
+        raw_values = out[column]
+        coerced = pd.to_numeric(raw_values, errors="coerce")
+        non_numeric = coerced.isna() & raw_values.notna()
+        if non_numeric.any():
+            non_numeric_cells[str(column)] = int(non_numeric.sum())
+        out[column] = coerced
+    if non_numeric_cells:
+        raise ValueError(f"Classic feature matrix contains non-numeric feature values: {non_numeric_cells}")
+    infinite_cells = {
+        str(column): int(np.isinf(out[column].to_numpy(dtype=np.float64, copy=False)).sum())
+        for column in feature_columns
+        if np.isinf(out[column].to_numpy(dtype=np.float64, copy=False)).any()
+    }
+    if infinite_cells:
+        raise ValueError(f"Classic feature matrix contains infinite feature values: {infinite_cells}")
     return out.astype(np.float32)
 
 
@@ -1230,6 +1346,46 @@ def _total_error_gate_bucket(rows: pd.DataFrame) -> pd.Series:
     return candidate_kind + "|" + first_name_bucket
 
 
+def _summarize_training_gate_buckets(train_df: pd.DataFrame) -> dict[str, dict[str, int]]:
+    """Count post-filter training rows and queries by promoted gate bucket."""
+
+    query_ids = train_df["query_group_id"].astype(str)
+    row_counts = query_ids.value_counts(sort=False)
+    query_representatives = train_df.assign(_query_group_id=query_ids).groupby("_query_group_id", sort=False).head(1)
+    candidate_kind = pd.Series(
+        np.where(
+            query_representatives["_query_group_id"].map(row_counts).astype(int).gt(1),
+            "multi_candidate",
+            "single_candidate",
+        ),
+        index=query_representatives.index,
+    )
+    bucket_frame = pd.DataFrame(
+        {
+            "bucket": candidate_kind + "|" + query_representatives.apply(_classic_gate_first_name_bucket, axis=1),
+            "row_count": query_representatives["_query_group_id"].map(row_counts).astype(int),
+        }
+    )
+    query_counts = bucket_frame["bucket"].value_counts(sort=False).to_dict()
+    training_row_counts = bucket_frame.groupby("bucket", sort=False)["row_count"].sum().to_dict()
+    return {
+        "query_counts": {bucket: int(query_counts.get(bucket, 0)) for bucket in _TOTAL_ERROR_SCORE_BUCKETS},
+        "row_counts": {bucket: int(training_row_counts.get(bucket, 0)) for bucket in _TOTAL_ERROR_SCORE_BUCKETS},
+    }
+
+
+def _gate_bucket_split_counts(predictions: pd.DataFrame, split_order: Sequence[str]) -> dict[str, dict[str, int]]:
+    """Count scored query choices by promoted gate bucket and split."""
+
+    if predictions.empty:
+        return {bucket: {str(split): 0 for split in split_order} for bucket in _TOTAL_ERROR_SCORE_BUCKETS}
+    counts = predictions.groupby(["gate_bucket", "split"], dropna=False, sort=False).size()
+    return {
+        bucket: {str(split): int(counts.get((bucket, str(split)), 0)) for split in split_order}
+        for bucket in _TOTAL_ERROR_SCORE_BUCKETS
+    }
+
+
 def _total_error_threshold_grid(values: pd.Series, reference: float, grid_size: int) -> np.ndarray:
     """Build a quantile threshold grid that always includes the reference value."""
 
@@ -1263,6 +1419,31 @@ def _total_error_count(rows: pd.DataFrame, link: np.ndarray) -> np.ndarray:
     return (~correct).sum(axis=0)
 
 
+def _weighted_error_count(
+    rows: pd.DataFrame,
+    link: np.ndarray,
+    *,
+    error_weights: Mapping[str, float] = _DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS,
+) -> np.ndarray:
+    """Return weighted error counts for one or more link/abstain decisions."""
+
+    query_target = rows["query_safe_target"].to_numpy(dtype=np.int8, copy=False)
+    chosen_target = rows["chosen_candidate_target"].to_numpy(dtype=np.int8, copy=False)
+    matrix = np.asarray(link, dtype=bool)
+    if matrix.ndim == 1:
+        matrix = matrix[:, None]
+    false_abstain = ((~matrix) & (query_target[:, None] == 1)).sum(axis=0).astype(np.float64)
+    false_link = (matrix & (query_target[:, None] == 0)).sum(axis=0).astype(np.float64)
+    wrong_candidate_link = (
+        (matrix & (query_target[:, None] == 1) & (chosen_target[:, None] == 0)).sum(axis=0).astype(np.float64)
+    )
+    return (
+        float(error_weights["false_abstain"]) * false_abstain
+        + float(error_weights["false_link"]) * false_link
+        + float(error_weights["wrong_candidate_link"]) * wrong_candidate_link
+    )
+
+
 def _fit_total_error_single_score(
     rows: pd.DataFrame,
     *,
@@ -1270,14 +1451,14 @@ def _fit_total_error_single_score(
     lambda_penalty: float,
     score_grid_size: int,
 ) -> float:
-    """Fit a score-only threshold by total errors plus optional drift penalty."""
+    """Fit a score-only threshold by weighted errors plus optional drift penalty."""
 
     if rows.empty:
         return float(reference_score)
     thresholds = _total_error_threshold_grid(rows["chosen_probability"], reference_score, score_grid_size)
     score = pd.to_numeric(rows["chosen_probability"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
     links = score[:, None] >= thresholds[None, :]
-    errors = _total_error_count(rows, links).astype(np.float64)
+    errors = _weighted_error_count(rows, links).astype(np.float64)
     drift = np.abs(thresholds - float(reference_score))
     objective = errors + float(lambda_penalty) * drift
     ranking = np.lexsort((drift, objective))
@@ -1293,7 +1474,7 @@ def _fit_total_error_score_margin(
     score_grid_size: int,
     margin_grid_size: int,
 ) -> tuple[float, float]:
-    """Fit a score-or-margin gate by total errors plus optional drift penalty."""
+    """Fit a score-or-margin gate by weighted errors plus optional drift penalty."""
 
     if rows.empty:
         return float(reference_score), float(reference_margin)
@@ -1305,7 +1486,7 @@ def _fit_total_error_score_margin(
     best = (float(reference_score), float(reference_margin))
     for score_threshold in score_grid:
         links = (score[:, None] >= float(score_threshold)) | (margin[:, None] >= margin_grid[None, :])
-        errors = _total_error_count(rows, links).astype(np.float64)
+        errors = _weighted_error_count(rows, links).astype(np.float64)
         drift = np.abs(float(score_threshold) - float(reference_score)) + np.abs(margin_grid - float(reference_margin))
         objective = errors + float(lambda_penalty) * drift
         best_index = int(np.lexsort((drift, objective))[0])
@@ -1325,7 +1506,7 @@ def _fit_total_error_gate_candidate(
     score_grid_size: int,
     margin_grid_size: int,
 ) -> TotalErrorGateSpec:
-    """Fit one 4-score/2-margin total-error gate candidate."""
+    """Fit one 4-score/2-margin weighted-error gate candidate."""
 
     labels = _total_error_gate_bucket(fit_rows)
     score_thresholds: dict[str, float] = {}
@@ -1400,7 +1581,7 @@ def _total_error_gate_candidate_rows(
     reference_score_thresholds: dict[str, float],
     reference_margin_thresholds: dict[str, float],
 ) -> pd.DataFrame:
-    """Return fit/check metrics for candidate total-error gates."""
+    """Return fit/check metrics for candidate weighted-error gates."""
 
     rows: list[dict[str, Any]] = []
     for gate in gates:
@@ -1428,7 +1609,7 @@ def _fit_promoted_stratified_total_error_gate(
     choices: pd.DataFrame,
     gate_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Fit and select the promoted non-fixed bucketed gate on stratified split choices."""
+    """Fit and select the promoted non-fixed bucketed gate on weighted stratified errors."""
 
     fit_rows = choices[choices["split"] == str(gate_config["fit_split"])].copy()
     check_rows = choices[choices["split"] == str(gate_config["selection_split"])].copy()
@@ -1439,6 +1620,7 @@ def _fit_promoted_stratified_total_error_gate(
         )
     reference_score_thresholds = dict(gate_config["reference_score_thresholds"])
     reference_margin_thresholds = dict(gate_config["reference_margin_thresholds"])
+    error_weights = dict(gate_config.get("error_weights", _DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS))
     gates = [
         _fit_total_error_gate_candidate(
             fit_rows,
@@ -1459,9 +1641,9 @@ def _fit_promoted_stratified_total_error_gate(
     )
     ranked = candidates.sort_values(
         by=[
-            "check_errors",
-            "check_false_link",
+            "check_weighted_average_error",
             "check_wrong_candidate_link",
+            "check_false_link",
             "check_false_abstain",
             "total_threshold_drift",
         ],
@@ -1478,9 +1660,14 @@ def _fit_promoted_stratified_total_error_gate(
         "check_metrics": check_metrics,
         "candidate_metrics": candidates.to_dict(orient="records"),
         "selection_key": {
+            "check_weighted_average_error": float(check_metrics["weighted_average_error"]),
+            "check_false_abstain_error_rate": float(check_metrics["false_abstain_error_rate"]),
+            "check_false_link_error_rate": float(check_metrics["false_link_error_rate"]),
+            "check_wrong_link_error_rate": float(check_metrics["wrong_link_error_rate"]),
+            "error_weights": error_weights,
             "check_errors": int(check_metrics["errors"]),
-            "check_false_link": int(check_metrics["false_link"]),
             "check_wrong_candidate_link": int(check_metrics["wrong_candidate_link"]),
+            "check_false_link": int(check_metrics["false_link"]),
             "check_false_abstain": int(check_metrics["false_abstain"]),
             "total_threshold_drift": _total_error_gate_drift(
                 selected_gate,
@@ -1819,6 +2006,143 @@ def _classic_stratified_eval_source_specs(spec: dict[str, Any]) -> tuple[dict[st
     return tuple(sources)
 
 
+def _drop_shadowed_calibration_source_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    """Drop calibration rows when the active public source has the same query."""
+
+    query_source_key = ["query_group_id", "source_key"]
+    public_query_sources = rows.loc[
+        ~rows["source_kind"].astype(str).eq("calibration_source"),
+        query_source_key,
+    ].drop_duplicates()
+    if public_query_sources.empty:
+        return rows
+
+    marked = rows.merge(
+        public_query_sources.assign(_has_public_source_rows=True),
+        on=query_source_key,
+        how="left",
+    )
+    shadowed = marked["source_kind"].astype(str).eq("calibration_source") & marked["_has_public_source_rows"].fillna(
+        False
+    )
+    return marked.loc[~shadowed].drop(columns=["_has_public_source_rows"]).copy()
+
+
+def _validate_unique_stratified_candidate_rows(rows: pd.DataFrame) -> None:
+    """Fail if one selected query/source/candidate has multiple active rows."""
+
+    key_columns = ["query_group_id", "source_key", "candidate_component_key"]
+    duplicate_mask = rows.duplicated(key_columns, keep=False)
+    if not duplicate_mask.any():
+        return
+
+    duplicate_rows = rows.loc[duplicate_mask, key_columns + ["label"]].copy()
+    duplicate_summary = (
+        duplicate_rows.groupby(key_columns, dropna=False)
+        .agg(row_count=("label", "size"), labels=("label", lambda values: sorted({str(value) for value in values})))
+        .reset_index()
+    )
+    conflict_count = int(duplicate_summary["labels"].map(len).gt(1).sum())
+    sample = duplicate_summary.head(5).to_dict(orient="records")
+    raise ValueError(
+        "Promoted stratified eval rows contain duplicate query/source/candidate rows: "
+        f"duplicate_pairs={len(duplicate_summary)}, conflicting_pairs={conflict_count}, sample={sample}"
+    )
+
+
+def _active_stratified_label_metadata(rows: pd.DataFrame) -> pd.DataFrame:
+    """Return query/source metadata recomputed from active candidate labels."""
+
+    metadata_input = rows[["query_group_id", "source_key", "candidate_component_key", "retrieval_rank", "label"]].copy()
+    metadata_input["_label"] = pd.to_numeric(metadata_input["label"], errors="coerce").fillna(0).astype(int)
+    metadata_input["_retrieval_rank"] = pd.to_numeric(metadata_input["retrieval_rank"], errors="coerce").fillna(
+        np.iinfo(np.int32).max
+    )
+    grouped = metadata_input.groupby(["query_group_id", "source_key"], sort=False)
+    metadata = grouped.agg(
+        candidate_count=("candidate_component_key", "nunique"),
+        min_retrieval_rank=("_retrieval_rank", "min"),
+        max_retrieval_rank=("_retrieval_rank", "max"),
+        positive_candidate_rows=("_label", "sum"),
+    ).reset_index()
+    min_positive_rank = (
+        metadata_input.loc[metadata_input["_label"].eq(1)]
+        .groupby(["query_group_id", "source_key"], sort=False)["_retrieval_rank"]
+        .min()
+    )
+    positive_rank_frame = min_positive_rank.rename("min_positive_rank").reset_index()
+    metadata = metadata.merge(positive_rank_frame, on=["query_group_id", "source_key"], how="left")
+    has_positive = metadata["positive_candidate_rows"].astype(int).gt(0)
+    positive_first = has_positive & metadata["min_positive_rank"].eq(metadata["min_retrieval_rank"])
+    metadata["has_positive_candidate"] = has_positive
+    metadata["positive_first"] = positive_first
+    metadata["positive_rank_bucket"] = np.select(
+        [~has_positive, positive_first],
+        ["no_positive", "positive_first"],
+        default="positive_not_first",
+    )
+    metadata["raw_has_positive_candidate"] = metadata["has_positive_candidate"]
+    metadata["raw_positive_first"] = metadata["positive_first"]
+    metadata["manual_safe_target"] = has_positive.astype(int)
+    metadata["multiple_candidates"] = metadata["candidate_count"].astype(int).gt(1)
+    metadata["min_positive_rank"] = metadata["min_positive_rank"].astype(object)
+    metadata.loc[~has_positive, "min_positive_rank"] = ""
+    for column in ("candidate_count", "min_retrieval_rank", "max_retrieval_rank", "positive_candidate_rows"):
+        metadata[column] = metadata[column].astype(int)
+    return metadata
+
+
+def _refresh_stratified_metadata_from_active_labels(
+    rows: pd.DataFrame,
+    assignments: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Refresh split metadata from the selected active candidate rows."""
+
+    metadata = _active_stratified_label_metadata(rows)
+    metadata_columns = [
+        "has_positive_candidate",
+        "positive_first",
+        "positive_rank_bucket",
+        "raw_has_positive_candidate",
+        "raw_positive_first",
+        "manual_safe_target",
+        "multiple_candidates",
+        "candidate_count",
+        "min_positive_rank",
+        "min_retrieval_rank",
+        "max_retrieval_rank",
+        "positive_candidate_rows",
+    ]
+    refreshed_rows = rows.drop(columns=[column for column in metadata_columns if column in rows.columns]).merge(
+        metadata,
+        on=["query_group_id", "source_key"],
+        how="left",
+    )
+    refreshed_assignments = assignments.drop(
+        columns=[column for column in metadata_columns if column in assignments.columns]
+    ).merge(
+        metadata,
+        on=["query_group_id", "source_key"],
+        how="left",
+    )
+    if "source_stratum" in refreshed_assignments.columns and "first_name_bucket" in refreshed_assignments.columns:
+        refreshed_assignments["stratum_key"] = refreshed_assignments.apply(
+            lambda row: (
+                f"{row['source_stratum']}|has_pos={int(bool(row['has_positive_candidate']))}|"
+                f"{row['positive_rank_bucket']}|{row['first_name_bucket']}|"
+                f"multi_cand={int(bool(row['multiple_candidates']))}"
+            ),
+            axis=1,
+        )
+    if "stratum_key" in refreshed_assignments.columns:
+        refreshed_rows = refreshed_rows.drop(columns=["stratum_key"], errors="ignore").merge(
+            refreshed_assignments[["query_group_id", "source_key", "stratum_key"]],
+            on=["query_group_id", "source_key"],
+            how="left",
+        )
+    return refreshed_rows, refreshed_assignments
+
+
 def _load_classic_stratified_eval_rows(
     bundle: OfficialBundle,
     spec: dict[str, Any],
@@ -1834,10 +2158,15 @@ def _load_classic_stratified_eval_rows(
     source_frames: list[pd.DataFrame] = []
     for source_spec in _classic_stratified_eval_source_specs(spec):
         rows = _read_csv(_resolve_path(bundle, source_spec["path"]), compression="gzip")
-        rows["source_key"] = str(source_spec["source_key"])
+        if str(source_spec["source_key"]) == "calibration_source":
+            rows["source_key"] = (
+                rows["dataset"].astype(str).map(CALIBRATION_DATASET_SOURCE_KEY_BY_DATASET).fillna("s2and_eval")
+            )
+        else:
+            rows["source_key"] = str(source_spec["source_key"])
         rows["source_kind"] = str(source_spec["source_kind"])
         source_frames.append(rows)
-    all_rows = pd.concat(source_frames, ignore_index=True)
+    all_rows = _drop_shadowed_calibration_source_rows(pd.concat(source_frames, ignore_index=True))
     assignment_columns = [
         "query_group_id",
         "source_key",
@@ -1871,6 +2200,8 @@ def _load_classic_stratified_eval_rows(
             "Stratified split assignments did not all match source rows: "
             f"matched={len(matched_assignments)}, expected={len(assignments)}"
         )
+    _validate_unique_stratified_candidate_rows(rows)
+    rows, assignments = _refresh_stratified_metadata_from_active_labels(rows, assignments)
     return rows, assignments
 
 
@@ -1922,12 +2253,13 @@ def _score_classic_stratified_eval_test_choices(
     if "first_name_bucket_split" in choices.columns:
         choices["first_name_bucket"] = choices["first_name_bucket_split"].fillna(choices["first_name_bucket"])
         choices = choices.drop(columns=["first_name_bucket_split"])
-    manual_target = pd.to_numeric(choices.get("manual_safe_target"), errors="coerce")
-    manual_override = manual_target.notna()
-    choices.loc[manual_override, "query_safe_target"] = manual_target[manual_override].astype(int)
     if "query_safe_target_source" not in choices.columns:
         choices["query_safe_target_source"] = "retrieved_window"
-    choices.loc[manual_override, "query_safe_target_source"] = "manual_safe_target"
+    if "manual_safe_target" in choices.columns:
+        manual_target = pd.to_numeric(choices["manual_safe_target"], errors="coerce")
+        choices["manual_safe_target_matches_active_label"] = manual_target.isna() | manual_target.astype("Int64").eq(
+            choices["query_safe_target"].astype("Int64")
+        )
     return choices, assignments
 
 
@@ -1938,6 +2270,10 @@ def _summarize_classic_stratified_predictions(
 ) -> dict[str, Any]:
     """Build promoted stratified split summary and test breakdowns from predictions."""
 
+    predictions = predictions.copy()
+    predictions["gate_bucket"] = (
+        _total_error_gate_bucket(predictions) if not predictions.empty else pd.Series(dtype="string")
+    )
     split_order = tuple(
         str(value)
         for value in split_spec.get(
@@ -1950,6 +2286,7 @@ def _summarize_classic_stratified_predictions(
     }
     test_predictions = predictions[predictions["split"] == str(split_spec.get("test_split", "test"))].copy()
     factor_columns = [
+        "gate_bucket",
         "source_key",
         "source_stratum",
         "has_positive_candidate",
@@ -1965,6 +2302,7 @@ def _summarize_classic_stratified_predictions(
             str(split): int(count) for split, count in predictions["split"].value_counts().sort_index().items()
         },
         "overall": overall_by_split,
+        "gate_bucket_split_counts": _gate_bucket_split_counts(predictions, split_order),
         "test_breakdowns": {
             column: _breakdown_predictions(test_predictions, column)
             for column in factor_columns
@@ -1997,6 +2335,23 @@ def _metric_count_cell(metrics: dict[str, Any], key: str) -> str:
     if value is None:
         return "n/a"
     return str(int(value))
+
+
+def _optional_metric_float_cell(value: Any) -> str:
+    """Return a formatted float cell, preserving missing values as n/a."""
+
+    if value is None:
+        return "n/a"
+    return _format_metric_float(value)
+
+
+def _count_from_mapping(values: Mapping[str, Any], key: str) -> int:
+    """Return an integer count from a JSON-style mapping."""
+
+    value = values.get(key, 0)
+    if value is None:
+        return 0
+    return int(value)
 
 
 def _metric_breakdown_row(label: str, metrics: dict[str, Any]) -> list[str]:
@@ -2034,12 +2389,95 @@ def _metric_factor_row(factor: str, group: str, metrics: dict[str, Any]) -> list
 def _markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     """Render a markdown table from string cells."""
 
+    def cell(value: str) -> str:
+        return str(value).replace("|", "\\|")
+
     lines = [
-        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(cell(header) for header in headers) + " |",
         "| " + " | ".join("---" for _ in headers) + " |",
     ]
-    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    lines.extend("| " + " | ".join(cell(value) for value in row) + " |" for row in rows)
     return lines
+
+
+def _classic_gate_bucket_table_rows(summary: dict[str, Any], breakdowns: dict[str, Any]) -> list[list[str]]:
+    """Return selected-gate calibration bucket rows for the promoted bucketed gate."""
+
+    abstain_rule = summary.get("abstain_rule")
+    split_summary = summary.get("stratified_eval_test_split")
+    if not isinstance(abstain_rule, dict) or not isinstance(split_summary, dict):
+        return []
+    score_thresholds = abstain_rule.get("bucketed_score_thresholds")
+    if not isinstance(score_thresholds, dict):
+        return []
+    margin_thresholds = abstain_rule.get("bucketed_margin_thresholds")
+    if not isinstance(margin_thresholds, dict):
+        margin_thresholds = {}
+
+    promoted_gate = abstain_rule.get("promoted_stratified_gate")
+    if isinstance(promoted_gate, dict):
+        fit_split = str(promoted_gate.get("fit_split", "calibration_fit"))
+        check_split = str(promoted_gate.get("selection_split", "calibration_check"))
+        test_split = str(promoted_gate.get("test_split", "test"))
+    else:
+        fit_split = "calibration_fit"
+        check_split = "calibration_check"
+        test_split = "test"
+
+    training_summary = summary.get("training_summary")
+    if not isinstance(training_summary, dict):
+        training_summary = {}
+    train_query_counts = training_summary.get("gate_bucket_query_counts")
+    if not isinstance(train_query_counts, dict):
+        train_query_counts = {}
+    train_row_counts = training_summary.get("gate_bucket_row_counts")
+    if not isinstance(train_row_counts, dict):
+        train_row_counts = {}
+
+    split_counts = split_summary.get("gate_bucket_split_counts")
+    if not isinstance(split_counts, dict):
+        split_counts = {}
+    test_breakdowns = breakdowns.get("gate_bucket")
+    if not isinstance(test_breakdowns, dict):
+        test_breakdowns = {}
+
+    rows: list[list[str]] = []
+    for bucket in _TOTAL_ERROR_SCORE_BUCKETS:
+        bucket_split_counts = split_counts.get(bucket)
+        if not isinstance(bucket_split_counts, dict):
+            bucket_split_counts = {}
+        fit_count = _count_from_mapping(bucket_split_counts, fit_split)
+        check_count = _count_from_mapping(bucket_split_counts, check_split)
+        test_metrics = test_breakdowns.get(bucket)
+        if not isinstance(test_metrics, dict):
+            test_metrics = {}
+        test_count = _count_from_mapping(test_metrics, "n_queries") or _count_from_mapping(
+            bucket_split_counts,
+            test_split,
+        )
+        calibration_count = fit_count + check_count
+        margin_threshold = margin_thresholds.get(bucket) if bucket in _TOTAL_ERROR_MARGIN_BUCKETS else None
+        rows.append(
+            [
+                bucket,
+                _optional_metric_float_cell(score_thresholds.get(bucket)),
+                _optional_metric_float_cell(margin_threshold),
+                str(_count_from_mapping(train_query_counts, bucket)),
+                str(_count_from_mapping(train_row_counts, bucket)),
+                str(fit_count),
+                str(check_count),
+                str(calibration_count),
+                str(test_count),
+                str(_count_from_mapping(test_metrics, "n_positive_queries")),
+                str(_count_from_mapping(test_metrics, "n_negative_queries")),
+                str(_count_from_mapping(test_metrics, "errors")),
+                "n/a" if test_count == 0 else _format_metric_float(test_metrics.get("error_rate", 0.0)),
+                str(_count_from_mapping(test_metrics, "false_abstain")),
+                str(_count_from_mapping(test_metrics, "false_link")),
+                str(_count_from_mapping(test_metrics, "wrong_candidate_link")),
+            ]
+        )
+    return rows
 
 
 def format_classic_selected_gate_tables(summary: dict[str, Any]) -> str:
@@ -2052,7 +2490,36 @@ def format_classic_selected_gate_tables(summary: dict[str, Any]) -> str:
     if not isinstance(breakdowns, dict):
         return ""
 
-    lines: list[str] = ["## By Dataset Slice, Selected Gate", ""]
+    lines: list[str] = []
+    bucket_rows = _classic_gate_bucket_table_rows(summary, breakdowns)
+    if bucket_rows:
+        lines.extend(["## By Calibration Bucket, Selected Gate", ""])
+        lines.extend(
+            _markdown_table(
+                [
+                    "bucket",
+                    "score threshold",
+                    "margin threshold",
+                    "train queries",
+                    "train rows",
+                    "calibration fit",
+                    "calibration check",
+                    "calibration total",
+                    "test queries",
+                    "test positive queries",
+                    "test negative queries",
+                    "test errors",
+                    "test error rate",
+                    "false abstain",
+                    "false link",
+                    "wrong link",
+                ],
+                bucket_rows,
+            )
+        )
+        lines.append("")
+
+    lines.extend(["## By Dataset Slice, Selected Gate", ""])
     source_breakdown = dict(breakdowns.get("source_key", {}))
     source_rows = [
         _metric_breakdown_row(str(slice_name), dict(metrics))
@@ -2171,7 +2638,14 @@ def _score_eval_candidate_rows(
     return pd.concat(frames, ignore_index=True)
 
 
-def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
+def run_classic(
+    bundle: OfficialBundle,
+    output_dir: Path,
+    *,
+    save_artifact_to: Path | None = None,
+    artifact_audit_metadata: Mapping[str, Any] | None = None,
+    required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
+) -> dict[str, Any]:
     """Fit, calibrate, and evaluate the official classic pipeline."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2197,6 +2671,7 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
         rule_name=spec.get("train_row_cap_rule"),
         min_train_limit=(int(spec["train_row_cap_min_limit"]) if "train_row_cap_min_limit" in spec else None),
     )
+    training_gate_bucket_summary = _summarize_training_gate_buckets(train_df)
     train_matrix = _classic_feature_matrix(train_df, feature_columns).to_numpy(dtype=np.float32)
     train_labels = train_df["label"].to_numpy(dtype=np.int8, copy=False)
     group_sizes = train_df["query_group_id"].astype(str).value_counts(sort=False)
@@ -2235,7 +2710,7 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
         (gate_source_query_choices["retrieval_rank_limit"] == calibration_limit)
         & (gate_source_query_choices["base_group_id"].isin(internal_eval_groups))
     ].copy()
-    frozen_expected = bundle.expected_metrics["classic"]
+    frozen_expected = dict(bundle.expected_metrics.get("classic", {}))
     fixed_bucketed_gate = _fixed_bucketed_gate_spec(spec)
     promoted_gate_config = _promoted_stratified_gate_spec(spec)
     stratified_scored_choices: tuple[pd.DataFrame, pd.DataFrame] | None = None
@@ -2290,6 +2765,8 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
             "score_grid_size": int(promoted_gate_config["score_grid_size"]),
             "margin_grid_size": int(promoted_gate_config["margin_grid_size"]),
             "lambda_grid": list(promoted_gate_config["lambda_grid"]),
+            "selection_metric": str(promoted_gate_config["selection_metric"]),
+            "error_weights": dict(promoted_gate_config["error_weights"]),
             "selected_gate_name": selected_gate.name,
             "selected_gate": {
                 "name": selected_gate.name,
@@ -2413,7 +2890,8 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
             bucketed_margin_thresholds=bucketed_margin_thresholds,
         )
 
-    override_df = _read_csv(_resolve_path(bundle, spec["hwang_clean_override_path"]))
+    override_path = spec.get("hwang_clean_override_path")
+    override_df = _read_csv(_resolve_path(bundle, str(override_path))) if override_path else None
     hwang_eval_summary = _evaluate_scored_windows(
         hwang_query_choices,
         score_threshold=score_threshold,
@@ -2465,6 +2943,8 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
             "rows": int(len(train_df)),
             "queries": int(train_df["query_group_id"].astype(str).nunique()),
             "positive_rows": int(train_df["label"].sum()),
+            "gate_bucket_query_counts": training_gate_bucket_summary["query_counts"],
+            "gate_bucket_row_counts": training_gate_bucket_summary["row_counts"],
             "elapsed_seconds": train_seconds,
             "train_holdout_filter_summary": train_holdout_filter_summary,
             "train_filter_summary": train_filter_summary,
@@ -2474,7 +2954,7 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
             "margin_threshold": margin_threshold,
             "single_candidate_score_threshold": single_candidate_score_threshold,
             "calibration_mode": (
-                "promoted_stratified_total_error_4score_2margin"
+                "promoted_stratified_weighted_average_error_4score_2margin"
                 if promoted_gate_config is not None
                 else ("fixed_bucketed_gate" if fixed_bucketed_gate is not None else "legacy_score_margin")
             ),
@@ -2514,6 +2994,37 @@ def run_classic(bundle: OfficialBundle, output_dir: Path) -> dict[str, Any]:
         selected_gate_tables_path = output_dir / "selected_gate_tables.md"
         selected_gate_tables_path.write_text(selected_gate_tables, encoding="utf-8")
         summary["selected_gate_tables_path"] = str(selected_gate_tables_path.relative_to(output_dir))
+    if save_artifact_to is not None:
+        fixture_source = gate_source_eval.head(5)
+        if len(fixture_source) == 0:
+            fixture_matrix = train_matrix[:5]
+        else:
+            fixture_matrix = _classic_feature_matrix(fixture_source, feature_columns).to_numpy(dtype=np.float32)
+        artifact_metadata = save_incremental_linking_artifact(
+            model,
+            Path(save_artifact_to),
+            feature_columns=feature_columns,
+            retrieval_top_k=25,
+            gate_config={
+                "score_threshold": score_threshold,
+                "margin_threshold": margin_threshold,
+                "single_candidate_score_threshold": single_candidate_score_threshold,
+                "bucketed_score_thresholds": bucketed_score_thresholds,
+                "bucketed_margin_threshold": bucketed_margin_threshold,
+                "bucketed_margin_thresholds": bucketed_margin_thresholds,
+                "calibration_mode": summary["abstain_rule"]["calibration_mode"],
+            },
+            prediction_fixture_matrix=fixture_matrix,
+            required_rust_capabilities=required_rust_capabilities,
+            audit_metadata=artifact_audit_metadata,
+        )
+        summary["artifact"] = {
+            "path": str(Path(save_artifact_to)),
+            "schema_version": artifact_metadata.schema_version,
+            "feature_schema_digest": artifact_metadata.feature_schema_digest,
+            "production_contract_digest": artifact_metadata.production_contract_digest,
+            "retrieval_stack_digest": artifact_metadata.retrieval_stack_digest,
+        }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary
 

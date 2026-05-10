@@ -38,6 +38,7 @@ dependencies = [
   "pyasn1>=0.6.3",
   "shap>=0.45",
   "sinonym>=0.2.2",
+  "pyarrow>=16,<19",
 ]
 
 [project.optional-dependencies]

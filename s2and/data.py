@@ -1272,7 +1272,10 @@ class ANDData:
         """
         if isinstance(path_or_list, str):
             with open(path_or_list) as f:
-                return f.read().strip().split("\n")
+                contents = f.read().strip()
+                if not contents:
+                    return []
+                return contents.splitlines()
         else:
             return path_or_list
 

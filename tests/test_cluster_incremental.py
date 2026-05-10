@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -5,7 +6,6 @@ import pytest
 from lightgbm import LGBMClassifier
 
 import s2and.model as model_module
-from s2and import memory_budget
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, IncrementalDistStats
@@ -64,6 +64,11 @@ def clusterer_dataset_factory():
         return _build_dummy_clusterer_and_dataset(name=name)
 
     return _factory
+
+
+@pytest.fixture(autouse=True)
+def _use_python_backend_by_default(monkeypatch):
+    monkeypatch.setenv("S2AND_BACKEND", "python")
 
 
 def test_predict_incremental(clusterer_dataset_factory):
@@ -127,6 +132,454 @@ def test_predict_incremental_return_contract(clusterer_dataset_factory, monkeypa
         return_clusters_only=True,
     )
     assert clusters_only == canned["clusters"]
+
+
+def test_predict_incremental_private_linker_mode_uses_seed_link_seam(clusterer_dataset_factory, monkeypatch):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_private_incremental_linker")
+    block = ["3", "4", "5", "6", "7", "8"]
+    residual_blocks: list[list[str]] = []
+    residual_total_ram_bytes: list[int | None] = []
+
+    def fake_predict_helper(block_dict, dataset_arg, partial_supervision, runtime_context, total_ram_bytes=None):
+        del dataset_arg, partial_supervision, runtime_context
+        residual_blocks.append(list(block_dict["block"]))
+        residual_total_ram_bytes.append(total_ram_bytes)
+        return {"residual_cluster": list(block_dict["block"])}, None
+
+    clusterer.predict_helper = cast(Any, fake_predict_helper)
+    monkeypatch.setattr(
+        model_module,
+        "_resolve_total_ram_bytes_for_incremental",
+        lambda _total=None: (1_000_000_000, "test"),
+    )
+    monkeypatch.setattr(model_module.memory_budget, "current_rss_bytes_best_effort", lambda _total: (1_000, "rss:test"))
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_module, "_get_rust_featurizer", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        model_module,
+        "_build_incremental_constraint_backend",
+        lambda *args, **kwargs: SimpleNamespace(rust_featurizer=None),
+    )
+
+    import s2and.incremental_linking.artifact as artifact_module
+    import s2and.incremental_linking.query_adapter as query_adapter_module
+    import s2and.incremental_linking.runtime as runtime_module
+
+    artifact = SimpleNamespace(metadata=SimpleNamespace(retrieval_top_k=25))
+    retriever = object()
+    captured_inputs: dict[str, Any] = {}
+    captured_runtime: dict[str, Any] = {}
+    monkeypatch.setattr(artifact_module, "load_incremental_linking_artifact", lambda _path: artifact)
+
+    def fake_build_inputs(**kwargs):
+        captured_inputs.update(kwargs)
+        query_by_signature_id = {
+            str(signature_id): f"query-{signature_id}" for signature_id in kwargs["query_signature_ids"]
+        }
+        return SimpleNamespace(
+            queries=tuple(query_by_signature_id[signature_id] for signature_id in kwargs["query_signature_ids"]),
+            query_by_signature_id=query_by_signature_id,
+            retriever=retriever,
+            summary_by_component={},
+        )
+
+    monkeypatch.setattr(query_adapter_module, "build_incremental_linker_inputs", fake_build_inputs)
+    monkeypatch.setattr(
+        query_adapter_module,
+        "build_name_count_rarity_row_signals",
+        lambda *args, **kwargs: {},
+    )
+
+    def fake_private_runtime(clusterer_arg, artifact_arg, **kwargs):
+        captured_runtime["clusterer"] = clusterer_arg
+        captured_runtime["artifact"] = artifact_arg
+        captured_runtime.update(kwargs)
+        return SimpleNamespace(
+            linked_signature_clusters={"5": "1"},
+            telemetry={"query_count": 2, "link_count": 1, "abstain_count": 1},
+        )
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_predict_incremental_link_or_abstain_production_private",
+        fake_private_runtime,
+    )
+
+    result = clusterer.predict_incremental(
+        block,
+        dataset,
+        batching_threshold=None,
+        incremental_linker_private=True,
+        incremental_linker_artifact_path="data/production_incremental_linker_v1.2",
+    )
+
+    assert captured_inputs["query_signature_ids"] == ["5", "8"]
+    assert captured_runtime["query_signature_ids"] == ["5", "8"]
+    assert captured_runtime["queries"] == ("query-5", "query-8")
+    assert captured_runtime["retriever"] is retriever
+    assert captured_runtime["artifact"] is artifact
+    assert captured_runtime["total_ram_bytes"] == 1_000_000_000
+    assert captured_runtime["seed_setup"][0] == captured_inputs["cluster_seeds_require"]
+    assert residual_blocks == [["8"]]
+    assert residual_total_ram_bytes == [1_000_000_000]
+    assert any(set(signatures) == {"3", "4", "5"} for signatures in result["clusters"].values())
+    assert any(set(signatures) == {"8"} for signatures in result["clusters"].values())
+    assert result["incremental_linker_telemetry"]["link_count"] == 1
+
+
+def test_predict_incremental_explicit_rust_backend_uses_promoted_linker_by_default(
+    clusterer_dataset_factory,
+    monkeypatch,
+):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_rust_incremental_linker_default")
+    block = ["3", "4", "5", "6", "7", "8"]
+    runtime_context = SimpleNamespace(
+        operation="cluster_predict_incremental",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-rust-promoted-incremental",
+        source="S2AND_BACKEND",
+    )
+    captured: dict[str, Any] = {}
+    promoted_payload = {
+        "clusters": {"promoted": list(block)},
+        "phase_b_mode": "exact",
+        "phase_b_budget_bytes": 0,
+        "phase_b_required_bytes": 0,
+    }
+
+    monkeypatch.setattr(model_module, "build_runtime_context", lambda _operation: runtime_context)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
+
+    def fake_promoted_mode(self, block_signatures, dataset_arg, **kwargs):
+        captured["self"] = self
+        captured["block_signatures"] = list(block_signatures)
+        captured["dataset"] = dataset_arg
+        captured.update(kwargs)
+        return dict(promoted_payload)
+
+    monkeypatch.setattr(Clusterer, "_predict_incremental_link_or_abstain_private_mode", fake_promoted_mode)
+
+    result = clusterer.predict_incremental(block, dataset, batching_threshold=None)
+
+    assert result == promoted_payload
+    assert captured["self"] is clusterer
+    assert captured["block_signatures"] == block
+    assert captured["dataset"] is dataset
+    assert captured["runtime_context"] is runtime_context
+    assert captured["artifact_path"] is None
+    assert captured["query_view"] == "initial_only"
+
+
+def test_predict_incremental_auto_backend_uses_promoted_linker_when_auto_resolves_to_rust(
+    clusterer_dataset_factory,
+    monkeypatch,
+):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_auto_incremental_linker_default")
+    block = ["3", "4", "5", "6", "7", "8"]
+    runtime_context = SimpleNamespace(
+        operation="cluster_predict_incremental",
+        requested_backend="auto",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-auto-promoted-incremental",
+        source="S2AND_BACKEND",
+    )
+    promoted_payload = {
+        "clusters": {"promoted": list(block)},
+        "phase_b_mode": "exact",
+        "phase_b_budget_bytes": 0,
+        "phase_b_required_bytes": 0,
+    }
+
+    monkeypatch.setattr(model_module, "build_runtime_context", lambda _operation: runtime_context)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        Clusterer,
+        "_predict_incremental_link_or_abstain_private_mode",
+        lambda *args, **kwargs: dict(promoted_payload),
+    )
+
+    assert clusterer.predict_incremental(block, dataset, batching_threshold=None) == promoted_payload
+
+
+def test_predict_incremental_promoted_linker_batches_queries(
+    clusterer_dataset_factory,
+    monkeypatch,
+):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_promoted_incremental_linker_batch")
+    block = ["3", "4", "5", "6", "7", "8"]
+    residual_blocks: list[list[str]] = []
+    runtime_context = SimpleNamespace(
+        operation="cluster_predict_incremental",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-rust-promoted-incremental-batch",
+        source="S2AND_BACKEND",
+    )
+    monkeypatch.setattr(model_module, "build_runtime_context", lambda _operation: runtime_context)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_module, "_get_rust_featurizer", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        model_module,
+        "_build_incremental_constraint_backend",
+        lambda *args, **kwargs: SimpleNamespace(rust_featurizer=None),
+    )
+
+    def fake_predict_helper(block_dict, dataset_arg, partial_supervision, runtime_context, total_ram_bytes=None):
+        del dataset_arg, partial_supervision, runtime_context, total_ram_bytes
+        residual_blocks.append(list(block_dict["block"]))
+        return {"residual_cluster": list(block_dict["block"])}, None
+
+    clusterer.predict_helper = cast(Any, fake_predict_helper)
+
+    import s2and.incremental_linking.artifact as artifact_module
+    import s2and.incremental_linking.query_adapter as query_adapter_module
+    import s2and.incremental_linking.runtime as runtime_module
+
+    artifact = SimpleNamespace(metadata=SimpleNamespace(retrieval_top_k=25))
+    captured_inputs: dict[str, Any] = {}
+    runtime_batches: list[list[str]] = []
+    monkeypatch.setattr(artifact_module, "load_incremental_linking_artifact", lambda _path: artifact)
+
+    def fake_build_inputs(**kwargs):
+        captured_inputs.update(kwargs)
+        query_by_signature_id = {
+            str(signature_id): f"query-{signature_id}" for signature_id in kwargs["query_signature_ids"]
+        }
+        return SimpleNamespace(
+            queries=tuple(query_by_signature_id[signature_id] for signature_id in kwargs["query_signature_ids"]),
+            query_by_signature_id=query_by_signature_id,
+            retriever=object(),
+            summary_by_component={},
+        )
+
+    monkeypatch.setattr(query_adapter_module, "build_incremental_linker_inputs", fake_build_inputs)
+    monkeypatch.setattr(
+        query_adapter_module,
+        "build_name_count_rarity_row_signals",
+        lambda *args, **kwargs: {},
+    )
+
+    def fake_private_runtime(clusterer_arg, artifact_arg, **kwargs):
+        del clusterer_arg, artifact_arg
+        batch = [str(signature_id) for signature_id in kwargs["query_signature_ids"]]
+        runtime_batches.append(batch)
+        return SimpleNamespace(
+            linked_signature_clusters={"5": "1"} if batch == ["5"] else {},
+            telemetry={
+                "query_count": len(batch),
+                "candidate_row_count": 10 + len(batch),
+                "pair_count": 20 + len(batch),
+                "link_count": 1 if batch == ["5"] else 0,
+                "abstain_count": 0 if batch == ["5"] else len(batch),
+                "retrieval_top_k": 25,
+                "seed_signature_count": 4,
+                "seed_component_count": 2,
+            },
+        )
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_predict_incremental_link_or_abstain_production_private",
+        fake_private_runtime,
+    )
+
+    result = clusterer.predict_incremental(block, dataset, batching_threshold=1)
+
+    assert captured_inputs["query_signature_ids"] == ["5", "8"]
+    assert runtime_batches == [["5"], ["8"]]
+    assert residual_blocks == [["8"]]
+    assert any(set(signatures) == {"3", "4", "5"} for signatures in result["clusters"].values())
+    telemetry = result["incremental_linker_telemetry"]
+    assert telemetry["query_count"] == 2
+    assert telemetry["candidate_row_count"] == 22
+    assert telemetry["pair_count"] == 42
+    assert telemetry["link_count"] == 1
+    assert telemetry["abstain_count"] == 1
+    assert telemetry["retrieval_top_k"] == 25
+    assert telemetry["seed_signature_count"] == 4
+    assert telemetry["seed_component_count"] == 2
+    assert telemetry["query_batch_count"] == 2
+    assert telemetry["query_batch_size_configured"] == 1
+    assert telemetry["query_batch_size_min"] == 1
+    assert telemetry["query_batch_size_max"] == 1
+
+
+def test_predict_incremental_promoted_linker_recalibrates_query_batch_size(
+    clusterer_dataset_factory,
+    monkeypatch,
+    caplog,
+):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_promoted_incremental_linker_calibration")
+    block = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
+    runtime_context = SimpleNamespace(
+        operation="cluster_predict_incremental",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-rust-promoted-incremental-calibration",
+        source="S2AND_BACKEND",
+    )
+    monkeypatch.setattr(model_module, "build_runtime_context", lambda _operation: runtime_context)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_module, "_get_rust_featurizer", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        model_module,
+        "_build_incremental_constraint_backend",
+        lambda *args, **kwargs: SimpleNamespace(rust_featurizer=None),
+    )
+    monkeypatch.setattr(model_module.memory_budget, "current_rss_bytes_best_effort", lambda _total: (1_200, "rss:test"))
+
+    def fake_limits(**kwargs):
+        query_count = int(kwargs["query_count"])
+        cap = kwargs.get("max_query_batch_size")
+        max_batch = query_count if cap is None else min(query_count, int(cap))
+        observed = int(kwargs.get("observed_query_count", 0) or 0) > 0
+        query_batch_size = 0 if query_count == 0 else max(1, min(max_batch, 3 if observed else 1))
+        return {
+            "query_batch_size": query_batch_size,
+            "single_query_exceeds_budget": False,
+            "single_query_predicted_persistent_bytes": 100,
+            "stage_budget_bytes": 10_000,
+            "total_ram_bytes": 100_000,
+            "current_rss_bytes": 1_000,
+            "safety_margin_bytes": 1_000,
+            "available_bytes": 90_000,
+            "predicted_peak_delta_bytes": 2_000 + query_batch_size,
+            "predicted_peak_rss_bytes": 3_000 + query_batch_size,
+            "operational_estimate_source": "observed_probe" if observed else "top_k_largest_components",
+            "predicted_pairs_per_batch": 40 * query_batch_size,
+            "predicted_candidate_rows_per_batch": 10 * query_batch_size,
+            "pair_chunk_pairs": 100,
+            "pair_chunk_count": 1 if query_batch_size else 0,
+        }
+
+    monkeypatch.setattr(model_module, "_compute_promoted_incremental_limits", lambda **kwargs: fake_limits(**kwargs))
+
+    def fake_predict_helper(block_dict, dataset_arg, partial_supervision, runtime_context, total_ram_bytes=None):
+        del dataset_arg, partial_supervision, runtime_context, total_ram_bytes
+        return {"residual_cluster": list(block_dict["block"])}, None
+
+    clusterer.predict_helper = cast(Any, fake_predict_helper)
+
+    import s2and.incremental_linking.artifact as artifact_module
+    import s2and.incremental_linking.query_adapter as query_adapter_module
+    import s2and.incremental_linking.runtime as runtime_module
+
+    monkeypatch.setattr(
+        artifact_module,
+        "load_incremental_linking_artifact",
+        lambda _path: SimpleNamespace(metadata=SimpleNamespace(retrieval_top_k=25)),
+    )
+
+    def fake_build_inputs(**kwargs):
+        query_by_signature_id = {
+            str(signature_id): f"query-{signature_id}" for signature_id in kwargs["query_signature_ids"]
+        }
+        return SimpleNamespace(
+            queries=tuple(query_by_signature_id[signature_id] for signature_id in kwargs["query_signature_ids"]),
+            query_by_signature_id=query_by_signature_id,
+            retriever=object(),
+            summary_by_component={},
+        )
+
+    monkeypatch.setattr(query_adapter_module, "build_incremental_linker_inputs", fake_build_inputs)
+    monkeypatch.setattr(
+        query_adapter_module,
+        "build_name_count_rarity_row_signals",
+        lambda *args, **kwargs: {},
+    )
+
+    runtime_batches: list[list[str]] = []
+
+    def fake_private_runtime(clusterer_arg, artifact_arg, **kwargs):
+        del clusterer_arg, artifact_arg
+        batch = [str(signature_id) for signature_id in kwargs["query_signature_ids"]]
+        runtime_batches.append(batch)
+        return SimpleNamespace(
+            linked_signature_clusters={},
+            telemetry={
+                "query_count": len(batch),
+                "candidate_row_count": 2 * len(batch),
+                "pair_count": 4 * len(batch),
+                "link_count": 0,
+                "abstain_count": len(batch),
+                "retrieval_top_k": 25,
+                "seed_signature_count": 4,
+                "seed_component_count": 2,
+            },
+        )
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_predict_incremental_link_or_abstain_production_private",
+        fake_private_runtime,
+    )
+
+    with caplog.at_level("INFO", logger="s2and"):
+        result = clusterer.predict_incremental(block, dataset, batching_threshold=None)
+
+    assert runtime_batches == [["0"], ["1", "2", "5"], ["8"]]
+    telemetry = result["incremental_linker_telemetry"]
+    assert telemetry["query_batch_count"] == 3
+    assert telemetry["query_batch_size_max"] == 3
+    assert telemetry["memory_initial_query_batch_size"] == 1
+    assert telemetry["memory_final_query_batch_size"] == 3
+    assert telemetry["memory_observed_calibration_applied"] == 1
+    assert telemetry["memory_final_operational_estimate_source"] == "observed_probe"
+    assert telemetry["memory_predicted_peak_delta_bytes_max"] == 2003
+    assert any(
+        record.message.startswith("Telemetry: incremental_promoted_query_batch_calibration ")
+        for record in caplog.records
+    )
+
+
+def test_predict_incremental_promoted_linker_fails_closed_when_single_query_exceeds_budget(
+    clusterer_dataset_factory,
+    monkeypatch,
+):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_promoted_incremental_linker_budget_fail")
+    runtime_context = SimpleNamespace(
+        operation="cluster_predict_incremental",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-rust-promoted-incremental-budget-fail",
+        source="S2AND_BACKEND",
+    )
+    monkeypatch.setattr(model_module, "build_runtime_context", lambda _operation: runtime_context)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        model_module,
+        "_get_rust_featurizer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should fail before featurizer build")),
+    )
+
+    import s2and.incremental_linking.artifact as artifact_module
+
+    monkeypatch.setattr(
+        artifact_module,
+        "load_incremental_linking_artifact",
+        lambda _path: SimpleNamespace(metadata=SimpleNamespace(retrieval_top_k=25)),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_compute_promoted_incremental_limits",
+        lambda **_kwargs: {
+            "single_query_exceeds_budget": True,
+            "single_query_predicted_persistent_bytes": 20_000,
+            "stage_budget_bytes": 10_000,
+            "total_ram_bytes": 100_000,
+            "current_rss_bytes": 80_000,
+            "safety_margin_bytes": 10_000,
+        },
+    )
+
+    with pytest.raises(MemoryError, match="cannot fit a single query"):
+        clusterer.predict_incremental(["3", "4", "5"], dataset, batching_threshold=None)
 
 
 def test_predict_incremental_helper_deprecated_shim(clusterer_dataset_factory, monkeypatch):
@@ -375,7 +828,7 @@ def test_predict_incremental_phase_split_budget_approx_fallback(clusterer_datase
     assert result["phase_b_mode"] == "subblock_local"
 
 
-def test_phase_b_telemetry_exact_vs_subblock(clusterer_dataset_factory, monkeypatch):
+def test_phase_b_mode_tracks_exact_vs_subblock_budget(clusterer_dataset_factory, monkeypatch):
     block = ["3", "4", "5", "6", "7", "8"]
     clusterer_exact, dataset_exact = clusterer_dataset_factory()
     monkeypatch.setattr(
@@ -438,82 +891,7 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_da
     assert observed_order == ["block|subblock=alpha", "block|subblock=zeta"]
 
 
-def test_phase_a_memory_prediction_logged_and_bounded(clusterer_dataset_factory, caplog):
-    clusterer, dataset = clusterer_dataset_factory()
-    block = ["3", "4", "5", "6", "7", "8"]
-    rss_now, _ = memory_budget.current_rss_bytes_best_effort(16 * 1024 * 1024 * 1024)
-    total_ram_bytes = max(8 * 1024 * 1024 * 1024, int(rss_now) + 4 * 1024 * 1024 * 1024)
-
-    with caplog.at_level("INFO", logger="s2and"):
-        clusterer.predict_incremental(
-            block,
-            dataset,
-            batching_threshold=3,
-            total_ram_bytes=total_ram_bytes,
-        )
-
-    phase_a_logs = [
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a constraints_pairs_total=")
-    ]
-    assert phase_a_logs, "Expected phase_split_phase_a telemetry log with memory prediction metrics"
-    phase_a_log = phase_a_logs[-1]
-    assert "prediction_contract_version=" in phase_a_log
-    assert "predicted_peak_delta_bytes=" in phase_a_log
-    assert "predicted_peak_rss_bytes=" in phase_a_log
-    assert "observed_peak_delta_bytes=" in phase_a_log
-    assert "prediction_error_ratio=" in phase_a_log
-    assert "underpredicted=" in phase_a_log
-
-    ratio_text = phase_a_log.split("prediction_error_ratio=")[1].split()[0]
-    ratio = float(ratio_text)
-    assert ratio <= 10.0
-
-
-def test_phase_a_subblock_telemetry_logged(clusterer_dataset_factory, monkeypatch, caplog):
-    clusterer, dataset = clusterer_dataset_factory()
-    block = ["3", "5", "6", "8"]
-
-    monkeypatch.setattr(
-        model_module,
-        "_compute_incremental_memory_limits",
-        lambda *_args, **_kwargs: _mock_incremental_limits(chunk_pairs=10, accumulator_budget_bytes=1_000_000),
-    )
-
-    def _fake_make_subblocks(signatures, anddata, maximum_size=7500, first_k_letter_counts_sorted=None):
-        del signatures, anddata, maximum_size, first_k_letter_counts_sorted
-        return {
-            "alpha": ["3", "5"],
-            "beta": ["6", "8"],
-        }
-
-    monkeypatch.setattr(model_module, "make_subblocks", _fake_make_subblocks)
-
-    with caplog.at_level("INFO", logger="s2and"):
-        clusterer.predict_incremental(block, dataset, batching_threshold=3)
-
-    phase_a_subblocks_logs = [
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a_subblocks ")
-    ]
-    assert phase_a_subblocks_logs
-    phase_a_subblocks_log = phase_a_subblocks_logs[-1]
-    assert "total_subblocks=2" in phase_a_subblocks_log
-    assert "phase_a_calls=2" in phase_a_subblocks_log
-
-    phase_a_subblock_logs = [
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
-    ]
-    assert len(phase_a_subblock_logs) == 2
-    assert any("key=alpha" in message for message in phase_a_subblock_logs)
-    assert any("key=beta" in message for message in phase_a_subblock_logs)
-
-
-def test_phase_a_batching_reduces_calls_and_preserves_partition(clusterer_dataset_factory, monkeypatch, caplog):
+def test_phase_a_batching_preserves_partition(clusterer_dataset_factory, monkeypatch):
     block = ["0", "1", "2", "3", "4", "5", "6", "7", "8"]
 
     monkeypatch.setattr(
@@ -534,61 +912,11 @@ def test_phase_a_batching_reduces_calls_and_preserves_partition(clusterer_datase
     monkeypatch.setattr(model_module, "make_subblocks", _fake_make_subblocks)
 
     baseline_clusterer, baseline_dataset = clusterer_dataset_factory(name="dummy_phase_a_batching_off")
-    with caplog.at_level("INFO", logger="s2and"):
-        baseline = baseline_clusterer.predict_incremental(block, baseline_dataset, batching_threshold=3)
-
-    baseline_phase_a_subblock_logs = [
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
-    ]
-    assert len(baseline_phase_a_subblock_logs) == 4
-    baseline_summary = next(
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a_subblocks ")
-    )
-    assert "phase_a_calls=4" in baseline_summary
-    assert "batched_phase_a_calls=0" in baseline_summary
-    assert "batched_subblocks=0" in baseline_summary
-
-    caplog.clear()
+    baseline = baseline_clusterer.predict_incremental(block, baseline_dataset, batching_threshold=3)
 
     batched_clusterer, batched_dataset = clusterer_dataset_factory(name="dummy_phase_a_batching_on")
     batched_clusterer.incremental_phase_a_pair_batch_target_multiple = 1.0
-    with caplog.at_level("INFO", logger="s2and"):
-        batched = batched_clusterer.predict_incremental(block, batched_dataset, batching_threshold=3)
-
-    batched_phase_a_subblock_logs = [
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a_subblock ")
-    ]
-    assert len(batched_phase_a_subblock_logs) == 2
-    assert any(
-        "key=alpha, beta, gamma" in message
-        and "subblock_count=3" in message
-        and "unassigned=3" in message
-        and "estimated_pairs=12" in message
-        for message in batched_phase_a_subblock_logs
-    )
-    assert any(
-        "key=delta" in message
-        and "subblock_count=1" in message
-        and "unassigned=2" in message
-        and "estimated_pairs=8" in message
-        for message in batched_phase_a_subblock_logs
-    )
-
-    batched_summary = next(
-        record.message
-        for record in caplog.records
-        if record.message.startswith("Telemetry: phase_split_phase_a_subblocks ")
-    )
-    assert "phase_a_calls=2" in batched_summary
-    assert "batched_phase_a_calls=1" in batched_summary
-    assert "batched_subblocks=3" in batched_summary
-    assert "phase_a_batch_target_pairs=10" in batched_summary
+    batched = batched_clusterer.predict_incremental(block, batched_dataset, batching_threshold=3)
 
     baseline_clusters = _clusters(baseline)
     batched_clusters = _clusters(batched)
@@ -600,7 +928,7 @@ def test_phase_a_batching_reduces_calls_and_preserves_partition(clusterer_datase
     assert _seeds_preserved(batched_clusters, [["3", "4"], ["6", "7"]])
 
 
-def test_phase_a_overflow_surfaces_in_result_and_telemetry(clusterer_dataset_factory, monkeypatch, caplog):
+def test_phase_a_overflow_surfaces_in_result(clusterer_dataset_factory, monkeypatch):
     clusterer, dataset = clusterer_dataset_factory()
     block = ["3", "4", "5", "6", "7", "8"]
 
@@ -609,15 +937,9 @@ def test_phase_a_overflow_surfaces_in_result_and_telemetry(clusterer_dataset_fac
     limits["accumulator_max"] = 1
     monkeypatch.setattr(model_module, "_compute_incremental_memory_limits", lambda *_args, **_kwargs: limits)
 
-    with caplog.at_level("INFO", logger="s2and"):
-        result = clusterer.predict_incremental(block, dataset, batching_threshold=3)
+    result = clusterer.predict_incremental(block, dataset, batching_threshold=3)
 
     assert bool(result["phase_a_accumulator_overflow_early_stop"]) is True
-    overflow_logs = [
-        record.message for record in caplog.records if "Telemetry: phase_split_phase_a_overflow" in record.message
-    ]
-    assert overflow_logs
-    assert "overflow_early_stop=True" in overflow_logs[-1]
 
 
 def test_best_incremental_cluster_respects_seed_score_mode():
@@ -659,6 +981,96 @@ def test_best_incremental_cluster_respects_seed_score_mode():
     )
     assert best_hybrid_high == "min_favorite"
     assert best_hybrid_high_score == pytest.approx(0.08)
+
+
+def test_finish_incremental_with_seed_links_reclusters_only_abstains():
+    clusterer = _build_minimal_incremental_clusterer()
+    residual_blocks: list[list[str]] = []
+    residual_total_ram_bytes: list[int | None] = []
+
+    def fake_predict_helper(block_dict, dataset, partial_supervision, runtime_context, total_ram_bytes=None):
+        del dataset, partial_supervision, runtime_context
+        residual_blocks.append(list(block_dict["block"]))
+        residual_total_ram_bytes.append(total_ram_bytes)
+        return {"residual_cluster": list(block_dict["block"])}, None
+
+    clusterer.predict_helper = cast(Any, fake_predict_helper)
+    dataset = cast(
+        ANDData,
+        type(
+            "IncrementalDataset",
+            (),
+            {
+                "cluster_seeds_require": {"seed0": "7", "seed1": "8"},
+                "max_seed_cluster_id": 8,
+                "signatures": {},
+                "name_tuples": set(),
+            },
+        )(),
+    )
+
+    result = clusterer._finish_incremental_with_seed_links(
+        ["u1", "u2"],
+        dataset,
+        {"u1": "7_0"},
+        {"7_0": "7"},
+        {"7": ["seed0"], "8": ["seed1"]},
+        False,
+        {},
+        runtime_context=cast(Any, object()),
+        total_ram_bytes=123_456,
+    )
+
+    assert result == {"7": ["seed0", "u1"], "8": ["seed1"], "9": ["u2"]}
+    assert residual_blocks == [["u2"]]
+    assert residual_total_ram_bytes == [123_456]
+
+
+def test_build_incremental_seed_setup_passes_total_ram_to_altered_profile_reclustering():
+    clusterer = _build_minimal_incremental_clusterer()
+    recluster_blocks: list[list[str]] = []
+    recluster_total_ram_bytes: list[int | None] = []
+
+    def fake_predict_helper(
+        block_dict,
+        dataset,
+        *,
+        incremental_dont_use_cluster_seeds,
+        partial_supervision,
+        runtime_context,
+        total_ram_bytes=None,
+    ):
+        del dataset, partial_supervision, runtime_context
+        assert incremental_dont_use_cluster_seeds is True
+        recluster_blocks.append(list(block_dict["block"]))
+        recluster_total_ram_bytes.append(total_ram_bytes)
+        return {"split0": ["seed0"], "split1": ["seed1"]}, None
+
+    clusterer.predict_helper = cast(Any, fake_predict_helper)
+    dataset = cast(
+        ANDData,
+        type(
+            "IncrementalDataset",
+            (),
+            {
+                "cluster_seeds_require": {"seed0": "7", "seed1": "7", "seed2": "8"},
+                "altered_cluster_signatures": ["seed0"],
+            },
+        )(),
+    )
+
+    cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = clusterer._build_incremental_seed_setup(
+        dataset,
+        {},
+        runtime_context=cast(Any, object()),
+        total_ram_bytes=123_456,
+    )
+
+    assert recluster_blocks == [["seed0", "seed1"]]
+    assert recluster_total_ram_bytes == [123_456]
+    assert cluster_seeds_require == {"seed0": "7_0", "seed1": "7_1", "seed2": "8"}
+    assert recluster_map == {"7_0": "7", "7_1": "7"}
+    assert cluster_seeds_require_inverse == {"7": ["seed0", "seed1"], "8": ["seed2"]}
 
 
 def test_top1_consensus_broadcast_only_applies_when_cluster_members_agree():

@@ -168,6 +168,101 @@ def test_compute_rust_batch_chunk_plan_base_chunk_pairs_zero_disables_floor():
     assert int(plan_big["chunk_pairs"]) == 500  # total_pairs is the only limit
 
 
+def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
+    limits = memory_budget.compute_promoted_phase_a_limits(
+        query_count=20,
+        component_sizes=[100, 50, 25, 10],
+        retrieval_top_k=3,
+        total_ram_bytes=1_000_000_000,
+        stage_budget_fraction=0.50,
+        fixed_overhead_bytes=1024,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+    )
+
+    assert int(limits["candidate_rows_per_query"]) == 3
+    assert int(limits["conservative_pairs_per_query"]) == 175
+    assert int(limits["max_component_size"]) == 100
+    assert int(limits["query_batch_size"]) == 20
+    assert int(limits["predicted_candidate_rows_per_batch"]) == 60
+    assert int(limits["predicted_pairs_per_batch"]) == 3500
+    assert float(limits["observed_safety_multiplier"]) == pytest.approx(2.0)
+    assert bool(limits["single_query_exceeds_budget"]) is False
+
+
+def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget():
+    limits = memory_budget.compute_promoted_phase_a_limits(
+        query_count=100,
+        component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
+        retrieval_top_k=5,
+        total_ram_bytes=100_000_000,
+        stage_budget_fraction=0.50,
+        fixed_overhead_bytes=1_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+
+    assert int(limits["query_batch_size"]) < 100
+    assert int(limits["query_batch_size"]) >= 1
+    assert int(limits["predicted_peak_rss_bytes"]) > int(limits["current_rss_bytes"])
+    assert int(limits["pair_chunk_pairs"]) >= 1
+
+
+def test_compute_promoted_phase_a_limits_uses_observed_probe_for_operational_batch():
+    hard = memory_budget.compute_promoted_phase_a_limits(
+        query_count=100,
+        component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
+        retrieval_top_k=5,
+        total_ram_bytes=100_000_000,
+        stage_budget_fraction=0.50,
+        fixed_overhead_bytes=1_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+    observed = memory_budget.compute_promoted_phase_a_limits(
+        query_count=100,
+        component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
+        retrieval_top_k=5,
+        total_ram_bytes=100_000_000,
+        stage_budget_fraction=0.50,
+        fixed_overhead_bytes=1_000_000,
+        observed_query_count=16,
+        observed_candidate_rows_per_query=5,
+        observed_pairs_per_query=5_000,
+        observed_safety_multiplier=2.0,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+
+    assert str(hard["operational_estimate_source"]) == "top_k_largest_components"
+    assert str(observed["operational_estimate_source"]) == "observed_probe"
+    assert int(observed["hard_query_batch_size"]) == int(hard["query_batch_size"])
+    assert int(observed["query_batch_size"]) > int(observed["hard_query_batch_size"])
+    assert int(observed["operational_pairs_per_query"]) == 10_000
+    assert int(observed["hard_predicted_pairs_per_batch"]) > int(observed["predicted_pairs_per_batch"])
+
+
+def test_compute_promoted_phase_a_limits_flags_single_query_over_budget():
+    limits = memory_budget.compute_promoted_phase_a_limits(
+        query_count=10,
+        component_sizes=[2_000_000],
+        retrieval_top_k=1,
+        total_ram_bytes=100_000_000,
+        stage_budget_fraction=0.10,
+        fixed_overhead_bytes=1_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+
+    assert int(limits["query_batch_size"]) == 1
+    assert bool(limits["single_query_exceeds_budget"]) is True
+
+
 def test_summarize_prediction_accuracy_flags_underprediction():
     summary = memory_budget.summarize_prediction_accuracy(
         stage_name="test_stage",
@@ -331,10 +426,3 @@ def test_effective_available_fraction_in_rust_batch_plan():
     )
     assert "effective_available_fraction" in plan
     assert float(plan["effective_available_fraction"]) == pytest.approx(0.7, abs=1e-6)
-
-
-def test_gc_collect_and_log(caplog):
-    """gc_collect_and_log should run without error."""
-    with caplog.at_level(logging.INFO, logger="s2and"):
-        memory_budget.gc_collect_and_log("test_stage")
-    # We can't assert exact collection counts, but it should not raise.

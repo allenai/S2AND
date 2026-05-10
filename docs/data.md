@@ -16,13 +16,23 @@ The release includes dataset files plus released model artifacts.
 
 ## Model-only download
 
-If you only want the current production model, download just the pickle:
+If you only want the current pairwise production model, download just the pickle:
 
 ```bash
 aws s3 cp --no-sign-request s3://ai2-s2-research-public/s2and-release/production_model_v1.2.pickle data/
 ```
 
 This is enough for the quick-start path that uses the bundled `tests/qian` fixture.
+
+The promoted incremental linker is a directory artifact, not a pickle:
+
+```bash
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release/production_incremental_linker_v1.2 data/production_incremental_linker_v1.2
+```
+
+It is used with `production_model_v1.2.pickle`.
+The directory includes `training_target.json`, which is the portable training
+target spec used by replay scripts.
 
 ## Configuring `data/path_config.json`
 

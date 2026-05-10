@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from s2and.consts import PROJECT_ROOT_PATH
-from scripts._rust_suite.common import get_result_markers
 
 
 def _load_compare_module():
@@ -133,31 +132,8 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
     assert set(papers_limited.keys()) == {"1", "2"}
 
 
-def test_build_run_metadata_handles_missing_git(monkeypatch):
-    module = _load_compare_module()
-
-    def _raise_file_not_found(*_args, **_kwargs):
-        raise FileNotFoundError("git missing")
-
-    monkeypatch.setattr(module.subprocess, "run", _raise_file_not_found)
-    metadata = module._build_run_metadata()
-
-    assert metadata["git_commit"] is None
-    assert metadata["git_branch"] is None
-    assert metadata["git_dirty"] is None
-    assert metadata["script"].endswith("rust_suite.py")
-    assert isinstance(metadata["env"], dict)
-
-
 def test_rust_suite_requires_subcommand():
     module = _load_compare_module()
     with pytest.raises(SystemExit) as exc_info:
         module.main([])
     assert exc_info.value.code not in (0, None)
-
-
-def test_rust_suite_profile_markers_use_common_source():
-    module = _load_compare_module()
-    expected_start, expected_end = get_result_markers("profile")
-    assert module.RESULT_JSON_START == expected_start
-    assert module.RESULT_JSON_END == expected_end

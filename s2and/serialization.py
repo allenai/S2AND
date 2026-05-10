@@ -21,8 +21,6 @@ _INITIAL_NAME_COUNT_SEMANTICS = "initial_char"
 def _resolve_name_count_semantics_from_featurizer_version(featurizer_version: Any) -> str | None:
     if not isinstance(featurizer_version, int):
         return None
-    if featurizer_version <= 2:
-        return _LEGACY_NAME_COUNT_SEMANTICS
     return _INITIAL_NAME_COUNT_SEMANTICS
 
 

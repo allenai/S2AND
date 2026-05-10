@@ -366,3 +366,34 @@ def test_signature_id_to_index_or_raise_reports_missing_signature_id():
 
     with pytest.raises(ValueError, match="999"):
         _signature_id_to_index_or_raise(signature_id_to_index, 999)
+
+
+def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch):
+    dataset = cast(ANDData, SimpleNamespace(name="dummy", compute_reference_features=False))
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    runtime_context = RuntimeContext(
+        operation="featurization_run",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="run-raises",
+        source="default",
+    )
+
+    monkeypatch.setattr(feature_port, "s2and_rust", object())
+
+    def fail_prewarm(*_args, **_kwargs):
+        raise RuntimeError("native init failed")
+
+    monkeypatch.setattr(feature_port, "_get_rust_featurizer", fail_prewarm)
+
+    with pytest.raises(RuntimeError, match="Rust featurizer init failed"):
+        many_pairs_featurize(
+            [],
+            dataset,
+            featurizer_info,
+            n_jobs=1,
+            use_cache=False,
+            chunk_size=1,
+            runtime_context=runtime_context,
+        )

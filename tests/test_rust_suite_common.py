@@ -2,20 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from scripts._rust_suite import common
-
-
-def test_get_result_markers_profile():
-    start, end = common.get_result_markers("profile")
-    assert start == "===S2AND_PROFILE_RESULT_START==="
-    assert end == "===S2AND_PROFILE_RESULT_END==="
-
-
-def test_get_result_markers_unknown_raises():
-    with pytest.raises(KeyError):
-        common.get_result_markers("unknown")
 
 
 def test_timed_method_tracks_calls_and_restores_instance_method():

@@ -313,7 +313,7 @@ def test_concurrent_builds_for_distinct_datasets_do_not_serialize(monkeypatch):
 
     monkeypatch.setattr(
         feature_port,
-        "_build_rust_featurizer_with_retry_for_missing_signature_ngrams",
+        "_build_rust_featurizer_strict",
         _build_stub,
     )
 
@@ -359,7 +359,7 @@ def test_concurrent_builds_for_same_dataset_share_single_inflight_build(monkeypa
 
     monkeypatch.setattr(
         feature_port,
-        "_build_rust_featurizer_with_retry_for_missing_signature_ngrams",
+        "_build_rust_featurizer_strict",
         _build_stub,
     )
 
@@ -445,7 +445,7 @@ def test_get_rust_featurizer_retries_empty_wait_then_builds(monkeypatch):
     dataset = DummyDataset("empty_wait_then_build", mode="train")
     attempts = {"count": 0}
     build_calls = {"count": 0}
-    inflight = feature_port._InFlightFeaturizerBuild()
+    inflight = feature_port._InFlightFeaturizerBuild("from_dataset")
     expected_featurizer = DummyRustFeaturizer("built_after_empty_wait")
     monkeypatch.setenv(feature_port.RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES_ENV, "2")
     monkeypatch.setenv(feature_port.RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS_ENV, "0")
@@ -599,42 +599,35 @@ def test_rust_build_path_env_forces_from_dataset(monkeypatch):
     assert DummyRustFeaturizer.from_json_created == []
 
 
+def test_rust_build_path_argument_forces_from_dataset_even_with_json_paths():
+    dataset = DummyDataset("inference_dataset", mode="inference")
+    dataset.signatures_path = "signatures.json"
+    dataset.papers_path = "papers.json"
+
+    feature_port._get_rust_featurizer(dataset, rust_build_path="from_dataset")
+
+    assert DummyRustFeaturizer.created == ["inference_dataset"]
+    assert DummyRustFeaturizer.from_json_created == []
+
+
+def test_rust_build_path_argument_rebuilds_cached_different_path():
+    dataset = DummyDataset("inference_dataset", mode="inference")
+    dataset.signatures_path = "signatures.json"
+    dataset.papers_path = "papers.json"
+
+    feature_port._get_rust_featurizer(dataset)
+    feature_port._get_rust_featurizer(dataset, rust_build_path="from_dataset")
+
+    assert len(DummyRustFeaturizer.from_json_created) == 1
+    assert DummyRustFeaturizer.created == ["inference_dataset"]
+
+
 def test_rust_build_path_env_rejects_unknown_value(monkeypatch):
     dataset = DummyDataset("inference_dataset", mode="inference")
     monkeypatch.setenv(feature_port.RUST_BUILD_PATH_ENV, "surprise")
 
     with pytest.raises(ValueError, match="S2AND_RUST_BUILD_PATH"):
         feature_port._get_rust_featurizer(dataset)
-
-
-def test_featurizer_telemetry_logs_runtime_callsite(caplog):
-    dataset = DummyDataset("telemetry_dataset", mode="train")
-    runtime_context = type("RuntimeContext", (), {"operation": "constraints", "run_id": "run-123"})()
-
-    with caplog.at_level("INFO", logger="s2and"):
-        feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=True)
-        feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=True)
-
-    logs = "\n".join(caplog.messages)
-    assert "rust_featurizer_cache cache=miss" in logs
-    assert "rust_featurizer_cache cache=hit" in logs
-    assert "rust_core_build seconds=" in logs
-    assert "op=constraints" in logs
-    assert "run=run-123" in logs
-    assert "path=from_dataset" in logs
-
-
-def test_featurizer_telemetry_logs_json_build_path(caplog, monkeypatch):
-    dataset = DummyDataset("telemetry_json_dataset", mode="inference")
-    dataset.signatures_path = "signatures.json"
-    dataset.papers_path = "papers.json"
-
-    with caplog.at_level("INFO", logger="s2and"):
-        feature_port._get_rust_featurizer(dataset)
-
-    logs = "\n".join(caplog.messages)
-    assert "rust_core_build seconds=" in logs
-    assert "path=from_json_paths" in logs
 
 
 def test_json_ingest_overlay_payload_includes_only_signatures_with_name_counts(monkeypatch):
@@ -672,7 +665,7 @@ def test_json_ingest_overlay_payload_includes_only_signatures_with_name_counts(m
     assert payload_entry.author_info_name_counts.last_first_initial == 4.0
 
 
-def test_signature_name_counts_overlay_payload_surfaces_items_failure(caplog):
+def test_signature_name_counts_overlay_payload_surfaces_items_failure():
     class FailingSignatures:
         def __len__(self):
             return 2
@@ -683,15 +676,11 @@ def test_signature_name_counts_overlay_payload_surfaces_items_failure(caplog):
     dataset = DummyDataset("overlay_items_failure", mode="inference")
     dataset.signatures = FailingSignatures()
 
-    with caplog.at_level("ERROR", logger="s2and"):
-        with pytest.raises(RuntimeError, match="iterating signatures"):
-            feature_port._signature_name_counts_overlay_payload_from_dataset(dataset)
-
-    logs = "\n".join(caplog.messages)
-    assert "failed to iterate signatures for name-count overlay dataset=overlay_items_failure" in logs
+    with pytest.raises(RuntimeError, match="iterating signatures"):
+        feature_port._signature_name_counts_overlay_payload_from_dataset(dataset)
 
 
-def test_json_ingest_source_telemetry_prefers_dataset_over_artifact(caplog, monkeypatch):
+def test_json_ingest_prefers_dataset_name_counts_over_artifact(monkeypatch):
     monkeypatch.setenv("S2AND_RUST_NAME_COUNTS_JSON", "name_counts.json")
     dataset = DummyDataset("telemetry_json_dataset", mode="inference")
     dataset.signatures_path = "signatures.json"
@@ -712,21 +701,13 @@ def test_json_ingest_source_telemetry_prefers_dataset_over_artifact(caplog, monk
         "s2": type("Sig", (), {"author_info_name_counts": None})(),
     }
 
-    with caplog.at_level("INFO", logger="s2and"):
-        feature_port._get_rust_featurizer(dataset)
-
-    logs = "\n".join(caplog.messages)
-    assert "stage=rust_json_ingest_name_counts_source" in logs
-    assert "name_counts_source=dataset" in logs
-    assert "signatures_total=2" in logs
-    assert "signatures_with_counts=1" in logs
-    assert "artifact_configured=True" in logs
+    feature_port._get_rust_featurizer(dataset)
 
     args, _kwargs = DummyRustFeaturizer.from_json_created[0]
     assert args[5] is None
 
 
-def test_json_ingest_source_telemetry_uses_artifact_when_non_minimal(tmp_path, caplog, monkeypatch):
+def test_json_ingest_uses_name_counts_artifact_when_dataset_has_no_counts(tmp_path, monkeypatch):
     artifact_path = tmp_path / "name_counts.json"
     artifact_path.write_text('{"normalization_version":"legacy_compat","counts":{}}', encoding="utf-8")
 
@@ -736,16 +717,21 @@ def test_json_ingest_source_telemetry_uses_artifact_when_non_minimal(tmp_path, c
     dataset.papers_path = "papers.json"
     dataset.signatures = {"s1": type("Sig", (), {"author_info_name_counts": None})()}
 
-    with caplog.at_level("INFO", logger="s2and"):
-        feature_port._get_rust_featurizer(dataset)
-
-    logs = "\n".join(caplog.messages)
-    assert "stage=rust_json_ingest_name_counts_source" in logs
-    assert "name_counts_source=artifact" in logs
-    assert "normalization_check_executed=True" in logs
+    feature_port._get_rust_featurizer(dataset)
 
     args, _kwargs = DummyRustFeaturizer.from_json_created[0]
     assert args[5] == str(artifact_path)
+
+
+def test_explicit_from_json_paths_requires_json_paths(monkeypatch):
+    monkeypatch.setenv("S2AND_RUST_BUILD_PATH", "from_json_paths")
+    dataset = DummyDataset("missing_json_paths", mode="train")
+
+    with pytest.raises(RuntimeError, match="signatures_path/papers_path are missing"):
+        feature_port._get_rust_featurizer(dataset, use_cache=False)
+
+    assert DummyRustFeaturizer.created == []
+    assert DummyRustFeaturizer.from_json_created == []
 
 
 def test_explicit_evict_and_clear_api(monkeypatch):

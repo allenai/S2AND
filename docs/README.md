@@ -32,7 +32,6 @@ This directory holds both user-facing guides and internal engineering notes.
 
 ## Deep dives and engineering notes
 
-- Single-letter giant-block behavior and historical retrieval alternative: [single_letter_signatures.md](single_letter_signatures.md)
 - Stage-wise memory telemetry notes: [stage_memory_estimates.md](stage_memory_estimates.md)
 
 ## Planning and migration docs

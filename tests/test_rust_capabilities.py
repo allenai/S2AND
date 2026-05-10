@@ -117,6 +117,79 @@ def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_ma
     assert capabilities.from_dataset_paper_preprocess_available is True
 
 
+def test_detect_rust_runtime_capabilities_reports_incremental_linker_names():
+    class NamedRustFeaturizer(_make_core_rust_featurizer()):
+        def linker_pair_index_arrays_aggregate_stats(self, *args, **kwargs):
+            return None
+
+        def linker_pair_index_arrays_constraint_labels(self, *args, **kwargs):
+            return None
+
+        def linker_pair_distance_accumulators(self, *args, **kwargs):
+            return None
+
+    class PairPlanMethod:
+        __text_signature__ = (
+            "($self, queries, query_signature_indices, component_member_indices_by_key, top_k, "
+            "num_threads=None, query_signature_ids=None, retrieval_subblock_index=None, "
+            "query_candidate_component_keys_by_signature_id=None, full_first_global_backfill_count=0)"
+        )
+
+        def __call__(self, *args, **kwargs):
+            return None
+
+    class NamedRustHybridCentroidRetriever:
+        def top_k_hybrid_centroid(self, *args, **kwargs):
+            return None
+
+        top_k_hybrid_centroid_pair_plan = PairPlanMethod()
+
+    class Module:
+        __version__ = "0.40.0"
+        RustFeaturizer = NamedRustFeaturizer
+        RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever
+
+    capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
+
+    assert "hybrid_centroid_retriever_v1" in capabilities.named_capabilities
+    assert "indexed_pair_array_featurization_v1" in capabilities.named_capabilities
+    assert "incremental_linking_pair_plan_v1" in capabilities.named_capabilities
+    assert "incremental_linking_constraint_arrays_v1" in capabilities.named_capabilities
+
+
+def test_detect_rust_runtime_capabilities_rejects_stale_incremental_pair_plan_abi():
+    class NamedRustFeaturizer(_make_core_rust_featurizer()):
+        def linker_pair_index_arrays_aggregate_stats(self, *args, **kwargs):
+            return None
+
+    class StalePairPlanMethod:
+        __text_signature__ = (
+            "($self, queries, query_signature_indices, component_member_indices_by_key, top_k, "
+            "num_threads=None, query_signature_ids=None, retrieval_subblock_index=None, "
+            "full_first_global_backfill_count=0)"
+        )
+
+        def __call__(self, *args, **kwargs):
+            return None
+
+    class NamedRustHybridCentroidRetriever:
+        def top_k_hybrid_centroid(self, *args, **kwargs):
+            return None
+
+        top_k_hybrid_centroid_pair_plan = StalePairPlanMethod()
+
+    class Module:
+        __version__ = "0.40.0"
+        RustFeaturizer = NamedRustFeaturizer
+        RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever
+
+    capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
+
+    assert "hybrid_centroid_retriever_v1" in capabilities.named_capabilities
+    assert "indexed_pair_array_featurization_v1" in capabilities.named_capabilities
+    assert "incremental_linking_pair_plan_v1" not in capabilities.named_capabilities
+
+
 def test_rust_get_build_info_contract():
     s2and_rust = pytest.importorskip("s2and_rust")
 

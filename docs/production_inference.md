@@ -2,7 +2,7 @@
 
 This document collects the operational details for using the released S2AND production models.
 
-## Which model to use
+## Which pairwise model to use
 
 | Model file | Status | Embeddings | Uses reference features? |
 | --- | --- | --- | --- |
@@ -18,6 +18,29 @@ Embedding source:
 
 - For `v1.2`, use `embedding.specter_v2` from the Semantic Scholar API.
 - For `v1.1`, use `embedding.specter_v1`.
+
+## Promoted incremental linker artifact
+
+The promoted incremental linker artifact is versioned with the pairwise model it
+depends on:
+
+| Artifact | Status | Depends on | Format |
+| --- | --- | --- | --- |
+| `production_incremental_linker_v1.2/` | Current | `production_model_v1.2.pickle` | `booster.lgb` + `metadata.json` |
+
+This is intentionally not a pickle. The directory artifact stores the LightGBM
+booster separately from metadata that validates the 70-feature schema,
+production contract, retrieval contract, gate thresholds, required Rust
+capabilities, and a prediction fixture at load time. It also ships
+`training_target.json`, the portable target spec used by replay scripts for the
+released 70-feature model.
+
+This artifact is the promoted incremental linker for Rust-backed
+`Clusterer.predict_incremental(...)`. It is not intended to reproduce the
+legacy incremental output. When Rust mode is selected and the extension plus
+artifact pass validation, the target behavior is to use this promoted
+retrieval/linker/gate path because it has shown better runtime and quality than
+the long-standing legacy implementation.
 
 ## Reference-feature behavior
 
@@ -87,7 +110,8 @@ S2AND supports two runtime semantics for the name-count feature key used by `las
 
 Compatibility rules:
 
-- `production_model_v1.1.pickle` and `production_model_v1.2.pickle` were trained with `legacy_full_first_token`.
+- `production_model_v1.1.pickle` and `production_model_v1.2.pickle` use `initial_char` with the checked-in
+  `data/name_counts.pickle`; that pickle stores keys like `smith j`, not `smith john`.
 - In `ANDData(..., mode="inference")`, prediction automatically applies the semantics expected by the loaded model via the stored feature contract.
 - Do not mix model artifacts and feature semantics without retraining.
 
@@ -155,7 +179,10 @@ Full runtime contract: [rust/runtime.md](rust/runtime.md)
 
 ## Large blocks and incremental inference
 
-For large blocks, use subblocking to keep peak memory bounded.
+For standard full-block prediction, subblocking keeps peak memory bounded. For
+the promoted Rust incremental target, query batching should provide the memory
+bound for the promoted retrieval/linker/gate path. The legacy incremental
+implementation remains a fallback or compatibility mode, not the output target.
 
 Standard large-block prediction:
 
@@ -187,6 +214,23 @@ phase_b_mode = result["phase_b_mode"]
 
 - `exact`: Phase B ran globally and is intended to match monolithic semantics.
 - `subblock_local`: runtime fell back to approximate per-subblock behavior to stay within budget.
+
+### Rust promoted incremental target
+
+The target behavior is that `Clusterer.predict_incremental(...)` uses the
+promoted Rust linker by default when `S2AND_BACKEND` selects Rust and the
+extension has the required promoted-incremental capabilities. Legacy output
+parity is not a release goal; the promoted path intentionally uses different
+retrieval, linker, and margin-gate decisions.
+
+`S2AND_BACKEND=rust` and `S2AND_BACKEND=auto` now route `predict_incremental`
+through the promoted linker when backend resolution selects Rust. The temporary
+`incremental_linker_private=True` switch remains available for focused
+experiments. Promoted query batching is available: `batching_threshold` caps
+the number of unassigned query signatures per promoted linker batch, while
+`total_ram_bytes` derives the default batch size when the caller does not pass a
+cap. The first meaningful promoted batch recalibrates rows/pairs per query for
+remaining batches, and telemetry records predicted/observed RSS deltas.
 
 Supporting docs:
 

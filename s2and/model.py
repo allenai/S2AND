@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any, Literal, Self, TypeVar
 
 import lightgbm as lgb
@@ -19,7 +20,7 @@ from sklearn.exceptions import EfficiencyWarning
 from tqdm import tqdm
 
 from s2and import memory_budget
-from s2and.consts import DEFAULT_CHUNK_SIZE, LARGE_INTEGER
+from s2and.consts import DEFAULT_CHUNK_SIZE, LARGE_INTEGER, PROJECT_ROOT_PATH
 from s2and.data import (
     NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
     NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
@@ -50,6 +51,7 @@ IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
 IncrementalDistStats = tuple[float, int, float]
 _TReturn = TypeVar("_TReturn")
 _MISSING = object()
+DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR = Path(PROJECT_ROOT_PATH) / "data" / "production_incremental_linker_v1.2"
 
 # Keep canonical pickle import paths stable after splitting module internals.
 for _export in (FastCluster, PairwiseModeler, VotingClassifier, intify):
@@ -320,8 +322,6 @@ def _name_count_semantics_from_featurizer_version(
 ) -> str | None:
     if not isinstance(featurizer_version, int):
         return None
-    if featurizer_version <= 2:
-        return NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY
     return NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
 
 
@@ -376,13 +376,7 @@ def _predict_class0_with_runtime(
     with warnings.catch_warnings():
         suppress_sklearn_feature_name_warnings()
         if num_threads is not None:
-            try:
-                predictions = classifier.predict_proba(features_2d, num_threads=int(num_threads))[:, 0]
-            except TypeError as exc:
-                message = str(exc).lower()
-                if "unexpected keyword" not in message and "unexpected argument" not in message:
-                    raise
-                predictions = classifier.predict_proba(features_2d)[:, 0]
+            predictions = classifier.predict_proba(features_2d, num_threads=int(num_threads))[:, 0]
         else:
             predictions = classifier.predict_proba(features_2d)[:, 0]
     return predictions, time.perf_counter() - python_start, "python"
@@ -495,41 +489,232 @@ def _use_rust_constraints(runtime_context: RuntimeContext | None = None) -> bool
     return stage_uses_rust(runtime_context)
 
 
-def _handle_rust_backend_exception(
+def _use_promoted_incremental_linker(
+    runtime_context: RuntimeContext,
+    *,
+    force_promoted_linker: bool,
+) -> bool:
+    if force_promoted_linker:
+        return True
+    return stage_uses_rust(runtime_context)
+
+
+_PROMOTED_INCREMENTAL_TELEMETRY_CONSTANT_KEYS = frozenset(
+    {
+        "retrieval_top_k",
+        "seed_signature_count",
+        "seed_component_count",
+    }
+)
+
+
+def _promoted_incremental_query_batches(
+    query_signature_ids: list[str],
+    query_batch_size: int | None,
+) -> list[list[str]]:
+    if len(query_signature_ids) == 0:
+        return []
+    if query_batch_size is None:
+        return [list(query_signature_ids)]
+    batch_size = int(query_batch_size)
+    if batch_size <= 0:
+        raise ValueError("Promoted query batch size must be positive")
+    return [query_signature_ids[start : start + batch_size] for start in range(0, len(query_signature_ids), batch_size)]
+
+
+def _promoted_incremental_component_sizes(cluster_seeds_require: Mapping[str, int | str]) -> dict[str, int]:
+    component_sizes: dict[str, int] = {}
+    for cluster_id in cluster_seeds_require.values():
+        component_key = str(cluster_id)
+        component_sizes[component_key] = component_sizes.get(component_key, 0) + 1
+    return component_sizes
+
+
+def _compute_promoted_incremental_limits(
+    *,
+    query_count: int,
+    component_sizes: Mapping[str, int],
+    retrieval_top_k: int,
+    total_ram_bytes: int | None,
+    max_query_batch_size: int | None,
+    observed_query_count: int = 0,
+    observed_candidate_rows_per_query: int | None = None,
+    observed_pairs_per_query: int | None = None,
+) -> memory_budget.PromotedPhaseALimits:
+    return memory_budget.compute_promoted_phase_a_limits(
+        query_count=query_count,
+        component_sizes=component_sizes,
+        retrieval_top_k=retrieval_top_k,
+        total_ram_bytes=total_ram_bytes,
+        max_query_batch_size=max_query_batch_size,
+        observed_query_count=observed_query_count,
+        observed_candidate_rows_per_query=observed_candidate_rows_per_query,
+        observed_pairs_per_query=observed_pairs_per_query,
+        detect_cgroup_fn=memory_budget.detect_cgroup_total_ram_bytes_best_effort,
+        detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
+        current_rss_fn=memory_budget.current_rss_bytes_best_effort,
+    )
+
+
+def _raise_if_promoted_incremental_batch_over_budget(limits: Mapping[str, Any]) -> None:
+    if not bool(limits.get("single_query_exceeds_budget", False)):
+        return
+    raise MemoryError(
+        "Promoted incremental linker cannot fit a single query under the memory budget: "
+        f"single_query_predicted_persistent_bytes={int(limits['single_query_predicted_persistent_bytes'])} "
+        f"stage_budget_bytes={int(limits['stage_budget_bytes'])} "
+        f"total_ram_bytes={int(limits['total_ram_bytes'])} "
+        f"current_rss_bytes={int(limits['current_rss_bytes'])} "
+        f"safety_margin_bytes={int(limits['safety_margin_bytes'])}"
+    )
+
+
+def _promoted_incremental_observed_probe(
+    telemetry: Mapping[str, int | float | str],
+    fallback_query_count: int,
+) -> tuple[int, int, int] | None:
+    try:
+        query_count = int(telemetry.get("query_count", fallback_query_count))
+        candidate_row_count = int(telemetry.get("candidate_row_count", 0))
+        pair_count = int(telemetry.get("pair_count", 0))
+    except (TypeError, ValueError):
+        return None
+    if query_count <= 0 or (candidate_row_count <= 0 and pair_count <= 0):
+        return None
+    rows_per_query = int(math.ceil(float(candidate_row_count) / float(query_count)))
+    pairs_per_query = int(math.ceil(float(pair_count) / float(query_count)))
+    return query_count, rows_per_query, pairs_per_query
+
+
+def _promoted_incremental_memory_telemetry_fields(
+    limits: Mapping[str, Any],
+    memory_summary: Mapping[str, Any],
+) -> dict[str, int | float | str]:
+    return {
+        "memory_total_ram_bytes": int(limits["total_ram_bytes"]),
+        "memory_available_bytes": int(limits["available_bytes"]),
+        "memory_stage_budget_bytes": int(limits["stage_budget_bytes"]),
+        "memory_predicted_peak_delta_bytes": int(memory_summary["predicted_peak_delta_bytes"]),
+        "memory_predicted_peak_rss_bytes": int(memory_summary["predicted_peak_rss_bytes"]),
+        "memory_rss_before_bytes": int(memory_summary["rss_before_bytes"]),
+        "memory_rss_peak_bytes": int(memory_summary["rss_peak_bytes"]),
+        "memory_rss_after_bytes": int(memory_summary["rss_after_bytes"]),
+        "memory_observed_peak_delta_bytes": int(memory_summary["observed_peak_delta_bytes"]),
+        "memory_observed_end_delta_bytes": int(memory_summary["observed_end_delta_bytes"]),
+        "memory_prediction_error_ratio": float(memory_summary["prediction_error_ratio"]),
+        "memory_underpredicted": int(bool(memory_summary["underpredicted"])),
+        "memory_prediction_contract_version": str(memory_summary["prediction_contract_version"]),
+    }
+
+
+def _merge_promoted_incremental_batch_telemetry(
+    batch_telemetries: list[Mapping[str, int | float | str]],
+    *,
+    batch_sizes: list[int],
+    configured_batch_size: int | None,
+    memory_telemetries: list[Mapping[str, int | float | str]] | None = None,
+    initial_limits: Mapping[str, Any] | None = None,
+    final_limits: Mapping[str, Any] | None = None,
+    calibration_applied: bool = False,
+) -> dict[str, int | float | str]:
+    merged: dict[str, int | float | str] = {}
+    conflict_counts: dict[str, int] = {}
+    for telemetry in batch_telemetries:
+        for key, value in telemetry.items():
+            if (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and key not in _PROMOTED_INCREMENTAL_TELEMETRY_CONSTANT_KEYS
+            ):
+                previous = merged.get(key, 0)
+                if isinstance(previous, int | float) and not isinstance(previous, bool):
+                    merged[key] = previous + value
+                else:
+                    conflict_counts[key] = conflict_counts.get(key, 0) + 1
+                continue
+            if key not in merged:
+                merged[key] = value
+            elif merged[key] != value:
+                conflict_counts[key] = conflict_counts.get(key, 0) + 1
+
+    merged["query_batch_count"] = len(batch_sizes)
+    merged["query_batch_size_configured"] = int(configured_batch_size or 0)
+    merged["query_batch_size_max"] = max(batch_sizes, default=0)
+    merged["query_batch_size_min"] = min(batch_sizes, default=0)
+    merged.setdefault("query_count", sum(batch_sizes))
+    if initial_limits is not None:
+        merged["memory_initial_query_batch_size"] = int(initial_limits["query_batch_size"])
+        merged["memory_initial_predicted_peak_delta_bytes"] = int(initial_limits["predicted_peak_delta_bytes"])
+        merged["memory_initial_predicted_peak_rss_bytes"] = int(initial_limits["predicted_peak_rss_bytes"])
+        merged["memory_initial_operational_estimate_source"] = str(initial_limits["operational_estimate_source"])
+    if final_limits is not None:
+        merged["memory_final_query_batch_size"] = int(final_limits["query_batch_size"])
+        merged["memory_final_predicted_peak_delta_bytes"] = int(final_limits["predicted_peak_delta_bytes"])
+        merged["memory_final_predicted_peak_rss_bytes"] = int(final_limits["predicted_peak_rss_bytes"])
+        merged["memory_final_operational_estimate_source"] = str(final_limits["operational_estimate_source"])
+    merged["memory_observed_calibration_applied"] = int(bool(calibration_applied))
+    if memory_telemetries:
+        int_max_fields = (
+            "memory_predicted_peak_delta_bytes",
+            "memory_predicted_peak_rss_bytes",
+            "memory_rss_peak_bytes",
+            "memory_observed_peak_delta_bytes",
+            "memory_observed_end_delta_bytes",
+            "memory_total_ram_bytes",
+            "memory_available_bytes",
+            "memory_stage_budget_bytes",
+        )
+        for field_name in int_max_fields:
+            merged[f"{field_name}_max"] = max(int(item.get(field_name, 0)) for item in memory_telemetries)
+        merged["memory_prediction_error_ratio_max"] = max(
+            float(item.get("memory_prediction_error_ratio", 0.0)) for item in memory_telemetries
+        )
+        merged["memory_underpredicted_batch_count"] = sum(
+            1 for item in memory_telemetries if bool(item.get("memory_underpredicted", 0))
+        )
+    for key, count in conflict_counts.items():
+        merged[f"{key}_batch_conflict_count"] = int(count)
+    return merged
+
+
+def _handle_optional_rust_exception(
     runtime_context: RuntimeContext,
     *,
     strict_message: str,
     exc: Exception,
-    fallback_warning: str,
+    python_path_warning: str,
     context_fields: tuple[str, ...] = (),
 ) -> None:
     details = " ".join((*context_fields, f"run_id={runtime_context.run_id}", f"error={exc}"))
     if stage_uses_rust(runtime_context):
         raise RuntimeError(f"{strict_message} ({details})") from exc
-    logger.warning("%s: %s", fallback_warning, exc)
+    logger.warning("%s: %s", python_path_warning, exc)
 
 
-def _rust_with_fallback(
+def _optional_rust_or_python_path(
     fn: Callable[[], _TReturn],
-    fallback_fn: Callable[[], _TReturn],
+    python_fn: Callable[[], _TReturn],
     *,
     runtime_context: RuntimeContext,
     label: str,
     context_fields: tuple[str, ...] = (),
     strict_message: str | None = None,
-    fallback_warning: str | None = None,
+    python_path_warning: str | None = None,
 ) -> _TReturn:
     try:
         return fn()
     except Exception as exc:  # pragma: no cover - native extension optional
-        _handle_rust_backend_exception(
+        _handle_optional_rust_exception(
             runtime_context,
             strict_message=(strict_message or f"Rust {label} failed in strict rust backend"),
             exc=exc,
-            fallback_warning=(fallback_warning or f"Rust {label} failed, falling back to Python"),
+            python_path_warning=(
+                python_path_warning
+                or f"Optional Rust {label} failed while runtime backend is Python; using Python path"
+            ),
             context_fields=context_fields,
         )
-        return fallback_fn()
+        return python_fn()
 
 
 def _cluster_seeds_version(dataset: ANDData) -> int:
@@ -714,7 +899,7 @@ def _get_constraint_value(
     if use_rust_constraints is None:
         use_rust_constraints = _use_rust_constraints(runtime_context)
     if use_rust_constraints:
-        return _rust_with_fallback(
+        return _optional_rust_or_python_path(
             fn=lambda: get_constraint_rust(
                 dataset,
                 sig_id_1,
@@ -726,7 +911,7 @@ def _get_constraint_value(
                 use_cache=use_cache,
                 suppress_orcid=suppress_orcid,
             ),
-            fallback_fn=lambda: dataset.get_constraint(
+            python_fn=lambda: dataset.get_constraint(
                 sig_id_1,
                 sig_id_2,
                 dont_merge_cluster_seeds=dont_merge_cluster_seeds,
@@ -736,7 +921,9 @@ def _get_constraint_value(
             runtime_context=runtime_context,
             label="constraint evaluation",
             strict_message="Rust constraint evaluation failed in strict rust backend",
-            fallback_warning="Rust get_constraint failed, falling back to Python",
+            python_path_warning=(
+                "Optional Rust get_constraint failed while runtime backend is Python; using Python constraint path"
+            ),
             context_fields=(f"pair=({sig_id_1}, {sig_id_2})",),
         )
     return dataset.get_constraint(
@@ -808,13 +995,15 @@ def _sync_rust_cluster_seeds(
             dataset._rust_cluster_seeds_disallow_id = disallow_id
             dataset._rust_cluster_seeds_disallow_len = disallow_len
 
-        _rust_with_fallback(
+        _optional_rust_or_python_path(
             fn=_sync,
-            fallback_fn=lambda: None,
+            python_fn=lambda: None,
             runtime_context=runtime_context,
             label="cluster seed sync",
             strict_message="Rust cluster seed sync failed in strict rust backend",
-            fallback_warning="Rust cluster seed sync failed, falling back to Python",
+            python_path_warning=(
+                "Optional Rust cluster seed sync failed while runtime backend is Python; using Python seed state"
+            ),
         )
 
 
@@ -832,13 +1021,15 @@ def _initialize_incremental_constraint_backend(
     if not use_rust_constraints:
         return None, False
 
-    rust_featurizer = _rust_with_fallback(
+    rust_featurizer = _optional_rust_or_python_path(
         fn=lambda: _get_rust_featurizer(dataset, runtime_context=runtime_context, use_cache=use_cache),
-        fallback_fn=lambda: None,
+        python_fn=lambda: None,
         runtime_context=runtime_context,
         label="constraint featurizer init",
         strict_message="Rust constraint stage requested but Rust featurizer init failed",
-        fallback_warning="Rust featurizer init failed, falling back to Python constraints",
+        python_path_warning=(
+            "Optional Rust featurizer init failed while runtime backend is Python; using Python constraints"
+        ),
     )
     if rust_featurizer is None:
         return None, False
@@ -878,15 +1069,15 @@ def _build_incremental_constraint_backend(
     constraint_api_mode = _resolve_constraint_api_mode(rust_featurizer, use_rust_constraints)
     signature_index_by_id: dict[str, int] | None = None
     if constraint_api_mode == "indexed" and rust_featurizer is not None:
-        signature_index_by_id = _rust_with_fallback(
+        signature_index_by_id = _optional_rust_or_python_path(
             fn=lambda: _build_signature_index_by_id(rust_featurizer),
-            fallback_fn=lambda: None,
+            python_fn=lambda: None,
             runtime_context=runtime_context,
             label="indexed constraint setup",
             strict_message="Rust indexed constraint setup failed in strict rust backend",
-            fallback_warning=(
-                "Rust indexed constraint setup failed in phase A; disabling Rust constraints and falling back "
-                "to Python"
+            python_path_warning=(
+                "Optional Rust indexed constraint setup failed while runtime backend is Python; "
+                "using Python constraints"
             ),
         )
         if signature_index_by_id is None:
@@ -977,7 +1168,6 @@ def _resolve_constraint_labels_batch(
         ]
 
     if use_rust_constraints and rust_featurizer is not None and mode == "indexed":
-        used_python_fallback = False
 
         def _resolve_values_rust() -> list[float | None]:
             if signature_index_by_id is None:
@@ -995,22 +1185,27 @@ def _resolve_constraint_labels_batch(
                 suppress_orcid=suppress_orcid,
             )
 
-        def _resolve_values_python_fallback() -> list[float | None]:
-            nonlocal used_python_fallback
-            used_python_fallback = True
+        used_python_path_after_optional_rust_failure = False
+
+        def _resolve_values_python_after_optional_rust_failure() -> list[float | None]:
+            nonlocal used_python_path_after_optional_rust_failure
+            used_python_path_after_optional_rust_failure = True
             return _resolve_values_python()
 
-        values = _rust_with_fallback(
+        values = _optional_rust_or_python_path(
             fn=_resolve_values_rust,
-            fallback_fn=_resolve_values_python_fallback,
+            python_fn=_resolve_values_python_after_optional_rust_failure,
             runtime_context=runtime_context,
             label="batch constraint evaluation",
             strict_message="Rust batch constraint evaluation failed in strict rust backend",
-            fallback_warning="Rust batch constraint evaluation failed, falling back to Python constraints",
+            python_path_warning=(
+                "Optional Rust batch constraint evaluation failed while runtime backend is Python; "
+                "using Python constraints"
+            ),
             context_fields=(f"pairs={len(unresolved_pairs)}",),
         )
-        if used_python_fallback:
-            telemetry.api_mode = "python_fallback"
+        if used_python_path_after_optional_rust_failure:
+            telemetry.api_mode = "optional_rust_failed_python"
             telemetry.rust_batch_call_count = 0
         else:
             telemetry.rust_batch_call_count = 1
@@ -1822,12 +2017,14 @@ class Clusterer:
                             suppress_orcid=constraint_backend.suppress_orcid,
                         )
                     except Exception as exc:
-                        _handle_rust_backend_exception(
+                        _handle_optional_rust_exception(
                             runtime_context,
                             strict_message="Rust fused block constraint evaluation failed in strict rust backend",
                             exc=exc,
-                            fallback_warning=(
-                                "Rust fused block constraint evaluation failed; falling back to non-fused chunk path"
+                            python_path_warning=(
+                                "Optional Rust fused block constraint evaluation failed while runtime backend "
+                                "is Python; "
+                                "using non-fused chunk path"
                             ),
                             context_fields=(
                                 f"block={block_key}",
@@ -1887,7 +2084,7 @@ class Clusterer:
                     )
                     offset += chunk_pair_count
                 if not use_fused_block_api:
-                    # Fused path disabled after runtime failure; continue with fallback for this and later blocks.
+                    # Fused path disabled after optional-Rust failure; continue with non-fused chunks.
                     yield from self._yield_non_fused_chunks(
                         block_key=block_key,
                         signatures=signatures,
@@ -3187,6 +3384,7 @@ class Clusterer:
         dataset: ANDData,
         partial_supervision: dict[tuple[str, str], int | float],
         runtime_context: RuntimeContext,
+        total_ram_bytes: int | None = None,
     ) -> tuple[
         dict[str, int | str],
         dict[int | str, int | str],
@@ -3224,6 +3422,7 @@ class Clusterer:
                     incremental_dont_use_cluster_seeds=True,
                     partial_supervision=partial_supervision,
                     runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
                 )
                 if len(reclustered_output) <= 1:
                     continue
@@ -3580,6 +3779,93 @@ class Clusterer:
                 )
         return signature_to_cluster_to_average_dist
 
+    def _finish_incremental_with_seed_links(
+        self,
+        unassigned_signature_ids: list[str],
+        dataset: ANDData,
+        linked_signature_to_cluster: Mapping[str, int | str],
+        recluster_map: dict[int | str, int | str],
+        cluster_seeds_require_inverse: dict[int | str, list[str]],
+        prevent_new_incompatibilities: bool,
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+        total_ram_bytes: int | None = None,
+    ) -> dict[str, list[str]]:
+        """Apply supplied seed-link decisions, then recluster abstained signatures."""
+
+        logger.info("Assigning unassigned signatures for incremental clustering")
+        pred_clusters = defaultdict(list)
+        singleton_signatures = []
+        for signature_id, cluster_id in dataset.cluster_seeds_require.items():
+            pred_clusters[f"{cluster_id}"].append(signature_id)
+        for unassigned_signature in unassigned_signature_ids:
+            if unassigned_signature not in linked_signature_to_cluster:
+                singleton_signatures.append(unassigned_signature)
+                continue
+
+            best_cluster_id = linked_signature_to_cluster[unassigned_signature]
+            # undo the altered-cluster split if applicable
+            new_name_disallowed = False
+            if best_cluster_id in recluster_map:
+                best_cluster_id = recluster_map[best_cluster_id]
+
+                if prevent_new_incompatibilities:
+                    # restrict reclusterings that would add a new name incompatibility to the main cluster
+                    main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
+                    all_firsts = set(
+                        _signature_first_for_rules(dataset.signatures[signature_id])
+                        for signature_id in main_cluster_signatures
+                    )
+                    all_firsts = {first for first in all_firsts if len(first) > 1}
+
+                    # if all existing first names are single characters, there is nothing else to check
+                    if len(all_firsts) > 0:
+                        first_unassigned = _signature_first_for_rules(dataset.signatures[unassigned_signature])
+                        match_found = False
+                        for first_assigned in all_firsts:
+                            prefix = same_prefix_tokens(first_assigned, first_unassigned)
+                            known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
+
+                            if prefix or known_alias:
+                                match_found = True
+                                break
+                        # if the candidate name is a prefix or a name alias for any existing name,
+                        # we allow it to cluster. Otherwise, it was clustered with a single-character
+                        # name and we don't want to allow that merge.
+                        if not match_found:
+                            signature = dataset.signatures[unassigned_signature]
+                            first = signature.author_info_first
+                            last = signature.author_info_last
+                            paper_id = signature.paper_id
+                            logger.info(
+                                "Incremental clustering prevented a name compatibility issue from being "
+                                f"added while clustering {first} {last} on {paper_id}"
+                            )
+                            new_name_disallowed = True
+
+            if new_name_disallowed:
+                singleton_signatures.append(unassigned_signature)
+            else:
+                pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
+
+        # all remaining singletons are reclustered together
+        if len(singleton_signatures) > 0:
+            logger.info("Clustering together the still unassigned signatures")
+            reclustered_output, _ = self.predict_helper(
+                {"block": singleton_signatures},
+                dataset,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+            )
+            new_cluster_id = _next_unused_cluster_id(pred_clusters, int(dataset.max_seed_cluster_id or 0))
+            for new_cluster in reclustered_output.values():
+                new_cluster_id = _next_unused_cluster_id(pred_clusters, new_cluster_id)
+                pred_clusters[str(new_cluster_id)] = new_cluster
+                new_cluster_id += 1
+        logger.info("Done. Returning incrementally predicted clusters")
+        return dict(pred_clusters)
+
     def _run_incremental_phases_bcd(
         self,
         unassigned_signature_ids: list[str],
@@ -3659,11 +3945,7 @@ class Clusterer:
                     for signature in incremental_cluster_signature_ids:
                         signature_to_cluster_to_average_dist.setdefault(signature, {})[cluster_id] = out
 
-        logger.info("Assigning unassigned signatures for incremental clustering")
-        pred_clusters = defaultdict(list)
-        singleton_signatures = []
-        for signature_id, cluster_id in dataset.cluster_seeds_require.items():
-            pred_clusters[f"{cluster_id}"].append(signature_id)
+        linked_signature_to_cluster: dict[str, int | str] = {}
         for unassigned_signature in unassigned_signature_ids:
             cluster_dists = signature_to_cluster_to_average_dist.get(unassigned_signature, {})
             best_cluster_id, best_dist, _second_best_dist = self._best_incremental_cluster(
@@ -3671,69 +3953,293 @@ class Clusterer:
                 config=config,
             )
             if best_cluster_id is not None and best_dist < self.cluster_model.eps:
-                # undo the altered-cluster split if applicable
-                new_name_disallowed = False
-                if best_cluster_id in recluster_map:
-                    best_cluster_id = recluster_map[best_cluster_id]
+                linked_signature_to_cluster[unassigned_signature] = best_cluster_id
 
-                    if prevent_new_incompatibilities:
-                        # restrict reclusterings that would add a new name incompatibility to the main cluster
-                        main_cluster_signatures = cluster_seeds_require_inverse[best_cluster_id]
-                        all_firsts = set(
-                            _signature_first_for_rules(dataset.signatures[signature_id])
-                            for signature_id in main_cluster_signatures
-                        )
-                        all_firsts = {first for first in all_firsts if len(first) > 1}
+        return self._finish_incremental_with_seed_links(
+            unassigned_signature_ids,
+            dataset,
+            linked_signature_to_cluster,
+            recluster_map,
+            cluster_seeds_require_inverse,
+            prevent_new_incompatibilities,
+            partial_supervision,
+            runtime_context,
+            total_ram_bytes=total_ram_bytes,
+        )
 
-                        # if all existing first names are single characters, there is nothing else to check
-                        if len(all_firsts) > 0:
-                            first_unassigned = _signature_first_for_rules(dataset.signatures[unassigned_signature])
-                            match_found = False
-                            for first_assigned in all_firsts:
-                                prefix = same_prefix_tokens(first_assigned, first_unassigned)
-                                known_alias = (first_assigned, first_unassigned) in dataset.name_tuples
+    def _predict_incremental_link_or_abstain_private_mode(
+        self,
+        block_signatures: list[str],
+        dataset: ANDData,
+        *,
+        prevent_new_incompatibilities: bool,
+        partial_supervision: dict[tuple[str, str], int | float],
+        runtime_context: RuntimeContext,
+        total_ram_bytes: int | None,
+        batching_threshold: int | None,
+        artifact_path: str | Path | None,
+        query_view: str,
+    ) -> dict[str, Any]:
+        """Run the promoted linker as the incremental seed-link provider."""
 
-                                if prefix or known_alias:
-                                    match_found = True
-                                    break
-                            # if the candidate name is a prefix or a name alias for any existing name,
-                            # we allow it to cluster. Otherwise, it was clustered with a single-character
-                            # name and we don't want to allow that merge.
-                            if not match_found:
-                                signature = dataset.signatures[unassigned_signature]
-                                first = signature.author_info_first
-                                last = signature.author_info_last
-                                paper_id = signature.paper_id
-                                logger.info(
-                                    "Incremental clustering prevented a name compatibility issue from being "
-                                    f"added while clustering {first} {last} on {paper_id}"
-                                )
-                                new_name_disallowed = True
+        from s2and.incremental_linking.artifact import load_incremental_linking_artifact
+        from s2and.incremental_linking.query_adapter import (
+            build_incremental_linker_inputs,
+            build_name_count_rarity_row_signals,
+        )
+        from s2and.incremental_linking.runtime import _predict_incremental_link_or_abstain_production_private
 
-                if new_name_disallowed:
-                    singleton_signatures.append(unassigned_signature)
-                else:
-                    pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
-            else:
-                singleton_signatures.append(unassigned_signature)
+        artifact_dir = Path(artifact_path) if artifact_path is not None else DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
+        artifact = load_incremental_linking_artifact(artifact_dir)
+        resolved_total_ram_bytes, _ = _resolve_total_ram_bytes_for_incremental(total_ram_bytes)
+        cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = self._build_incremental_seed_setup(
+            dataset,
+            partial_supervision,
+            runtime_context,
+            total_ram_bytes=resolved_total_ram_bytes,
+        )
+        if len(cluster_seeds_require) == 0:
+            raise ValueError("Promoted incremental linker mode requires at least one seed cluster")
 
-        # all remaining singletons are reclustered together
-        if len(singleton_signatures) > 0:
-            logger.info("Clustering together the still unassigned signatures")
-            reclustered_output, _ = self.predict_helper(
-                {"block": singleton_signatures},
-                dataset,
-                partial_supervision=partial_supervision,
-                runtime_context=runtime_context,
+        unassigned_signature_ids = [
+            str(signature_id) for signature_id in block_signatures if str(signature_id) not in cluster_seeds_require
+        ]
+        component_sizes = _promoted_incremental_component_sizes(cluster_seeds_require)
+        retrieval_top_k = int(artifact.metadata.retrieval_top_k)
+        initial_limits = _compute_promoted_incremental_limits(
+            query_count=len(unassigned_signature_ids),
+            component_sizes=component_sizes,
+            retrieval_top_k=retrieval_top_k,
+            total_ram_bytes=resolved_total_ram_bytes,
+            max_query_batch_size=batching_threshold,
+        )
+        resolved_total_ram_bytes = int(initial_limits["total_ram_bytes"])
+        _raise_if_promoted_incremental_batch_over_budget(initial_limits)
+        featurizer = _get_rust_featurizer(
+            dataset,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+        )
+        constraint_backend = _build_incremental_constraint_backend(
+            dataset,
+            use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
+            runtime_context=runtime_context,
+            use_cache=self.use_cache,
+            suppress_orcid=getattr(self, "suppress_orcid", False),
+        )
+        linked_signature_clusters: dict[str, int | str] = {}
+        batch_telemetries: list[Mapping[str, int | float | str]] = []
+        memory_telemetries: list[Mapping[str, int | float | str]] = []
+        batch_sizes: list[int] = []
+        final_limits: Mapping[str, Any] = initial_limits
+        calibration_applied = False
+        observed_probe: tuple[int, int, int] | None = None
+        if unassigned_signature_ids:
+            linker_inputs = build_incremental_linker_inputs(
+                dataset=dataset,
+                query_signature_ids=unassigned_signature_ids,
+                cluster_seeds_require=cluster_seeds_require,
+                query_view=query_view,
             )
-            new_cluster_id = _next_unused_cluster_id(pred_clusters, int(dataset.max_seed_cluster_id or 0))
-            for new_cluster in reclustered_output.values():
-                new_cluster_id = _next_unused_cluster_id(pred_clusters, new_cluster_id)
-                pred_clusters[str(new_cluster_id)] = new_cluster
-                new_cluster_id += 1
-        logger.info("Done. Returning incrementally predicted clusters")
-        # end NEW!
-        return dict(pred_clusters)
+
+            def _extra_row_signal_builder(retrieval_batch, query_signature_id_by_index):
+                return build_name_count_rarity_row_signals(
+                    retrieval_batch,
+                    query_signature_id_by_index=query_signature_id_by_index,
+                    query_by_signature_id=linker_inputs.query_by_signature_id,
+                    summary_by_component=linker_inputs.summary_by_component,
+                )
+
+            next_query_index = 0
+            current_limits: Mapping[str, Any] = initial_limits
+            current_query_batch_size = max(1, int(current_limits["query_batch_size"]))
+            while next_query_index < len(unassigned_signature_ids):
+                remaining_query_count = len(unassigned_signature_ids) - next_query_index
+                query_batch_size = min(current_query_batch_size, remaining_query_count)
+                query_batch = unassigned_signature_ids[next_query_index : next_query_index + query_batch_size]
+                batch_limit_kwargs: dict[str, Any] = {}
+                if observed_probe is not None:
+                    observed_query_count, observed_rows_per_query, observed_pairs_per_query = observed_probe
+                    batch_limit_kwargs = {
+                        "observed_query_count": observed_query_count,
+                        "observed_candidate_rows_per_query": observed_rows_per_query,
+                        "observed_pairs_per_query": observed_pairs_per_query,
+                    }
+                batch_limits = _compute_promoted_incremental_limits(
+                    query_count=len(query_batch),
+                    component_sizes=component_sizes,
+                    retrieval_top_k=retrieval_top_k,
+                    total_ram_bytes=resolved_total_ram_bytes,
+                    max_query_batch_size=len(query_batch),
+                    **batch_limit_kwargs,
+                )
+                _raise_if_promoted_incremental_batch_over_budget(batch_limits)
+                batch_queries = tuple(
+                    linker_inputs.query_by_signature_id[str(signature_id)] for signature_id in query_batch
+                )
+                batch_rss_before_bytes = int(batch_limits["current_rss_bytes"])
+                private_result = _predict_incremental_link_or_abstain_production_private(
+                    self,
+                    artifact,
+                    dataset=dataset,
+                    featurizer=featurizer,
+                    retriever=linker_inputs.retriever,
+                    queries=batch_queries,
+                    query_signature_ids=query_batch,
+                    query_view=query_view,
+                    partial_supervision=partial_supervision,
+                    constraint_backend=constraint_backend,
+                    extra_row_signal_builder=_extra_row_signal_builder,
+                    seed_setup=(cluster_seeds_require, recluster_map, cluster_seeds_require_inverse),
+                    runtime_context=runtime_context,
+                    n_jobs=self.n_jobs,
+                    total_ram_bytes=resolved_total_ram_bytes,
+                )
+                linked_signature_clusters.update(dict(private_result.linked_signature_clusters or {}))
+                batch_telemetry = dict(private_result.telemetry)
+                batch_telemetries.append(batch_telemetry)
+                next_query_index += len(query_batch)
+                batch_sizes.append(len(query_batch))
+                batch_rss_after_bytes, batch_rss_source = memory_budget.current_rss_bytes_best_effort(
+                    int(batch_limits["total_ram_bytes"])
+                )
+                batch_rss_peak_bytes = max(batch_rss_before_bytes, int(batch_rss_after_bytes))
+                memory_summary = memory_budget.summarize_prediction_accuracy(
+                    stage_name="incremental_promoted_query_batch",
+                    predicted_peak_delta_bytes=int(batch_limits["predicted_peak_delta_bytes"]),
+                    rss_before_bytes=batch_rss_before_bytes,
+                    rss_peak_bytes=batch_rss_peak_bytes,
+                    rss_after_bytes=int(batch_rss_after_bytes),
+                )
+                batch_memory_telemetry = _promoted_incremental_memory_telemetry_fields(
+                    batch_limits,
+                    memory_summary,
+                )
+                memory_telemetries.append(batch_memory_telemetry)
+                logger.info(
+                    "Telemetry: incremental_promoted_query_batch index=%d query_count=%d "
+                    "candidate_row_count=%d pair_count=%d link_count=%d abstain_count=%d "
+                    "query_batch_size=%d query_batch_size_configured=%d "
+                    "operational_estimate_source=%s predicted_pairs_per_batch=%d "
+                    "predicted_candidate_rows_per_batch=%d pair_chunk_pairs=%d pair_chunk_count=%d "
+                    "prediction_contract_version=%s predicted_peak_delta_bytes=%d "
+                    "predicted_peak_rss_bytes=%d rss_before_bytes=%d rss_peak_bytes=%d "
+                    "rss_after_bytes=%d observed_peak_delta_bytes=%d prediction_error_ratio=%.3f "
+                    "underpredicted=%s rss_source=%s run_id=%s",
+                    len(batch_sizes),
+                    len(query_batch),
+                    int(batch_telemetry.get("candidate_row_count", 0)),
+                    int(batch_telemetry.get("pair_count", 0)),
+                    int(batch_telemetry.get("link_count", 0)),
+                    int(batch_telemetry.get("abstain_count", 0)),
+                    int(batch_limits["query_batch_size"]),
+                    int(batching_threshold or 0),
+                    str(batch_limits["operational_estimate_source"]),
+                    int(batch_limits["predicted_pairs_per_batch"]),
+                    int(batch_limits["predicted_candidate_rows_per_batch"]),
+                    int(batch_limits["pair_chunk_pairs"]),
+                    int(batch_limits["pair_chunk_count"]),
+                    str(memory_summary["prediction_contract_version"]),
+                    int(memory_summary["predicted_peak_delta_bytes"]),
+                    int(memory_summary["predicted_peak_rss_bytes"]),
+                    int(memory_summary["rss_before_bytes"]),
+                    int(memory_summary["rss_peak_bytes"]),
+                    int(memory_summary["rss_after_bytes"]),
+                    int(memory_summary["observed_peak_delta_bytes"]),
+                    float(memory_summary["prediction_error_ratio"]),
+                    bool(memory_summary["underpredicted"]),
+                    str(batch_rss_source),
+                    runtime_context.run_id,
+                )
+                if not calibration_applied and next_query_index < len(unassigned_signature_ids):
+                    observed_probe = _promoted_incremental_observed_probe(batch_telemetry, len(query_batch))
+                    if observed_probe is not None:
+                        remaining_after_probe = len(unassigned_signature_ids) - next_query_index
+                        observed_query_count, observed_rows_per_query, observed_pairs_per_query = observed_probe
+                        calibrated_limits = _compute_promoted_incremental_limits(
+                            query_count=remaining_after_probe,
+                            component_sizes=component_sizes,
+                            retrieval_top_k=retrieval_top_k,
+                            total_ram_bytes=resolved_total_ram_bytes,
+                            max_query_batch_size=batching_threshold,
+                            observed_query_count=observed_query_count,
+                            observed_candidate_rows_per_query=observed_rows_per_query,
+                            observed_pairs_per_query=observed_pairs_per_query,
+                        )
+                        _raise_if_promoted_incremental_batch_over_budget(calibrated_limits)
+                        current_limits = calibrated_limits
+                        current_query_batch_size = max(1, int(calibrated_limits["query_batch_size"]))
+                        final_limits = calibrated_limits
+                        calibration_applied = True
+                        logger.info(
+                            "Telemetry: incremental_promoted_query_batch_calibration "
+                            "observed_query_count=%d observed_candidate_rows_per_query=%d "
+                            "observed_pairs_per_query=%d old_query_batch_size=%d "
+                            "new_query_batch_size=%d operational_estimate_source=%s "
+                            "predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d run_id=%s",
+                            observed_query_count,
+                            observed_rows_per_query,
+                            observed_pairs_per_query,
+                            int(initial_limits["query_batch_size"]),
+                            int(calibrated_limits["query_batch_size"]),
+                            str(calibrated_limits["operational_estimate_source"]),
+                            int(calibrated_limits["predicted_peak_delta_bytes"]),
+                            int(calibrated_limits["predicted_peak_rss_bytes"]),
+                            runtime_context.run_id,
+                        )
+        merged_telemetry = _merge_promoted_incremental_batch_telemetry(
+            batch_telemetries,
+            batch_sizes=batch_sizes,
+            configured_batch_size=batching_threshold,
+            memory_telemetries=memory_telemetries,
+            initial_limits=initial_limits,
+            final_limits=final_limits,
+            calibration_applied=calibration_applied,
+        )
+        logger.info(
+            "Telemetry: incremental_promoted_query_batches query_count=%d batch_count=%d "
+            "batch_size_min=%d batch_size_max=%d query_batch_size_configured=%d "
+            "initial_query_batch_size=%d final_query_batch_size=%d calibration_applied=%s "
+            "predicted_peak_delta_bytes_max=%d observed_peak_delta_bytes_max=%d "
+            "underpredicted_batch_count=%d run_id=%s",
+            int(merged_telemetry.get("query_count", len(unassigned_signature_ids))),
+            int(merged_telemetry.get("query_batch_count", 0)),
+            int(merged_telemetry.get("query_batch_size_min", 0)),
+            int(merged_telemetry.get("query_batch_size_max", 0)),
+            int(merged_telemetry.get("query_batch_size_configured", 0)),
+            int(merged_telemetry.get("memory_initial_query_batch_size", 0)),
+            int(merged_telemetry.get("memory_final_query_batch_size", 0)),
+            bool(merged_telemetry.get("memory_observed_calibration_applied", 0)),
+            int(merged_telemetry.get("memory_predicted_peak_delta_bytes_max", 0)),
+            int(merged_telemetry.get("memory_observed_peak_delta_bytes_max", 0)),
+            int(merged_telemetry.get("memory_underpredicted_batch_count", 0)),
+            runtime_context.run_id,
+        )
+        predicted_clusters = self._finish_incremental_with_seed_links(
+            unassigned_signature_ids,
+            dataset,
+            linked_signature_clusters,
+            recluster_map,
+            cluster_seeds_require_inverse,
+            prevent_new_incompatibilities,
+            partial_supervision,
+            runtime_context,
+            total_ram_bytes=resolved_total_ram_bytes,
+        )
+        residual_count = sum(
+            1 for signature_id in unassigned_signature_ids if signature_id not in linked_signature_clusters
+        )
+        phase_b_required_bytes = residual_count * (residual_count - 1) // 2 * 8
+        payload = _build_incremental_result(
+            predicted_clusters,
+            phase_b_mode="exact",
+            phase_b_budget_bytes=phase_b_required_bytes,
+            phase_b_required_bytes=phase_b_required_bytes,
+        )
+        payload["incremental_linker_artifact_path"] = str(artifact_dir)
+        payload["incremental_linker_query_view"] = str(query_view)
+        payload["incremental_linker_telemetry"] = merged_telemetry
+        return payload
 
     def _phase_split_subblock_fallback(
         self,
@@ -3842,6 +4348,7 @@ class Clusterer:
             dataset,
             partial_supervision,
             runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
         subblocks = make_subblocks(block_signatures, dataset, maximum_size=batching_threshold)
 
@@ -4164,6 +4671,9 @@ class Clusterer:
         total_ram_bytes: int | None = None,
         max_chunk_pairs: int | None = None,
         return_clusters_only: bool = False,
+        incremental_linker_private: bool = False,
+        incremental_linker_artifact_path: str | Path | None = None,
+        incremental_linker_query_view: str = "initial_only",
     ) -> dict[str, Any] | dict[str, list[str]]:
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
@@ -4209,6 +4719,16 @@ class Clusterer:
         return_clusters_only: bool
             If True, return only the historical clusters dict shape instead of the full
             telemetry payload.
+        incremental_linker_private: bool
+            If True, force the promoted link-or-abstain seed-link provider.
+            Explicit Rust backend selection also uses this provider by default.
+            This is not a public compatibility mode and does not claim legacy
+            slow-path semantics.
+        incremental_linker_artifact_path: Optional[str]
+            Artifact directory for the promoted linker. Defaults to the
+            released `data/production_incremental_linker_v1.2` artifact.
+        incremental_linker_query_view: str
+            Query-view policy for the promoted linker.
         Returns
         -------
         Dict: incremental clustering payload (default) or clusters-only dict when
@@ -4220,6 +4740,22 @@ class Clusterer:
         _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
         if partial_supervision is None:
             partial_supervision = {}
+        if _use_promoted_incremental_linker(
+            runtime_context,
+            force_promoted_linker=incremental_linker_private,
+        ):
+            incremental_result = self._predict_incremental_link_or_abstain_private_mode(
+                block_signatures,
+                dataset,
+                prevent_new_incompatibilities=prevent_new_incompatibilities,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
+                batching_threshold=batching_threshold,
+                artifact_path=incremental_linker_artifact_path,
+                query_view=incremental_linker_query_view,
+            )
+            return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
         if batching_threshold is None or len(block_signatures) <= batching_threshold:
             incremental_result = self._predict_incremental_helper(
                 block_signatures,
@@ -4282,6 +4818,7 @@ class Clusterer:
             dataset,
             partial_supervision,
             runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
 
         logger.info("Getting name constraints")

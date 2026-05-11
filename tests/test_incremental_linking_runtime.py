@@ -71,13 +71,14 @@ class RejectsNumThreadsClassifier:
         return np.column_stack((distances, 1.0 - distances))
 
 
-def test_pairwise_predict_class0_requires_num_threads_keyword_support() -> None:
-    with pytest.raises(TypeError, match="num_threads"):
-        runtime_module._predict_pairwise_class0(
-            RejectsNumThreadsClassifier(),
-            np.zeros((2, 1), dtype=np.float64),
-            num_threads=2,
-        )
+def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() -> None:
+    predictions = runtime_module._predict_pairwise_class0(
+        RejectsNumThreadsClassifier(),
+        np.asarray([[0.25], [0.75]], dtype=np.float64),
+        num_threads=2,
+    )
+
+    assert np.allclose(predictions, [0.25, 0.75])
 
 
 class FakeRuntimeFeaturizer:

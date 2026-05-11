@@ -372,13 +372,14 @@ def _predict_class0_with_runtime(
     if features_2d.size == 0:
         return np.asarray([], dtype=np.float64), 0.0, "none"
 
+    # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
+    # is LightGBM-specific and breaks sklearn-compatible wrappers.
+    del num_threads
+
     python_start = time.perf_counter()
     with warnings.catch_warnings():
         suppress_sklearn_feature_name_warnings()
-        if num_threads is not None:
-            predictions = classifier.predict_proba(features_2d, num_threads=int(num_threads))[:, 0]
-        else:
-            predictions = classifier.predict_proba(features_2d)[:, 0]
+        predictions = classifier.predict_proba(features_2d)[:, 0]
     return predictions, time.perf_counter() - python_start, "python"
 
 

@@ -779,7 +779,7 @@
       1.0
     ]
   ],
-  "production_contract_digest": "caa5cf6550ef0773dc5ee8787d3ccb0bd167069db70b7ff8cf8e6886246c3320",
+      "production_contract_digest": "66a85c51cd72a50869e15cd506ea7435621d3517a8fccefdbf9c168032be4ca7",
   "required_rust_capabilities": [
     "hybrid_centroid_retriever_v1",
     "indexed_pair_array_featurization_v1",

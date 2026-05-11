@@ -12,8 +12,9 @@ import pytest
 import s2and.incremental_linking.query_adapter as retrieval
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training import build_rust_hybrid_centroid_retriever
-from scripts.joint_safe_link_official_stack import OfficialBundle
 from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
+    OfficialBundle,
+    _apply_row_nan_policy,
     _clean_minimal_raw_structural_rows,
     _component_member_details_by_key,
     _enable_fasttext_language_detection,
@@ -58,8 +59,8 @@ def test_load_target_accepts_historical_supported_promoted_features(tmp_path) ->
     target_path.write_text(
         json.dumps(
             {
-                "feature_count": 2,
-                "features": ["min_distance", "pw_max_email_prefix_equal"],
+                "feature_count": 3,
+                "features": ["min_distance", "pw_max_email_prefix_equal", "pw_valid_fraction_email"],
             }
         ),
         encoding="utf-8",
@@ -67,7 +68,7 @@ def test_load_target_accepts_historical_supported_promoted_features(tmp_path) ->
 
     target = _load_target(target_path)
 
-    assert target["features"] == ["min_distance", "pw_max_email_prefix_equal"]
+    assert target["features"] == ["min_distance", "pw_max_email_prefix_equal", "pw_valid_fraction_email"]
 
 
 def test_load_target_rejects_unsupported_historical_features(tmp_path) -> None:
@@ -84,6 +85,159 @@ def test_load_target_rejects_unsupported_historical_features(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="unknown features"):
         _load_target(target_path)
+
+
+def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None:
+    batch = LinkerCandidateBatch(
+        row_count=4,
+        left_signature_indices=np.asarray([], dtype=np.uint32),
+        right_signature_indices=np.asarray([], dtype=np.uint32),
+        pair_row_indices=np.asarray([], dtype=np.uint32),
+        row_query_signature_indices=np.asarray([0, 0, 1, 2], dtype=np.uint32),
+    )
+    row_signals = {
+        "pair_count": np.asarray([2.0, 2.0, 0.0, 2.0], dtype=np.float32),
+        "query_year_missing": np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
+        "candidate_year_range_missing": np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        "query_has_affiliations": np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        "candidate_has_affiliations": np.zeros(4, dtype=np.float32),
+        "query_has_coauthors": np.zeros(4, dtype=np.float32),
+        "candidate_has_coauthors": np.zeros(4, dtype=np.float32),
+        "query_has_title_terms": np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        "candidate_has_title_terms": np.zeros(4, dtype=np.float32),
+        "query_has_venue_terms": np.zeros(4, dtype=np.float32),
+        "candidate_has_venue_terms": np.zeros(4, dtype=np.float32),
+        "query_has_specter": np.zeros(4, dtype=np.float32),
+        "candidate_has_specter_exemplars": np.zeros(4, dtype=np.float32),
+        "query_has_name_counts": np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
+        "candidate_has_name_counts": np.asarray([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
+        "query_has_full_first": np.asarray([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
+        "query_first_token": np.asarray(["alex", "bo", "", "c"], dtype=object),
+        "dominant_first_name": np.asarray(["alex", "", "casey", "c"], dtype=object),
+    }
+    features = {
+        column: np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+        for column in (
+            "min_distance",
+            "retrieval_score_gap_vs_best_competitor",
+            "top5_distance_best_gap",
+            "affiliation_contradiction_severity",
+            "query_first_prefix_match",
+            "anchor_evidence_count",
+            "strong_positive_anchor_score",
+            "weak_residual_anchor_score",
+            "sparse_relative_winner_score",
+            "last_name_count_min_rarity",
+            "candidate_last_first_name_count_min_rarity",
+            "first_prefix_x_last_first_name_count_min_rarity",
+            "year_mismatch_severity",
+            "top5_mean_distance",
+            "distance_spread_top5_minus_min",
+        )
+    }
+
+    adjusted, summary = _apply_row_nan_policy(
+        features,
+        row_signals,
+        batch,
+        row_nan_policy="semantic",
+    )
+
+    distance_nan = np.asarray([False, False, True, False])
+    np.testing.assert_array_equal(np.isnan(adjusted["min_distance"]), distance_nan)
+    np.testing.assert_array_equal(np.isnan(adjusted["top5_distance_best_gap"]), distance_nan)
+    np.testing.assert_array_equal(np.isnan(adjusted["top5_mean_distance"]), distance_nan)
+    np.testing.assert_array_equal(np.isnan(adjusted["distance_spread_top5_minus_min"]), distance_nan)
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["retrieval_score_gap_vs_best_competitor"]),
+        np.asarray([False, False, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["affiliation_contradiction_severity"]),
+        np.asarray([True, False, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["query_first_prefix_match"]),
+        np.asarray([False, True, True, True]),
+    )
+    composite_nan = np.asarray([False, False, True, False])
+    np.testing.assert_array_equal(np.isnan(adjusted["anchor_evidence_count"]), composite_nan)
+    np.testing.assert_array_equal(np.isnan(adjusted["strong_positive_anchor_score"]), composite_nan)
+    np.testing.assert_array_equal(np.isnan(adjusted["weak_residual_anchor_score"]), composite_nan)
+    np.testing.assert_array_equal(np.isnan(adjusted["sparse_relative_winner_score"]), composite_nan)
+    assert adjusted["anchor_evidence_count"][0] == pytest.approx(0.1)
+    assert adjusted["anchor_evidence_count"][1] == pytest.approx(0.2)
+    assert adjusted["anchor_evidence_count"][3] == pytest.approx(0.4)
+    assert adjusted["affiliation_contradiction_severity"][1] == pytest.approx(0.2)
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["last_name_count_min_rarity"]),
+        np.asarray([False, True, True, False]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["candidate_last_first_name_count_min_rarity"]),
+        np.asarray([False, False, True, False]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["first_prefix_x_last_first_name_count_min_rarity"]),
+        np.asarray([False, True, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["year_mismatch_severity"]),
+        np.asarray([True, False, True, True]),
+    )
+    assert summary["row_nan_policy"] == "semantic"
+    assert summary["semantic_nan_total"] > 0
+
+
+def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:
+    batch = LinkerCandidateBatch(
+        row_count=2,
+        left_signature_indices=np.asarray([], dtype=np.uint32),
+        right_signature_indices=np.asarray([], dtype=np.uint32),
+        pair_row_indices=np.asarray([], dtype=np.uint32),
+        row_query_signature_indices=np.asarray([0, 0], dtype=np.uint32),
+    )
+    row_signals = {
+        "pair_count": np.zeros(2, dtype=np.float32),
+        "query_year_missing": np.ones(2, dtype=np.float32),
+        "candidate_year_range_missing": np.ones(2, dtype=np.float32),
+        "query_has_affiliations": np.zeros(2, dtype=np.float32),
+        "candidate_has_affiliations": np.zeros(2, dtype=np.float32),
+        "query_has_coauthors": np.zeros(2, dtype=np.float32),
+        "candidate_has_coauthors": np.zeros(2, dtype=np.float32),
+        "query_has_title_terms": np.zeros(2, dtype=np.float32),
+        "candidate_has_title_terms": np.zeros(2, dtype=np.float32),
+        "query_has_venue_terms": np.zeros(2, dtype=np.float32),
+        "candidate_has_venue_terms": np.zeros(2, dtype=np.float32),
+        "query_has_specter": np.zeros(2, dtype=np.float32),
+        "candidate_has_specter_exemplars": np.zeros(2, dtype=np.float32),
+        "query_has_name_counts": np.ones(2, dtype=np.float32),
+        "candidate_has_name_counts": np.ones(2, dtype=np.float32),
+        "query_has_full_first": np.ones(2, dtype=np.float32),
+        "query_first_token": np.asarray(["alex", "alex"], dtype=object),
+        "dominant_first_name": np.asarray(["alex", "alex"], dtype=object),
+    }
+    features = {
+        column: np.asarray([0.1, 0.2], dtype=np.float32)
+        for column in (
+            "anchor_evidence_count",
+            "strong_positive_anchor_score",
+            "weak_residual_anchor_score",
+            "sparse_relative_winner_score",
+        )
+    }
+
+    adjusted, _summary = _apply_row_nan_policy(
+        features,
+        row_signals,
+        batch,
+        row_nan_policy="semantic",
+    )
+
+    assert not np.isnan(adjusted["anchor_evidence_count"]).any()
+    assert not np.isnan(adjusted["weak_residual_anchor_score"]).any()
+    assert not np.isnan(adjusted["sparse_relative_winner_score"]).any()
+    assert np.isnan(adjusted["strong_positive_anchor_score"]).all()
 
 
 def test_minimal_raw_constraint_resolution_bypasses_seed_constraints_and_ignores_disallow() -> None:

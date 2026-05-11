@@ -442,14 +442,12 @@ def test_fused_pairwise_model_and_aggregates_preserve_existing_distance_semantic
     assert 6 in calls[0]["matrix_indices"]
     assert tuple(calls[0]["aggregate_indices"]) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_INDICES)
     assert np.isnan(float(calls[0]["nan_value"]))
-    assert np.isnan(float(calls[0]["aggregate_nan_value"]))
+    assert float(calls[0]["aggregate_nan_value"]) == 0.0
     np.testing.assert_array_equal(result.pairwise_stats.counts, np.asarray([2, 1, 2, 0], dtype=np.uint64))
-    assert np.isnan(result.pairwise_stats.sums[0, 0])
-    np.testing.assert_allclose(result.pairwise_stats.sums[1:, 0], np.asarray([2.0, 7.0, 0.0]))
-    assert np.isnan(result.pairwise_stats.mins[0, 0])
-    np.testing.assert_allclose(result.pairwise_stats.mins[1:, 0], np.asarray([2.0, 3.0, np.inf]))
-    assert np.isnan(result.pairwise_stats.maxs[0, 0])
-    np.testing.assert_allclose(result.pairwise_stats.maxs[1:, 0], np.asarray([2.0, 4.0, -np.inf]))
+    np.testing.assert_array_equal(result.pairwise_stats.valid_counts[:, 0], np.asarray([2, 1, 2, 0]))
+    np.testing.assert_allclose(result.pairwise_stats.sums[:, 0], np.asarray([0.7, 0.1, 1.3, 0.0]))
+    np.testing.assert_allclose(result.pairwise_stats.mins[:, 0], np.asarray([0.2, 0.1, 0.4, np.inf]))
+    np.testing.assert_allclose(result.pairwise_stats.maxs[:, 0], np.asarray([0.5, 0.1, 0.9, -np.inf]))
     np.testing.assert_allclose(result.row_signals["min_distance"], np.asarray([0.0, 0.2, 0.3, 1.0]))
     np.testing.assert_allclose(result.row_signals["mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))
     np.testing.assert_allclose(result.row_signals["top3_mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))
@@ -460,6 +458,120 @@ def test_fused_pairwise_model_and_aggregates_preserve_existing_distance_semantic
     )
     assert result.telemetry["pair_count"] == 5
     assert result.telemetry["chunk_count"] == 1
+
+
+def test_fused_pairwise_model_uses_configurable_nan_policies(monkeypatch) -> None:
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=np.asarray([0, 1], dtype=np.uint32),
+        right_signature_indices=np.asarray([10, 11], dtype=np.uint32),
+        pair_row_indices=np.asarray([0, 0], dtype=np.uint32),
+    )
+    calls: list[tuple[float, float]] = []
+
+    def fake_build_arrays(
+        _dataset,
+        left_signature_indices,
+        _right_signature_indices,
+        row_indices,
+        row_count,
+        *,
+        matrix_indices,
+        aggregate_indices,
+        num_threads,
+        nan_value,
+        aggregate_nan_value,
+        runtime_context=None,
+        use_cache=False,
+        featurizer=None,
+    ):
+        del _right_signature_indices, runtime_context, use_cache, featurizer
+        assert num_threads == 1
+        calls.append((float(nan_value), float(aggregate_nan_value)))
+        offsets = np.asarray(left_signature_indices, dtype=np.int64)
+        position_by_index = {int(index): position for position, index in enumerate(matrix_indices)}
+        matrix = np.full((len(offsets), len(matrix_indices)), 0.25, dtype=np.float64)
+        last_aggregate_position = position_by_index[int(aggregate_indices[-1])]
+        matrix[0, last_aggregate_position] = np.nan
+        matrix[1, last_aggregate_position] = 0.75
+        counts = np.zeros(int(row_count), dtype=np.uint32)
+        sums = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64)
+        mins = np.full((int(row_count), len(aggregate_indices)), np.inf, dtype=np.float64)
+        maxs = np.full((int(row_count), len(aggregate_indices)), -np.inf, dtype=np.float64)
+        for local_row in row_indices:
+            row = int(local_row)
+            counts[row] += 1
+            sums[row] += 0.0
+            mins[row] = np.minimum(mins[row], 0.0)
+            maxs[row] = np.maximum(maxs[row], 0.0)
+        return matrix, counts, sums, mins, maxs
+
+    monkeypatch.setattr(
+        runtime_module.feature_port,
+        "build_linker_pair_features_and_aggregate_stats_arrays_rust",
+        fake_build_arrays,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_accumulate_pairwise_distance_chunk",
+        lambda **kwargs: _python_distance_accumulators(
+            row_indices=kwargs["row_indices"],
+            row_count=kwargs["row_count"],
+            model_distances=kwargs["model_distances"],
+            labels=kwargs["labels"],
+        ),
+    )
+
+    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
+        SimpleNamespace(),
+        candidate_batch,
+        classifier=FirstColumnDistanceClassifier(),
+        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
+        pair_labels=np.full(candidate_batch.pair_count, np.nan, dtype=np.float64),
+        pairwise_model_nan_value=0.0,
+        pairwise_aggregate_nan_value=0.0,
+        featurizer=object(),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == 0.0
+    assert calls[0][1] == 0.0
+    assert result.pairwise_stats.valid_counts[0, -1] == 2
+    assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.375)
+
+    calls.clear()
+    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
+        SimpleNamespace(),
+        candidate_batch,
+        classifier=FirstColumnDistanceClassifier(),
+        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
+        pair_labels=np.full(candidate_batch.pair_count, np.nan, dtype=np.float64),
+        featurizer=object(),
+    )
+
+    assert len(calls) == 1
+    assert np.isnan(calls[0][0])
+    assert calls[0][1] == 0.0
+    assert result.pairwise_stats.valid_counts[0, -1] == 2
+    assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.375)
+
+    calls.clear()
+    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
+        SimpleNamespace(),
+        candidate_batch,
+        classifier=FirstColumnDistanceClassifier(),
+        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
+        pair_labels=np.full(candidate_batch.pair_count, np.nan, dtype=np.float64),
+        pairwise_model_nan_value=np.nan,
+        pairwise_aggregate_nan_value=np.nan,
+        featurizer=object(),
+    )
+
+    assert len(calls) == 1
+    assert np.isnan(calls[0][0])
+    assert np.isnan(calls[0][1])
+    assert result.pairwise_stats.valid_counts[0, -1] == 1
+    assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.75)
 
 
 def test_fused_pairwise_model_preserves_true_hard_disallow_distances(monkeypatch) -> None:
@@ -491,7 +603,7 @@ def test_fused_pairwise_model_preserves_true_hard_disallow_distances(monkeypatch
         assert featurizer is not None
         assert num_threads == 2
         assert np.isnan(float(nan_value))
-        assert np.isnan(float(aggregate_nan_value))
+        assert float(aggregate_nan_value) == 0.0
         offsets = np.asarray(left_signature_indices, dtype=np.int64)
         position_by_index = {int(index): position for position, index in enumerate(matrix_indices)}
         matrix = np.zeros((len(offsets), len(matrix_indices)), dtype=np.float64)

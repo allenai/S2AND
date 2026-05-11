@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from scripts import run_joint_safe_link_promoted_train_calibrate_eval as promoted_train
-from scripts.joint_safe_link_official_stack import run_classic
+from scripts.run_joint_safe_link_promoted_train_calibrate_eval import run_classic
 
 
 def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:

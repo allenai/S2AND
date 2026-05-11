@@ -49,6 +49,22 @@ PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS: tuple[str, ...] = tuple(
     for stat in ("min", "mean", "max")
     for feature_name in PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES
 )
+PROMOTED_PAIRWISE_COVERAGE_GROUPS: dict[str, tuple[str, ...]] = {
+    "middle_name": ("middle_initials_overlap", "middle_names_equal"),
+    "email": ("email_prefix_equal", "email_suffix_equal"),
+    "title": ("title_overlap_words", "title_overlap_chars"),
+    "coauthor_overlap": ("coauthor_overlap", "coauthor_match"),
+    "coauthor_similarity": ("coauthor_similarity",),
+    "affiliation": ("affiliation_overlap",),
+    "specter": ("specter_cosine_sim",),
+    "venue": ("venue_overlap",),
+    "journal": ("journal_overlap",),
+}
+PROMOTED_PAIRWISE_COVERAGE_FEATURE_COLUMNS: tuple[str, ...] = (
+    "pw_pair_count_log_capped",
+    *(f"pw_valid_fraction_{group_name}" for group_name in PROMOTED_PAIRWISE_COVERAGE_GROUPS),
+)
+PAIRWISE_COUNT_LOG_CAPPED_REFERENCE_SIZE = 192.0
 
 
 @dataclass(frozen=True)
@@ -65,6 +81,7 @@ class LinkerPairFeatureChunk:
     sums: np.ndarray
     mins: np.ndarray
     maxs: np.ndarray
+    valid_counts: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -81,14 +98,20 @@ class PairwiseAggregateStats:
     chunk_count: int
     matrix_indices: tuple[int, ...]
     aggregate_indices: tuple[int, ...]
+    valid_counts: np.ndarray | None = None
 
     def mean_matrix(self) -> np.ndarray:
-        """Return row-wise aggregate means with NaN rows for candidates with no pairs."""
+        """Return row-wise aggregate means, ignoring missing per-pair values."""
 
         means = np.full_like(self.sums, np.nan, dtype=np.float64)
-        observed = self.counts > 0
-        if np.any(observed):
-            means[observed] = self.sums[observed] / self.counts[observed, None]
+        if self.valid_counts is None:
+            observed = self.counts > 0
+            if np.any(observed):
+                means[observed] = self.sums[observed] / self.counts[observed, None]
+        else:
+            observed = self.valid_counts > 0
+            if np.any(observed):
+                means[observed] = self.sums[observed] / self.valid_counts[observed]
         means[~np.isfinite(means)] = np.nan
         return means
 
@@ -97,12 +120,37 @@ class PairwiseAggregateStats:
 
         mins = self.mins.copy()
         maxs = self.maxs.copy()
-        observed = self.counts > 0
+        observed = (
+            np.broadcast_to(self.counts[:, None] > 0, mins.shape)
+            if self.valid_counts is None
+            else self.valid_counts > 0
+        )
         mins[~observed] = np.nan
         maxs[~observed] = np.nan
         mins[~np.isfinite(mins)] = np.nan
         maxs[~np.isfinite(maxs)] = np.nan
         return np.concatenate((mins, self.mean_matrix(), maxs), axis=1)
+
+    def coverage_feature_matrix(self) -> np.ndarray:
+        """Return compact denominator/validity coverage features for pairwise aggregates."""
+
+        row_count = len(self.counts)
+        coverage = np.full((row_count, len(PROMOTED_PAIRWISE_COVERAGE_FEATURE_COLUMNS)), np.nan, dtype=np.float64)
+        counts = np.asarray(self.counts, dtype=np.float64)
+        coverage[:, 0] = np.log1p(np.minimum(counts, PAIRWISE_COUNT_LOG_CAPPED_REFERENCE_SIZE))
+        if self.valid_counts is None:
+            return coverage
+
+        position_by_name = {feature_name: index for index, feature_name in enumerate(self.base_feature_names)}
+        observed = counts > 0.0
+        for output_index, feature_names in enumerate(PROMOTED_PAIRWISE_COVERAGE_GROUPS.values(), start=1):
+            if not all(feature_name in position_by_name for feature_name in feature_names):
+                continue
+            positions = [position_by_name[feature_name] for feature_name in feature_names]
+            valid_count = np.asarray(self.valid_counts[:, positions], dtype=np.float64).min(axis=1)
+            coverage[observed, output_index] = valid_count[observed] / counts[observed]
+        coverage[~np.isfinite(coverage)] = np.nan
+        return coverage
 
 
 @dataclass(frozen=True)
@@ -178,6 +226,12 @@ def promoted_pairwise_aggregate_columns() -> tuple[str, ...]:
     """Return the promoted pairwise aggregate feature columns in model order."""
 
     return PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS
+
+
+def promoted_pairwise_coverage_columns() -> tuple[str, ...]:
+    """Return compact pairwise coverage feature columns in model order."""
+
+    return PROMOTED_PAIRWISE_COVERAGE_FEATURE_COLUMNS
 
 
 def _as_uint32_1d(name: str, values: Sequence[Any] | np.ndarray) -> np.ndarray:
@@ -268,6 +322,65 @@ def _localize_row_indices(row_chunk: np.ndarray) -> tuple[np.ndarray, np.ndarray
         return global_rows, local_row_indices
     global_rows, local_row_indices = np.unique(row_chunk, return_inverse=True)
     return np.ascontiguousarray(global_rows, dtype=np.int64), np.ascontiguousarray(local_row_indices, dtype=np.uint32)
+
+
+def _matrix_positions(matrix_indices: Sequence[int], selected_indices: Sequence[int]) -> tuple[int, ...]:
+    position_by_index = {int(index): position for position, index in enumerate(matrix_indices)}
+    return tuple(position_by_index[int(index)] for index in selected_indices)
+
+
+def aggregate_pair_feature_chunk_nan_aware(
+    *,
+    pair_features: np.ndarray,
+    local_row_indices: np.ndarray,
+    row_count: int,
+    matrix_indices: Sequence[int],
+    aggregate_indices: Sequence[int],
+    nan_value: float = math.nan,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Aggregate pair features with `nan*` semantics per row and base feature.
+
+    If ``nan_value`` is NaN, missing per-pair values are skipped and each
+    feature is NaN only when all contributing pair values are missing. Otherwise
+    NaNs are first replaced with ``nan_value`` and counted as ordinary values.
+    """
+
+    aggregate_positions = _matrix_positions(matrix_indices, aggregate_indices)
+    aggregate_values = np.asarray(pair_features[:, aggregate_positions], dtype=np.float64)
+    row_count = int(row_count)
+    aggregate_count = len(aggregate_positions)
+    counts = np.zeros(row_count, dtype=np.uint32)
+    valid_counts = np.zeros((row_count, aggregate_count), dtype=np.uint64)
+    sums = np.zeros((row_count, aggregate_count), dtype=np.float64)
+    mins = np.full((row_count, aggregate_count), np.inf, dtype=np.float64)
+    maxs = np.full((row_count, aggregate_count), -np.inf, dtype=np.float64)
+    if len(aggregate_values) == 0 or aggregate_count == 0:
+        return counts, valid_counts, sums, mins, maxs
+
+    local_rows = np.asarray(local_row_indices, dtype=np.uint32)
+    if local_rows.shape != (len(aggregate_values),):
+        raise ValueError(f"local_row_indices must have shape ({len(aggregate_values)},), got {local_rows.shape}")
+    if len(local_rows) and int(local_rows.max()) >= row_count:
+        raise IndexError(f"local_row_indices contains row >= row_count={row_count}")
+
+    counts += np.bincount(local_rows, minlength=row_count).astype(np.uint32, copy=False)
+    replace_missing = not math.isnan(float(nan_value))
+    if replace_missing:
+        aggregate_values = np.where(np.isnan(aggregate_values), float(nan_value), aggregate_values)
+        valid = np.ones(aggregate_values.shape, dtype=bool)
+    else:
+        valid = ~np.isnan(aggregate_values)
+    for column_index in range(aggregate_count):
+        column_valid = valid[:, column_index]
+        if not np.any(column_valid):
+            continue
+        rows = local_rows[column_valid]
+        values = aggregate_values[column_valid, column_index]
+        valid_counts[:, column_index] += np.bincount(rows, minlength=row_count).astype(np.uint64, copy=False)
+        np.add.at(sums[:, column_index], rows, values)
+        np.minimum.at(mins[:, column_index], rows, values)
+        np.maximum.at(maxs[:, column_index], rows, values)
+    return counts, valid_counts, sums, mins, maxs
 
 
 def compute_linker_pair_chunk_plan(
@@ -378,6 +491,14 @@ def iter_linker_pair_feature_chunks_rust(
                 featurizer=featurizer,
             )
         )
+        counts, valid_counts, sums, mins, maxs = aggregate_pair_feature_chunk_nan_aware(
+            pair_features=pair_features,
+            local_row_indices=np.asarray(local_row_indices, dtype=np.uint32),
+            row_count=len(global_rows),
+            matrix_indices=resolved_matrix_indices,
+            aggregate_indices=resolved_aggregate_indices,
+            nan_value=float(nan_value),
+        )
         yield LinkerPairFeatureChunk(
             start=int(start),
             stop=int(stop),
@@ -389,6 +510,7 @@ def iter_linker_pair_feature_chunks_rust(
             sums=sums,
             mins=mins,
             maxs=maxs,
+            valid_counts=valid_counts,
         )
 
 
@@ -453,6 +575,14 @@ def iter_candidate_batch_pair_feature_chunks_rust(
                 featurizer=featurizer,
             )
         )
+        counts, valid_counts, sums, mins, maxs = aggregate_pair_feature_chunk_nan_aware(
+            pair_features=pair_features,
+            local_row_indices=local_row_indices,
+            row_count=len(global_rows),
+            matrix_indices=resolved_matrix_indices,
+            aggregate_indices=resolved_aggregate_indices,
+            nan_value=float(nan_value),
+        )
         yield LinkerPairFeatureChunk(
             start=int(start),
             stop=int(stop),
@@ -464,6 +594,7 @@ def iter_candidate_batch_pair_feature_chunks_rust(
             sums=sums,
             mins=mins,
             maxs=maxs,
+            valid_counts=valid_counts,
         )
 
 
@@ -497,43 +628,36 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
         total_ram_bytes=total_ram_bytes,
     )
     counts = np.zeros(candidate_batch.row_count, dtype=np.uint64)
+    valid_counts = np.zeros((candidate_batch.row_count, len(aggregate_indices)), dtype=np.uint64)
     sums = np.zeros((candidate_batch.row_count, len(aggregate_indices)), dtype=np.float64)
     mins = np.full((candidate_batch.row_count, len(aggregate_indices)), np.inf, dtype=np.float64)
     maxs = np.full((candidate_batch.row_count, len(aggregate_indices)), -np.inf, dtype=np.float64)
     chunk_count = 0
-    if featurizer is None:
-        featurizer = feature_port._get_rust_featurizer(  # noqa: SLF001
-            dataset,
-            runtime_context=runtime_context,
-            use_cache=use_cache,
-        )
-    chunk_pairs = int(plan["chunk_pairs"])
-    for start in range(0, candidate_batch.pair_count, chunk_pairs):
-        stop = min(candidate_batch.pair_count, start + chunk_pairs)
-        row_chunk = candidate_batch.pair_row_indices[start:stop]
-        global_rows, local_row_indices = _localize_row_indices(row_chunk)
-        chunk_counts, chunk_sums, chunk_mins, chunk_maxs = feature_port.build_linker_pair_aggregate_stats_arrays_rust(
-            dataset,
-            candidate_batch.left_signature_indices[start:stop],
-            candidate_batch.right_signature_indices[start:stop],
-            local_row_indices,
-            len(global_rows),
-            aggregate_indices=list(aggregate_indices),
-            num_threads=max(1, int(n_jobs)),
-            nan_value=float(nan_value),
-            runtime_context=runtime_context,
-            use_cache=use_cache,
-            featurizer=featurizer,
-        )
+    for chunk in iter_candidate_batch_pair_feature_chunks_rust(
+        dataset,
+        candidate_batch,
+        matrix_indices=aggregate_indices,
+        aggregate_indices=aggregate_indices,
+        n_jobs=n_jobs,
+        total_ram_bytes=total_ram_bytes,
+        nan_value=nan_value,
+        runtime_context=runtime_context,
+        use_cache=use_cache,
+        featurizer=featurizer,
+        chunk_plan=plan,
+    ):
         chunk_count += 1
-        observed = chunk_counts > 0
+        observed = chunk.counts > 0
         if not np.any(observed):
             continue
-        rows = global_rows[observed]
-        counts[rows] += chunk_counts[observed].astype(np.uint64, copy=False)
-        sums[rows] += chunk_sums[observed]
-        mins[rows] = np.minimum(mins[rows], chunk_mins[observed])
-        maxs[rows] = np.maximum(maxs[rows], chunk_maxs[observed])
+        rows = chunk.global_row_indices[observed]
+        counts[rows] += chunk.counts[observed].astype(np.uint64, copy=False)
+        if chunk.valid_counts is None:
+            raise RuntimeError("nan-aware pairwise aggregate chunks must include valid_counts")
+        valid_counts[rows] += chunk.valid_counts[observed]
+        sums[rows] += chunk.sums[observed]
+        mins[rows] = np.minimum(mins[rows], chunk.mins[observed])
+        maxs[rows] = np.maximum(maxs[rows], chunk.maxs[observed])
     return PairwiseAggregateStats(
         counts=counts,
         sums=sums,
@@ -545,6 +669,7 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
         chunk_count=int(chunk_count),
         matrix_indices=tuple(aggregate_indices),
         aggregate_indices=tuple(aggregate_indices),
+        valid_counts=valid_counts,
     )
 
 
@@ -581,6 +706,7 @@ def compute_pairwise_aggregate_stats_rust(
         total_ram_bytes=total_ram_bytes,
     )
     counts = np.zeros(int(row_count), dtype=np.uint64)
+    valid_counts = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.uint64)
     sums = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64)
     mins = np.full((int(row_count), len(aggregate_indices)), np.inf, dtype=np.float64)
     maxs = np.full((int(row_count), len(aggregate_indices)), -np.inf, dtype=np.float64)
@@ -607,6 +733,9 @@ def compute_pairwise_aggregate_stats_rust(
             continue
         rows = chunk.global_row_indices[observed]
         counts[rows] += chunk.counts[observed].astype(np.uint64, copy=False)
+        if chunk.valid_counts is None:
+            raise RuntimeError("nan-aware pairwise aggregate chunks must include valid_counts")
+        valid_counts[rows] += chunk.valid_counts[observed]
         sums[rows] += chunk.sums[observed]
         mins[rows] = np.minimum(mins[rows], chunk.mins[observed])
         maxs[rows] = np.maximum(maxs[rows], chunk.maxs[observed])
@@ -621,4 +750,5 @@ def compute_pairwise_aggregate_stats_rust(
         chunk_count=int(chunk_count),
         matrix_indices=tuple(aggregate_indices),
         aggregate_indices=tuple(aggregate_indices),
+        valid_counts=valid_counts,
     )

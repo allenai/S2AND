@@ -24,6 +24,7 @@ from s2and.incremental_linking.linker_pairwise import (
     LinkerCandidateBatch,
     PairwiseAggregateStats,
     _localize_row_indices,
+    aggregate_pair_feature_chunk_nan_aware,
     compute_candidate_batch_pairwise_aggregate_stats_rust,
     compute_linker_pair_chunk_plan,
 )
@@ -34,10 +35,10 @@ from s2and.runtime import build_runtime_context
 LinkAction = Literal["link", "abstain"]
 _LETTERS_RE = re.compile(r"[A-Za-z]+")
 
-# Named pairwise NaN policies. Pairwise model features and promoted `pw_*`
-# aggregate features both preserve missingness for LightGBM.
+# Production 1.2 dense output semantics. The pairwise distance model preserves
+# NaNs internally; only the exported pw_* aggregate features are zero-filled.
 _PAIRWISE_MODEL_NAN_VALUE: float = float("nan")
-_PAIRWISE_AGGREGATE_NAN_VALUE: float = float("nan")
+_PAIRWISE_AGGREGATE_NAN_VALUE: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -429,15 +430,17 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
     pair_labels: np.ndarray | None = None,
     n_jobs: int = 1,
     total_ram_bytes: int | None = None,
+    pairwise_model_nan_value: float = _PAIRWISE_MODEL_NAN_VALUE,
+    pairwise_aggregate_nan_value: float = _PAIRWISE_AGGREGATE_NAN_VALUE,
     runtime_context: Any | None = None,
     use_cache: bool = False,
     featurizer: Any | None = None,
 ) -> CandidateBatchPairwiseModelResult:
     """Score candidate pairs and compute promoted pairwise aggregates in one Rust feature pass.
 
-    Pairwise model features and promoted aggregate features preserve missingness
-    for LightGBM (``_PAIRWISE_MODEL_NAN_VALUE`` and
-    ``_PAIRWISE_AGGREGATE_NAN_VALUE``).
+    Production defaults reproduce the dense production 1.2 matrix by preserving
+    NaNs for pairwise distance model inputs and zero-filling the exported
+    promoted pairwise aggregate values.
     """
 
     start_seconds = time.perf_counter()
@@ -475,6 +478,7 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
         total_ram_bytes=total_ram_bytes,
     )
     aggregate_counts = np.zeros(row_count, dtype=np.uint64)
+    aggregate_valid_counts = np.zeros((row_count, len(aggregate_indices)), dtype=np.uint64)
     aggregate_sums = np.zeros((row_count, len(aggregate_indices)), dtype=np.float64)
     aggregate_mins = np.full((row_count, len(aggregate_indices)), np.inf, dtype=np.float64)
     aggregate_maxs = np.full((row_count, len(aggregate_indices)), -np.inf, dtype=np.float64)
@@ -499,7 +503,7 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
         row_chunk = candidate_batch.pair_row_indices[chunk_start:chunk_stop]
         global_rows, local_row_indices = _localize_row_indices(row_chunk)
         feature_start = time.perf_counter()
-        pair_features, counts, sums, mins, maxs = (
+        pair_features, _rust_counts, _rust_sums, _rust_mins, _rust_maxs = (
             feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
                 dataset,
                 candidate_batch.left_signature_indices[chunk_start:chunk_stop],
@@ -509,8 +513,8 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
                 matrix_indices=list(matrix_indices),
                 aggregate_indices=list(aggregate_indices),
                 num_threads=max(1, int(n_jobs)),
-                nan_value=_PAIRWISE_MODEL_NAN_VALUE,
-                aggregate_nan_value=_PAIRWISE_AGGREGATE_NAN_VALUE,
+                nan_value=float(pairwise_model_nan_value),
+                aggregate_nan_value=float(pairwise_aggregate_nan_value),
                 runtime_context=runtime_context,
                 use_cache=use_cache,
                 featurizer=featurizer,
@@ -519,23 +523,36 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
         feature_seconds += time.perf_counter() - feature_start
         chunk_count += 1
 
+        counts, valid_counts, sums, mins, maxs = aggregate_pair_feature_chunk_nan_aware(
+            pair_features=pair_features,
+            local_row_indices=local_row_indices,
+            row_count=len(global_rows),
+            matrix_indices=matrix_indices,
+            aggregate_indices=aggregate_indices,
+            nan_value=float(pairwise_aggregate_nan_value),
+        )
         observed = counts > 0
         if np.any(observed):
             rows = global_rows[observed]
             aggregate_counts[rows] += counts[observed].astype(np.uint64, copy=False)
+            aggregate_valid_counts[rows] += valid_counts[observed]
             aggregate_sums[rows] += sums[observed]
             aggregate_mins[rows] = np.minimum(aggregate_mins[rows], mins[observed])
             aggregate_maxs[rows] = np.maximum(aggregate_maxs[rows], maxs[observed])
 
         predict_start = time.perf_counter()
         labels_chunk = labels[chunk_start:chunk_stop]
+        model_pair_features = pair_features
+        if not np.isnan(float(pairwise_model_nan_value)):
+            model_pair_features = pair_features.copy()
+            model_pair_features[np.isnan(model_pair_features)] = float(pairwise_model_nan_value)
         model_distances = _predict_pairwise_model_distances(
             classifier=classifier,
-            features=pair_features[:, main_positions],
+            features=model_pair_features[:, main_positions],
             labels=labels_chunk,
             num_threads=max(1, int(n_jobs)),
             nameless_classifier=nameless_classifier,
-            nameless_features=pair_features[:, nameless_positions] if nameless_positions else None,
+            nameless_features=model_pair_features[:, nameless_positions] if nameless_positions else None,
         )
         predict_seconds += time.perf_counter() - predict_start
         distance_accumulators = _accumulate_pairwise_distance_chunk(
@@ -578,6 +595,7 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
         chunk_count=int(chunk_count),
         matrix_indices=matrix_indices,
         aggregate_indices=aggregate_indices,
+        valid_counts=aggregate_valid_counts,
     )
     telemetry: dict[str, int | float] = {
         "candidate_row_count": row_count,

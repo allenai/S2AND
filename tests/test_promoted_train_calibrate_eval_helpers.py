@@ -1,4 +1,4 @@
-"""Regression tests for the official joint safe-link shared stack helpers."""
+"""Regression tests for promoted train/calibrate/eval helper functions."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.joint_safe_link_official_stack import (
-    DEFAULT_PACKAGE_DIR,
+from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
     OfficialBundle,
     _apply_classic_gate,
     _apply_classic_train_holdout_filter,
@@ -39,7 +38,7 @@ from scripts.joint_safe_link_official_stack import (
     format_classic_selected_gate_tables,
     load_bundle,
 )
-from scripts.joint_safe_link_official_stack import (
+from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
     _read_csv as _read_official_table,
 )
 
@@ -906,29 +905,21 @@ def test_classic_feature_matrix_rejects_infinite_feature_cells() -> None:
         _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
 
 
-def test_load_bundle_defaults_to_active_featureless_self_contained_bundle() -> None:
-    """The shared stack should default to the active featureless self-contained bundle."""
+def test_load_bundle_requires_explicit_root(tmp_path: Path) -> None:
+    """Bundle loading should not silently default to historical feature tables."""
 
-    bundle = load_bundle()
-    classic = bundle.models["classic"]
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "bundle.json").write_text(
+        '{"bundle_name":"demo","assets":{},"models":{"classic":{}},"expected_metrics":{}}',
+        encoding="utf-8",
+    )
 
-    assert DEFAULT_PACKAGE_DIR.name == "joint_safe_link_featureless_self_contained_20260506a"
-    assert bundle.root == DEFAULT_PACKAGE_DIR
-    assert bundle.bundle_name == "joint_safe_link_featureless_self_contained_20260506a"
-    assert classic["train_path"] == "features_corrected\\train.parquet"
-    assert classic["classic_gate_source_path"] == "features_corrected\\calibration_source.parquet"
-    assert classic["s2and_eval_path"] == "features_corrected\\s2and_eval.parquet"
-    assert classic["hwang_eval_path"] == "features_corrected\\hwang_eval.parquet"
-    assert classic["extra_eval_paths"] == {
-        "a_khan": "features_corrected\\a_khan_eval.parquet",
-        "a_silva": "features_corrected\\a_silva_eval.parquet",
-        "j_smith": "features_corrected\\j_smith_eval.parquet",
-        "s_gupta": "features_corrected\\s_gupta_eval.parquet",
-    }
-    assert bundle.assets["featureless_rows"]["files"]["train_path"] == "labels\\train.parquet"
-    assert bundle.assets["corrected_feature_rows"]["files"]["train_path"] == "features_corrected\\train.parquet"
-    assert bundle.assets["candidate_members"]["root"] == "components"
-    assert bundle.assets["raw_metadata"]["root"] == "raw"
+    bundle = load_bundle(bundle_root)
+
+    assert bundle.root == bundle_root.resolve()
+    assert bundle.bundle_name == "demo"
+    assert bundle.models == {"classic": {}}
     assert bundle.expected_metrics == {}
 
 

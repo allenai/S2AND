@@ -8,7 +8,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS, promoted_linker_feature_columns
-from s2and.incremental_linking.linker_pairwise import promoted_pairwise_aggregate_columns
+from s2and.incremental_linking.linker_pairwise import (
+    promoted_pairwise_aggregate_columns,
+    promoted_pairwise_coverage_columns,
+)
 from s2and.runtime import (
     RUST_CAPABILITY_HYBRID_CENTROID_RETRIEVER_V1,
     RUST_CAPABILITY_INCREMENTAL_LINKING_CONSTRAINT_ARRAYS_V1,
@@ -62,12 +65,15 @@ def promoted_feature_production_manifest(feature_columns: Sequence[str] | None =
     columns = tuple(promoted_linker_feature_columns() if feature_columns is None else feature_columns)
     non_pairwise = set(PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS)
     pairwise = set(promoted_pairwise_aggregate_columns())
+    coverage = set(promoted_pairwise_coverage_columns())
     manifest: dict[str, str] = {}
     for column in columns:
         if column in non_pairwise:
             manifest[column] = "compact_non_pairwise_row_formula"
         elif column in pairwise:
             manifest[column] = "rust_pairwise_aggregate"
+        elif column in coverage:
+            manifest[column] = "rust_pairwise_aggregate_coverage"
         else:
             manifest[column] = "external_or_unknown"
     return manifest
@@ -82,8 +88,9 @@ def production_contract_payload(feature_columns: Sequence[str] | None = None) ->
         "feature_schema_digest": promoted_linker_feature_schema_digest(columns),
         "feature_production_manifest": promoted_feature_production_manifest(columns),
         "missing_value_policy": {
-            "pairwise_nan_value": "preserve_nan",
-            "matrix_nan_allowed": True,
+            "pairwise_model_nan_value": "preserve_nan",
+            "pairwise_aggregate_nan_value": 0.0,
+            "matrix_nan_allowed": False,
         },
         "rounding_policy": {
             "compact_non_pairwise": "round_to_6_decimal_places_where_formula_requires",

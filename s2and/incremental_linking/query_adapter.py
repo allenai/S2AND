@@ -109,7 +109,7 @@ def _normalize_term_set(value: Any) -> frozenset[str]:
     normalized = normalize_text(str(value or ""))
     if not normalized:
         return EMPTY_STRING_SET
-    return frozenset(token for token in normalized.split() if len(token) > 1)
+    return frozenset(token for token in normalized.split() if token)
 
 
 def _nonempty_feature_values(values: Sequence[str] | None) -> frozenset[str]:

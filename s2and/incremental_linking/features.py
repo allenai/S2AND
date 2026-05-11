@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +14,7 @@ from s2and.incremental_linking.linker_pairwise import (
     PairwiseAggregateStats,
     compute_candidate_batch_pairwise_aggregate_stats_rust,
     promoted_pairwise_aggregate_columns,
+    promoted_pairwise_coverage_columns,
 )
 
 PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS: tuple[str, ...] = (
@@ -192,10 +192,27 @@ def _pairwise_feature_columns_to_matrix(
         )
     if np.isinf(pairwise_matrix).any():
         raise ValueError("pairwise feature matrix contains infinite values")
-    return {
+    if np.isnan(pairwise_matrix).any():
+        raise ValueError("pairwise feature matrix contains NaN values")
+    pairwise_columns = {
         feature_column: pairwise_matrix[:, column_index]
         for column_index, feature_column in enumerate(pairwise_stats.aggregate_feature_columns)
     }
+    if hasattr(pairwise_stats, "coverage_feature_matrix"):
+        coverage_matrix = np.asarray(pairwise_stats.coverage_feature_matrix(), dtype=np.float32)
+        coverage_columns = promoted_pairwise_coverage_columns()
+        if coverage_matrix.shape != (row_count, len(coverage_columns)):
+            raise ValueError(
+                "pairwise coverage feature matrix shape must match row_count and coverage columns: "
+                f"{coverage_matrix.shape} != ({row_count}, {len(coverage_columns)})"
+            )
+        pairwise_columns.update(
+            {
+                feature_column: coverage_matrix[:, column_index]
+                for column_index, feature_column in enumerate(coverage_columns)
+            }
+        )
+    return pairwise_columns
 
 
 def assemble_linker_feature_matrix(
@@ -233,7 +250,7 @@ def assemble_linker_feature_matrix_rust(
     feature_columns: Sequence[str] = PROMOTED_LINKER_FEATURE_COLUMNS,
     n_jobs: int = 1,
     total_ram_bytes: int | None = None,
-    nan_value: float = math.nan,
+    nan_value: float = 0.0,
     runtime_context: Any | None = None,
     use_cache: bool = False,
     featurizer: Any | None = None,

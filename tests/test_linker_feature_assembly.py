@@ -8,16 +8,37 @@ import pandas as pd
 import pytest
 
 from s2and.incremental_linking import features
-from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch, promoted_pairwise_aggregate_columns
+from s2and.incremental_linking.linker_pairwise import (
+    LinkerCandidateBatch,
+    promoted_pairwise_aggregate_columns,
+    promoted_pairwise_coverage_columns,
+)
 
 
 class StaticPairwiseStats:
-    def __init__(self, matrix: np.ndarray, columns: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        matrix: np.ndarray,
+        columns: tuple[str, ...],
+        coverage_matrix: np.ndarray | None = None,
+    ) -> None:
         self._matrix = np.asarray(matrix, dtype=np.float32)
         self.aggregate_feature_columns = columns
+        self._coverage_matrix = (
+            np.asarray(coverage_matrix, dtype=np.float32) if coverage_matrix is not None else None
+        )
 
     def feature_matrix(self) -> np.ndarray:
         return self._matrix
+
+    def coverage_feature_matrix(self) -> np.ndarray:
+        if self._coverage_matrix is None:
+            return np.full(
+                (len(self._matrix), len(promoted_pairwise_coverage_columns())),
+                np.nan,
+                dtype=np.float32,
+            )
+        return self._coverage_matrix
 
 
 def _row_feature_fixture(row_count: int) -> dict[str, np.ndarray]:
@@ -73,7 +94,38 @@ def test_assemble_linker_feature_matrix_places_row_and_pairwise_columns() -> Non
     )
 
 
-def test_assemble_linker_feature_matrix_allows_pairwise_nans() -> None:
+def test_assemble_linker_feature_matrix_places_pairwise_coverage_columns() -> None:
+    row_count = 3
+    candidate_batch = LinkerCandidateBatch(
+        row_count=row_count,
+        left_signature_indices=np.zeros(0, dtype=np.uint32),
+        right_signature_indices=np.zeros(0, dtype=np.uint32),
+        pair_row_indices=np.zeros(0, dtype=np.uint32),
+    )
+    pairwise_columns = promoted_pairwise_aggregate_columns()
+    coverage_columns = promoted_pairwise_coverage_columns()
+    pairwise_matrix = np.zeros((row_count, len(pairwise_columns)), dtype=np.float32)
+    coverage_matrix = np.arange(row_count * len(coverage_columns), dtype=np.float32).reshape(
+        row_count,
+        len(coverage_columns),
+    )
+    target_columns = ("min_distance", "pw_mean_first_names_equal", "pw_valid_fraction_email")
+
+    assembled = features.assemble_linker_feature_matrix(
+        candidate_batch,
+        _row_feature_fixture(row_count),
+        pairwise_stats=StaticPairwiseStats(pairwise_matrix, pairwise_columns, coverage_matrix),
+        feature_columns=target_columns,
+    )
+
+    assert assembled.feature_columns == target_columns
+    np.testing.assert_array_equal(
+        assembled.matrix[:, assembled.feature_columns.index("pw_valid_fraction_email")],
+        coverage_matrix[:, coverage_columns.index("pw_valid_fraction_email")],
+    )
+
+
+def test_assemble_linker_feature_matrix_rejects_pairwise_nans() -> None:
     row_count = 2
     candidate_batch = LinkerCandidateBatch(
         row_count=row_count,
@@ -85,13 +137,12 @@ def test_assemble_linker_feature_matrix_allows_pairwise_nans() -> None:
     pairwise_matrix = np.zeros((row_count, len(pairwise_columns)), dtype=np.float32)
     pairwise_matrix[0, pairwise_columns.index("pw_mean_middle_names_equal")] = np.nan
 
-    assembled = features.assemble_linker_feature_matrix(
-        candidate_batch,
-        _row_feature_fixture(row_count),
-        pairwise_stats=StaticPairwiseStats(pairwise_matrix, pairwise_columns),
-    )
-
-    assert np.isnan(assembled.matrix[0, assembled.feature_columns.index("pw_mean_middle_names_equal")])
+    with pytest.raises(ValueError, match="NaN values"):
+        features.assemble_linker_feature_matrix(
+            candidate_batch,
+            _row_feature_fixture(row_count),
+            pairwise_stats=StaticPairwiseStats(pairwise_matrix, pairwise_columns),
+        )
 
 
 def test_assemble_linker_feature_matrix_rejects_pairwise_infinities() -> None:

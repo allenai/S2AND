@@ -37,7 +37,7 @@ Focused checks:
 ```powershell
 uv run pytest -q tests/test_cluster_incremental.py::test_predict_incremental_private_linker_mode_uses_seed_link_seam tests/test_cluster_incremental.py::test_predict_incremental_promoted_linker_batches_queries tests/test_cluster_incremental.py::test_finish_incremental_with_seed_links_reclusters_only_abstains
 uv run pytest -q tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py tests/test_incremental_linking_default_artifact.py
-uv run ruff check scripts/run_joint_safe_link_promoted_train_calibrate_eval.py scripts/joint_safe_link_official_stack.py tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py
+uv run ruff check scripts/run_joint_safe_link_promoted_train_calibrate_eval.py tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py
 ```
 
 Full PR verification should still run the broader incremental-linking and

@@ -210,6 +210,59 @@ def test_pairwise_aggregate_feature_matrix_preserves_missing_values() -> None:
     assert np.isnan(matrix[1]).all()
 
 
+def test_pairwise_coverage_features_expose_compact_denominator_signal() -> None:
+    stats = linker_pairwise.PairwiseAggregateStats(
+        counts=np.asarray([4, 2, 0], dtype=np.uint64),
+        sums=np.zeros((3, 4), dtype=np.float64),
+        mins=np.zeros((3, 4), dtype=np.float64),
+        maxs=np.zeros((3, 4), dtype=np.float64),
+        base_feature_names=(
+            "middle_initials_overlap",
+            "middle_names_equal",
+            "email_prefix_equal",
+            "email_suffix_equal",
+        ),
+        aggregate_feature_columns=(
+            "pw_min_middle_initials_overlap",
+            "pw_min_middle_names_equal",
+            "pw_min_email_prefix_equal",
+            "pw_min_email_suffix_equal",
+            "pw_mean_middle_initials_overlap",
+            "pw_mean_middle_names_equal",
+            "pw_mean_email_prefix_equal",
+            "pw_mean_email_suffix_equal",
+            "pw_max_middle_initials_overlap",
+            "pw_max_middle_names_equal",
+            "pw_max_email_prefix_equal",
+            "pw_max_email_suffix_equal",
+        ),
+        chunk_plan=_mock_chunk_plan(chunk_pairs=2, total_pairs=6),
+        chunk_count=1,
+        matrix_indices=(0, 1, 2, 3),
+        aggregate_indices=(0, 1, 2, 3),
+        valid_counts=np.asarray(
+            [
+                [2, 2, 1, 1],
+                [1, 2, 2, 2],
+                [0, 0, 0, 0],
+            ],
+            dtype=np.uint64,
+        ),
+    )
+
+    columns = linker_pairwise.promoted_pairwise_coverage_columns()
+    matrix = stats.coverage_feature_matrix()
+
+    assert matrix.shape == (3, len(columns))
+    assert matrix[0, columns.index("pw_pair_count_log_capped")] == pytest.approx(np.log1p(4.0))
+    assert matrix[0, columns.index("pw_valid_fraction_middle_name")] == pytest.approx(0.5)
+    assert matrix[0, columns.index("pw_valid_fraction_email")] == pytest.approx(0.25)
+    assert matrix[1, columns.index("pw_valid_fraction_middle_name")] == pytest.approx(0.5)
+    assert matrix[1, columns.index("pw_valid_fraction_email")] == pytest.approx(1.0)
+    assert matrix[2, columns.index("pw_pair_count_log_capped")] == pytest.approx(0.0)
+    assert np.isnan(matrix[2, columns.index("pw_valid_fraction_middle_name")])
+
+
 def test_linker_pairwise_aggregates_accept_indexed_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = build_dummy_dataset("dummy_linker_pairwise_indexed_fake", load_name_counts=True)
     pairs = [(0, 1), (0, 2), (1, 2)]
@@ -283,37 +336,34 @@ def test_candidate_batch_aggregates_use_array_api(monkeypatch: pytest.MonkeyPatc
     call_sizes: list[int] = []
 
     class FakeRustFeaturizer:
-        def linker_pair_index_arrays_aggregate_stats(
+        def linker_pair_index_arrays_and_aggregate_stats(
             self,
             left_signature_indices,
             right_signature_indices,
             row_indices,
             row_count,
+            matrix_indices,
             aggregate_indices,
             num_threads,
             nan_value,
+            aggregate_nan_value,
         ):
-            del num_threads, nan_value
+            del num_threads, nan_value, aggregate_nan_value
             call_sizes.append(len(left_signature_indices))
+            matrix = np.zeros((len(left_signature_indices), len(matrix_indices)), dtype=np.float64)
+            matrix_position = {int(feature_index): position for position, feature_index in enumerate(matrix_indices)}
+            for pair_offset, (left, right) in enumerate(
+                zip(left_signature_indices, right_signature_indices, strict=True)
+            ):
+                for feature_index in aggregate_indices:
+                    matrix[pair_offset, matrix_position[int(feature_index)]] = float(left + right + feature_index)
             counts = np.zeros(int(row_count), dtype=np.uint32)
             sums = np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64)
             mins = np.full((int(row_count), len(aggregate_indices)), np.inf, dtype=np.float64)
             maxs = np.full((int(row_count), len(aggregate_indices)), -np.inf, dtype=np.float64)
-            for left, right, local_row_index in zip(
-                left_signature_indices,
-                right_signature_indices,
-                row_indices,
-                strict=True,
-            ):
+            for local_row_index in row_indices:
                 counts[int(local_row_index)] += 1
-                values = np.asarray(
-                    [float(left + right + feature_index) for feature_index in aggregate_indices],
-                    dtype=np.float64,
-                )
-                sums[int(local_row_index)] += values
-                mins[int(local_row_index)] = np.minimum(mins[int(local_row_index)], values)
-                maxs[int(local_row_index)] = np.maximum(maxs[int(local_row_index)], values)
-            return counts, sums, mins, maxs
+            return matrix, counts, sums, mins, maxs
 
     fake_featurizer = FakeRustFeaturizer()
     monkeypatch.setattr(

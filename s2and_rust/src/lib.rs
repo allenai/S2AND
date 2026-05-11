@@ -1066,6 +1066,18 @@ fn extract_pair_set(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<(String, String)
     Ok(out)
 }
 
+fn insert_name_tuple_alias(map: &mut HashMap<String, HashSet<String>>, a: String, b: String) {
+    let left = a.trim().to_lowercase();
+    let right = b.trim().to_lowercase();
+    if left.is_empty() || right.is_empty() {
+        return;
+    }
+    map.entry(left.clone())
+        .or_insert_with(HashSet::new)
+        .insert(right.clone());
+    map.entry(right).or_insert_with(HashSet::new).insert(left);
+}
+
 fn extract_name_tuples_map(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, HashSet<String>>> {
     if obj.is_none() {
         return Ok(HashMap::new());
@@ -1074,7 +1086,7 @@ fn extract_name_tuples_map(obj: &Bound<'_, PyAny>) -> PyResult<HashMap<String, H
     for item in PyIterator::from_object(obj)? {
         let tuple = item?;
         let (a, b): (String, String) = tuple.extract()?;
-        out.entry(a).or_insert_with(HashSet::new).insert(b);
+        insert_name_tuple_alias(&mut out, a, b);
     }
     Ok(out)
 }
@@ -2696,9 +2708,7 @@ fn load_name_tuples_from_text_path(
             continue;
         }
         if let Some((a, b)) = trimmed.split_once(',') {
-            out.entry(a.to_string())
-                .or_insert_with(HashSet::new)
-                .insert(b.to_string());
+            insert_name_tuple_alias(&mut out, a.to_string(), b.to_string());
         }
     }
     Ok(out)
@@ -2868,7 +2878,21 @@ fn same_prefix_tokens(a: &str, b: &str) -> bool {
 }
 
 fn name_tuple_contains(map: &HashMap<String, HashSet<String>>, a: &str, b: &str) -> bool {
-    map.get(a).map_or(false, |vals| vals.contains(b))
+    if map.get(a).map_or(false, |vals| vals.contains(b))
+        || map.get(b).map_or(false, |vals| vals.contains(a))
+    {
+        return true;
+    }
+    let a_normalized = a.trim().to_lowercase();
+    let b_normalized = b.trim().to_lowercase();
+    if a_normalized.as_str() == a && b_normalized.as_str() == b {
+        return false;
+    }
+    map.get(a_normalized.as_str())
+        .map_or(false, |vals| vals.contains(b_normalized.as_str()))
+        || map
+            .get(b_normalized.as_str())
+            .map_or(false, |vals| vals.contains(a_normalized.as_str()))
 }
 
 fn first_name_forms(value: &str) -> (String, String, String) {

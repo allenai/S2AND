@@ -88,6 +88,41 @@ def test_rust_retrieval_batch_returns_flat_pair_plan() -> None:
     assert "affiliation_overlap" in batch.row_signals
 
 
+def test_rust_retrieval_batch_preserves_single_character_title_and_venue_terms() -> None:
+    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
+        pytest.skip("top_k_hybrid_centroid_pair_plan is unavailable")
+    query = build_query_features(
+        first="alice",
+        title_terms=frozenset({"a", "m", "study"}),
+        venue_terms=frozenset({"series", "a"}),
+        has_full_first=True,
+    )
+    summaries = [
+        build_cluster_summary(
+            component_key="c1",
+            size=1,
+            first_name_counts=Counter({"alice": 1}),
+            title_counts=Counter({"a": 1, "study": 1}),
+            venue_counts=Counter({"a": 1}),
+        )
+    ]
+    retriever = s2and_rust.RustHybridCentroidRetriever(summaries, include_exemplars=True)
+
+    batch = build_linker_retrieval_batch_rust(
+        retriever=retriever,
+        queries=[query],
+        query_signature_indices=np.asarray([9], dtype=np.uint32),
+        component_member_indices_by_key={"c1": [1]},
+        top_k=1,
+        query_view="full",
+        n_jobs=1,
+    )
+
+    assert batch.candidate_batch.row_component_keys == ("c1",)
+    np.testing.assert_allclose(batch.row_signals["title_overlap"], [2.0 / 3.0], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(batch.row_signals["venue_overlap"], [0.5], rtol=1e-6, atol=1e-6)
+
+
 def test_rust_retrieval_batch_matches_direct_top_k_order() -> None:
     if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
         pytest.skip("top_k_hybrid_centroid_pair_plan is unavailable")

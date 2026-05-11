@@ -565,6 +565,97 @@ def test_get_constraint_rust_ignores_reliable_language_mismatch():
     assert got_indexed == [None]
 
 
+def test_get_constraint_rust_uses_dataset_name_tuple_aliases():
+    signatures = {
+        "s1": {
+            "signature_id": "s1",
+            "paper_id": "p1",
+            "author_info": {
+                "first": "Yu",
+                "middle": None,
+                "last": "Chen",
+                "suffix": None,
+                "affiliations": [],
+                "email": None,
+                "position": 0,
+                "block": "y chen",
+            },
+        },
+        "s2": {
+            "signature_id": "s2",
+            "paper_id": "p2",
+            "author_info": {
+                "first": "Yi",
+                "middle": None,
+                "last": "Chen",
+                "suffix": None,
+                "affiliations": [],
+                "email": None,
+                "position": 0,
+                "block": "y chen",
+            },
+        },
+    }
+    papers = {
+        "p1": {
+            "paper_id": "p1",
+            "title": "A",
+            "abstract": "",
+            "authors": [{"author_name": "Yu Chen", "position": 0}],
+            "venue": "",
+            "journal_name": "",
+            "year": 1964,
+            "references": [],
+        },
+        "p2": {
+            "paper_id": "p2",
+            "title": "B",
+            "abstract": "",
+            "authors": [{"author_name": "Yi Chen", "position": 0}],
+            "venue": "",
+            "journal_name": "",
+            "year": 1970,
+            "references": [],
+        },
+    }
+    ds = ANDData(
+        signatures=signatures,
+        papers=papers,
+        name="name_tuple_alias_constraint_parity",
+        mode="train",
+        specter_embeddings=None,
+        clusters={"c1": {"cluster_id": "c1", "signature_ids": ["s1", "s2"], "model_version": -1}},
+        cluster_seeds=None,
+        block_type="s2",
+        train_pairs=None,
+        val_pairs=None,
+        test_pairs=None,
+        train_pairs_size=10,
+        val_pairs_size=10,
+        test_pairs_size=10,
+        n_jobs=1,
+        load_name_counts=False,
+        preprocess=True,
+        random_seed=42,
+        name_tuples={("yu", "yi")},
+        use_orcid_id=True,
+        use_sinonym_overwrite=False,
+        compute_reference_features=False,
+    )
+
+    assert ds.get_constraint("s1", "s2") is None
+    rust_featurizer = _get_rust_featurizer(ds, use_cache=False)
+    assert get_constraint_rust(ds, "s1", "s2", featurizer=rust_featurizer) is None
+    signature_ids = list(rust_featurizer.signature_ids())
+    signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
+    indexed_values = get_constraints_matrix_indexed_rust(
+        ds,
+        [(signature_index["s1"], signature_index["s2"])],
+        featurizer=rust_featurizer,
+    )
+    assert indexed_values == [None]
+
+
 def test_get_constraints_matrix_rust_parity(dataset, constraint_pairs):
     expected = [dataset.get_constraint(s1, s2) for s1, s2 in constraint_pairs]
     got = get_constraints_matrix_rust(dataset, constraint_pairs)

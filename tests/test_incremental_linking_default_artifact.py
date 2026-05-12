@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
 import pytest
@@ -9,6 +8,11 @@ from s2and.incremental_linking.artifact import load_incremental_linking_artifact
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.model import DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
 from s2and.runtime import RUST_CAPABILITY_INCREMENTAL_LINKING_PAIR_PLAN_V1, detect_rust_runtime_capabilities
+
+s2and_rust = pytest.importorskip(
+    "s2and_rust",
+    reason="default incremental linker artifact requires the Rust extension",
+)
 
 
 def test_default_incremental_linker_artifact_loads_with_current_schema() -> None:
@@ -28,7 +32,6 @@ def test_default_rust_import_exposes_current_incremental_linking_pair_plan_abi()
     if not artifact_dir.exists():
         pytest.skip(f"default incremental linker artifact is not present: {artifact_dir}")
 
-    s2and_rust = importlib.import_module("s2and_rust")
     capabilities = detect_rust_runtime_capabilities(extension_module=s2and_rust)
 
     assert RUST_CAPABILITY_INCREMENTAL_LINKING_PAIR_PLAN_V1 in capabilities.named_capabilities

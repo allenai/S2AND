@@ -61,6 +61,11 @@ class QueryFeatures:
     has_middle: bool
     title_terms: frozenset[str] = EMPTY_STRING_SET
     name_counts: Any | None = None
+    paper_author_count: int = 0
+    paper_author_names: frozenset[str] = EMPTY_STRING_SET
+    author_position: int | None = None
+    local10_author_names: frozenset[str] = EMPTY_STRING_SET
+    signature_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,14 @@ class ClusterSummary:
     exemplar_vectors: list[np.ndarray]
     title_counts: Counter[str] = field(default_factory=Counter)
     name_counts_values: tuple[Any, ...] = field(default_factory=tuple)
+    non_mega_coauthor_counts: Counter[str] = field(default_factory=Counter)
+    max_paper_author_count: int = 0
+    member_paper_author_names: tuple[frozenset[str], ...] = ()
+    member_paper_author_counts: tuple[int, ...] = ()
+    member_author_positions: tuple[int | None, ...] = ()
+    member_local10_author_names: tuple[frozenset[str], ...] = ()
+    member_signature_ids: tuple[str, ...] = ()
+    member_title_terms: tuple[frozenset[str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +129,49 @@ def _nonempty_feature_values(values: Sequence[str] | None) -> frozenset[str]:
     if not values:
         return EMPTY_STRING_SET
     return frozenset(str(value) for value in values if str(value or ""))
+
+
+def _normalized_author_records(authors: Any) -> tuple[tuple[int, str], ...]:
+    if not authors:
+        return ()
+    records: list[tuple[int, int, str]] = []
+    for index, author in enumerate(authors):
+        raw_position = getattr(author, "position", index)
+        raw_name = getattr(author, "author_name", None)
+        if isinstance(author, Mapping):
+            raw_position = author.get("position", index)
+            raw_name = author.get("author_name") or author.get("name")
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            position = index
+        normalized = normalize_text(str(raw_name or ""))
+        records.append((position, index, normalized))
+    records.sort(key=lambda item: (item[0], item[1]))
+    return tuple((position, normalized) for position, _index, normalized in records)
+
+
+def _normalized_author_name_set(authors: Any) -> frozenset[str]:
+    names = {name for _position, name in _normalized_author_records(authors) if name}
+    return frozenset(names)
+
+
+def _local_author_name_set(authors: Any, center_position: int | None, *, radius: int) -> frozenset[str]:
+    if center_position is None:
+        return EMPTY_STRING_SET
+    return frozenset(
+        name
+        for position, name in _normalized_author_records(authors)
+        if name and position != center_position and abs(position - center_position) <= radius
+    )
+
+
+def _signature_author_position(signature: Any) -> int | None:
+    raw_position = getattr(signature, "author_info_position", None)
+    try:
+        return int(raw_position)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_compute_block(name: str) -> str:
@@ -161,6 +217,7 @@ def extract_query_features(
     signature_id: str,
     *,
     feature_cache: dict[str, QueryFeatures] | None = None,
+    paper_author_name_cache: dict[str, frozenset[str]] | None = None,
     orcid_enabled: bool = False,
 ) -> QueryFeatures:
     """Extract production retrieval features for one signature."""
@@ -176,10 +233,23 @@ def extract_query_features(
         venue_terms = EMPTY_STRING_SET
         title_terms = EMPTY_STRING_SET
         year = None
+        paper_author_count = 0
+        paper_author_names = EMPTY_STRING_SET
+        local10_author_names = EMPTY_STRING_SET
+        author_position = _signature_author_position(signature)
         if paper is not None:
             venue_terms = _normalize_term_set(" ".join(part for part in [paper.venue, paper.journal_name] if part))
             title_terms = _normalize_term_set(getattr(paper, "title", None))
             year = paper.year
+            authors = getattr(paper, "authors", None)
+            paper_author_count = len(authors) if authors is not None else 0
+            local10_author_names = _local_author_name_set(authors, author_position, radius=10)
+            if paper_author_name_cache is not None and str(signature.paper_id) in paper_author_name_cache:
+                paper_author_names = paper_author_name_cache[str(signature.paper_id)]
+            else:
+                paper_author_names = _normalized_author_name_set(authors)
+                if paper_author_name_cache is not None:
+                    paper_author_name_cache[str(signature.paper_id)] = paper_author_names
         specter = _get_specter_vector(dataset, signature.paper_id)
         middle_tokens = [token for token in middle.split() if token]
         features = QueryFeatures(
@@ -200,6 +270,11 @@ def extract_query_features(
             has_middle=bool(middle_tokens),
             title_terms=title_terms,
             name_counts=getattr(signature, "author_info_name_counts", None),
+            paper_author_count=int(paper_author_count),
+            paper_author_names=paper_author_names,
+            author_position=author_position,
+            local10_author_names=local10_author_names,
+            signature_id=str(signature_id),
         )
         if feature_cache is not None:
             feature_cache[signature_id] = features
@@ -234,6 +309,11 @@ def mask_query_features(base: QueryFeatures, view: str, *, orcid_enabled: bool =
         has_middle=False,
         title_terms=base.title_terms,
         name_counts=base.name_counts,
+        paper_author_count=base.paper_author_count,
+        paper_author_names=base.paper_author_names,
+        author_position=base.author_position,
+        local10_author_names=base.local10_author_names,
+        signature_id=base.signature_id,
     )
     if view == "initial_only":
         return masked
@@ -300,6 +380,7 @@ def build_cluster_summary(
     signature_ids: Sequence[str],
     max_exemplars: int,
     feature_cache: dict[str, QueryFeatures] | None = None,
+    paper_author_name_cache: dict[str, frozenset[str]] | None = None,
     orcid_enabled: bool = False,
     block_key: str = "incremental",
 ) -> ClusterSummary:
@@ -308,6 +389,7 @@ def build_cluster_summary(
     first_name_counts: Counter[str] = Counter()
     middle_initial_counts: Counter[str] = Counter()
     coauthor_counts: Counter[str] = Counter()
+    non_mega_coauthor_counts: Counter[str] = Counter()
     affiliation_counts: Counter[str] = Counter()
     venue_counts: Counter[str] = Counter()
     title_counts: Counter[str] = Counter()
@@ -315,12 +397,20 @@ def build_cluster_summary(
     orcid_values: set[str] = set()
     specter_vectors: list[np.ndarray] = []
     name_counts_values: list[Any] = []
+    paper_author_counts: list[int] = []
+    member_paper_author_names: list[frozenset[str]] = []
+    member_paper_author_counts: list[int] = []
+    member_author_positions: list[int | None] = []
+    member_local10_author_names: list[frozenset[str]] = []
+    member_signature_ids: list[str] = []
+    member_title_terms: list[frozenset[str]] = []
 
     for signature_id in signature_ids:
         features = extract_query_features(
             dataset,
             str(signature_id),
             feature_cache=feature_cache,
+            paper_author_name_cache=paper_author_name_cache,
             orcid_enabled=orcid_enabled,
         )
         if len(features.first) > 1:
@@ -329,6 +419,8 @@ def build_cluster_summary(
             middle_initial_counts[initial] += 1
         for block in features.coauthor_blocks:
             coauthor_counts[block] += 1
+            if int(features.paper_author_count) < 50:
+                non_mega_coauthor_counts[block] += 1
         for term in features.affiliation_terms:
             affiliation_counts[term] += 1
         for term in features.venue_terms:
@@ -343,6 +435,13 @@ def build_cluster_summary(
             specter_vectors.append(features.specter)
         if features.name_counts is not None:
             name_counts_values.append(features.name_counts)
+        paper_author_counts.append(int(features.paper_author_count))
+        member_paper_author_names.append(features.paper_author_names)
+        member_paper_author_counts.append(int(features.paper_author_count))
+        member_author_positions.append(features.author_position)
+        member_local10_author_names.append(features.local10_author_names)
+        member_signature_ids.append(str(signature_id))
+        member_title_terms.append(features.title_terms)
 
     centroid = None
     if specter_vectors:
@@ -356,6 +455,7 @@ def build_cluster_summary(
         first_name_counts=first_name_counts,
         middle_initial_counts=middle_initial_counts,
         coauthor_counts=coauthor_counts,
+        non_mega_coauthor_counts=non_mega_coauthor_counts,
         affiliation_counts=affiliation_counts,
         venue_counts=venue_counts,
         year_values=year_values,
@@ -367,7 +467,76 @@ def build_cluster_summary(
         exemplar_vectors=_select_exemplars(specter_vectors, max_exemplars=max_exemplars),
         title_counts=title_counts,
         name_counts_values=tuple(name_counts_values),
+        max_paper_author_count=max(paper_author_counts) if paper_author_counts else 0,
+        member_paper_author_names=tuple(member_paper_author_names),
+        member_paper_author_counts=tuple(member_paper_author_counts),
+        member_author_positions=tuple(member_author_positions),
+        member_local10_author_names=tuple(member_local10_author_names),
+        member_signature_ids=tuple(member_signature_ids),
+        member_title_terms=tuple(member_title_terms),
     )
+
+
+def raw_paper_evidence_features(query: QueryFeatures, summary: ClusterSummary) -> dict[str, float]:
+    """Return member-level raw paper evidence for giant-paper candidate rows."""
+
+    query_author_names = query.paper_author_names
+    query_local10_names = query.local10_author_names
+    query_author_count = int(query.paper_author_count)
+    query_signature_id = str(getattr(query, "signature_id", "") or "")
+    best_author_jaccard = 0.0
+    best_author_containment = 0.0
+    best_author_overlap = 0.0
+    best_local10_jaccard = 0.0
+    best_local10_overlap_count = 0.0
+    best_author_count_log_absdiff: float | None = None
+    member_local10_author_names = summary.member_local10_author_names or (
+        (EMPTY_STRING_SET,) * len(summary.member_paper_author_names)
+    )
+    member_signature_ids = summary.member_signature_ids or (("",) * len(summary.member_paper_author_names))
+
+    for (
+        candidate_names,
+        candidate_count,
+        candidate_local10_names,
+        candidate_signature_id,
+    ) in zip(
+        summary.member_paper_author_names,
+        summary.member_paper_author_counts,
+        member_local10_author_names,
+        member_signature_ids,
+        strict=True,
+    ):
+        same_signature = query_signature_id and query_signature_id == str(candidate_signature_id)
+        intersection = len(query_author_names & candidate_names)
+        union = len(query_author_names | candidate_names)
+        jaccard = float(intersection / union) if union else 0.0
+        denominator = min(len(query_author_names), len(candidate_names))
+        containment = float(intersection / denominator) if denominator else 0.0
+        best_author_jaccard = max(best_author_jaccard, jaccard)
+        best_author_containment = max(best_author_containment, containment)
+        best_author_overlap = max(best_author_overlap, float(intersection))
+
+        if not same_signature:
+            local10_intersection = len(query_local10_names & candidate_local10_names)
+            local10_union = len(query_local10_names | candidate_local10_names)
+            if local10_union:
+                best_local10_jaccard = max(best_local10_jaccard, float(local10_intersection / local10_union))
+            best_local10_overlap_count = max(best_local10_overlap_count, float(local10_intersection))
+
+        count_delta = abs(math.log1p(query_author_count) - math.log1p(int(candidate_count)))
+        best_author_count_log_absdiff = (
+            count_delta if best_author_count_log_absdiff is None else min(best_author_count_log_absdiff, count_delta)
+        )
+
+    return {
+        "paper_author_list_max_jaccard": round(best_author_jaccard, 6),
+        "paper_author_list_max_containment": round(best_author_containment, 6),
+        "paper_author_list_max_overlap_count": round(best_author_overlap, 6),
+        "local_author_window10_jaccard_max": round(best_local10_jaccard, 6),
+        "local_author_window10_overlap_count_max": round(best_local10_overlap_count, 6),
+        "best_author_count_log_absdiff": round(float(best_author_count_log_absdiff or 0.0), 6),
+    }
 
 
 def build_rust_hybrid_centroid_retriever(
@@ -411,9 +580,16 @@ def build_incremental_linker_inputs(
     """Build queries and the seed-cluster retriever for private incremental linking."""
 
     feature_cache: dict[str, QueryFeatures] = {}
+    paper_author_name_cache: dict[str, frozenset[str]] = {}
     query_by_signature_id = {
         str(signature_id): mask_query_features(
-            extract_query_features(dataset, str(signature_id), feature_cache=feature_cache, orcid_enabled=False),
+            extract_query_features(
+                dataset,
+                str(signature_id),
+                feature_cache=feature_cache,
+                paper_author_name_cache=paper_author_name_cache,
+                orcid_enabled=False,
+            ),
             query_view,
             orcid_enabled=False,
         )
@@ -427,6 +603,7 @@ def build_incremental_linker_inputs(
             signature_ids=signature_ids,
             max_exemplars=max_exemplars,
             feature_cache=feature_cache,
+            paper_author_name_cache=paper_author_name_cache,
             orcid_enabled=False,
         )
         for component_key, signature_ids in _seed_members_by_cluster(cluster_seeds_require).items()
@@ -557,6 +734,13 @@ def build_name_count_rarity_row_signals(
         "candidate_last_first_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
         "last_first_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
         "first_prefix_x_last_first_name_count_min_rarity": np.zeros(row_count, dtype=np.float32),
+        "candidate_cluster_max_paper_author_count": np.zeros(row_count, dtype=np.float32),
+        "paper_author_list_max_jaccard": np.zeros(row_count, dtype=np.float32),
+        "paper_author_list_max_containment": np.zeros(row_count, dtype=np.float32),
+        "paper_author_list_max_overlap_count": np.zeros(row_count, dtype=np.float32),
+        "local_author_window10_jaccard_max": np.zeros(row_count, dtype=np.float32),
+        "local_author_window10_overlap_count_max": np.zeros(row_count, dtype=np.float32),
+        "best_author_count_log_absdiff": np.zeros(row_count, dtype=np.float32),
     }
     for row_index, (query_index, component_key) in enumerate(zip(query_indices, component_keys, strict=True)):
         query_signature_id = query_signature_id_by_index.get(int(query_index))
@@ -565,6 +749,15 @@ def build_name_count_rarity_row_signals(
         query = query_by_signature_id[str(query_signature_id)]
         summary = summary_by_component[str(component_key)]
         rarity = _name_count_rarity_features(query, summary)
-        for signal_name in signals:
+        for signal_name in (
+            "last_name_count_min_rarity",
+            "candidate_last_name_count_min_rarity",
+            "candidate_last_first_name_count_min_rarity",
+            "last_first_name_count_min_rarity",
+            "first_prefix_x_last_first_name_count_min_rarity",
+        ):
             signals[signal_name][row_index] = float(rarity.get(signal_name, 0.0) or 0.0)
+        signals["candidate_cluster_max_paper_author_count"][row_index] = float(summary.max_paper_author_count)
+        for signal_name, value in raw_paper_evidence_features(query, summary).items():
+            signals[signal_name][row_index] = float(value)
     return signals

@@ -94,6 +94,11 @@ def build_query_features(
     has_middle: bool = False,
     title_terms: frozenset[str] = frozenset(),
     name_counts: Any | None = None,
+    paper_author_count: int = 0,
+    paper_author_names: frozenset[str] = frozenset(),
+    author_position: int | None = None,
+    local10_author_names: frozenset[str] = frozenset(),
+    signature_id: str = "",
 ) -> QueryFeatures:
     """Build a compact `QueryFeatures` fixture for retrieval tests."""
 
@@ -123,6 +128,11 @@ def build_query_features(
         has_middle=has_middle,
         title_terms=title_terms,
         name_counts=name_counts,
+        paper_author_count=paper_author_count,
+        paper_author_names=paper_author_names,
+        author_position=author_position,
+        local10_author_names=local10_author_names,
+        signature_id=signature_id,
     )
 
 
@@ -133,6 +143,7 @@ def build_cluster_summary(
     first_name_counts: Counter[str] | None = None,
     middle_initial_counts: Counter[str] | None = None,
     coauthor_counts: Counter[str] | None = None,
+    non_mega_coauthor_counts: Counter[str] | None = None,
     affiliation_counts: Counter[str] | None = None,
     venue_counts: Counter[str] | None = None,
     year_min: int | None = None,
@@ -143,6 +154,13 @@ def build_cluster_summary(
     exemplar_vectors: list[Any] | None = None,
     title_counts: Counter[str] | None = None,
     name_counts_values: tuple[Any, ...] = (),
+    max_paper_author_count: int = 0,
+    member_paper_author_names: tuple[frozenset[str], ...] = (),
+    member_paper_author_counts: tuple[int, ...] = (),
+    member_author_positions: tuple[int | None, ...] = (),
+    member_local10_author_names: tuple[frozenset[str], ...] = (),
+    member_signature_ids: tuple[str, ...] = (),
+    member_title_terms: tuple[frozenset[str], ...] = (),
 ) -> ClusterSummary:
     """Build a compact `ClusterSummary` fixture for retrieval tests."""
 
@@ -154,6 +172,9 @@ def build_cluster_summary(
         first_name_counts=first_name_counts or Counter(),
         middle_initial_counts=middle_initial_counts or Counter(),
         coauthor_counts=coauthor_counts or Counter(),
+        non_mega_coauthor_counts=(
+            non_mega_coauthor_counts if non_mega_coauthor_counts is not None else coauthor_counts or Counter()
+        ),
         affiliation_counts=affiliation_counts or Counter(),
         venue_counts=venue_counts or Counter(),
         year_values=[],
@@ -165,4 +186,11 @@ def build_cluster_summary(
         exemplar_vectors=[] if exemplar_vectors is None else exemplar_vectors,
         title_counts=title_counts or Counter(),
         name_counts_values=name_counts_values,
+        max_paper_author_count=max_paper_author_count,
+        member_paper_author_names=member_paper_author_names,
+        member_paper_author_counts=member_paper_author_counts,
+        member_author_positions=member_author_positions,
+        member_local10_author_names=member_local10_author_names,
+        member_signature_ids=member_signature_ids,
+        member_title_terms=member_title_terms,
     )

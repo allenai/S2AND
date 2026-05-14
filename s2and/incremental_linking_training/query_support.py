@@ -43,6 +43,9 @@ class RustHybridCentroidScoringConfig:
     coauthor_use_idf: bool = False
     coauthor_per_term_cap: float | None = None
     coauthor_total_cap: float | None = None
+    drop_candidate_mega_coauthors: bool = False
+    mega_coauthor_rescue_query_coverage: float | None = None
+    mega_coauthor_rescue_min_shared_blocks: int = 3
     affiliation_use_idf: bool = False
     affiliation_per_term_cap: float | None = None
     affiliation_total_cap: float | None = None
@@ -59,6 +62,9 @@ class RustHybridCentroidScoringConfig:
             "coauthor_use_idf": bool(self.coauthor_use_idf),
             "coauthor_per_term_cap": self.coauthor_per_term_cap,
             "coauthor_total_cap": self.coauthor_total_cap,
+            "drop_candidate_mega_coauthors": bool(self.drop_candidate_mega_coauthors),
+            "mega_coauthor_rescue_query_coverage": self.mega_coauthor_rescue_query_coverage,
+            "mega_coauthor_rescue_min_shared_blocks": int(self.mega_coauthor_rescue_min_shared_blocks),
             "affiliation_use_idf": bool(self.affiliation_use_idf),
             "affiliation_per_term_cap": self.affiliation_per_term_cap,
             "affiliation_total_cap": self.affiliation_total_cap,
@@ -126,6 +132,9 @@ FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY = FrozenRustHybridCentroidPolicy(
         specter_mode="max_centroid_exemplar",
         coauthor_use_idf=True,
         coauthor_per_term_cap=0.35,
+        drop_candidate_mega_coauthors=True,
+        mega_coauthor_rescue_query_coverage=0.995,
+        mega_coauthor_rescue_min_shared_blocks=3,
         affiliation_use_idf=True,
     ),
     initial_only_scoring_config=RustHybridCentroidScoringConfig(
@@ -133,6 +142,9 @@ FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY = FrozenRustHybridCentroidPolicy(
         specter_mode="max_centroid_exemplar",
         coauthor_use_idf=True,
         coauthor_per_term_cap=0.35,
+        drop_candidate_mega_coauthors=True,
+        mega_coauthor_rescue_query_coverage=0.995,
+        mega_coauthor_rescue_min_shared_blocks=3,
         affiliation_use_idf=True,
     ),
     full_candidate_strategy="name_compat_plus_global_backfill5",

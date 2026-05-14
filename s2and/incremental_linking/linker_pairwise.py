@@ -27,7 +27,6 @@ PROD_PAIRWISE_FEATURE_GROUPS: tuple[str, ...] = (
     "journal_similarity",
     "advanced_name_similarity",
 )
-PROMOTED_DROPPED_PAIRWISE_BASE_FEATURES: frozenset[str] = frozenset({"year_diff", "position_diff"})
 PAIRWISE_INFO = FeaturizationInfo(features_to_use=list(PROD_PAIRWISE_FEATURE_GROUPS))
 PROD_PAIRWISE_FEATURE_NAMES: tuple[str, ...] = tuple(PAIRWISE_INFO.get_feature_names())
 PROD_PAIRWISE_FEATURE_INDICES: tuple[int, ...] = tuple(
@@ -35,36 +34,50 @@ PROD_PAIRWISE_FEATURE_INDICES: tuple[int, ...] = tuple(
     for feature_group in PROD_PAIRWISE_FEATURE_GROUPS
     for feature_index in PAIRWISE_INFO.feature_group_to_index[feature_group]
 )
+PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS: tuple[str, ...] = tuple(
+    (
+        "pw_max_affiliation_overlap",
+        "pw_max_middle_initials_overlap",
+        "pw_mean_email_prefix_equal",
+        "pw_mean_first_names_equal",
+        "pw_min_middle_initials_overlap",
+        "pw_max_title_overlap_words",
+        "pw_max_journal_overlap",
+        "pw_mean_middle_names_equal",
+        "pw_min_last_first_name_count_max",
+        "pw_mean_coauthor_match",
+        "pw_mean_coauthor_overlap",
+        "pw_mean_title_overlap_words",
+        "pw_max_venue_overlap",
+        "pw_mean_journal_overlap",
+        "pw_min_specter_cosine_sim",
+        "pw_min_first_name_count_max",
+        "pw_max_coauthor_overlap",
+        "pw_max_jaro",
+        "pw_min_first_name_count_min",
+        "pw_min_levenshtein",
+        "pw_mean_english_count",
+        "pw_mean_middle_one_missing",
+        "pw_mean_specter_cosine_sim",
+    )
+)
+
+
+def _pairwise_aggregate_column_parts(column: str) -> tuple[str, str]:
+    for stat in ("min", "mean", "max"):
+        prefix = f"pw_{stat}_"
+        if column.startswith(prefix):
+            return stat, column[len(prefix) :]
+    raise ValueError(f"Unsupported pairwise aggregate column name: {column}")
+
+
 PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES: tuple[str, ...] = tuple(
-    feature_name
-    for feature_name in PROD_PAIRWISE_FEATURE_NAMES
-    if feature_name not in PROMOTED_DROPPED_PAIRWISE_BASE_FEATURES
+    dict.fromkeys(_pairwise_aggregate_column_parts(column)[1] for column in PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS)
 )
 PROMOTED_PAIRWISE_AGG_FEATURE_INDICES: tuple[int, ...] = tuple(
     PROD_PAIRWISE_FEATURE_INDICES[PROD_PAIRWISE_FEATURE_NAMES.index(feature_name)]
     for feature_name in PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES
 )
-PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS: tuple[str, ...] = tuple(
-    f"pw_{stat}_{feature_name}"
-    for stat in ("min", "mean", "max")
-    for feature_name in PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES
-)
-PROMOTED_PAIRWISE_COVERAGE_GROUPS: dict[str, tuple[str, ...]] = {
-    "middle_name": ("middle_initials_overlap", "middle_names_equal"),
-    "email": ("email_prefix_equal", "email_suffix_equal"),
-    "title": ("title_overlap_words", "title_overlap_chars"),
-    "coauthor_overlap": ("coauthor_overlap", "coauthor_match"),
-    "coauthor_similarity": ("coauthor_similarity",),
-    "affiliation": ("affiliation_overlap",),
-    "specter": ("specter_cosine_sim",),
-    "venue": ("venue_overlap",),
-    "journal": ("journal_overlap",),
-}
-PROMOTED_PAIRWISE_COVERAGE_FEATURE_COLUMNS: tuple[str, ...] = (
-    "pw_pair_count_log_capped",
-    *(f"pw_valid_fraction_{group_name}" for group_name in PROMOTED_PAIRWISE_COVERAGE_GROUPS),
-)
-PAIRWISE_COUNT_LOG_CAPPED_REFERENCE_SIZE = 192.0
 
 
 @dataclass(frozen=True)
@@ -116,7 +129,7 @@ class PairwiseAggregateStats:
         return means
 
     def feature_matrix(self) -> np.ndarray:
-        """Return columns in promoted `pw_min`, `pw_mean`, `pw_max` order."""
+        """Return promoted pairwise aggregate columns in artifact order."""
 
         mins = self.mins.copy()
         maxs = self.maxs.copy()
@@ -129,28 +142,21 @@ class PairwiseAggregateStats:
         maxs[~observed] = np.nan
         mins[~np.isfinite(mins)] = np.nan
         maxs[~np.isfinite(maxs)] = np.nan
-        return np.concatenate((mins, self.mean_matrix(), maxs), axis=1)
-
-    def coverage_feature_matrix(self) -> np.ndarray:
-        """Return compact denominator/validity coverage features for pairwise aggregates."""
-
-        row_count = len(self.counts)
-        coverage = np.full((row_count, len(PROMOTED_PAIRWISE_COVERAGE_FEATURE_COLUMNS)), np.nan, dtype=np.float64)
-        counts = np.asarray(self.counts, dtype=np.float64)
-        coverage[:, 0] = np.log1p(np.minimum(counts, PAIRWISE_COUNT_LOG_CAPPED_REFERENCE_SIZE))
-        if self.valid_counts is None:
-            return coverage
-
+        means = self.mean_matrix()
         position_by_name = {feature_name: index for index, feature_name in enumerate(self.base_feature_names)}
-        observed = counts > 0.0
-        for output_index, feature_names in enumerate(PROMOTED_PAIRWISE_COVERAGE_GROUPS.values(), start=1):
-            if not all(feature_name in position_by_name for feature_name in feature_names):
-                continue
-            positions = [position_by_name[feature_name] for feature_name in feature_names]
-            valid_count = np.asarray(self.valid_counts[:, positions], dtype=np.float64).min(axis=1)
-            coverage[observed, output_index] = valid_count[observed] / counts[observed]
-        coverage[~np.isfinite(coverage)] = np.nan
-        return coverage
+        columns: list[np.ndarray] = []
+        for column in self.aggregate_feature_columns:
+            stat, feature_name = _pairwise_aggregate_column_parts(column)
+            position = position_by_name[feature_name]
+            if stat == "min":
+                columns.append(mins[:, position])
+            elif stat == "mean":
+                columns.append(means[:, position])
+            elif stat == "max":
+                columns.append(maxs[:, position])
+            else:  # pragma: no cover - parser above constrains the domain
+                raise ValueError(f"Unsupported pairwise aggregate stat: {stat}")
+        return np.column_stack(columns) if columns else np.empty((len(self.counts), 0), dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -226,12 +232,6 @@ def promoted_pairwise_aggregate_columns() -> tuple[str, ...]:
     """Return the promoted pairwise aggregate feature columns in model order."""
 
     return PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS
-
-
-def promoted_pairwise_coverage_columns() -> tuple[str, ...]:
-    """Return compact pairwise coverage feature columns in model order."""
-
-    return PROMOTED_PAIRWISE_COVERAGE_FEATURE_COLUMNS
 
 
 def _as_uint32_1d(name: str, values: Sequence[Any] | np.ndarray) -> np.ndarray:
@@ -617,8 +617,12 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
         PROD_PAIRWISE_FEATURE_INDICES[PROD_PAIRWISE_FEATURE_NAMES.index(feature_name)]
         for feature_name in aggregate_feature_names
     )
-    aggregate_columns = tuple(
-        f"pw_{stat}_{feature_name}" for stat in ("min", "mean", "max") for feature_name in aggregate_feature_names
+    aggregate_columns = (
+        PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS
+        if aggregate_feature_names == PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES
+        else tuple(
+            f"pw_{stat}_{feature_name}" for stat in ("min", "mean", "max") for feature_name in aggregate_feature_names
+        )
     )
     plan = compute_linker_pair_chunk_plan(
         total_pairs=candidate_batch.pair_count,
@@ -695,8 +699,12 @@ def compute_pairwise_aggregate_stats_rust(
         PROD_PAIRWISE_FEATURE_INDICES[PROD_PAIRWISE_FEATURE_NAMES.index(feature_name)]
         for feature_name in aggregate_feature_names
     )
-    aggregate_columns = tuple(
-        f"pw_{stat}_{feature_name}" for stat in ("min", "mean", "max") for feature_name in aggregate_feature_names
+    aggregate_columns = (
+        PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS
+        if aggregate_feature_names == PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES
+        else tuple(
+            f"pw_{stat}_{feature_name}" for stat in ("min", "mean", "max") for feature_name in aggregate_feature_names
+        )
     )
     plan = compute_linker_pair_chunk_plan(
         total_pairs=len(pairs),

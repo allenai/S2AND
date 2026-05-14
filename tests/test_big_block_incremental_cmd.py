@@ -119,6 +119,17 @@ def test_run_single_uses_synthetic_cluster_seeds_when_no_path_is_supplied(monkey
                     "phase_b_mode": "exact",
                     "phase_b_budget_bytes": 1,
                     "phase_b_required_bytes": 1,
+                    "phase_b_residual_count": 1,
+                    "incremental_linker_telemetry": {
+                        "candidate_row_count": 11,
+                        "pair_count": 22,
+                        "link_count": 1,
+                        "abstain_count": 1,
+                        "query_batch_count": 2,
+                        "query_batch_size_max": 3,
+                        "memory_predicted_peak_delta_bytes_max": 444,
+                        "memory_observed_peak_delta_bytes_max": 555,
+                    },
                 },
             )
         },
@@ -146,6 +157,15 @@ def test_run_single_uses_synthetic_cluster_seeds_when_no_path_is_supplied(monkey
     assert result["seed_signatures"] == 1
     assert result["unassigned_signatures"] == 2
     assert result["estimated_incremental_pairs"] == 2
+    assert result["phase_b_residual_count"] == 1
+    assert result["promoted_candidate_rows"] == 11
+    assert result["promoted_scored_pairs"] == 22
+    assert result["promoted_link_count"] == 1
+    assert result["promoted_abstain_count"] == 1
+    assert result["promoted_query_batch_count"] == 2
+    assert result["promoted_query_batch_size_max"] == 3
+    assert result["promoted_memory_predicted_peak_delta_bytes_max"] == 444
+    assert result["promoted_memory_observed_peak_delta_bytes_max"] == 555
     assert os.environ["S2AND_BACKEND"] == "python"
     assert os.environ["S2AND_SKIP_FASTTEXT"] == "0"
     assert os.environ["OMP_NUM_THREADS"] == "3"

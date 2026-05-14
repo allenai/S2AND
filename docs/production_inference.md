@@ -29,11 +29,12 @@ depends on:
 | `production_incremental_linker_v1.2/` | Current | `production_model_v1.2.pickle` | `booster.lgb` + `metadata.json` |
 
 This is intentionally not a pickle. The directory artifact stores the LightGBM
-booster separately from metadata that validates the 70-feature schema,
+booster separately from metadata that validates the feature schema,
 production contract, retrieval contract, gate thresholds, required Rust
 capabilities, and a prediction fixture at load time. It also ships
-`training_target.json`, the portable target spec used by replay scripts for the
-released 70-feature model.
+`training_target.json`, the portable target spec used by replay scripts. The
+tracked target is currently the promoted 53-feature schema used by the bundled
+booster and metadata.
 
 This artifact is the promoted incremental linker for Rust-backed
 `Clusterer.predict_incremental(...)`. It is not intended to reproduce the
@@ -41,6 +42,21 @@ legacy incremental output. When Rust mode is selected and the extension plus
 artifact pass validation, the target behavior is to use this promoted
 retrieval/linker/gate path because it has shown better runtime and quality than
 the long-standing legacy implementation.
+
+Training/evaluation replay normally recomputes promoted features from the
+self-contained minimal-raw source bundle. For compute-once/reuse workflows, the
+replay script also supports an explicit portable precomputed bundle mode:
+
+```powershell
+uv run python scripts\run_joint_safe_link_promoted_train_calibrate_eval.py `
+  --feature-mode precomputed-promoted `
+  --precomputed-feature-bundle-root path\to\minimal_raw_feature_bundle `
+  --run-full
+```
+
+The script validates relative table paths, row counts, target/schema digests,
+required tables, and exact 53-feature column equality before training. There is
+no shipped machine-local default for precomputed feature tables.
 
 ## Reference-feature behavior
 
@@ -231,6 +247,12 @@ the number of unassigned query signatures per promoted linker batch, while
 `total_ram_bytes` derives the default batch size when the caller does not pass a
 cap. The first meaningful promoted batch recalibrates rows/pairs per query for
 remaining batches, and telemetry records predicted/observed RSS deltas.
+
+The release evidence in [predict_incremental_fast_design.md](predict_incremental_fast_design.md)
+includes a current promoted-53 4k real-block run: 3,000,000 broad seed/query
+pairs reduced to 150,000 promoted scored pairs, 354 exact residual queries,
+499,848 residual-tail bytes, 8.202s `predict_incremental` time, 9.288s
+setup-inclusive runtime, and 0.621 GiB process-tree peak RSS.
 
 Supporting docs:
 

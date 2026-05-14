@@ -20,6 +20,7 @@ from s2and.incremental_linking.artifact import IncrementalLinkingArtifact
 from s2and.incremental_linking.features import LinkerFeatureMatrix, assemble_linker_feature_matrix
 from s2and.incremental_linking.linker_pairwise import (
     PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES,
+    PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS,
     PROMOTED_PAIRWISE_AGG_FEATURE_INDICES,
     LinkerCandidateBatch,
     PairwiseAggregateStats,
@@ -467,9 +468,7 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
     main_positions = _matrix_positions(matrix_indices, main_indices)
     nameless_positions = _matrix_positions(matrix_indices, nameless_indices) if nameless_indices else ()
     aggregate_feature_names = tuple(PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES)
-    aggregate_columns = tuple(
-        f"pw_{stat}_{feature_name}" for stat in ("min", "mean", "max") for feature_name in aggregate_feature_names
-    )
+    aggregate_columns = tuple(PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS)
     plan = compute_linker_pair_chunk_plan(
         total_pairs=pair_count,
         row_count=row_count,

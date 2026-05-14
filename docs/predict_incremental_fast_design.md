@@ -1,6 +1,6 @@
 # Rust-Promoted `predict_incremental`
 
-Status date: 2026-05-10
+Status date: 2026-05-13
 
 ## Why This Exists
 
@@ -12,7 +12,7 @@ seed-cluster candidates.
 
 The promoted Rust path changes the problem shape. It retrieves a bounded set of
 candidate seed clusters first, scores only those candidate query/member pairs,
-assembles the released 70-feature linker matrix, and applies a calibrated
+assembles the promoted 53-feature linker matrix, and applies a calibrated
 link-or-abstain gate. Output parity with the legacy path is not a goal; the
 goal is better measured quality and runtime under an explicit memory budget.
 
@@ -23,7 +23,7 @@ seed clusters + unassigned queries
   -> Rust seed-cluster retrieval
   -> Rust candidate pair plan
   -> indexed pair featurization + pairwise model distances + pw_* aggregates
-  -> promoted 70-feature row assembly
+  -> promoted 53-feature row assembly
   -> calibrated score/margin gate
   -> exact residual clustering tail for abstained/no-candidate queries
 ```
@@ -34,8 +34,8 @@ Compared with the legacy Python path:
   Rust scores retrieved seed-cluster candidates.
 - **Decision model:** legacy uses pairwise distances and `eps`-style cluster
   decisions; promoted Rust uses a trained LightGBM linker plus calibrated gates.
-- **Feature surface:** legacy relies on pairwise features; promoted Rust uses 18
-  compact row features plus 52 retained `pw_*` aggregate features.
+- **Feature surface:** legacy relies on pairwise features; promoted Rust uses 30
+  compact row features plus 23 retained `pw_*` aggregate features.
 - **Memory behavior:** promoted Rust batches query signatures by
   `total_ram_bytes` and `batching_threshold`; the residual tail stays exact and
   fails before allocation if the exact matrix cannot fit.
@@ -57,6 +57,29 @@ pair work from about 91.7M pairs to about 0.8M pairs on this benchmark while
 improving reviewed-label precision and recall. The end-to-end number includes
 the exact residual clustering tail.
 
+A current promoted-53 operational replay on the existing real-block
+`scratch/inventors_topblock_15k` subset (`j kim`, 4,000 selected signatures,
+3,000 seed signatures, 1,000 unassigned signatures, 500 synthetic seed clusters,
+`n_jobs=20`, `total_ram_bytes=32 GiB`) produced:
+
+| Metric | Value |
+|---|---:|
+| Setup-inclusive runtime | 9.288s |
+| `predict_incremental` runtime | 8.202s |
+| Broad seed/query pair scope | 3,000,000 pairs |
+| Promoted candidate rows | 25,000 rows |
+| Promoted scored query/member pairs | 150,000 pairs |
+| Promoted links / abstains | 646 / 354 |
+| Exact residual-tail queries | 354 |
+| Exact residual-tail pair matrix | 62,481 pairs, 499,848 bytes |
+| Process-tree peak RSS | 0.621 GiB |
+| Promoted-batch observed RSS delta | 66,285,568 bytes |
+| Promoted-batch predicted RSS delta | 277,177,216 bytes |
+
+The command wrote
+`scratch/predict_incremental_release_4000_20260513/single.json`. The run used
+the production v1.2 pairwise model and required a release Rust extension.
+
 ## Release Inputs
 
 The release surface is:
@@ -72,25 +95,30 @@ machine-local analysis artifacts.
 
 ## Reusing Computed Features
 
-Official replay currently recomputes promoted features from the self-contained
-source bundle. If repeated replay needs compute-once/reuse, add a portable
-precomputed-feature bundle flow:
+Official replay defaults to recomputing promoted features from the
+self-contained source bundle. Repeated replay can explicitly reuse a portable
+precomputed promoted-feature bundle:
 
 1. Materialize features once into an explicit `--output-dir`.
 2. Promote the materialized bundle only after it has relative paths, row counts,
    a target-spec digest, a feature-schema digest, and verification metrics.
-3. Store release candidates under a tracked or downloadable data path such as
-   `s2and/data/promoted_feature_bundles/<version>/`.
-4. Add `--feature-mode precomputed-promoted` only with an explicit
-   `--precomputed-feature-bundle-root`; do not ship a machine-local default.
+3. Reuse it with `--feature-mode precomputed-promoted` and an explicit
+   `--precomputed-feature-bundle-root`.
 
-That mode should validate `bundle.json`, table paths, row counts, required
-train/calibrate/eval tables, and exact feature-column equality with
-`training_target.json` before training.
+That mode validates `bundle.json`, table paths, row counts, required
+train/calibrate/eval tables, target-spec digest, feature-schema digest, and
+exact feature-column equality with `training_target.json` before training. It
+has no machine-local default.
+
+The full promoted-53 replay through precomputed mode wrote
+`scratch/precomputed_promoted53_replay_20260513/run_summary.json` and reproduced
+the production training/evaluation metrics with all ten feature tables reused:
+53 features, 1,636,263 training rows, 300 stratified test errors, and
+`weighted_average_error=0.003968401417923204`.
 
 ## Release Gates
 
-Before making broader claims, report:
+For each release candidate, report:
 
 - reviewed-label quality;
 - setup-inclusive and hot-path wall time;

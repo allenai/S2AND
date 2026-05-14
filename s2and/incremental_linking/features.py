@@ -14,126 +14,110 @@ from s2and.incremental_linking.linker_pairwise import (
     PairwiseAggregateStats,
     compute_candidate_batch_pairwise_aggregate_stats_rust,
     promoted_pairwise_aggregate_columns,
-    promoted_pairwise_coverage_columns,
 )
 
 PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS: tuple[str, ...] = (
     "min_distance",
-    "retrieval_score_gap_vs_best_competitor",
-    "top5_distance_best_gap",
-    "retrieval_score",
     "affiliation_contradiction_severity",
-    "coarse_family_top5_best_gap",
-    "same_family_as_best_top5",
-    "same_family_as_heuristic_choice",
-    "same_family_as_top1",
-    "query_first_prefix_match",
-    "retrieval_score_best_gap",
-    "cluster_size_log_capped",
+    "specter_exemplar_similarity",
+    "coauthor_overlap",
+    "affiliation_overlap",
+    "year_compatibility",
+    "retrieval_rank",
+    "retrieval_reciprocal_rank",
+    "cluster_size_log",
+    "candidate_year_span",
+    "year_gap_to_candidate_range",
+    "year_gap_signed_to_candidate_range",
+    "candidate_dominant_first_name_length",
+    "query_first_prefix_match_any_length",
+    "candidate_cluster_max_paper_author_count",
+    "paper_author_list_max_jaccard",
+    "paper_author_list_max_containment",
+    "paper_author_list_max_overlap_count",
+    "local_author_window10_jaccard_max",
+    "local_author_window10_overlap_count_max",
+    "best_author_count_log_absdiff",
     "anchor_evidence_count",
     "strong_positive_anchor_score",
     "weak_residual_anchor_score",
     "sparse_relative_winner_score",
-    "query_view__initial_only",
-    "last_name_count_min_rarity",
-    "candidate_last_first_name_count_min_rarity",
-    "last_first_name_count_min_rarity",
-    "first_prefix_x_last_first_name_count_min_rarity",
-    "exact_anchor_evidence_flag",
-    "year_mismatch_severity",
+    "same_dominant_first_as_best_top5",
+    "same_family_as_heuristic_choice",
     "top5_mean_distance",
-    "distance_spread_top5_minus_min",
-)
-PROMOTED_LINKER_RANK_FRACTION_FEATURE_COLUMNS: frozenset[str] = frozenset(
-    {
-        "affiliation_overlap_rank_fraction",
-        "coauthor_overlap_rank_fraction",
-        "mean_distance_rank_fraction",
-        "min_distance_rank_fraction",
-        "retrieval_rank_fraction",
-        "retrieval_score_rank_fraction",
-        "title_overlap_rank_fraction",
-        "top3_distance_rank_fraction",
-        "top5_distance_rank_fraction",
-        "venue_overlap_rank_fraction",
-        "year_compatibility_rank_fraction",
-    }
-)
-PROMOTED_LINKER_DROPPED_FEATURE_COLUMNS: frozenset[str] = (
-    frozenset(
-        {
-            "candidate_last_name_count_min_rarity",
-            "coarse_family_top5_best_gap",
-            "exact_anchor_evidence_flag",
-            "last_first_name_count_min_rarity",
-            "pw_max_email_prefix_equal",
-            "pw_max_email_suffix_equal",
-            "pw_max_abstract_count",
-            "pw_max_coauthor_match",
-            "pw_max_english_count",
-            "pw_max_first_names_equal",
-            "pw_max_first_name_count_max",
-            "pw_max_last_first_initial_count_min",
-            "pw_max_last_first_name_count_max",
-            "pw_max_last_first_name_count_min",
-            "pw_max_last_name_count_min",
-            "pw_max_lcs",
-            "pw_max_levenshtein",
-            "pw_max_middle_names_equal",
-            "pw_max_middle_one_missing",
-            "pw_max_language_reliability_count",
-            "pw_max_same_language",
-            "pw_max_single_char_first",
-            "pw_max_single_char_middle",
-            "pw_mean_jaro",
-            "pw_mean_last_first_initial_count_min",
-            "pw_mean_last_first_name_count_max",
-            "pw_mean_last_name_count_min",
-            "pw_mean_lcs",
-            "pw_mean_levenshtein",
-            "pw_mean_middle_initials_overlap",
-            "pw_mean_prefix",
-            "pw_mean_first_name_count_max",
-            "pw_mean_first_name_count_min",
-            "pw_min_english_count",
-            "pw_min_first_names_equal",
-            "pw_min_middle_names_equal",
-            "pw_min_middle_one_missing",
-            "pw_min_email_prefix_equal",
-            "pw_min_email_suffix_equal",
-            "pw_min_language_reliability_count",
-            "pw_min_last_name_count_min",
-            "pw_min_lcs",
-            "pw_min_same_language",
-            "pw_min_single_char_middle",
-            "pw_min_single_char_first",
-            "query_view__full",
-            "query_view__initial_only",
-            "retrieval_score_best_gap",
-            "same_family_as_best_top5",
-            "same_family_as_top1",
-        }
-    )
-    | PROMOTED_LINKER_RANK_FRACTION_FEATURE_COLUMNS
+    "last_name_count_min_rarity",
+    "last_first_name_count_min_rarity",
 )
 PROMOTED_LINKER_FEATURE_COLUMNS: tuple[str, ...] = (
-    *(
-        column
-        for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
-        if column not in PROMOTED_LINKER_DROPPED_FEATURE_COLUMNS
-    ),
-    *(
-        column
-        for column in promoted_pairwise_aggregate_columns()
-        if column not in PROMOTED_LINKER_DROPPED_FEATURE_COLUMNS
-    ),
+    "min_distance",
+    "pw_max_affiliation_overlap",
+    "strong_positive_anchor_score",
+    "pw_max_middle_initials_overlap",
+    "top5_mean_distance",
+    "retrieval_reciprocal_rank",
+    "anchor_evidence_count",
+    "retrieval_rank",
+    "specter_exemplar_similarity",
+    "paper_author_list_max_jaccard",
+    "best_author_count_log_absdiff",
+    "affiliation_overlap",
+    "query_first_prefix_match_any_length",
+    "pw_mean_email_prefix_equal",
+    "year_gap_signed_to_candidate_range",
+    "pw_mean_first_names_equal",
+    "pw_min_middle_initials_overlap",
+    "pw_max_title_overlap_words",
+    "affiliation_contradiction_severity",
+    "paper_author_list_max_containment",
+    "pw_max_journal_overlap",
+    "candidate_cluster_max_paper_author_count",
+    "pw_mean_middle_names_equal",
+    "pw_min_last_first_name_count_max",
+    "pw_mean_coauthor_match",
+    "pw_mean_coauthor_overlap",
+    "weak_residual_anchor_score",
+    "candidate_year_span",
+    "pw_mean_title_overlap_words",
+    "pw_max_venue_overlap",
+    "pw_mean_journal_overlap",
+    "same_dominant_first_as_best_top5",
+    "year_compatibility",
+    "last_first_name_count_min_rarity",
+    "pw_min_specter_cosine_sim",
+    "last_name_count_min_rarity",
+    "cluster_size_log",
+    "pw_min_first_name_count_max",
+    "pw_max_coauthor_overlap",
+    "candidate_dominant_first_name_length",
+    "paper_author_list_max_overlap_count",
+    "local_author_window10_jaccard_max",
+    "local_author_window10_overlap_count_max",
+    "pw_max_jaro",
+    "same_family_as_heuristic_choice",
+    "sparse_relative_winner_score",
+    "pw_min_first_name_count_min",
+    "pw_min_levenshtein",
+    "coauthor_overlap",
+    "pw_mean_english_count",
+    "year_gap_to_candidate_range",
+    "pw_mean_middle_one_missing",
+    "pw_mean_specter_cosine_sim",
 )
-if len(PROMOTED_LINKER_FEATURE_COLUMNS) != 70:
+_AVAILABLE_PROMOTED_LINKER_FEATURE_COLUMNS = frozenset(PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS) | frozenset(
+    promoted_pairwise_aggregate_columns()
+)
+_UNKNOWN_PROMOTED_LINKER_FEATURE_COLUMNS = frozenset(PROMOTED_LINKER_FEATURE_COLUMNS) - (
+    _AVAILABLE_PROMOTED_LINKER_FEATURE_COLUMNS
+)
+if _UNKNOWN_PROMOTED_LINKER_FEATURE_COLUMNS:
     raise RuntimeError(
-        f"Promoted linker feature schema must have 70 columns, got {len(PROMOTED_LINKER_FEATURE_COLUMNS)}"
+        "Promoted linker feature schema contains columns without a production source: "
+        f"{sorted(_UNKNOWN_PROMOTED_LINKER_FEATURE_COLUMNS)}"
     )
-if PROMOTED_LINKER_DROPPED_FEATURE_COLUMNS.intersection(PROMOTED_LINKER_FEATURE_COLUMNS):
-    raise RuntimeError("Promoted linker feature schema still contains dropped columns")
+if len(PROMOTED_LINKER_FEATURE_COLUMNS) != 53:
+    raise RuntimeError(
+        f"Promoted linker feature schema must have 53 columns, got {len(PROMOTED_LINKER_FEATURE_COLUMNS)}"
+    )
 
 
 @dataclass(frozen=True)
@@ -147,7 +131,7 @@ class LinkerFeatureMatrix:
 
 
 def promoted_linker_feature_columns() -> tuple[str, ...]:
-    """Return the promoted 70-feature linker/reranker schema in artifact order."""
+    """Return the promoted 53-feature linker/reranker schema in artifact order."""
 
     return PROMOTED_LINKER_FEATURE_COLUMNS
 
@@ -198,20 +182,6 @@ def _pairwise_feature_columns_to_matrix(
         feature_column: pairwise_matrix[:, column_index]
         for column_index, feature_column in enumerate(pairwise_stats.aggregate_feature_columns)
     }
-    if hasattr(pairwise_stats, "coverage_feature_matrix"):
-        coverage_matrix = np.asarray(pairwise_stats.coverage_feature_matrix(), dtype=np.float32)
-        coverage_columns = promoted_pairwise_coverage_columns()
-        if coverage_matrix.shape != (row_count, len(coverage_columns)):
-            raise ValueError(
-                "pairwise coverage feature matrix shape must match row_count and coverage columns: "
-                f"{coverage_matrix.shape} != ({row_count}, {len(coverage_columns)})"
-            )
-        pairwise_columns.update(
-            {
-                feature_column: coverage_matrix[:, column_index]
-                for column_index, feature_column in enumerate(coverage_columns)
-            }
-        )
     return pairwise_columns
 
 

@@ -210,59 +210,6 @@ def test_pairwise_aggregate_feature_matrix_preserves_missing_values() -> None:
     assert np.isnan(matrix[1]).all()
 
 
-def test_pairwise_coverage_features_expose_compact_denominator_signal() -> None:
-    stats = linker_pairwise.PairwiseAggregateStats(
-        counts=np.asarray([4, 2, 0], dtype=np.uint64),
-        sums=np.zeros((3, 4), dtype=np.float64),
-        mins=np.zeros((3, 4), dtype=np.float64),
-        maxs=np.zeros((3, 4), dtype=np.float64),
-        base_feature_names=(
-            "middle_initials_overlap",
-            "middle_names_equal",
-            "email_prefix_equal",
-            "email_suffix_equal",
-        ),
-        aggregate_feature_columns=(
-            "pw_min_middle_initials_overlap",
-            "pw_min_middle_names_equal",
-            "pw_min_email_prefix_equal",
-            "pw_min_email_suffix_equal",
-            "pw_mean_middle_initials_overlap",
-            "pw_mean_middle_names_equal",
-            "pw_mean_email_prefix_equal",
-            "pw_mean_email_suffix_equal",
-            "pw_max_middle_initials_overlap",
-            "pw_max_middle_names_equal",
-            "pw_max_email_prefix_equal",
-            "pw_max_email_suffix_equal",
-        ),
-        chunk_plan=_mock_chunk_plan(chunk_pairs=2, total_pairs=6),
-        chunk_count=1,
-        matrix_indices=(0, 1, 2, 3),
-        aggregate_indices=(0, 1, 2, 3),
-        valid_counts=np.asarray(
-            [
-                [2, 2, 1, 1],
-                [1, 2, 2, 2],
-                [0, 0, 0, 0],
-            ],
-            dtype=np.uint64,
-        ),
-    )
-
-    columns = linker_pairwise.promoted_pairwise_coverage_columns()
-    matrix = stats.coverage_feature_matrix()
-
-    assert matrix.shape == (3, len(columns))
-    assert matrix[0, columns.index("pw_pair_count_log_capped")] == pytest.approx(np.log1p(4.0))
-    assert matrix[0, columns.index("pw_valid_fraction_middle_name")] == pytest.approx(0.5)
-    assert matrix[0, columns.index("pw_valid_fraction_email")] == pytest.approx(0.25)
-    assert matrix[1, columns.index("pw_valid_fraction_middle_name")] == pytest.approx(0.5)
-    assert matrix[1, columns.index("pw_valid_fraction_email")] == pytest.approx(1.0)
-    assert matrix[2, columns.index("pw_pair_count_log_capped")] == pytest.approx(0.0)
-    assert np.isnan(matrix[2, columns.index("pw_valid_fraction_middle_name")])
-
-
 def test_linker_pairwise_aggregates_accept_indexed_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = build_dummy_dataset("dummy_linker_pairwise_indexed_fake", load_name_counts=True)
     pairs = [(0, 1), (0, 2), (1, 2)]

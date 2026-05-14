@@ -1,6 +1,6 @@
 """Train, calibrate, and evaluate the promoted joint-safe linker target.
 
-This is the official replay entrypoint for the promoted 70-feature LightGBM
+This is the official replay entrypoint for the promoted LightGBM
 linker/reranker target. It intentionally pins the promoted target JSON instead
 of trusting bundle manifests whose classic model specs predate the promotion.
 
@@ -47,7 +47,11 @@ from s2and import text as s2and_text  # noqa: E402
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
-from s2and.incremental_linking.contracts import INCREMENTAL_LINKING_RUST_CAPABILITIES  # noqa: E402
+from s2and.incremental_linking.contracts import (  # noqa: E402
+    INCREMENTAL_LINKING_RUST_CAPABILITIES,
+    canonical_json_digest,
+    promoted_linker_feature_schema_digest,
+)
 from s2and.incremental_linking.features import (  # noqa: E402
     PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS,
     promoted_linker_feature_columns,
@@ -56,7 +60,6 @@ from s2and.incremental_linking.linker_pairwise import (  # noqa: E402
     LinkerCandidateBatch,
     compute_candidate_batch_pairwise_aggregate_stats_rust,
     promoted_pairwise_aggregate_columns,
-    promoted_pairwise_coverage_columns,
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features  # noqa: E402
 from s2and.incremental_linking.runtime import compute_candidate_batch_pairwise_model_and_aggregate_stats  # noqa: E402
@@ -71,11 +74,9 @@ from s2and.incremental_linking_training import (  # noqa: E402
     load_clusterer,
     load_giant_block_dataset,
     load_labeled_dataset,
-    middle_initial_compatibility,
     name_count_rarity_features,
     rank_top_summaries_rust_hybrid_centroid,
     specter_exemplar_similarity,
-    title_overlap,
     year_compatibility,
 )
 from s2and.model import (  # noqa: E402
@@ -102,39 +103,70 @@ REQUIRED_TABLE_KEYS = (
     "s2and_eval_path",
     "hwang_eval_path",
 )
+PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION = "precomputed_promoted_feature_bundle_v1"
 
 
 # Shared training, calibration, and evaluation helpers live in this entrypoint
 # so production training cannot silently default to historical feature tables.
-CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE = 192.0
 _ANCHOR_EVIDENCE_FEATURE_COLUMNS = (
     "anchor_evidence_count",
     "strong_positive_anchor_score",
     "weak_residual_anchor_score",
     "sparse_relative_winner_score",
 )
+_DERIVED_PROMOTED_FEATURE_COLUMNS = (
+    "retrieval_reciprocal_rank",
+    "cluster_size_log",
+    "candidate_year_span",
+    "year_gap_to_candidate_range",
+    "year_gap_signed_to_candidate_range",
+    "candidate_dominant_first_name_length",
+    "query_first_prefix_match_any_length",
+    "same_dominant_first_as_best_top5",
+    "same_family_as_heuristic_choice",
+)
 _ANCHOR_EVIDENCE_PREREQUISITES = (
     "min_distance",
-    "specter_exemplar_similarity",
-    "title_overlap",
-    "coauthor_overlap",
-    "affiliation_overlap",
-    "venue_overlap",
-    "year_compatibility",
     "retrieval_score_gap_vs_best_competitor",
-    "candidate_contradiction_score",
     "same_family_as_top1",
-    "candidate_pair_share_within_coarse_family",
-    "cluster_size",
-    "named_signature_count",
     "retrieval_rank",
 )
 _CLASSIC_DERIVABLE_FEATURE_PREREQUISITES: dict[str, tuple[str, ...]] = {
-    "cluster_size_log_capped": ("cluster_size",),
-    "query_first_prefix_match": ("dominant_first_name",),
+    "retrieval_reciprocal_rank": ("retrieval_rank",),
+    "cluster_size_log": ("cluster_size",),
+    "candidate_year_span": ("candidate_year_min", "candidate_year_max", "candidate_year_range_missing"),
+    "year_gap_to_candidate_range": (
+        "candidate_year_min",
+        "candidate_year_max",
+        "candidate_year_range_missing",
+        "query_year",
+        "query_year_missing",
+    ),
+    "year_gap_signed_to_candidate_range": (
+        "candidate_year_min",
+        "candidate_year_max",
+        "candidate_year_range_missing",
+        "query_year",
+        "query_year_missing",
+    ),
+    "candidate_dominant_first_name_length": ("dominant_first_name",),
+    "query_first_prefix_match_any_length": ("dominant_first_name",),
+    "same_dominant_first_as_best_top5": (
+        "query_group_id",
+        "dominant_first_name",
+        "retrieval_rank",
+        "top5_mean_distance",
+        "candidate_component_key",
+    ),
+    "same_family_as_heuristic_choice": (
+        "query_group_id",
+        "dominant_first_name",
+        "retrieval_rank",
+        "top5_mean_distance",
+        "candidate_component_key",
+        "retrieval_score",
+    ),
     **{feature: _ANCHOR_EVIDENCE_PREREQUISITES for feature in _ANCHOR_EVIDENCE_FEATURE_COLUMNS},
-    "query_view__full": ("query_view",),
-    "query_view__initial_only": ("query_view",),
 }
 
 for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
@@ -160,7 +192,6 @@ class TotalErrorGateSpec:
     name: str
     score_thresholds: dict[str, float]
     margin_thresholds: dict[str, float]
-    lambda_penalty: float | None
 
 
 _TOTAL_ERROR_SCORE_BUCKETS = (
@@ -173,7 +204,7 @@ _TOTAL_ERROR_MARGIN_BUCKETS = (
     "multi_candidate|multi_letter_first",
     "multi_candidate|single_letter_first",
 )
-_DEFAULT_TOTAL_ERROR_LAMBDA_GRID = (0.0, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0)
+_DEFAULT_PROMOTED_GATE_FIXED_GRID_STEP = 0.01
 _DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS = {
     "false_abstain": 0.25,
     "false_link": 1.0,
@@ -478,14 +509,10 @@ def _normalize_optional_letters(value: Any) -> str:
     return _normalize_letters(value)
 
 
-def _cluster_size_log_capped(cluster_size: Any) -> float:
-    """Return a capped log-size prior anchored to the train p95 component size."""
+def _cluster_size_log(cluster_size: Any) -> float:
+    """Return an uncapped log-size primitive."""
 
-    size = max(0.0, float(cluster_size or 0.0))
-    if size <= 0.0:
-        return 0.0
-    reference = float(CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE)
-    return float(min(1.0, math.log1p(size) / math.log1p(reference)))
+    return float(math.log1p(max(0.0, float(cluster_size or 0.0))))
 
 
 def _numeric_feature_series(df: pd.DataFrame, column: str, *, default: float = 0.0) -> pd.Series:
@@ -496,97 +523,224 @@ def _numeric_feature_series(df: pd.DataFrame, column: str, *, default: float = 0
     return pd.to_numeric(df[column], errors="coerce").fillna(default).astype(np.float32)
 
 
+def _query_first_series_for_prefix(out: pd.DataFrame) -> list[str]:
+    if "query_author" in out.columns:
+        query_first_from_author = out["query_author"].map(_query_first_token)
+    else:
+        query_first_from_author = pd.Series([""] * len(out), index=out.index, dtype="string")
+    if "query_first_token" in out.columns:
+        query_first_from_token = out["query_first_token"].map(_normalize_optional_letters)
+    else:
+        query_first_from_token = pd.Series([""] * len(out), index=out.index, dtype="string")
+    return [
+        author_token if author_token else token
+        for author_token, token in zip(query_first_from_author, query_first_from_token, strict=True)
+    ]
+
+
+def _derive_promoted_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive promoted row features from portable candidate-row primitives."""
+
+    out = df.copy()
+    if "retrieval_rank" in out.columns:
+        retrieval_rank = pd.to_numeric(out["retrieval_rank"], errors="coerce").fillna(0.0).astype(np.float32)
+        out["retrieval_reciprocal_rank"] = 1.0 / np.maximum(retrieval_rank.to_numpy(dtype=np.float32), 1.0)
+    if "cluster_size" in out.columns:
+        cluster_size = pd.to_numeric(out["cluster_size"], errors="coerce").fillna(0.0).astype(np.float32)
+        out["cluster_size_log"] = cluster_size.map(_cluster_size_log)
+    if {"candidate_year_min", "candidate_year_max", "candidate_year_range_missing"}.issubset(out.columns):
+        candidate_year_min = pd.to_numeric(out["candidate_year_min"], errors="coerce").fillna(0.0).astype(np.float32)
+        candidate_year_max = pd.to_numeric(out["candidate_year_max"], errors="coerce").fillna(0.0).astype(np.float32)
+        candidate_missing = (
+            pd.to_numeric(out["candidate_year_range_missing"], errors="coerce").fillna(1.0).astype(np.float32) > 0.0
+        )
+        out["candidate_year_span"] = np.where(
+            candidate_missing,
+            0.0,
+            np.maximum(
+                candidate_year_max.to_numpy(dtype=np.float32) - candidate_year_min.to_numpy(dtype=np.float32),
+                0.0,
+            ),
+        )
+        if {"query_year", "query_year_missing"}.issubset(out.columns):
+            query_year = pd.to_numeric(out["query_year"], errors="coerce").fillna(0.0).astype(np.float32)
+            query_missing = (
+                pd.to_numeric(out["query_year_missing"], errors="coerce").fillna(1.0).astype(np.float32) > 0.0
+            )
+            observed = ~(candidate_missing | query_missing)
+            lower = observed & (query_year < candidate_year_min)
+            upper = observed & (query_year > candidate_year_max)
+            gap = np.zeros(len(out), dtype=np.float32)
+            signed_gap = np.zeros(len(out), dtype=np.float32)
+            lower_gap = (candidate_year_min[lower] - query_year[lower]).to_numpy(dtype=np.float32)
+            upper_gap = (query_year[upper] - candidate_year_max[upper]).to_numpy(dtype=np.float32)
+            gap[lower.to_numpy(dtype=bool)] = lower_gap
+            gap[upper.to_numpy(dtype=bool)] = upper_gap
+            signed_gap[lower.to_numpy(dtype=bool)] = -lower_gap
+            signed_gap[upper.to_numpy(dtype=bool)] = upper_gap
+            out["year_gap_to_candidate_range"] = gap
+            out["year_gap_signed_to_candidate_range"] = signed_gap
+    if "dominant_first_name" in out.columns:
+        query_first = _query_first_series_for_prefix(out)
+        dominant_first = out["dominant_first_name"].map(_normalize_optional_letters)
+        out["candidate_dominant_first_name_length"] = [float(len(value)) for value in dominant_first]
+        out["query_first_prefix_match_any_length"] = [
+            1.0 if query and dominant and (query.startswith(dominant) or dominant.startswith(query)) else 0.0
+            for query, dominant in zip(query_first, dominant_first, strict=True)
+        ]
+        if {
+            "query_group_id",
+            "retrieval_rank",
+            "top5_mean_distance",
+            "candidate_component_key",
+        }.issubset(out.columns):
+            group_key = out["query_group_id"].astype(str)
+            retrieval_rank_numeric = pd.to_numeric(out["retrieval_rank"], errors="coerce")
+            retrieval_score_sort = (
+                -pd.to_numeric(out["retrieval_score"], errors="coerce")
+                if "retrieval_score" in out.columns
+                else retrieval_rank_numeric
+            )
+            grouping_frame = out.assign(
+                _query_group_key=group_key,
+                _dominant_first_alpha=dominant_first,
+                _retrieval_rank_numeric=retrieval_rank_numeric,
+                _retrieval_score_sort=retrieval_score_sort,
+                _top5_mean_distance_numeric=pd.to_numeric(out["top5_mean_distance"], errors="coerce"),
+                _row_order=np.arange(len(out)),
+            )
+            top1_rows = grouping_frame.sort_values(
+                [
+                    "_query_group_key",
+                    "_retrieval_score_sort",
+                    "_retrieval_rank_numeric",
+                    "candidate_component_key",
+                    "_row_order",
+                ],
+                kind="stable",
+            )
+            top1_by_group = top1_rows.drop_duplicates("_query_group_key").set_index("_query_group_key")
+            top1_dominant = group_key.map(top1_by_group["_dominant_first_alpha"])
+            best_top5_rows = grouping_frame.sort_values(
+                [
+                    "_query_group_key",
+                    "_top5_mean_distance_numeric",
+                    "_retrieval_score_sort",
+                    "_retrieval_rank_numeric",
+                    "candidate_component_key",
+                    "_row_order",
+                ],
+                kind="stable",
+            )
+            best_top5_by_group = best_top5_rows.drop_duplicates("_query_group_key").set_index("_query_group_key")
+            best_top5_dominant = group_key.map(best_top5_by_group["_dominant_first_alpha"])
+            dominant_first_top1_match = np.asarray(
+                [
+                    1.0 if dominant and top1 and dominant == top1 else 0.0
+                    for dominant, top1 in zip(dominant_first, top1_dominant, strict=True)
+                ],
+                dtype=np.float32,
+            )
+            same_dominant_first_as_best_top5 = np.asarray(
+                [
+                    1.0 if dominant and best and dominant == best else 0.0
+                    for dominant, best in zip(dominant_first, best_top5_dominant, strict=True)
+                ],
+                dtype=np.float32,
+            )
+            out["same_dominant_first_as_best_top5"] = same_dominant_first_as_best_top5
+            out["same_family_as_heuristic_choice"] = (
+                dominant_first_top1_match
+                * pd.to_numeric(out["retrieval_score"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+                + same_dominant_first_as_best_top5
+                * (
+                    1.0
+                    - pd.to_numeric(out["top5_mean_distance"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+                )
+            ).astype(np.float32)
+    return out
+
+
 def _derive_anchor_evidence_features(df: pd.DataFrame) -> pd.DataFrame:
     """Derive anchor-evidence formulas from existing candidate-row evidence columns."""
 
     out = df.copy()
+    if {
+        "query_group_id",
+        "retrieval_score",
+        "retrieval_rank",
+        "candidate_component_key",
+    }.issubset(out.columns):
+        retrieval_score_values = pd.to_numeric(out["retrieval_score"], errors="coerce").astype(np.float32)
+        stored_rank_values = pd.to_numeric(out["retrieval_rank"], errors="coerce").fillna(99.0).astype(np.float32)
+        current_rank = np.zeros(len(out), dtype=np.float32)
+        current_gap = np.zeros(len(out), dtype=np.float32)
+        best_gap = np.zeros(len(out), dtype=np.float32)
+        ordering_frame = pd.DataFrame(
+            {
+                "_query_group_key": out["query_group_id"].astype(str),
+                "_score": retrieval_score_values,
+                "_stored_rank": stored_rank_values,
+                "_component_key": out["candidate_component_key"].astype(str),
+                "_row_index": np.arange(len(out)),
+            }
+        )
+        for _group_key, group in ordering_frame.groupby("_query_group_key", sort=False):
+            ordered = group.sort_values(
+                ["_score", "_stored_rank", "_component_key", "_row_index"],
+                ascending=[False, True, True, True],
+                kind="stable",
+            )
+            indices = ordered["_row_index"].to_numpy(dtype=np.int64)
+            if len(indices) == 0:
+                continue
+            scores = retrieval_score_values.iloc[indices].to_numpy(dtype=np.float32)
+            top1 = int(indices[0])
+            runner_up = int(indices[1]) if len(indices) > 1 else top1
+            best_score = float(np.max(scores))
+            for rank, row_index in enumerate(indices, start=1):
+                competitor = runner_up if int(row_index) == top1 else top1
+                current_rank[int(row_index)] = float(rank)
+                current_gap[int(row_index)] = float(
+                    retrieval_score_values.iloc[int(row_index)] - retrieval_score_values.iloc[int(competitor)]
+                )
+                best_gap[int(row_index)] = float(best_score - retrieval_score_values.iloc[int(row_index)])
+        out["retrieval_rank"] = current_rank
+        out["retrieval_score_gap_vs_best_competitor"] = np.round(current_gap, 6).astype(np.float32)
+        out["retrieval_score_best_gap"] = np.round(best_gap, 6).astype(np.float32)
+
     min_distance = _numeric_feature_series(out, "min_distance", default=10000.0)
-    specter = _numeric_feature_series(out, "specter_exemplar_similarity")
-    title = _numeric_feature_series(out, "title_overlap")
-    coauthor = _numeric_feature_series(out, "coauthor_overlap")
-    affiliation = _numeric_feature_series(out, "affiliation_overlap")
-    venue = _numeric_feature_series(out, "venue_overlap")
-    year = _numeric_feature_series(out, "year_compatibility")
     retrieval_gap = _numeric_feature_series(out, "retrieval_score_gap_vs_best_competitor")
-    contradiction = _numeric_feature_series(out, "candidate_contradiction_score")
     same_top1 = _numeric_feature_series(out, "same_family_as_top1")
-    candidate_pair_share = _numeric_feature_series(out, "candidate_pair_share_within_coarse_family")
-    cluster_size = _numeric_feature_series(out, "cluster_size")
-    named_signature_count = _numeric_feature_series(out, "named_signature_count")
     retrieval_rank = _numeric_feature_series(out, "retrieval_rank", default=99.0)
 
     min_distance_values = min_distance.to_numpy(dtype=np.float32, copy=False)
-    specter_values = specter.to_numpy(dtype=np.float32, copy=False)
-    title_values = title.to_numpy(dtype=np.float32, copy=False)
-    coauthor_values = coauthor.to_numpy(dtype=np.float32, copy=False)
-    affiliation_values = affiliation.to_numpy(dtype=np.float32, copy=False)
-    venue_values = venue.to_numpy(dtype=np.float32, copy=False)
-    year_values = year.to_numpy(dtype=np.float32, copy=False)
     retrieval_gap_values = retrieval_gap.to_numpy(dtype=np.float32, copy=False)
-    contradiction_values = contradiction.to_numpy(dtype=np.float32, copy=False)
     same_top1_values = same_top1.to_numpy(dtype=np.float32, copy=False)
-    candidate_pair_share_values = candidate_pair_share.to_numpy(dtype=np.float32, copy=False)
-    cluster_size_values = cluster_size.to_numpy(dtype=np.float32, copy=False)
-    named_signature_count_values = named_signature_count.to_numpy(dtype=np.float32, copy=False)
     retrieval_rank_values = retrieval_rank.to_numpy(dtype=np.float32, copy=False)
 
     min_distance_clip = np.clip(min_distance_values, 0.0, 1.0)
-    specter_clip = np.clip(specter_values, 0.0, 1.0)
-    title_clip = np.clip(title_values, 0.0, 1.0)
-    coauthor_clip = np.clip(coauthor_values, 0.0, 1.0)
-    affiliation_clip = np.clip(affiliation_values, 0.0, 1.0)
-    venue_clip = np.clip(venue_values, 0.0, 1.0)
-    year_clip = np.clip(year_values, 0.0, 1.0)
     same_top1_clip = np.clip(same_top1_values, 0.0, 1.0)
     retrieval_gap_positive = np.clip(retrieval_gap_values, 0.0, 0.3) / 0.3
     retrieval_gap_normalized = np.clip((np.clip(retrieval_gap_values, -0.2, 0.3) + 0.2) / 0.5, 0.0, 1.0)
-    candidate_pair_share_clip = np.clip(candidate_pair_share_values, 0.0, 1.0)
 
     out["anchor_evidence_count"] = (
-        (min_distance_values <= 0.15).astype(np.float32)
-        + (specter_values >= 0.70).astype(np.float32)
-        + (title_values >= 0.20).astype(np.float32)
-        + (coauthor_values >= 0.25).astype(np.float32)
-        + (affiliation_values >= 0.25).astype(np.float32)
-        + (venue_values >= 0.20).astype(np.float32)
-        + (year_values >= 0.90).astype(np.float32)
-        + (retrieval_gap_values >= 0.02).astype(np.float32)
+        (min_distance_values <= 0.15).astype(np.float32) + (retrieval_gap_values >= 0.02).astype(np.float32)
     ).astype(np.float32)
 
-    support_strength = (
-        0.20 * (1.0 - min_distance_clip)
-        + 0.20 * specter_clip
-        + 0.18 * title_clip
-        + 0.18 * coauthor_clip
-        + 0.12 * affiliation_clip
-        + 0.06 * venue_clip
-        + 0.06 * year_clip
-    )
-    low_contradiction_multiplier = np.clip(1.0 - np.clip(contradiction_values, 0.0, 1.0), 0.0, 1.0)
-    out["strong_positive_anchor_score"] = (
-        np.clip(support_strength, 0.0, 1.0)
-        * (0.5 + 0.5 * same_top1_clip)
-        * (0.35 + 0.65 * low_contradiction_multiplier)
-    ).astype(np.float32)
-
-    tiny_candidate = ((cluster_size_values <= 2.0) | (named_signature_count_values <= 2.0)).astype(np.float32)
-    residual_support = (
-        0.28 * (1.0 - min_distance_clip)
-        + 0.20 * specter_clip
-        + 0.20 * coauthor_clip
-        + 0.14 * title_clip
-        + 0.10 * year_clip
-        + 0.08 * retrieval_gap_normalized
-    )
-    out["weak_residual_anchor_score"] = (tiny_candidate * same_top1_clip * np.clip(residual_support, 0.0, 1.0)).astype(
+    distance_signal = 1.0 - min_distance_clip
+    support_strength = 0.20 * distance_signal
+    out["strong_positive_anchor_score"] = (np.clip(support_strength, 0.0, 1.0) * (0.5 + 0.5 * same_top1_clip)).astype(
         np.float32
     )
+
+    residual_support = 0.28 * distance_signal + 0.08 * retrieval_gap_normalized
+    out["weak_residual_anchor_score"] = (same_top1_clip * np.clip(residual_support, 0.0, 1.0)).astype(np.float32)
 
     out["sparse_relative_winner_score"] = (
         (retrieval_rank_values <= 1.0).astype(np.float32)
         * same_top1_clip
         * np.clip(retrieval_gap_positive, 0.0, 1.0)
-        * (1.0 - candidate_pair_share_clip)
         * np.clip(residual_support, 0.0, 1.0)
     ).astype(np.float32)
     return out
@@ -670,34 +824,24 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
         return None
     if not isinstance(configured, dict):
         raise ValueError("classic.promoted_stratified_gate must be a mapping when provided")
-    if str(configured.get("mode")) != "total_error_4score_2margin":
-        raise ValueError("classic.promoted_stratified_gate.mode must be total_error_4score_2margin")
-    score_thresholds = configured.get("reference_score_thresholds")
-    margin_thresholds = configured.get("reference_margin_thresholds")
-    if not isinstance(score_thresholds, dict) or not isinstance(margin_thresholds, dict):
-        raise ValueError(
-            "classic.promoted_stratified_gate requires reference_score_thresholds and reference_margin_thresholds"
-        )
-    missing_score_buckets = sorted(set(_TOTAL_ERROR_SCORE_BUCKETS) - set(score_thresholds))
-    missing_margin_buckets = sorted(set(_TOTAL_ERROR_MARGIN_BUCKETS) - set(margin_thresholds))
-    if missing_score_buckets or missing_margin_buckets:
-        raise ValueError(
-            "classic.promoted_stratified_gate has missing reference buckets: "
-            f"score={missing_score_buckets}, margin={missing_margin_buckets}"
-        )
+    if str(configured.get("mode")) != "full_calibration_fixed_grid_4score_2margin":
+        raise ValueError("classic.promoted_stratified_gate.mode must be full_calibration_fixed_grid_4score_2margin")
     out = dict(configured)
-    out["reference_score_thresholds"] = {
-        bucket: float(score_thresholds[bucket]) for bucket in _TOTAL_ERROR_SCORE_BUCKETS
-    }
-    out["reference_margin_thresholds"] = {
-        bucket: float(margin_thresholds[bucket]) for bucket in _TOTAL_ERROR_MARGIN_BUCKETS
-    }
-    out["lambda_grid"] = [float(value) for value in out.get("lambda_grid", list(_DEFAULT_TOTAL_ERROR_LAMBDA_GRID))]
-    out["score_grid_size"] = int(out.get("score_grid_size", spec.get("score_grid_size", 101)))
-    out["margin_grid_size"] = int(out.get("margin_grid_size", spec.get("margin_grid_size", 101)))
-    out["fit_split"] = str(out.get("fit_split", "calibration_fit"))
-    out["selection_split"] = str(out.get("selection_split", "calibration_check"))
-    out["test_split"] = str(out.get("test_split", "test"))
+    split_spec = spec.get("stratified_eval_test_split")
+    split_spec = split_spec if isinstance(split_spec, dict) else {}
+    calibration_splits = out.get("calibration_splits")
+    if calibration_splits is None:
+        calibration_splits = [
+            split_spec.get("calibration_fit_split", "calibration_fit"),
+            split_spec.get("calibration_check_split", "calibration_check"),
+        ]
+    if isinstance(calibration_splits, str) or not isinstance(calibration_splits, Sequence):
+        raise ValueError("classic.promoted_stratified_gate.calibration_splits must be a sequence of split names")
+    out["calibration_splits"] = [str(split) for split in calibration_splits]
+    if not out["calibration_splits"]:
+        raise ValueError("classic.promoted_stratified_gate.calibration_splits must be non-empty")
+    out["test_split"] = str(out.get("test_split", split_spec.get("test_split", "test")))
+    out["fixed_grid_step"] = float(out.get("fixed_grid_step", _DEFAULT_PROMOTED_GATE_FIXED_GRID_STEP))
     out["selection_metric"] = str(out.get("selection_metric", "weighted_average_error"))
     if out["selection_metric"] != "weighted_average_error":
         raise ValueError("classic.promoted_stratified_gate.selection_metric must be weighted_average_error")
@@ -805,68 +949,20 @@ def _normalize_augmented_feature_frame(df: pd.DataFrame, feature_columns: tuple[
     requested_anchor_features = set(feature_columns) & set(_ANCHOR_EVIDENCE_FEATURE_COLUMNS)
     if requested_anchor_features:
         out = _derive_anchor_evidence_features(out)
-    if "query_first_prefix_match" in feature_columns:
-        if "dominant_first_name" in out.columns:
-            if "query_author" in out.columns:
-                query_first_from_author = out["query_author"].map(_query_first_token)
-            else:
-                query_first_from_author = pd.Series([""] * len(out), index=out.index, dtype="string")
-            if "query_first_token" in out.columns:
-                query_first_from_token = out["query_first_token"].map(_normalize_optional_letters)
-            else:
-                query_first_from_token = pd.Series([""] * len(out), index=out.index, dtype="string")
-            query_first = [
-                author_token if author_token else token
-                for author_token, token in zip(query_first_from_author, query_first_from_token, strict=True)
-            ]
-            dominant_first = out["dominant_first_name"].map(_normalize_optional_letters)
-            out["query_first_prefix_match"] = [
-                1.0 if q and len(q) > 1 and d and (q.startswith(d) or d.startswith(q)) else 0.0
-                for q, d in zip(query_first, dominant_first, strict=True)
-            ]
-    if "cluster_size_log_capped" in feature_columns and "cluster_size" in out.columns:
-        cluster_size = pd.to_numeric(out["cluster_size"], errors="coerce")
-        missing_cluster_size = int(cluster_size.isna().sum())
-        if missing_cluster_size:
-            raise ValueError(
-                "Cannot derive cluster_size_log_capped because cluster_size has "
-                f"{missing_cluster_size} missing/non-numeric rows"
-            )
-        out["cluster_size_log_capped"] = cluster_size.map(_cluster_size_log_capped)
-    elif "cluster_size_log_capped" in feature_columns and "cluster_size_log_capped" not in out.columns:
-        if "cluster_size" in out.columns:
-            cluster_size = pd.to_numeric(out["cluster_size"], errors="coerce")
-            missing_cluster_size = int(cluster_size.isna().sum())
-            if missing_cluster_size:
-                raise ValueError(
-                    "Cannot derive cluster_size_log_capped because cluster_size has "
-                    f"{missing_cluster_size} missing/non-numeric rows"
-                )
-        else:
-            raise ValueError("Cannot derive cluster_size_log_capped without cluster_size")
-        out["cluster_size_log_capped"] = cluster_size.map(_cluster_size_log_capped)
+    requested_derived_features = set(feature_columns) & set(_DERIVED_PROMOTED_FEATURE_COLUMNS)
+    if requested_derived_features:
+        out = _derive_promoted_features(out)
     for column in feature_columns:
         if column not in out.columns:
             out[column] = np.nan
     for column in feature_columns:
-        if column == "query_view":
-            out[column] = out[column].astype("string").fillna("missing")
-        else:
-            out[column] = pd.to_numeric(out[column], errors="coerce")
+        out[column] = pd.to_numeric(out[column], errors="coerce")
     return out
 
 
 def _augmented_feature_matrix(df: pd.DataFrame, feature_columns: tuple[str, ...]) -> pd.DataFrame:
     prepared = _normalize_augmented_feature_frame(df, feature_columns)
-    numeric_columns = [column for column in feature_columns if column != "query_view"]
-    features = prepared.loc[:, numeric_columns].copy().astype(np.float32)
-    if "query_view" in prepared.columns:
-        query_view = prepared["query_view"].astype("string").fillna("missing")
-    else:
-        query_view = pd.Series(["missing"] * len(prepared), index=prepared.index, dtype="string")
-    features["query_view__full"] = (query_view == "full").astype(np.float32)
-    features["query_view__initial_only"] = (query_view == "initial_only").astype(np.float32)
-    return features
+    return prepared.loc[:, list(feature_columns)].copy().astype(np.float32)
 
 
 def _validate_classic_feature_inputs(df: pd.DataFrame, feature_columns: tuple[str, ...]) -> None:
@@ -916,50 +1012,59 @@ def _coerce_classic_feature_matrix(features: pd.DataFrame, feature_columns: tupl
 
 
 _CLASSIC_MONOTONE_CONSTRAINT_BY_FEATURE: dict[str, int] = {
-    "min_distance_rank_fraction": -1,
-    "affiliation_overlap": 1,
     "affiliation_contradiction_severity": -1,
-    "count_normalized_confidence": 1,
-    "venue_overlap": 1,
-    "venue_overlap_rank_fraction": -1,
     "coauthor_overlap": 1,
-    "same_family_as_top1": 0,
-    "top5_gap_to_retrieval_top1": -1,
-    "heuristic_prefers_top1": 0,
-    "affiliation_overlap_rank_fraction": -1,
-    "specter_exemplar_rank_fraction": -1,
-    "exact_anchor_evidence_flag": 1,
-    "year_compatibility": 1,
-    "year_mismatch_severity": -1,
-    "title_overlap_rank_fraction": -1,
-    "middle_initial_compatibility": 1,
-    "title_overlap": 1,
-    "coauthor_overlap_rank_fraction": -1,
-    "cluster_size": 0,
-    "cluster_size_log_capped": 0,
+    "cluster_size_log": 0,
     "min_distance": -1,
     "specter_exemplar_similarity": 1,
-    "specter_centroid_similarity": 1,
-    "raw_max_affiliation_jaccard": 1,
-    "raw_max_coauthor_jaccard": 1,
-    "raw_max_title_jaccard": 1,
-    "raw_max_text_jaccard": 1,
+    "affiliation_overlap": 1,
+    "year_compatibility": 1,
+    "paper_author_list_max_jaccard": 1,
+    "paper_author_list_max_containment": 1,
+    "paper_author_list_max_overlap_count": 1,
+    "local_author_window10_jaccard_max": 1,
+    "local_author_window10_overlap_count_max": 1,
+    "best_author_count_log_absdiff": -1,
     "top5_mean_distance": -1,
-    "distance_spread_top5_minus_min": 0,
-    "year_compatibility_rank_fraction": -1,
-    "query_view__full": 0,
-    "query_view__initial_only": 0,
+    "retrieval_rank": -1,
+    "retrieval_reciprocal_rank": 1,
+    "candidate_year_span": 0,
+    "year_gap_to_candidate_range": -1,
+    "year_gap_signed_to_candidate_range": 0,
+    "candidate_dominant_first_name_length": 0,
+    "query_first_prefix_match_any_length": 1,
+    "same_dominant_first_as_best_top5": 1,
+    "same_family_as_heuristic_choice": 1,
+    "candidate_cluster_max_paper_author_count": 0,
     "anchor_evidence_count": 1,
     "strong_positive_anchor_score": 1,
     "weak_residual_anchor_score": 1,
     "sparse_relative_winner_score": 1,
-    "first_name_count_min_rarity": 1,
     "last_first_name_count_min_rarity": 1,
     "last_name_count_min_rarity": 1,
-    "last_first_initial_count_min_rarity": 1,
-    "first_name_count_max_rarity": 1,
-    "last_first_name_count_max_rarity": 1,
-    "first_prefix_x_last_first_name_count_min_rarity": 1,
+    "pw_max_affiliation_overlap": 1,
+    "pw_max_middle_initials_overlap": 1,
+    "pw_mean_email_prefix_equal": 1,
+    "pw_mean_first_names_equal": 1,
+    "pw_min_middle_initials_overlap": 1,
+    "pw_max_title_overlap_words": 1,
+    "pw_max_journal_overlap": 1,
+    "pw_mean_middle_names_equal": 1,
+    "pw_min_last_first_name_count_max": 0,
+    "pw_mean_coauthor_match": 1,
+    "pw_mean_coauthor_overlap": 1,
+    "pw_mean_title_overlap_words": 1,
+    "pw_max_venue_overlap": 1,
+    "pw_mean_journal_overlap": 1,
+    "pw_min_specter_cosine_sim": 1,
+    "pw_min_first_name_count_max": 0,
+    "pw_max_coauthor_overlap": 1,
+    "pw_max_jaro": 1,
+    "pw_min_first_name_count_min": 0,
+    "pw_min_levenshtein": -1,
+    "pw_mean_english_count": 0,
+    "pw_mean_middle_one_missing": 0,
+    "pw_mean_specter_cosine_sim": 1,
 }
 
 
@@ -1017,10 +1122,8 @@ def _classic_feature_matrix(df: pd.DataFrame, feature_columns: tuple[str, ...]) 
     """Build a classic feature frame, allowing union-style augmented features when requested."""
 
     _validate_classic_feature_inputs(df, feature_columns)
-    needs_augmented_matrix = any(
-        column in _CLASSIC_DERIVABLE_FEATURE_PREREQUISITES for column in feature_columns
-    ) or any(column not in df.columns for column in feature_columns)
-    if needs_augmented_matrix:
+    missing_feature_columns = [column for column in feature_columns if column not in df.columns]
+    if missing_feature_columns:
         features = _augmented_feature_matrix(df, feature_columns)
         return _coerce_classic_feature_matrix(features, feature_columns)
     out = df.copy()
@@ -1471,157 +1574,257 @@ def _gate_bucket_split_counts(predictions: pd.DataFrame, split_order: Sequence[s
     }
 
 
-def _total_error_threshold_grid(values: pd.Series, reference: float, grid_size: int) -> np.ndarray:
-    """Build a quantile threshold grid that always includes the reference value."""
+def _fixed_probability_threshold_grid(step: float) -> np.ndarray:
+    """Return an inclusive fixed probability grid from 0.0 to 1.0."""
 
-    numeric = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=np.float64)
-    if numeric.size == 0:
-        return np.array([float(reference)], dtype=np.float64)
-    quantiles = np.linspace(0.0, 1.0, max(int(grid_size), 2), dtype=np.float64)
-    epsilon = 1e-12
-    return np.unique(
-        np.concatenate(
-            (
-                np.array([float(reference), float(numeric.min()) - epsilon], dtype=np.float64),
-                np.quantile(numeric, quantiles).astype(np.float64, copy=False),
-                np.array([float(numeric.max()) + epsilon], dtype=np.float64),
-            )
-        )
-    )
+    step = float(step)
+    if not 0.0 < step <= 1.0:
+        raise ValueError("classic.promoted_stratified_gate.fixed_grid_step must be in (0, 1]")
+    interval_count = int(round(1.0 / step))
+    if not np.isclose(float(interval_count) * step, 1.0, rtol=0.0, atol=1e-9):
+        raise ValueError("classic.promoted_stratified_gate.fixed_grid_step must evenly divide 1.0")
+    return np.round(np.linspace(0.0, 1.0, interval_count + 1, dtype=np.float64), 6)
 
 
-def _total_error_count(rows: pd.DataFrame, link: np.ndarray) -> np.ndarray:
-    """Count query-level errors for one or more link/abstain decisions."""
+def _total_error_components(rows: pd.DataFrame, link: np.ndarray) -> dict[str, np.ndarray]:
+    """Count error components for one or more link/abstain decisions."""
 
     query_target = rows["query_safe_target"].to_numpy(dtype=np.int8, copy=False)
     chosen_target = rows["chosen_candidate_target"].to_numpy(dtype=np.int8, copy=False)
     matrix = np.asarray(link, dtype=bool)
     if matrix.ndim == 1:
         matrix = matrix[:, None]
-    correct = ((~matrix) & (query_target[:, None] == 0)) | (
-        matrix & (query_target[:, None] == 1) & (chosen_target[:, None] == 1)
+    false_abstain = ((~matrix) & (query_target[:, None] == 1)).sum(axis=0).astype(np.int64)
+    false_link = (matrix & (query_target[:, None] == 0)).sum(axis=0).astype(np.int64)
+    wrong_candidate_link = (
+        (matrix & (query_target[:, None] == 1) & (chosen_target[:, None] == 0)).sum(axis=0).astype(np.int64)
     )
-    return (~correct).sum(axis=0)
+    return {
+        "false_abstain": false_abstain,
+        "false_link": false_link,
+        "wrong_candidate_link": wrong_candidate_link,
+        "errors": false_abstain + false_link + wrong_candidate_link,
+    }
 
 
-def _weighted_error_count(
-    rows: pd.DataFrame,
-    link: np.ndarray,
+def _weighted_error_counts_from_components(
+    components: Mapping[str, np.ndarray],
     *,
     error_weights: Mapping[str, float] = _DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS,
 ) -> np.ndarray:
-    """Return weighted error counts for one or more link/abstain decisions."""
+    """Return weighted error counts from vectorized error components."""
 
-    query_target = rows["query_safe_target"].to_numpy(dtype=np.int8, copy=False)
-    chosen_target = rows["chosen_candidate_target"].to_numpy(dtype=np.int8, copy=False)
-    matrix = np.asarray(link, dtype=bool)
-    if matrix.ndim == 1:
-        matrix = matrix[:, None]
-    false_abstain = ((~matrix) & (query_target[:, None] == 1)).sum(axis=0).astype(np.float64)
-    false_link = (matrix & (query_target[:, None] == 0)).sum(axis=0).astype(np.float64)
-    wrong_candidate_link = (
-        (matrix & (query_target[:, None] == 1) & (chosen_target[:, None] == 0)).sum(axis=0).astype(np.float64)
-    )
     return (
-        float(error_weights["false_abstain"]) * false_abstain
-        + float(error_weights["false_link"]) * false_link
-        + float(error_weights["wrong_candidate_link"]) * wrong_candidate_link
+        float(error_weights["false_abstain"]) * np.asarray(components["false_abstain"], dtype=np.float64)
+        + float(error_weights["false_link"]) * np.asarray(components["false_link"], dtype=np.float64)
+        + float(error_weights["wrong_candidate_link"])
+        * np.asarray(components["wrong_candidate_link"], dtype=np.float64)
     )
+
+
+def _best_total_error_threshold_index(
+    components: Mapping[str, np.ndarray],
+    *,
+    score_thresholds: np.ndarray,
+    error_weights: Mapping[str, float],
+    margin_thresholds: np.ndarray | None = None,
+) -> int:
+    """Select the best fixed-grid threshold by weighted error with deterministic ties."""
+
+    weighted_errors = _weighted_error_counts_from_components(components, error_weights=error_weights)
+    tie_keys: list[np.ndarray] = [np.asarray(score_thresholds, dtype=np.float64)]
+    if margin_thresholds is not None:
+        tie_keys.append(np.asarray(margin_thresholds, dtype=np.float64))
+    ranking = np.lexsort(
+        tuple(
+            [
+                *tie_keys,
+                np.asarray(components["false_abstain"], dtype=np.int64),
+                np.asarray(components["false_link"], dtype=np.int64),
+                np.asarray(components["wrong_candidate_link"], dtype=np.int64),
+                weighted_errors,
+            ]
+        )
+    )
+    return int(ranking[0])
+
+
+def _total_error_fit_metrics(
+    rows: pd.DataFrame,
+    components: Mapping[str, np.ndarray],
+    best_index: int,
+    *,
+    error_weights: Mapping[str, float],
+) -> dict[str, Any]:
+    """Return scalar fit metrics for the selected threshold candidate."""
+
+    false_abstain = int(np.asarray(components["false_abstain"])[best_index])
+    false_link = int(np.asarray(components["false_link"])[best_index])
+    wrong_candidate_link = int(np.asarray(components["wrong_candidate_link"])[best_index])
+    weighted_error_count = float(
+        _weighted_error_counts_from_components(components, error_weights=error_weights)[best_index]
+    )
+    return {
+        "n_queries": int(len(rows)),
+        "errors": int(np.asarray(components["errors"])[best_index]),
+        "false_abstain": false_abstain,
+        "false_link": false_link,
+        "wrong_candidate_link": wrong_candidate_link,
+        "weighted_error_count": weighted_error_count,
+        **_weighted_error_metrics(
+            n_queries=int(len(rows)),
+            false_abstain=false_abstain,
+            false_link=false_link,
+            wrong_candidate_link=wrong_candidate_link,
+            error_weights=error_weights,
+        ),
+    }
 
 
 def _fit_total_error_single_score(
     rows: pd.DataFrame,
     *,
-    reference_score: float,
-    lambda_penalty: float,
-    score_grid_size: int,
-) -> float:
-    """Fit a score-only threshold by weighted errors plus optional drift penalty."""
+    threshold_grid: np.ndarray,
+    error_weights: Mapping[str, float],
+) -> tuple[float, dict[str, Any]]:
+    """Fit a score-only threshold on a fixed probability grid."""
 
     if rows.empty:
-        return float(reference_score)
-    thresholds = _total_error_threshold_grid(rows["chosen_probability"], reference_score, score_grid_size)
+        return float(threshold_grid[-1]), {
+            "n_queries": 0,
+            "errors": 0,
+            "false_abstain": 0,
+            "false_link": 0,
+            "wrong_candidate_link": 0,
+            "weighted_error_count": 0.0,
+            **_weighted_error_metrics(
+                n_queries=0,
+                false_abstain=0,
+                false_link=0,
+                wrong_candidate_link=0,
+                error_weights=error_weights,
+            ),
+        }
     score = pd.to_numeric(rows["chosen_probability"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-    links = score[:, None] >= thresholds[None, :]
-    errors = _weighted_error_count(rows, links).astype(np.float64)
-    drift = np.abs(thresholds - float(reference_score))
-    objective = errors + float(lambda_penalty) * drift
-    ranking = np.lexsort((drift, objective))
-    return float(thresholds[int(ranking[0])])
+    links = score[:, None] >= threshold_grid[None, :]
+    components = _total_error_components(rows, links)
+    best_index = _best_total_error_threshold_index(
+        components,
+        score_thresholds=threshold_grid,
+        error_weights=error_weights,
+    )
+    return float(threshold_grid[best_index]), _total_error_fit_metrics(
+        rows,
+        components,
+        best_index,
+        error_weights=error_weights,
+    )
 
 
 def _fit_total_error_score_margin(
     rows: pd.DataFrame,
     *,
-    reference_score: float,
-    reference_margin: float,
-    lambda_penalty: float,
-    score_grid_size: int,
-    margin_grid_size: int,
-) -> tuple[float, float]:
-    """Fit a score-or-margin gate by weighted errors plus optional drift penalty."""
+    threshold_grid: np.ndarray,
+    error_weights: Mapping[str, float],
+) -> tuple[float, float, dict[str, Any]]:
+    """Fit a score-or-margin threshold pair on a fixed probability grid."""
 
     if rows.empty:
-        return float(reference_score), float(reference_margin)
-    score_grid = _total_error_threshold_grid(rows["chosen_probability"], reference_score, score_grid_size)
-    margin_grid = _total_error_threshold_grid(rows["score_margin"], reference_margin, margin_grid_size)
+        empty_metrics = {
+            "n_queries": 0,
+            "errors": 0,
+            "false_abstain": 0,
+            "false_link": 0,
+            "wrong_candidate_link": 0,
+            "weighted_error_count": 0.0,
+            **_weighted_error_metrics(
+                n_queries=0,
+                false_abstain=0,
+                false_link=0,
+                wrong_candidate_link=0,
+                error_weights=error_weights,
+            ),
+        }
+        return float(threshold_grid[-1]), float(threshold_grid[-1]), empty_metrics
     score = pd.to_numeric(rows["chosen_probability"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
     margin = pd.to_numeric(rows["score_margin"], errors="coerce").fillna(-np.inf).to_numpy(dtype=np.float64)
-    best_key: tuple[float, float] | None = None
-    best = (float(reference_score), float(reference_margin))
-    for score_threshold in score_grid:
-        links = (score[:, None] >= float(score_threshold)) | (margin[:, None] >= margin_grid[None, :])
-        errors = _weighted_error_count(rows, links).astype(np.float64)
-        drift = np.abs(float(score_threshold) - float(reference_score)) + np.abs(margin_grid - float(reference_margin))
-        objective = errors + float(lambda_penalty) * drift
-        best_index = int(np.lexsort((drift, objective))[0])
-        key = (float(objective[best_index]), float(drift[best_index]))
+    best_key: tuple[float, int, int, int, float, float] | None = None
+    best_score_threshold = float(threshold_grid[-1])
+    best_margin_threshold = float(threshold_grid[-1])
+    best_metrics: dict[str, Any] | None = None
+    for score_threshold in threshold_grid:
+        links = (score[:, None] >= float(score_threshold)) | (margin[:, None] >= threshold_grid[None, :])
+        components = _total_error_components(rows, links)
+        score_thresholds = np.repeat(float(score_threshold), len(threshold_grid))
+        best_index = _best_total_error_threshold_index(
+            components,
+            score_thresholds=score_thresholds,
+            margin_thresholds=threshold_grid,
+            error_weights=error_weights,
+        )
+        metrics = _total_error_fit_metrics(rows, components, best_index, error_weights=error_weights)
+        key = (
+            float(metrics["weighted_error_count"]),
+            int(metrics["wrong_candidate_link"]),
+            int(metrics["false_link"]),
+            int(metrics["false_abstain"]),
+            float(score_threshold),
+            float(threshold_grid[best_index]),
+        )
         if best_key is None or key < best_key:
             best_key = key
-            best = (float(score_threshold), float(margin_grid[best_index]))
-    return best
+            best_score_threshold = float(score_threshold)
+            best_margin_threshold = float(threshold_grid[best_index])
+            best_metrics = metrics
+    if best_metrics is None:
+        raise ValueError("Unable to fit promoted score/margin gate on non-empty calibration rows")
+    return best_score_threshold, best_margin_threshold, best_metrics
 
 
-def _fit_total_error_gate_candidate(
-    fit_rows: pd.DataFrame,
+def _fit_total_error_gate(
+    calibration_rows: pd.DataFrame,
     *,
-    reference_score_thresholds: dict[str, float],
-    reference_margin_thresholds: dict[str, float],
-    lambda_penalty: float,
-    score_grid_size: int,
-    margin_grid_size: int,
-) -> TotalErrorGateSpec:
-    """Fit one 4-score/2-margin weighted-error gate candidate."""
+    fixed_grid_step: float,
+    error_weights: Mapping[str, float],
+) -> dict[str, Any]:
+    """Fit the promoted 4-score/2-margin gate on all calibration rows."""
 
-    labels = _total_error_gate_bucket(fit_rows)
+    threshold_grid = _fixed_probability_threshold_grid(fixed_grid_step)
+    labels = _total_error_gate_bucket(calibration_rows)
     score_thresholds: dict[str, float] = {}
     margin_thresholds: dict[str, float] = {}
+    bucket_metrics: dict[str, dict[str, Any]] = {}
     for bucket in _TOTAL_ERROR_SCORE_BUCKETS:
-        rows = fit_rows[labels == bucket].copy()
+        rows = calibration_rows[labels == bucket].copy()
         if bucket in _TOTAL_ERROR_MARGIN_BUCKETS:
-            score_threshold, margin_threshold = _fit_total_error_score_margin(
+            score_threshold, margin_threshold, metrics = _fit_total_error_score_margin(
                 rows,
-                reference_score=reference_score_thresholds[bucket],
-                reference_margin=reference_margin_thresholds[bucket],
-                lambda_penalty=lambda_penalty,
-                score_grid_size=score_grid_size,
-                margin_grid_size=margin_grid_size,
+                threshold_grid=threshold_grid,
+                error_weights=error_weights,
             )
             score_thresholds[bucket] = score_threshold
             margin_thresholds[bucket] = margin_threshold
         else:
-            score_thresholds[bucket] = _fit_total_error_single_score(
+            score_threshold, metrics = _fit_total_error_single_score(
                 rows,
-                reference_score=reference_score_thresholds[bucket],
-                lambda_penalty=lambda_penalty,
-                score_grid_size=score_grid_size,
+                threshold_grid=threshold_grid,
+                error_weights=error_weights,
             )
-    return TotalErrorGateSpec(
-        name=f"total_error_4score_2margin_lambda_{lambda_penalty:g}",
-        score_thresholds=score_thresholds,
-        margin_thresholds=margin_thresholds,
-        lambda_penalty=float(lambda_penalty),
-    )
+            score_thresholds[bucket] = score_threshold
+        bucket_metrics[bucket] = {
+            "score_threshold": float(score_thresholds[bucket]),
+            "margin_threshold": float(margin_thresholds[bucket]) if bucket in margin_thresholds else None,
+            **metrics,
+        }
+    return {
+        "gate": TotalErrorGateSpec(
+            name=f"full_calibration_fixed_grid_{float(fixed_grid_step):g}",
+            score_thresholds=score_thresholds,
+            margin_thresholds=margin_thresholds,
+        ),
+        "bucket_metrics": bucket_metrics,
+        "threshold_grid_points": int(len(threshold_grid)),
+    }
 
 
 def _apply_total_error_gate(rows: pd.DataFrame, gate: TotalErrorGateSpec) -> pd.DataFrame:
@@ -1639,126 +1842,48 @@ def _apply_total_error_gate(rows: pd.DataFrame, gate: TotalErrorGateSpec) -> pd.
     return predictions
 
 
-def _total_error_gate_drift(
-    gate: TotalErrorGateSpec,
-    *,
-    reference_score_thresholds: dict[str, float],
-    reference_margin_thresholds: dict[str, float],
-) -> float:
-    """Return L1 threshold drift from the configured reference gate."""
-
-    score_drift = sum(
-        abs(float(gate.score_thresholds[bucket]) - float(reference_score_thresholds[bucket]))
-        for bucket in _TOTAL_ERROR_SCORE_BUCKETS
-    )
-    margin_drift = sum(
-        abs(float(gate.margin_thresholds[bucket]) - float(reference_margin_thresholds[bucket]))
-        for bucket in _TOTAL_ERROR_MARGIN_BUCKETS
-    )
-    return float(score_drift + margin_drift)
-
-
-def _total_error_gate_candidate_rows(
-    gates: list[TotalErrorGateSpec],
-    *,
-    fit_rows: pd.DataFrame,
-    check_rows: pd.DataFrame,
-    reference_score_thresholds: dict[str, float],
-    reference_margin_thresholds: dict[str, float],
-) -> pd.DataFrame:
-    """Return fit/check metrics for candidate weighted-error gates."""
-
-    rows: list[dict[str, Any]] = []
-    for gate in gates:
-        fit_metrics = _summarize_predictions(_apply_total_error_gate(fit_rows, gate))
-        check_metrics = _summarize_predictions(_apply_total_error_gate(check_rows, gate))
-        rows.append(
-            {
-                "name": gate.name,
-                "lambda_penalty": gate.lambda_penalty,
-                "score_thresholds_json": json.dumps(gate.score_thresholds, sort_keys=True),
-                "margin_thresholds_json": json.dumps(gate.margin_thresholds, sort_keys=True),
-                "total_threshold_drift": _total_error_gate_drift(
-                    gate,
-                    reference_score_thresholds=reference_score_thresholds,
-                    reference_margin_thresholds=reference_margin_thresholds,
-                ),
-                **{f"fit_{key}": value for key, value in fit_metrics.items()},
-                **{f"check_{key}": value for key, value in check_metrics.items()},
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def _fit_promoted_stratified_total_error_gate(
     choices: pd.DataFrame,
     gate_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Fit and select the promoted non-fixed bucketed gate on weighted stratified errors."""
+    """Fit the promoted bucketed gate on all configured calibration splits."""
 
-    fit_rows = choices[choices["split"] == str(gate_config["fit_split"])].copy()
-    check_rows = choices[choices["split"] == str(gate_config["selection_split"])].copy()
-    if fit_rows.empty or check_rows.empty:
+    calibration_splits = tuple(str(split) for split in gate_config["calibration_splits"])
+    calibration_rows = choices[choices["split"].astype(str).isin(calibration_splits)].copy()
+    if calibration_rows.empty:
         raise ValueError(
-            "Promoted stratified gate requires non-empty fit/check splits: "
-            f"fit={len(fit_rows)}, check={len(check_rows)}"
+            "Promoted stratified gate requires non-empty calibration splits: " f"splits={list(calibration_splits)}"
         )
-    reference_score_thresholds = dict(gate_config["reference_score_thresholds"])
-    reference_margin_thresholds = dict(gate_config["reference_margin_thresholds"])
     error_weights = dict(gate_config.get("error_weights", _DEFAULT_PROMOTED_GATE_ERROR_WEIGHTS))
-    gates = [
-        _fit_total_error_gate_candidate(
-            fit_rows,
-            reference_score_thresholds=reference_score_thresholds,
-            reference_margin_thresholds=reference_margin_thresholds,
-            lambda_penalty=float(lambda_penalty),
-            score_grid_size=int(gate_config["score_grid_size"]),
-            margin_grid_size=int(gate_config["margin_grid_size"]),
-        )
-        for lambda_penalty in gate_config["lambda_grid"]
-    ]
-    candidates = _total_error_gate_candidate_rows(
-        gates,
-        fit_rows=fit_rows,
-        check_rows=check_rows,
-        reference_score_thresholds=reference_score_thresholds,
-        reference_margin_thresholds=reference_margin_thresholds,
+    fit_result = _fit_total_error_gate(
+        calibration_rows,
+        fixed_grid_step=float(gate_config["fixed_grid_step"]),
+        error_weights=error_weights,
     )
-    ranked = candidates.sort_values(
-        by=[
-            "check_weighted_average_error",
-            "check_wrong_candidate_link",
-            "check_false_link",
-            "check_false_abstain",
-            "total_threshold_drift",
-        ],
-        ascending=[True, True, True, True, True],
-        kind="mergesort",
-    )
-    selected_name = str(ranked.iloc[0]["name"])
-    selected_gate = next(gate for gate in gates if gate.name == selected_name)
-    fit_metrics = _summarize_predictions(_apply_total_error_gate(fit_rows, selected_gate))
-    check_metrics = _summarize_predictions(_apply_total_error_gate(check_rows, selected_gate))
+    selected_gate = fit_result["gate"]
+    calibration_predictions = _apply_total_error_gate(calibration_rows, selected_gate)
+    calibration_metrics = _summarize_predictions(calibration_predictions)
+    split_series = choices["split"].astype(str)
+    split_metrics = {
+        split: _summarize_predictions(_apply_total_error_gate(choices[split_series == split].copy(), selected_gate))
+        for split in calibration_splits
+    }
     return {
         "gate": selected_gate,
-        "fit_metrics": fit_metrics,
-        "check_metrics": check_metrics,
-        "candidate_metrics": candidates.to_dict(orient="records"),
+        "calibration_metrics": calibration_metrics,
+        "calibration_split_metrics": split_metrics,
+        "bucket_metrics": dict(fit_result["bucket_metrics"]),
+        "threshold_grid_points": int(fit_result["threshold_grid_points"]),
         "selection_key": {
-            "check_weighted_average_error": float(check_metrics["weighted_average_error"]),
-            "check_false_abstain_error_rate": float(check_metrics["false_abstain_error_rate"]),
-            "check_false_link_error_rate": float(check_metrics["false_link_error_rate"]),
-            "check_wrong_link_error_rate": float(check_metrics["wrong_link_error_rate"]),
+            "calibration_weighted_average_error": float(calibration_metrics["weighted_average_error"]),
+            "calibration_false_abstain_error_rate": float(calibration_metrics["false_abstain_error_rate"]),
+            "calibration_false_link_error_rate": float(calibration_metrics["false_link_error_rate"]),
+            "calibration_wrong_link_error_rate": float(calibration_metrics["wrong_link_error_rate"]),
             "error_weights": error_weights,
-            "check_errors": int(check_metrics["errors"]),
-            "check_wrong_candidate_link": int(check_metrics["wrong_candidate_link"]),
-            "check_false_link": int(check_metrics["false_link"]),
-            "check_false_abstain": int(check_metrics["false_abstain"]),
-            "total_threshold_drift": _total_error_gate_drift(
-                selected_gate,
-                reference_score_thresholds=reference_score_thresholds,
-                reference_margin_thresholds=reference_margin_thresholds,
-            ),
+            "calibration_errors": int(calibration_metrics["errors"]),
+            "calibration_wrong_candidate_link": int(calibration_metrics["wrong_candidate_link"]),
+            "calibration_false_link": int(calibration_metrics["false_link"]),
+            "calibration_false_abstain": int(calibration_metrics["false_abstain"]),
         },
     }
 
@@ -2501,8 +2626,13 @@ def _classic_gate_bucket_table_rows(summary: dict[str, Any], breakdowns: dict[st
 
     promoted_gate = abstain_rule.get("promoted_stratified_gate")
     if isinstance(promoted_gate, dict):
-        fit_split = str(promoted_gate.get("fit_split", "calibration_fit"))
-        check_split = str(promoted_gate.get("selection_split", "calibration_check"))
+        calibration_splits_value = promoted_gate.get("calibration_splits", ["calibration_fit", "calibration_check"])
+        if isinstance(calibration_splits_value, str) or not isinstance(calibration_splits_value, Sequence):
+            calibration_splits = ["calibration_fit", "calibration_check"]
+        else:
+            calibration_splits = [str(split) for split in calibration_splits_value]
+        fit_split = calibration_splits[0] if calibration_splits else "calibration_fit"
+        check_split = calibration_splits[1] if len(calibration_splits) > 1 else ""
         test_split = str(promoted_gate.get("test_split", "test"))
     else:
         fit_split = "calibration_fit"
@@ -2822,21 +2952,23 @@ def run_classic(
         score_threshold = float(bucketed_score_thresholds["multi_candidate|multi_letter_first"])
         margin_threshold = float(bucketed_margin_thresholds["multi_candidate|multi_letter_first"])
         single_candidate_score_threshold = float(bucketed_score_thresholds["single_candidate|single_letter_first"])
+        calibration_splits = tuple(str(split) for split in promoted_gate_config["calibration_splits"])
+        calibration_split_label = "+".join(calibration_splits)
         calibration_metrics = {
-            "split": str(promoted_gate_config["fit_split"]),
+            "split": calibration_split_label,
             "score_threshold": score_threshold,
             "margin_threshold": margin_threshold,
-            **dict(selected_gate_result["fit_metrics"]),
+            **dict(selected_gate_result["calibration_metrics"]),
         }
-        fit_predictions = _apply_total_error_gate(
+        calibration_predictions = _apply_total_error_gate(
             stratified_scored_choices[0][
-                stratified_scored_choices[0]["split"] == str(promoted_gate_config["fit_split"])
+                stratified_scored_choices[0]["split"].astype(str).isin(calibration_splits)
             ].copy(),
             selected_gate,
         )
-        single_candidate_predictions = fit_predictions[
-            (pd.to_numeric(fit_predictions["has_runner_up"], errors="coerce").fillna(0).astype(int) == 0)
-            | fit_predictions["score_margin"].isna()
+        single_candidate_predictions = calibration_predictions[
+            (pd.to_numeric(calibration_predictions["has_runner_up"], errors="coerce").fillna(0).astype(int) == 0)
+            | calibration_predictions["score_margin"].isna()
         ].copy()
         single_candidate_calibration_metrics = {
             "single_candidate_score_threshold": single_candidate_score_threshold,
@@ -2844,25 +2976,21 @@ def run_classic(
         }
         promoted_gate_summary = {
             "mode": str(promoted_gate_config["mode"]),
-            "fit_split": str(promoted_gate_config["fit_split"]),
-            "selection_split": str(promoted_gate_config["selection_split"]),
+            "calibration_splits": list(calibration_splits),
             "test_split": str(promoted_gate_config["test_split"]),
-            "score_grid_size": int(promoted_gate_config["score_grid_size"]),
-            "margin_grid_size": int(promoted_gate_config["margin_grid_size"]),
-            "lambda_grid": list(promoted_gate_config["lambda_grid"]),
+            "fixed_grid_step": float(promoted_gate_config["fixed_grid_step"]),
+            "threshold_grid_points": int(selected_gate_result["threshold_grid_points"]),
             "selection_metric": str(promoted_gate_config["selection_metric"]),
             "error_weights": dict(promoted_gate_config["error_weights"]),
-            "selected_gate_name": selected_gate.name,
             "selected_gate": {
                 "name": selected_gate.name,
                 "score_thresholds": dict(selected_gate.score_thresholds),
                 "margin_thresholds": dict(selected_gate.margin_thresholds),
-                "lambda_penalty": selected_gate.lambda_penalty,
             },
             "selection_key": dict(selected_gate_result["selection_key"]),
-            "fit_metrics": dict(selected_gate_result["fit_metrics"]),
-            "check_metrics": dict(selected_gate_result["check_metrics"]),
-            "candidate_metrics": selected_gate_result["candidate_metrics"],
+            "calibration_metrics": dict(selected_gate_result["calibration_metrics"]),
+            "calibration_split_metrics": dict(selected_gate_result["calibration_split_metrics"]),
+            "bucket_metrics": dict(selected_gate_result["bucket_metrics"]),
         }
     elif fixed_bucketed_gate is None:
         fitted_rule = _fit_score_margin_gate(
@@ -3039,7 +3167,7 @@ def run_classic(
             "margin_threshold": margin_threshold,
             "single_candidate_score_threshold": single_candidate_score_threshold,
             "calibration_mode": (
-                "promoted_stratified_weighted_average_error_4score_2margin"
+                "promoted_stratified_full_calibration_fixed_grid_4score_2margin"
                 if promoted_gate_config is not None
                 else ("fixed_bucketed_gate" if fixed_bucketed_gate is not None else "legacy_score_margin")
             ),
@@ -3231,15 +3359,11 @@ def compare_to_expected(summary: dict[str, Any], expected: dict[str, Any]) -> di
 
     return {key: _expected_metric_actual_value(summary, key=key) - float(expected[key]) for key in expected}
 
+
 PROMOTED_PAIRWISE_COLUMNS = promoted_pairwise_aggregate_columns()
-PROMOTED_PAIRWISE_COVERAGE_COLUMNS = promoted_pairwise_coverage_columns()
 PROMOTED_NON_PAIRWISE_COLUMNS = tuple(PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS)
 PROMOTED_FEATURE_COLUMNS = promoted_linker_feature_columns()
-SUPPORTED_PROMOTED_FEATURE_COLUMNS = (
-    frozenset(PROMOTED_NON_PAIRWISE_COLUMNS)
-    | frozenset(PROMOTED_PAIRWISE_COLUMNS)
-    | frozenset(PROMOTED_PAIRWISE_COVERAGE_COLUMNS)
-)
+SUPPORTED_PROMOTED_FEATURE_COLUMNS = frozenset(PROMOTED_NON_PAIRWISE_COLUMNS) | frozenset(PROMOTED_PAIRWISE_COLUMNS)
 FROZEN_RETRIEVAL_POLICY = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY
 FROZEN_RETRIEVAL_POLICY_NAME = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME
 WEIGHTED_ERROR_WEIGHTS = {
@@ -3278,6 +3402,7 @@ class MinimalRawDatasetContext:
     pairwise_component_indices: dict[str, np.ndarray]
     component_keys_by_block: dict[str, tuple[str, ...]]
     feature_cache: dict[str, retrieval.QueryFeatures]
+    paper_author_name_cache: dict[str, frozenset[str]]
     full_summary_cache: dict[str, retrieval.ClusterSummary]
     residual_summary_cache: dict[tuple[str, str], retrieval.ClusterSummary]
     rust_hybrid_centroid_retriever: Any
@@ -3350,11 +3475,7 @@ def _load_target(path: Path) -> dict[str, Any]:
     if len(features) != int(target["feature_count"]):
         raise ValueError(f"Promoted target feature_count mismatch in {path}")
     unknown_pw = sorted(
-        feature
-        for feature in features
-        if feature.startswith("pw_")
-        and feature not in PROMOTED_PAIRWISE_COLUMNS
-        and feature not in PROMOTED_PAIRWISE_COVERAGE_COLUMNS
+        feature for feature in features if feature.startswith("pw_") and feature not in PROMOTED_PAIRWISE_COLUMNS
     )
     unknown_non_pw = sorted(
         feature
@@ -3443,6 +3564,12 @@ def _linker_artifact_audit_metadata(
         "target_metrics": dict(target.get("metrics", {})),
         "pairwise_model": pairwise_model,
         "training_source_bundle": _portable_repo_path(Path(args.source_bundle_root)),
+        "training_feature_mode": str(args.feature_mode),
+        "precomputed_feature_bundle": (
+            _portable_repo_path(Path(args.precomputed_feature_bundle_root))
+            if args.precomputed_feature_bundle_root is not None
+            else None
+        ),
         "training_feature_bundle_name": str(feature_bundle.bundle_name),
         "feature_nan_policy": _feature_nan_policy_summary(args),
         "featureization": [_strip_local_paths(dict(summary)) for summary in featureization_summaries],
@@ -4049,6 +4176,7 @@ def _build_full_retrieval_summary_cache(
     dataset: ANDData,
     component_details: Mapping[str, ComponentMembers],
     feature_cache: dict[str, retrieval.QueryFeatures],
+    paper_author_name_cache: dict[str, frozenset[str]],
     max_exemplars: int,
 ) -> dict[str, retrieval.ClusterSummary]:
     summaries: dict[str, retrieval.ClusterSummary] = {}
@@ -4059,6 +4187,7 @@ def _build_full_retrieval_summary_cache(
             candidate_cluster_id=None,
             signature_ids=details.signature_ids,
             feature_cache=feature_cache,
+            paper_author_name_cache=paper_author_name_cache,
             max_exemplars=max_exemplars,
         )
     return summaries
@@ -4155,6 +4284,7 @@ def _build_minimal_raw_dataset_context(
     pairwise_component_details = component_details
     pairwise_component_indices = component_indices
     feature_cache: dict[str, retrieval.QueryFeatures] = {}
+    paper_author_name_cache: dict[str, frozenset[str]] = {}
     retrieval_subblock_index, retrieval_subblock_index_diagnostics, component_keys_by_block = (
         _build_retrieval_subblock_index_for_components(
             dataset=dataset,
@@ -4166,6 +4296,7 @@ def _build_minimal_raw_dataset_context(
         dataset=dataset,
         component_details=component_details,
         feature_cache=feature_cache,
+        paper_author_name_cache=paper_author_name_cache,
         max_exemplars=max_exemplars,
     )
     rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(
@@ -4207,6 +4338,7 @@ def _build_minimal_raw_dataset_context(
         pairwise_component_indices=pairwise_component_indices,
         component_keys_by_block=component_keys_by_block,
         feature_cache=feature_cache,
+        paper_author_name_cache=paper_author_name_cache,
         full_summary_cache=full_summary_cache,
         residual_summary_cache={},
         rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
@@ -4217,6 +4349,7 @@ def _build_minimal_raw_dataset_context(
 
 def _release_minimal_raw_dataset_context(context: MinimalRawDatasetContext) -> None:
     context.feature_cache.clear()
+    context.paper_author_name_cache.clear()
     context.full_summary_cache.clear()
     context.residual_summary_cache.clear()
     context.retrieval_subblock_index.clear()
@@ -4332,6 +4465,23 @@ def _score_candidate_summaries_with_frozen_rust_policy(
         scoring_config=FROZEN_RETRIEVAL_POLICY.scoring_config_for_query(query),
     )
     return {str(summary.component_key): round(float(score), 6) for score, summary in ranked}
+
+
+def _current_retrieval_ranks_from_scores(
+    retrieval_scores: Mapping[str, float],
+    stored_retrieval_ranks: Mapping[str, int],
+) -> dict[str, int]:
+    """Return rank order induced by recomputed retrieval scores over the frozen candidate set."""
+
+    ordered = sorted(
+        retrieval_scores,
+        key=lambda component_key: (
+            -float(retrieval_scores[str(component_key)]),
+            int(stored_retrieval_ranks[str(component_key)]),
+            str(component_key),
+        ),
+    )
+    return {str(component_key): rank for rank, component_key in enumerate(ordered, start=1)}
 
 
 def _truthy_row_value(value: Any) -> bool:
@@ -4673,6 +4823,152 @@ def _validate_reusable_parquet(
     return row_count
 
 
+def _relative_bundle_asset_path(bundle: OfficialBundle, path: Path) -> str:
+    """Return a portable bundle-relative path for a resolved asset path."""
+
+    try:
+        return str(path.resolve().relative_to(bundle.root.resolve()))
+    except ValueError as exc:
+        raise ValueError(f"Precomputed feature path escapes bundle root: {path}") from exc
+
+
+def _target_spec_digest(target: Mapping[str, Any]) -> str:
+    """Return the stable digest for a promoted training target spec."""
+
+    return canonical_json_digest(dict(target))
+
+
+def _precomputed_table_metadata(bundle: OfficialBundle, target_features: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Return validated table metadata for a portable precomputed feature bundle."""
+
+    spec = dict(bundle.models["classic"])
+    table_metadata: dict[str, dict[str, Any]] = {}
+    for table_key in _classic_table_keys(spec):
+        path = _asset_file(bundle, "corrected_feature_rows", table_key)
+        row_count, columns = _parquet_row_count_and_columns(path)
+        missing_features = sorted(set(str(feature) for feature in target_features) - columns)
+        if missing_features:
+            raise ValueError(f"{table_key}: precomputed table is missing target features: {missing_features[:10]}")
+        table_metadata[table_key] = {
+            "path": _relative_bundle_asset_path(bundle, path),
+            "rows": int(row_count),
+            "feature_count": int(len(target_features)),
+        }
+    return table_metadata
+
+
+def _precomputed_promoted_bundle_metadata(
+    *,
+    bundle: OfficialBundle,
+    target: Mapping[str, Any],
+    source_mode: str,
+) -> dict[str, Any]:
+    """Build portable metadata for a validated precomputed promoted feature bundle."""
+
+    target_features = tuple(str(feature) for feature in target["features"])
+    return {
+        "schema_version": PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION,
+        "source_mode": str(source_mode),
+        "target_spec_digest": _target_spec_digest(target),
+        "feature_schema_digest": promoted_linker_feature_schema_digest(target_features),
+        "feature_count": int(target["feature_count"]),
+        "feature_columns": list(target_features),
+        "tables": _precomputed_table_metadata(bundle, target_features),
+    }
+
+
+def _stamp_precomputed_promoted_bundle_metadata(
+    *,
+    output_bundle_root: Path,
+    target: Mapping[str, Any],
+    source_mode: str,
+) -> None:
+    """Persist portable precomputed-feature metadata into `bundle.json`."""
+
+    bundle = load_bundle(output_bundle_root)
+    payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
+    payload["precomputed_promoted_feature_bundle"] = _precomputed_promoted_bundle_metadata(
+        bundle=bundle,
+        target=target,
+        source_mode=source_mode,
+    )
+    (output_bundle_root / "bundle.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _load_precomputed_promoted_feature_bundle(
+    *,
+    bundle_root: Path,
+    target: Mapping[str, Any],
+) -> tuple[OfficialBundle, list[dict[str, Any]]]:
+    """Load and validate a portable precomputed promoted feature bundle."""
+
+    root = bundle_root.resolve()
+    payload = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
+    metadata = payload.get("precomputed_promoted_feature_bundle")
+    if not isinstance(metadata, Mapping):
+        raise ValueError(
+            "precomputed-promoted bundles must include precomputed_promoted_feature_bundle metadata; "
+            "rerun materialization with --reuse-existing-features to stamp it"
+        )
+    if metadata.get("schema_version") != PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported precomputed promoted bundle schema_version: " f"{metadata.get('schema_version')!r}"
+        )
+    target_features = tuple(str(feature) for feature in target["features"])
+    if tuple(str(feature) for feature in metadata.get("feature_columns", ())) != target_features:
+        raise ValueError("Precomputed promoted bundle feature columns do not match target_json")
+    if int(metadata.get("feature_count", -1)) != int(target["feature_count"]):
+        raise ValueError("Precomputed promoted bundle feature_count does not match target_json")
+    expected_target_digest = _target_spec_digest(target)
+    if metadata.get("target_spec_digest") != expected_target_digest:
+        raise ValueError("Precomputed promoted bundle target_spec_digest does not match target_json")
+    expected_schema_digest = promoted_linker_feature_schema_digest(target_features)
+    if metadata.get("feature_schema_digest") != expected_schema_digest:
+        raise ValueError("Precomputed promoted bundle feature_schema_digest does not match target_json")
+
+    raw_files = dict(payload.get("assets", {}).get("corrected_feature_rows", {}).get("files", {}))
+    absolute_paths = sorted(str(path) for path in raw_files.values() if Path(str(path)).is_absolute())
+    if absolute_paths:
+        raise ValueError(f"Precomputed promoted bundle contains absolute feature paths: {absolute_paths[:5]}")
+
+    bundle = _bundle_with_promoted_target(load_bundle(root), target)
+    if tuple(str(feature) for feature in bundle.models["classic"]["feature_columns"]) != target_features:
+        raise ValueError("Precomputed promoted bundle classic feature_columns do not match target_json")
+    table_metadata = metadata.get("tables", {})
+    if not isinstance(table_metadata, Mapping):
+        raise ValueError("Precomputed promoted bundle metadata must include table row counts")
+    featureization_summaries: list[dict[str, Any]] = []
+    for table_key in _classic_table_keys(bundle.models["classic"]):
+        if table_key not in table_metadata:
+            raise ValueError(f"Precomputed promoted bundle metadata is missing table {table_key!r}")
+        table_payload = dict(cast(Mapping[str, Any], table_metadata[table_key]))
+        table_path = _asset_file(bundle, "corrected_feature_rows", table_key)
+        if Path(str(table_payload.get("path", ""))).is_absolute():
+            raise ValueError(f"{table_key}: precomputed table metadata path must be bundle-relative")
+        if str(table_payload.get("path", "")) != _relative_bundle_asset_path(bundle, table_path):
+            raise ValueError(f"{table_key}: precomputed table metadata path does not match bundle asset path")
+        expected_rows = int(table_payload["rows"])
+        row_count = _validate_reusable_parquet(
+            table_path,
+            expected_rows=expected_rows,
+            required_columns=target_features,
+            context=f"{table_key} precomputed promoted feature table",
+        )
+        featureization_summaries.append(
+            {
+                "table_key": table_key,
+                "output_path": str(table_path.relative_to(bundle.root)),
+                "rows": int(row_count),
+                "mode": "precomputed-promoted",
+                "reused": True,
+            }
+        )
+    return bundle, featureization_summaries
+
+
 def _validate_materialized_target_features(
     frame: pd.DataFrame,
     target_features: Sequence[str],
@@ -4692,6 +4988,32 @@ def _validate_materialized_target_features(
             infinite_features[str(column)] = infinite_count
     if infinite_features:
         raise ValueError(f"{context}: materialized features contain infinite values: {infinite_features}")
+
+
+def _required_materialized_output_columns(labels: pd.DataFrame, target_features: Sequence[str]) -> list[str]:
+    """Return output columns, treating label columns as reusable feature columns."""
+
+    columns = [str(column) for column in labels.columns]
+    seen = set(columns)
+    for feature in target_features:
+        feature = str(feature)
+        if feature not in seen:
+            columns.append(feature)
+            seen.add(feature)
+    return columns
+
+
+def _target_feature_frame_to_append(
+    rows: pd.DataFrame,
+    dataset_features: Mapping[str, np.ndarray],
+    target_features: Sequence[str],
+) -> pd.DataFrame:
+    """Return materialized target features that are not already present in row labels."""
+
+    existing = {str(column) for column in rows.columns}
+    return pd.DataFrame(
+        {str(column): dataset_features[str(column)] for column in target_features if str(column) not in existing}
+    )
 
 
 def _copy_bundle_support_files(
@@ -4786,6 +5108,12 @@ def _materialize_promoted_feature_bundle(
         encoding="utf-8",
     )
     _write_json(output_bundle_root / "featureization_summary.json", summaries)
+    if table_keys is None and datasets is None and limit_rows is None:
+        _stamp_precomputed_promoted_bundle_metadata(
+            output_bundle_root=output_bundle_root,
+            target=target,
+            source_mode="rust-recompute-pw",
+        )
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target), summaries
 
 
@@ -4796,6 +5124,7 @@ def _build_summary_for_members(
     candidate_cluster_id: str | None,
     signature_ids: Sequence[str],
     feature_cache: dict[str, retrieval.QueryFeatures],
+    paper_author_name_cache: dict[str, frozenset[str]] | None,
     max_exemplars: int,
 ) -> retrieval.ClusterSummary:
     block_key, cluster_id = _component_id_parts(component_key, candidate_cluster_id)
@@ -4807,6 +5136,7 @@ def _build_summary_for_members(
         signature_ids=[str(signature_id) for signature_id in signature_ids],
         max_exemplars=max_exemplars,
         feature_cache=feature_cache,
+        paper_author_name_cache=paper_author_name_cache,
         orcid_enabled=False,
     )
 
@@ -4824,23 +5154,22 @@ def _initialize_row_signal_arrays(row_count: int, rows: pd.DataFrame) -> dict[st
         "query_year_missing",
         "query_has_affiliations",
         "query_has_coauthors",
-        "query_has_full_first",
-        "query_has_title_terms",
-        "query_has_venue_terms",
         "query_has_specter",
         "query_has_name_counts",
         "candidate_has_affiliations",
         "candidate_has_coauthors",
-        "candidate_has_title_terms",
-        "candidate_has_venue_terms",
         "candidate_has_specter_exemplars",
         "candidate_has_name_counts",
-        "middle_initial_compatibility",
+        "candidate_cluster_max_paper_author_count",
+        "paper_author_list_max_jaccard",
+        "paper_author_list_max_containment",
+        "paper_author_list_max_overlap_count",
+        "local_author_window10_jaccard_max",
+        "local_author_window10_overlap_count_max",
+        "best_author_count_log_absdiff",
         "affiliation_overlap",
         "coauthor_overlap",
-        "venue_overlap",
         "year_compatibility",
-        "title_overlap",
         "specter_exemplar_similarity",
         "min_distance",
         "mean_distance",
@@ -4849,9 +5178,7 @@ def _initialize_row_signal_arrays(row_count: int, rows: pd.DataFrame) -> dict[st
         "pair_count",
         "last_name_count_min_rarity",
         "candidate_last_name_count_min_rarity",
-        "candidate_last_first_name_count_min_rarity",
         "last_first_name_count_min_rarity",
-        "first_prefix_x_last_first_name_count_min_rarity",
     )
     signals: dict[str, Any] = {name: np.full(row_count, np.nan, dtype=np.float32) for name in float_signal_names}
     signals["candidate_component_key"] = rows["candidate_component_key"].astype(str).to_numpy(dtype=object)
@@ -4893,9 +5220,6 @@ def _fill_row_signal(
     row_signals["query_year_missing"][local_index] = float(query_year_missing)
     row_signals["query_has_affiliations"][local_index] = float(query.has_affiliations)
     row_signals["query_has_coauthors"][local_index] = float(query.has_coauthors)
-    row_signals["query_has_full_first"][local_index] = float(bool(getattr(query, "has_full_first", False)))
-    row_signals["query_has_title_terms"][local_index] = float(bool(getattr(query, "title_terms", frozenset())))
-    row_signals["query_has_venue_terms"][local_index] = float(bool(getattr(query, "venue_terms", frozenset())))
     row_signals["query_has_specter"][local_index] = float(
         bool(getattr(query, "has_specter", False)) and getattr(query, "specter", None) is not None
     )
@@ -4904,18 +5228,17 @@ def _fill_row_signal(
         bool(summary.affiliation_counts) and summary.size > 0
     )
     row_signals["candidate_has_coauthors"][local_index] = float(bool(summary.coauthor_counts) and summary.size > 0)
-    row_signals["candidate_has_title_terms"][local_index] = float(bool(summary.title_counts) and summary.size > 0)
-    row_signals["candidate_has_venue_terms"][local_index] = float(bool(summary.venue_counts) and summary.size > 0)
     row_signals["candidate_has_specter_exemplars"][local_index] = float(
         bool(getattr(summary, "exemplar_vectors", ()) or ())
     )
     row_signals["candidate_has_name_counts"][local_index] = float(
         bool(getattr(summary, "name_counts_values", ()) or ())
     )
-    row_signals["middle_initial_compatibility"][local_index] = round(
-        float(middle_initial_compatibility(query, summary)),
-        6,
+    row_signals["candidate_cluster_max_paper_author_count"][local_index] = float(
+        getattr(summary, "max_paper_author_count", 0)
     )
+    for signal_name, value in retrieval.raw_paper_evidence_features(query, summary).items():
+        row_signals[signal_name][local_index] = float(value)
     row_signals["affiliation_overlap"][local_index] = round(
         float(counter_query_overlap(query.affiliation_terms, summary.affiliation_counts, summary.size)),
         6,
@@ -4924,12 +5247,7 @@ def _fill_row_signal(
         float(counter_query_overlap(query.coauthor_blocks, summary.coauthor_counts, summary.size)),
         6,
     )
-    row_signals["venue_overlap"][local_index] = round(
-        float(counter_query_overlap(query.venue_terms, summary.venue_counts, summary.size)),
-        6,
-    )
     row_signals["year_compatibility"][local_index] = round(float(year_compatibility(query.year, summary)), 6)
-    row_signals["title_overlap"][local_index] = round(float(title_overlap(query, summary)), 6)
     row_signals["specter_exemplar_similarity"][local_index] = round(
         float(specter_exemplar_similarity(query, summary)),
         6,
@@ -4942,9 +5260,7 @@ def _fill_row_signal(
     for signal_name in (
         "last_name_count_min_rarity",
         "candidate_last_name_count_min_rarity",
-        "candidate_last_first_name_count_min_rarity",
         "last_first_name_count_min_rarity",
-        "first_prefix_x_last_first_name_count_min_rarity",
     ):
         row_signals[signal_name][local_index] = float(rarity.get(signal_name, 0.0) or 0.0)
 
@@ -5016,25 +5332,14 @@ def _semantic_row_nan_masks(
     competitor_missing = _singleton_query_group_mask(candidate_batch)
     query_year_missing = np.asarray(row_signals["query_year_missing"], dtype=np.float32) > 0.0
     candidate_year_range_missing = np.asarray(row_signals["candidate_year_range_missing"], dtype=np.float32) > 0.0
-    year_missing = query_year_missing | candidate_year_range_missing
     query_has_affiliations = _bool_row_signal(row_signals, "query_has_affiliations", row_count)
     query_has_coauthors = _bool_row_signal(row_signals, "query_has_coauthors", row_count)
-    query_has_title_terms = _bool_row_signal(row_signals, "query_has_title_terms", row_count)
-    query_has_venue_terms = _bool_row_signal(row_signals, "query_has_venue_terms", row_count)
     query_has_specter = _bool_row_signal(row_signals, "query_has_specter", row_count)
     query_has_name_counts = _bool_row_signal(row_signals, "query_has_name_counts", row_count)
     candidate_has_affiliations = _bool_row_signal(row_signals, "candidate_has_affiliations", row_count)
     candidate_has_coauthors = _bool_row_signal(row_signals, "candidate_has_coauthors", row_count)
-    candidate_has_title_terms = _bool_row_signal(row_signals, "candidate_has_title_terms", row_count)
-    candidate_has_venue_terms = _bool_row_signal(row_signals, "candidate_has_venue_terms", row_count)
     candidate_has_specter_exemplars = _bool_row_signal(row_signals, "candidate_has_specter_exemplars", row_count)
     candidate_has_name_counts = _bool_row_signal(row_signals, "candidate_has_name_counts", row_count)
-    query_first_prefix_available = _normalized_alpha_present_signal(
-        row_signals,
-        "query_first_token",
-        row_count,
-        min_length=2,
-    )
     candidate_dominant_first_available = _normalized_alpha_present_signal(
         row_signals,
         "dominant_first_name",
@@ -5043,60 +5348,53 @@ def _semantic_row_nan_masks(
     query_name_count_missing = ~query_has_name_counts
     candidate_name_count_missing = ~candidate_has_name_counts
     name_count_missing = query_name_count_missing | candidate_name_count_missing
-    query_first_prefix_missing = ~query_first_prefix_available
-    first_prefix_comparison_missing = query_first_prefix_missing | ~candidate_dominant_first_available
+    query_first_any_available = _normalized_alpha_present_signal(
+        row_signals,
+        "query_first_token",
+        row_count,
+        min_length=1,
+    )
+    first_name_comparison_missing = ~query_first_any_available | ~candidate_dominant_first_available
 
     distance_available = ~distance_missing
     competitor_available = ~competitor_missing
-    year_source_available = ~query_year_missing | ~candidate_year_range_missing
-    affiliation_source_available = query_has_affiliations | candidate_has_affiliations
-    coauthor_source_available = query_has_coauthors | candidate_has_coauthors
-    title_source_available = query_has_title_terms | candidate_has_title_terms
-    venue_source_available = query_has_venue_terms | candidate_has_venue_terms
-    specter_source_available = query_has_specter | candidate_has_specter_exemplars
-    anchor_support_missing = ~(
-        distance_available
-        | competitor_available
-        | specter_source_available
-        | title_source_available
-        | coauthor_source_available
-        | affiliation_source_available
-        | venue_source_available
-        | year_source_available
-    )
-    strong_support_missing = ~(
-        distance_available
-        | specter_source_available
-        | title_source_available
-        | coauthor_source_available
-        | affiliation_source_available
-        | venue_source_available
-        | year_source_available
-    )
-    residual_support_missing = ~(
-        distance_available
-        | competitor_available
-        | specter_source_available
-        | title_source_available
-        | coauthor_source_available
-        | year_source_available
-    )
+    year_comparison_missing = query_year_missing | candidate_year_range_missing
+    affiliation_comparison_missing = ~(query_has_affiliations & candidate_has_affiliations)
+    coauthor_comparison_missing = ~(query_has_coauthors & candidate_has_coauthors)
+    specter_comparison_missing = ~(query_has_specter & candidate_has_specter_exemplars)
+    anchor_support_missing = ~(distance_available | competitor_available)
+    strong_support_missing = distance_missing
+    residual_support_missing = ~(distance_available | competitor_available)
     return {
         "min_distance": distance_missing,
-        "retrieval_score_gap_vs_best_competitor": competitor_missing,
-        "top5_distance_best_gap": distance_missing,
+        "retrieval_reciprocal_rank": np.zeros(row_count, dtype=bool),
+        "specter_exemplar_similarity": specter_comparison_missing,
+        "coauthor_overlap": coauthor_comparison_missing,
+        "affiliation_overlap": affiliation_comparison_missing,
+        "year_compatibility": year_comparison_missing,
+        "candidate_year_span": candidate_year_range_missing,
+        "year_gap_to_candidate_range": year_comparison_missing,
+        "year_gap_signed_to_candidate_range": year_comparison_missing,
         "affiliation_contradiction_severity": ~query_has_affiliations,
-        "query_first_prefix_match": first_prefix_comparison_missing,
+        "same_dominant_first_as_best_top5": first_name_comparison_missing,
+        "same_family_as_heuristic_choice": first_name_comparison_missing | distance_missing,
+        "query_first_prefix_match_any_length": first_name_comparison_missing,
         "anchor_evidence_count": anchor_support_missing,
         "strong_positive_anchor_score": strong_support_missing,
         "weak_residual_anchor_score": residual_support_missing,
         "sparse_relative_winner_score": residual_support_missing,
         "last_name_count_min_rarity": name_count_missing,
-        "candidate_last_first_name_count_min_rarity": candidate_name_count_missing,
-        "first_prefix_x_last_first_name_count_min_rarity": name_count_missing | query_first_prefix_missing,
-        "year_mismatch_severity": year_missing,
+        "last_first_name_count_min_rarity": name_count_missing,
         "top5_mean_distance": distance_missing,
-        "distance_spread_top5_minus_min": distance_missing,
+        "cluster_size_log": np.zeros(row_count, dtype=bool),
+        "candidate_dominant_first_name_length": ~candidate_dominant_first_available,
+        "paper_author_list_max_jaccard": np.zeros(row_count, dtype=bool),
+        "paper_author_list_max_containment": np.zeros(row_count, dtype=bool),
+        "paper_author_list_max_overlap_count": np.zeros(row_count, dtype=bool),
+        "local_author_window10_jaccard_max": np.zeros(row_count, dtype=bool),
+        "local_author_window10_overlap_count_max": np.zeros(row_count, dtype=bool),
+        "best_author_count_log_absdiff": np.zeros(row_count, dtype=bool),
+        "candidate_cluster_max_paper_author_count": np.zeros(row_count, dtype=bool),
     }
 
 
@@ -5155,23 +5453,10 @@ def _pairwise_feature_values(pairwise_stats: Any) -> dict[str, np.ndarray]:
     if pairwise_columns != PROMOTED_PAIRWISE_COLUMNS:
         raise ValueError("Rust pairwise aggregate column order mismatch in minimal raw materialization")
     pairwise_matrix = pairwise_stats.feature_matrix().astype(np.float32, copy=False)
-    coverage_matrix = pairwise_stats.coverage_feature_matrix().astype(np.float32, copy=False)
-    if coverage_matrix.shape != (pairwise_matrix.shape[0], len(PROMOTED_PAIRWISE_COVERAGE_COLUMNS)):
-        raise ValueError(
-            "Rust pairwise coverage column order mismatch in minimal raw materialization: "
-            f"{coverage_matrix.shape} != ({pairwise_matrix.shape[0]}, {len(PROMOTED_PAIRWISE_COVERAGE_COLUMNS)})"
-        )
-    values = {
+    return {
         column: np.asarray(pairwise_matrix[:, column_index], dtype=np.float32)
         for column_index, column in enumerate(pairwise_columns)
     }
-    values.update(
-        {
-            column: np.asarray(coverage_matrix[:, column_index], dtype=np.float32)
-            for column_index, column in enumerate(PROMOTED_PAIRWISE_COVERAGE_COLUMNS)
-        }
-    )
-    return values
 
 
 def _assemble_minimal_raw_feature_values(
@@ -5260,6 +5545,7 @@ def _materialize_minimal_raw_dataset_rows(
                     candidate_cluster_id=component_cluster_ids.get(str(component_key)),
                     signature_ids=active_member_ids,
                     feature_cache=feature_cache,
+                    paper_author_name_cache=context.paper_author_name_cache,
                     max_exemplars=max_exemplars,
                 )
                 residual_summary_cache[cache_key] = summary
@@ -5273,6 +5559,7 @@ def _materialize_minimal_raw_dataset_rows(
                 candidate_cluster_id=component_cluster_ids.get(str(component_key)),
                 signature_ids=member_ids,
                 feature_cache=feature_cache,
+                paper_author_name_cache=context.paper_author_name_cache,
                 max_exemplars=max_exemplars,
             )
             full_summary_cache[str(component_key)] = summary
@@ -5291,6 +5578,7 @@ def _materialize_minimal_raw_dataset_rows(
             dataset,
             query_signature_id,
             feature_cache=feature_cache,
+            paper_author_name_cache=context.paper_author_name_cache,
             orcid_enabled=False,
         )
         query_first_token_for_prefix = _query_first_token_for_prefix(group, base_query)
@@ -5328,12 +5616,13 @@ def _materialize_minimal_raw_dataset_rows(
             max_block_component_size=context.max_block_component_size,
             n_jobs=n_jobs,
         )
+        current_retrieval_ranks = _current_retrieval_ranks_from_scores(retrieval_scores, retrieval_ranks)
         contexts.append(
             {
                 "query": query,
                 "query_first_token_for_prefix": query_first_token_for_prefix,
                 "retrieval_scores": retrieval_scores,
-                "retrieval_ranks": retrieval_ranks,
+                "retrieval_ranks": current_retrieval_ranks,
                 "summaries": summaries,
                 "rows_by_component": rows_by_component,
             }
@@ -5477,7 +5766,7 @@ def _materialize_minimal_raw_table(
     labels = pd.read_parquet(labels_path)
     positions = _selected_row_positions(labels, datasets, limit_rows)
     labels = labels.iloc[positions].reset_index(drop=True)
-    required_output_columns = [*labels.columns.astype(str), *(str(column) for column in target_features)]
+    required_output_columns = _required_materialized_output_columns(labels, target_features)
     if reuse_existing_features and output_path.exists():
         row_count = _validate_reusable_parquet(
             output_path,
@@ -5576,7 +5865,7 @@ def _materialize_minimal_raw_table(
         finally:
             _release_minimal_raw_dataset_context(context)
             del context
-        feature_frame = pd.DataFrame({str(column): dataset_features[str(column)] for column in target_features})
+        feature_frame = _target_feature_frame_to_append(dataset_rows, dataset_features, target_features)
         partial_output = pd.concat([dataset_rows.reset_index(drop=True), feature_frame], axis=1)
         partial_output.insert(0, "_row_position", row_positions)
         partial_output.to_parquet(partial_path, index=False)
@@ -5641,7 +5930,7 @@ def _write_minimal_raw_partial_frame(
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
 ) -> None:
-    feature_frame = pd.DataFrame({str(column): dataset_features[str(column)] for column in target_features})
+    feature_frame = _target_feature_frame_to_append(rows, dataset_features, target_features)
     partial_output = pd.concat([rows.reset_index(drop=True), feature_frame], axis=1)
     partial_output.insert(0, "_row_position", row_positions)
     partial_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5683,6 +5972,7 @@ def _finalize_minimal_raw_bundle_metadata(
     output_bundle_root: Path,
     target: Mapping[str, Any],
     selected_keys: Sequence[str],
+    stamp_precomputed_metadata: bool,
 ) -> OfficialBundle:
     payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
     feature_count = int(target["feature_count"])
@@ -5706,6 +5996,12 @@ def _finalize_minimal_raw_bundle_metadata(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    if stamp_precomputed_metadata:
+        _stamp_precomputed_promoted_bundle_metadata(
+            output_bundle_root=output_bundle_root,
+            target=target,
+            source_mode="minimal-raw-rust",
+        )
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target)
 
 
@@ -5771,7 +6067,7 @@ def _materialize_minimal_raw_feature_bundle(
             rows=labels,
             component_membership_cache=component_membership_cache,
         )
-        required_output_columns = [*labels.columns.astype(str), *target_features]
+        required_output_columns = _required_materialized_output_columns(labels, target_features)
         if reuse_existing_features and output_path.exists():
             row_count = _validate_reusable_parquet(
                 output_path,
@@ -5946,6 +6242,7 @@ def _materialize_minimal_raw_feature_bundle(
             output_bundle_root=output_bundle_root,
             target=target,
             selected_keys=selected_keys,
+            stamp_precomputed_metadata=table_keys is None and datasets is None and limit_rows is None,
         ),
         summaries,
     )
@@ -6136,7 +6433,6 @@ def _train_and_save_prod_artifact(
 def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
     train = dict(summary["training_summary"])
     stratified_test = dict(summary["stratified_eval_test_split"]["overall"]["test"])
-    gate = summary["abstain_rule"]["promoted_stratified_gate"]
     n_queries = int(stratified_test["n_queries"])
     false_abstain_error_rate = float(stratified_test["false_abstain"]) / float(n_queries) if n_queries else 0.0
     false_link_error_rate = float(stratified_test["false_link"]) / float(n_queries) if n_queries else 0.0
@@ -6154,7 +6450,6 @@ def _observed_official_metrics(summary: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "training_rows": int(train["rows"]),
         "training_positive_rows": int(train["positive_rows"]),
-        "selected_gate_name": str(gate["selected_gate_name"]),
         "stratified_test_queries": n_queries,
         "stratified_test_accuracy": float(stratified_test["accuracy"]),
         "stratified_test_balanced_accuracy": float(stratified_test["balanced_accuracy"]),
@@ -6277,6 +6572,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "source_bundle_root": str(source_bundle.root),
                 "feature_bundle_root": str(feature_bundle.root),
                 "pairwise_model_path": str(args.pairwise_model_path),
+                "feature_count": int(target["feature_count"]),
                 "minimal_raw_component_scope": "block-local",
                 "feature_nan_policy": feature_nan_policy,
                 "featureization": featureization_summaries,
@@ -6307,11 +6603,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             result = {
                 "mode": args.feature_mode,
                 "feature_bundle_root": str(feature_bundle.root),
+                "feature_count": int(target["feature_count"]),
                 "feature_nan_policy": feature_nan_policy,
                 "featureization": featureization_summaries,
             }
             _write_json(output_dir / "run_summary.json", result)
             return result
+    elif args.feature_mode == "precomputed-promoted":
+        if args.precomputed_feature_bundle_root is None:
+            raise SystemExit("--feature-mode precomputed-promoted requires --precomputed-feature-bundle-root")
+        if not args.run_full:
+            raise SystemExit("precomputed-promoted train/calibrate/eval requires --run-full")
+        if args.materialize_only:
+            raise SystemExit("precomputed-promoted does not materialize features")
+        if args.limit_rows is not None or args.tables or args.datasets:
+            raise SystemExit("precomputed-promoted requires a complete validated feature bundle")
+        feature_bundle, featureization_summaries = _load_precomputed_promoted_feature_bundle(
+            bundle_root=args.precomputed_feature_bundle_root,
+            target=target,
+        )
     else:
         raise ValueError(f"Unknown feature mode: {args.feature_mode}")
 
@@ -6445,9 +6755,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hyperopt-seed", type=int, default=13)
     parser.add_argument(
         "--feature-mode",
-        choices=("minimal-raw-rust", "rust-recompute-pw"),
+        choices=("minimal-raw-rust", "rust-recompute-pw", "precomputed-promoted"),
         default="minimal-raw-rust",
         help="Feature source for the official train/calibrate/eval run.",
+    )
+    parser.add_argument(
+        "--precomputed-feature-bundle-root",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit portable precomputed promoted feature bundle root. Required only with "
+            "--feature-mode precomputed-promoted."
+        ),
     )
     parser.add_argument(
         "--pairwise-source",

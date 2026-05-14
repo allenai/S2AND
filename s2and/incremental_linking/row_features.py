@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -15,22 +14,14 @@ from s2and.text import normalize_text
 
 logger = logging.getLogger("s2and")
 
-CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE = 192.0
-GENERIC_HEURISTIC_OVERRIDE_MARGIN = 0.01
-GENERIC_CROSS_FAMILY_EXTRA_MARGIN = 0.04
 GENERIC_FAMILY_MIN_COUNT = 3
 GENERIC_FAMILY_MIN_RATIO = 0.6
-EXACT_TITLE_ANCHOR_THRESHOLD = 0.95
-ANCHOR_SUPPORT_OVERLAP_THRESHOLD = 0.05
-ANCHOR_YEAR_COMPATIBILITY_THRESHOLD = 0.85
-SEVERE_CONTRADICTION_THRESHOLD = 0.75
 
 _REQUIRED_BASE_SIGNALS: frozenset[str] = frozenset(
     {
         "retrieval_score",
         "retrieval_rank",
         "candidate_component_key",
-        "query_view",
         "cluster_size",
         "named_signature_count",
         "dominant_first_name",
@@ -41,21 +32,21 @@ _REQUIRED_BASE_SIGNALS: frozenset[str] = frozenset(
         "query_year",
         "query_year_missing",
         "query_has_affiliations",
-        "query_has_coauthors",
-        "middle_initial_compatibility",
         "affiliation_overlap",
         "coauthor_overlap",
-        "venue_overlap",
         "year_compatibility",
-        "title_overlap",
         "specter_exemplar_similarity",
         "min_distance",
         "top5_mean_distance",
-        "pair_count",
         "last_name_count_min_rarity",
-        "candidate_last_first_name_count_min_rarity",
         "last_first_name_count_min_rarity",
-        "first_prefix_x_last_first_name_count_min_rarity",
+        "candidate_cluster_max_paper_author_count",
+        "paper_author_list_max_jaccard",
+        "paper_author_list_max_containment",
+        "paper_author_list_max_overlap_count",
+        "local_author_window10_jaccard_max",
+        "local_author_window10_overlap_count_max",
+        "best_author_count_log_absdiff",
     }
 )
 
@@ -93,37 +84,16 @@ def _groups(candidate_batch: LinkerCandidateBatch) -> list[np.ndarray]:
     return [chunk for chunk in np.split(order, starts) if len(chunk) and int(chunk.max()) < row_count]
 
 
-def _best_index_by_group(
-    primary: np.ndarray,
-    retrieval_ranks: np.ndarray,
-    component_keys: np.ndarray,
-    groups: Sequence[np.ndarray],
-    *,
-    higher_is_better: bool,
-) -> np.ndarray:
-    out = np.zeros(len(primary), dtype=np.uint32)
-    for group in groups:
-        best = min(
-            (int(index) for index in group),
-            key=lambda index: (
-                -float(primary[index]) if higher_is_better else float(primary[index]),
-                int(retrieval_ranks[index]),
-                str(component_keys[index]),
-            ),
-        )
-        out[group] = best
-    return out
-
-
 def _retrieval_ordered_groups(
     groups: Sequence[np.ndarray],
+    retrieval_score: np.ndarray,
     retrieval_rank: np.ndarray,
     component_keys: np.ndarray,
 ) -> list[list[int]]:
     return [
         sorted(
             (int(index) for index in group),
-            key=lambda idx: (int(retrieval_rank[idx]), str(component_keys[idx])),
+            key=lambda idx: (-float(retrieval_score[idx]), int(retrieval_rank[idx]), str(component_keys[idx])),
         )
         for group in groups
     ]
@@ -147,15 +117,9 @@ def _normalized_alpha_array(values: np.ndarray) -> np.ndarray:
     return np.asarray(out, dtype=object)
 
 
-def _cluster_size_log_capped(cluster_size: np.ndarray) -> np.ndarray:
+def _cluster_size_log(cluster_size: np.ndarray) -> np.ndarray:
     values = np.maximum(cluster_size.astype(np.float32), np.float32(0.0))
-    out = np.zeros_like(values, dtype=np.float32)
-    observed = values > 0.0
-    out[observed] = np.minimum(
-        np.float32(1.0),
-        np.log1p(values[observed]) / np.float32(math.log1p(CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE)),
-    )
-    return out
+    return np.log1p(values).astype(np.float32)
 
 
 def _family_ids(
@@ -174,59 +138,35 @@ def _family_ids(
     return out
 
 
-def _confident_family_mask(family_ids: np.ndarray, component_keys: np.ndarray) -> np.ndarray:
-    return np.asarray(
-        [
-            bool(str(family)) and str(family) != str(component)
-            for family, component in zip(family_ids, component_keys, strict=True)
-        ],
-        dtype=bool,
-    )
-
-
-def _cross_family(left: int, right: int, family_ids: np.ndarray, confident_family: np.ndarray) -> bool:
-    return bool(confident_family[left] and confident_family[right] and str(family_ids[left]) != str(family_ids[right]))
-
-
-def _coarse_family_keys(
-    dominant_first_alpha: np.ndarray,
-    family_alpha: np.ndarray,
-    component_alpha: np.ndarray,
-) -> np.ndarray:
-    out = np.empty(len(dominant_first_alpha), dtype=object)
-    for index, (dominant, family, component) in enumerate(
-        zip(dominant_first_alpha, family_alpha, component_alpha, strict=True)
-    ):
-        out[index] = str(dominant or family or component)[:3]
-    return out
-
-
-def _first_name_compatibility(query_first: Any, dominant_first: Any) -> float:
-    query = _normalize_alpha(query_first)
-    dominant = _normalize_alpha(dominant_first)
-    if not dominant:
-        return 0.0
-    if query and (query == dominant or query.startswith(dominant) or dominant.startswith(query)):
-        return 1.0
-    if query and dominant.startswith(query[0]):
-        return 1.0
-    return 0.0
-
-
-def _year_mismatch_severity(
+def _year_gap_to_candidate_range(
     query_year: np.ndarray,
     query_year_missing: np.ndarray,
     candidate_year_min: np.ndarray,
     candidate_year_max: np.ndarray,
     candidate_year_range_missing: np.ndarray,
-) -> np.ndarray:
-    out = np.zeros(len(query_year), dtype=np.float32)
-    observed = (query_year_missing == 0) & (candidate_year_range_missing == 0)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    gap = np.zeros(len(query_year), dtype=np.float32)
+    signed_gap = np.zeros(len(query_year), dtype=np.float32)
+    span = np.zeros(len(query_year), dtype=np.float32)
+    candidate_observed = candidate_year_range_missing == 0
+    span[candidate_observed] = np.maximum(
+        np.float32(0.0),
+        candidate_year_max[candidate_observed] - candidate_year_min[candidate_observed],
+    )
+    observed = (query_year_missing == 0) & candidate_observed
     lower = observed & (query_year < candidate_year_min)
     upper = observed & (query_year > candidate_year_max)
-    out[lower] = np.minimum(1.0, (candidate_year_min[lower] - query_year[lower]).astype(np.float32) / 10.0)
-    out[upper] = np.minimum(1.0, (query_year[upper] - candidate_year_max[upper]).astype(np.float32) / 10.0)
-    return np.round(out, 6)
+    lower_gap = (candidate_year_min[lower] - query_year[lower]).astype(np.float32)
+    upper_gap = (query_year[upper] - candidate_year_max[upper]).astype(np.float32)
+    gap[lower] = lower_gap
+    gap[upper] = upper_gap
+    signed_gap[lower] = -lower_gap
+    signed_gap[upper] = upper_gap
+    return np.round(gap, 6), np.round(signed_gap, 6), np.round(span, 6)
+
+
+def _normalized_alpha_lengths(values: np.ndarray) -> np.ndarray:
+    return np.asarray([float(len(str(value or ""))) for value in values], dtype=np.float32)
 
 
 def _derive_group_features(
@@ -236,72 +176,54 @@ def _derive_group_features(
     retrieval_rank: np.ndarray,
     component_keys: np.ndarray,
     family_ids: np.ndarray,
-    confident_family: np.ndarray,
-    coarse_family_keys: np.ndarray,
-    pair_count: np.ndarray,
+    dominant_first_alpha: np.ndarray,
     top5_mean_distance: np.ndarray,
 ) -> dict[str, np.ndarray]:
     row_count = len(retrieval_score)
     retrieval_score_gap_vs_best_competitor = np.zeros(row_count, dtype=np.float32)
-    retrieval_score_best_gap = np.zeros(row_count, dtype=np.float32)
     same_family_as_top1 = np.zeros(row_count, dtype=np.float32)
     same_family_as_best_top5 = np.zeros(row_count, dtype=np.float32)
     same_family_as_heuristic_choice = np.zeros(row_count, dtype=np.float32)
-    coarse_family_top5_best_gap = np.zeros(row_count, dtype=np.float32)
-    candidate_pair_share = np.ones(row_count, dtype=np.float32)
+    dominant_first_top1_match = np.zeros(row_count, dtype=np.float32)
+    same_dominant_first_as_best_top5 = np.zeros(row_count, dtype=np.float32)
+    current_retrieval_rank = np.zeros(row_count, dtype=np.float32)
 
     for ordered in ordered_groups:
-        group = np.asarray(ordered, dtype=np.uint32)
         top1 = ordered[0]
         runner_up = ordered[1] if len(ordered) > 1 else ordered[0]
         best_top5 = min(
             ordered,
             key=lambda idx: (float(top5_mean_distance[idx]), int(retrieval_rank[idx]), str(component_keys[idx])),
         )
-        heuristic_choice = best_top5
-        if best_top5 != top1:
-            effective_margin = GENERIC_HEURISTIC_OVERRIDE_MARGIN
-            if _cross_family(top1, best_top5, family_ids, confident_family):
-                effective_margin += GENERIC_CROSS_FAMILY_EXTRA_MARGIN
-            if float(top5_mean_distance[best_top5]) + effective_margin >= float(top5_mean_distance[top1]):
-                heuristic_choice = top1
-        best_score = float(np.max(retrieval_score[group]))
-        for index in group:
+        for current_rank, index in enumerate(ordered, start=1):
             competitor = runner_up if int(index) == top1 else top1
+            current_retrieval_rank[index] = float(current_rank)
             retrieval_score_gap_vs_best_competitor[index] = float(retrieval_score[index] - retrieval_score[competitor])
-            retrieval_score_best_gap[index] = float(best_score - retrieval_score[index])
             same_family_as_top1[index] = float(
                 bool(family_ids[index]) and str(family_ids[index]) == str(family_ids[top1])
             )
             same_family_as_best_top5[index] = float(
                 bool(family_ids[index]) and str(family_ids[index]) == str(family_ids[best_top5])
             )
+            dominant_first_top1_match[index] = float(
+                bool(dominant_first_alpha[index])
+                and str(dominant_first_alpha[index]) == str(dominant_first_alpha[top1])
+            )
+            same_dominant_first_as_best_top5[index] = float(
+                bool(dominant_first_alpha[index])
+                and str(dominant_first_alpha[index]) == str(dominant_first_alpha[best_top5])
+            )
             same_family_as_heuristic_choice[index] = float(
-                bool(family_ids[index]) and str(family_ids[index]) == str(family_ids[heuristic_choice])
+                dominant_first_top1_match[index] * retrieval_score[index]
+                + same_dominant_first_as_best_top5[index] * (1.0 - top5_mean_distance[index])
             )
-
-        coarse_to_rows: dict[str, list[int]] = {}
-        for index in group:
-            coarse = str(coarse_family_keys[index])
-            coarse_to_rows.setdefault(coarse, []).append(int(index))
-        for coarse_rows in coarse_to_rows.values():
-            total_pairs = max(1.0, float(np.sum(pair_count[coarse_rows])))
-            best = min(
-                coarse_rows,
-                key=lambda idx: (float(top5_mean_distance[idx]), int(retrieval_rank[idx]), str(component_keys[idx])),
-            )
-            for index in coarse_rows:
-                coarse_family_top5_best_gap[index] = float(top5_mean_distance[index] - top5_mean_distance[best])
-                candidate_pair_share[index] = float(pair_count[index] / total_pairs)
 
     return {
         "retrieval_score_gap_vs_best_competitor": np.round(retrieval_score_gap_vs_best_competitor, 6),
-        "retrieval_score_best_gap": np.round(retrieval_score_best_gap, 6),
         "same_family_as_top1": same_family_as_top1,
-        "same_family_as_best_top5": same_family_as_best_top5,
-        "same_family_as_heuristic_choice": same_family_as_heuristic_choice,
-        "coarse_family_top5_best_gap": np.round(coarse_family_top5_best_gap, 6),
-        "candidate_pair_share_within_coarse_family": np.round(candidate_pair_share, 6),
+        "same_family_as_heuristic_choice": np.round(same_family_as_heuristic_choice, 6),
+        "same_dominant_first_as_best_top5": same_dominant_first_as_best_top5,
+        "current_retrieval_rank": current_retrieval_rank,
     }
 
 
@@ -319,7 +241,6 @@ def _build_promoted_non_pairwise_row_features_python_reference(
     retrieval_score = _float_signal(row_signals, "retrieval_score", row_count)
     retrieval_rank = _float_signal(row_signals, "retrieval_rank", row_count)
     component_keys = _object_signal(row_signals, "candidate_component_key", row_count)
-    query_view = _object_signal(row_signals, "query_view", row_count)
     cluster_size = _float_signal(row_signals, "cluster_size", row_count)
     named_signature_count = _float_signal(row_signals, "named_signature_count", row_count)
     dominant_first_name = _object_signal(row_signals, "dominant_first_name", row_count)
@@ -330,49 +251,47 @@ def _build_promoted_non_pairwise_row_features_python_reference(
     query_year = _float_signal(row_signals, "query_year", row_count)
     query_year_missing = _float_signal(row_signals, "query_year_missing", row_count)
     query_has_affiliations = _float_signal(row_signals, "query_has_affiliations", row_count)
-    query_has_coauthors = _float_signal(row_signals, "query_has_coauthors", row_count)
     affiliation_overlap = _float_signal(row_signals, "affiliation_overlap", row_count)
     coauthor_overlap = _float_signal(row_signals, "coauthor_overlap", row_count)
-    venue_overlap = _float_signal(row_signals, "venue_overlap", row_count)
     year_compatibility = _float_signal(row_signals, "year_compatibility", row_count)
-    title_overlap = _float_signal(row_signals, "title_overlap", row_count)
     specter_exemplar_similarity = _float_signal(row_signals, "specter_exemplar_similarity", row_count)
     min_distance = _float_signal(row_signals, "min_distance", row_count)
     top5_mean_distance = _float_signal(row_signals, "top5_mean_distance", row_count)
-    pair_count = _float_signal(row_signals, "pair_count", row_count)
+    candidate_cluster_max_paper_author_count = _float_signal(
+        row_signals,
+        "candidate_cluster_max_paper_author_count",
+        row_count,
+    )
+    paper_author_list_max_jaccard = _float_signal(row_signals, "paper_author_list_max_jaccard", row_count)
+    paper_author_list_max_containment = _float_signal(row_signals, "paper_author_list_max_containment", row_count)
+    paper_author_list_max_overlap_count = _float_signal(row_signals, "paper_author_list_max_overlap_count", row_count)
+    local_author_window10_jaccard_max = _float_signal(row_signals, "local_author_window10_jaccard_max", row_count)
+    local_author_window10_overlap_count_max = _float_signal(
+        row_signals,
+        "local_author_window10_overlap_count_max",
+        row_count,
+    )
+    best_author_count_log_absdiff = _float_signal(row_signals, "best_author_count_log_absdiff", row_count)
 
     groups = _groups(candidate_batch)
-    ordered_groups = _retrieval_ordered_groups(groups, retrieval_rank, component_keys)
+    ordered_groups = _retrieval_ordered_groups(groups, retrieval_score, retrieval_rank, component_keys)
     family_ids = (
         _object_signal(row_signals, "family_id", row_count)
         if "family_id" in row_signals
         else _family_ids(component_keys, dominant_first_name, named_signature_count, cluster_size)
     )
-    confident_family = _confident_family_mask(family_ids, component_keys)
     query_first_alpha = _normalized_alpha_array(query_first_token)
     dominant_first_alpha = _normalized_alpha_array(dominant_first_name)
-    family_alpha = _normalized_alpha_array(family_ids)
-    component_alpha = _normalized_alpha_array(component_keys)
-    coarse_family_keys = _coarse_family_keys(dominant_first_alpha, family_alpha, component_alpha)
-    best_top5_indices = _best_index_by_group(
-        top5_mean_distance,
-        retrieval_rank,
-        component_keys,
-        groups,
-        higher_is_better=False,
-    )
     group_features = _derive_group_features(
         ordered_groups=ordered_groups,
         retrieval_score=retrieval_score,
         retrieval_rank=retrieval_rank,
         component_keys=component_keys,
         family_ids=family_ids,
-        confident_family=confident_family,
-        coarse_family_keys=coarse_family_keys,
-        pair_count=pair_count,
+        dominant_first_alpha=dominant_first_alpha,
         top5_mean_distance=top5_mean_distance,
     )
-    year_mismatch_severity = _year_mismatch_severity(
+    year_gap_to_candidate_range, year_gap_signed_to_candidate_range, candidate_year_span = _year_gap_to_candidate_range(
         query_year,
         query_year_missing,
         candidate_year_min,
@@ -384,94 +303,26 @@ def _build_promoted_non_pairwise_row_features_python_reference(
         np.maximum(0.0, 1.0 - affiliation_overlap),
         0.0,
     ).astype(np.float32)
-    first_name_compatibility = np.asarray(
-        [
-            1.0
-            if dominant
-            and (
-                (query and (query == dominant or query.startswith(dominant) or dominant.startswith(query)))
-                or (query and dominant.startswith(query[0]))
-            )
-            else 0.0
-            for query, dominant in zip(query_first_alpha, dominant_first_alpha, strict=True)
-        ],
-        dtype=np.float32,
-    )
-    coauthor_contradiction = np.where(
-        query_has_coauthors > 0.0,
-        np.maximum(0.0, 1.0 - coauthor_overlap),
-        0.0,
-    ).astype(np.float32)
-    title_anchor = title_overlap >= EXACT_TITLE_ANCHOR_THRESHOLD
-    contradiction = np.maximum.reduce(
-        [
-            year_mismatch_severity,
-            affiliation_contradiction_severity,
-            np.where(title_anchor, coauthor_contradiction, 0.0),
-            np.where(title_anchor & (first_name_compatibility <= 0.0), 1.0, 0.0),
-        ]
-    ).astype(np.float32)
-    exact_anchor_evidence_flag = (
-        (title_overlap >= EXACT_TITLE_ANCHOR_THRESHOLD)
-        & (
-            (coauthor_overlap >= ANCHOR_SUPPORT_OVERLAP_THRESHOLD)
-            | (affiliation_overlap >= ANCHOR_SUPPORT_OVERLAP_THRESHOLD)
-            | (year_compatibility >= ANCHOR_YEAR_COMPATIBILITY_THRESHOLD)
-        )
-    ).astype(np.float32)
 
     same_top1 = group_features["same_family_as_top1"].astype(np.float32)
-    candidate_pair_share = group_features["candidate_pair_share_within_coarse_family"].astype(np.float32)
     retrieval_gap = group_features["retrieval_score_gap_vs_best_competitor"].astype(np.float32)
-    anchor_evidence_count = (
-        (min_distance <= 0.15).astype(np.float32)
-        + (specter_exemplar_similarity >= 0.70).astype(np.float32)
-        + (title_overlap >= 0.20).astype(np.float32)
-        + (coauthor_overlap >= 0.25).astype(np.float32)
-        + (affiliation_overlap >= 0.25).astype(np.float32)
-        + (venue_overlap >= 0.20).astype(np.float32)
-        + (year_compatibility >= 0.90).astype(np.float32)
-        + (retrieval_gap >= 0.02).astype(np.float32)
-    )
-    support_strength = (
-        0.20 * (1.0 - np.clip(min_distance, 0.0, 1.0))
-        + 0.20 * np.clip(specter_exemplar_similarity, 0.0, 1.0)
-        + 0.18 * np.clip(title_overlap, 0.0, 1.0)
-        + 0.18 * np.clip(coauthor_overlap, 0.0, 1.0)
-        + 0.12 * np.clip(affiliation_overlap, 0.0, 1.0)
-        + 0.06 * np.clip(venue_overlap, 0.0, 1.0)
-        + 0.06 * np.clip(year_compatibility, 0.0, 1.0)
-    )
-    strong_positive_anchor_score = (
-        np.clip(support_strength, 0.0, 1.0)
-        * (0.5 + 0.5 * np.clip(same_top1, 0.0, 1.0))
-        * (0.35 + 0.65 * np.clip(1.0 - contradiction, 0.0, 1.0))
-    )
+    anchor_evidence_count = (min_distance <= 0.15).astype(np.float32) + (retrieval_gap >= 0.02).astype(np.float32)
+    distance_signal = 1.0 - np.clip(min_distance, 0.0, 1.0)
+    support_strength = 0.20 * distance_signal
+    strong_positive_anchor_score = np.clip(support_strength, 0.0, 1.0) * (0.5 + 0.5 * np.clip(same_top1, 0.0, 1.0))
     retrieval_gap_scaled = np.clip((np.clip(retrieval_gap, -0.2, 0.3) + 0.2) / 0.5, 0.0, 1.0)
-    residual_support = (
-        0.28 * (1.0 - np.clip(min_distance, 0.0, 1.0))
-        + 0.20 * np.clip(specter_exemplar_similarity, 0.0, 1.0)
-        + 0.20 * np.clip(coauthor_overlap, 0.0, 1.0)
-        + 0.14 * np.clip(title_overlap, 0.0, 1.0)
-        + 0.10 * np.clip(year_compatibility, 0.0, 1.0)
-        + 0.08 * retrieval_gap_scaled
-    )
-    tiny_candidate = ((cluster_size <= 2.0) | (named_signature_count <= 2.0)).astype(np.float32)
-    weak_residual_anchor_score = tiny_candidate * same_top1 * np.clip(residual_support, 0.0, 1.0)
+    residual_support = 0.28 * distance_signal + 0.08 * retrieval_gap_scaled
+    weak_residual_anchor_score = same_top1 * np.clip(residual_support, 0.0, 1.0)
     sparse_relative_winner_score = (
-        (retrieval_rank <= 1.0).astype(np.float32)
+        (group_features["current_retrieval_rank"] <= 1.0).astype(np.float32)
         * same_top1
         * np.clip(np.clip(retrieval_gap, 0.0, 0.3) / 0.3, 0.0, 1.0)
-        * (1.0 - np.clip(candidate_pair_share, 0.0, 1.0))
         * np.clip(residual_support, 0.0, 1.0)
     )
-    query_first_prefix_match = np.asarray(
+    query_first_prefix_match_any_length = np.asarray(
         [
             1.0
-            if query_first
-            and len(query_first) > 1
-            and dominant
-            and (query_first.startswith(dominant) or dominant.startswith(query_first))
+            if query_first and dominant and (query_first.startswith(dominant) or dominant.startswith(query_first))
             else 0.0
             for query_first, dominant in zip(query_first_alpha, dominant_first_alpha, strict=True)
         ],
@@ -480,41 +331,38 @@ def _build_promoted_non_pairwise_row_features_python_reference(
 
     out: dict[str, np.ndarray] = {
         "min_distance": min_distance,
-        "retrieval_score_gap_vs_best_competitor": group_features["retrieval_score_gap_vs_best_competitor"],
-        "top5_distance_best_gap": np.round(top5_mean_distance - top5_mean_distance[best_top5_indices], 6),
-        "retrieval_score": retrieval_score,
         "affiliation_contradiction_severity": np.round(affiliation_contradiction_severity, 6),
-        "coarse_family_top5_best_gap": group_features["coarse_family_top5_best_gap"],
-        "same_family_as_best_top5": group_features["same_family_as_best_top5"],
         "same_family_as_heuristic_choice": group_features["same_family_as_heuristic_choice"],
-        "same_family_as_top1": same_top1,
-        "query_first_prefix_match": query_first_prefix_match,
-        "retrieval_score_best_gap": group_features["retrieval_score_best_gap"],
-        "cluster_size_log_capped": _cluster_size_log_capped(cluster_size),
+        "same_dominant_first_as_best_top5": group_features["same_dominant_first_as_best_top5"],
+        "specter_exemplar_similarity": specter_exemplar_similarity,
+        "coauthor_overlap": coauthor_overlap,
+        "affiliation_overlap": affiliation_overlap,
+        "year_compatibility": year_compatibility,
+        "retrieval_rank": group_features["current_retrieval_rank"],
+        "retrieval_reciprocal_rank": np.round(
+            1.0 / np.maximum(group_features["current_retrieval_rank"].astype(np.float32), np.float32(1.0)),
+            6,
+        ),
+        "cluster_size_log": _cluster_size_log(cluster_size),
+        "candidate_year_span": candidate_year_span,
+        "year_gap_to_candidate_range": year_gap_to_candidate_range,
+        "year_gap_signed_to_candidate_range": year_gap_signed_to_candidate_range,
+        "candidate_dominant_first_name_length": _normalized_alpha_lengths(dominant_first_alpha),
+        "query_first_prefix_match_any_length": query_first_prefix_match_any_length,
+        "candidate_cluster_max_paper_author_count": candidate_cluster_max_paper_author_count,
+        "paper_author_list_max_jaccard": paper_author_list_max_jaccard,
+        "paper_author_list_max_containment": paper_author_list_max_containment,
+        "paper_author_list_max_overlap_count": paper_author_list_max_overlap_count,
+        "local_author_window10_jaccard_max": local_author_window10_jaccard_max,
+        "local_author_window10_overlap_count_max": local_author_window10_overlap_count_max,
+        "best_author_count_log_absdiff": best_author_count_log_absdiff,
         "anchor_evidence_count": anchor_evidence_count.astype(np.float32),
         "strong_positive_anchor_score": np.round(strong_positive_anchor_score, 6).astype(np.float32),
         "weak_residual_anchor_score": np.round(weak_residual_anchor_score, 6).astype(np.float32),
         "sparse_relative_winner_score": np.round(sparse_relative_winner_score, 6).astype(np.float32),
-        "query_view__initial_only": np.asarray(
-            [float(str(value) == "initial_only") for value in query_view],
-            dtype=np.float32,
-        ),
         "last_name_count_min_rarity": _float_signal(row_signals, "last_name_count_min_rarity", row_count),
-        "candidate_last_first_name_count_min_rarity": _float_signal(
-            row_signals,
-            "candidate_last_first_name_count_min_rarity",
-            row_count,
-        ),
         "last_first_name_count_min_rarity": _float_signal(row_signals, "last_first_name_count_min_rarity", row_count),
-        "first_prefix_x_last_first_name_count_min_rarity": _float_signal(
-            row_signals,
-            "first_prefix_x_last_first_name_count_min_rarity",
-            row_count,
-        ),
-        "exact_anchor_evidence_flag": exact_anchor_evidence_flag,
-        "year_mismatch_severity": year_mismatch_severity,
         "top5_mean_distance": top5_mean_distance,
-        "distance_spread_top5_minus_min": np.round(top5_mean_distance - min_distance, 6),
     }
     missing_output = sorted(set(PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS) - set(out))
     if missing_output:
@@ -544,7 +392,6 @@ def _rust_payload(candidate_batch: LinkerCandidateBatch, row_signals: Mapping[st
             dtype=np.uint32,
         ),
         "candidate_component_key": _rust_string_signal(row_signals, "candidate_component_key", row_count),
-        "query_view": _rust_string_signal(row_signals, "query_view", row_count),
         "dominant_first_name": _rust_string_signal(row_signals, "dominant_first_name", row_count),
         "query_first_token": _rust_string_signal(row_signals, "query_first_token", row_count),
     }
@@ -561,21 +408,21 @@ def _rust_payload(candidate_batch: LinkerCandidateBatch, row_signals: Mapping[st
         "query_year",
         "query_year_missing",
         "query_has_affiliations",
-        "query_has_coauthors",
-        "middle_initial_compatibility",
         "affiliation_overlap",
         "coauthor_overlap",
-        "venue_overlap",
         "year_compatibility",
-        "title_overlap",
         "specter_exemplar_similarity",
         "min_distance",
         "top5_mean_distance",
-        "pair_count",
         "last_name_count_min_rarity",
-        "candidate_last_first_name_count_min_rarity",
         "last_first_name_count_min_rarity",
-        "first_prefix_x_last_first_name_count_min_rarity",
+        "candidate_cluster_max_paper_author_count",
+        "paper_author_list_max_jaccard",
+        "paper_author_list_max_containment",
+        "paper_author_list_max_overlap_count",
+        "local_author_window10_jaccard_max",
+        "local_author_window10_overlap_count_max",
+        "best_author_count_log_absdiff",
     ):
         payload[signal] = _rust_float_signal(row_signals, signal, row_count)
     for signal in ("mean_distance", "top3_mean_distance"):
@@ -623,8 +470,24 @@ def build_promoted_non_pairwise_row_features_with_telemetry(
             telemetry.get("generated_family_id_count", 0),
             telemetry.get("generic_family_override_count", 0),
         )
+    result_payload = dict(result)
+    for passthrough_column in (
+        "candidate_cluster_max_paper_author_count",
+        "paper_author_list_max_jaccard",
+        "paper_author_list_max_containment",
+        "paper_author_list_max_overlap_count",
+        "local_author_window10_jaccard_max",
+        "local_author_window10_overlap_count_max",
+        "best_author_count_log_absdiff",
+    ):
+        if passthrough_column not in result_payload and passthrough_column in row_signals:
+            result_payload[passthrough_column] = _float_signal(
+                row_signals,
+                passthrough_column,
+                candidate_batch.row_count,
+            )
     features = {
-        column: np.asarray(result[column], dtype=np.float32) for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
+        column: np.asarray(result_payload[column], dtype=np.float32) for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
     }
     return features, telemetry
 

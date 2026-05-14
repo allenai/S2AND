@@ -142,9 +142,11 @@ struct RetrievalSummaryData {
     first_name_counts: Vec<(String, f32)>,
     middle_initial_counts: Option<CounterData>,
     coauthor_counts: Option<CounterData>,
+    non_mega_coauthor_counts: Option<CounterData>,
     affiliation_counts: Option<CounterData>,
     venue_counts: Option<CounterData>,
     title_counts: Option<CounterData>,
+    max_paper_author_count: usize,
     year_min: Option<i64>,
     year_max: Option<i64>,
     year_mean: Option<f64>,
@@ -204,6 +206,7 @@ const RETRIEVAL_YEAR_SCORE_DECAY_YEARS: f64 = 15.0;
 const RETRIEVAL_YEAR_SCORE_RANGE_GAP: i64 = 10;
 const RETRIEVAL_YEAR_SCORE_RANGE_PENALTY: f64 = 0.15;
 const RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP: i64 = 35;
+const RETRIEVAL_MEGA_AUTHOR_THRESHOLD: usize = 50;
 
 impl RetrievalHybridWeights {
     fn from_array(weights: [f64; 5]) -> Self {
@@ -251,6 +254,9 @@ struct RetrievalExperimentalConfig {
     first_name_mode: RetrievalFirstNameMode,
     specter_mode: RetrievalSpecterMode,
     coauthor: RetrievalOverlapConfig,
+    drop_candidate_mega_coauthors: bool,
+    mega_coauthor_rescue_query_coverage: Option<f64>,
+    mega_coauthor_rescue_min_shared_blocks: usize,
     affiliation: RetrievalOverlapConfig,
 }
 
@@ -260,6 +266,7 @@ struct RustHybridCentroidRetriever {
     max_block_component_size: usize,
     component_index_by_key: HashMap<String, usize>,
     coauthor_cluster_df: HashMap<u64, usize>,
+    non_mega_coauthor_cluster_df: HashMap<u64, usize>,
     affiliation_cluster_df: HashMap<u64, usize>,
 }
 
@@ -337,6 +344,9 @@ impl RustHybridCentroidRetriever {
                 per_term_cap: Some(0.35),
                 ..default_overlap_config()
             },
+            drop_candidate_mega_coauthors: true,
+            mega_coauthor_rescue_query_coverage: Some(0.995),
+            mega_coauthor_rescue_min_shared_blocks: 3,
             affiliation: RetrievalOverlapConfig {
                 use_idf: true,
                 ..default_overlap_config()
@@ -426,6 +436,7 @@ impl RustHybridCentroidRetriever {
                         weights,
                         config,
                         &self.coauthor_cluster_df,
+                        &self.non_mega_coauthor_cluster_df,
                         &self.affiliation_cluster_df,
                         self.summaries.len(),
                     ),
@@ -711,6 +722,7 @@ impl RustHybridCentroidRetriever {
                                 weights,
                                 config,
                                 &self.coauthor_cluster_df,
+                                &self.non_mega_coauthor_cluster_df,
                                 &self.affiliation_cluster_df,
                                 self.summaries.len(),
                             ),
@@ -2058,9 +2070,11 @@ fn extract_retrieval_summary(
     let first_name_counts = extract_string_count_pairs(&obj.getattr("first_name_counts")?)?;
     let middle_initial_counts = extract_counter(&obj.getattr("middle_initial_counts")?)?;
     let coauthor_counts = extract_counter(&obj.getattr("coauthor_counts")?)?;
+    let non_mega_coauthor_counts = extract_counter(&obj.getattr("non_mega_coauthor_counts")?)?;
     let affiliation_counts = extract_counter(&obj.getattr("affiliation_counts")?)?;
     let venue_counts = extract_counter(&obj.getattr("venue_counts")?)?;
     let title_counts = extract_counter(&obj.getattr("title_counts")?)?;
+    let max_paper_author_count: usize = obj.getattr("max_paper_author_count")?.extract()?;
     let year_min: Option<i64> = obj.getattr("year_min")?.extract()?;
     let year_max: Option<i64> = obj.getattr("year_max")?.extract()?;
     let year_mean: Option<f64> = obj.getattr("year_mean")?.extract()?;
@@ -2101,9 +2115,11 @@ fn extract_retrieval_summary(
         first_name_counts,
         middle_initial_counts,
         coauthor_counts,
+        non_mega_coauthor_counts,
         affiliation_counts,
         venue_counts,
         title_counts,
+        max_paper_author_count,
         year_min,
         year_max,
         year_mean,
@@ -2220,6 +2236,9 @@ fn build_experimental_config(
     coauthor_use_idf: bool,
     coauthor_per_term_cap: Option<f64>,
     coauthor_total_cap: Option<f64>,
+    drop_candidate_mega_coauthors: bool,
+    mega_coauthor_rescue_query_coverage: Option<f64>,
+    mega_coauthor_rescue_min_shared_blocks: usize,
     affiliation_use_idf: bool,
     affiliation_per_term_cap: Option<f64>,
     affiliation_total_cap: Option<f64>,
@@ -2237,6 +2256,18 @@ fn build_experimental_config(
             "Affiliation structure weights must be finite",
         ));
     }
+    if let Some(coverage) = mega_coauthor_rescue_query_coverage {
+        if !coverage.is_finite() || coverage <= 0.0 || coverage > 1.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "mega_coauthor_rescue_query_coverage must be in (0, 1]",
+            ));
+        }
+    }
+    if mega_coauthor_rescue_min_shared_blocks == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "mega_coauthor_rescue_min_shared_blocks must be positive",
+        ));
+    }
     Ok(RetrievalExperimentalConfig {
         first_name_mode: parse_first_name_mode(first_name_mode)?,
         specter_mode: parse_specter_mode(specter_mode)?,
@@ -2246,6 +2277,9 @@ fn build_experimental_config(
             total_cap: coauthor_total_cap,
             ..default_overlap_config()
         },
+        drop_candidate_mega_coauthors,
+        mega_coauthor_rescue_query_coverage,
+        mega_coauthor_rescue_min_shared_blocks,
         affiliation: RetrievalOverlapConfig {
             use_idf: affiliation_use_idf,
             per_term_cap: affiliation_per_term_cap,
@@ -2311,6 +2345,54 @@ fn score_hybrid_centroid_query(
         + weights.first_name * first_name_score) as f32
 }
 
+fn query_counter_overlap_count(
+    query_terms: &[RetrievalQueryTerm],
+    counter: &Option<CounterData>,
+) -> usize {
+    let Some(counter_data) = counter.as_ref() else {
+        return 0;
+    };
+    query_terms
+        .iter()
+        .filter(|term| {
+            counter_data
+                .entries
+                .binary_search_by_key(&term.hash, |entry| entry.0)
+                .is_ok()
+        })
+        .count()
+}
+
+fn should_rescue_candidate_mega_coauthors(
+    query: &RetrievalQueryData,
+    summary: &RetrievalSummaryData,
+    config: RetrievalExperimentalConfig,
+) -> bool {
+    if !config.drop_candidate_mega_coauthors {
+        return false;
+    }
+    let Some(min_query_coverage) = config.mega_coauthor_rescue_query_coverage else {
+        return false;
+    };
+    if summary.max_paper_author_count < RETRIEVAL_MEGA_AUTHOR_THRESHOLD
+        || query.coauthor_terms.is_empty()
+    {
+        return false;
+    }
+
+    let full_overlap = query_counter_overlap_count(&query.coauthor_terms, &summary.coauthor_counts);
+    if full_overlap < config.mega_coauthor_rescue_min_shared_blocks {
+        return false;
+    }
+    let filtered_overlap =
+        query_counter_overlap_count(&query.coauthor_terms, &summary.non_mega_coauthor_counts);
+    if full_overlap <= filtered_overlap {
+        return false;
+    }
+
+    (full_overlap as f64) / (query.coauthor_terms.len() as f64) >= min_query_coverage
+}
+
 fn score_experimental_hybrid_centroid_query(
     query: &RetrievalQueryData,
     summary: &RetrievalSummaryData,
@@ -2318,14 +2400,26 @@ fn score_experimental_hybrid_centroid_query(
     weights: RetrievalHybridWeights,
     config: RetrievalExperimentalConfig,
     coauthor_cluster_df: &HashMap<u64, usize>,
+    non_mega_coauthor_cluster_df: &HashMap<u64, usize>,
     affiliation_cluster_df: &HashMap<u64, usize>,
     total_summary_count: usize,
 ) -> f32 {
+    let use_non_mega_coauthor_counter = config.drop_candidate_mega_coauthors
+        && summary.max_paper_author_count >= RETRIEVAL_MEGA_AUTHOR_THRESHOLD
+        && !should_rescue_candidate_mega_coauthors(query, summary, config);
+    let (coauthor_counts, coauthor_df) = if use_non_mega_coauthor_counter {
+        (
+            &summary.non_mega_coauthor_counts,
+            non_mega_coauthor_cluster_df,
+        )
+    } else {
+        (&summary.coauthor_counts, coauthor_cluster_df)
+    };
     let coauthor_score = weighted_counter_query_overlap(
         &query.coauthor_terms,
-        &summary.coauthor_counts,
+        coauthor_counts,
         summary.size,
-        coauthor_cluster_df,
+        coauthor_df,
         total_summary_count,
         config.coauthor,
     );
@@ -7580,12 +7674,17 @@ impl RustHybridCentroidRetriever {
         let mut packed_summaries = Vec::new();
         let mut component_index_by_key = HashMap::new();
         let mut coauthor_cluster_df = HashMap::new();
+        let mut non_mega_coauthor_cluster_df = HashMap::new();
         let mut affiliation_cluster_df = HashMap::new();
         for item in PyIterator::from_object(summaries)? {
             let summary_obj = item?;
             update_cluster_df_from_counter(
                 &summary_obj.getattr("coauthor_counts")?,
                 &mut coauthor_cluster_df,
+            )?;
+            update_cluster_df_from_counter(
+                &summary_obj.getattr("non_mega_coauthor_counts")?,
+                &mut non_mega_coauthor_cluster_df,
             )?;
             update_cluster_df_from_counter(
                 &summary_obj.getattr("affiliation_counts")?,
@@ -7605,6 +7704,7 @@ impl RustHybridCentroidRetriever {
             max_block_component_size,
             component_index_by_key,
             coauthor_cluster_df,
+            non_mega_coauthor_cluster_df,
             affiliation_cluster_df,
         })
     }
@@ -8181,6 +8281,9 @@ impl RustHybridCentroidRetriever {
             coauthor_use_idf = false,
             coauthor_per_term_cap = None,
             coauthor_total_cap = None,
+            drop_candidate_mega_coauthors = false,
+            mega_coauthor_rescue_query_coverage = None,
+            mega_coauthor_rescue_min_shared_blocks = 3,
             affiliation_use_idf = false,
             affiliation_per_term_cap = None,
             affiliation_total_cap = None,
@@ -8204,6 +8307,9 @@ impl RustHybridCentroidRetriever {
         coauthor_use_idf: bool,
         coauthor_per_term_cap: Option<f64>,
         coauthor_total_cap: Option<f64>,
+        drop_candidate_mega_coauthors: bool,
+        mega_coauthor_rescue_query_coverage: Option<f64>,
+        mega_coauthor_rescue_min_shared_blocks: usize,
         affiliation_use_idf: bool,
         affiliation_per_term_cap: Option<f64>,
         affiliation_total_cap: Option<f64>,
@@ -8227,6 +8333,9 @@ impl RustHybridCentroidRetriever {
             coauthor_use_idf,
             coauthor_per_term_cap,
             coauthor_total_cap,
+            drop_candidate_mega_coauthors,
+            mega_coauthor_rescue_query_coverage,
+            mega_coauthor_rescue_min_shared_blocks,
             affiliation_use_idf,
             affiliation_per_term_cap,
             affiliation_total_cap,
@@ -8359,14 +8468,8 @@ impl RustHybridCentroidRetriever {
     }
 }
 
-const LINKER_CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE: f32 = 192.0;
-const LINKER_GENERIC_HEURISTIC_OVERRIDE_MARGIN: f32 = 0.01;
-const LINKER_GENERIC_CROSS_FAMILY_EXTRA_MARGIN: f32 = 0.04;
 const LINKER_GENERIC_FAMILY_MIN_COUNT: f32 = 3.0;
 const LINKER_GENERIC_FAMILY_MIN_RATIO: f32 = 0.6;
-const LINKER_EXACT_TITLE_ANCHOR_THRESHOLD: f32 = 0.95;
-const LINKER_ANCHOR_SUPPORT_OVERLAP_THRESHOLD: f32 = 0.05;
-const LINKER_ANCHOR_YEAR_COMPATIBILITY_THRESHOLD: f32 = 0.85;
 
 fn linker_round(value: f32, scale: f32) -> f32 {
     (value * scale).round() / scale
@@ -8503,6 +8606,7 @@ fn linker_groups(row_query_signature_indices: &[u32]) -> Vec<Vec<usize>> {
 
 fn linker_retrieval_ordered_groups(
     groups: &[Vec<usize>],
+    retrieval_score: &[f32],
     retrieval_rank: &[f32],
     component_keys: &[String],
 ) -> Vec<Vec<usize>> {
@@ -8510,59 +8614,12 @@ fn linker_retrieval_ordered_groups(
     for group in groups {
         let mut ordered = group.clone();
         ordered.sort_by(|left, right| {
-            (retrieval_rank[*left] as i64)
-                .cmp(&(retrieval_rank[*right] as i64))
+            retrieval_score[*right]
+                .total_cmp(&retrieval_score[*left])
+                .then_with(|| (retrieval_rank[*left] as i64).cmp(&(retrieval_rank[*right] as i64)))
                 .then_with(|| component_keys[*left].cmp(&component_keys[*right]))
         });
         out.push(ordered);
-    }
-    out
-}
-
-fn linker_best_index_by_group(
-    primary: &[f32],
-    retrieval_rank: &[f32],
-    component_keys: &[String],
-    groups: &[Vec<usize>],
-    higher_is_better: bool,
-) -> Vec<usize> {
-    let mut out = vec![0usize; primary.len()];
-    for group in groups {
-        let mut best = group[0];
-        for index in group.iter().copied().skip(1) {
-            let current_key = if higher_is_better {
-                (
-                    -primary[index],
-                    retrieval_rank[index] as i64,
-                    component_keys[index].as_str(),
-                )
-            } else {
-                (
-                    primary[index],
-                    retrieval_rank[index] as i64,
-                    component_keys[index].as_str(),
-                )
-            };
-            let best_key = if higher_is_better {
-                (
-                    -primary[best],
-                    retrieval_rank[best] as i64,
-                    component_keys[best].as_str(),
-                )
-            } else {
-                (
-                    primary[best],
-                    retrieval_rank[best] as i64,
-                    component_keys[best].as_str(),
-                )
-            };
-            if current_key < best_key {
-                best = index;
-            }
-        }
-        for index in group {
-            out[*index] = best;
-        }
     }
     out
 }
@@ -8611,53 +8668,12 @@ fn linker_family_ids(
     out
 }
 
-fn linker_confident_family_mask(family_ids: &[String], component_keys: &[String]) -> Vec<bool> {
-    family_ids
-        .iter()
-        .zip(component_keys.iter())
-        .map(|(family, component)| !family.is_empty() && family != component)
-        .collect()
-}
-
-fn linker_coarse_family_keys(
-    dominant_first_alpha: &[String],
-    family_alpha: &[String],
-    component_alpha: &[String],
-) -> Vec<String> {
-    dominant_first_alpha
-        .iter()
-        .zip(family_alpha.iter())
-        .zip(component_alpha.iter())
-        .map(|((dominant, family), component)| {
-            let source = if !dominant.is_empty() {
-                dominant
-            } else if !family.is_empty() {
-                family
-            } else {
-                component
-            };
-            source.chars().take(3).collect()
-        })
-        .collect()
-}
-
-fn linker_cross_family(
-    left: usize,
-    right: usize,
-    family_ids: &[String],
-    confident_family: &[bool],
-) -> bool {
-    confident_family[left] && confident_family[right] && family_ids[left] != family_ids[right]
-}
-
 struct LinkerGroupFeatures {
     retrieval_score_gap_vs_best_competitor: Vec<f32>,
-    retrieval_score_best_gap: Vec<f32>,
     same_family_as_top1: Vec<f32>,
-    same_family_as_best_top5: Vec<f32>,
     same_family_as_heuristic_choice: Vec<f32>,
-    coarse_family_top5_best_gap: Vec<f32>,
-    candidate_pair_share_within_coarse_family: Vec<f32>,
+    same_dominant_first_as_best_top5: Vec<f32>,
+    current_retrieval_rank: Vec<f32>,
 }
 
 fn linker_derive_group_features(
@@ -8666,19 +8682,16 @@ fn linker_derive_group_features(
     retrieval_rank: &[f32],
     component_keys: &[String],
     family_ids: &[String],
-    confident_family: &[bool],
-    coarse_family_keys: &[String],
-    pair_count: &[f32],
+    dominant_first_alpha: &[String],
     top5_mean_distance: &[f32],
 ) -> LinkerGroupFeatures {
     let row_count = retrieval_score.len();
     let mut retrieval_score_gap_vs_best_competitor = vec![0.0f32; row_count];
-    let mut retrieval_score_best_gap = vec![0.0f32; row_count];
     let mut same_family_as_top1 = vec![0.0f32; row_count];
-    let mut same_family_as_best_top5 = vec![0.0f32; row_count];
     let mut same_family_as_heuristic_choice = vec![0.0f32; row_count];
-    let mut coarse_family_top5_best_gap = vec![0.0f32; row_count];
-    let mut candidate_pair_share_within_coarse_family = vec![1.0f32; row_count];
+    let mut dominant_first_top1_match = vec![0.0f32; row_count];
+    let mut same_dominant_first_as_best_top5 = vec![0.0f32; row_count];
+    let mut current_retrieval_rank = vec![0.0f32; row_count];
 
     for ordered in ordered_groups {
         let top1 = ordered[0];
@@ -8703,116 +8716,73 @@ fn linker_derive_group_features(
                 best_top5 = index;
             }
         }
-        let mut heuristic_choice = best_top5;
-        if best_top5 != top1 {
-            let mut effective_margin = LINKER_GENERIC_HEURISTIC_OVERRIDE_MARGIN;
-            if linker_cross_family(top1, best_top5, family_ids, confident_family) {
-                effective_margin += LINKER_GENERIC_CROSS_FAMILY_EXTRA_MARGIN;
-            }
-            if top5_mean_distance[best_top5] + effective_margin >= top5_mean_distance[top1] {
-                heuristic_choice = top1;
-            }
-        }
-        let best_score = ordered
-            .iter()
-            .map(|index| retrieval_score[*index])
-            .fold(f32::NEG_INFINITY, f32::max);
-        for index in ordered {
+        for (current_rank, index) in ordered.iter().enumerate() {
             let competitor = if *index == top1 { runner_up } else { top1 };
+            current_retrieval_rank[*index] = (current_rank + 1) as f32;
             retrieval_score_gap_vs_best_competitor[*index] = linker_round(
                 retrieval_score[*index] - retrieval_score[competitor],
                 1_000_000.0,
             );
-            retrieval_score_best_gap[*index] =
-                linker_round(best_score - retrieval_score[*index], 1_000_000.0);
             same_family_as_top1[*index] = linker_bool(
                 !family_ids[*index].is_empty() && family_ids[*index] == family_ids[top1],
             );
-            same_family_as_best_top5[*index] = linker_bool(
-                !family_ids[*index].is_empty() && family_ids[*index] == family_ids[best_top5],
+            dominant_first_top1_match[*index] = linker_bool(
+                !dominant_first_alpha[*index].is_empty()
+                    && dominant_first_alpha[*index] == dominant_first_alpha[top1],
             );
-            same_family_as_heuristic_choice[*index] = linker_bool(
-                !family_ids[*index].is_empty()
-                    && family_ids[*index] == family_ids[heuristic_choice],
+            same_dominant_first_as_best_top5[*index] = linker_bool(
+                !dominant_first_alpha[*index].is_empty()
+                    && dominant_first_alpha[*index] == dominant_first_alpha[best_top5],
             );
-        }
-
-        let mut coarse_to_rows: HashMap<String, Vec<usize>> = HashMap::new();
-        for index in ordered {
-            coarse_to_rows
-                .entry(coarse_family_keys[*index].clone())
-                .or_default()
-                .push(*index);
-        }
-        for coarse_rows in coarse_to_rows.values() {
-            let total_pairs = coarse_rows
-                .iter()
-                .map(|index| pair_count[*index])
-                .sum::<f32>()
-                .max(1.0);
-            let mut best = coarse_rows[0];
-            for index in coarse_rows.iter().copied().skip(1) {
-                let current_key = (
-                    top5_mean_distance[index],
-                    retrieval_rank[index] as i64,
-                    component_keys[index].as_str(),
-                );
-                let best_key = (
-                    top5_mean_distance[best],
-                    retrieval_rank[best] as i64,
-                    component_keys[best].as_str(),
-                );
-                if current_key < best_key {
-                    best = index;
-                }
-            }
-            for index in coarse_rows {
-                coarse_family_top5_best_gap[*index] = linker_round(
-                    top5_mean_distance[*index] - top5_mean_distance[best],
-                    1_000_000.0,
-                );
-                candidate_pair_share_within_coarse_family[*index] =
-                    linker_round(pair_count[*index] / total_pairs, 1_000_000.0);
-            }
+            same_family_as_heuristic_choice[*index] = linker_round(
+                dominant_first_top1_match[*index] * retrieval_score[*index]
+                    + same_dominant_first_as_best_top5[*index] * (1.0 - top5_mean_distance[*index]),
+                1_000_000.0,
+            );
         }
     }
 
     LinkerGroupFeatures {
         retrieval_score_gap_vs_best_competitor,
-        retrieval_score_best_gap,
         same_family_as_top1,
-        same_family_as_best_top5,
         same_family_as_heuristic_choice,
-        coarse_family_top5_best_gap,
-        candidate_pair_share_within_coarse_family,
+        same_dominant_first_as_best_top5,
+        current_retrieval_rank,
     }
 }
 
-fn linker_year_mismatch_severity(
+fn linker_year_gap_features(
     query_year: &[f32],
     query_year_missing: &[f32],
     candidate_year_min: &[f32],
     candidate_year_max: &[f32],
     candidate_year_range_missing: &[f32],
-) -> Vec<f32> {
-    let mut out = vec![0.0f32; query_year.len()];
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut gap = vec![0.0f32; query_year.len()];
+    let mut signed_gap = vec![0.0f32; query_year.len()];
+    let mut span = vec![0.0f32; query_year.len()];
     for index in 0..query_year.len() {
+        if candidate_year_range_missing[index] == 0.0 {
+            span[index] = (candidate_year_max[index] - candidate_year_min[index]).max(0.0);
+        }
         if query_year_missing[index] != 0.0 || candidate_year_range_missing[index] != 0.0 {
             continue;
         }
         if query_year[index] < candidate_year_min[index] {
-            out[index] = linker_round(
-                ((candidate_year_min[index] - query_year[index]) / 10.0).min(1.0),
-                1_000_000.0,
-            );
+            let current_gap = candidate_year_min[index] - query_year[index];
+            gap[index] = linker_round(current_gap, 1_000_000.0);
+            signed_gap[index] = linker_round(-current_gap, 1_000_000.0);
         } else if query_year[index] > candidate_year_max[index] {
-            out[index] = linker_round(
-                ((query_year[index] - candidate_year_max[index]) / 10.0).min(1.0),
-                1_000_000.0,
-            );
+            let current_gap = query_year[index] - candidate_year_max[index];
+            gap[index] = linker_round(current_gap, 1_000_000.0);
+            signed_gap[index] = linker_round(current_gap, 1_000_000.0);
         }
     }
-    out
+    (gap, signed_gap, span)
+}
+
+fn linker_alpha_length(value: &str) -> f32 {
+    py_len(value) as f32
 }
 
 fn linker_set_f32_array<'py>(
@@ -8846,7 +8816,6 @@ fn promoted_linker_non_pairwise_features<'py>(
     let retrieval_score = linker_extract_f32_vec(signals, "retrieval_score", row_count)?;
     let retrieval_rank = linker_extract_f32_vec(signals, "retrieval_rank", row_count)?;
     let component_keys = linker_extract_string_vec(signals, "candidate_component_key", row_count)?;
-    let query_view = linker_extract_string_vec(signals, "query_view", row_count)?;
     let cluster_size = linker_extract_f32_vec(signals, "cluster_size", row_count)?;
     let named_signature_count =
         linker_extract_f32_vec(signals, "named_signature_count", row_count)?;
@@ -8860,34 +8829,45 @@ fn promoted_linker_non_pairwise_features<'py>(
     let query_year_missing = linker_extract_f32_vec(signals, "query_year_missing", row_count)?;
     let query_has_affiliations =
         linker_extract_f32_vec(signals, "query_has_affiliations", row_count)?;
-    let query_has_coauthors = linker_extract_f32_vec(signals, "query_has_coauthors", row_count)?;
     let affiliation_overlap = linker_extract_f32_vec(signals, "affiliation_overlap", row_count)?;
     let coauthor_overlap = linker_extract_f32_vec(signals, "coauthor_overlap", row_count)?;
-    let venue_overlap = linker_extract_f32_vec(signals, "venue_overlap", row_count)?;
     let year_compatibility = linker_extract_f32_vec(signals, "year_compatibility", row_count)?;
-    let title_overlap = linker_extract_f32_vec(signals, "title_overlap", row_count)?;
     let specter_exemplar_similarity =
         linker_extract_f32_vec(signals, "specter_exemplar_similarity", row_count)?;
     let min_distance = linker_extract_f32_vec(signals, "min_distance", row_count)?;
     let top5_mean_distance = linker_extract_f32_vec(signals, "top5_mean_distance", row_count)?;
-    let pair_count = linker_extract_f32_vec(signals, "pair_count", row_count)?;
     let last_name_count_min_rarity =
         linker_extract_f32_vec(signals, "last_name_count_min_rarity", row_count)?;
-    let candidate_last_first_name_count_min_rarity = linker_extract_f32_vec(
-        signals,
-        "candidate_last_first_name_count_min_rarity",
-        row_count,
-    )?;
     let last_first_name_count_min_rarity =
         linker_extract_f32_vec(signals, "last_first_name_count_min_rarity", row_count)?;
-    let first_prefix_x_last_first_name_count_min_rarity = linker_extract_f32_vec(
+    let candidate_cluster_max_paper_author_count = linker_extract_f32_vec(
         signals,
-        "first_prefix_x_last_first_name_count_min_rarity",
+        "candidate_cluster_max_paper_author_count",
         row_count,
     )?;
+    let paper_author_list_max_jaccard =
+        linker_extract_f32_vec(signals, "paper_author_list_max_jaccard", row_count)?;
+    let paper_author_list_max_containment =
+        linker_extract_f32_vec(signals, "paper_author_list_max_containment", row_count)?;
+    let paper_author_list_max_overlap_count =
+        linker_extract_f32_vec(signals, "paper_author_list_max_overlap_count", row_count)?;
+    let local_author_window10_jaccard_max =
+        linker_extract_f32_vec(signals, "local_author_window10_jaccard_max", row_count)?;
+    let local_author_window10_overlap_count_max = linker_extract_f32_vec(
+        signals,
+        "local_author_window10_overlap_count_max",
+        row_count,
+    )?;
+    let best_author_count_log_absdiff =
+        linker_extract_f32_vec(signals, "best_author_count_log_absdiff", row_count)?;
 
     let groups = linker_groups(&row_query_signature_indices);
-    let ordered_groups = linker_retrieval_ordered_groups(&groups, &retrieval_rank, &component_keys);
+    let ordered_groups = linker_retrieval_ordered_groups(
+        &groups,
+        &retrieval_score,
+        &retrieval_rank,
+        &component_keys,
+    );
     let family_ids_from_signal = linker_optional_string_vec(signals, "family_id", row_count)?;
     let generated_family_id_count = if family_ids_from_signal.is_some() {
         0usize
@@ -8907,55 +8887,36 @@ fn promoted_linker_non_pairwise_features<'py>(
         .zip(component_keys.iter())
         .filter(|(family, component)| !family.is_empty() && *family != *component)
         .count();
-    let confident_family = linker_confident_family_mask(&family_ids, &component_keys);
     let query_first_alpha = linker_normalized_alpha_vec(&query_first_token);
     let dominant_first_alpha = linker_normalized_alpha_vec(&dominant_first_name);
-    let family_alpha = linker_normalized_alpha_vec(&family_ids);
-    let component_alpha = linker_normalized_alpha_vec(&component_keys);
-    let coarse_family_keys =
-        linker_coarse_family_keys(&dominant_first_alpha, &family_alpha, &component_alpha);
-    let best_top5_indices = linker_best_index_by_group(
-        &top5_mean_distance,
-        &retrieval_rank,
-        &component_keys,
-        &groups,
-        false,
-    );
     let group_features = linker_derive_group_features(
         &ordered_groups,
         &retrieval_score,
         &retrieval_rank,
         &component_keys,
         &family_ids,
-        &confident_family,
-        &coarse_family_keys,
-        &pair_count,
+        &dominant_first_alpha,
         &top5_mean_distance,
     );
-    let year_mismatch_severity = linker_year_mismatch_severity(
-        &query_year,
-        &query_year_missing,
-        &candidate_year_min,
-        &candidate_year_max,
-        &candidate_year_range_missing,
-    );
+    let (year_gap_to_candidate_range, year_gap_signed_to_candidate_range, candidate_year_span) =
+        linker_year_gap_features(
+            &query_year,
+            &query_year_missing,
+            &candidate_year_min,
+            &candidate_year_max,
+            &candidate_year_range_missing,
+        );
 
     let mut affiliation_contradiction_severity = vec![0.0f32; row_count];
-    let mut first_name_compatibility = vec![0.0f32; row_count];
-    let mut coauthor_contradiction = vec![0.0f32; row_count];
-    let mut contradiction = vec![0.0f32; row_count];
-    let mut exact_anchor_evidence_flag = vec![0.0f32; row_count];
     let mut anchor_evidence_count = vec![0.0f32; row_count];
     let mut strong_positive_anchor_score = vec![0.0f32; row_count];
     let mut weak_residual_anchor_score = vec![0.0f32; row_count];
     let mut sparse_relative_winner_score = vec![0.0f32; row_count];
-    let mut query_first_prefix_match = vec![0.0f32; row_count];
-    let mut cluster_size_log_capped = vec![0.0f32; row_count];
-    let mut distance_spread_top5_minus_min = vec![0.0f32; row_count];
-    let mut query_view_initial_only = vec![0.0f32; row_count];
-    let mut top5_distance_best_gap = vec![0.0f32; row_count];
+    let mut query_first_prefix_match_any_length = vec![0.0f32; row_count];
+    let mut candidate_dominant_first_name_length = vec![0.0f32; row_count];
+    let mut cluster_size_log = vec![0.0f32; row_count];
+    let mut retrieval_reciprocal_rank = vec![0.0f32; row_count];
 
-    let log_reference = (1.0 + LINKER_CLUSTER_SIZE_LOG_CAPPED_REFERENCE_SIZE).ln();
     for index in 0..row_count {
         if query_has_affiliations[index] > 0.0 {
             affiliation_contradiction_severity[index] =
@@ -8963,100 +8924,37 @@ fn promoted_linker_non_pairwise_features<'py>(
         }
         let query_first = &query_first_alpha[index];
         let dominant_first = &dominant_first_alpha[index];
-        if !dominant_first.is_empty()
-            && ((!query_first.is_empty()
-                && (query_first == dominant_first
-                    || query_first.starts_with(dominant_first)
-                    || dominant_first.starts_with(query_first)))
-                || (!query_first.is_empty() && dominant_first.starts_with(&query_first[0..1])))
-        {
-            first_name_compatibility[index] = 1.0;
-        }
-        if query_has_coauthors[index] > 0.0 {
-            coauthor_contradiction[index] = (1.0 - coauthor_overlap[index]).max(0.0);
-        }
-        let title_anchor = title_overlap[index] >= LINKER_EXACT_TITLE_ANCHOR_THRESHOLD;
-        contradiction[index] = year_mismatch_severity[index]
-            .max(affiliation_contradiction_severity[index])
-            .max(if title_anchor {
-                coauthor_contradiction[index]
-            } else {
-                0.0
-            })
-            .max(if title_anchor && first_name_compatibility[index] <= 0.0 {
-                1.0
-            } else {
-                0.0
-            });
-        exact_anchor_evidence_flag[index] = linker_bool(
-            title_overlap[index] >= LINKER_EXACT_TITLE_ANCHOR_THRESHOLD
-                && (coauthor_overlap[index] >= LINKER_ANCHOR_SUPPORT_OVERLAP_THRESHOLD
-                    || affiliation_overlap[index] >= LINKER_ANCHOR_SUPPORT_OVERLAP_THRESHOLD
-                    || year_compatibility[index] >= LINKER_ANCHOR_YEAR_COMPATIBILITY_THRESHOLD),
-        );
         let retrieval_gap = group_features.retrieval_score_gap_vs_best_competitor[index];
-        anchor_evidence_count[index] = linker_bool(min_distance[index] <= 0.15)
-            + linker_bool(specter_exemplar_similarity[index] >= 0.70)
-            + linker_bool(title_overlap[index] >= 0.20)
-            + linker_bool(coauthor_overlap[index] >= 0.25)
-            + linker_bool(affiliation_overlap[index] >= 0.25)
-            + linker_bool(venue_overlap[index] >= 0.20)
-            + linker_bool(year_compatibility[index] >= 0.90)
-            + linker_bool(retrieval_gap >= 0.02);
-        let support_strength = 0.20 * (1.0 - linker_clip01(min_distance[index]))
-            + 0.20 * linker_clip01(specter_exemplar_similarity[index])
-            + 0.18 * linker_clip01(title_overlap[index])
-            + 0.18 * linker_clip01(coauthor_overlap[index])
-            + 0.12 * linker_clip01(affiliation_overlap[index])
-            + 0.06 * linker_clip01(venue_overlap[index])
-            + 0.06 * linker_clip01(year_compatibility[index]);
+        anchor_evidence_count[index] =
+            linker_bool(min_distance[index] <= 0.15) + linker_bool(retrieval_gap >= 0.02);
+        let distance_signal = 1.0 - linker_clip01(min_distance[index]);
+        let support_strength = 0.20 * distance_signal;
         let same_top1 = group_features.same_family_as_top1[index];
         strong_positive_anchor_score[index] = linker_round(
-            linker_clip01(support_strength)
-                * (0.5 + 0.5 * linker_clip01(same_top1))
-                * (0.35 + 0.65 * linker_clip01(1.0 - contradiction[index])),
+            linker_clip01(support_strength) * (0.5 + 0.5 * linker_clip01(same_top1)),
             1_000_000.0,
         );
         let retrieval_gap_scaled = linker_clip01((retrieval_gap.clamp(-0.2, 0.3) + 0.2) / 0.5);
-        let residual_support = 0.28 * (1.0 - linker_clip01(min_distance[index]))
-            + 0.20 * linker_clip01(specter_exemplar_similarity[index])
-            + 0.20 * linker_clip01(coauthor_overlap[index])
-            + 0.14 * linker_clip01(title_overlap[index])
-            + 0.10 * linker_clip01(year_compatibility[index])
-            + 0.08 * retrieval_gap_scaled;
-        let tiny_candidate =
-            linker_bool(cluster_size[index] <= 2.0 || named_signature_count[index] <= 2.0);
-        weak_residual_anchor_score[index] = linker_round(
-            tiny_candidate * same_top1 * linker_clip01(residual_support),
-            1_000_000.0,
-        );
+        let residual_support = 0.28 * distance_signal + 0.08 * retrieval_gap_scaled;
+        weak_residual_anchor_score[index] =
+            linker_round(same_top1 * linker_clip01(residual_support), 1_000_000.0);
         sparse_relative_winner_score[index] = linker_round(
-            linker_bool(retrieval_rank[index] <= 1.0)
+            linker_bool(group_features.current_retrieval_rank[index] <= 1.0)
                 * same_top1
                 * linker_clip01(retrieval_gap.clamp(0.0, 0.3) / 0.3)
-                * (1.0
-                    - linker_clip01(
-                        group_features.candidate_pair_share_within_coarse_family[index],
-                    ))
                 * linker_clip01(residual_support),
             1_000_000.0,
         );
-        query_first_prefix_match[index] = linker_bool(
+        query_first_prefix_match_any_length[index] = linker_bool(
             !query_first.is_empty()
-                && py_len(query_first) > 1
                 && !dominant_first.is_empty()
                 && (query_first.starts_with(dominant_first)
                     || dominant_first.starts_with(query_first)),
         );
-        if cluster_size[index] > 0.0 {
-            cluster_size_log_capped[index] =
-                ((1.0 + cluster_size[index]).ln() / log_reference).min(1.0);
-        }
-        distance_spread_top5_minus_min[index] =
-            linker_round(top5_mean_distance[index] - min_distance[index], 1_000_000.0);
-        query_view_initial_only[index] = linker_bool(query_view[index] == "initial_only");
-        top5_distance_best_gap[index] = linker_round(
-            top5_mean_distance[index] - top5_mean_distance[best_top5_indices[index]],
+        candidate_dominant_first_name_length[index] = linker_alpha_length(dominant_first);
+        cluster_size_log[index] = (1.0 + cluster_size[index].max(0.0)).ln();
+        retrieval_reciprocal_rank[index] = linker_round(
+            1.0 / group_features.current_retrieval_rank[index].max(1.0),
             1_000_000.0,
         );
     }
@@ -9066,33 +8964,8 @@ fn promoted_linker_non_pairwise_features<'py>(
     linker_set_f32_array(
         py,
         &payload,
-        "retrieval_score_gap_vs_best_competitor",
-        group_features.retrieval_score_gap_vs_best_competitor,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "top5_distance_best_gap",
-        top5_distance_best_gap,
-    )?;
-    linker_set_f32_array(py, &payload, "retrieval_score", retrieval_score.clone())?;
-    linker_set_f32_array(
-        py,
-        &payload,
         "affiliation_contradiction_severity",
         affiliation_contradiction_severity,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "coarse_family_top5_best_gap",
-        group_features.coarse_family_top5_best_gap,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "same_family_as_best_top5",
-        group_features.same_family_as_best_top5,
     )?;
     linker_set_f32_array(
         py,
@@ -9103,26 +8976,97 @@ fn promoted_linker_non_pairwise_features<'py>(
     linker_set_f32_array(
         py,
         &payload,
-        "same_family_as_top1",
-        group_features.same_family_as_top1,
+        "same_dominant_first_as_best_top5",
+        group_features.same_dominant_first_as_best_top5,
     )?;
     linker_set_f32_array(
         py,
         &payload,
-        "query_first_prefix_match",
-        query_first_prefix_match,
+        "specter_exemplar_similarity",
+        specter_exemplar_similarity,
+    )?;
+    linker_set_f32_array(py, &payload, "coauthor_overlap", coauthor_overlap)?;
+    linker_set_f32_array(py, &payload, "affiliation_overlap", affiliation_overlap)?;
+    linker_set_f32_array(py, &payload, "year_compatibility", year_compatibility)?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "retrieval_rank",
+        group_features.current_retrieval_rank,
     )?;
     linker_set_f32_array(
         py,
         &payload,
-        "retrieval_score_best_gap",
-        group_features.retrieval_score_best_gap,
+        "retrieval_reciprocal_rank",
+        retrieval_reciprocal_rank,
+    )?;
+    linker_set_f32_array(py, &payload, "cluster_size_log", cluster_size_log)?;
+    linker_set_f32_array(py, &payload, "candidate_year_span", candidate_year_span)?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "year_gap_to_candidate_range",
+        year_gap_to_candidate_range,
     )?;
     linker_set_f32_array(
         py,
         &payload,
-        "cluster_size_log_capped",
-        cluster_size_log_capped,
+        "year_gap_signed_to_candidate_range",
+        year_gap_signed_to_candidate_range,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "candidate_dominant_first_name_length",
+        candidate_dominant_first_name_length,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "query_first_prefix_match_any_length",
+        query_first_prefix_match_any_length,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "candidate_cluster_max_paper_author_count",
+        candidate_cluster_max_paper_author_count,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "paper_author_list_max_jaccard",
+        paper_author_list_max_jaccard,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "paper_author_list_max_containment",
+        paper_author_list_max_containment,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "paper_author_list_max_overlap_count",
+        paper_author_list_max_overlap_count,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "local_author_window10_jaccard_max",
+        local_author_window10_jaccard_max,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "local_author_window10_overlap_count_max",
+        local_author_window10_overlap_count_max,
+    )?;
+    linker_set_f32_array(
+        py,
+        &payload,
+        "best_author_count_log_absdiff",
+        best_author_count_log_absdiff,
     )?;
     linker_set_f32_array(py, &payload, "anchor_evidence_count", anchor_evidence_count)?;
     linker_set_f32_array(
@@ -9146,20 +9090,8 @@ fn promoted_linker_non_pairwise_features<'py>(
     linker_set_f32_array(
         py,
         &payload,
-        "query_view__initial_only",
-        query_view_initial_only,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
         "last_name_count_min_rarity",
         last_name_count_min_rarity,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "candidate_last_first_name_count_min_rarity",
-        candidate_last_first_name_count_min_rarity,
     )?;
     linker_set_f32_array(
         py,
@@ -9170,32 +9102,8 @@ fn promoted_linker_non_pairwise_features<'py>(
     linker_set_f32_array(
         py,
         &payload,
-        "first_prefix_x_last_first_name_count_min_rarity",
-        first_prefix_x_last_first_name_count_min_rarity,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "exact_anchor_evidence_flag",
-        exact_anchor_evidence_flag,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "year_mismatch_severity",
-        year_mismatch_severity,
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
         "top5_mean_distance",
         top5_mean_distance.clone(),
-    )?;
-    linker_set_f32_array(
-        py,
-        &payload,
-        "distance_spread_top5_minus_min",
-        distance_spread_top5_minus_min,
     )?;
     let telemetry = PyDict::new(py);
     telemetry.set_item("generated_family_id_count", generated_family_id_count)?;

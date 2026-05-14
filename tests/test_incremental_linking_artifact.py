@@ -20,7 +20,7 @@ from s2and.incremental_linking.features import promoted_linker_feature_columns
 def _tiny_booster() -> tuple[lgb.Booster, np.ndarray]:
     columns = promoted_linker_feature_columns()
     matrix = np.zeros((8, len(columns)), dtype=np.float32)
-    matrix[:, columns.index("retrieval_score")] = np.linspace(0.0, 1.0, len(matrix), dtype=np.float32)
+    matrix[:, columns.index("min_distance")] = np.linspace(1.0, 0.0, len(matrix), dtype=np.float32)
     labels = np.asarray([0, 0, 0, 1, 1, 1, 1, 1], dtype=np.int8)
     dataset = lgb.Dataset(matrix, label=labels, free_raw_data=False)
     booster = lgb.train(

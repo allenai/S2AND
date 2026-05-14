@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,8 @@ def test_promoted_training_defaults_to_minimal_raw_specter_source() -> None:
         "s2and/data/production_incremental_linker_v1.2/training_target.json"
     )
     assert parser_defaults["feature_mode"] == "minimal-raw-rust"
-    assert feature_mode_action.choices == ("minimal-raw-rust", "rust-recompute-pw")
+    assert feature_mode_action.choices == ("minimal-raw-rust", "rust-recompute-pw", "precomputed-promoted")
+    assert parser_defaults["precomputed_feature_bundle_root"] is None
     assert "promoted_feature_bundle_root" not in parser_defaults
     assert parser_defaults["prod_holdout_importance_weight"] == 10.0
     assert parser_defaults["hyperopt"] is False
@@ -54,6 +56,91 @@ def test_promoted_training_defaults_to_minimal_raw_specter_source() -> None:
     assert parser_defaults["hyperopt_metric"] == "weighted_average_error"
     assert "minimal_raw_component_scope" not in parser_defaults
     assert "minimal_raw_compare_pw_scopes" not in parser_defaults
+
+
+def _write_precomputed_promoted_bundle(root: Path, target: dict[str, Any]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    table_files = {
+        "train_path": "features_corrected/train.parquet",
+        "classic_gate_source_path": "features_corrected/calibration_source.parquet",
+        "s2and_eval_path": "features_corrected/s2and_eval.parquet",
+        "hwang_eval_path": "features_corrected/hwang_eval.parquet",
+    }
+    for table_key, relative_path in table_files.items():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {
+                    "query_group_id": f"{table_key}:q1",
+                    "retrieval_rank": 1,
+                    "label": 1,
+                    "f0": 0.5,
+                }
+            ]
+        ).to_parquet(path, index=False)
+    payload = {
+        "bundle_name": "precomputed_test",
+        "assets": {
+            "corrected_feature_rows": {
+                "root": "features_corrected",
+                "files": dict(table_files),
+            }
+        },
+        "models": {
+            "classic": {
+                **dict(table_files),
+                "feature_columns": list(target["features"]),
+                "best_params": dict(target["params"]),
+            }
+        },
+        "expected_metrics": {},
+    }
+    (root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    bundle = promoted_train.load_bundle(root)
+    payload["precomputed_promoted_feature_bundle"] = promoted_train._precomputed_promoted_bundle_metadata(  # noqa: SLF001
+        bundle=bundle,
+        target=target,
+        source_mode="test",
+    )
+    (root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return root
+
+
+def test_precomputed_promoted_bundle_validation_requires_portable_matching_tables(tmp_path: Path) -> None:
+    target = {"features": ["f0"], "feature_count": 1, "params": {"n_estimators": 10}, "metrics": {}}
+    bundle_root = _write_precomputed_promoted_bundle(tmp_path / "bundle", target)
+
+    bundle, summaries = promoted_train._load_precomputed_promoted_feature_bundle(  # noqa: SLF001
+        bundle_root=bundle_root,
+        target=target,
+    )
+
+    assert bundle.root == bundle_root.resolve()
+    assert bundle.models["classic"]["feature_columns"] == ["f0"]
+    assert [summary["table_key"] for summary in summaries] == [
+        "train_path",
+        "classic_gate_source_path",
+        "s2and_eval_path",
+        "hwang_eval_path",
+    ]
+    assert all(summary["mode"] == "precomputed-promoted" for summary in summaries)
+
+
+def test_precomputed_promoted_bundle_rejects_absolute_feature_paths(tmp_path: Path) -> None:
+    target = {"features": ["f0"], "feature_count": 1, "params": {"n_estimators": 10}, "metrics": {}}
+    bundle_root = _write_precomputed_promoted_bundle(tmp_path / "bundle", target)
+    payload = json.loads((bundle_root / "bundle.json").read_text(encoding="utf-8"))
+    payload["assets"]["corrected_feature_rows"]["files"]["train_path"] = str(
+        (bundle_root / "features_corrected/train.parquet").resolve()
+    )
+    (bundle_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="absolute feature paths"):
+        promoted_train._load_precomputed_promoted_feature_bundle(  # noqa: SLF001
+            bundle_root=bundle_root,
+            target=target,
+        )
 
 
 def test_promoted_training_uses_extracted_training_helpers() -> None:
@@ -79,7 +166,7 @@ def test_run_classic_keeps_artifact_export_hook() -> None:
 def test_hyperopt_loss_uses_weighted_average_error() -> None:
     summary = {
         "training_summary": {"rows": 10, "positive_rows": 3},
-        "abstain_rule": {"promoted_stratified_gate": {"selected_gate_name": "gate"}},
+        "abstain_rule": {"promoted_stratified_gate": {"fixed_grid_step": 0.01}},
         "stratified_eval_test_split": {
             "overall": {
                 "test": {
@@ -128,7 +215,7 @@ def test_hyperopt_includes_base_params_as_candidate(
         calls.append({"params": dict(feature_bundle.models["classic"]["best_params"]), "output_dir": output_dir})
         return {
             "training_summary": {"rows": 3, "positive_rows": 1},
-            "abstain_rule": {"promoted_stratified_gate": {"selected_gate_name": "gate"}},
+            "abstain_rule": {"promoted_stratified_gate": {"fixed_grid_step": 0.01}},
             "stratified_eval_test_split": {
                 "overall": {
                     "test": {
@@ -271,7 +358,7 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
         )
         return {
             "training_summary": {"rows": 3, "positive_rows": 1},
-            "abstain_rule": {"promoted_stratified_gate": {"selected_gate_name": "gate"}},
+            "abstain_rule": {"promoted_stratified_gate": {"fixed_grid_step": 0.01}},
             "stratified_eval_test_split": {
                 "overall": {
                     "test": {
@@ -339,3 +426,76 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     assert result["n_estimators"] == 42
     assert result["artifact_summary"]["path"] == str(artifact_dir.resolve())
     assert result["metric_drift_check"] == "skipped_after_hyperopt_param_search"
+
+
+def test_run_uses_explicit_precomputed_promoted_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = {
+        "features": ["f0"],
+        "feature_count": 1,
+        "params": {"n_estimators": 10},
+        "metrics": {"stratified_test_errors": 0},
+    }
+    bundle = promoted_train.OfficialBundle(
+        root=(tmp_path / "precomputed").resolve(),
+        bundle_name="precomputed",
+        assets={},
+        models={"classic": {"feature_columns": ["f0"], "best_params": {"n_estimators": 10}}},
+        expected_metrics={},
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_load_precomputed(**kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
+        calls.append({"bundle_root": kwargs["bundle_root"], "target": kwargs["target"]})
+        return bundle, [{"mode": "precomputed-promoted", "table_key": "train_path", "rows": 1}]
+
+    def fake_run_classic(feature_bundle: Any, output_dir: Path, **_kwargs: Any) -> dict[str, Any]:
+        assert feature_bundle is bundle
+        assert output_dir == tmp_path / "out" / "classic"
+        return {
+            "training_summary": {"rows": 3, "positive_rows": 1},
+            "abstain_rule": {"promoted_stratified_gate": {"fixed_grid_step": 0.01}},
+            "stratified_eval_test_split": {
+                "overall": {
+                    "test": {
+                        "accuracy": 1.0,
+                        "balanced_accuracy": 1.0,
+                        "error_rate": 0.0,
+                        "n_queries": 3,
+                        "errors": 0,
+                        "false_abstain": 0,
+                        "false_link": 0,
+                        "wrong_candidate_link": 0,
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
+    monkeypatch.setattr(
+        promoted_train,
+        "_load_precomputed_promoted_feature_bundle",
+        fake_load_precomputed,
+    )
+    monkeypatch.setattr(promoted_train, "run_classic", fake_run_classic)
+
+    precomputed_root = tmp_path / "precomputed"
+    args = promoted_train.build_parser().parse_args(
+        [
+            "--feature-mode",
+            "precomputed-promoted",
+            "--precomputed-feature-bundle-root",
+            str(precomputed_root),
+            "--run-full",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    result = promoted_train.run(args)
+
+    assert calls == [{"bundle_root": precomputed_root, "target": target}]
+    assert result["mode"] == "precomputed-promoted"
+    assert result["featureization"] == [{"mode": "precomputed-promoted", "table_key": "train_path", "rows": 1}]

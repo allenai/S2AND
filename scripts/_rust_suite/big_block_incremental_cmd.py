@@ -424,6 +424,7 @@ def _run_single_impl(args: argparse.Namespace) -> dict[str, Any]:
             total_ram_bytes=int(args.total_ram_bytes),
         )
         pred_clusters = incremental_result["clusters"]
+        promoted_telemetry = dict(incremental_result.get("incremental_linker_telemetry", {}))
         predict_seconds = time.perf_counter() - predict_start
 
     total_runtime_seconds = time.perf_counter() - total_start
@@ -460,6 +461,19 @@ def _run_single_impl(args: argparse.Namespace) -> dict[str, Any]:
         "phase_b_mode": str(incremental_result["phase_b_mode"]),
         "phase_b_budget_bytes": int(incremental_result["phase_b_budget_bytes"]),
         "phase_b_required_bytes": int(incremental_result["phase_b_required_bytes"]),
+        "phase_b_residual_count": int(incremental_result.get("phase_b_residual_count", 0)),
+        "promoted_candidate_rows": int(promoted_telemetry.get("candidate_row_count", 0)),
+        "promoted_scored_pairs": int(promoted_telemetry.get("pair_count", 0)),
+        "promoted_link_count": int(promoted_telemetry.get("link_count", 0)),
+        "promoted_abstain_count": int(promoted_telemetry.get("abstain_count", 0)),
+        "promoted_query_batch_count": int(promoted_telemetry.get("query_batch_count", 0)),
+        "promoted_query_batch_size_max": int(promoted_telemetry.get("query_batch_size_max", 0)),
+        "promoted_memory_predicted_peak_delta_bytes_max": int(
+            promoted_telemetry.get("memory_predicted_peak_delta_bytes_max", 0)
+        ),
+        "promoted_memory_observed_peak_delta_bytes_max": int(
+            promoted_telemetry.get("memory_observed_peak_delta_bytes_max", 0)
+        ),
         "phase_a_accumulator_overflow_early_stop": bool(
             incremental_result.get("phase_a_accumulator_overflow_early_stop", False)
         ),

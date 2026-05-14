@@ -38,7 +38,12 @@ The promoted incremental linker is versioned separately as a directory artifact:
 - `production_incremental_linker_v1.2/`
 
 Its `training_target.json` file is the tracked replay target for the promoted
-70-feature linker; replay scripts should not depend on machine-local analysis
+53-feature linker; replay scripts should not depend on machine-local analysis
 artifacts.
+
+For repeated promoted-linker replay, materialized feature bundles can be reused
+only through the explicit `precomputed-promoted` mode. The bundle must be
+portable and validated against `training_target.json`; local scratch paths are
+not accepted as artifact metadata.
 
 See [production_inference.md](production_inference.md) for the current inference contract.

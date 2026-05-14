@@ -25,6 +25,7 @@ from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
     _row_allows_seed_constraint_bypass,
     _row_label_is_positive,
     _score_candidate_summaries_with_frozen_rust_policy,
+    _write_minimal_raw_partial_frame,
 )
 
 
@@ -54,13 +55,13 @@ class _ConstraintClusterer:
         return [-90_000.0 for _pair in pairs], {}
 
 
-def test_load_target_accepts_historical_supported_promoted_features(tmp_path) -> None:
-    target_path = tmp_path / "historical_target.json"
+def test_load_target_accepts_current_supported_promoted_features(tmp_path) -> None:
+    target_path = tmp_path / "current_target.json"
     target_path.write_text(
         json.dumps(
             {
                 "feature_count": 3,
-                "features": ["min_distance", "pw_max_email_prefix_equal", "pw_valid_fraction_email"],
+                "features": ["min_distance", "pw_max_affiliation_overlap", "strong_positive_anchor_score"],
             }
         ),
         encoding="utf-8",
@@ -68,16 +69,16 @@ def test_load_target_accepts_historical_supported_promoted_features(tmp_path) ->
 
     target = _load_target(target_path)
 
-    assert target["features"] == ["min_distance", "pw_max_email_prefix_equal", "pw_valid_fraction_email"]
+    assert target["features"] == ["min_distance", "pw_max_affiliation_overlap", "strong_positive_anchor_score"]
 
 
-def test_load_target_rejects_unsupported_historical_features(tmp_path) -> None:
+def test_load_target_rejects_removed_promoted_features(tmp_path) -> None:
     target_path = tmp_path / "unsupported_target.json"
     target_path.write_text(
         json.dumps(
             {
                 "feature_count": 1,
-                "features": ["min_distance_rank_fraction"],
+                "features": ["pw_max_email_prefix_equal"],
             }
         ),
         encoding="utf-8",
@@ -111,7 +112,6 @@ def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None
         "candidate_has_specter_exemplars": np.zeros(4, dtype=np.float32),
         "query_has_name_counts": np.asarray([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
         "candidate_has_name_counts": np.asarray([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
-        "query_has_full_first": np.asarray([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
         "query_first_token": np.asarray(["alex", "bo", "", "c"], dtype=object),
         "dominant_first_name": np.asarray(["alex", "", "casey", "c"], dtype=object),
     }
@@ -119,20 +119,24 @@ def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None
         column: np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
         for column in (
             "min_distance",
-            "retrieval_score_gap_vs_best_competitor",
-            "top5_distance_best_gap",
+            "specter_exemplar_similarity",
+            "coauthor_overlap",
+            "affiliation_overlap",
+            "year_compatibility",
+            "candidate_year_span",
+            "year_gap_to_candidate_range",
+            "year_gap_signed_to_candidate_range",
+            "same_dominant_first_as_best_top5",
+            "same_family_as_heuristic_choice",
+            "query_first_prefix_match_any_length",
             "affiliation_contradiction_severity",
-            "query_first_prefix_match",
             "anchor_evidence_count",
             "strong_positive_anchor_score",
             "weak_residual_anchor_score",
             "sparse_relative_winner_score",
             "last_name_count_min_rarity",
-            "candidate_last_first_name_count_min_rarity",
-            "first_prefix_x_last_first_name_count_min_rarity",
-            "year_mismatch_severity",
+            "last_first_name_count_min_rarity",
             "top5_mean_distance",
-            "distance_spread_top5_minus_min",
         )
     }
 
@@ -145,20 +149,50 @@ def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None
 
     distance_nan = np.asarray([False, False, True, False])
     np.testing.assert_array_equal(np.isnan(adjusted["min_distance"]), distance_nan)
-    np.testing.assert_array_equal(np.isnan(adjusted["top5_distance_best_gap"]), distance_nan)
     np.testing.assert_array_equal(np.isnan(adjusted["top5_mean_distance"]), distance_nan)
-    np.testing.assert_array_equal(np.isnan(adjusted["distance_spread_top5_minus_min"]), distance_nan)
     np.testing.assert_array_equal(
-        np.isnan(adjusted["retrieval_score_gap_vs_best_competitor"]),
-        np.asarray([False, False, True, True]),
+        np.isnan(adjusted["specter_exemplar_similarity"]),
+        np.asarray([True, True, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["coauthor_overlap"]),
+        np.asarray([True, True, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["affiliation_overlap"]),
+        np.asarray([True, True, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["year_compatibility"]),
+        np.asarray([True, False, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["candidate_year_span"]),
+        np.asarray([True, False, True, False]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["year_gap_to_candidate_range"]),
+        np.asarray([True, False, True, True]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["year_gap_signed_to_candidate_range"]),
+        np.asarray([True, False, True, True]),
     )
     np.testing.assert_array_equal(
         np.isnan(adjusted["affiliation_contradiction_severity"]),
         np.asarray([True, False, True, True]),
     )
     np.testing.assert_array_equal(
-        np.isnan(adjusted["query_first_prefix_match"]),
-        np.asarray([False, True, True, True]),
+        np.isnan(adjusted["same_dominant_first_as_best_top5"]),
+        np.asarray([False, True, True, False]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["same_family_as_heuristic_choice"]),
+        np.asarray([False, True, True, False]),
+    )
+    np.testing.assert_array_equal(
+        np.isnan(adjusted["query_first_prefix_match_any_length"]),
+        np.asarray([False, True, True, False]),
     )
     composite_nan = np.asarray([False, False, True, False])
     np.testing.assert_array_equal(np.isnan(adjusted["anchor_evidence_count"]), composite_nan)
@@ -174,19 +208,39 @@ def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None
         np.asarray([False, True, True, False]),
     )
     np.testing.assert_array_equal(
-        np.isnan(adjusted["candidate_last_first_name_count_min_rarity"]),
-        np.asarray([False, False, True, False]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["first_prefix_x_last_first_name_count_min_rarity"]),
-        np.asarray([False, True, True, True]),
-    )
-    np.testing.assert_array_equal(
-        np.isnan(adjusted["year_mismatch_severity"]),
-        np.asarray([True, False, True, True]),
+        np.isnan(adjusted["last_first_name_count_min_rarity"]),
+        np.asarray([False, True, True, False]),
     )
     assert summary["row_nan_policy"] == "semantic"
     assert summary["semantic_nan_total"] > 0
+
+
+def test_minimal_raw_partial_writer_reuses_label_columns_as_features(tmp_path) -> None:
+    rows = pd.DataFrame(
+        {
+            "retrieval_rank": [1.0, 2.0],
+            "query_group_id": ["q1", "q1"],
+            "label": [1, 0],
+        }
+    )
+    partial_path = tmp_path / "partial.parquet"
+
+    _write_minimal_raw_partial_frame(
+        rows=rows,
+        row_positions=np.asarray([7, 8], dtype=np.int64),
+        partial_path=partial_path,
+        dataset_features={
+            "retrieval_rank": np.asarray([1.0, 2.0], dtype=np.float32),
+            "title_overlap": np.asarray([0.4, 0.1], dtype=np.float32),
+        },
+        target_features=("retrieval_rank", "title_overlap"),
+    )
+
+    out = pd.read_parquet(partial_path)
+
+    assert out.columns.tolist() == ["_row_position", "retrieval_rank", "query_group_id", "label", "title_overlap"]
+    assert out["retrieval_rank"].tolist() == [1.0, 2.0]
+    assert out["title_overlap"].tolist() == pytest.approx([0.4, 0.1])
 
 
 def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:
@@ -213,7 +267,6 @@ def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:
         "candidate_has_specter_exemplars": np.zeros(2, dtype=np.float32),
         "query_has_name_counts": np.ones(2, dtype=np.float32),
         "candidate_has_name_counts": np.ones(2, dtype=np.float32),
-        "query_has_full_first": np.ones(2, dtype=np.float32),
         "query_first_token": np.asarray(["alex", "alex"], dtype=object),
         "dominant_first_name": np.asarray(["alex", "alex"], dtype=object),
     }

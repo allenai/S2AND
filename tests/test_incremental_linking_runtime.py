@@ -19,6 +19,7 @@ from s2and.incremental_linking.features import (
     promoted_linker_feature_columns,
 )
 from s2and.incremental_linking.linker_pairwise import (
+    PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS,
     PROMOTED_PAIRWISE_AGG_FEATURE_INDICES,
     LinkerCandidateBatch,
     promoted_pairwise_aggregate_columns,
@@ -214,7 +215,7 @@ class FakeProductionClusterer:
 def _tiny_booster() -> tuple[lgb.Booster, np.ndarray]:
     columns = promoted_linker_feature_columns()
     matrix = np.zeros((8, len(columns)), dtype=np.float32)
-    matrix[:, columns.index("retrieval_score")] = np.linspace(0.0, 1.0, len(matrix), dtype=np.float32)
+    matrix[:, columns.index("min_distance")] = np.linspace(1.0, 0.0, len(matrix), dtype=np.float32)
     labels = np.asarray([0, 0, 0, 1, 1, 1, 1, 1], dtype=np.int8)
     dataset = lgb.Dataset(matrix, label=labels, free_raw_data=False)
     booster = lgb.train(
@@ -238,7 +239,7 @@ def _tiny_booster() -> tuple[lgb.Booster, np.ndarray]:
 def _row_features(retrieval_scores: np.ndarray) -> dict[str, np.ndarray]:
     row_count = len(retrieval_scores)
     row_features = {column: np.zeros(row_count, dtype=np.float32) for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS}
-    row_features["retrieval_score"] = np.asarray(retrieval_scores, dtype=np.float32)
+    row_features["min_distance"] = 1.0 - np.asarray(retrieval_scores, dtype=np.float32)
     return row_features
 
 
@@ -443,11 +444,12 @@ def test_fused_pairwise_model_and_aggregates_preserve_existing_distance_semantic
     assert tuple(calls[0]["aggregate_indices"]) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_INDICES)
     assert np.isnan(float(calls[0]["nan_value"]))
     assert float(calls[0]["aggregate_nan_value"]) == 0.0
+    assert tuple(result.pairwise_stats.aggregate_feature_columns) == tuple(PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS)
     np.testing.assert_array_equal(result.pairwise_stats.counts, np.asarray([2, 1, 2, 0], dtype=np.uint64))
     np.testing.assert_array_equal(result.pairwise_stats.valid_counts[:, 0], np.asarray([2, 1, 2, 0]))
-    np.testing.assert_allclose(result.pairwise_stats.sums[:, 0], np.asarray([0.7, 0.1, 1.3, 0.0]))
-    np.testing.assert_allclose(result.pairwise_stats.mins[:, 0], np.asarray([0.2, 0.1, 0.4, np.inf]))
-    np.testing.assert_allclose(result.pairwise_stats.maxs[:, 0], np.asarray([0.5, 0.1, 0.9, -np.inf]))
+    np.testing.assert_allclose(result.pairwise_stats.sums[:, 0], np.asarray([1.1, 0.3, 0.9, 0.0]))
+    np.testing.assert_allclose(result.pairwise_stats.mins[:, 0], np.asarray([0.4, 0.3, 0.2, np.inf]))
+    np.testing.assert_allclose(result.pairwise_stats.maxs[:, 0], np.asarray([0.7, 0.3, 0.7, -np.inf]))
     np.testing.assert_allclose(result.row_signals["min_distance"], np.asarray([0.0, 0.2, 0.3, 1.0]))
     np.testing.assert_allclose(result.row_signals["mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))
     np.testing.assert_allclose(result.row_signals["top3_mean_distance"], np.asarray([0.15, 0.2, 0.55, 1.0]))

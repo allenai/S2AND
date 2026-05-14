@@ -95,9 +95,9 @@ def test_normalize_augmented_feature_frame_derives_query_first_features() -> Non
     )
     out = _normalize_augmented_feature_frame(
         df,
-        feature_columns=("query_view", "query_first_prefix_match"),
+        feature_columns=("query_first_prefix_match_any_length",),
     )
-    assert out["query_first_prefix_match"].tolist() == [1.0, 0.0]
+    assert out["query_first_prefix_match_any_length"].tolist() == [1.0, 1.0]
 
 
 def test_normalize_augmented_feature_frame_overwrites_stale_runtime_features() -> None:
@@ -108,20 +108,20 @@ def test_normalize_augmented_feature_frame_overwrites_stale_runtime_features() -
             {
                 "query_author": "Hanbing Wang",
                 "dominant_first_name": "hanbing",
-                "query_first_prefix_match": 0.0,
                 "cluster_size": 17,
-                "cluster_size_log_capped": 0.0,
+                "query_first_prefix_match_any_length": 0.0,
+                "cluster_size_log": 0.0,
             }
         ]
     )
 
     out = _normalize_augmented_feature_frame(
         df,
-        feature_columns=("query_first_prefix_match", "cluster_size_log_capped"),
+        feature_columns=("query_first_prefix_match_any_length", "cluster_size_log"),
     )
 
-    assert out.iloc[0]["query_first_prefix_match"] == 1.0
-    assert out.iloc[0]["cluster_size_log_capped"] > 0.0
+    assert out.iloc[0]["query_first_prefix_match_any_length"] == 1.0
+    assert out.iloc[0]["cluster_size_log"] == pytest.approx(np.log1p(17))
 
 
 def test_normalize_augmented_feature_frame_derives_anchor_evidence_features() -> None:
@@ -159,10 +159,59 @@ def test_normalize_augmented_feature_frame_derives_anchor_evidence_features() ->
         ),
     )
 
-    assert out.iloc[0]["anchor_evidence_count"] == pytest.approx(7.0)
-    assert out.iloc[0]["strong_positive_anchor_score"] == pytest.approx(0.47067, abs=1e-6)
-    assert out.iloc[0]["weak_residual_anchor_score"] == pytest.approx(0.6506, abs=1e-6)
-    assert out.iloc[0]["sparse_relative_winner_score"] == pytest.approx(0.09759, abs=1e-6)
+    assert out.iloc[0]["anchor_evidence_count"] == pytest.approx(2.0)
+    assert out.iloc[0]["strong_positive_anchor_score"] == pytest.approx(0.18, abs=1e-6)
+    assert out.iloc[0]["weak_residual_anchor_score"] == pytest.approx(0.2936, abs=1e-6)
+    assert out.iloc[0]["sparse_relative_winner_score"] == pytest.approx(0.05872, abs=1e-6)
+
+
+def test_normalize_augmented_feature_frame_derives_promoted_primitives() -> None:
+    """Promoted runtime primitives should be recomputed from raw evidence."""
+
+    df = pd.DataFrame(
+        [
+            {
+                "query_group_id": "q1",
+                "query_author": "C. Zhang",
+                "candidate_component_key": "c1",
+                "dominant_first_name": "chen",
+                "retrieval_rank": 2,
+                "retrieval_score": 0.75,
+                "top5_mean_distance": 0.4,
+                "cluster_size": 200,
+                "candidate_year_min": 2010,
+                "candidate_year_max": 2015,
+                "candidate_year_range_missing": 0,
+                "query_year": 2007,
+                "query_year_missing": 0,
+            }
+        ]
+    )
+
+    out = _normalize_augmented_feature_frame(
+        df,
+        feature_columns=(
+            "retrieval_reciprocal_rank",
+            "cluster_size_log",
+            "candidate_year_span",
+            "year_gap_to_candidate_range",
+            "year_gap_signed_to_candidate_range",
+            "candidate_dominant_first_name_length",
+            "query_first_prefix_match_any_length",
+            "same_dominant_first_as_best_top5",
+            "same_family_as_heuristic_choice",
+        ),
+    )
+
+    assert out.iloc[0]["retrieval_reciprocal_rank"] == pytest.approx(0.5)
+    assert out.iloc[0]["cluster_size_log"] == pytest.approx(np.log1p(200))
+    assert out.iloc[0]["candidate_year_span"] == pytest.approx(5.0)
+    assert out.iloc[0]["year_gap_to_candidate_range"] == pytest.approx(3.0)
+    assert out.iloc[0]["year_gap_signed_to_candidate_range"] == pytest.approx(-3.0)
+    assert out.iloc[0]["candidate_dominant_first_name_length"] == pytest.approx(4.0)
+    assert out.iloc[0]["query_first_prefix_match_any_length"] == pytest.approx(1.0)
+    assert out.iloc[0]["same_dominant_first_as_best_top5"] == pytest.approx(1.0)
+    assert out.iloc[0]["same_family_as_heuristic_choice"] == pytest.approx(1.35)
 
 
 def test_classic_feature_matrix_uses_query_first_token_without_query_author() -> None:
@@ -175,9 +224,9 @@ def test_classic_feature_matrix_uses_query_first_token_without_query_author() ->
         ]
     )
 
-    features = _classic_feature_matrix(df, ("query_first_prefix_match",))
+    features = _classic_feature_matrix(df, ("query_first_prefix_match_any_length",))
 
-    assert features["query_first_prefix_match"].tolist() == [1.0, 0.0]
+    assert features["query_first_prefix_match_any_length"].tolist() == [1.0, 0.0]
 
 
 def test_official_table_loader_reads_parquet_with_usecols(tmp_path: Path) -> None:
@@ -189,6 +238,8 @@ def test_official_table_loader_reads_parquet_with_usecols(tmp_path: Path) -> Non
     loaded = _read_official_table(path, usecols=["query_group_id", "label"])
 
     assert loaded.to_dict(orient="records") == [{"query_group_id": "001", "label": 1}]
+
+
 def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibration_rows(
     tmp_path: Path,
 ) -> None:
@@ -277,6 +328,8 @@ def test_promoted_stratified_loader_prefers_public_rows_over_shadowing_calibrati
     assert choice["query_safe_target"] == 1
     assert choice["positive_rank_bucket"] == "positive_first"
     assert assignment["positive_rank_bucket"] == "positive_first"
+
+
 def test_fit_score_margin_gate_finds_perfect_gate() -> None:
     """Score+margin fitting should recover a gate with perfect balanced accuracy when available."""
 
@@ -456,8 +509,8 @@ def test_apply_classic_gate_supports_bucketed_thresholds() -> None:
     assert predictions.loc["q_single_multi_abstain", "predicted_action"] == "abstain"
 
 
-def test_promoted_total_error_gate_selects_on_check_errors() -> None:
-    """Promoted non-fixed gate calibration should fit on one split and select on check."""
+def test_promoted_total_error_gate_fits_fixed_grid_on_full_calibration() -> None:
+    """Promoted gate calibration should fit one fixed-grid gate on all calibration splits."""
 
     choices = pd.DataFrame(
         [
@@ -508,30 +561,19 @@ def test_promoted_total_error_gate_selects_on_check_errors() -> None:
         ]
     )
     config = {
-        "mode": "total_error_4score_2margin",
-        "fit_split": "calibration_fit",
-        "selection_split": "calibration_check",
+        "mode": "full_calibration_fixed_grid_4score_2margin",
+        "calibration_splits": ["calibration_fit", "calibration_check"],
         "test_split": "test",
-        "score_grid_size": 7,
-        "margin_grid_size": 7,
-        "lambda_grid": [0.0],
-        "reference_score_thresholds": {
-            "multi_candidate|multi_letter_first": 0.5,
-            "multi_candidate|single_letter_first": 0.5,
-            "single_candidate|multi_letter_first": 0.5,
-            "single_candidate|single_letter_first": 0.5,
-        },
-        "reference_margin_thresholds": {
-            "multi_candidate|multi_letter_first": 0.5,
-            "multi_candidate|single_letter_first": 0.5,
-        },
+        "fixed_grid_step": 0.1,
     }
 
     result = _fit_promoted_stratified_total_error_gate(choices, config)
 
-    assert result["gate"].name == "total_error_4score_2margin_lambda_0"
-    assert result["check_metrics"]["errors"] == 0
-    assert result["fit_metrics"]["errors"] == 0
+    assert result["gate"].name == "full_calibration_fixed_grid_0.1"
+    assert result["calibration_metrics"]["errors"] == 0
+    assert result["calibration_split_metrics"]["calibration_fit"]["errors"] == 0
+    assert result["calibration_split_metrics"]["calibration_check"]["errors"] == 0
+    assert result["threshold_grid_points"] == 11
 
 
 def test_promoted_gate_selects_on_weighted_error_not_total_errors() -> None:
@@ -541,10 +583,10 @@ def test_promoted_gate_selects_on_weighted_error_not_total_errors() -> None:
     for index, (query_target, candidate_target, score) in enumerate(
         [
             (1, 1, 0.9),
+            (1, 1, 0.5),
+            (1, 1, 0.5),
+            (1, 1, 0.5),
             (0, 0, 0.5),
-            (1, 0, 0.5),
-            (1, 0, 0.5),
-            (1, 0, 0.5),
             (1, 0, 0.5),
         ]
     ):
@@ -561,58 +603,20 @@ def test_promoted_gate_selects_on_weighted_error_not_total_errors() -> None:
                 "has_runner_up": 0,
             }
         )
-    for index, (query_target, candidate_target, score) in enumerate(
-        [
-            (1, 1, 0.55),
-            (1, 1, 0.55),
-            (1, 1, 0.55),
-            (1, 0, 0.5),
-            (0, 0, 0.5),
-        ]
-    ):
-        rows.append(
-            {
-                "query_case_id": f"check_{index}",
-                "split": "calibration_check",
-                "candidate_kind": "single_candidate",
-                "first_name_bucket": "multi_letter_first",
-                "query_safe_target": query_target,
-                "chosen_candidate_target": candidate_target,
-                "chosen_probability": score,
-                "score_margin": np.nan,
-                "has_runner_up": 0,
-            }
-        )
     config = {
-        "mode": "total_error_4score_2margin",
-        "fit_split": "calibration_fit",
-        "selection_split": "calibration_check",
+        "mode": "full_calibration_fixed_grid_4score_2margin",
+        "calibration_splits": ["calibration_fit"],
         "test_split": "test",
-        "score_grid_size": 7,
-        "margin_grid_size": 7,
-        "lambda_grid": [0.0, 100.0],
-        "reference_score_thresholds": {
-            "multi_candidate|multi_letter_first": 0.2,
-            "multi_candidate|single_letter_first": 0.2,
-            "single_candidate|multi_letter_first": 0.2,
-            "single_candidate|single_letter_first": 0.2,
-        },
-        "reference_margin_thresholds": {
-            "multi_candidate|multi_letter_first": 0.2,
-            "multi_candidate|single_letter_first": 0.2,
-        },
+        "fixed_grid_step": 0.1,
     }
 
     result = _fit_promoted_stratified_total_error_gate(pd.DataFrame(rows), config)
 
-    candidate_metrics = {row["name"]: row for row in result["candidate_metrics"]}
-    assert result["gate"].name == "total_error_4score_2margin_lambda_0"
-    assert result["selection_key"]["check_weighted_average_error"] == pytest.approx((4 * 0.25) / (5 * 2.75))
-    assert result["selection_key"]["check_errors"] == 4
-    assert candidate_metrics["total_error_4score_2margin_lambda_100"]["check_errors"] == 2
-    assert candidate_metrics["total_error_4score_2margin_lambda_100"]["check_weighted_average_error"] == pytest.approx(
-        (1.5 + 1.0) / (5 * 2.75)
-    )
+    bucket = "single_candidate|multi_letter_first"
+    assert result["gate"].score_thresholds[bucket] == pytest.approx(0.6)
+    assert result["selection_key"]["calibration_weighted_average_error"] == pytest.approx((4 * 0.25) / (6 * 2.75))
+    assert result["selection_key"]["calibration_errors"] == 4
+    assert result["bucket_metrics"][bucket]["errors"] == 4
 
 
 def test_apply_classic_gate_requires_positive_query_target_for_correct_link() -> None:
@@ -794,14 +798,13 @@ def test_evaluate_classic_manual_holdout_scores_fresh_candidates() -> None:
 
 
 def test_augmented_feature_matrix_respects_ablation_columns() -> None:
-    """Augmented feature matrices should honor ablated feature lists and keep query-view dummies."""
+    """Augmented feature matrices should honor ablated promoted feature lists."""
 
     df = pd.DataFrame(
         [
             {
                 "query_author": "Hanbing Wang",
                 "dominant_first_name": "hanbing",
-                "query_view": "full",
                 "title_overlap": 0.25,
                 "cluster_size": 17,
                 "model_score": 0.91,
@@ -815,16 +818,13 @@ def test_augmented_feature_matrix_respects_ablation_columns() -> None:
         feature_columns=(
             "title_overlap",
             "cluster_size",
-            "query_first_prefix_match",
-            "query_view",
+            "query_first_prefix_match_any_length",
         ),
     )
     assert list(features.columns) == [
         "title_overlap",
         "cluster_size",
-        "query_first_prefix_match",
-        "query_view__full",
-        "query_view__initial_only",
+        "query_first_prefix_match_any_length",
     ]
 
 
@@ -836,7 +836,6 @@ def test_classic_feature_matrix_supports_augmented_union_features() -> None:
             {
                 "query_author": "Hanbing Wang",
                 "dominant_first_name": "hanbing",
-                "query_view": "full",
                 "title_overlap": 0.25,
                 "cluster_size": 17,
                 "count_normalized_confidence": 0.6,
@@ -848,23 +847,27 @@ def test_classic_feature_matrix_supports_augmented_union_features() -> None:
         (
             "title_overlap",
             "cluster_size",
-            "cluster_size_log_capped",
-            "query_view__full",
-            "query_view__initial_only",
+            "cluster_size_log",
         ),
     )
     assert list(features.columns) == [
         "title_overlap",
         "cluster_size",
-        "cluster_size_log_capped",
-        "query_view__full",
-        "query_view__initial_only",
+        "cluster_size_log",
     ]
     assert features.iloc[0]["title_overlap"] == 0.25
     assert features.iloc[0]["cluster_size"] == 17.0
-    assert features.iloc[0]["cluster_size_log_capped"] > 0.0
-    assert features.iloc[0]["query_view__full"] == 1.0
-    assert features.iloc[0]["query_view__initial_only"] == 0.0
+    assert features.iloc[0]["cluster_size_log"] == pytest.approx(np.log1p(17))
+
+
+def test_classic_feature_matrix_preserves_present_derivable_features() -> None:
+    """Stored feature columns should be used as-is even when they are derivable."""
+
+    df = pd.DataFrame([{"cluster_size": 17, "cluster_size_log": 99.0}])
+
+    features = _classic_feature_matrix(df, ("cluster_size_log",))
+
+    assert features.iloc[0]["cluster_size_log"] == 99.0
 
 
 def test_classic_feature_matrix_rejects_missing_required_features() -> None:
@@ -1020,57 +1023,55 @@ def test_classic_monotone_constraints_match_active_feature_order() -> None:
 
     feature_columns = (
         "min_distance",
-        "retrieval_score_gap_vs_best_competitor",
         "specter_exemplar_similarity",
-        "top5_distance_best_gap",
-        "retrieval_score",
+        "top5_mean_distance",
         "affiliation_contradiction_severity",
-        "venue_overlap_rank_fraction",
-        "coarse_family_top5_best_gap",
-        "same_family_as_best_top5",
+        "same_dominant_first_as_best_top5",
         "same_family_as_heuristic_choice",
-        "same_family_as_top1",
-        "query_first_prefix_match",
-        "retrieval_score_best_gap",
-        "specter_exemplar_rank_fraction",
-        "cluster_size_log_capped",
+        "query_first_prefix_match_any_length",
+        "cluster_size_log",
         "anchor_evidence_count",
         "strong_positive_anchor_score",
         "weak_residual_anchor_score",
         "sparse_relative_winner_score",
+        "local_author_window10_jaccard_max",
+        "local_author_window10_overlap_count_max",
+        "best_author_count_log_absdiff",
+        "year_gap_to_candidate_range",
+        "pw_min_levenshtein",
     )
     assert _classic_monotone_constraints_for_features(feature_columns) == [
         -1,
-        0,
         1,
-        0,
-        0,
         -1,
         -1,
+        1,
+        1,
+        1,
         0,
-        0,
-        0,
-        0,
-        0,
-        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
         -1,
-        0,
-        1,
-        1,
-        1,
-        1,
+        -1,
+        -1,
     ]
 
 
 def test_resolve_classic_monotone_constraints_requires_explicit_opt_in() -> None:
     """Classic monotone constraints should only activate when the bundle specifies them."""
 
-    feature_columns = ("title_overlap", "cluster_size", "query_view__full")
+    feature_columns = ("title_overlap", "cluster_size", "min_distance")
     assert _resolve_classic_monotone_constraints({}, feature_columns) is None
     assert _resolve_classic_monotone_constraints(
         {"monotone_constraints": [1, 0, 0]},
         feature_columns,
     ) == [1, 0, 0]
+
+
 def test_extra_eval_paths_support_dynamic_dataset_mapping() -> None:
     """Classic bundle specs should support arbitrary extra eval dataset mappings."""
 
@@ -1432,8 +1433,7 @@ def test_format_classic_selected_gate_tables_includes_calibration_bucket_table()
                 "multi_candidate|single_letter_first": 0.41,
             },
             "promoted_stratified_gate": {
-                "fit_split": "calibration_fit",
-                "selection_split": "calibration_check",
+                "calibration_splits": ["calibration_fit", "calibration_check"],
                 "test_split": "test",
             },
         },

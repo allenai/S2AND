@@ -64,10 +64,11 @@ def _build_incremental_result(
     phase_b_mode: IncrementalPhaseBMode,
     phase_b_budget_bytes: int,
     phase_b_required_bytes: int,
+    phase_b_residual_count: int | None = None,
     phase_a_accumulator_overflow_early_stop: bool = False,
     phase_a_adaptive_halvings_max: int = 0,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "clusters": clusters,
         "phase_b_mode": phase_b_mode,
         "phase_b_budget_bytes": int(phase_b_budget_bytes),
@@ -75,6 +76,9 @@ def _build_incremental_result(
         "phase_a_accumulator_overflow_early_stop": bool(phase_a_accumulator_overflow_early_stop),
         "phase_a_adaptive_halvings_max": int(phase_a_adaptive_halvings_max),
     }
+    if phase_b_residual_count is not None:
+        result["phase_b_residual_count"] = int(phase_b_residual_count)
+    return result
 
 
 def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None) -> tuple[int, str]:
@@ -4236,6 +4240,7 @@ class Clusterer:
             phase_b_mode="exact",
             phase_b_budget_bytes=phase_b_required_bytes,
             phase_b_required_bytes=phase_b_required_bytes,
+            phase_b_residual_count=residual_count,
         )
         payload["incremental_linker_artifact_path"] = str(artifact_dir)
         payload["incremental_linker_query_view"] = str(query_view)

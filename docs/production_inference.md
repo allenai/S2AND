@@ -240,10 +240,10 @@ parity is not a release goal; the promoted path intentionally uses different
 retrieval, linker, and margin-gate decisions.
 
 `S2AND_BACKEND=rust` and `S2AND_BACKEND=auto` now route `predict_incremental`
-through the promoted linker when backend resolution selects Rust. The temporary
-`incremental_linker_private=True` switch remains available for focused
-experiments. Promoted query batching is available: `batching_threshold` caps
-the number of unassigned query signatures per promoted linker batch, while
+through the promoted linker when backend resolution selects Rust. There is no
+separate public force flag or artifact override: backend selection is the
+routing contract. Promoted query batching is available: `batching_threshold`
+caps the number of unassigned query signatures per promoted linker batch, while
 `total_ram_bytes` derives the default batch size when the caller does not pass a
 cap. The first meaningful promoted batch recalibrates rows/pairs per query for
 remaining batches, and telemetry records predicted/observed RSS deltas.

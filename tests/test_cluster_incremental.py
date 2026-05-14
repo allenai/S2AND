@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
@@ -134,11 +135,27 @@ def test_predict_incremental_return_contract(clusterer_dataset_factory, monkeypa
     assert clusters_only == canned["clusters"]
 
 
-def test_predict_incremental_private_linker_mode_uses_seed_link_seam(clusterer_dataset_factory, monkeypatch):
-    clusterer, dataset = clusterer_dataset_factory(name="dummy_private_incremental_linker")
+def test_predict_incremental_public_signature_has_no_promoted_override_args() -> None:
+    signature = inspect.signature(Clusterer.predict_incremental)
+
+    assert "incremental_linker_private" not in signature.parameters
+    assert "incremental_linker_artifact_path" not in signature.parameters
+    assert "incremental_linker_query_view" not in signature.parameters
+
+
+def test_predict_incremental_rust_promoted_linker_uses_seed_link_seam(clusterer_dataset_factory, monkeypatch):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_rust_incremental_linker")
     block = ["3", "4", "5", "6", "7", "8"]
     residual_blocks: list[list[str]] = []
     residual_total_ram_bytes: list[int | None] = []
+    runtime_context = SimpleNamespace(
+        operation="cluster_predict_incremental",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-rust-promoted-seed-link-seam",
+        source="S2AND_BACKEND",
+    )
 
     def fake_predict_helper(block_dict, dataset_arg, partial_supervision, runtime_context, total_ram_bytes=None):
         del dataset_arg, partial_supervision, runtime_context
@@ -152,6 +169,7 @@ def test_predict_incremental_private_linker_mode_uses_seed_link_seam(clusterer_d
         "_resolve_total_ram_bytes_for_incremental",
         lambda _total=None: (1_000_000_000, "test"),
     )
+    monkeypatch.setattr(model_module, "build_runtime_context", lambda _operation: runtime_context)
     monkeypatch.setattr(model_module.memory_budget, "current_rss_bytes_best_effort", lambda _total: (1_000, "rss:test"))
     monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_module, "_get_rust_featurizer", lambda *args, **kwargs: object())
@@ -209,8 +227,6 @@ def test_predict_incremental_private_linker_mode_uses_seed_link_seam(clusterer_d
         block,
         dataset,
         batching_threshold=None,
-        incremental_linker_private=True,
-        incremental_linker_artifact_path="s2and/data/production_incremental_linker_v1.2",
     )
 
     assert captured_inputs["query_signature_ids"] == ["5", "8"]
@@ -259,7 +275,7 @@ def test_predict_incremental_explicit_rust_backend_uses_promoted_linker_by_defau
         captured.update(kwargs)
         return dict(promoted_payload)
 
-    monkeypatch.setattr(Clusterer, "_predict_incremental_link_or_abstain_private_mode", fake_promoted_mode)
+    monkeypatch.setattr(Clusterer, "_predict_incremental_promoted_linker", fake_promoted_mode)
 
     result = clusterer.predict_incremental(block, dataset, batching_threshold=None)
 
@@ -268,8 +284,6 @@ def test_predict_incremental_explicit_rust_backend_uses_promoted_linker_by_defau
     assert captured["block_signatures"] == block
     assert captured["dataset"] is dataset
     assert captured["runtime_context"] is runtime_context
-    assert captured["artifact_path"] is None
-    assert captured["query_view"] == "initial_only"
 
 
 def test_predict_incremental_auto_backend_uses_promoted_linker_when_auto_resolves_to_rust(
@@ -297,7 +311,7 @@ def test_predict_incremental_auto_backend_uses_promoted_linker_when_auto_resolve
     monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         Clusterer,
-        "_predict_incremental_link_or_abstain_private_mode",
+        "_predict_incremental_promoted_linker",
         lambda *args, **kwargs: dict(promoted_payload),
     )
 

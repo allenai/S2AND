@@ -494,16 +494,6 @@ def _use_rust_constraints(runtime_context: RuntimeContext | None = None) -> bool
     return stage_uses_rust(runtime_context)
 
 
-def _use_promoted_incremental_linker(
-    runtime_context: RuntimeContext,
-    *,
-    force_promoted_linker: bool,
-) -> bool:
-    if force_promoted_linker:
-        return True
-    return stage_uses_rust(runtime_context)
-
-
 _PROMOTED_INCREMENTAL_TELEMETRY_CONSTANT_KEYS = frozenset(
     {
         "retrieval_top_k",
@@ -3972,7 +3962,7 @@ class Clusterer:
             total_ram_bytes=total_ram_bytes,
         )
 
-    def _predict_incremental_link_or_abstain_private_mode(
+    def _predict_incremental_promoted_linker(
         self,
         block_signatures: list[str],
         dataset: ANDData,
@@ -3982,8 +3972,6 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None,
         batching_threshold: int | None,
-        artifact_path: str | Path | None,
-        query_view: str,
     ) -> dict[str, Any]:
         """Run the promoted linker as the incremental seed-link provider."""
 
@@ -3994,7 +3982,8 @@ class Clusterer:
         )
         from s2and.incremental_linking.runtime import _predict_incremental_link_or_abstain_production_private
 
-        artifact_dir = Path(artifact_path) if artifact_path is not None else DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
+        artifact_dir = DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
+        query_view = "initial_only"
         artifact = load_incremental_linking_artifact(artifact_dir)
         resolved_total_ram_bytes, _ = _resolve_total_ram_bytes_for_incremental(total_ram_bytes)
         cluster_seeds_require, recluster_map, cluster_seeds_require_inverse = self._build_incremental_seed_setup(
@@ -4677,9 +4666,6 @@ class Clusterer:
         total_ram_bytes: int | None = None,
         max_chunk_pairs: int | None = None,
         return_clusters_only: bool = False,
-        incremental_linker_private: bool = False,
-        incremental_linker_artifact_path: str | Path | None = None,
-        incremental_linker_query_view: str = "initial_only",
     ) -> dict[str, Any] | dict[str, list[str]]:
         """
         Predict clustering in incremental mode. This assumes that the majority of the labels are passed
@@ -4725,16 +4711,6 @@ class Clusterer:
         return_clusters_only: bool
             If True, return only the historical clusters dict shape instead of the full
             telemetry payload.
-        incremental_linker_private: bool
-            If True, force the promoted link-or-abstain seed-link provider.
-            Explicit Rust backend selection also uses this provider by default.
-            This is not a public compatibility mode and does not claim legacy
-            slow-path semantics.
-        incremental_linker_artifact_path: Optional[str]
-            Artifact directory for the promoted linker. Defaults to the
-            released `s2and/data/production_incremental_linker_v1.2` artifact.
-        incremental_linker_query_view: str
-            Query-view policy for the promoted linker.
         Returns
         -------
         Dict: incremental clustering payload (default) or clusters-only dict when
@@ -4746,11 +4722,8 @@ class Clusterer:
         _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context, use_cache=self.use_cache)
         if partial_supervision is None:
             partial_supervision = {}
-        if _use_promoted_incremental_linker(
-            runtime_context,
-            force_promoted_linker=incremental_linker_private,
-        ):
-            incremental_result = self._predict_incremental_link_or_abstain_private_mode(
+        if stage_uses_rust(runtime_context):
+            incremental_result = self._predict_incremental_promoted_linker(
                 block_signatures,
                 dataset,
                 prevent_new_incompatibilities=prevent_new_incompatibilities,
@@ -4758,8 +4731,6 @@ class Clusterer:
                 runtime_context=runtime_context,
                 total_ram_bytes=total_ram_bytes,
                 batching_threshold=batching_threshold,
-                artifact_path=incremental_linker_artifact_path,
-                query_view=incremental_linker_query_view,
             )
             return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
         if batching_threshold is None or len(block_signatures) <= batching_threshold:

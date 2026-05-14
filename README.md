@@ -35,11 +35,17 @@ uv pip install "s2and[rust]"
 Repo checkout:
 
 ```bash
+git lfs install
+git lfs pull
 uv venv --python 3.11.13
 # activate the environment, then:
 uv sync --active --extra dev
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
+
+Source checkouts use Git LFS for versioned model artifacts, including the bundled
+production model directory and legacy production pickle files. Run `git lfs pull`
+after cloning or switching branches if those files appear as small pointer files.
 
 The Rust build step is optional and only needed when you want the native extension from source. For OS prerequisites, activation commands, WSL notes, and install variants, see [docs/install.md](docs/install.md).
 

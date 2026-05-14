@@ -6,9 +6,7 @@ __pycache__/
 pypitoken
 *.pickle
 !tests/qian/specter.pickle
-!s2and/data/production_model_v1.0.pickle
-!s2and/data/production_model_v1.1.pickle
-!s2and/data/production_model_v1.2.pickle
+!s2and/data/production_model_v*.pickle
 
 # Legacy top-level data root. Current downloads and local datasets live under s2and/data/.
 /data/

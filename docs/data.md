@@ -10,7 +10,7 @@ Download the full S2AND release into `s2and/data/`:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
 ```
 
-Expected size is about `50.4 GiB`.
+Expected size is about `55.5 GiB`.
 
 The release includes dataset files plus released model artifacts.
 
@@ -33,6 +33,17 @@ aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release/producti
 It is used with `production_model_v1.2.pickle`.
 The directory includes `training_target.json`, which is the portable training
 target spec used by replay scripts.
+
+The promoted linker train/calibrate/eval replay data is also published under
+the same S3 release prefix. Download it when you need to rebuild or audit the
+promoted linker artifact:
+
+```bash
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release/s2and_and_big_blocks_linker_dataset_20260513 s2and/data/s2and_and_big_blocks_linker_dataset_20260513
+```
+
+This source bundle is the default `--source-bundle-root` for
+`scripts/run_joint_safe_link_promoted_train_calibrate_eval.py`.
 
 ## Configuring `s2and/data/path_config.json`
 

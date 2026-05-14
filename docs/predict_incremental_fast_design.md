@@ -80,6 +80,22 @@ The command wrote
 `scratch/predict_incremental_release_4000_20260513/single.json`. The run used
 the production v1.2 pairwise model and required a release Rust extension.
 
+## Current Release State
+
+The promoted-53 Rust path is the current release target for Rust-backed
+`Clusterer.predict_incremental(...)`. Backend selection routes through the
+promoted linker when the Rust extension, artifact, and required capabilities are
+available.
+
+The checked-in release artifact is
+`s2and/data/production_incremental_linker_v1.2/`, with `booster.lgb`,
+`metadata.json`, and `training_target.json`. Runtime code lives under
+`s2and/incremental_linking/` and must not import `scripts.*`.
+
+Feature assembly is tested against the tracked 53-feature target. Query
+batching uses `total_ram_bytes` and `batching_threshold`; the residual tail
+stays exact and receives the resolved RAM budget.
+
 ## Release Inputs
 
 The release surface is:
@@ -87,11 +103,15 @@ The release surface is:
 - `s2and/data/production_model_v1.2.pickle`
 - `s2and/data/production_incremental_linker_v1.2/`
 - `s2and/data/production_incremental_linker_v1.2/training_target.json`
-- `s2and/data/joint_safe_link_minimal_raw_specter_20260507a/`
+- `s2and/data/s2and_and_big_blocks_linker_dataset_20260513/`
 
 `training_target.json` is the portable target spec for replay: feature order,
 LightGBM params, target metrics, status, and variant. Replay must not depend on
 machine-local analysis artifacts.
+
+When the pairwise model changes, update the promoted linker as a coordinated
+release unit; see
+[production_inference.md](production_inference.md#updating-the-linker-after-a-pairwise-model-change).
 
 ## Reusing Computed Features
 
@@ -127,3 +147,17 @@ For each release candidate, report:
 - observed RSS versus `total_ram_bytes`.
 
 Legacy-output parity is not a release gate.
+
+## Verification
+
+Focused release checks:
+
+```powershell
+uv run pytest -q tests/test_cluster_incremental.py::test_predict_incremental_rust_promoted_linker_uses_seed_link_seam tests/test_cluster_incremental.py::test_predict_incremental_promoted_linker_batches_queries tests/test_cluster_incremental.py::test_finish_incremental_with_seed_links_reclusters_only_abstains
+uv run pytest -q tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py tests/test_incremental_linking_default_artifact.py
+uv run pytest -q tests/test_big_block_incremental_cmd.py
+uv run ruff check scripts/run_joint_safe_link_promoted_train_calibrate_eval.py scripts/_rust_suite/big_block_incremental_cmd.py tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py tests/test_big_block_incremental_cmd.py
+```
+
+Full PR verification should also run the broader incremental-linking and
+cluster-incremental suites.

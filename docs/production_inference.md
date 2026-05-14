@@ -43,6 +43,147 @@ artifact pass validation, the target behavior is to use this promoted
 retrieval/linker/gate path because it has shown better runtime and quality than
 the long-standing legacy implementation.
 
+### Updating the linker after a pairwise model change
+
+Treat the pairwise model and promoted linker as one release unit. If
+`production_model_vX.Y.pickle` changes, build a new
+`production_incremental_linker_vX.Y/` artifact from features recomputed with
+that exact pairwise model. Do not copy the old `booster.lgb`, reuse the old
+`metadata.json`, or only edit metadata to point at the new pairwise file. The
+promoted linker trains on pairwise-model distances plus `pw_*` aggregate
+features, and the artifact audit metadata records the pairwise model path,
+version, and SHA.
+
+Before replay, confirm the new pairwise model is compatible with the replay
+source bundle. The default minimal-raw bundle does not store reference papers,
+so the replay script rejects pairwise models that require
+`reference_features`. If the pairwise model changes embedding source or input
+contract, rebuild the source bundle and pass it with `--source-bundle-root`.
+The current train/calibrate/eval source bundle is published on S3 with the
+other release data:
+
+```powershell
+aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release/s2and_and_big_blocks_linker_dataset_20260513 s2and\data\s2and_and_big_blocks_linker_dataset_20260513
+```
+
+#### What the replay script does
+
+`scripts/run_joint_safe_link_promoted_train_calibrate_eval.py` is the official
+replay driver for the promoted incremental linker. It does not train the
+pairwise pickle. It takes the pairwise pickle as an input, recomputes or loads
+the promoted linker feature tables, trains/calibrates/evaluates the downstream
+LightGBM linker, and can write the runtime linker artifact.
+
+Its main inputs are:
+
+- `--pairwise-model-path`: the pairwise model whose distances feed the linker.
+- `--source-bundle-root`: the raw+SPECTER2+labels train/calibrate/eval bundle.
+- `--target-json`: the replay target with feature order, LightGBM params,
+  expected metrics, status, and variant.
+- `--output-dir`: the scratch run directory for materialized features,
+  summaries, and replay outputs.
+- `--save-artifact-to`: optional output directory for `booster.lgb` and
+  `metadata.json`.
+
+In the default `--feature-mode minimal-raw-rust`, the script rebuilds promoted
+features from the source bundle. For each selected table and dataset, it loads
+the raw papers, signatures, SPECTER2 embeddings, and labels; applies structural
+cleaning; builds block-local query/candidate context; uses the frozen Rust
+retrieval policy to choose candidate seed clusters; builds the candidate/member
+pair plan; computes pairwise model distances and `pw_*` aggregate features; adds
+the non-pairwise row features; then writes target-ordered feature tables and
+bundle metadata under `--output-dir`. These feature values are tied to the exact
+pairwise model passed with `--pairwise-model-path`.
+
+The other feature modes are narrower:
+
+- `rust-recompute-pw` rematerializes promoted tables from an existing source
+  bundle while recomputing the Rust pairwise aggregate columns.
+- `precomputed-promoted` loads an already materialized portable feature bundle.
+  It validates relative table paths, row counts, required tables, target-spec
+  digest, feature-schema digest, and exact target feature-column order before
+  training.
+
+After features are available, the script runs the classic train/calibrate/eval
+stack. It trains the LightGBM linker with the target params, fits or applies the
+configured score/margin gate, evaluates the configured S2AND/Hwang/extra/manual
+holdout tables, writes `classic/summary.json`, and writes `run_summary.json`
+with observed metrics and deltas from `training_target.json`. Unless
+`--allow-metric-drift` is passed, a full replay fails when observed metrics do
+not match the target metrics.
+
+When `--save-artifact-to` is set, the script also fits the final production
+linker on train rows plus weighted calibration/eval rows, then writes
+`booster.lgb` and `metadata.json`. The metadata includes the feature schema,
+gate config, required Rust capabilities, prediction fixture, booster digest,
+pairwise model path/version/SHA, source bundle, feature mode, observed metrics,
+and production training summary. Keep `training_target.json` in the release
+artifact directory alongside those files; `--save-artifact-to` writes the model
+artifact files, not a new target spec.
+
+Safety behavior is intentional: an unbounded full run requires `--run-full`;
+`--datasets`, `--tables`, and `--limit-rows` are smoke/materialization controls
+and require `--materialize-only`; and precomputed feature reuse is accepted only
+through explicit `--feature-mode precomputed-promoted`.
+
+The required update flow is:
+
+1. Put the candidate pairwise pickle under `s2and/data/`, choose the matching
+   linker version, and create or update
+   `s2and/data/production_incremental_linker_vX.Y/training_target.json`. Start
+   from the previous target only when the 53-feature schema and LightGBM params
+   are intentionally unchanged.
+2. Run a bounded materialization smoke test before any full replay:
+
+```powershell
+uv run python scripts\run_joint_safe_link_promoted_train_calibrate_eval.py `
+  --pairwise-model-path s2and\data\production_model_vX.Y.pickle `
+  --target-json s2and\data\production_incremental_linker_vX.Y\training_target.json `
+  --output-dir scratch\joint_safe_link_promoted_vX.Y_smoke `
+  --datasets qian `
+  --limit-rows 200 `
+  --materialize-only
+```
+
+3. Run the full train/calibrate/eval replay and write the new directory
+   artifact. This is a large job; report the command, expected runtime, output
+   directory, and monitoring plan before starting it.
+
+```powershell
+uv run python scripts\run_joint_safe_link_promoted_train_calibrate_eval.py `
+  --pairwise-model-path s2and\data\production_model_vX.Y.pickle `
+  --target-json s2and\data\production_incremental_linker_vX.Y\training_target.json `
+  --save-artifact-to s2and\data\production_incremental_linker_vX.Y `
+  --linker-artifact-version vX.Y `
+  --output-dir scratch\joint_safe_link_promoted_vX.Y_full `
+  --run-full
+```
+
+Use `--allow-metric-drift` only for exploratory candidate runs when the target
+metrics are intentionally stale. Do not use it as the final release gate.
+
+4. Review `run_summary.json`, `classic/summary.json`, and
+   `prod_artifact_summary.json`. Report reviewed-label quality,
+   setup-inclusive and hot-path wall time, candidate rows, scored pairs,
+   residual pairs, residual count, exact-tail memory behavior, and observed RSS
+   versus `total_ram_bytes`.
+5. Promote the release as a coordinated update: the pairwise pickle, the linker
+   artifact directory (`booster.lgb`, `metadata.json`, and
+   `training_target.json`), default paths in `s2and/model.py` and
+   `scripts/run_joint_safe_link_promoted_train_calibrate_eval.py`, package data
+   entries in `pyproject.toml`, and tests/docs that hard-code the release
+   version.
+6. Verify the promoted artifact and release wiring:
+
+```powershell
+uv run pytest -q tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py tests/test_incremental_linking_default_artifact.py
+uv run ruff check scripts/run_joint_safe_link_promoted_train_calibrate_eval.py tests/test_incremental_linking_m1_gates.py tests/test_linker_feature_assembly.py tests/test_incremental_linking_default_artifact.py
+```
+
+For repeated replay, `--feature-mode precomputed-promoted` is allowed only when
+the precomputed bundle was materialized for the same target and pairwise model;
+the full default replay recomputes promoted features from the source bundle.
+
 Training/evaluation replay normally recomputes promoted features from the
 self-contained minimal-raw source bundle. For compute-once/reuse workflows, the
 replay script also supports an explicit portable precomputed bundle mode:

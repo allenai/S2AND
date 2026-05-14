@@ -51,7 +51,7 @@ Full dataset download:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
 ```
 
-Expected size is about `50.4 GiB`.
+Expected size is about `55.5 GiB`.
 
 Model-only download:
 

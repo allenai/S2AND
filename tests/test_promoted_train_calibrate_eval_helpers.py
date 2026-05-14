@@ -17,7 +17,6 @@ from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
     _apply_classic_train_row_cap,
     _augmented_feature_matrix,
     _classic_feature_matrix,
-    _classic_monotone_constraints_for_features,
     _evaluate_classic_manual_holdout,
     _fit_promoted_stratified_total_error_gate,
     _fit_score_margin_gate,
@@ -29,51 +28,15 @@ from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
     _score_abstain_rule,
     _score_classic_stratified_eval_test_choices,
     _score_eval_candidate_rows,
-    _select_negative_training_groups,
     _summarize_classic_stratified_predictions,
     _summarize_training_gate_buckets,
     _summary_key_for_eval_dataset,
-    compare_to_expected,
-    expected_metrics_from_summary,
     format_classic_selected_gate_tables,
     load_bundle,
 )
 from scripts.run_joint_safe_link_promoted_train_calibrate_eval import (
     _read_csv as _read_official_table,
 )
-
-
-def test_select_negative_training_groups_supports_named_filters() -> None:
-    """Named negative filters should keep the expected training groups."""
-
-    top1 = pd.DataFrame(
-        [
-            {
-                "train_group_id": "g1",
-                "title_overlap": 0.0,
-                "coauthor_overlap": 0.0,
-                "affiliation_overlap": 0.0,
-                "count_normalized_confidence": 0.2,
-            },
-            {
-                "train_group_id": "g2",
-                "title_overlap": 0.04,
-                "coauthor_overlap": 0.0,
-                "affiliation_overlap": 0.0,
-                "count_normalized_confidence": 0.35,
-            },
-            {
-                "train_group_id": "g3",
-                "title_overlap": 0.2,
-                "coauthor_overlap": 1.0,
-                "affiliation_overlap": 0.0,
-                "count_normalized_confidence": 0.2,
-            },
-        ]
-    )
-    assert _select_negative_training_groups(top1, filter_name="strict") == {"g1"}
-    assert _select_negative_training_groups(top1, filter_name="better") == {"g1", "g2"}
-    assert _select_negative_training_groups(top1, filter_name="medium") == {"g1", "g2"}
 
 
 def test_normalize_augmented_feature_frame_derives_query_first_features() -> None:
@@ -1018,49 +981,6 @@ def test_bundle_path_resolution_rejects_absolute_paths_outside_bundle(tmp_path: 
         _resolve_path(bundle, outside_path)
 
 
-def test_classic_monotone_constraints_match_active_feature_order() -> None:
-    """Classic monotone constraints should stay aligned with the active feature order."""
-
-    feature_columns = (
-        "min_distance",
-        "specter_exemplar_similarity",
-        "top5_mean_distance",
-        "affiliation_contradiction_severity",
-        "same_dominant_first_as_best_top5",
-        "same_family_as_heuristic_choice",
-        "query_first_prefix_match_any_length",
-        "cluster_size_log",
-        "anchor_evidence_count",
-        "strong_positive_anchor_score",
-        "weak_residual_anchor_score",
-        "sparse_relative_winner_score",
-        "local_author_window10_jaccard_max",
-        "local_author_window10_overlap_count_max",
-        "best_author_count_log_absdiff",
-        "year_gap_to_candidate_range",
-        "pw_min_levenshtein",
-    )
-    assert _classic_monotone_constraints_for_features(feature_columns) == [
-        -1,
-        1,
-        -1,
-        -1,
-        1,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-    ]
-
-
 def test_resolve_classic_monotone_constraints_requires_explicit_opt_in() -> None:
     """Classic monotone constraints should only activate when the bundle specifies them."""
 
@@ -1088,167 +1008,6 @@ def test_extra_eval_paths_support_dynamic_dataset_mapping() -> None:
         ("a_silva", "test/a_silva_eval_rows.csv.gz"),
     )
     assert _summary_key_for_eval_dataset("a_silva") == "overall_a_silva_eval"
-
-
-def test_compare_to_expected_supports_dynamic_window_keys() -> None:
-    """Expected-metric comparison should support w5/w25 keys, not just w50/w250."""
-
-    summary = {
-        "manual_holdout": {"overall": {"balanced_accuracy": 0.8}},
-        "overall_s2and_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.71}},
-            "25": {"overall": {"balanced_accuracy": 0.73}},
-        },
-        "hwang_cleaned_eval": {
-            "w5": {"cleaned_balanced_accuracy": 0.81},
-            "w25": {"cleaned_balanced_accuracy": 0.79},
-        },
-        "overall_s_park_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.77}},
-            "25": {"overall": {"balanced_accuracy": 0.75}},
-        },
-        "overall_s_lee_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.79}},
-            "25": {"overall": {"balanced_accuracy": 0.78}},
-        },
-        "overall_j_smith_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.66}},
-            "25": {"overall": {"balanced_accuracy": 0.64}},
-        },
-        "abstain_rule": {
-            "score_threshold": 0.9,
-            "margin_threshold": 0.8,
-            "single_candidate_score_threshold": 0.7,
-        },
-    }
-    expected = {
-        "manual_holdout_overall_balanced_accuracy": 0.75,
-        "s2and_w5_balanced_accuracy": 0.7,
-        "s2and_w25_balanced_accuracy": 0.7,
-        "hwang_clean_w5_balanced_accuracy": 0.8,
-        "hwang_clean_w25_balanced_accuracy": 0.8,
-        "s_park_w5_balanced_accuracy": 0.75,
-        "s_park_w25_balanced_accuracy": 0.74,
-        "s_lee_w5_balanced_accuracy": 0.76,
-        "s_lee_w25_balanced_accuracy": 0.77,
-        "j_smith_w5_balanced_accuracy": 0.61,
-        "j_smith_w25_balanced_accuracy": 0.6,
-        "score_threshold": 0.85,
-        "margin_threshold": 0.75,
-        "single_candidate_score_threshold": 0.6,
-    }
-    deltas = compare_to_expected(summary, expected)
-    assert deltas == {
-        "manual_holdout_overall_balanced_accuracy": 0.050000000000000044,
-        "s2and_w5_balanced_accuracy": 0.010000000000000009,
-        "s2and_w25_balanced_accuracy": 0.030000000000000027,
-        "hwang_clean_w5_balanced_accuracy": 0.010000000000000009,
-        "hwang_clean_w25_balanced_accuracy": -0.010000000000000009,
-        "s_park_w5_balanced_accuracy": 0.020000000000000018,
-        "s_park_w25_balanced_accuracy": 0.010000000000000009,
-        "s_lee_w5_balanced_accuracy": 0.030000000000000027,
-        "s_lee_w25_balanced_accuracy": 0.010000000000000009,
-        "j_smith_w5_balanced_accuracy": 0.050000000000000044,
-        "j_smith_w25_balanced_accuracy": 0.040000000000000036,
-        "score_threshold": 0.050000000000000044,
-        "margin_threshold": 0.050000000000000044,
-        "single_candidate_score_threshold": 0.09999999999999998,
-    }
-
-
-def test_expected_metrics_from_summary_captures_dynamic_eval_sections() -> None:
-    """Frozen expected metrics should be derived from the replay summary shape."""
-
-    summary = {
-        "manual_holdout": {"overall": {"balanced_accuracy": 0.8}},
-        "overall_s2and_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.71}},
-            "25": {"overall": {"balanced_accuracy": 0.73}},
-        },
-        "hwang_cleaned_eval": {
-            "w5": {"cleaned_balanced_accuracy": 0.81},
-            "w25": {"cleaned_balanced_accuracy": 0.79},
-        },
-        "overall_s_park_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.77}},
-            "25": {"overall": {"balanced_accuracy": 0.75}},
-        },
-        "overall_s_lee_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.79}},
-            "25": {"overall": {"balanced_accuracy": 0.78}},
-        },
-        "overall_j_smith_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.66}},
-            "25": {"overall": {"balanced_accuracy": 0.64}},
-        },
-        "abstain_rule": {
-            "score_threshold": 0.9,
-            "margin_threshold": 0.8,
-            "single_candidate_score_threshold": 0.7,
-        },
-    }
-
-    assert expected_metrics_from_summary(summary) == {
-        "manual_holdout_overall_balanced_accuracy": 0.8,
-        "s2and_w5_balanced_accuracy": 0.71,
-        "s2and_w25_balanced_accuracy": 0.73,
-        "s_park_w5_balanced_accuracy": 0.77,
-        "s_park_w25_balanced_accuracy": 0.75,
-        "s_lee_w5_balanced_accuracy": 0.79,
-        "s_lee_w25_balanced_accuracy": 0.78,
-        "j_smith_w5_balanced_accuracy": 0.66,
-        "j_smith_w25_balanced_accuracy": 0.64,
-        "hwang_clean_w5_balanced_accuracy": 0.81,
-        "hwang_clean_w25_balanced_accuracy": 0.79,
-        "score_threshold": 0.9,
-        "margin_threshold": 0.8,
-        "single_candidate_score_threshold": 0.7,
-    }
-
-
-def test_expected_metrics_from_summary_captures_bucketed_gate_and_stratified_split() -> None:
-    """Frozen expected metrics should include the promoted bucketed gate and held-out split metrics."""
-
-    summary = {
-        "overall_s2and_eval": {
-            "5": {"overall": {"balanced_accuracy": 0.71}},
-        },
-        "hwang_cleaned_eval": {},
-        "abstain_rule": {
-            "score_threshold": 0.82,
-            "margin_threshold": 0.16,
-            "single_candidate_score_threshold": 0.50,
-            "bucketed_score_thresholds": {
-                "multi_candidate|multi_letter_first": 0.82,
-                "multi_candidate|single_letter_first": 0.04,
-                "single_candidate|multi_letter_first": 0.01,
-                "single_candidate|single_letter_first": 0.50,
-            },
-            "bucketed_margin_thresholds": {
-                "multi_candidate|multi_letter_first": 0.16,
-                "multi_candidate|single_letter_first": 0.41,
-            },
-        },
-        "stratified_eval_test_split": {
-            "overall": {
-                "test": {
-                    "balanced_accuracy": 0.92,
-                    "accuracy": 0.95,
-                    "error_rate": 0.05,
-                }
-            }
-        },
-    }
-
-    expected = expected_metrics_from_summary(summary)
-
-    assert expected["multi_candidate_single_letter_score_threshold"] == 0.04
-    assert expected["single_candidate_multi_letter_score_threshold"] == 0.01
-    assert expected["multi_candidate_multi_letter_margin_threshold"] == 0.16
-    assert expected["multi_candidate_single_letter_margin_threshold"] == 0.41
-    assert expected["stratified_test_balanced_accuracy"] == 0.92
-    assert expected["stratified_test_accuracy"] == 0.95
-    assert expected["stratified_test_error_rate"] == 0.05
 
 
 def test_format_classic_selected_gate_tables_includes_requested_breakdowns() -> None:

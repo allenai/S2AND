@@ -54,17 +54,20 @@ Performance with SPECTERv2 data, on zbmath (B3): (0.961, 0.97, 0.965)
 
 
 Usage:
-    # Evaluate on inventors_s2and (default)
-    python scripts/eval_prod_models.py
+    # Evaluate on all full datasets (default)
+    uv run python scripts/eval_prod_models.py
+
+    # Evaluate on inventors_s2and
+    uv run python scripts/eval_prod_models.py --dataset inventors_s2and
 
     # Evaluate on s2and_mini datasets
-    python scripts/eval_prod_models.py --dataset mini
+    uv run python scripts/eval_prod_models.py --dataset mini
 
     # Retrain from scratch instead of using prod models
-    python scripts/eval_prod_models.py --train
+    uv run python scripts/eval_prod_models.py --train
 
     # Override seed / n_jobs
-    python scripts/eval_prod_models.py --seed 42 --n_jobs 8
+    uv run python scripts/eval_prod_models.py --seed 42 --n_jobs 8
 """
 
 import argparse

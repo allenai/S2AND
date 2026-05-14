@@ -168,6 +168,8 @@ def _local_author_name_set(authors: Any, center_position: int | None, *, radius:
 
 def _signature_author_position(signature: Any) -> int | None:
     raw_position = getattr(signature, "author_info_position", None)
+    if raw_position is None:
+        return None
     try:
         return int(raw_position)
     except (TypeError, ValueError):

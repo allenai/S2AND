@@ -858,8 +858,8 @@
     "target_spec": "s2and\\data\\production_incremental_linker_v1.2\\training_target.json",
     "target_status": "promoted_pending_retrain",
     "target_variant": "promoted_53_round6_backward_shap_corr_weighted_loss_pending_retrain",
-    "training_feature_bundle_name": "joint_safe_link_minimal_raw_specter_20260507a_promoted_rust_recomputed_pw_minimal_raw_block_local_promoted_53_675trees_promoted_53_675trees",
-    "training_source_bundle": "s2and\\data\\joint_safe_link_minimal_raw_specter_20260507a"
+    "training_feature_bundle_name": "s2and_and_big_blocks_linker_dataset_20260513_promoted_rust_recomputed_pw_minimal_raw_block_local_promoted_53_675trees_promoted_53_675trees",
+    "training_source_bundle": "s2and\\data\\s2and_and_big_blocks_linker_dataset_20260513"
   },
   "booster_sha256": "0d3a871c5a2c7d739c0d36c2981f6fd8364ce7789698c041cf881617e86774ec",
   "feature_columns": [

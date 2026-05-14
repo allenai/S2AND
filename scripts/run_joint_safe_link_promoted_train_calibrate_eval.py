@@ -54,7 +54,6 @@ from s2and.incremental_linking.contracts import (  # noqa: E402
 )
 from s2and.incremental_linking.features import (  # noqa: E402
     PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS,
-    promoted_linker_feature_columns,
 )
 from s2and.incremental_linking.linker_pairwise import (  # noqa: E402
     LinkerCandidateBatch,
@@ -89,11 +88,10 @@ os.environ.setdefault("S2AND_BACKEND", "rust")
 os.environ.setdefault("S2AND_RUST_FEATURIZER_MAX_INMEM", "1")
 
 PACKAGE_DATA_ROOT = REPO_ROOT / "s2and" / "data"
-DEFAULT_SOURCE_BUNDLE_ROOT = PACKAGE_DATA_ROOT / "joint_safe_link_minimal_raw_specter_20260507a"
+DEFAULT_SOURCE_BUNDLE_ROOT = PACKAGE_DATA_ROOT / "s2and_and_big_blocks_linker_dataset_20260513"
 DEFAULT_TARGET_JSON = PACKAGE_DATA_ROOT / "production_incremental_linker_v1.2" / "training_target.json"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "scratch" / "joint_safe_link_promoted_official_20260507"
 DEFAULT_PAIRWISE_MODEL_PATH = PACKAGE_DATA_ROOT / "production_model_v1.2.pickle"
-DEFAULT_LINKER_ARTIFACT_DIR = PACKAGE_DATA_ROOT / "production_incremental_linker_v1.2"
 DEFAULT_GIANT_DATASET_ROOT = Path(r"D:\data")
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 GIANT_DATASETS = frozenset({"a_khan", "a_silva", "h_wang", "j_smith", "s_gupta", "s_lee", "s_park"})
@@ -1011,69 +1009,6 @@ def _coerce_classic_feature_matrix(features: pd.DataFrame, feature_columns: tupl
     return out.astype(np.float32)
 
 
-_CLASSIC_MONOTONE_CONSTRAINT_BY_FEATURE: dict[str, int] = {
-    "affiliation_contradiction_severity": -1,
-    "coauthor_overlap": 1,
-    "cluster_size_log": 0,
-    "min_distance": -1,
-    "specter_exemplar_similarity": 1,
-    "affiliation_overlap": 1,
-    "year_compatibility": 1,
-    "paper_author_list_max_jaccard": 1,
-    "paper_author_list_max_containment": 1,
-    "paper_author_list_max_overlap_count": 1,
-    "local_author_window10_jaccard_max": 1,
-    "local_author_window10_overlap_count_max": 1,
-    "best_author_count_log_absdiff": -1,
-    "top5_mean_distance": -1,
-    "retrieval_rank": -1,
-    "retrieval_reciprocal_rank": 1,
-    "candidate_year_span": 0,
-    "year_gap_to_candidate_range": -1,
-    "year_gap_signed_to_candidate_range": 0,
-    "candidate_dominant_first_name_length": 0,
-    "query_first_prefix_match_any_length": 1,
-    "same_dominant_first_as_best_top5": 1,
-    "same_family_as_heuristic_choice": 1,
-    "candidate_cluster_max_paper_author_count": 0,
-    "anchor_evidence_count": 1,
-    "strong_positive_anchor_score": 1,
-    "weak_residual_anchor_score": 1,
-    "sparse_relative_winner_score": 1,
-    "last_first_name_count_min_rarity": 1,
-    "last_name_count_min_rarity": 1,
-    "pw_max_affiliation_overlap": 1,
-    "pw_max_middle_initials_overlap": 1,
-    "pw_mean_email_prefix_equal": 1,
-    "pw_mean_first_names_equal": 1,
-    "pw_min_middle_initials_overlap": 1,
-    "pw_max_title_overlap_words": 1,
-    "pw_max_journal_overlap": 1,
-    "pw_mean_middle_names_equal": 1,
-    "pw_min_last_first_name_count_max": 0,
-    "pw_mean_coauthor_match": 1,
-    "pw_mean_coauthor_overlap": 1,
-    "pw_mean_title_overlap_words": 1,
-    "pw_max_venue_overlap": 1,
-    "pw_mean_journal_overlap": 1,
-    "pw_min_specter_cosine_sim": 1,
-    "pw_min_first_name_count_max": 0,
-    "pw_max_coauthor_overlap": 1,
-    "pw_max_jaro": 1,
-    "pw_min_first_name_count_min": 0,
-    "pw_min_levenshtein": -1,
-    "pw_mean_english_count": 0,
-    "pw_mean_middle_one_missing": 0,
-    "pw_mean_specter_cosine_sim": 1,
-}
-
-
-def _classic_monotone_constraints_for_features(feature_columns: tuple[str, ...] | list[str]) -> list[int]:
-    """Return the default classic monotone constraints in feature order."""
-
-    return [int(_CLASSIC_MONOTONE_CONSTRAINT_BY_FEATURE.get(str(column), 0)) for column in feature_columns]
-
-
 def _resolve_classic_monotone_constraints(
     spec: dict[str, Any],
     feature_columns: tuple[str, ...],
@@ -1184,40 +1119,6 @@ def _apply_classic_train_row_cap(
         "queries_with_row_cap_above_min": retained_beyond_min,
         "queries_with_row_cap_equal_min": int(len(query_caps) - retained_beyond_min),
     }
-
-
-def _select_negative_training_groups(
-    top1_negative_rows: pd.DataFrame,
-    *,
-    filter_name: str,
-) -> set[str]:
-    """Select negative training groups using a named conservative filter."""
-
-    top1 = top1_negative_rows.copy()
-    for column in ["title_overlap", "coauthor_overlap", "affiliation_overlap", "count_normalized_confidence"]:
-        top1[column] = pd.to_numeric(top1[column], errors="coerce").fillna(0.0)
-    rules = {
-        "better": (
-            (top1["coauthor_overlap"] <= 0.0)
-            & (top1["affiliation_overlap"] <= 0.0)
-            & (top1["count_normalized_confidence"] < 0.4)
-        ),
-        "strict": (
-            (top1["title_overlap"] <= 0.0)
-            & (top1["coauthor_overlap"] <= 0.0)
-            & (top1["affiliation_overlap"] <= 0.0)
-            & (top1["count_normalized_confidence"] < 0.4)
-        ),
-        "medium": (
-            (top1["title_overlap"] <= 0.05)
-            & (top1["coauthor_overlap"] <= 0.0)
-            & (top1["affiliation_overlap"] <= 0.1)
-            & (top1["count_normalized_confidence"] < 0.5)
-        ),
-    }
-    if filter_name not in rules:
-        raise ValueError(f"Unknown negative filter: {filter_name}")
-    return set(top1.loc[rules[filter_name], "train_group_id"].astype(str))
 
 
 def _score_query_choices(
@@ -1984,50 +1885,6 @@ def _score_abstain_rule(
             ).sum()
         ),
     }
-
-
-def _tune_classic_abstain_rule(rows: pd.DataFrame, score_grid_size: int, margin_grid_size: int) -> dict[str, Any]:
-    eligible_rows = rows[(rows["has_runner_up"] == 1) & rows["score_margin"].notna()].copy()
-    if eligible_rows.empty:
-        return {"score_threshold": 0.0, "margin_threshold": 0.0, "balanced_accuracy": 0.0}
-    score_values = eligible_rows["chosen_probability"].to_numpy(dtype=np.float64)
-    margin_values = eligible_rows["score_margin"].to_numpy(dtype=np.float64)
-    score_thresholds = np.unique(np.quantile(score_values, np.linspace(0.0, 1.0, int(score_grid_size))))
-    margin_thresholds = np.unique(np.quantile(margin_values, np.linspace(0.0, 1.0, int(margin_grid_size))))
-    epsilon = 1e-6
-    score_thresholds = np.unique(
-        np.concatenate(([float(score_values.min()) - epsilon], score_thresholds, [float(score_values.max()) + epsilon]))
-    )
-    margin_thresholds = np.unique(
-        np.concatenate(
-            (
-                [float(margin_values.min()) - epsilon],
-                margin_thresholds,
-                [float(margin_values.max()) + epsilon],
-            )
-        )
-    )
-    best_metrics: dict[str, Any] | None = None
-    best_key: tuple[float, float, float, float, float] | None = None
-    for score_threshold in score_thresholds:
-        for margin_threshold in margin_thresholds:
-            metrics = _score_abstain_rule(
-                eligible_rows,
-                score_threshold=float(score_threshold),
-                margin_threshold=float(margin_threshold),
-            )
-            ranking_key = (
-                float(metrics["balanced_accuracy"]),
-                float(metrics["positive_accuracy"] if metrics["positive_accuracy"] is not None else -1.0),
-                -float(metrics["rejection_rate"]),
-                -float(metrics["score_threshold"]),
-                -float(metrics["margin_threshold"]),
-            )
-            if best_key is None or ranking_key > best_key:
-                best_key = ranking_key
-                best_metrics = metrics
-    assert best_metrics is not None
-    return best_metrics
 
 
 def _apply_classic_gate(
@@ -3242,127 +3099,8 @@ def run_classic(
     return summary
 
 
-def _expected_metric_actual_value(summary: dict[str, Any], *, key: str) -> float:
-    """Resolve a frozen metric key against a runtime summary."""
-
-    if key == "manual_holdout_overall_balanced_accuracy":
-        return float(summary["manual_holdout"]["overall"]["balanced_accuracy"])
-    if key == "score_threshold":
-        return float(summary["abstain_rule"]["score_threshold"])
-    if key == "margin_threshold":
-        return float(summary["abstain_rule"]["margin_threshold"])
-    if key == "single_candidate_score_threshold":
-        return float(summary["abstain_rule"]["single_candidate_score_threshold"])
-    if key == "multi_candidate_multi_letter_score_threshold":
-        return float(summary["abstain_rule"]["bucketed_score_thresholds"]["multi_candidate|multi_letter_first"])
-    if key == "multi_candidate_single_letter_score_threshold":
-        return float(summary["abstain_rule"]["bucketed_score_thresholds"]["multi_candidate|single_letter_first"])
-    if key == "single_candidate_multi_letter_score_threshold":
-        return float(summary["abstain_rule"]["bucketed_score_thresholds"]["single_candidate|multi_letter_first"])
-    if key == "single_candidate_single_letter_score_threshold":
-        return float(summary["abstain_rule"]["bucketed_score_thresholds"]["single_candidate|single_letter_first"])
-    if key == "multi_candidate_multi_letter_margin_threshold":
-        margin_thresholds = summary["abstain_rule"].get("bucketed_margin_thresholds")
-        if margin_thresholds is not None:
-            return float(margin_thresholds["multi_candidate|multi_letter_first"])
-        return float(summary["abstain_rule"]["bucketed_margin_threshold"])
-    if key == "multi_candidate_single_letter_margin_threshold":
-        margin_thresholds = summary["abstain_rule"].get("bucketed_margin_thresholds")
-        if margin_thresholds is not None:
-            return float(margin_thresholds["multi_candidate|single_letter_first"])
-        return float(summary["abstain_rule"]["bucketed_margin_threshold"])
-    if key == "stratified_test_balanced_accuracy":
-        return float(summary["stratified_eval_test_split"]["overall"]["test"]["balanced_accuracy"])
-    if key == "stratified_test_accuracy":
-        return float(summary["stratified_eval_test_split"]["overall"]["test"]["accuracy"])
-    if key == "stratified_test_error_rate":
-        return float(summary["stratified_eval_test_split"]["overall"]["test"]["error_rate"])
-
-    window_match = re.fullmatch(r"(.+)_w(\d+)_balanced_accuracy", key)
-    if window_match is None:
-        raise KeyError(f"Unsupported expected metric key: {key}")
-    dataset_name, window = window_match.groups()
-    if dataset_name == "hwang_clean":
-        if f"w{window}" in summary["hwang_cleaned_eval"]:
-            return float(summary["hwang_cleaned_eval"][f"w{window}"]["cleaned_balanced_accuracy"])
-        return float(summary["hwang_cleaned_eval"][window]["overall"]["balanced_accuracy"])
-    summary_key = _summary_key_for_eval_dataset(dataset_name)
-    if summary_key not in summary:
-        raise KeyError(f"Eval summary missing for expected metric key {key!r}: {summary_key}")
-    return float(summary[summary_key][window]["overall"]["balanced_accuracy"])
-
-
-def expected_metrics_from_summary(summary: dict[str, Any]) -> dict[str, float]:
-    """Build the frozen expected-metrics payload from one runtime summary."""
-
-    expected: dict[str, float] = {}
-    if "manual_holdout" in summary:
-        expected["manual_holdout_overall_balanced_accuracy"] = float(
-            summary["manual_holdout"]["overall"]["balanced_accuracy"]
-        )
-
-    overall_eval_keys = sorted(key for key in summary if str(key).startswith("overall_") and str(key).endswith("_eval"))
-    for summary_key in overall_eval_keys:
-        dataset_name = str(summary_key)[len("overall_") : -len("_eval")]
-        window_payload = dict(summary[summary_key])
-        for window in sorted(window_payload, key=lambda value: int(value)):
-            expected[f"{dataset_name}_w{int(window)}_balanced_accuracy"] = float(
-                window_payload[str(window)]["overall"]["balanced_accuracy"]
-            )
-
-    if "hwang_cleaned_eval" in summary:
-        cleaned_payload = dict(summary["hwang_cleaned_eval"])
-        for window_key in sorted(cleaned_payload, key=lambda value: int(str(value).lstrip("w"))):
-            normalized_window = int(str(window_key).lstrip("w"))
-            expected[f"hwang_clean_w{normalized_window}_balanced_accuracy"] = float(
-                cleaned_payload[str(window_key)]["cleaned_balanced_accuracy"]
-            )
-
-    expected["score_threshold"] = float(summary["abstain_rule"]["score_threshold"])
-    expected["margin_threshold"] = float(summary["abstain_rule"]["margin_threshold"])
-    if "single_candidate_score_threshold" in summary["abstain_rule"]:
-        expected["single_candidate_score_threshold"] = float(
-            summary["abstain_rule"]["single_candidate_score_threshold"]
-        )
-    bucketed_score_thresholds = summary["abstain_rule"].get("bucketed_score_thresholds")
-    if bucketed_score_thresholds is not None:
-        expected["multi_candidate_multi_letter_score_threshold"] = float(
-            bucketed_score_thresholds["multi_candidate|multi_letter_first"]
-        )
-        expected["multi_candidate_single_letter_score_threshold"] = float(
-            bucketed_score_thresholds["multi_candidate|single_letter_first"]
-        )
-        expected["single_candidate_multi_letter_score_threshold"] = float(
-            bucketed_score_thresholds["single_candidate|multi_letter_first"]
-        )
-        expected["single_candidate_single_letter_score_threshold"] = float(
-            bucketed_score_thresholds["single_candidate|single_letter_first"]
-        )
-    bucketed_margin_thresholds = summary["abstain_rule"].get("bucketed_margin_thresholds")
-    if bucketed_margin_thresholds is not None:
-        expected["multi_candidate_multi_letter_margin_threshold"] = float(
-            bucketed_margin_thresholds["multi_candidate|multi_letter_first"]
-        )
-        expected["multi_candidate_single_letter_margin_threshold"] = float(
-            bucketed_margin_thresholds["multi_candidate|single_letter_first"]
-        )
-    if "stratified_eval_test_split" in summary:
-        stratified_test = summary["stratified_eval_test_split"]["overall"]["test"]
-        expected["stratified_test_balanced_accuracy"] = float(stratified_test["balanced_accuracy"])
-        expected["stratified_test_accuracy"] = float(stratified_test["accuracy"])
-        expected["stratified_test_error_rate"] = float(stratified_test["error_rate"])
-    return expected
-
-
-def compare_to_expected(summary: dict[str, Any], expected: dict[str, Any]) -> dict[str, float]:
-    """Return headline metric deltas relative to the frozen expectations."""
-
-    return {key: _expected_metric_actual_value(summary, key=key) - float(expected[key]) for key in expected}
-
-
 PROMOTED_PAIRWISE_COLUMNS = promoted_pairwise_aggregate_columns()
 PROMOTED_NON_PAIRWISE_COLUMNS = tuple(PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS)
-PROMOTED_FEATURE_COLUMNS = promoted_linker_feature_columns()
 SUPPORTED_PROMOTED_FEATURE_COLUMNS = frozenset(PROMOTED_NON_PAIRWISE_COLUMNS) | frozenset(PROMOTED_PAIRWISE_COLUMNS)
 FROZEN_RETRIEVAL_POLICY = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY
 FROZEN_RETRIEVAL_POLICY_NAME = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME
@@ -5739,168 +5477,6 @@ def _materialize_minimal_raw_dataset_rows(
     del pair_labels, fused_pairwise
     gc.collect()
     return feature_values, summary
-
-
-def _materialize_minimal_raw_table(
-    *,
-    source_bundle: OfficialBundle,
-    table_key: str,
-    output_path: Path,
-    target_features: Sequence[str],
-    clusterer: Any,
-    n_jobs: int,
-    total_ram_bytes: int,
-    datasets: set[str] | None,
-    limit_rows: int | None,
-    pair_batch_size: int,
-    query_batch_pair_limit: int,
-    max_exemplars: int,
-    max_top_k: int,
-    pairwise_model_nan_value: float,
-    pairwise_aggregate_nan_value: float,
-    row_nan_policy: str,
-    reuse_existing_features: bool,
-    rust_build_path: str | None,
-) -> dict[str, Any]:
-    labels_path = _asset_file(source_bundle, "featureless_rows", table_key)
-    labels = pd.read_parquet(labels_path)
-    positions = _selected_row_positions(labels, datasets, limit_rows)
-    labels = labels.iloc[positions].reset_index(drop=True)
-    required_output_columns = _required_materialized_output_columns(labels, target_features)
-    if reuse_existing_features and output_path.exists():
-        row_count = _validate_reusable_parquet(
-            output_path,
-            expected_rows=len(labels),
-            required_columns=required_output_columns,
-            context=f"{table_key} existing output",
-        )
-        return {
-            "table_key": table_key,
-            "labels_path": str(labels_path.relative_to(source_bundle.root)),
-            "output_path": str(output_path),
-            "rows": int(row_count),
-            "datasets": [],
-            "seconds": 0.0,
-            "mode": "minimal-raw-rust",
-            "reused": True,
-        }
-
-    started = time.perf_counter()
-    dataset_summaries: list[dict[str, Any]] = []
-    partial_dir = output_path.parent / "_partial" / output_path.stem
-    if partial_dir.exists() and not reuse_existing_features:
-        shutil.rmtree(partial_dir)
-    partial_dir.mkdir(parents=True, exist_ok=True)
-    partial_paths: list[Path] = []
-    for dataset_name, dataset_rows in labels.groupby(labels["dataset"].astype(str), sort=False):
-        dataset_name = str(dataset_name)
-        row_positions = dataset_rows.index.to_numpy(dtype=np.int64)
-        safe_dataset_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in dataset_name)
-        partial_path = partial_dir / f"{safe_dataset_name}.parquet"
-        if reuse_existing_features and partial_path.exists():
-            row_count = _validate_reusable_parquet(
-                partial_path,
-                expected_rows=len(dataset_rows),
-                required_columns=["_row_position", *required_output_columns],
-                context=f"{table_key} {dataset_name} partial",
-            )
-            dataset_summaries.append(
-                {
-                    "dataset": dataset_name,
-                    "rows": int(row_count),
-                    "seconds": 0.0,
-                    "mode": "minimal-raw-rust",
-                    "reused": True,
-                }
-            )
-            partial_paths.append(partial_path)
-            print(
-                json.dumps(
-                    {
-                        "event": "minimal_raw_dataset_featureization_reused",
-                        "table_key": table_key,
-                        "dataset": dataset_name,
-                        "rows": int(row_count),
-                        "partial_path": str(partial_path),
-                    }
-                ),
-                flush=True,
-            )
-            continue
-        print(
-            json.dumps(
-                {
-                    "event": "minimal_raw_dataset_featureization_start",
-                    "table_key": table_key,
-                    "dataset": dataset_name,
-                    "rows": int(len(dataset_rows)),
-                }
-            ),
-            flush=True,
-        )
-        context = _build_minimal_raw_dataset_context(
-            source_bundle=source_bundle,
-            dataset_name=dataset_name,
-            clusterer=clusterer,
-            n_jobs=n_jobs,
-            rust_build_path=rust_build_path,
-            max_exemplars=max_exemplars,
-        )
-        try:
-            dataset_features, dataset_summary = _materialize_minimal_raw_dataset_rows(
-                context=context,
-                rows=dataset_rows.reset_index(drop=True),
-                target_features=target_features,
-                clusterer=clusterer,
-                n_jobs=n_jobs,
-                total_ram_bytes=total_ram_bytes,
-                pair_batch_size=pair_batch_size,
-                query_batch_pair_limit=query_batch_pair_limit,
-                max_exemplars=max_exemplars,
-                max_top_k=max_top_k,
-                pairwise_model_nan_value=float(pairwise_model_nan_value),
-                pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
-                row_nan_policy=str(row_nan_policy),
-            )
-        finally:
-            _release_minimal_raw_dataset_context(context)
-            del context
-        feature_frame = _target_feature_frame_to_append(dataset_rows, dataset_features, target_features)
-        partial_output = pd.concat([dataset_rows.reset_index(drop=True), feature_frame], axis=1)
-        partial_output.insert(0, "_row_position", row_positions)
-        partial_output.to_parquet(partial_path, index=False)
-        partial_paths.append(partial_path)
-        dataset_summaries.append(dataset_summary)
-        print(
-            json.dumps(
-                {
-                    "event": "minimal_raw_dataset_featureization_done",
-                    "partial_path": str(partial_path),
-                    **dataset_summary,
-                }
-            ),
-            flush=True,
-        )
-        del dataset_features, feature_frame, partial_output
-        gc.collect()
-
-    parts = [pd.read_parquet(path) for path in partial_paths]
-    output = pd.concat(parts, axis=0, ignore_index=True)
-    output = output.sort_values("_row_position", kind="stable").drop(columns=["_row_position"]).reset_index(drop=True)
-    if len(output) != len(labels):
-        raise ValueError(f"{table_key}: materialized row count mismatch: {len(output)} != {len(labels)}")
-    _validate_materialized_target_features(output, target_features, context=table_key)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output.to_parquet(output_path, index=False)
-    return {
-        "table_key": table_key,
-        "labels_path": str(labels_path.relative_to(source_bundle.root)),
-        "output_path": str(output_path),
-        "rows": int(len(output)),
-        "datasets": dataset_summaries,
-        "seconds": round(float(time.perf_counter() - started), 3),
-        "mode": "minimal-raw-rust",
-    }
 
 
 def _safe_dataset_filename(dataset_name: str) -> str:

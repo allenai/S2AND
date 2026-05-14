@@ -40,19 +40,22 @@
 | `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults to a local ignored output path) |
 | `make_inventors_hf_specter_embeddings.py` | Generate SPECTER embeddings for inventors dataset (defaults to a local ignored output path) |
 | `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files; supports both pretty-printed and minified JSON exports |
+| `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables |
 | `bench_preprocess_phases.py` | Benchmark preprocessing phases (papers, signatures) across serial / threads / processes |
 | `get_name_counts.py` | Documentation for how name counts metadata was collected (internal data) |
 | `get_orcid_name_prefix_counts.py` | Documentation for how ORCID prefix counts were collected (internal data) |
-
-Retired experiment-only scripts from the old fixed-slice phase and the
-joint-safe-link promotion cleanup are intentionally not part of the public script
-surface.
 
 ### Testing
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate production models (SPECTER1 vs SPECTER2) on inventors_s2and or mini datasets |
+| `eval_prod_models.py` | Evaluate production models (SPECTER1 vs SPECTER2) on full, inventors_s2and, or mini datasets |
+
+### Incremental linker replay
+
+| Script | What it does |
+|---|---|
+| `run_joint_safe_link_promoted_train_calibrate_eval.py` | Official promoted incremental-linker replay: materialize promoted features, train/calibrate/evaluate the v1.2 target, and optionally save the production artifact |
 
 ### CI & release
 
@@ -75,12 +78,16 @@ Scripts in `archive/` are historical and generally not intended to be rerun.
 | `archive/make_s2and_mini_dataset.py` | Historical mini-dataset creation utility |
 | `archive/make_s2and_name_tuples.py` | Historical name tuples creation (superseded; don't rerun) |
 | `archive/LLM_based_filtering_of_name_tuples.py` | Filter name tuples using Gemini 2.5 Pro (costs money to re-run) |
+| `archive/paper_experiments.sh` | Historical paper-era command set; reproduce from the `s2and_paper` branch instead of current `main` |
 | `archive/find_largest_block.py` | Scan dataset signature files and find the single largest block |
 | `archive/blog_post_eval.py` | Min edit distance numbers for blog post (Python-only legacy) |
 | `archive/claims_cluster_eval.py` | Evaluate on S2 corrections data (Python-only legacy) |
 | `archive/transform_all_datasets.py` | Transform old dataset format to final |
 | `archive/make_claims_dataset.py` | Create S2 corrections evaluation dataset (internal data) |
+| `archive/test_specter2.ipynb` | Historical notebook comparing SPECTER1 and SPECTER2 embeddings |
 
 ## Notes
 
 **`transfer_experiment_seed_paper.py`**: Uses `main_data_dir` from `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). For one-shot large runs, leave `--use_cache` off unless you expect to rerun the same workload and reuse cached pair features. With `--use_cache`, S2AND writes the SQLite-backed pair-feature cache plus Rust featurizer disk cache, and a loaded pair-feature cache is also kept in process memory, so it can add IO and RAM pressure when the cache will not be reused.
+
+**`run_joint_safe_link_promoted_train_calibrate_eval.py`**: Defaults to safe smoke/materialization behavior unless `--run-full` is passed. Full runs can be expensive; use `--limit-rows`, `--tables`, or `--datasets` with `--materialize-only` for bounded checks.

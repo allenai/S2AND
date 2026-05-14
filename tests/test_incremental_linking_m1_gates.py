@@ -42,7 +42,7 @@ def test_promoted_training_defaults_to_minimal_raw_specter_source() -> None:
     parser_defaults = vars(parser.parse_args([]))
     feature_mode_action = next(action for action in parser._actions if action.dest == "feature_mode")  # noqa: SLF001
 
-    assert promoted_train.DEFAULT_SOURCE_BUNDLE_ROOT.name == "joint_safe_link_minimal_raw_specter_20260507a"
+    assert promoted_train.DEFAULT_SOURCE_BUNDLE_ROOT.name == "s2and_and_big_blocks_linker_dataset_20260513"
     assert promoted_train.DEFAULT_TARGET_JSON.relative_to(promoted_train.REPO_ROOT) == Path(
         "s2and/data/production_incremental_linker_v1.2/training_target.json"
     )

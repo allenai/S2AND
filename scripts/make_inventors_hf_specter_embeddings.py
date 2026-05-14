@@ -12,7 +12,7 @@ Pickle format matches S2AND expectations: `(X, keys)`, where
 
 Example:
 uv run --with torch --with transformers --with adapters \
-  python scripts/generate_inventors_hf_specter_embeddings.py \
+  python scripts/make_inventors_hf_specter_embeddings.py \
   --signatures-path scratch/inventors_s2and/inventors_s2and_signatures.json \
   --papers-path scratch/inventors_s2and/inventors_s2and_papers.json \
   --output-specter-path scratch/inventors_s2and/inventors_s2and_specter.pickle \

@@ -356,11 +356,13 @@ def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty
     assert bool(limits.single_query_exceeds_budget) is False
 
 
-def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold():
-    # An explicit non-positive caller value is still invalid when there are queries.
+@pytest.mark.parametrize("query_count", [0, 5])
+def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold(query_count):
+    # An explicit non-positive caller value is always invalid, including when
+    # query_count == 0 (it must not be silently coerced to a 1-size batch).
     with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
         memory_budget.compute_promoted_phase_a_limits(
-            query_count=5,
+            query_count=query_count,
             component_sizes=[4],
             retrieval_top_k=50,
             total_ram_bytes=8_000_000_000,

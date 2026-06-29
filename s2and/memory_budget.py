@@ -768,11 +768,12 @@ def compute_promoted_phase_a_limits(
         current_rss_fn=current_rss_fn,
     )
     stage_budget_bytes = compute_stage_budget_bytes(snapshot.available_bytes, stage_budget_fraction)
-    max_batch = parsed_query_count if max_query_batch_size is None else int(max_query_batch_size)
-    # query_count == 0 means no queries to batch; the planner short-circuits to a
-    # zero-size batch below, so only an explicit non-positive caller value is invalid.
-    if parsed_query_count > 0 and max_batch <= 0:
+    # An explicitly supplied batch size must be positive, regardless of query_count.
+    # A None threshold with query_count == 0 is valid: the planner short-circuits to a
+    # zero-size batch below (no queries to batch), so it must not be rejected here.
+    if max_query_batch_size is not None and int(max_query_batch_size) <= 0:
         raise ValueError(f"max_query_batch_size must be positive, got {max_query_batch_size}")
+    max_batch = parsed_query_count if max_query_batch_size is None else int(max_query_batch_size)
     max_batch = max(1, min(parsed_query_count if parsed_query_count > 0 else 1, max_batch))
 
     row_state_bytes_per_row = (

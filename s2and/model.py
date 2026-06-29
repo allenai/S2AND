@@ -1236,6 +1236,16 @@ class Clusterer:
         self.production_model_bundle_dir: Path | None = None
         self.production_model_bundle_version: str | None = None
         self.production_model_bundle_status: str | None = None
+        # Post-clustering many-way topic split (see s2and/topic_split.py). Over-segments
+        # each cluster's embeddings and re-merges sub-groups that share coauthors, to
+        # separate distinct same-name authors that were over-merged. Never merges across
+        # clusters, so it cannot lower recall on already-separated clusters. Read via
+        # getattr at call sites so models unpickled from older bundles fall back to defaults.
+        self.topic_split_enabled: bool = True
+        self.topic_split_min_cluster: int = 8
+        self.topic_split_min_subgroup: int = 2
+        self.topic_split_embed_distance_threshold: float = 0.17
+        self.topic_split_remerge_min_shared_coauthors: int = 2
 
     @property
     def n_jobs(self) -> int:
@@ -2556,7 +2566,36 @@ class Clusterer:
             total_predict_time = end - start
             logger.info(f"Finished predict on full blocks. Time taken: {total_predict_time}")
 
+        pred_clusters = self._maybe_coauthor_corroborated_split(pred_clusters, dataset)
+
         return dict(pred_clusters), dists
+
+    def _maybe_coauthor_corroborated_split(
+        self, pred_clusters: dict[str, list[str]], dataset: ANDData
+    ) -> dict[str, list[str]]:
+        """Optionally split over-merged same-name clusters using topic + coauthor signals.
+
+        Guarded by ``topic_split_enabled``; read via getattr so clusterers unpickled
+        from older bundles (which lack these attributes) fall back to the defaults.
+        """
+        if not getattr(self, "topic_split_enabled", False):
+            return pred_clusters
+        if getattr(dataset, "specter_embeddings", None) is None:
+            return pred_clusters
+        try:
+            from s2and.topic_split import coauthor_corroborated_split
+
+            return coauthor_corroborated_split(
+                pred_clusters,
+                dataset,
+                min_cluster=int(getattr(self, "topic_split_min_cluster", 8)),
+                min_subgroup=int(getattr(self, "topic_split_min_subgroup", 2)),
+                embed_distance_threshold=float(getattr(self, "topic_split_embed_distance_threshold", 0.17)),
+                remerge_min_shared_coauthors=int(getattr(self, "topic_split_remerge_min_shared_coauthors", 2)),
+            )
+        except Exception as exc:  # never let the optional refinement break prediction
+            logger.warning("coauthor_corroborated_split skipped due to error: %s", exc)
+            return pred_clusters
 
     def _cluster_one_block(
         self,

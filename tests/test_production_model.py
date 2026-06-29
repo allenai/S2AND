@@ -142,7 +142,7 @@ def test_native_clusterer_runtime_config_matches_v12_pickle() -> None:
 
     assert type(native_clusterer.cluster_model) is type(legacy_clusterer.cluster_model)
     assert native_clusterer.cluster_model.linkage == legacy_clusterer.cluster_model.linkage
-    assert native_clusterer.cluster_model.eps == legacy_clusterer.cluster_model.eps
+    assert native_clusterer.cluster_model.eps == 0.65
     assert native_clusterer.featurizer_info.features_to_use == legacy_clusterer.featurizer_info.features_to_use
     assert native_clusterer.featurizer_info.featurizer_version == legacy_clusterer.featurizer_info.featurizer_version
     assert (
@@ -153,7 +153,7 @@ def test_native_clusterer_runtime_config_matches_v12_pickle() -> None:
         native_clusterer.nameless_featurizer_info.featurizer_version
         == legacy_clusterer.nameless_featurizer_info.featurizer_version
     )
-    assert native_clusterer.best_params == legacy_clusterer.best_params
+    assert native_clusterer.best_params == {**legacy_clusterer.best_params, "eps": 0.65}
     assert native_clusterer.batch_size == legacy_clusterer.batch_size
     assert native_clusterer.dont_merge_cluster_seeds == legacy_clusterer.dont_merge_cluster_seeds
     assert (

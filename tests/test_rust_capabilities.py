@@ -4,6 +4,12 @@ import numpy as np
 import pytest
 
 import s2and.rust_capabilities as rust_capabilities
+from s2and import runtime as _runtime
+
+# A rust extension version that satisfies the current minimum. Derived from the
+# guard itself so these fixtures track the lockstep version bump instead of going
+# stale on every release (see MIN_SUPPORTED_RUST_EXTENSION_VERSION).
+_SUPPORTED_VERSION = _runtime.min_supported_rust_extension_version_string()
 
 
 def _missing_module(name: str) -> ModuleNotFoundError:
@@ -55,7 +61,7 @@ def test_load_s2and_rust_extension_prefers_versioned_candidate_on_tie(monkeypatc
     ShimModule.RustFeaturizer = RustFeaturizer
 
     class NativeModule:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
 
     NativeModule.RustFeaturizer = RustFeaturizer
 
@@ -105,7 +111,7 @@ def test_load_s2and_rust_extension_reraises_nested_missing_dependency(monkeypatc
     RustFeaturizer = _make_core_rust_featurizer()
 
     class ShimModule:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
 
     ShimModule.RustFeaturizer = RustFeaturizer
 
@@ -174,7 +180,7 @@ def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_ma
     RustFeaturizer = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
 
     class Module:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
 
     Module.RustFeaturizer = RustFeaturizer
 
@@ -212,7 +218,7 @@ def test_detect_rust_runtime_capabilities_requires_json_ingest_telemetry():
             return 0
 
     class Module:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
         RustFeaturizer = RustFeaturizerWithoutTelemetry
 
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
@@ -249,7 +255,7 @@ def test_detect_rust_runtime_capabilities_reports_incremental_linker_names():
         top_k_hybrid_centroid_pair_plan = PairPlanMethod()
 
     class Module:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
         INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS = ("row_orcid_match",)
         RustFeaturizer = NamedRustFeaturizer
         RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever
@@ -284,7 +290,7 @@ def test_detect_rust_runtime_capabilities_rejects_stale_incremental_pair_plan_ab
         top_k_hybrid_centroid_pair_plan = StalePairPlanMethod()
 
     class Module:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
         RustFeaturizer = NamedRustFeaturizer
         RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever
 
@@ -317,7 +323,7 @@ def test_detect_rust_runtime_capabilities_requires_pair_plan_orcid_signal_marker
         top_k_hybrid_centroid_pair_plan = PairPlanMethod()
 
     class Module:
-        __version__ = "0.50.0"
+        __version__ = _SUPPORTED_VERSION
         INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS = ()
         RustFeaturizer = NamedRustFeaturizer
         RustHybridCentroidRetriever = NamedRustHybridCentroidRetriever

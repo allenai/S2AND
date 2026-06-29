@@ -769,7 +769,9 @@ def compute_promoted_phase_a_limits(
     )
     stage_budget_bytes = compute_stage_budget_bytes(snapshot.available_bytes, stage_budget_fraction)
     max_batch = parsed_query_count if max_query_batch_size is None else int(max_query_batch_size)
-    if max_batch <= 0:
+    # query_count == 0 means no queries to batch; the planner short-circuits to a
+    # zero-size batch below, so only an explicit non-positive caller value is invalid.
+    if parsed_query_count > 0 and max_batch <= 0:
         raise ValueError(f"max_query_batch_size must be positive, got {max_query_batch_size}")
     max_batch = max(1, min(parsed_query_count if parsed_query_count > 0 else 1, max_batch))
 

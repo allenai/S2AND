@@ -335,6 +335,42 @@ def test_compute_promoted_phase_a_limits_fails_when_single_query_exceeds_budget(
         )
 
 
+def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty_batch():
+    # All-seeded incremental request: every signature is already in a seed component,
+    # so query_count == 0 and no batching_threshold is forwarded. This must not raise;
+    # the planner short-circuits to a zero-size batch (no work to do).
+    limits = memory_budget.compute_promoted_phase_a_limits(
+        query_count=0,
+        component_sizes=[4],
+        retrieval_top_k=50,
+        total_ram_bytes=8_000_000_000,
+        max_query_batch_size=None,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+    )
+
+    assert int(limits.query_count) == 0
+    assert int(limits.query_batch_size) == 0
+    assert int(limits.hard_query_batch_size) == 0
+    assert bool(limits.single_query_exceeds_budget) is False
+
+
+def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold():
+    # An explicit non-positive caller value is still invalid when there are queries.
+    with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
+        memory_budget.compute_promoted_phase_a_limits(
+            query_count=5,
+            component_sizes=[4],
+            retrieval_top_k=50,
+            total_ram_bytes=8_000_000_000,
+            max_query_batch_size=0,
+            detect_cgroup_fn=lambda: (None, "unavailable"),
+            detect_total_fn=lambda: (None, "unavailable"),
+            current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        )
+
+
 def test_summarize_prediction_accuracy_flags_underprediction():
     summary = memory_budget.summarize_prediction_accuracy(
         stage_name="test_stage",

@@ -57,7 +57,7 @@ dev = [
   "ipykernel",
 ]
 rust = [
-  "s2and-rust==0.50.1",
+  "s2and-rust==0.50.2",
 ]
 
 [tool.setuptools.packages.find]

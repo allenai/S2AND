@@ -1241,7 +1241,7 @@ provides-extras = ["dev", "rust"]
 
 [[package]]
 name = "s2and-rust"
-version = "0.50.1"
+version = "0.50.2"
 source = { directory = "s2and_rust" }
 
 [[package]]

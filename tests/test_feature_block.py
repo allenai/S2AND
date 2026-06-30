@@ -10,6 +10,7 @@ import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.arrow_inputs import MissingArrowArtifactError
+from s2and.arrow_service_io import feature_block_from_rows, write_feature_block_arrow_from_rows
 from s2and.data import ANDData, NameCounts
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
@@ -2233,3 +2234,153 @@ def test_raw_candidate_plan_bridge_rejects_missing_schema_version() -> None:
             raw_plan,
             feature_block_signature_order=feature_block_signature_order_from_raw_candidate_plan(_raw_plan()),
         )
+
+
+def _rows_from_feature_block(fb: Any) -> tuple[list[dict], list[dict], list[dict], dict | None]:
+    sig_rows = [
+        {
+            "signature_id": s.signature_id,
+            "paper_id": s.paper_id,
+            "author_first": s.author_first,
+            "author_middle": s.author_middle,
+            "author_last": s.author_last,
+            "author_suffix": s.author_suffix,
+            "author_affiliations": list(s.author_affiliations),
+            "author_orcid": s.author_orcid,
+            "author_position": s.author_position,
+            "author_block": s.author_block,
+            "author_email": s.author_email,
+            "source_author_ids": list(s.source_author_ids),
+        }
+        for s in fb.signatures
+    ]
+    paper_rows = [
+        {
+            "paper_id": p.paper_id,
+            "title": p.title,
+            "has_abstract": p.abstract == "Has Abstract",
+            "venue": p.venue,
+            "journal_name": p.journal_name,
+            "year": p.year,
+            "predicted_language": p.predicted_language,
+            "is_reliable": p.is_reliable,
+        }
+        for p in fb.papers
+    ]
+    paper_author_rows = [
+        {"paper_id": a.paper_id, "position": a.position, "author_name": a.author_name} for a in fb.paper_authors
+    ]
+    specter = (
+        {pid: fb.specter_embeddings[i] for i, pid in enumerate(fb.specter_paper_ids)}
+        if fb.specter_embeddings is not None
+        else None
+    )
+    return sig_rows, paper_rows, paper_author_rows, specter
+
+
+def test_feature_block_from_rows_matches_anddata() -> None:
+    # Parity (identity): rows extracted from the ANDData-built FeatureBlock rebuild an identical
+    # FeatureBlock via the row path, so the preferred path is contract-equivalent to the bridge.
+    dataset = _tiny_anddata()
+    dataset.cluster_seeds_disallow = set()
+    fb_anddata = feature_block_from_anddata(dataset, signature_ids=["q", "s1"], query_signature_ids=["q"])
+
+    sig_rows, paper_rows, paper_author_rows, specter = _rows_from_feature_block(fb_anddata)
+    fb_rows = feature_block_from_rows(
+        signatures=sig_rows,
+        papers=paper_rows,
+        paper_authors=paper_author_rows,
+        specter_embeddings=specter,
+        cluster_seeds_require=dict(fb_anddata.cluster_seeds_require),
+        cluster_seeds_disallow=fb_anddata.cluster_seeds_disallow,
+        query_signature_ids=fb_anddata.query_signature_ids,
+    )
+
+    assert fb_rows.signatures == fb_anddata.signatures
+    assert fb_rows.papers == fb_anddata.papers
+    assert fb_rows.paper_authors == fb_anddata.paper_authors
+    assert set(fb_rows.cluster_seeds_require) == set(fb_anddata.cluster_seeds_require)
+    assert set(fb_rows.cluster_seeds_disallow) == set(fb_anddata.cluster_seeds_disallow)
+    assert fb_rows.query_signature_ids == fb_anddata.query_signature_ids
+    assert fb_rows.specter_paper_ids == fb_anddata.specter_paper_ids
+    np.testing.assert_array_equal(fb_rows.specter_embeddings, fb_anddata.specter_embeddings)
+
+
+def test_write_feature_block_arrow_from_rows_round_trips(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+
+    sig_rows = [
+        {
+            "signature_id": "q",
+            "paper_id": "p_q",
+            "author_first": "Ada",
+            "author_middle": "",
+            "author_last": "Lovelace",
+            "author_suffix": "",
+            "author_affiliations": ["Lab"],
+            "author_orcid": "0000-0000-0000-0001",
+            "author_position": 0,
+            "author_block": "a lovelace",
+            "author_email": "",
+            "source_author_ids": ["src-q"],
+        },
+        {
+            "signature_id": "s1",
+            "paper_id": "p1",
+            "author_first": "Ada",
+            "author_middle": "",
+            "author_last": "Lovelace",
+            "author_suffix": "",
+            "author_affiliations": [],
+            "author_orcid": None,
+            "author_position": 0,
+            "author_block": "a lovelace",
+            "author_email": "",
+            "source_author_ids": [],
+        },
+    ]
+    paper_rows = [
+        {"paper_id": "p_q", "title": "Notes", "has_abstract": True, "venue": "RS", "journal_name": "", "year": 1843},
+        {"paper_id": "p1", "title": "Notes", "has_abstract": False, "venue": "RS", "journal_name": "", "year": 1843},
+    ]
+    paper_author_rows = [
+        {"paper_id": "p_q", "position": 0, "author_name": "ada lovelace"},
+        {"paper_id": "p1", "position": 0, "author_name": "ada lovelace"},
+    ]
+    specter = {"p_q": np.asarray([1.0, 0.0], dtype=np.float32), "p1": np.asarray([0.5, 0.5], dtype=np.float32)}
+
+    table_paths = write_feature_block_arrow_from_rows(
+        tmp_path,
+        signatures=sig_rows,
+        papers=paper_rows,
+        paper_authors=paper_author_rows,
+        specter_embeddings=specter,
+        cluster_seeds_require={"s1": "c_ada"},
+        cluster_seeds_disallow=[("q", "s1")],
+        include_empty_cluster_seeds=True,
+    )
+    indexed_paths, _metrics = feature_block_arrow_module.write_raw_arrow_batch_lookup_indexes(table_paths, tmp_path)
+
+    def read(name: str) -> Any:
+        with pa.memory_map(table_paths[name]) as source:
+            return pa.ipc.open_file(source).read_all()
+
+    signatures = read("signatures")
+    assert signatures.column("signature_id").to_pylist() == ["q", "s1"]
+    assert signatures.column("author_orcid").to_pylist() == ["0000-0000-0000-0001", None]
+    papers = read("papers")
+    assert papers.column("paper_id").to_pylist() == ["p_q", "p1"]
+    assert papers.column("abstract").to_pylist() == ["Has Abstract", ""]
+    assert read("paper_authors").num_rows == 2
+    assert read("specter").column("paper_id").to_pylist() == ["p_q", "p1"]
+    cluster_seeds = read("cluster_seeds")
+    assert cluster_seeds.column("signature_id").to_pylist() == ["s1"]
+    assert cluster_seeds.column("cluster_id").to_pylist() == ["c_ada"]
+    assert read("cluster_seed_disallows").num_rows == 1
+    for key in (
+        "signatures_batch_index",
+        "papers_batch_index",
+        "paper_authors_batch_index",
+        "specter_batch_index",
+    ):
+        assert key in indexed_paths and Path(indexed_paths[key]).exists()

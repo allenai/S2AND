@@ -69,7 +69,7 @@ Version bump workflow:
 
 ```bash
 # 1) edit VERSION
-echo 0.51.0 > VERSION
+echo 0.51.1 > VERSION
 
 # 2) sync manifests
 uv run python scripts/sync_version.py

@@ -19,7 +19,7 @@ RuntimeSource = Literal["S2AND_BACKEND", "argument", "default"]
 _STARTUP_WARNING_EMITTED = False
 _STARTUP_WARNING_LOCK = threading.Lock()
 
-MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 51, 0)
+MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 51, 1)
 _CORE_REQUIRED_FEATURIZER_MARKERS = (
     "from_arrow_paths",
     "signature_ids",

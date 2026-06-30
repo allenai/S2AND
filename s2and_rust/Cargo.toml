@@ -1,6 +1,6 @@
 [package]
 name = "s2and_rust"
-version = "0.51.0"
+version = "0.51.1"
 edition = "2021"
 
 [lib]

@@ -14,6 +14,9 @@ from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from tests.helpers import patch_tiny_name_counts_loader
 
+# Derived from the guard so fixtures track the lockstep version bump instead of going stale.
+_SUPPORTED_VERSION = runtime.min_supported_rust_extension_version_string()
+
 
 def _missing_module(name: str) -> ModuleNotFoundError:
     return ModuleNotFoundError(f"No module named {name!r}", name=name)
@@ -64,7 +67,7 @@ class DummyRustFeaturizer:
 
 
 class DummyRustModule:
-    __version__ = "0.51.0"
+    __version__ = _SUPPORTED_VERSION
     RustFeaturizer = DummyRustFeaturizer
 
 
@@ -270,7 +273,7 @@ def test_rust_featurizer_cache_tracks_in_place_numpy_embedding_mutation(monkeypa
             return cls(dataset.name)
 
     class EmbeddingRustModule:
-        __version__ = "0.51.0"
+        __version__ = _SUPPORTED_VERSION
         RustFeaturizer = EmbeddingRustFeaturizer
 
     monkeypatch.setattr(feature_port, "s2and_rust", EmbeddingRustModule)
@@ -437,7 +440,7 @@ def test_build_rust_featurizer_from_arrow_paths_rejects_none_path(monkeypatch):
             raise AssertionError("from_arrow_paths should not be called for invalid paths")
 
     class ArrowRustModule:
-        __version__ = "0.51.0"
+        __version__ = _SUPPORTED_VERSION
         RustFeaturizer = ArrowRustFeaturizer
 
     monkeypatch.setattr(feature_port, "s2and_rust", ArrowRustModule)
@@ -461,7 +464,7 @@ def test_build_rust_featurizer_from_arrow_paths_requires_index_for_name_counts(m
             return cls("arrow")
 
     class ArrowRustModule:
-        __version__ = "0.51.0"
+        __version__ = _SUPPORTED_VERSION
         RustFeaturizer = ArrowRustFeaturizer
 
     monkeypatch.setattr(feature_port, "s2and_rust", ArrowRustModule)
@@ -507,7 +510,7 @@ def test_build_rust_featurizer_from_arrow_paths_requires_batch_indexes_by_defaul
             return cls("arrow")
 
     class ArrowRustModule:
-        __version__ = "0.51.0"
+        __version__ = _SUPPORTED_VERSION
         RustFeaturizer = ArrowRustFeaturizer
 
     monkeypatch.setattr(feature_port, "s2and_rust", ArrowRustModule)

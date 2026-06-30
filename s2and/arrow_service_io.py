@@ -20,6 +20,8 @@ import numpy as np
 
 from s2and.incremental_linking.feature_block_arrow import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
+    _record_batch_limit_for_table,
+    write_arrow_ipc_table,
     write_feature_block_arrow_tables,
 )
 from s2and.incremental_linking.feature_block_contract import (
@@ -31,8 +33,10 @@ from s2and.incremental_linking.feature_block_contract import (
     _optional_int,
     _optional_str,
     _strict_string_tuple,
+    build_feature_block_arrow_tables,
     filter_cluster_seed_disallows_for_signature_subset,
     normalize_cluster_seed_disallow_pairs,
+    validate_feature_block_columns,
 )
 
 
@@ -50,29 +54,134 @@ def write_feature_block_arrow_from_rows(
     max_record_batch_rows: Mapping[str, int] | int | None = RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     overwrite: bool = True,
 ) -> dict[str, str]:
-    """Build a FeatureBlock from service-native rows and write Arrow IPC tables (no ANDData).
+    """Build the FeatureBlock Arrow tables directly from service-native rows and write them.
 
-    Row mappings use the Arrow column names (see the schema contract). cluster_seeds_require maps
-    signature_id -> cluster_id (already grouped); cluster_seeds_disallow is an iterable of
-    signature-id pairs.
+    Builds the Arrow tables column-by-column (no per-row FeatureBlock dataclass objects) for
+    throughput on large blocks, while funneling through the shared validator
+    (``validate_feature_block_columns``) and schema builder (``build_feature_block_arrow_tables``)
+    so it enforces the same contract and matches the canonical schema. Row mappings use the Arrow
+    column names; cluster_seeds_require maps signature_id -> cluster_id (already grouped);
+    cluster_seeds_disallow is an iterable of signature-id pairs.
     """
 
-    feature_block = feature_block_from_rows(
-        signatures=signatures,
-        papers=papers,
-        paper_authors=paper_authors,
-        specter_embeddings=specter_embeddings,
-        cluster_seeds_require=cluster_seeds_require,
-        cluster_seeds_disallow=cluster_seeds_disallow,
-        query_signature_ids=query_signature_ids,
+    signature_columns = {
+        "signature_id": [str(r["signature_id"]) for r in signatures],
+        "paper_id": [str(r["paper_id"]) for r in signatures],
+        "author_first": [_optional_str(r.get("author_first")) for r in signatures],
+        "author_middle": [_optional_str(r.get("author_middle")) for r in signatures],
+        "author_last": [_optional_str(r.get("author_last")) for r in signatures],
+        "author_suffix": [_optional_str(r.get("author_suffix")) for r in signatures],
+        "author_affiliations": [
+            _strict_string_tuple(r.get("author_affiliations"), field_name="signatures.author_affiliations")
+            for r in signatures
+        ],
+        "author_orcid": [_optional_str(r.get("author_orcid")) for r in signatures],
+        "author_position": [
+            _optional_int(r.get("author_position"), field_name="signatures.author_position") for r in signatures
+        ],
+        "author_block": [_optional_str(r.get("author_block")) for r in signatures],
+        "author_email": [_optional_str(r.get("author_email")) for r in signatures],
+        "source_author_ids": [
+            _strict_string_tuple(r.get("source_author_ids"), field_name="signatures.source_author_ids", skip_none=True)
+            for r in signatures
+        ],
+    }
+    paper_columns = {
+        "paper_id": [str(r["paper_id"]) for r in papers],
+        "title": [_optional_str(r.get("title")) for r in papers],
+        "abstract": ["Has Abstract" if bool(r.get("has_abstract", False)) else "" for r in papers],
+        "venue": [_optional_str(r.get("venue")) for r in papers],
+        "journal_name": [_optional_str(r.get("journal_name")) for r in papers],
+        "year": [_optional_int(r.get("year"), field_name="papers.year") for r in papers],
+        "predicted_language": [_optional_str(r.get("predicted_language")) for r in papers],
+        "is_reliable": [_optional_bool(r.get("is_reliable"), field_name="papers.is_reliable") for r in papers],
+    }
+    paper_author_columns = {
+        "paper_id": [str(r["paper_id"]) for r in paper_authors],
+        "position": [
+            (_optional_int(r.get("position"), field_name="paper_authors.position") or 0) for r in paper_authors
+        ],
+        "author_name": [str(r.get("author_name", "") or "") for r in paper_authors],
+    }
+
+    signature_id_set = set(signature_columns["signature_id"])
+    require_pairs = tuple(
+        (str(sid), str(cid)) for sid, cid in (cluster_seeds_require or {}).items() if str(sid) in signature_id_set
     )
-    return write_feature_block_arrow_tables(
-        feature_block,
-        output_dir,
-        include_empty_cluster_seeds=include_empty_cluster_seeds,
-        max_record_batch_rows=max_record_batch_rows,
-        overwrite=overwrite,
+    disallow_pairs = filter_cluster_seed_disallows_for_signature_subset(
+        normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow or ()),
+        signature_id_set,
     )
+    specter_paper_ids, specter_matrix = _specter_columns_from_paper_rows(papers, specter_embeddings)
+
+    validate_feature_block_columns(
+        signature_ids=signature_columns["signature_id"],
+        signature_paper_ids=signature_columns["paper_id"],
+        paper_ids=paper_columns["paper_id"],
+        paper_author_position_keys=zip(
+            paper_author_columns["paper_id"], paper_author_columns["position"], strict=False
+        ),
+        query_signature_ids=[str(value) for value in query_signature_ids],
+        cluster_seeds_require=require_pairs,
+    )
+
+    tables = build_feature_block_arrow_tables(
+        signature_columns=signature_columns,
+        paper_columns=paper_columns,
+        paper_author_columns=paper_author_columns,
+        cluster_seeds_require=require_pairs,
+        cluster_seeds_disallow=disallow_pairs,
+        specter_paper_ids=specter_paper_ids,
+        specter_embeddings=specter_matrix,
+    )
+
+    output_path = Path(output_dir)
+    paths: dict[str, str] = {}
+    for name, table in tables.items():
+        if (
+            name in {"cluster_seeds", "cluster_seed_disallows"}
+            and table.num_rows == 0
+            and not include_empty_cluster_seeds
+        ):
+            continue
+        path = output_path / f"{name}.arrow"
+        if overwrite or not path.exists():
+            write_arrow_ipc_table(
+                table, path, max_record_batch_rows=_record_batch_limit_for_table(name, max_record_batch_rows)
+            )
+        paths[name] = str(path)
+    return paths
+
+
+def _specter_columns_from_paper_rows(
+    paper_rows: Sequence[Mapping[str, Any]],
+    specter_embeddings: Mapping[str, Sequence[float]] | None,
+) -> tuple[tuple[str, ...], np.ndarray | None]:
+    if not specter_embeddings:
+        return (), None
+    paper_ids: list[str] = []
+    vectors: list[np.ndarray] = []
+    expected_dim: int | None = None
+    for row in paper_rows:
+        paper_id = str(row["paper_id"])
+        vector = specter_embeddings.get(paper_id)
+        if vector is None:
+            continue
+        array = np.asarray(vector, dtype=np.float32)
+        if array.ndim != 1:
+            raise ValueError(f"SPECTER vector for paper_id={paper_id!r} must be 1D, got shape={array.shape}")
+        if expected_dim is None:
+            expected_dim = int(array.shape[0])
+        elif int(array.shape[0]) != expected_dim:
+            raise ValueError(
+                "SPECTER vectors must have equal dimensions: "
+                f"expected {expected_dim}, got {array.shape[0]} for paper_id={paper_id!r}"
+            )
+        paper_ids.append(paper_id)
+        vectors.append(array)
+    if not vectors:
+        return (), None
+    return tuple(paper_ids), np.ascontiguousarray(np.vstack(vectors), dtype=np.float32)
 
 
 def feature_block_from_rows(

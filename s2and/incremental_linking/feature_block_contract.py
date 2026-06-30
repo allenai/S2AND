@@ -200,24 +200,25 @@ class FeatureBlock:
 
     def __post_init__(self) -> None:
         signature_ids = tuple(signature.signature_id for signature in self.signatures)
-        object.__setattr__(self, "_signature_ids_cache", signature_ids)
-        if len(set(signature_ids)) != len(signature_ids):
-            raise ValueError("FeatureBlock signatures must have unique signature_id values")
+        signature_paper_ids = tuple(signature.paper_id for signature in self.signatures)
         paper_ids = tuple(paper.paper_id for paper in self.papers)
-        if len(set(paper_ids)) != len(paper_ids):
-            raise ValueError("FeatureBlock papers must have unique paper_id values")
-        seen_paper_author_positions: set[tuple[str, int]] = set()
-        for author in self.paper_authors:
-            key = (str(author.paper_id), int(author.position))
-            if key in seen_paper_author_positions:
-                raise ValueError(f"FeatureBlock paper_authors contains duplicate (paper_id, position): {key!r}")
-            seen_paper_author_positions.add(key)
+        paper_author_position_keys = [(str(author.paper_id), int(author.position)) for author in self.paper_authors]
+        query_signature_ids = tuple(str(value) for value in self.query_signature_ids)
+        require_pairs = tuple(
+            (str(signature_id), str(component_id)) for signature_id, component_id in self.cluster_seeds_require
+        )
+
+        validate_feature_block_columns(
+            signature_ids=signature_ids,
+            signature_paper_ids=signature_paper_ids,
+            paper_ids=paper_ids,
+            paper_author_position_keys=paper_author_position_keys,
+            query_signature_ids=query_signature_ids,
+            cluster_seeds_require=require_pairs,
+        )
 
         signature_id_set = set(signature_ids)
-        query_signature_ids = tuple(str(value) for value in self.query_signature_ids)
-        missing_queries = sorted(set(query_signature_ids) - signature_id_set)
-        if missing_queries:
-            raise ValueError(f"query_signature_ids are missing from FeatureBlock signatures: {missing_queries}")
+        object.__setattr__(self, "_signature_ids_cache", signature_ids)
         object.__setattr__(self, "query_signature_ids", query_signature_ids)
         signature_order = FeatureBlockSignatureOrder(
             signature_ids=signature_ids,
@@ -229,26 +230,6 @@ class FeatureBlock:
             "_signature_id_to_index_cache",
             MappingProxyType(signature_order.signature_id_to_index),
         )
-
-        require_pair_list: list[tuple[str, str]] = []
-        seen_require_signature_ids: set[str] = set()
-        for signature_id, component_id in self.cluster_seeds_require:
-            signature_key = str(signature_id)
-            component_key = str(component_id)
-            if not signature_key:
-                raise ValueError("cluster_seeds_require cannot contain empty signature_id values")
-            if not component_key:
-                raise ValueError(f"cluster_seeds_require cannot contain empty component_id values: {signature_key!r}")
-            if signature_key in seen_require_signature_ids:
-                raise ValueError(f"cluster_seeds_require contains duplicate signature_id: {signature_key!r}")
-            seen_require_signature_ids.add(signature_key)
-            require_pair_list.append((signature_key, component_key))
-        require_pairs = tuple(require_pair_list)
-        missing_require = sorted(
-            signature_id for signature_id, _component_id in require_pairs if signature_id not in signature_id_set
-        )
-        if missing_require:
-            raise ValueError(f"cluster_seeds_require contains signatures missing from FeatureBlock: {missing_require}")
         object.__setattr__(self, "cluster_seeds_require", require_pairs)
 
         disallow_pairs = normalize_cluster_seed_disallow_pairs(
@@ -303,87 +284,173 @@ class FeatureBlock:
     def to_arrow_tables(self) -> dict[str, Any]:
         """Return Arrow tables for the current Rust raw-candidate schema."""
 
-        import pyarrow as pa
+        return build_feature_block_arrow_tables(
+            signature_columns={
+                "signature_id": [row.signature_id for row in self.signatures],
+                "paper_id": [row.paper_id for row in self.signatures],
+                "author_first": [row.author_first for row in self.signatures],
+                "author_middle": [row.author_middle for row in self.signatures],
+                "author_last": [row.author_last for row in self.signatures],
+                "author_suffix": [row.author_suffix for row in self.signatures],
+                "author_affiliations": [list(row.author_affiliations) for row in self.signatures],
+                "author_orcid": [row.author_orcid for row in self.signatures],
+                "author_position": [row.author_position for row in self.signatures],
+                "author_block": [row.author_block for row in self.signatures],
+                "author_email": [row.author_email for row in self.signatures],
+                "source_author_ids": [list(row.source_author_ids) for row in self.signatures],
+            },
+            paper_columns={
+                "paper_id": [row.paper_id for row in self.papers],
+                "title": [row.title for row in self.papers],
+                "abstract": [row.abstract for row in self.papers],
+                "venue": [row.venue for row in self.papers],
+                "journal_name": [row.journal_name for row in self.papers],
+                "year": [row.year for row in self.papers],
+                "predicted_language": [row.predicted_language for row in self.papers],
+                "is_reliable": [row.is_reliable for row in self.papers],
+            },
+            paper_author_columns={
+                "paper_id": [row.paper_id for row in self.paper_authors],
+                "position": [row.position for row in self.paper_authors],
+                "author_name": [row.author_name for row in self.paper_authors],
+            },
+            cluster_seeds_require=self.cluster_seeds_require,
+            cluster_seeds_disallow=self.cluster_seeds_disallow,
+            specter_paper_ids=self.specter_paper_ids,
+            specter_embeddings=self.specter_embeddings,
+        )
 
-        tables: dict[str, Any] = {
-            "signatures": pa.table(
-                {
-                    "signature_id": pa.array([row.signature_id for row in self.signatures], type=pa.string()),
-                    "paper_id": pa.array([row.paper_id for row in self.signatures], type=pa.string()),
-                    "author_first": pa.array([row.author_first for row in self.signatures], type=pa.string()),
-                    "author_middle": pa.array([row.author_middle for row in self.signatures], type=pa.string()),
-                    "author_last": pa.array([row.author_last for row in self.signatures], type=pa.string()),
-                    "author_suffix": pa.array([row.author_suffix for row in self.signatures], type=pa.string()),
-                    "author_affiliations": pa.array(
-                        [list(row.author_affiliations) for row in self.signatures],
-                        type=pa.list_(pa.string()),
-                    ),
-                    "author_orcid": pa.array([row.author_orcid for row in self.signatures], type=pa.string()),
-                    "author_position": pa.array([row.author_position for row in self.signatures], type=pa.int64()),
-                    "author_block": pa.array([row.author_block for row in self.signatures], type=pa.string()),
-                    "author_email": pa.array([row.author_email for row in self.signatures], type=pa.string()),
-                    "source_author_ids": pa.array(
-                        [list(row.source_author_ids) for row in self.signatures],
-                        type=pa.list_(pa.string()),
-                    ),
-                }
-            ),
-            "papers": pa.table(
-                {
-                    "paper_id": pa.array([row.paper_id for row in self.papers], type=pa.string()),
-                    "title": pa.array([row.title for row in self.papers], type=pa.string()),
-                    "abstract": pa.array([row.abstract for row in self.papers], type=pa.string()),
-                    "venue": pa.array([row.venue for row in self.papers], type=pa.string()),
-                    "journal_name": pa.array([row.journal_name for row in self.papers], type=pa.string()),
-                    "year": pa.array([row.year for row in self.papers], type=pa.int64()),
-                    "predicted_language": pa.array(
-                        [row.predicted_language for row in self.papers],
-                        type=pa.string(),
-                    ),
-                    "is_reliable": pa.array([row.is_reliable for row in self.papers], type=pa.bool_()),
-                }
-            ),
-            "paper_authors": pa.table(
-                {
-                    "paper_id": pa.array([row.paper_id for row in self.paper_authors], type=pa.string()),
-                    "position": pa.array([row.position for row in self.paper_authors], type=pa.int64()),
-                    "author_name": pa.array([row.author_name for row in self.paper_authors], type=pa.string()),
-                }
-            ),
-            "cluster_seeds": pa.table(
-                {
-                    "signature_id": pa.array(
-                        [signature_id for signature_id, _component_id in self.cluster_seeds_require],
-                        type=pa.string(),
-                    ),
-                    "cluster_id": pa.array(
-                        [component_id for _signature_id, component_id in self.cluster_seeds_require],
-                        type=pa.string(),
-                    ),
-                }
-            ),
-            "cluster_seed_disallows": pa.table(
-                {
-                    "signature_id_1": pa.array(
-                        [left for left, _right in self.cluster_seeds_disallow],
-                        type=pa.string(),
-                    ),
-                    "signature_id_2": pa.array(
-                        [right for _left, right in self.cluster_seeds_disallow],
-                        type=pa.string(),
-                    ),
-                }
-            ),
-        }
-        if self.specter_embeddings is not None:
-            flat = pa.array(np.ravel(self.specter_embeddings), type=pa.float32())
-            tables["specter"] = pa.table(
-                {
-                    "paper_id": list(self.specter_paper_ids),
-                    "embedding": pa.FixedSizeListArray.from_arrays(flat, int(self.specter_embeddings.shape[1])),
-                }
-            )
-        return tables
+
+def validate_feature_block_columns(
+    *,
+    signature_ids: Sequence[str],
+    signature_paper_ids: Sequence[str],
+    paper_ids: Sequence[str],
+    paper_author_position_keys: Iterable[tuple[str, int]],
+    query_signature_ids: Sequence[str],
+    cluster_seeds_require: Sequence[tuple[str, str]],
+) -> None:
+    """Structural FeatureBlock invariants, shared by ``FeatureBlock.__post_init__`` and the
+    columnar service path so both reject the same malformed inputs.
+    """
+
+    for signature_id, signature_paper_id in zip(signature_ids, signature_paper_ids, strict=False):
+        if not str(signature_id):
+            raise ValueError("FeatureBlockSignature.signature_id must be non-empty")
+        if not str(signature_paper_id):
+            raise ValueError(f"FeatureBlockSignature.paper_id must be non-empty for {signature_id!r}")
+    if len(set(signature_ids)) != len(signature_ids):
+        raise ValueError("FeatureBlock signatures must have unique signature_id values")
+    for paper_id in paper_ids:
+        if not str(paper_id):
+            raise ValueError("FeatureBlockPaper.paper_id must be non-empty")
+    if len(set(paper_ids)) != len(paper_ids):
+        raise ValueError("FeatureBlock papers must have unique paper_id values")
+    seen_positions: set[tuple[str, int]] = set()
+    for key in paper_author_position_keys:
+        if not str(key[0]):
+            raise ValueError("FeatureBlockPaperAuthor.paper_id must be non-empty")
+        if key in seen_positions:
+            raise ValueError(f"FeatureBlock paper_authors contains duplicate (paper_id, position): {key!r}")
+        seen_positions.add(key)
+    signature_id_set = set(signature_ids)
+    missing_queries = sorted({str(value) for value in query_signature_ids} - signature_id_set)
+    if missing_queries:
+        raise ValueError(f"query_signature_ids are missing from FeatureBlock signatures: {missing_queries}")
+    seen_require: set[str] = set()
+    for signature_id, component_id in cluster_seeds_require:
+        signature_key = str(signature_id)
+        if not signature_key:
+            raise ValueError("cluster_seeds_require cannot contain empty signature_id values")
+        if not str(component_id):
+            raise ValueError(f"cluster_seeds_require cannot contain empty component_id values: {signature_key!r}")
+        if signature_key in seen_require:
+            raise ValueError(f"cluster_seeds_require contains duplicate signature_id: {signature_key!r}")
+        seen_require.add(signature_key)
+    missing_require = sorted(
+        str(signature_id) for signature_id, _c in cluster_seeds_require if str(signature_id) not in signature_id_set
+    )
+    if missing_require:
+        raise ValueError(f"cluster_seeds_require contains signatures missing from FeatureBlock: {missing_require}")
+
+
+def build_feature_block_arrow_tables(
+    *,
+    signature_columns: Mapping[str, Sequence[Any]],
+    paper_columns: Mapping[str, Sequence[Any]],
+    paper_author_columns: Mapping[str, Sequence[Any]],
+    cluster_seeds_require: Sequence[tuple[str, str]],
+    cluster_seeds_disallow: Sequence[tuple[str, str]],
+    specter_paper_ids: Sequence[str],
+    specter_embeddings: np.ndarray | None,
+) -> dict[str, Any]:
+    """Single source of truth for the FeatureBlock Arrow schema.
+
+    Builds the Rust raw-candidate Arrow tables from already-prepared column sequences. Used by
+    both ``FeatureBlock.to_arrow_tables`` (columns extracted from row objects) and the columnar
+    service path (columns built directly from request rows), so the schema lives in one place.
+    """
+
+    import pyarrow as pa
+
+    tables: dict[str, Any] = {
+        "signatures": pa.table(
+            {
+                "signature_id": pa.array(signature_columns["signature_id"], type=pa.string()),
+                "paper_id": pa.array(signature_columns["paper_id"], type=pa.string()),
+                "author_first": pa.array(signature_columns["author_first"], type=pa.string()),
+                "author_middle": pa.array(signature_columns["author_middle"], type=pa.string()),
+                "author_last": pa.array(signature_columns["author_last"], type=pa.string()),
+                "author_suffix": pa.array(signature_columns["author_suffix"], type=pa.string()),
+                "author_affiliations": pa.array(signature_columns["author_affiliations"], type=pa.list_(pa.string())),
+                "author_orcid": pa.array(signature_columns["author_orcid"], type=pa.string()),
+                "author_position": pa.array(signature_columns["author_position"], type=pa.int64()),
+                "author_block": pa.array(signature_columns["author_block"], type=pa.string()),
+                "author_email": pa.array(signature_columns["author_email"], type=pa.string()),
+                "source_author_ids": pa.array(signature_columns["source_author_ids"], type=pa.list_(pa.string())),
+            }
+        ),
+        "papers": pa.table(
+            {
+                "paper_id": pa.array(paper_columns["paper_id"], type=pa.string()),
+                "title": pa.array(paper_columns["title"], type=pa.string()),
+                "abstract": pa.array(paper_columns["abstract"], type=pa.string()),
+                "venue": pa.array(paper_columns["venue"], type=pa.string()),
+                "journal_name": pa.array(paper_columns["journal_name"], type=pa.string()),
+                "year": pa.array(paper_columns["year"], type=pa.int64()),
+                "predicted_language": pa.array(paper_columns["predicted_language"], type=pa.string()),
+                "is_reliable": pa.array(paper_columns["is_reliable"], type=pa.bool_()),
+            }
+        ),
+        "paper_authors": pa.table(
+            {
+                "paper_id": pa.array(paper_author_columns["paper_id"], type=pa.string()),
+                "position": pa.array(paper_author_columns["position"], type=pa.int64()),
+                "author_name": pa.array(paper_author_columns["author_name"], type=pa.string()),
+            }
+        ),
+        "cluster_seeds": pa.table(
+            {
+                "signature_id": pa.array([s for s, _c in cluster_seeds_require], type=pa.string()),
+                "cluster_id": pa.array([c for _s, c in cluster_seeds_require], type=pa.string()),
+            }
+        ),
+        "cluster_seed_disallows": pa.table(
+            {
+                "signature_id_1": pa.array([left for left, _r in cluster_seeds_disallow], type=pa.string()),
+                "signature_id_2": pa.array([right for _l, right in cluster_seeds_disallow], type=pa.string()),
+            }
+        ),
+    }
+    if specter_embeddings is not None:
+        flat = pa.array(np.ravel(specter_embeddings), type=pa.float32())
+        tables["specter"] = pa.table(
+            {
+                "paper_id": list(specter_paper_ids),
+                "embedding": pa.FixedSizeListArray.from_arrays(flat, int(specter_embeddings.shape[1])),
+            }
+        )
+    return tables
 
 
 def feature_block_signature_order_from_raw_candidate_plan(plan: Mapping[str, Any]) -> FeatureBlockSignatureOrder:

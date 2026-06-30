@@ -2384,3 +2384,101 @@ def test_write_feature_block_arrow_from_rows_round_trips(tmp_path: Path) -> None
         "specter_batch_index",
     ):
         assert key in indexed_paths and Path(indexed_paths[key]).exists()
+
+
+def _sig_row(signature_id: str, paper_id: str, **overrides: Any) -> dict[str, Any]:
+    row = {
+        "signature_id": signature_id,
+        "paper_id": paper_id,
+        "author_first": "Ada",
+        "author_last": "Lovelace",
+        "author_affiliations": [],
+        "author_position": 0,
+        "author_block": "a lovelace",
+    }
+    row.update(overrides)
+    return row
+
+
+def _paper_row(paper_id: str, **overrides: Any) -> dict[str, Any]:
+    row = {"paper_id": paper_id, "title": "T", "has_abstract": False, "venue": "RS", "year": 2020}
+    row.update(overrides)
+    return row
+
+
+def test_write_feature_block_arrow_from_rows_enforces_contract(tmp_path: Path) -> None:
+    # The columnar row path must reject the same malformed inputs the dataclass path does
+    # (it funnels through validate_feature_block_columns + the strict coercers).
+    pytest.importorskip("pyarrow")
+
+    def write(**kwargs: Any) -> Any:
+        return write_feature_block_arrow_from_rows(tmp_path, paper_authors=[], **kwargs)
+
+    with pytest.raises(ValueError, match="unique signature_id"):
+        write(signatures=[_sig_row("q", "p1"), _sig_row("q", "p2")], papers=[_paper_row("p1"), _paper_row("p2")])
+    with pytest.raises(ValueError, match="unique paper_id"):
+        write(signatures=[_sig_row("q", "p1")], papers=[_paper_row("p1"), _paper_row("p1")])
+    with pytest.raises(ValueError, match="cannot contain null"):
+        write(signatures=[_sig_row("q", "p1", author_affiliations=["ok", None])], papers=[_paper_row("p1")])
+    with pytest.raises(ValueError, match="must be a sequence"):
+        write(signatures=[_sig_row("q", "p1", author_affiliations="oops")], papers=[_paper_row("p1")])
+    with pytest.raises(ValueError, match="query_signature_ids"):
+        write(signatures=[_sig_row("q", "p1")], papers=[_paper_row("p1")], query_signature_ids=["missing"])
+    with pytest.raises(ValueError, match="FeatureBlockSignature.signature_id must be non-empty"):
+        write(signatures=[_sig_row("", "p1")], papers=[_paper_row("p1")])
+    with pytest.raises(ValueError, match="FeatureBlockSignature.paper_id must be non-empty"):
+        write(signatures=[_sig_row("q", "")], papers=[_paper_row("p1")])
+    with pytest.raises(ValueError, match="FeatureBlockPaper.paper_id must be non-empty"):
+        write(signatures=[_sig_row("q", "p1")], papers=[_paper_row("")])
+    with pytest.raises(ValueError, match="FeatureBlockPaperAuthor.paper_id must be non-empty"):
+        write_feature_block_arrow_from_rows(
+            tmp_path,
+            signatures=[_sig_row("q", "p1")],
+            papers=[_paper_row("p1")],
+            paper_authors=[{"paper_id": "", "position": 0, "author_name": "a"}],
+        )
+    with pytest.raises(ValueError, match="duplicate"):
+        write_feature_block_arrow_from_rows(
+            tmp_path,
+            signatures=[_sig_row("q", "p1")],
+            papers=[_paper_row("p1")],
+            paper_authors=[
+                {"paper_id": "p1", "position": 0, "author_name": "a"},
+                {"paper_id": "p1", "position": 0, "author_name": "b"},
+            ],
+        )
+
+
+def test_write_feature_block_arrow_from_rows_matches_to_arrow_tables(tmp_path: Path) -> None:
+    # Pin the columnar output against the canonical FeatureBlock.to_arrow_tables schema/values.
+    pa = pytest.importorskip("pyarrow")
+
+    signatures = [_sig_row("q", "p1", author_orcid="0000-0000-0000-0001", source_author_ids=["src-q"])]
+    papers = [_paper_row("p1", has_abstract=True)]
+    paper_authors = [{"paper_id": "p1", "position": 0, "author_name": "ada lovelace"}]
+    specter = {"p1": np.asarray([1.0, 0.0], dtype=np.float32)}
+
+    table_paths = write_feature_block_arrow_from_rows(
+        tmp_path,
+        signatures=signatures,
+        papers=papers,
+        paper_authors=paper_authors,
+        specter_embeddings=specter,
+    )
+    canonical = feature_block_from_rows(
+        signatures=signatures,
+        papers=papers,
+        paper_authors=paper_authors,
+        specter_embeddings=specter,
+    ).to_arrow_tables()
+
+    def read(path: str) -> Any:
+        with pa.memory_map(path) as source:
+            return pa.ipc.open_file(source).read_all()
+
+    for name, table in canonical.items():
+        if table.num_rows == 0:
+            continue
+        written = read(table_paths[name])
+        assert written.schema == table.schema, name
+        assert written.to_pydict() == table.to_pydict(), name

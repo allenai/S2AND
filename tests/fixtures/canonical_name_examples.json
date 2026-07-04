@@ -3,9 +3,9 @@
   "normalization_version": "canonical_v2",
   "decisions": {
     "D1": {
-      "status": "open",
-      "title": "No-spill multi-token given names",
-      "description": "Canonical first keeps ALL tokens of the raw first field (space-separated), for spaced, dashed, and initialed forms alike; canonical middle comes from the raw middle field only. Legacy spills tokens 2..n of a non-dashed first into middle."
+      "status": "decided",
+      "title": "Spill on space, keep together on dash",
+      "description": "Canonical first keeps all tokens of the raw first field ONLY when the raw first contains a dash-like character; otherwise the first token stays and tokens 2..n spill into middle. Confirms the current dash-aware rule as canonical policy (ruled 2026-07-04, per the issue #39 findings: spaced Western firsts are usually first+middle, spaced Chinese compounds are Sinonym's job upstream, and cross-variant compatibility of Jo / Jo Ann / JoAnn is compare-time via same_prefix_tokens, not canonicalization-identity)."
     },
     "D2": {
       "status": "decided",
@@ -13,14 +13,14 @@
       "description": "Apostrophes are removed (not turned into separators) in first, middle, AND last. Legacy strips them only in first; middle/last turn apostrophes into token breaks (O'Brien last -> 'o brien')."
     },
     "D3": {
-      "status": "open",
+      "status": "decided",
       "title": "Uniform apostrophe-like marks",
-      "description": "All apostrophe-like marks behave identically to ASCII apostrophe. Curly quotes already transliterate to ASCII ' via unidecode; backtick currently becomes a separator. Proposal: backtick (and similar) are apostrophes for name fields."
+      "description": "All apostrophe-like marks (ASCII ', backtick `, acute, curly quotes, modifier letters, primes, saltillo, fullwidth) normalize to nothing in name fields (ruled 2026-07-04). Implementation: unify apostrophe-like code points to ASCII ' before unidecode, then delete ' and ` after unidecode."
     },
     "D4": {
       "status": "decided",
-      "title": "Dash-space equivalence",
-      "description": "Every dash-like character is equivalent to a space at canonicalization; no ASCII/non-ASCII dash distinction anywhere (per migration doc Decided list)."
+      "title": "Dash uniformity",
+      "description": "All dash-like characters behave identically to one another; no ASCII vs Unicode dash distinction anywhere. For given names any dash keeps the first-field tokens together (see D1); for surnames dash and space variants canonicalize to the same spaced form (see D5)."
     },
     "D5": {
       "status": "decided",
@@ -28,9 +28,9 @@
       "description": "Canonical last names are stored as normalized space-separated tokens with particles preserved ('ou yang', 'van der berg'). Canonical count keys use the spaced forms; the compact-join shims (ouyang/vanderberg) are retired."
     },
     "D6": {
-      "status": "open",
-      "title": "Count-key informativeness and null semantics",
-      "description": "first/first_last count keys exist only when the canonical first has at least one token longer than one character (so 'y z' is uninformative, 'jo ann' counts). Keys with a missing component are null (no lookups, NaN feature) instead of colliding with sentinel count 1."
+      "status": "decided",
+      "title": "Count keys are canonical fields; null for missing",
+      "description": "Count keys use the canonical fields verbatim (no compaction). The informative gate is unchanged from legacy: first/first_last keys exist only when the canonical first string is longer than one character. Keys with a missing component are null (no lookup / NaN feature) instead of colliding with sentinel count 1 (ties to the empty-last bug in work_plan section 2)."
     },
     "D7": {
       "status": "decided",
@@ -47,20 +47,20 @@
     {
       "id": "joann-spaced",
       "family": "given-hyphen-space",
-      "equivalence_group": "g-joann",
+      "equivalence_group": null,
       "input": {
         "first": "Jo Ann",
         "middle": "",
         "last": "Smith"
       },
       "canonical": {
-        "first": "jo ann",
-        "middle": "",
+        "first": "jo",
+        "middle": "ann",
         "last": "smith",
         "count_keys": {
-          "first": "jo ann",
+          "first": "jo",
           "last": "smith",
-          "first_last": "jo ann smith",
+          "first_last": "jo smith",
           "last_first_initial": "smith j"
         }
       },
@@ -79,12 +79,12 @@
       "decisions": [
         "D1"
       ],
-      "notes": ""
+      "notes": "Spaced first spills; compare-time same_prefix_tokens keeps 'jo' compatible with 'jo ann'/'joann'."
     },
     {
       "id": "joann-dashed",
       "family": "given-hyphen-space",
-      "equivalence_group": "g-joann",
+      "equivalence_group": null,
       "input": {
         "first": "Jo-Ann",
         "middle": "",
@@ -117,7 +117,7 @@
         "D1",
         "D4"
       ],
-      "notes": ""
+      "notes": "Dashed first stays together; count key is the spaced field, not compacted 'joann'."
     },
     {
       "id": "joann-joined",
@@ -152,25 +152,25 @@
         }
       },
       "decisions": [],
-      "notes": "Joined form is a distinct canonical string; equivalence to 'jo ann' is a compare-time concern."
+      "notes": "Joined form is a distinct canonical string; equivalence to 'jo'/'jo ann' is a compare-time concern."
     },
     {
       "id": "yuzhong-spaced",
       "family": "given-hyphen-space",
-      "equivalence_group": "g-yuzhong",
+      "equivalence_group": null,
       "input": {
         "first": "Yu Zhong",
         "middle": "",
         "last": "Wang"
       },
       "canonical": {
-        "first": "yu zhong",
-        "middle": "",
+        "first": "yu",
+        "middle": "zhong",
         "last": "wang",
         "count_keys": {
-          "first": "yu zhong",
+          "first": "yu",
           "last": "wang",
-          "first_last": "yu zhong wang",
+          "first_last": "yu wang",
           "last_first_initial": "wang y"
         }
       },
@@ -189,12 +189,12 @@
       "decisions": [
         "D1"
       ],
-      "notes": ""
+      "notes": "The splitter itself spills; Sinonym overwrite (when enabled upstream) may rewrite detected Chinese spaced compounds before the splitter runs."
     },
     {
       "id": "yuzhong-dashed",
       "family": "given-hyphen-space",
-      "equivalence_group": "g-yuzhong",
+      "equivalence_group": null,
       "input": {
         "first": "Yu-Zhong",
         "middle": "",
@@ -274,8 +274,8 @@
         "last": "Wang"
       },
       "canonical": {
-        "first": "y z",
-        "middle": "",
+        "first": "y",
+        "middle": "z",
         "last": "wang",
         "count_keys": {
           "first": null,
@@ -300,7 +300,7 @@
         "D1",
         "D6"
       ],
-      "notes": "Two bare initials: first stays 'y z' but is uninformative for first/first_last count keys."
+      "notes": "Bare initials spill like any spaced first; single-char first stays uninformative for first/first_last count keys."
     },
     {
       "id": "sangmin-ascii-dash",
@@ -374,25 +374,25 @@
       "decisions": [
         "D4"
       ],
-      "notes": "U+2010 hyphen; must match the ASCII-dash case exactly."
+      "notes": "U+2010 hyphen; must match the ASCII-dash case exactly (no subblocking-style ASCII/non-ASCII split)."
     },
     {
       "id": "sangmin-spaced",
       "family": "given-hyphen-space",
-      "equivalence_group": "g-sangmin",
+      "equivalence_group": null,
       "input": {
         "first": "Sang Min",
         "middle": "",
         "last": "Lee"
       },
       "canonical": {
-        "first": "sang min",
-        "middle": "",
+        "first": "sang",
+        "middle": "min",
         "last": "lee",
         "count_keys": {
-          "first": "sang min",
+          "first": "sang",
           "last": "lee",
-          "first_last": "sang min lee",
+          "first_last": "sang lee",
           "last_first_initial": "lee s"
         }
       },
@@ -490,20 +490,20 @@
     {
       "id": "qixin-spaced",
       "family": "given-hyphen-space",
-      "equivalence_group": "g-qixin",
+      "equivalence_group": null,
       "input": {
         "first": "Qi Xin",
         "middle": "",
         "last": "Zhou"
       },
       "canonical": {
-        "first": "qi xin",
-        "middle": "",
+        "first": "qi",
+        "middle": "xin",
         "last": "zhou",
         "count_keys": {
-          "first": "qi xin",
+          "first": "qi",
           "last": "zhou",
-          "first_last": "qi xin zhou",
+          "first_last": "qi zhou",
           "last_first_initial": "zhou q"
         }
       },
@@ -671,7 +671,7 @@
         "D2",
         "D3"
       ],
-      "notes": "Backtick in first is NOT stripped today (only ASCII apostrophe is), so legacy first splits into 'd angelo'."
+      "notes": "Backtick in first is NOT stripped today (only ASCII apostrophe is), so legacy first splits into 'd' + middle 'angelo'."
     },
     {
       "id": "obrien-last-ascii",
@@ -784,7 +784,7 @@
         "D2",
         "D3"
       ],
-      "notes": "Backtick is currently a separator everywhere; D3 proposes apostrophe treatment."
+      "notes": "Backtick is currently a separator everywhere; D3 rules apostrophe treatment."
     },
     {
       "id": "oneil-middle",
@@ -826,15 +826,15 @@
     {
       "id": "hg-initials",
       "family": "initials",
-      "equivalence_group": "g-hg",
+      "equivalence_group": null,
       "input": {
         "first": "H. G.",
         "middle": "",
         "last": "Wells"
       },
       "canonical": {
-        "first": "h g",
-        "middle": "",
+        "first": "h",
+        "middle": "g",
         "last": "wells",
         "count_keys": {
           "first": null,
@@ -859,12 +859,12 @@
         "D1",
         "D6"
       ],
-      "notes": ""
+      "notes": "Spaced initials spill: first is 'h'; the single-char gate keeps first/first_last count keys null, as today."
     },
     {
       "id": "hg-dashed-initials",
       "family": "initials",
-      "equivalence_group": "g-hg",
+      "equivalence_group": null,
       "input": {
         "first": "H.-G.",
         "middle": "",
@@ -875,9 +875,9 @@
         "middle": "",
         "last": "wells",
         "count_keys": {
-          "first": null,
+          "first": "h g",
           "last": "wells",
-          "first_last": null,
+          "first_last": "h g wells",
           "last_first_initial": "wells h"
         }
       },
@@ -897,7 +897,7 @@
         "D4",
         "D6"
       ],
-      "notes": ""
+      "notes": "Dashed initials stay together; count key is the spaced field 'h g' (legacy compacted to 'hg')."
     },
     {
       "id": "single-initial",
@@ -1312,13 +1312,13 @@
         "last": "Nguy\u1ec5n"
       },
       "canonical": {
-        "first": "thi minh",
-        "middle": "",
+        "first": "thi",
+        "middle": "minh",
         "last": "nguyen",
         "count_keys": {
-          "first": "thi minh",
+          "first": "thi",
           "last": "nguyen",
-          "first_last": "thi minh nguyen",
+          "first_last": "thi nguyen",
           "last_first_initial": "nguyen t"
         }
       },
@@ -1337,7 +1337,7 @@
       "decisions": [
         "D1"
       ],
-      "notes": ""
+      "notes": "Spaced Vietnamese first spills like any spaced first; Sinonym-style upstream rewriting is the place for language-aware compounds."
     },
     {
       "id": "muller",
@@ -1530,13 +1530,13 @@
         "last": "Brown"
       },
       "canonical": {
-        "first": "robert james",
-        "middle": "lee",
+        "first": "robert",
+        "middle": "james lee",
         "last": "brown",
         "count_keys": {
-          "first": "robert james",
+          "first": "robert",
           "last": "brown",
-          "first_last": "robert james brown",
+          "first_last": "robert brown",
           "last_first_initial": "brown r"
         }
       },
@@ -1555,7 +1555,7 @@
       "decisions": [
         "D1"
       ],
-      "notes": "Legacy spills 'james' into middle ('james lee')."
+      "notes": "Matches legacy spill: 'james' joins the middle ahead of 'lee'."
     }
   ]
 }

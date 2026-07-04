@@ -31,6 +31,15 @@ Scope
 Decided (from issue history)
 - Apostrophes: canonical fields should remove apostrophes globally (no dual stream).
 - Chinese given names: Sinonym-aware handling is part of canonicalization; hyphenated given names should stay together.
+- Spaced given names (ruled 2026-07-04, per issue #39): when the raw first has no dash-like
+  character, tokens after the first spill into middle; any dash keeps the first-field tokens
+  together. Cross-variant compatibility (`Jo` / `Jo Ann` / `JoAnn`) is a compare-time concern
+  (`same_prefix_tokens`), not canonicalization identity.
+- Apostrophe-like marks (ruled 2026-07-04): all apostrophe-like characters, including backtick,
+  are removed from name fields (never treated as separators).
+- Count keys (ruled 2026-07-04): canonical count keys are the canonical fields verbatim (the
+  compact-join shims are retired); the single-character informative gate is unchanged; keys
+  with a missing component are null, never sentinel counts.
 - Dash semantics: canonical behavior should not assign different semantic meaning to ASCII hyphen versus Unicode
   dash-like characters. Any current ASCII/non-ASCII split must be treated as a measured legacy-compatibility repair,
   not as the desired canonical policy.
@@ -245,6 +254,9 @@ Target End State
 
 Migration Plan (phased, verifiable)
 1) Lock policy and examples
+   - Status 2026-07-04: the frozen table exists at `tests/fixtures/canonical_name_examples.json`
+     (41 cases, decisions D1-D8 ruled), enforced by `tests/test_canonical_name_examples.py`
+     (legacy pins run now; canonical contract activates when the step-2 functions land).
    - Resolve all Open Decisions above.
    - Freeze a canonical example table covering:
      - `Jo Ann`, `Jo-Ann`, `JoAnn`.

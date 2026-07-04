@@ -109,6 +109,18 @@ remaining open items are bugs that exist in Python (or in both Python and Rust)
 and would change Python feature values when fixed. See "Fixed in 2026-05-28
 correctness pass" below for what changed.
 
+Status update (2026-07-04): a reachability audit re-verified every open item
+below against the current tree. All remain present, with two corrections: line
+references are refreshed throughout, and the same-signature
+`paper_author_list_*` item moved from Tier A to Tier B because the current
+linker training path already builds residual summaries that exclude the query
+([scripts/production/model/linker_train_calibrate_eval.py:2591-2609](../scripts/production/model/linker_train_calibrate_eval.py#L2591-L2609))
+and filters the query out of pair batches
+([scripts/production/model/linker_train_calibrate_eval.py:1082](../scripts/production/model/linker_train_calibrate_eval.py#L1082)),
+so no live path feeds a query-inclusive summary. When picking up the remaining
+items for the re-baseline cycle, verify each on a live call path (not just
+code presence) before scoping the fix.
+
 Required when picking these up:
 
 - Fix Python and Rust sides together where a bug exists in both.
@@ -120,7 +132,7 @@ Required when picking these up:
 Open bugs (Python feature changes deferred for the next re-baseline cycle):
 
 - **Sinonym overwrite leaves stale normalized fields when run outside `__init__`.**
-  [s2and/data.py:2385-2389](../s2and/data.py#L2385-L2389) replaces only raw
+  [s2and/data.py:2391-2395](../s2and/data.py#L2391-L2395) replaces only raw
   `author_info_first/middle/last`. Inside `__init__` the subsequent
   `preprocess_signatures()` call at
   [s2and/data.py:815](../s2and/data.py#L815) rebuilds normalized fields, so the
@@ -144,7 +156,7 @@ Open bugs (Python feature changes deferred for the next re-baseline cycle):
   treat absent `@` as missing. Fix both sides.
 
 - **`equal_middle` falls through to 0 for multi-token middles (parity bug).**
-  Python at [s2and/text.py:735-742](../s2and/text.py#L735-L742) and Rust at
+  Python at [s2and/text.py:736-743](../s2and/text.py#L736-L743) and Rust at
   [s2and_rust/src/features.rs:381-399](../s2and_rust/src/features.rs#L381-L399)
   only compare the first character when one side is a single initial; later
   tokens of a joined multi-token middle that match the other side's initial
@@ -165,7 +177,7 @@ Open bugs (Python feature changes deferred for the next re-baseline cycle):
   canonical, but the assumption is not enforced.) Rust
   [s2and_rust/src/raw_arrow_features.rs:49-51](../s2and_rust/src/raw_arrow_features.rs#L49-L51)
   and
-  [s2and_rust/src/rust_featurizer.rs:1639-1640](../s2and_rust/src/rust_featurizer.rs#L1639-L1640)
+  [s2and_rust/src/rust_featurizer.rs:1637-1638](../s2and_rust/src/rust_featurizer.rs#L1637-L1638)
   pin the semantic to `InitialChar` with an inline comment. If a future Arrow
   bundle were generated from a `legacy_full_first_token` ANDData, Rust would
   silently use the wrong `last_first_initial` keys with no diagnostic. Cheap
@@ -188,7 +200,7 @@ Open bugs (Python feature changes deferred for the next re-baseline cycle):
   [s2and_rust/src/language_detection.rs:80-86](../s2and_rust/src/language_detection.rs#L80-L86).
 
 - **`detect_language` reports `is_reliable=True` when only one detector responded.**
-  [s2and/text.py:387-398](../s2and/text.py#L387-L398) treats `un_ft` or `un_2`
+  [s2and/text.py:385-399](../s2and/text.py#L385-L399) treats `un_ft` or `un_2`
   as a successful agreement, so single-detector signals are weighted the same
   as two-detector agreement downstream. Decide whether single-detector should
   be reliable; if not, fix and propagate the new `is_reliable` semantics.
@@ -216,7 +228,7 @@ re-baseline, or latent issues that are tracked but not actively fixed.
 
 - **ORCID regex accepts Unicode digits in Python but Rust requires ASCII.**
   Python `ORCID_PATTERN` at
-  [s2and/text.py:108-114](../s2and/text.py#L108-L114) uses bare `\d` (no
+  [s2and/text.py:109-115](../s2and/text.py#L109-L115) uses bare `\d` (no
   `re.ASCII`), so Unicode digit classes (Arabic-Indic `٠-٩`, etc.) match.
   Rust `normalize_orcid_owned` at
   [s2and_rust/src/orcid.rs:19,34](../s2and_rust/src/orcid.rs#L19) requires
@@ -226,15 +238,15 @@ re-baseline, or latent issues that are tracked but not actively fixed.
   (add `re.ASCII` or `[0-9]`).
 
 - **Reader silently coerces NULL to `""` for schema-required string columns.**
-  [s2and_rust/src/raw_arrow/readers.rs:153-156](../s2and_rust/src/raw_arrow/readers.rs#L153-L156)
+  [s2and_rust/src/raw_arrow/readers.rs:160-163](../s2and_rust/src/raw_arrow/readers.rs#L160-L163)
   and
-  [s2and_rust/src/raw_arrow/readers.rs:242-248](../s2and_rust/src/raw_arrow/readers.rs#L242-L248)
+  [s2and_rust/src/raw_arrow/readers.rs:249-255](../s2and_rust/src/raw_arrow/readers.rs#L249-L255)
   call `optional_owned(row).unwrap_or_default()` on `signatures.author_first`,
   `author_middle`, `author_last`, `author_suffix` and on `papers.title`,
   `venue`, `journal_name`, all of which the schema contract at
   [s2and/arrow_schema_contract.json:30-43](../s2and/arrow_schema_contract.json)
   declares `required=true`. Compare `paper_authors.author_name` at
-  [s2and_rust/src/raw_arrow/readers.rs:295](../s2and_rust/src/raw_arrow/readers.rs#L295),
+  [s2and_rust/src/raw_arrow/readers.rs:302-304](../s2and_rust/src/raw_arrow/readers.rs#L302-L304),
   which correctly errors via `required_value`. The current behavior turns
   upstream NULLs into empty-string name-count lookups (see [Bug 5 below](#empty-last-coalesces-to-1)),
   empty-title term sets, etc. Fix: route the affected fields through
@@ -243,9 +255,9 @@ re-baseline, or latent issues that are tracked but not actively fixed.
 
 - **SPECTER all-zero rows mean "missing" via Python dict ingest and "present" via Arrow ingest.**
   Python-dict path
-  [s2and_rust/src/ingest_dataset.rs:701-738](../s2and_rust/src/ingest_dataset.rs#L701-L738)
+  [s2and_rust/src/ingest_dataset.rs:706-743](../s2and_rust/src/ingest_dataset.rs#L706-L743)
   drops all-zero embeddings as missing; Arrow path
-  [s2and_rust/src/raw_arrow/readers.rs:501-512](../s2and_rust/src/raw_arrow/readers.rs#L501-L512)
+  [s2and_rust/src/raw_arrow/readers.rs:490-517](../s2and_rust/src/raw_arrow/readers.rs#L490-L517)
   via
   [s2and_rust/src/raw_arrow/arrow_io.rs:245-287](../s2and_rust/src/raw_arrow/arrow_io.rs#L245-L287)
   keeps them as real centroids. The work plan already declares "Present rows
@@ -266,27 +278,14 @@ re-baseline, or latent issues that are tracked but not actively fixed.
   four ngram-Counter features on `reference_details`.
 
 - <a id="empty-last-coalesces-to-1"></a>**`_compute_signature_name_counts` returns `last=1` for empty surnames (sentinel collision with genuinely once-seen surnames).**
-  [s2and/data.py:896-901](../s2and/data.py#L896-L901):
+  [s2and/data.py:902-907](../s2and/data.py#L902-L907):
   `last=self.last_dict.get(last_for_counts, 1)` returns the default `1` when
   `last_for_counts == ""`, indistinguishable from a real corpus count of `1`.
-  Same for `last_first_initial` on line 900. `first` and `first_last` are
-  symmetric and correctly return `np.nan` (lines 897, 899). Together with the
+  Same for `last_first_initial` on line 906. `first` and `first_last` are
+  symmetric and correctly return `np.nan` (lines 903, 905). Together with the
   reader bug above, a NULL `author_last` ends up as a rare-surname signal.
   This is the same shape of bug as the documented "MISSING" email collision —
   fix by returning `np.nan` (or an explicit None) when `last_for_counts == ""`.
-
-- **Same-signature row inflates `paper_author_list_*` features when the query is a member of its own cluster.**
-  [s2and/incremental_linking/query_adapter.py:578-611](../s2and/incremental_linking/query_adapter.py#L578-L611):
-  the `if same_signature: continue` guard at line 605 skips the local10
-  features but only after `best_author_jaccard`, `best_author_containment`,
-  `best_author_overlap`, and `best_author_count_log_absdiff` are already
-  updated with a perfect self-match (jaccard=1, containment=1, count_log_absdiff≈0).
-  Production incremental linking accidentally avoids this because
-  `unassigned_signature_ids` excludes seeds, but
-  [scripts/production/model/linker_train_calibrate_eval.py:2297](../scripts/production/model/linker_train_calibrate_eval.py#L2297)
-  uses the query as a member of its own cluster for positive-example
-  generation, polluting training data. Fix: move the `if same_signature:
-  continue` guard above the paper-author-list updates.
 
 - **Query-vs-query `cluster_seed_disallows` pairs silently dropped from raw planner exclusion.**
   [s2and_rust/src/raw_candidate_planner.rs:174-201](../s2and_rust/src/raw_candidate_planner.rs#L174-L201)
@@ -302,13 +301,31 @@ re-baseline, or latent issues that are tracked but not actively fixed.
   [s2and/text.py:569-600](../s2and/text.py#L569-L600): the
   `len(word) > 2` filter is only applied inside the `stopwords is not None`
   branch. Reference-author ngrams built in
-  [s2and/data.py:2522](../s2and/data.py#L2522) pass `stopwords=None`,
+  [s2and/data.py:2528](../s2and/data.py#L2528) pass `stopwords=None`,
   accidentally disabling the short-token filter as well, so reference-author
   ngrams include 1-2 char tokens (`"li"`, `"wu"`) that title/venue ngrams
   drop. Decouple the two filters — either apply `len > 2` unconditionally or
   add an explicit second argument.
 
 #### Tier B — latent, masked, or training-only
+
+- **Same-signature guard in `raw_paper_evidence_features` runs after the `best_author_*` updates.**
+  (Moved from Tier A on 2026-07-04: the earlier "pollutes training data" claim
+  was inaccurate as written — the residual-summary training path predates that
+  entry, commit `f7e98c7`.)
+  [s2and/incremental_linking/query_adapter.py:578-611](../s2and/incremental_linking/query_adapter.py#L578-L611):
+  the `if same_signature: continue` guard at line 605 skips the local10
+  features only after `best_author_jaccard`, `best_author_containment`,
+  `best_author_overlap`, and `best_author_count_log_absdiff` are updated with a
+  perfect self-match. No live path feeds a query-inclusive summary today:
+  production incremental linking excludes seeds via
+  `unassigned_signature_ids`, and linker training builds residual summaries
+  that exclude the query
+  ([scripts/production/model/linker_train_calibrate_eval.py:2591-2609](../scripts/production/model/linker_train_calibrate_eval.py#L2591-L2609))
+  and drops the query from pair batches
+  ([scripts/production/model/linker_train_calibrate_eval.py:1082](../scripts/production/model/linker_train_calibrate_eval.py#L1082)).
+  Fix as cheap hardening for future callers: move the `if same_signature:
+  continue` guard above the paper-author-list updates.
 
 - **`equal()` returns 1 (equal) for two whitespace-only first/middle/last inputs.**
   [s2and/text.py:698-707](../s2and/text.py#L698-L707): the empty check uses

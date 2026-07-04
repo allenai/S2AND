@@ -1,7 +1,10 @@
 # Normalization Unification Migration Plan
 
-Execution status (last reconfirmed 2026-05-26; originally entered blocked state 2026-03-02)
+Execution status (last reconfirmed 2026-07-04; originally entered blocked state 2026-03-02)
 - Blocked: normalization work is on hold until the required data/artifacts are ready.
+- Unblocking in progress (2026-07-04): canonical upstream names are arriving; this plan is
+  expected to execute together with the production v1.3 retrain, with regenerated artifacts
+  and retrained models moving as one release unit.
 - Keep this plan separate from the active execution plan in `docs/work_plan.md`.
 
 Status
@@ -16,6 +19,10 @@ Status
   `normalize_subblocking_signature_rows` after earlier module extractions out of `lib.rs`,
   and noted that Rust now supports both `last_first_initial` semantics via
   `NameCountsLastFirstInitialSemantics`. No policy or compatibility-shim changes.
+- Blast-radius review on July 4, 2026, ahead of the v1.3 retrain: added "Implementation
+  notes (2026-07-04)" and Open Decisions 3-4 below; no normalization-policy changes. The
+  `docs/work_plan.md` section-2 bug list was re-verified the same day (one entry demoted to
+  latent after a reachability check).
 
 Scope
 - Unify name normalization for first/middle/last across data preparation, modeling, subblocking, and auxiliary datasets (name counts, name tuples, ORCID prefix counts).
@@ -43,8 +50,24 @@ Decided (from issue history)
 Open Decisions (remaining before migration freeze)
 1) Compatibility-mode decommission window
    - finalize the exact number of releases/runs required before removing compatibility mode.
+   - moot if Open Decision 4 adopts the single-mode cutover.
 2) Threshold tightening
    - decide whether adopted Rust-alignment thresholds should be tightened for release-grade datasets.
+3) Benchmark training-data names (added 2026-07-04)
+   - decide whether the fixed benchmark gold datasets (pubmed, aminer, arnetminer, inspire, kisti,
+     qian, zbmath, plus the medline/augmented pair CSVs) receive re-exported canonical names
+     re-joined by signature id, or keep legacy raw names that are only re-normalized at read time.
+   - if they keep legacy names, pairwise training and production inference see different raw-name
+     distributions; no in-repo re-join/re-export tool exists today. Corpus-derived data (name
+     counts, ORCID prefix counts, the big-block replay bundle) receives new names either way.
+4) Single-mode cutover vs compatibility window (added 2026-07-04)
+   - decide whether to drop the dual-mode `legacy_compat`/`canonical_v2` runtime contract in favor
+     of a single-mode release that only accepts `canonical_v2` artifacts (fail fast on mismatch),
+     with rollback = redeploying the previous package + artifact set.
+   - recommendation: single-mode. Artifacts, models, and code already ship as one checksummed
+     release unit, and "old code + canonical_v2" is unsupported either way; a runtime
+     compatibility mode doubles the cutover test matrix for a rollback path that package/artifact
+     pinning already provides.
 
 Rust Alignment Decisions (effective February 20, 2026; refreshed 2026-05-23)
 1) Canonical cutover contract
@@ -64,6 +87,39 @@ Rust Alignment Decisions (effective February 20, 2026; refreshed 2026-05-23)
    - Before enabling canonical mode by default, production retraining and production inference must use the same canonical normalization + Sinonym path.
 5) Rust coupling
    - Any Rust ingestion change that affects normalized names, name-count keys, ORCID fallbacks, or block keys must be treated as a policy-sensitive change, not a pure performance refactor.
+
+Implementation notes (2026-07-04 blast-radius review)
+- `normalization_version` enforcement is net-new: no code path or manifest carries it today. The
+  model bundle already records a versioned feature contract
+  (`s2and/data/production_model_v1.21/clusterer.json` ->
+  `feature_contract.name_counts_last_first_initial_semantics`); the recommended mechanism is to
+  extend that same contract shape into the `name_counts_index/` manifest and the Arrow dataset
+  manifests (add `normalization_version` alongside `name_counts_last_first_initial_semantics`),
+  then assert model contract == artifact contract at load in `s2and.arrow_inputs` and in the Rust
+  readers (the `schema_version` gate in `s2and_rust/src/name_counts.rs` is the natural fail-fast
+  hook). This also discharges the latent hardcoded-`InitialChar` item in `docs/work_plan.md`.
+- Name tuples can be regenerated deterministically: re-normalize
+  `s2and/data/s2and_unnormalized_filtered_name_tuples.txt` through the canonical normalizer
+  instead of re-running the archived hmni/LLM pipeline. Regenerated tuples must be emitted
+  symmetrically (or Rust must symmetrize on insert): `insert_name_tuple_alias` in
+  `s2and_rust/src/ingest_dataset.rs` is directional and relies on the shipped file listing both
+  directions of each pair.
+- Count generators are internal doc-stubs (`pys2`) built on legacy normalization. Regenerating
+  `name_counts.pickle` and `first_k_letter_counts_from_orcid.json` requires rewriting both
+  scripts to import the canonical routine before running them on internal infrastructure;
+  `generate_orcid_name_prefix_counts.py::normalize_names` is a divergent inline copy of the
+  legacy splitter and must not survive the rewrite. `name_counts_index/` is a pure
+  re-serialization of the pickle and is regenerated afterwards (note: the checked-in index
+  manifest predates the current writer and lacks its `fingerprint` field; a clean regeneration
+  adds it).
+- Additional cutover sites beyond "References in code" below:
+  - Inline duplicate of the name-tuple probing logic in `s2and_rust/src/rust_featurizer.rs`
+    (constraint scoring, ~lines 345-351); remove together with the `first_names_name_compatible`
+    probing forms.
+  - `author_info_first_normalized` (single-token) is a legacy cached first-token field:
+    `ANDData.preprocess_signatures` still reads/materializes it, but feature, constraint,
+    subblocking, and model-scoring paths consume `author_info_first_normalized_without_apostrophe`
+    instead. Remove it with the dual-field unification.
 
 Current State (post-Sinonym hyphen pass)
 - Given-name canonicalization currently preserves hyphenated Chinese given names:
@@ -221,6 +277,12 @@ Migration Plan (phased, verifiable)
 
 5) Validate, benchmark, and roll out
    - Pairwise and clustering evaluation on representative datasets; compare to pinned baseline.
+   - Re-baseline the pinned quality gates on regenerated artifacts: the `s_lee`/`s_park`/`h_wang`
+     recall values above and the `eval_prod_models.py` docstring B3 baselines were measured on
+     legacy-name artifacts and do not transfer to a new-name bundle. Protocol: score old code +
+     old bundle and new code + new bundle each against its own gold labels and compare deltas;
+     additionally run new code on the old bundle once to separate code-driven from data-driven
+     movement.
    - Subblocking checks: size distribution, merge behavior, ORCID co-location sanity checks, and dash-variant alias
      behavior on `s_lee`, `s_park`, and `h_wang`.
    - Performance checks: runtime and memory for preprocessing/subblocking/featurization.
@@ -240,6 +302,10 @@ Required Evidence / Exit Criteria
 - Quality thresholds (adopted for Rust alignment):
   - Pairwise: `AUC delta <= 0.001`, `F1 delta <= 0.005` versus pinned baseline.
   - Clustering: `B3 delta <= 0.005` versus pinned baseline.
+  - Threshold scope (clarified 2026-07-04): these deltas gate no-op alignment/refactor
+    comparisons on unchanged inputs. The retrain release gate is end-metric non-regression
+    versus the shipped production model on the same eval sets; per-column drift tolerances do
+    not apply to an intentional feature-changing retrain.
 - Runtime:
   - No unexpected slowdown beyond agreed threshold.
 - Runtime thresholds (adopted for Rust alignment):

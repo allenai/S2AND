@@ -79,6 +79,11 @@ New production releases are built as a two-stage native bundle. First,
 linker into the same directory and writes the final checksummed `manifest.json`.
 Production release scripts should not write pickle artifacts.
 
+New bundles must store their intended runtime `eps` in `clusterer.json` at
+export time. The loader's runtime eps override is scoped to v1.2-derived
+artifacts only (`_RUNTIME_CLUSTER_EPS_OVERRIDE_VERSIONS` in
+`s2and/production_model.py`); do not extend it to new versions.
+
 ### Updating the linker after a pairwise model change
 
 Treat the pairwise model and promoted linker as one release unit. If

@@ -1,5 +1,5 @@
 {
-  "description": "Frozen canonical name-normalization example table (migration step 1 of docs/normalization_migration_blocked.md). 'canonical' values are the proposed canonical_v2 policy; 'legacy' values are computed from the current code and pinned by tests/test_canonical_name_examples.py. Count keys use initial_char semantics; null count keys mean no lookup (missing), never sentinel counts.",
+  "description": "Frozen canonical name-normalization example table (migration step 1 of docs/normalization_migration_blocked.md). 'canonical' values are the ruled canonical_v2 policy; 'legacy' values are computed from the current code and pinned by tests/test_canonical_name_examples.py. Count keys use initial_char semantics; null count keys mean no lookup (missing), never sentinel counts. compare_compatibility encodes the compare-time equivalence contract (same_prefix_tokens) across variant groups that are deliberately not canonicalization-identical.",
   "normalization_version": "canonical_v2",
   "decisions": {
     "D1": {
@@ -29,19 +29,62 @@
     },
     "D6": {
       "status": "decided",
-      "title": "Count keys are canonical fields; null for missing",
-      "description": "Count keys use the canonical fields verbatim (no compaction). The informative gate is unchanged from legacy: first/first_last keys exist only when the canonical first string is longer than one character. Keys with a missing component are null (no lookup / NaN feature) instead of colliding with sentinel count 1 (ties to the empty-last bug in work_plan section 2)."
+      "title": "Count keys are canonical fields; null for missing (feature-semantics change)",
+      "description": "Count keys use the canonical fields verbatim (no compaction), and keys with a missing component are null (no lookup / NaN feature). This changes live feature values: legacy always looks up last and last_first_initial even when a component is empty (empty first yields lfi key 'smith'; empty last yields lfi key 'j' plus the sentinel last=1 bug tracked in work_plan section 2). The change lands inside the single re-baseline/retrain cycle and is gated by its end-metric non-regression eval. The single-character informative gate for first/first_last is unchanged from legacy."
     },
     "D7": {
       "status": "decided",
       "title": "Leading title prefixes dropped",
-      "description": "A single leading NAME_PREFIXES token (dr, prof, ...) is dropped from first, as today. Edge to confirm: a prefix-only first canonicalizes to empty."
+      "description": "A single leading NAME_PREFIXES token (dr, prof, ...) is dropped from first, as today. A prefix-only first therefore canonicalizes to empty, and its first-dependent count keys are null per D6 (matches current field behavior)."
     },
     "D8": {
       "status": "decided",
       "title": "last_first_initial stays initial-char",
       "description": "The last_first_initial count key remains '<canonical last> <first initial char>' (initial_char semantics, matching the current default and Arrow contract)."
     }
+  },
+  "compare_compatibility": {
+    "compatible_groups": [
+      [
+        "joann-spaced",
+        "joann-dashed",
+        "joann-joined"
+      ],
+      [
+        "yuzhong-spaced",
+        "yuzhong-dashed",
+        "yuzhong-joined",
+        "yz-initials"
+      ],
+      [
+        "sangmin-ascii-dash",
+        "sangmin-u2010-dash",
+        "sangmin-spaced"
+      ],
+      [
+        "qixin-ascii-dash",
+        "qixin-u2010-dash",
+        "qixin-spaced"
+      ],
+      [
+        "hg-initials",
+        "hg-dashed-initials"
+      ]
+    ],
+    "incompatible_pairs": [
+      [
+        "jon david",
+        "john david"
+      ],
+      [
+        "john david",
+        "j f"
+      ],
+      [
+        "yu",
+        "zhang"
+      ]
+    ]
   },
   "cases": [
     {

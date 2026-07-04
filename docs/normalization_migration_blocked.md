@@ -39,7 +39,10 @@ Decided (from issue history)
   are removed from name fields (never treated as separators).
 - Count keys (ruled 2026-07-04): canonical count keys are the canonical fields verbatim (the
   compact-join shims are retired); the single-character informative gate is unchanged; keys
-  with a missing component are null, never sentinel counts.
+  with a missing component are null, never sentinel counts. The null-key change is a
+  feature-value change (legacy always looks up `last`/`last_first_initial`, even for empty
+  components) and is gated by the retrain re-baseline eval, like the work_plan section-2
+  fixes.
 - Dash semantics: canonical behavior should not assign different semantic meaning to ASCII hyphen versus Unicode
   dash-like characters. Any current ASCII/non-ASCII split must be treated as a measured legacy-compatibility repair,
   not as the desired canonical policy.

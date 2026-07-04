@@ -899,11 +899,21 @@ class ANDData:
             first_initial = first_for_counts[0] if first_for_counts else ""
             last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
 
+        # A count key is looked up only when its components are present. An empty
+        # surname must yield np.nan (not the sentinel default 1), otherwise a
+        # genuinely missing last name is indistinguishable from a corpus count of
+        # 1 (D6 in docs/normalization_migration_blocked.md; work_plan section 2).
+        first_informative = len(first_for_counts) > 1
+        last_present = len(last_for_counts) > 0
         return NameCounts(
-            first=(self.first_dict.get(first_for_counts, 1) if len(first_for_counts) > 1 else np.nan),
-            last=self.last_dict.get(last_for_counts, 1),
-            first_last=(self.first_last_dict.get(first_last_for_count, 1) if len(first_for_counts) > 1 else np.nan),
-            last_first_initial=self.last_first_initial_dict.get(last_first_initial_for_count, 1),
+            first=(self.first_dict.get(first_for_counts, 1) if first_informative else np.nan),
+            last=(self.last_dict.get(last_for_counts, 1) if last_present else np.nan),
+            first_last=(
+                self.first_last_dict.get(first_last_for_count, 1) if first_informative and last_present else np.nan
+            ),
+            last_first_initial=(
+                self.last_first_initial_dict.get(last_first_initial_for_count, 1) if last_present else np.nan
+            ),
         )
 
     def preprocess_signatures(self, load_name_counts: bool):
@@ -2387,11 +2397,21 @@ def apply_sinonym_overwrites(
             if first and last:
                 new_block = normalize_text(f"{first[:1]} {last}")
 
-            # Always update first/middle/last; conditionally update block in inference
+            # Always update first/middle/last; conditionally update block in inference.
+            # Invalidate the fields derived from the name parts so a caller that
+            # mutates signatures post-init cannot read stale normalized names or
+            # name counts. Inside ANDData.__init__ these are already None and get
+            # rebuilt by the subsequent preprocess_signatures() call.
             new_sig = sig._replace(
                 author_info_first=first,
                 author_info_middle=middle,
                 author_info_last=last,
+                author_info_first_normalized=None,
+                author_info_first_normalized_without_apostrophe=None,
+                author_info_middle_normalized_without_apostrophe=None,
+                author_info_last_normalized=None,
+                author_info_full_name=None,
+                author_info_name_counts=None,
             )
             if overwrite_blocks and new_block is not None:
                 # Note: changing blocks will affect clustering; only do this in inference

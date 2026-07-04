@@ -333,9 +333,9 @@
         "middle_normalized_without_apostrophe": "z",
         "last_normalized": "wang",
         "count_keys": {
-          "first": "y",
+          "first": null,
           "last": "wang",
-          "first_last": "y wang",
+          "first_last": null,
           "last_first_initial": "wang y"
         }
       },
@@ -704,9 +704,9 @@
         "middle_normalized_without_apostrophe": "angelo",
         "last_normalized": "russell",
         "count_keys": {
-          "first": "d",
+          "first": null,
           "last": "russell",
-          "first_last": "d russell",
+          "first_last": null,
           "last_first_initial": "russell d"
         }
       },
@@ -892,9 +892,9 @@
         "middle_normalized_without_apostrophe": "g",
         "last_normalized": "wells",
         "count_keys": {
-          "first": "h",
+          "first": null,
           "last": "wells",
-          "first_last": "h wells",
+          "first_last": null,
           "last_first_initial": "wells h"
         }
       },
@@ -968,9 +968,9 @@
         "middle_normalized_without_apostrophe": "",
         "last_normalized": "doe",
         "count_keys": {
-          "first": "j",
+          "first": null,
           "last": "doe",
-          "first_last": "j doe",
+          "first_last": null,
           "last_first_initial": "doe j"
         }
       },
@@ -1264,9 +1264,9 @@
         "middle_normalized_without_apostrophe": "",
         "last_normalized": "higgins",
         "count_keys": {
-          "first": "",
+          "first": null,
           "last": "higgins",
-          "first_last": "higgins",
+          "first_last": null,
           "last_first_initial": "higgins"
         }
       },
@@ -1443,9 +1443,9 @@
         "middle_normalized_without_apostrophe": "",
         "last_normalized": "smith",
         "count_keys": {
-          "first": "",
+          "first": null,
           "last": "smith",
-          "first_last": "smith",
+          "first_last": null,
           "last_first_initial": "smith"
         }
       },
@@ -1480,9 +1480,9 @@
         "middle_normalized_without_apostrophe": "",
         "last_normalized": "smith",
         "count_keys": {
-          "first": "",
+          "first": null,
           "last": "smith",
-          "first_last": "smith",
+          "first_last": null,
           "last_first_initial": "smith"
         }
       },
@@ -1518,9 +1518,9 @@
         "last_normalized": "",
         "count_keys": {
           "first": "john",
-          "last": "",
-          "first_last": "john",
-          "last_first_initial": "j"
+          "last": null,
+          "first_last": null,
+          "last_first_initial": null
         }
       },
       "decisions": [

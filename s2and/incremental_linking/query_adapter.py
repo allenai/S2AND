@@ -588,6 +588,11 @@ def raw_paper_evidence_features(query: QueryFeatures, summary: ClusterSummary) -
         strict=True,
     ):
         same_signature = query_signature_id and query_signature_id == str(candidate_signature_id)
+        # Skip the query's own membership row before any paper-author-list update,
+        # so a query that is a member of its own candidate cluster cannot inflate
+        # these features with a perfect self-match.
+        if same_signature:
+            continue
         intersection = len(query_author_names & candidate_names)
         union = len(query_author_names | candidate_names)
         jaccard = float(intersection / union) if union else 0.0
@@ -602,8 +607,6 @@ def raw_paper_evidence_features(query: QueryFeatures, summary: ClusterSummary) -
             count_delta if best_author_count_log_absdiff is None else min(best_author_count_log_absdiff, count_delta)
         )
 
-        if same_signature:
-            continue
         local10_intersection = len(query_local10_names & candidate_local10_names)
         local10_union = len(query_local10_names | candidate_local10_names)
         if local10_union:

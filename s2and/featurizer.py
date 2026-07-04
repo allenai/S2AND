@@ -32,6 +32,7 @@ from s2and.text import (
     cosine_sim,
     counter_jaccard,
     diff,
+    email_prefix_suffix,
     equal,
     equal_middle,
     jaccard,
@@ -1112,16 +1113,8 @@ def _single_pair_featurize(
         and signature_2.author_info_email is not None
         and len(signature_2.author_info_email) > 0
     ):
-        email_1 = signature_1.author_info_email
-        email_2 = signature_2.author_info_email
-        email_1 = email_1 if "@" in email_1 else email_1 + "@MISSING"
-        email_2 = email_2 if "@" in email_2 else email_2 + "@MISSING"
-        split_email_1 = email_1.split("@")
-        split_email_2 = email_2.split("@")
-        email_prefix_1 = "".join(split_email_1[:-1]).strip(".").lower()
-        email_prefix_2 = "".join(split_email_2[:-1]).strip(".").lower()
-        email_suffix_1 = split_email_1[-1].strip(".").lower()
-        email_suffix_2 = split_email_2[-1].strip(".").lower()
+        email_prefix_1, email_suffix_1 = email_prefix_suffix(signature_1.author_info_email)
+        email_prefix_2, email_suffix_2 = email_prefix_suffix(signature_2.author_info_email)
 
     features.extend(
         [
@@ -1173,14 +1166,27 @@ def _single_pair_featurize(
     references_1 = set(paper_1.references or [])
     references_2 = set(paper_2.references or [])
     compute_ref = bool(getattr(dataset, "compute_reference_features", False))
-    if compute_ref and paper_1.reference_details is not None and paper_2.reference_details is not None:
+    if compute_ref:
+        # The four ngram-Counter features need reference_details; the two
+        # reference-list features only need paper.references (always populated),
+        # so compute them whenever reference features are enabled.
+        if paper_1.reference_details is not None and paper_2.reference_details is not None:
+            features.extend(
+                [
+                    counter_jaccard(paper_1.reference_details[0], paper_2.reference_details[0], denominator_max=5000),
+                    counter_jaccard(paper_1.reference_details[1], paper_2.reference_details[1]),
+                    counter_jaccard(paper_1.reference_details[2], paper_2.reference_details[2]),
+                    counter_jaccard(paper_1.reference_details[3], paper_2.reference_details[3]),
+                ]
+            )
+        else:
+            features.extend([NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN])
+        # Self-citation is a signal only between two distinct papers; when both
+        # signatures are on the same paper, a paper citing itself is not a
+        # cross-paper self-cite.
         features.extend(
             [
-                counter_jaccard(paper_1.reference_details[0], paper_2.reference_details[0], denominator_max=5000),
-                counter_jaccard(paper_1.reference_details[1], paper_2.reference_details[1]),
-                counter_jaccard(paper_1.reference_details[2], paper_2.reference_details[2]),
-                counter_jaccard(paper_1.reference_details[3], paper_2.reference_details[3]),
-                int(paper_id_2 in references_1 or paper_id_1 in references_2),
+                int(paper_id_1 != paper_id_2 and (paper_id_2 in references_1 or paper_id_1 in references_2)),
                 jaccard(references_1, references_2),
             ]
         )

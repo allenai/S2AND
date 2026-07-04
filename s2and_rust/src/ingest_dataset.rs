@@ -707,39 +707,21 @@ pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec
     if obj.is_none() {
         return Ok(None);
     }
+    // All-zero vectors are kept as present (real vectors), matching the Arrow
+    // ingest path and the Current Decisions table in docs/work_plan.md. The
+    // missing-vector treatment for all-zero rows lives at feature time in the
+    // featurizer, so both ingest modes share the same semantics here.
     if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
         let readonly = arr.readonly();
-        let slice = readonly.as_slice()?;
-        let all_zero = slice.iter().all(|v| *v == 0.0);
-        if all_zero {
-            return Ok(None);
-        }
-        return Ok(Some(slice.to_vec()));
+        return Ok(Some(readonly.as_slice()?.to_vec()));
     }
     if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
-        let slice = readonly.as_slice()?;
-        let all_zero = slice.iter().all(|v| *v == 0.0);
-        if all_zero {
-            return Ok(None);
-        }
-        let mut out = Vec::with_capacity(slice.len());
-        for v in slice {
-            out.push(*v as f32);
-        }
-        return Ok(Some(out));
+        return Ok(Some(readonly.as_slice()?.iter().map(|v| *v as f32).collect()));
     }
     // Fallback: try to extract as Vec<f64>
     let vec_f64: Vec<f64> = obj.extract()?;
-    let all_zero = vec_f64.iter().all(|v| *v == 0.0);
-    if all_zero {
-        return Ok(None);
-    }
-    let mut out = Vec::with_capacity(vec_f64.len());
-    for v in vec_f64 {
-        out.push(v as f32);
-    }
-    Ok(Some(out))
+    Ok(Some(vec_f64.into_iter().map(|v| v as f32).collect()))
 }
 
 pub(crate) fn extract_name_tuples_argument(

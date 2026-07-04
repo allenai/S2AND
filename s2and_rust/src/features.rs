@@ -335,14 +335,16 @@ pub(crate) fn first_names_equal(name1: Option<&str>, name2: Option<&str>) -> f64
     let (Some(n1), Some(n2)) = (name1, name2) else {
         return f64::NAN;
     };
-    if py_len(n1) == 0 || py_len(n2) == 0 {
-        return f64::NAN;
-    }
-    if n1 == "-" || n2 == "-" {
-        return f64::NAN;
-    }
+    // Trim/lowercase first, then test emptiness, so whitespace-only inputs are
+    // treated as empty (NaN) rather than comparing equal as "".
     let n1_norm = n1.trim().to_lowercase();
     let n2_norm = n2.trim().to_lowercase();
+    if n1_norm.is_empty() || n2_norm.is_empty() {
+        return f64::NAN;
+    }
+    if n1_norm == "-" || n2_norm == "-" {
+        return f64::NAN;
+    }
     if n1_norm == n2_norm {
         1.0
     } else {
@@ -385,11 +387,17 @@ pub(crate) fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f6
     if py_len(n1) == 0 || py_len(n2) == 0 {
         return f64::NAN;
     }
+    // When either side is a single-character initial, compare the sets of token
+    // initials so a joined multi-token middle ("james lee") matches the other
+    // side's initial for ANY of its tokens, not just the first one.
     if py_len(n1) == 1 || py_len(n2) == 1 {
-        let (Some(c1), Some(c2)) = (n1.chars().next(), n2.chars().next()) else {
-            return f64::NAN;
+        let initials_1: HashSet<char> = n1.split(' ').filter_map(|t| t.chars().next()).collect();
+        let initials_2: HashSet<char> = n2.split(' ').filter_map(|t| t.chars().next()).collect();
+        return if initials_1.is_disjoint(&initials_2) {
+            0.0
+        } else {
+            1.0
         };
-        return if c1 == c2 { 1.0 } else { 0.0 };
     }
     if n1 == n2 {
         1.0
@@ -447,27 +455,28 @@ pub(crate) fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f6
     }
 }
 
-pub(crate) fn email_parts(email: &str) -> (String, String) {
-    let (prefix_raw, suffix_raw) = if let Some((before_last, after_last)) = email.rsplit_once('@') {
+pub(crate) fn email_parts(email: &str) -> (String, Option<String>) {
+    if let Some((before_last, after_last)) = email.rsplit_once('@') {
         let mut merged_prefix = String::with_capacity(before_last.len());
         for ch in before_last.chars() {
             if ch != '@' {
                 merged_prefix.push(ch);
             }
         }
-        (merged_prefix, after_last.to_string())
+        let prefix = merged_prefix.trim_matches('.').to_lowercase();
+        let suffix = after_last.trim_matches('.').to_lowercase();
+        (prefix, Some(suffix))
     } else {
-        (email.to_string(), "MISSING".to_string())
-    };
-    let prefix = prefix_raw.trim_matches('.').to_lowercase();
-    let suffix = suffix_raw.trim_matches('.').to_lowercase();
-    (prefix, suffix)
+        // No "@": the whole string is the prefix and the suffix is missing
+        // (None), so two malformed emails do not match on a shared sentinel.
+        (email.trim_matches('.').to_lowercase(), None)
+    }
 }
 
 pub(crate) fn email_pair_parts(
     email1: Option<&str>,
     email2: Option<&str>,
-) -> Option<((String, String), (String, String))> {
+) -> Option<((String, Option<String>), (String, Option<String>))> {
     let (Some(e1), Some(e2)) = (email1, email2) else {
         return None;
     };

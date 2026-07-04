@@ -106,12 +106,15 @@ RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
 DASH_CHARS = "-\u2010\u2011\u2012\u2013\u2014\u2212\ufe58\ufe63\uff0d"
 NAME_DASH_CHARS = frozenset(DASH_CHARS)
 ORCID_DASH_CLASS = re.escape(DASH_CHARS)
+# Digit groups are matched with the explicit ASCII class [0-9] (not \d) so that
+# Unicode digit code points (Arabic-Indic, etc.) are rejected, matching the Rust
+# is_ascii_digit() behavior in s2and_rust/src/orcid.rs.
 ORCID_PATTERN = re.compile(
     rf"(?i)(?<![0-9x])"
-    rf"\d{{4}}[{ORCID_DASH_CLASS}]?"
-    rf"\d{{4}}[{ORCID_DASH_CLASS}]?"
-    rf"\d{{4}}[{ORCID_DASH_CLASS}]?"
-    rf"\d{{3}}[0-9x](?![0-9x])"
+    rf"[0-9]{{4}}[{ORCID_DASH_CLASS}]?"
+    rf"[0-9]{{4}}[{ORCID_DASH_CLASS}]?"
+    rf"[0-9]{{4}}[{ORCID_DASH_CLASS}]?"
+    rf"[0-9]{{3}}[0-9x](?![0-9x])"
 )
 
 DROPPED_AFFIXES = {
@@ -547,6 +550,24 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
         return inner(a, b) / (a_norm * b_norm)
 
 
+def email_prefix_suffix(email: str) -> tuple[str, str | None]:
+    """Split an email into (prefix, suffix), normalized (dot-stripped, lowercased).
+
+    When the address has no ``@``, the whole string is the prefix and the suffix
+    is None (missing) rather than a sentinel like "missing" — so two malformed
+    emails do not spuriously match on a shared sentinel suffix. Mirrors the Rust
+    ``email_parts`` in s2and_rust/src/features.rs.
+    """
+    if "@" in email:
+        prefix_raw, _, suffix_raw = email.rpartition("@")
+        prefix = prefix_raw.replace("@", "").strip(".").lower()
+        suffix: str | None = suffix_raw.strip(".").lower()
+    else:
+        prefix = email.strip(".").lower()
+        suffix = None
+    return prefix, suffix
+
+
 def get_text_ngrams(
     text: str | None, use_unigrams: bool = False, use_bigrams: bool = True, stopwords: set[str] | None = STOPWORDS
 ) -> Counter:
@@ -570,8 +591,13 @@ def get_text_ngrams(
     if text is None or len(text) == 0:
         return Counter()
 
+    # The short-token filter is applied whenever word tokenization happens, and
+    # is independent of stopword removal. Callers that pass stopwords=None (e.g.
+    # reference-author ngrams) still drop 1-2 char tokens like title/venue do.
+    words = [word for word in text.split(" ") if len(word) > 2]
     if stopwords is not None:
-        text = " ".join([word for word in text.split(" ") if word not in stopwords and len(word) > 2])
+        words = [word for word in words if word not in stopwords]
+    text = " ".join(words)
 
     unigrams = []
     if use_unigrams:
@@ -696,16 +722,20 @@ def equal(
     -------
     int: 0 (if unequal) or 1 (if equal)
     """
-    if name_1 is None or name_2 is None or len(name_1) == 0 or len(name_2) == 0:
+    if name_1 is None or name_2 is None:
         return default_val
 
-    if name_1 == "-" or name_2 == "-":
+    # Strip/lower first, then test emptiness, so whitespace-only inputs are
+    # treated as empty (return default) rather than comparing equal as "".
+    norm_1 = name_1.lower().strip()
+    norm_2 = name_2.lower().strip()
+    if len(norm_1) == 0 or len(norm_2) == 0:
         return default_val
 
-    if name_1.lower().strip() == name_2.lower().strip():
-        return 1
-    else:
-        return 0
+    if norm_1 == "-" or norm_2 == "-":
+        return default_val
+
+    return 1 if norm_1 == norm_2 else 0
 
 
 def equal_middle(
@@ -733,14 +763,15 @@ def equal_middle(
     if name_1 is None or name_2 is None or len(name_1) == 0 or len(name_2) == 0:
         return default_val
 
+    # When either side is a single-character initial, compare the sets of
+    # token initials so a joined multi-token middle ("james lee") matches the
+    # other side's initial for ANY of its tokens, not just the first one.
     if len(name_1) == 1 or len(name_2) == 1:
-        if name_1[0] == name_2[0]:
-            return 1
+        initials_1 = {token[0] for token in name_1.split() if token}
+        initials_2 = {token[0] for token in name_2.split() if token}
+        return 1 if not initials_1.isdisjoint(initials_2) else 0
 
-    elif name_1 == name_2:
-        return 1
-
-    return 0
+    return 1 if name_1 == name_2 else 0
 
 
 def equal_initial(

@@ -121,6 +121,55 @@ so no live path feeds a query-inclusive summary. When picking up the remaining
 items for the re-baseline cycle, verify each on a live call path (not just
 code presence) before scoping the fix.
 
+Fixed in 2026-07-04 correctness pass (branch `canonical-v2-migration`): the
+prescribed, decision-free items below are now fixed, Python and Rust in
+lockstep where both sides were affected, with `FEATURIZER_VERSION` bumped 3->4
+to invalidate the pair-feature cache. Covered by `tests/test_text.py`,
+`tests/test_correctness_pass.py`, and the existing parity battery
+(`test_feature_port_parity.py`, `test_rust_from_dataset_contract.py`) which
+verifies the two implementations still agree.
+
+- Self-cite shared-paper (parity): guarded on `paper_id_1 != paper_id_2` in
+  both `s2and/featurizer.py` and `s2and_rust/src/rust_featurizer.rs`.
+- "MISSING" email collision (parity): absent `@` now yields a `None` suffix
+  (feature = NaN, not a sentinel match); `s2and.text.email_prefix_suffix` and
+  Rust `email_parts`.
+- `equal_middle` multi-token (parity): single initial compared against the set
+  of all token initials in `s2and/text.py` and Rust `middle_names_equal`.
+- Whitespace-only `equal` (latent, parity): strip-then-test-empty in both
+  `s2and.text.equal` and Rust `first_names_equal`.
+- ORCID Unicode digits (Python): `ORCID_PATTERN` uses `[0-9]` so only ASCII
+  digits match, aligning with Rust `is_ascii_digit()`.
+- Reader NULL coercion (Rust): required string columns route through
+  `required_value` (errors on NULL; empty string still allowed).
+- SPECTER all-zero ingest (Rust): `extract_specter_vec` keeps all-zero rows as
+  present, matching the Arrow ingest path; the featurizer still treats them as
+  missing at feature time (no feature-value change).
+- `compute_ref` reference-list features (parity): the two reference-list
+  features are computed whenever reference features are enabled (only the four
+  ngram-Counter features still require `reference_details`), in both
+  `s2and/featurizer.py` and `s2and_rust/src/rust_featurizer.rs`. The Rust side
+  needed the same restructure for parity even though the doc had scoped it
+  Python-only.
+- Empty-surname name counts (Python, = D6): `_compute_signature_name_counts`
+  returns `np.nan` for every last-dependent key when the surname is empty,
+  rather than the sentinel default 1.
+- `get_text_ngrams` short-token filter (Python): decoupled from stopword
+  removal so reference-author ngrams (stopwords=None) also drop 1-2 char
+  tokens. Rust consumes the Python-built `reference_details` counters, so no
+  Rust change was needed.
+- Same-signature `paper_author_list_*` guard (Tier B hardening): the
+  `same_signature` continue now precedes the `best_author_*` updates in
+  `s2and/incremental_linking/query_adapter.py`.
+- Sinonym stale fields: `apply_sinonym_overwrites` invalidates the derived
+  normalized-name and name-count fields when overwriting raw name parts.
+
+Still open after this pass:
+
+- **`detect_language` single-detector `is_reliable`** — genuine product policy
+  call (should a single responding detector count as reliable?). Left unchanged
+  pending a decision; not a mechanical fix.
+
 Required when picking these up:
 
 - Fix Python and Rust sides together where a bug exists in both.

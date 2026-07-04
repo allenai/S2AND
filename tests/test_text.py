@@ -17,6 +17,7 @@ from s2and.text import (
     counter_jaccard,
     detect_language,
     diff,
+    email_prefix_suffix,
     equal,
     equal_initial,
     equal_middle,
@@ -50,6 +51,10 @@ class TestClusterer(unittest.TestCase):
         assert normalize_orcid("https://orcid.org/0000\u20100002\u20101825\u20100097") == "0000-0002-1825-0097"
         assert normalize_orcid("s000-0000-1879-1075X") is None
         assert normalize_orcid("0000-0002-1825") is None
+        # Non-ASCII (Unicode) digits are rejected, matching the Rust
+        # is_ascii_digit() behavior; only [0-9] count as ORCID digits.
+        assert normalize_orcid("٠٠٠٠-٠٠٠٢-1825-009X") is None
+        assert normalize_orcid("００００-0002-1825-0097") is None
 
     def test_split_first_middle_treats_unicode_dashes_as_hyphens(self):
         assert split_first_middle_hyphen_aware("Amin-ul-Haq", None) == ("amin ul haq", "")
@@ -138,6 +143,10 @@ class TestClusterer(unittest.TestCase):
         assert np.isnan(equal("-", "text"))
         assert 1 == equal("text", "text")
         assert 0 == equal("text", "hi")
+        # Whitespace-only inputs are empty after stripping -> default (NaN),
+        # not a spurious "" == "" match.
+        assert np.isnan(equal(" ", "  "))
+        assert np.isnan(equal(" ", "text"))
 
     def test_equal_middle(self):
         assert np.isnan(equal_middle(None, None))
@@ -148,6 +157,35 @@ class TestClusterer(unittest.TestCase):
         assert 1 == equal_middle("a", "as")
         assert 0 == equal_middle("as", "af")
         assert 1 == equal_middle("as", "as")
+        # Multi-token middle: a single initial matches ANY token's initial,
+        # not just the first token's.
+        assert 1 == equal_middle("l", "james lee")
+        assert 1 == equal_middle("james lee", "l")
+        assert 1 == equal_middle("j", "james lee")
+        assert 0 == equal_middle("k", "james lee")
+        assert 1 == equal_middle("a j", "j")
+
+    def test_email_prefix_suffix(self):
+        assert email_prefix_suffix("jsmith@mit.edu") == ("jsmith", "mit.edu")
+        # Leading/trailing dots are stripped and case lowered; internal dots kept.
+        assert email_prefix_suffix("J.Smith@MIT.EDU.") == ("j.smith", "mit.edu")
+        # No "@" -> whole string is prefix, suffix is missing (None), so two
+        # malformed emails never match on a shared sentinel suffix.
+        assert email_prefix_suffix("jsmith") == ("jsmith", None)
+        assert email_prefix_suffix("a@b@c") == ("ab", "c")
+
+    def test_get_text_ngrams_short_token_filter_decoupled_from_stopwords(self):
+        # The short-token (len<=2) filter now applies regardless of stopwords,
+        # so reference-author ngrams (stopwords=None) drop "li"/"wu" like
+        # title/venue ngrams do.
+        with_none = get_text_ngrams("li wu abcd", stopwords=None)
+        assert "li" not in with_none
+        assert "ab" in with_none
+        # With stopwords None vs an (empty) set the result is now identical:
+        # the two filters are independent.
+        assert with_none == get_text_ngrams("li wu abcd", stopwords=set())
+        # Providing real stopwords still removes those words too.
+        assert "ab" not in get_text_ngrams("abcd efgh", stopwords={"abcd"})
 
     def test_equal_initial(self):
         assert np.isnan(equal_initial(None, None))

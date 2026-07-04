@@ -131,7 +131,17 @@ impl RustFeaturizer {
             match email_pair_parts(s1.email.as_deref(), s2.email.as_deref()) {
                 Some(((p1, sfx1), (p2, sfx2))) => (
                     if p1 == p2 { 1.0 } else { 0.0 },
-                    if sfx1 == sfx2 { 1.0 } else { 0.0 },
+                    match (sfx1, sfx2) {
+                        // A missing suffix (no "@") is treated as missing, not a match.
+                        (Some(a), Some(b)) => {
+                            if a == b {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        _ => f64::NAN,
+                    },
                 ),
                 None => (f64::NAN, f64::NAN),
             };
@@ -164,33 +174,45 @@ impl RustFeaturizer {
             f64::INFINITY,
         ));
 
-        if self.compute_reference_features && p1.ref_details_present && p2.ref_details_present {
-            push_feat!(counter_jaccard_data(
-                &p1.ref_authors,
-                &p2.ref_authors,
-                5000.0,
-            ));
-            push_feat!(counter_jaccard_data(
-                &p1.ref_titles,
-                &p2.ref_titles,
-                f64::INFINITY,
-            ));
-            push_feat!(counter_jaccard_data(
-                &p1.ref_venues,
-                &p2.ref_venues,
-                f64::INFINITY,
-            ));
-            push_feat!(counter_jaccard_data(
-                &p1.ref_blocks,
-                &p2.ref_blocks,
-                f64::INFINITY,
-            ));
-            let self_cite =
-                if p1.references.contains(&s2.paper_id) || p2.references.contains(&s1.paper_id) {
-                    1.0
-                } else {
-                    0.0
-                };
+        if self.compute_reference_features {
+            // The four ngram-Counter features need reference_details; the two
+            // reference-list features only need paper.references (always
+            // populated), so compute them whenever reference features are on.
+            if p1.ref_details_present && p2.ref_details_present {
+                push_feat!(counter_jaccard_data(
+                    &p1.ref_authors,
+                    &p2.ref_authors,
+                    5000.0,
+                ));
+                push_feat!(counter_jaccard_data(
+                    &p1.ref_titles,
+                    &p2.ref_titles,
+                    f64::INFINITY,
+                ));
+                push_feat!(counter_jaccard_data(
+                    &p1.ref_venues,
+                    &p2.ref_venues,
+                    f64::INFINITY,
+                ));
+                push_feat!(counter_jaccard_data(
+                    &p1.ref_blocks,
+                    &p2.ref_blocks,
+                    f64::INFINITY,
+                ));
+            } else {
+                for _ in 0..4 {
+                    push_feat!(f64::NAN);
+                }
+            }
+            // Self-citation is a signal only between two distinct papers; two
+            // signatures on the same paper (paper citing itself) is not one.
+            let self_cite = if s1.paper_id != s2.paper_id
+                && (p1.references.contains(&s2.paper_id) || p2.references.contains(&s1.paper_id))
+            {
+                1.0
+            } else {
+                0.0
+            };
             push_feat!(self_cite);
             push_feat!(refs_jaccard(&p1.references, &p2.references));
         } else {

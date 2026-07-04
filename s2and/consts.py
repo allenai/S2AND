@@ -137,8 +137,12 @@ Incrementation history
 1 - initial version
 2 - changed to SPECTERv2, subblocking etc
 3 - name-count semantics contract and inference compatibility gating
+4 - correctness-pass feature-value fixes (self-cite same-paper guard, email
+    missing-suffix, equal_middle multi-token initials, empty-surname name
+    counts, unconditional reference-list features, decoupled ngram short-token
+    filter, whitespace-only equal)
 """
-FEATURIZER_VERSION = 3
+FEATURIZER_VERSION = 4
 
 # important constant values
 NUMPY_NAN = np.nan

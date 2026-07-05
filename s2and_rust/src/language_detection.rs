@@ -6,6 +6,25 @@ fn parse_fasttext_label(label: &str) -> String {
     label.rsplit("__").next().unwrap_or(label).to_string()
 }
 
+/// Reconcile the fastText and cld2 predictions into a final call. Mirrors the
+/// Python `s2and.text.reconcile_detected_languages`: a prediction is reliable
+/// only when BOTH detectors return a concrete language (neither the
+/// `"un_ft"`/`"un_2"` unknown sentinel) AND they agree. Any non-agreement --
+/// disagreement, or only one detector responding -- collapses to
+/// `("un", false)`, preserving the invariant `is_reliable <=> language != "un"`.
+pub(crate) fn reconcile_detected_languages(
+    predicted_language_ft: &str,
+    predicted_language_2: &str,
+) -> (String, bool) {
+    let ft_known = predicted_language_ft != "un_ft";
+    let cld2_known = predicted_language_2 != "un_2";
+    if ft_known && cld2_known && predicted_language_ft == predicted_language_2 {
+        (predicted_language_2.to_string(), true)
+    } else {
+        ("un".to_string(), false)
+    }
+}
+
 fn resolve_fasttext_model_path(py: Python<'_>) -> PyResult<String> {
     let consts = py.import("s2and.consts")?;
     let fasttext_path = consts.getattr("FASTTEXT_PATH")?;
@@ -124,17 +143,7 @@ impl LanguageDetectorCompat {
         }
 
         let (predicted_language, is_reliable) =
-            if predicted_language_ft == "un_ft" && predicted_language_2 == "un_2" {
-                ("un".to_string(), false)
-            } else if predicted_language_ft == "un_ft" {
-                (predicted_language_2.clone(), true)
-            } else if predicted_language_2 == "un_2" {
-                (predicted_language_ft.clone(), true)
-            } else if predicted_language_2 != predicted_language_ft {
-                ("un".to_string(), false)
-            } else {
-                (predicted_language_2.clone(), true)
-            };
+            reconcile_detected_languages(&predicted_language_ft, &predicted_language_2);
 
         let is_english = predicted_language == "en";
         Ok(LanguageDetectionAudit {
@@ -142,5 +151,54 @@ impl LanguageDetectorCompat {
             is_reliable,
             is_english,
         })
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::reconcile_detected_languages;
+
+    // Mirrors the Python reconcile_detected_languages tests in tests/test_text.py
+    // so the two implementations are pinned to the same truth table.
+    #[test]
+    fn agreement_is_reliable() {
+        assert_eq!(
+            reconcile_detected_languages("en", "en"),
+            ("en".to_string(), true)
+        );
+        assert_eq!(
+            reconcile_detected_languages("fr", "fr"),
+            ("fr".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn disagreement_collapses_to_unknown() {
+        assert_eq!(
+            reconcile_detected_languages("en", "fr"),
+            ("un".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn single_detector_is_not_reliable() {
+        // Only cld2 responded (fastText unknown, e.g. disabled).
+        assert_eq!(
+            reconcile_detected_languages("un_ft", "en"),
+            ("un".to_string(), false)
+        );
+        // Only fastText responded (cld2 unknown/failed).
+        assert_eq!(
+            reconcile_detected_languages("en", "un_2"),
+            ("un".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn both_unknown_is_not_reliable() {
+        assert_eq!(
+            reconcile_detected_languages("un_ft", "un_2"),
+            ("un".to_string(), false)
+        );
     }
 }

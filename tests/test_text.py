@@ -29,6 +29,7 @@ from s2and.text import (
     normalize_orcid,
     normalize_orcid_compact,
     normalize_text,
+    reconcile_detected_languages,
     split_first_middle_hyphen_aware,
 )
 
@@ -220,12 +221,17 @@ class TestClusterer(unittest.TestCase):
         nc2 = NameCounts(first=4, first_last=99, last=11, last_first_initial=201)
         assert [4, 99, 10, 200, 5, 100] == name_counts(nc1, nc2)
 
-    def test_detect_language(self):
+    def test_detect_language_unreliable_when_fasttext_disabled(self):
+        # Reliability now requires fastText AND cld2 to agree. The suite disables
+        # fastText (see conftest), so the two detectors cannot agree and
+        # detection collapses to unreliable / "un" regardless of the text. (The
+        # real-model agreement path is covered by the reconcile unit tests below
+        # and the fastText-sensitive parity test in test_rust_from_dataset_contract.)
         text = "Genetic behavior of resistance to the beet cyst as a way to enchant"
         is_reliable, is_english, predicted_language = detect_language(text)
-        assert is_reliable is True
-        assert is_english is True
-        assert predicted_language == "en"
+        assert is_reliable is False
+        assert is_english is False
+        assert predicted_language == "un"
 
 
 def test_fasttext_model_lazy_load_is_thread_safe(monkeypatch):
@@ -352,7 +358,7 @@ def test_fasttext_enable_preserves_loaded_model(monkeypatch):
     assert load_calls["count"] == 1
 
 
-def test_fasttext_failed_load_remains_negative_cached_after_reenable(monkeypatch):
+def test_fasttext_failed_load_raises(monkeypatch):
     import s2and.text as text_module
 
     load_calls = {"count": 0}
@@ -369,12 +375,15 @@ def test_fasttext_failed_load_remains_negative_cached_after_reenable(monkeypatch
     text_module._FASTTEXT_MODEL_INITIALIZED = False
     text_module._FASTTEXT_LOAD_FAILED = False
 
-    assert text_module._get_fasttext_model() is None
-    assert text_module._get_fasttext_model() is None
-    text_module.set_fasttext_loading_enabled(True)
-    assert text_module._get_fasttext_model() is None
-
-    assert load_calls["count"] == 1
+    # fastText is mandatory in production: a load failure must raise, not
+    # silently degrade to a cld2-only path.
+    with pytest.raises(RuntimeError, match="fastText language model is required"):
+        text_module._get_fasttext_model()
+    # The failure is not cached as "initialized", so a later call re-attempts
+    # the load and raises again (rather than returning a silent None).
+    with pytest.raises(RuntimeError, match="fastText language model is required"):
+        text_module._get_fasttext_model()
+    assert load_calls["count"] == 2
 
 
 def test_fasttext_unexpected_load_error_propagates(monkeypatch):
@@ -406,3 +415,26 @@ def test_cld2_unexpected_error_propagates(monkeypatch):
 
     with pytest.raises(TypeError, match="bad cld2 state"):
         detect_language("hello world")
+
+
+# reconcile_detected_languages truth table (mirrored by the Rust unit tests in
+# s2and_rust/src/language_detection.rs::reconcile_tests). is_reliable is True
+# only when both detectors return a concrete language AND agree.
+def test_reconcile_detected_languages_agreement_is_reliable():
+    assert reconcile_detected_languages("en", "en") == ("en", True)
+    assert reconcile_detected_languages("fr", "fr") == ("fr", True)
+
+
+def test_reconcile_detected_languages_disagreement_is_unknown():
+    assert reconcile_detected_languages("en", "fr") == ("un", False)
+
+
+def test_reconcile_detected_languages_single_detector_is_unknown():
+    # Only cld2 responded (fastText unknown, e.g. disabled during tests).
+    assert reconcile_detected_languages("un_ft", "en") == ("un", False)
+    # Only fastText responded (cld2 unknown/failed).
+    assert reconcile_detected_languages("en", "un_2") == ("un", False)
+
+
+def test_reconcile_detected_languages_both_unknown_is_unknown():
+    assert reconcile_detected_languages("un_ft", "un_2") == ("un", False)

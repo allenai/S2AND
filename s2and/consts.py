@@ -141,8 +141,13 @@ Incrementation history
     missing-suffix, equal_middle multi-token initials, empty-surname name
     counts, unconditional reference-list features, decoupled ngram short-token
     filter, whitespace-only equal)
+5 - language detection: is_reliable now requires both detectors (fastText +
+    cld2) to agree; any non-agreement collapses to predicted_language="un".
+    fastText is mandatory in production (load failure raises). Affects the
+    is_reliable-sum, predicted_language-equality, and english_or_unknown_count
+    features. (Sinonym normalization path removed; no feature-value effect.)
 """
-FEATURIZER_VERSION = 4
+FEATURIZER_VERSION = 5
 
 # important constant values
 NUMPY_NAN = np.nan

@@ -285,13 +285,23 @@ def test_from_dataset_raw_papers_match_preprocessed_for_language_names_and_ngram
 def test_from_dataset_raw_language_detection_uses_fasttext_sensitive_outputs(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("S2AND_SKIP_FASTTEXT", raising=False)
     text_mod.set_fasttext_loading_enabled(True)
-    if text_mod._get_fasttext_model() is None:
-        raise pytest.skip.Exception("fastText language model is unavailable")
+    # fastText is mandatory in production, so an absent model now raises rather
+    # than returning None; skip this parity check when the model is unavailable.
+    try:
+        fasttext_model = text_mod._get_fasttext_model()
+    except RuntimeError:
+        pytest.skip("fastText language model is unavailable")
+    if fasttext_model is None:
+        pytest.skip("fastText language model is unavailable")
 
     dataset_raw = _build_minimal_dataset("rust_contract_raw_fasttext_language")
+    # Titles long/clear enough that fastText AND cld2 agree, so detection is
+    # reliable under the "both detectors must agree" rule (short titles collapse
+    # to 'un' because cld2 abstains). This keeps the English-vs-German
+    # distinction the test relies on while exercising fastText sensitivity.
     raw_titles = {
-        "1": "SPortS: Semantic + Portal + Service",
-        "2": "Vom lokalen Hypertext zum verteilten Hypermediasystem",
+        "1": "A neural network approach to automatic speech recognition",
+        "2": "Ein neuronaler Netzwerkansatz zur automatischen Spracherkennung",
     }
     expected_language = {}
     for paper_id, title in raw_titles.items():

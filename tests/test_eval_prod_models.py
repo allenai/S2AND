@@ -803,4 +803,9 @@ def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
     cluster_metrics = b3_precision_recall_fscore(cluster_to_signatures, predicted_clusters)
     assert total_query_count == 127
     assert total_candidate_row_count > 0
-    assert cluster_metrics[:3] == pytest.approx((1.0, 0.816, 0.899), abs=5e-4)
+    # Was (1.0, 0.816, 0.899) before FEATURIZER_VERSION 5. The is_reliable
+    # "both detectors must agree" change perturbs the language features fed to
+    # the (not-yet-retrained) production model, shifting B3 recall/F1 by ~0.001
+    # on this fixture. This pins the transient old-model-with-new-features value
+    # and will move again once the v1.3 model is retrained on the new features.
+    assert cluster_metrics[:3] == pytest.approx((1.0, 0.815, 0.898), abs=5e-4)

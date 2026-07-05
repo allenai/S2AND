@@ -93,10 +93,17 @@ def _get_fasttext_model():
         try:
             _FASTTEXT_MODEL = fasttext.load_model(cached_path(FASTTEXT_PATH))
             _FASTTEXT_LOAD_FAILED = False
-        except (OSError, RuntimeError, ValueError):
-            logger.exception("Failed to load fastText language model; language detection will skip fastText")
-            _FASTTEXT_MODEL = None
+        except (OSError, RuntimeError, ValueError) as err:
+            # fastText is mandatory in production: a genuine load failure must
+            # surface rather than silently degrading to a cld2-only path. Leave
+            # _FASTTEXT_MODEL_INITIALIZED unset so a later call re-attempts (and
+            # re-raises). To run without fastText (tests only) set
+            # S2AND_SKIP_FASTTEXT=1 or use set_fasttext_loading_enabled(False).
             _FASTTEXT_LOAD_FAILED = True
+            raise RuntimeError(
+                f"fastText language model is required but failed to load from {FASTTEXT_PATH!r}. "
+                "Set S2AND_SKIP_FASTTEXT=1 to disable language detection during testing."
+            ) from err
         _FASTTEXT_MODEL_INITIALIZED = True
         return _FASTTEXT_MODEL
 
@@ -356,6 +363,32 @@ TEXT_FUNCTIONS = [
 ]
 
 
+def reconcile_detected_languages(predicted_language_ft: str, predicted_language_2: str) -> tuple[str, bool]:
+    """Reconcile the fastText and cld2 language predictions into a final call.
+
+    A prediction is trusted as reliable only when BOTH detectors return a
+    concrete language (neither the ``"un_ft"``/``"un_2"`` unknown sentinel) AND
+    they agree. Any non-agreement -- an outright disagreement, or only one
+    detector responding -- collapses to ``("un", False)``. This preserves the
+    invariant ``is_reliable <=> predicted_language != "un"``.
+
+    Args:
+        predicted_language_ft: fastText's language code, or ``"un_ft"`` when
+            fastText produced no usable prediction (e.g. disabled during tests).
+        predicted_language_2: cld2's language code, or ``"un_2"`` when cld2
+            failed or returned unknown.
+
+    Returns:
+        A ``(predicted_language, is_reliable)`` tuple.
+    """
+
+    ft_known = predicted_language_ft != "un_ft"
+    cld2_known = predicted_language_2 != "un_2"
+    if ft_known and cld2_known and predicted_language_ft == predicted_language_2:
+        return predicted_language_2, True
+    return "un", False
+
+
 def detect_language(text: str):
     if len(text.split()) <= 1:
         return (False, False, "un")
@@ -385,21 +418,7 @@ def detect_language(text: str):
         logger.exception("cld2 language detection failed; using unknown language marker")
         predicted_language_2 = "un_2"
 
-    if predicted_language_ft == "un_ft" and predicted_language_2 == "un_2":
-        predicted_language = "un"
-        is_reliable = False
-    elif predicted_language_ft == "un_ft":
-        predicted_language = predicted_language_2
-        is_reliable = True
-    elif predicted_language_2 == "un_2":
-        predicted_language = predicted_language_ft
-        is_reliable = True
-    elif predicted_language_2 != predicted_language_ft:
-        predicted_language = "un"
-        is_reliable = False
-    else:
-        predicted_language = predicted_language_2
-        is_reliable = True
+    predicted_language, is_reliable = reconcile_detected_languages(predicted_language_ft, predicted_language_2)
 
     # is_english can now be obtained
     is_english = predicted_language == "en"

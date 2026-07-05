@@ -10,7 +10,7 @@ import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.arrow_inputs import MissingArrowArtifactError
-from s2and.data import ANDData, NameCounts
+from s2and.data import NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY, ANDData, NameCounts
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
@@ -435,6 +435,21 @@ def test_feature_block_from_anddata_rejects_signature_missing_paper() -> None:
     del dataset.papers["p1"]
 
     with pytest.raises(ValueError, match="missing signature paper_id"):
+        feature_block_from_anddata(
+            dataset,
+            signature_ids=["q", "s1"],
+            query_signature_ids=["q"],
+        )
+
+
+def test_feature_block_from_anddata_rejects_legacy_name_count_semantics() -> None:
+    # Arrow bundles are contractually initial_char; a bundle built from a
+    # legacy_full_first_token ANDData would silently mis-key last_first_initial
+    # lookups in Rust, so conversion must fail fast.
+    dataset = _tiny_anddata()
+    dataset.name_counts_last_first_initial_semantics = NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY
+
+    with pytest.raises(ValueError, match="initial_char"):
         feature_block_from_anddata(
             dataset,
             signature_ids=["q", "s1"],

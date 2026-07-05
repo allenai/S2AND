@@ -1,6 +1,6 @@
 # Work Plan
 
-Status date: 2026-05-28
+Status date: 2026-07-05
 
 This is the active Rust/Arrow platform backlog. Stable architecture and artifact
 contracts live in:
@@ -181,17 +181,26 @@ Decided after this pass (implementation on this branch):
   detectors (fastText + cld2) to agree. Any non-agreement (disagreement, or only
   one detector responding) yields `predicted_language = "un"` and
   `is_reliable = False`, preserving the invariant `is_reliable <=> language != "un"`.
-  Must change Python (`s2and/text.py`) AND Rust
-  (`s2and_rust/src/language_detection.rs`) in lockstep, AND regenerate the Arrow
-  bundle — the language columns are Python-computed and read verbatim in the
-  production Arrow path (Rust recomputes live only for NULL rows). Bumps
-  `FEATURIZER_VERSION` again (4 -> 5).
+  Python (`s2and/text.py`) and Rust
+  (`s2and_rust/src/language_detection.rs`) changed in lockstep. Production
+  Arrow datasets are not expected to carry language columns in general:
+  `predicted_language`/`is_reliable` are optional cached compatibility
+  overrides. When `predicted_language` is missing or NULL, Rust recomputes
+  language locally from the raw title with the same detector policy. Only
+  compatibility/offline Arrow bundles with non-NULL cached language values need
+  regeneration or clearing. Bumps `FEATURIZER_VERSION` again (4 -> 5).
 - **fastText availability** — DECIDED: production no longer supports a missing
   fastText model; a load failure raises instead of silently falling back to
   cld2-only (`un_ft`). A testing off-switch (`S2AND_SKIP_FASTTEXT`) is retained.
   Interacts with the reliability rule: with fastText off, agreement is
   impossible, so detection is uniformly unreliable — language-detection tests
   must opt into the real model.
+- **Sinonym API removal** — DECIDED: `ANDData(..., use_sinonym_overwrite=...)`
+  and `sinonym_overwrite_min_ratio` are removed without a compatibility alias.
+  Canonical-v2 data preparation is expected to supply upstream-normalized names
+  before `ANDData` construction; `ANDData` no longer owns a Sinonym-dependent
+  rewrite step. This is an intentional breaking API change for callers that set
+  those keyword arguments and must be called out in release notes.
 
 Required when picking these up:
 
@@ -201,53 +210,40 @@ Required when picking these up:
 - Re-train production pairwise models if cumulative feature drift exceeds the
   current `1e-5` tolerance on any non-changed column.
 
-Open bugs (Python feature changes deferred for the next re-baseline cycle):
+Remaining open bugs and decision items after the 2026-07-04 correctness pass:
 
-- **Self-cite signal returns 1.0 when both signatures share a self-citing paper (parity bug).**
-  Same bug exists in Python at
-  [s2and/featurizer.py:1183](../s2and/featurizer.py#L1183) and Rust at
-  [s2and_rust/src/rust_featurizer.rs:188-193](../s2and_rust/src/rust_featurizer.rs#L188-L193).
-  When `s1.paper_id == s2.paper_id` and the paper appears in its own reference
-  list, both produce 1.0. Fix both sides simultaneously to preserve parity.
-
-- **"MISSING" email collision (parity bug).**
-  Python at
-  [s2and/featurizer.py:1117-1124](../s2and/featurizer.py#L1117-L1124) and Rust
-  at [s2and_rust/src/features.rs:460-463](../s2and_rust/src/features.rs#L460-L463)
-  both map emails without `@` to suffix `"missing"`, so two malformed emails
-  produce a false suffix match. Return an `Option`/`None` suffix instead and
-  treat absent `@` as missing. Fix both sides.
-
-- **`equal_middle` falls through to 0 for multi-token middles (parity bug).**
-  Python at [s2and/text.py:736-743](../s2and/text.py#L736-L743) and Rust at
-  [s2and_rust/src/features.rs:381-399](../s2and_rust/src/features.rs#L381-L399)
-  only compare the first character when one side is a single initial; later
-  tokens of a joined multi-token middle that match the other side's initial
-  return 0. Split both sides on whitespace and compare initial sets when either
-  side is a single character.
-
-- **Subblocking ORCID gating asymmetry between layers.** (Latent — outputs
-  match on the default code path.) Rust at
-  [s2and_rust/src/raw_arrow_features.rs:120](../s2and_rust/src/raw_arrow_features.rs#L120)
-  gates the ORCID hash on a per-call `orcid_enabled` flag; Python relies on
-  `author_info_orcid` being `None` when `use_orcid_id=False` at
-  [s2and/data.py:554](../s2and/data.py#L554). Mismatched flag combinations
-  between ingest and subblocking would diverge. Align the gating surface so the
-  same flag controls both layers in both implementations.
+- **Subblocking ORCID gating asymmetry between layers.** RESOLVED 2026-07-04
+  (verified consistent, downgraded from open). A code trace shows both
+  implementations already gate ORCID on the per-request `orcid_enabled` flag,
+  not on field presence: Rust
+  [raw_arrow_features.rs:143](../s2and_rust/src/raw_arrow_features.rs#L143)
+  gates the `orcid_hash` on `orcid_enabled`, and Python
+  `query_adapter.mask_query_features`
+  ([:343](../s2and/incremental_linking/query_adapter.py#L343)) sets `orcid=None`
+  when `orcid_enabled` is false, so a populated `author_info_orcid` is
+  suppressed. The subblocking repair pass uses the same `use_orcid_subblocking`
+  flag in both Python ([subblocking.py:1932](../s2and/subblocking.py#L1932)) and
+  Rust ([subblocking.rs:2580](../s2and_rust/src/subblocking.rs#L2580)).
+  `use_orcid_id` (ingest field-strip) and `suppress_orcid`/`orcid_enabled`
+  (per-request) are orthogonal by design; all field×flag combinations are
+  consistent, so there is no contradictory combination to guard. The
+  flag-is-authoritative invariant is pinned by
+  `tests/test_query_adapter.py::test_orcid_enabled_false_suppresses_populated_orcid_field`.
+  (A hard single-flag master switch that also disables the subblocking pass on
+  `suppress_orcid` remains an available product change, but it alters clustering
+  and needs a re-baseline, so it is not done here.)
 
 - **Arrow ingest hardcodes `NameCountsLastFirstInitialSemantics::InitialChar`.**
-  (Latent — correct by construction because Arrow datasets are contractually
-  canonical, but the assumption is not enforced.) Rust
-  [s2and_rust/src/raw_arrow_features.rs:49-51](../s2and_rust/src/raw_arrow_features.rs#L49-L51)
-  and
-  [s2and_rust/src/rust_featurizer.rs:1637-1638](../s2and_rust/src/rust_featurizer.rs#L1637-L1638)
-  pin the semantic to `InitialChar` with an inline comment. If a future Arrow
-  bundle were generated from a `legacy_full_first_token` ANDData, Rust would
-  silently use the wrong `last_first_initial` keys with no diagnostic. Cheap
-  defenses: (a) add `name_counts_last_first_initial_semantics` to the Arrow
-  dataset manifest (defaulting to `initial_char`) and pass it through to
-  `build_name_counts_data_from_artifact`, or (b) when the manifest is present,
-  assert it declares `initial_char` and fail fast otherwise.
+  RESOLVED 2026-07-04 (option b, write-time assert). `feature_block_from_anddata`
+  ([scripts/arrow_conversion_helpers.py](../scripts/arrow_conversion_helpers.py),
+  the single ANDData->Arrow funnel) now raises if the source ANDData declares a
+  non-`initial_char` `name_counts_last_first_initial_semantics`, so a bundle can
+  no longer be built from a `legacy_full_first_token` ANDData without a
+  diagnostic. The Rust readers still pin `InitialChar`
+  ([raw_arrow_features.rs:49-51](../s2and_rust/src/raw_arrow_features.rs#L49-L51),
+  [rust_featurizer.rs:1637-1638](../s2and_rust/src/rust_featurizer.rs#L1637-L1638)),
+  now guaranteed correct by construction at conversion time. Covered by
+  `tests/test_feature_block.py::test_feature_block_from_anddata_rejects_legacy_name_count_semantics`.
 
 - **Unicode `is_alphabetic` / `is_uppercase` claim under review in the fastText
   0.9 gate.** Original report claimed Python's `isalpha` counts category Lm
@@ -262,93 +258,14 @@ Open bugs (Python feature changes deferred for the next re-baseline cycle):
   [s2and/text.py:360-365](../s2and/text.py#L360-L365);
   [s2and_rust/src/language_detection.rs:80-86](../s2and_rust/src/language_detection.rs#L80-L86).
 
-- **`detect_language` reports `is_reliable=True` when only one detector responded.**
-  [s2and/text.py:385-399](../s2and/text.py#L385-L399) treats `un_ft` or `un_2`
-  as a successful agreement, so single-detector signals are weighted the same
-  as two-detector agreement downstream. Decide whether single-detector should
-  be reliable; if not, fix and propagate the new `is_reliable` semantics.
-
-- **Query-vs-query `cluster_seed_disallows` pairs are unenforced.**
-  Telemetry counter only on the Python side at
-  [s2and/incremental_linking/runtime.py:1163-1164](../s2and/incremental_linking/runtime.py#L1163-L1164),
-  silently dropped on the Rust side at
-  [s2and_rust/src/raw_candidate_planner.rs:174-201](../s2and_rust/src/raw_candidate_planner.rs#L174-L201).
-  Rust and Python currently agree on the no-op behavior, but enforcement
-  requires post-link reconciliation across both implementations. Pick one
-  policy (raise, telemetry-only, or enforce) coordinated with model owners.
-
 ### Second-pass bugs (2026-05-28)
 
-Found during a follow-up sweep that explicitly excluded the ten items above.
-Split into severity tiers. Tier A bugs change observable production behavior
-today; Tier B bugs are latent (currently masked, harmless, or only fire in
-labeled training paths) but worth fixing during the same re-baseline cycle.
-
-The remaining items below are Python-side feature changes that would require a
-re-baseline, or latent issues that are tracked but not actively fixed.
+Found during a follow-up sweep that explicitly excluded the original ten items.
+The 2026-07-04 correctness pass fixed or rejected the resolved entries; only
+the still-open items remain below. Tier A bugs change observable production
+behavior today; Tier B bugs are latent, currently masked, or decision cleanup.
 
 #### Tier A — observable in production
-
-- **ORCID regex accepts Unicode digits in Python but Rust requires ASCII.**
-  Python `ORCID_PATTERN` at
-  [s2and/text.py:109-115](../s2and/text.py#L109-L115) uses bare `\d` (no
-  `re.ASCII`), so Unicode digit classes (Arabic-Indic `٠-٩`, etc.) match.
-  Rust `normalize_orcid_owned` at
-  [s2and_rust/src/orcid.rs:19,34](../s2and_rust/src/orcid.rs#L19) requires
-  `is_ascii_digit()`. Concrete divergence: a string like
-  `"https://orcid.org/٠٠٠٠-٠٠٠٢-١٨٢٥-009X"` returns a normalized ORCID under
-  Python and `None` under Rust. Fix the Python side to require ASCII digits
-  (add `re.ASCII` or `[0-9]`).
-
-- **Reader silently coerces NULL to `""` for schema-required string columns.**
-  [s2and_rust/src/raw_arrow/readers.rs:160-163](../s2and_rust/src/raw_arrow/readers.rs#L160-L163)
-  and
-  [s2and_rust/src/raw_arrow/readers.rs:249-255](../s2and_rust/src/raw_arrow/readers.rs#L249-L255)
-  call `optional_owned(row).unwrap_or_default()` on `signatures.author_first`,
-  `author_middle`, `author_last`, `author_suffix` and on `papers.title`,
-  `venue`, `journal_name`, all of which the schema contract at
-  [s2and/arrow_schema_contract.json:30-43](../s2and/arrow_schema_contract.json)
-  declares `required=true`. Compare `paper_authors.author_name` at
-  [s2and_rust/src/raw_arrow/readers.rs:302-304](../s2and_rust/src/raw_arrow/readers.rs#L302-L304),
-  which correctly errors via `required_value`. The current behavior turns
-  upstream NULLs into empty-string name-count lookups (see [Bug 5 below](#empty-last-coalesces-to-1)),
-  empty-title term sets, etc. Fix: route the affected fields through
-  `required_value` and let `s2and.arrow_inputs` raise structured
-  `MissingArrowArtifactError`.
-
-- **SPECTER all-zero rows mean "missing" via Python dict ingest and "present" via Arrow ingest.**
-  Python-dict path
-  [s2and_rust/src/ingest_dataset.rs:706-743](../s2and_rust/src/ingest_dataset.rs#L706-L743)
-  drops all-zero embeddings as missing; Arrow path
-  [s2and_rust/src/raw_arrow/readers.rs:490-517](../s2and_rust/src/raw_arrow/readers.rs#L490-L517)
-  via
-  [s2and_rust/src/raw_arrow/arrow_io.rs:245-287](../s2and_rust/src/raw_arrow/arrow_io.rs#L245-L287)
-  keeps them as real centroids. The work plan already declares "Present rows
-  are real vectors, including all-zero rows" (Current Decisions table), so the
-  Arrow path matches the decision; the Python-dict path silently filters. Pick
-  one and align — the cleanest fix is to remove the zero-vector filter in the
-  Python-dict path so the two ingest modes share semantics.
-
-- **`compute_ref` drops self-citation and reference-Jaccard signal whenever `reference_details is None`.**
-  [s2and/featurizer.py:1175-1189](../s2and/featurizer.py#L1175-L1189)
-  gates the entire reference feature block on `compute_ref` AND both papers
-  having non-None `reference_details`. But `paper_id_2 in references_1` and
-  `jaccard(references_1, references_2)` only need `paper.references` (the raw
-  int list, always populated by the loader). On any non-canonical path with
-  `preprocess=False` and `compute_reference_features=True`, two computable
-  features become NaN. Fix: compute the two reference-list features
-  unconditionally when both `references` lists are present, and gate only the
-  four ngram-Counter features on `reference_details`.
-
-- <a id="empty-last-coalesces-to-1"></a>**`_compute_signature_name_counts` returns `last=1` for empty surnames (sentinel collision with genuinely once-seen surnames).**
-  [s2and/data.py:902-907](../s2and/data.py#L902-L907):
-  `last=self.last_dict.get(last_for_counts, 1)` returns the default `1` when
-  `last_for_counts == ""`, indistinguishable from a real corpus count of `1`.
-  Same for `last_first_initial` on line 906. `first` and `first_last` are
-  symmetric and correctly return `np.nan` (lines 903, 905). Together with the
-  reader bug above, a NULL `author_last` ends up as a rare-surname signal.
-  This is the same shape of bug as the documented "MISSING" email collision —
-  fix by returning `np.nan` (or an explicit None) when `last_for_counts == ""`.
 
 - **Query-vs-query `cluster_seed_disallows` pairs silently dropped from raw planner exclusion.**
   [s2and_rust/src/raw_candidate_planner.rs:174-201](../s2and_rust/src/raw_candidate_planner.rs#L174-L201)
@@ -360,48 +277,7 @@ re-baseline, or latent issues that are tracked but not actively fixed.
   one batch. Fix: enforce the constraint at batch reconciliation, or reject
   query-vs-query disallows at validation time with a typed error.
 
-- **`get_text_ngrams` couples the short-token filter to `stopwords is not None`.**
-  [s2and/text.py:569-600](../s2and/text.py#L569-L600): the
-  `len(word) > 2` filter is only applied inside the `stopwords is not None`
-  branch. Reference-author ngrams built in
-  [s2and/data.py:2528](../s2and/data.py#L2528) pass `stopwords=None`,
-  accidentally disabling the short-token filter as well, so reference-author
-  ngrams include 1-2 char tokens (`"li"`, `"wu"`) that title/venue ngrams
-  drop. Decouple the two filters — either apply `len > 2` unconditionally or
-  add an explicit second argument.
-
 #### Tier B — latent, masked, or training-only
-
-- **Same-signature guard in `raw_paper_evidence_features` runs after the `best_author_*` updates.**
-  (Moved from Tier A on 2026-07-04: the earlier "pollutes training data" claim
-  was inaccurate as written — the residual-summary training path predates that
-  entry, commit `f7e98c7`.)
-  [s2and/incremental_linking/query_adapter.py:578-611](../s2and/incremental_linking/query_adapter.py#L578-L611):
-  the `if same_signature: continue` guard at line 605 skips the local10
-  features only after `best_author_jaccard`, `best_author_containment`,
-  `best_author_overlap`, and `best_author_count_log_absdiff` are updated with a
-  perfect self-match. No live path feeds a query-inclusive summary today:
-  production incremental linking excludes seeds via
-  `unassigned_signature_ids`, and linker training builds residual summaries
-  that exclude the query
-  ([scripts/production/model/linker_train_calibrate_eval.py:2591-2609](../scripts/production/model/linker_train_calibrate_eval.py#L2591-L2609))
-  and drops the query from pair batches
-  ([scripts/production/model/linker_train_calibrate_eval.py:1082](../scripts/production/model/linker_train_calibrate_eval.py#L1082)).
-  ~~Fix as cheap hardening for future callers: move the `if same_signature:
-  continue` guard above the paper-author-list updates.~~ REJECTED 2026-07-04
-  (won't-fix): implemented in the correctness pass, then reverted — it broke the
-  pre-existing `test_local10_evidence_ignores_query_signature_member`
-  (paper-author-list is intentionally allowed to self-match) and is a
-  speculative guard for a caller that does not exist. Per CLAUDE.md (no
-  speculative guards) the guard stays scoped to local10.
-
-- **`equal()` returns 1 (equal) for two whitespace-only first/middle/last inputs.**
-  [s2and/text.py:698-707](../s2and/text.py#L698-L707): the empty check uses
-  raw `len()` but the comparison uses `.lower().strip()`. `equal(" ", "  ")`
-  returns `1` (perfect match) instead of `default_val (NaN)`. Normalized
-  pipelines should not produce whitespace-only normalized names, but the
-  asymmetry between the raw-length guard and the post-strip comparison is a
-  latent foot-gun.
 
 - **Stale-index header reserves `indexed_source_mtime_ns` but freshness check ignores it.**
   [s2and_rust/src/arrow_batch_lookup.rs:78-109](../s2and_rust/src/arrow_batch_lookup.rs#L78-L109):

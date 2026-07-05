@@ -31,18 +31,22 @@ Scope
 Decided (from issue history)
 - Apostrophes: canonical fields should remove apostrophes globally (no dual stream).
 - Chinese given names: upstream data preparation handles language-aware compounds; hyphenated given names should stay together.
-- Spaced given names (ruled 2026-07-04, per issue #39): when the raw first has no dash-like
-  character, tokens after the first spill into middle; any dash keeps the first-field tokens
-  together. Cross-variant compatibility (`Jo` / `Jo Ann` / `JoAnn`) is a compare-time concern
+- Spaced given names (ruled 2026-07-04, per issue #39): dash-bound tokens stay together,
+  but separate space tokens after a dashed compound still spill into middle; when the raw
+  first has no dash-like character, tokens after the first also spill into middle.
+  Cross-variant compatibility (`Jo` / `Jo Ann` / `JoAnn`) is a compare-time concern
   (`same_prefix_tokens`), not canonicalization identity.
 - Apostrophe-like marks (ruled 2026-07-04): all apostrophe-like characters, including backtick,
   are removed from name fields (never treated as separators).
-- Count keys (ruled 2026-07-04): canonical count keys are the canonical fields verbatim (the
-  compact-join shims are retired); the single-character informative gate is unchanged; keys
-  with a missing component are null, never sentinel counts. The null-key change is a
-  feature-value change (legacy always looks up `last`/`last_first_initial`, even for empty
-  components) and is gated by the retrain re-baseline eval, like the work_plan section-2
-  fixes.
+- Count keys (ruled 2026-07-04): canonical count keys use canonical fields after missing and
+  informativeness gating (the compact-join shims are retired); the informative threshold is
+  string-level `len(key) > 1` for first-dependent keys. Multi-initial compounds such as `j p`
+  and joined initials such as `jp` are intentionally informative; a lone initial such as `j`
+  is not. Keys with a missing component are null, never sentinel counts. The null-key change
+  is a feature-value change for missing-first examples because legacy still looks up
+  `last_first_initial` from the last name alone; empty-last/null-last are already pinned to
+  null last-dependent keys in the live code. This is gated by the retrain re-baseline eval,
+  like the work_plan section-2 fixes.
 - Dash semantics: canonical behavior should not assign different semantic meaning to ASCII hyphen versus Unicode
   dash-like characters. Any current ASCII/non-ASCII split must be treated as a measured legacy-compatibility repair,
   not as the desired canonical policy.
@@ -58,6 +62,62 @@ Decided (from issue history)
   - Name tuples.
   - ORCID prefix counts.
 - Retraining requirement: production retraining data must go through the same normalization path as production inference.
+
+Canonicalization Pipeline (target `canonical_v2`)
+1. Inputs are raw `first`, `middle`, and `last`; `None` is treated as missing/empty.
+2. Normalize Unicode spacing before tokenization. NBSP is whitespace. Soft hyphen (`U+00AD`)
+   and zero-width joiner (`U+200D`) are invisible formatting controls and are deleted, not
+   treated as dash separators.
+3. Map every D3 apostrophe-like code point to ASCII apostrophe before transliteration; after
+   transliteration, delete ASCII apostrophe and backtick rather than converting them to spaces.
+4. Map every configured dash-like character to a dash separator. The canonical dash set is
+   exactly `-\u2010\u2011\u2012\u2013\u2014\u2212\ufe58\ufe63\uff0d`; soft hyphen is deliberately
+   outside this set.
+5. Transliterate with `text-unidecode`, lowercase, replace remaining non-letter/non-whitespace
+   characters with spaces, and collapse repeated whitespace.
+6. Drop at most one leading `NAME_PREFIXES` token from the normalized first field.
+7. Split first/middle after normalization:
+   - If normalized first has no dash-bound group, keep the first token as first and spill later
+     first tokens into middle ahead of existing middle tokens.
+   - If normalized first starts with a dash-bound group, keep that group in first as spaced
+     tokens; separate space tokens after that group still spill to middle (`Anne-Marie Claire`
+     -> first `anne marie`, middle `claire`).
+8. Normalize last independently and preserve normalized spaces in canonical surname form.
+   Suffix/postnominal-like tokens already present in `last` are retained; suffix stripping is
+   outside `canonical_v2`.
+9. Build count keys from canonical fields after gating:
+   - `first`: canonical first when first is present and `len(first) > 1`, else null.
+   - `last`: canonical last when last is present, else null.
+   - `first_last`: `<first> <last>` when first is informative and last is present, else null.
+   - `last_first_initial`: `<last> <first[0]>` when first and last are present, else null.
+
+Compare-Time First-Name Compatibility
+- `same_prefix_tokens` is a symmetric predicate over already-normalized canonical first fields.
+  It is a compare/backoff contract, not canonicalization identity.
+- For each aligned token pair up to the shorter token list, one token must be an exact prefix
+  of the other. Extra tokens on the longer side are allowed. Callers must not treat an empty
+  first field as positive name evidence.
+- Middle and last names do not participate in this predicate; they are handled by separate
+  fields/features.
+
+Truth table pinned by `tests/fixtures/canonical_name_examples.json`:
+
+| A | B | Compatible? | Reason |
+|---|---|---|---|
+| `jo` | `joann` | yes | single-token prefix |
+| `jon` | `john` | no | no exact prefix relation |
+| `j p` | `jean pierre` | yes | both aligned tokens are prefixes |
+| `j p` | `john paul` | yes | prefix compatibility, not semantic identity |
+| `yu zhong` | `y z` | yes | initials are aligned prefixes |
+| `yu` | `yusuf` | yes | short token is a prefix of longer token |
+| `john david` | `j f` | no | second aligned token mismatches |
+| `yu` | `wei` | no | no aligned prefix relation |
+
+Fixture Metadata
+- `family` is a reviewer-facing category label.
+- `equivalence_group` means all members must share identical canonical first/middle/last fields.
+- Per-case `decisions` are primary review highlights, not exhaustive dependency labels. The
+  policy registry is the source of truth for global applicability.
 
 Open Decisions (remaining before migration freeze)
 1) Compatibility-mode decommission window
@@ -256,17 +316,26 @@ Target End State
 Migration Plan (phased, verifiable)
 1) Lock policy and examples
    - Status 2026-07-04: the frozen table exists at `tests/fixtures/canonical_name_examples.json`
-     (41 cases, decisions D1-D8 ruled), enforced by `tests/test_canonical_name_examples.py`
+     (89 cases, decisions D1-D8 ruled), enforced by `tests/test_canonical_name_examples.py`
      (legacy pins run now; canonical contract activates when the step-2 functions land).
    - Resolve all Open Decisions above.
    - Freeze a canonical example table covering:
      - `Jo Ann`, `Jo-Ann`, `JoAnn`.
      - `Yu Zhong`, `Yu-Zhong`, `YuZhong`, `Y. Z.`.
-     - ASCII and Unicode dash-equivalent forms: `Sang-Min`, `Sang<U+2010>Min`, `Sang Min`;
-       `Qi-Xin`, `Qi<U+2010>Xin`, `Qi Xin`.
-     - Apostrophe-like forms (`O'Brien`, ``O`Brien``, curly apostrophes).
-     - Multi-initial cases (`H. G.`-style).
-     - Surname dash/space variants (`Ou-Yang`, `Ou Yang`, `Ouyang`) and particle surnames.
+     - ASCII and Unicode dash-equivalent forms: `Sang-Min`, every configured `NAME_DASH_CHARS`
+       Unicode dash spelling for `Sang-Min`, `Sang Min`; `Qi-Xin`, `Qi<U+2010>Xin`, `Qi Xin`.
+     - Apostrophe-like forms (`O'Brien`, ``O`Brien``, curly apostrophes, spacing acute,
+       okina/modifier apostrophe, saltillo, primes, U+FE4D, and fullwidth apostrophe).
+     - Multi-initial cases (`H. G.`-style), close-dotted initials, space-separated initials,
+       joined initials, and dashed/spaced `J. P.` variants.
+     - Missing/null first, middle, and last fields.
+     - Apostrophe-as-space and joined variants (`O Brien`/`OBrien`, `D Angelo`/`DAngelo`).
+     - Invisible formatting (`NBSP`, `U+00AD` soft hyphen, `U+200D` zero-width joiner).
+     - Suffix/postnominal leakage in `last` (`Smith Jr.`, `Doe PhD`).
+     - Surname dash/space variants (`Ou-Yang`, `Ou Yang`, `Ouyang`) and particle surnames,
+       including dashed particles and joined particle spellings that remain single tokens.
+     - Joined/spaced particle surname aliases (`de Souza`/`DeSouza`, `La Salle`/`LaSalle`).
+     - A combined dash-plus-apostrophe case proving the policies compose.
    - Output: explicit normalization invariants used by tests and artifact builders.
 
 2) Implement unified canonicalization

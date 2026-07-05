@@ -189,6 +189,16 @@ def test_compare_time_first_name_incompatibility():
         assert not same_prefix_tokens(first_a, first_b), f"{first_a!r} vs {first_b!r} must NOT be compatible"
 
 
+def test_compare_time_first_name_truth_table():
+    rows = FIXTURE["compare_compatibility"]["truth_table"]
+    assert rows, "fixture must define the compare-time truth table"
+    for row in rows:
+        actual = same_prefix_tokens(row["a"], row["b"])
+        actual_reversed = same_prefix_tokens(row["b"], row["a"])
+        assert actual is row["compatible"], f"{row['a']!r} vs {row['b']!r}: {row['notes']}"
+        assert actual_reversed is row["compatible"], f"truth table must be symmetric for {row['a']!r}/{row['b']!r}"
+
+
 def test_equivalence_groups_share_canonical_fields():
     groups: dict[str, list[dict]] = {}
     for case in CASES:

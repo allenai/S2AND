@@ -1,5 +1,11 @@
 # Release Notes
 
+## Unreleased
+
+- Breaking: removes the Sinonym-dependent `ANDData` rewrite API. `ANDData(...)`
+  no longer accepts `use_sinonym_overwrite` or `sinonym_overwrite_min_ratio`;
+  callers must provide upstream-normalized names before constructing `ANDData`.
+
 ## 0.51.1
 
 - Ships the package as `0.51.1` and pins optional Rust installs to `s2and-rust==0.51.1`.

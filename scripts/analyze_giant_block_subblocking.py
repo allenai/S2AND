@@ -34,7 +34,6 @@ from s2and.subblocking import (
     normalize_orcid_for_subblocking,
     signature_name_parts_for_subblocking,
 )
-from s2and.text import set_fasttext_loading_enabled
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,7 +271,6 @@ def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
     papers_path = _required_file(dataset_root, "papers.json")
     specter_path = _required_file(dataset_root, "specter.pickle")
 
-    set_fasttext_loading_enabled(False)
     os.environ.setdefault("S2AND_BACKEND", "python")
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
 

@@ -367,9 +367,6 @@ def _single_run(
     from hyperopt import hp
 
     from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
     from s2and.data import ANDData
     from s2and.eval import cluster_eval
     from s2and.featurizer import FeaturizationInfo, featurize

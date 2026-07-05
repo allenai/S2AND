@@ -109,9 +109,6 @@ def _set_backend_env(
 
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
     os.environ["S2AND_BACKEND"] = backend
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
 
 
 def _collect_rust_package_info(require_non_dev_rust: bool, require_rust_release: bool) -> dict[str, Any]:

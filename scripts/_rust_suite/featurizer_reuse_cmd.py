@@ -161,10 +161,7 @@ def _run_arrow_reuse_profile(
 
     from s2and.consts import PROJECT_ROOT_PATH
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
     from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
-
-    set_fasttext_loading_enabled(False)
 
     model_path = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", "production_model_v1.21")
     resolved_arrow_root = _resolve_path(PROJECT_ROOT_PATH, arrow_data_root)
@@ -235,9 +232,6 @@ def _run_json_reuse_profile(
     from s2and.eval import cluster_eval
     from s2and.feature_port import _rust_featurizer_build_count, clear_rust_featurizer_cache
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
 
     paths = _build_data_paths(PROJECT_ROOT_PATH, dataset_name, json_data_root)
     for key, path in paths.items():

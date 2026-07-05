@@ -35,7 +35,7 @@ See [caching.md](caching.md) for cache semantics and on-disk layout.
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `S2AND_SKIP_FASTTEXT` | `1`, `true`, `yes` to skip | unset | Disables fastText model loading for scripts/tests that do not need language detection. Set before importing `s2and.text`. |
+| `S2AND_SKIP_FASTTEXT` | `1`, `true`, `yes` to skip | unset | Test-only escape hatch that disables fastText model loading. Production and repository scripts should leave this unset so language detection uses the mandatory fastText + cld2 agreement path. |
 
 ---
 

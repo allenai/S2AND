@@ -215,9 +215,6 @@ def run_rebuild_stress(
         raise ValueError("compute_reference_features is only supported with build_path='from_dataset'")
 
     os.environ.setdefault("S2AND_BACKEND", "rust")
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
     dataset_name = dataset.strip().lower()
     resolved_arrow_data_root = None
     if build_path == "from_arrow_paths":

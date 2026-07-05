@@ -7,7 +7,6 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
-from s2and import text as s2and_text
 from scripts.eps_sweep import sweep_eps_on_linking_gold
 
 
@@ -54,19 +53,21 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
 
 
-def test_eps_sweep_runtime_environment_disables_fasttext(monkeypatch) -> None:
+def test_eps_sweep_runtime_environment_preserves_fasttext(monkeypatch) -> None:
+    from s2and import text as s2and_text
+
     previous_enabled = s2and_text.fasttext_loading_enabled()
     s2and_text.set_fasttext_loading_enabled(True)
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "0")
+    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "preexisting")
 
     try:
         sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(backend="python", n_jobs=2)))
 
-        assert s2and_text.fasttext_loading_enabled() is False
+        assert s2and_text.fasttext_loading_enabled() is True
         assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "python"
         assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
         assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
-        assert sweep_eps_on_linking_gold.os.environ["S2AND_SKIP_FASTTEXT"] == "1"
+        assert sweep_eps_on_linking_gold.os.environ["S2AND_SKIP_FASTTEXT"] == "preexisting"
     finally:
         s2and_text.set_fasttext_loading_enabled(previous_enabled)
 

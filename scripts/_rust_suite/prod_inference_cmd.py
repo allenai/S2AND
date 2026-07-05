@@ -152,9 +152,6 @@ def _single_run(
     from s2and.data import ANDData
     from s2and.eval import cluster_eval
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
 
     resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     clusterer = load_production_model(resolved_model_path)
@@ -258,10 +255,7 @@ def _single_arrow_run(
 
     from s2and.consts import PROJECT_ROOT_PATH
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
     from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
-
-    set_fasttext_loading_enabled(False)
 
     resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     resolved_arrow_root = _resolve_path(PROJECT_ROOT_PATH, arrow_data_root)

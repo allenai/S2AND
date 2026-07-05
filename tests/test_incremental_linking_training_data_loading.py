@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from s2and import text as s2and_text
 from s2and.incremental_linking_training import data_loading
 
 
@@ -52,7 +53,7 @@ def test_load_giant_block_dataset_restores_runtime_env(
     captured: dict[str, Any] = {}
 
     def fake_anddata(**kwargs: Any) -> SimpleNamespace:
-        captured["fasttext_enabled_during_constructor"] = data_loading.fasttext_loading_enabled()
+        captured["fasttext_enabled_during_constructor"] = s2and_text.fasttext_loading_enabled()
         captured["backend_during_constructor"] = os.environ["S2AND_BACKEND"]
         captured["omp_threads_during_constructor"] = os.environ["OMP_NUM_THREADS"]
         captured["rayon_threads_during_constructor"] = os.environ["RAYON_NUM_THREADS"]
@@ -64,7 +65,7 @@ def test_load_giant_block_dataset_restores_runtime_env(
     monkeypatch.setenv("OMP_NUM_THREADS", "9")
     monkeypatch.setenv("RAYON_NUM_THREADS", "11")
     monkeypatch.setattr(data_loading, "ANDData", fake_anddata)
-    data_loading.set_fasttext_loading_enabled(True)
+    s2and_text.set_fasttext_loading_enabled(True)
 
     dataset, load_info = data_loading.load_giant_block_dataset(tmp_path, block_key=None, n_jobs=1)
 
@@ -72,11 +73,11 @@ def test_load_giant_block_dataset_restores_runtime_env(
     assert os.environ["S2AND_BACKEND"] == "python"
     assert os.environ["OMP_NUM_THREADS"] == "9"
     assert os.environ["RAYON_NUM_THREADS"] == "11"
-    assert captured["fasttext_enabled_during_constructor"] is False
+    assert captured["fasttext_enabled_during_constructor"] is True
     assert captured["backend_during_constructor"] == "rust"
     assert captured["omp_threads_during_constructor"] == "1"
     assert captured["rayon_threads_during_constructor"] == "1"
-    assert data_loading.fasttext_loading_enabled() is True
+    assert s2and_text.fasttext_loading_enabled() is True
     assert dataset is not None
     assert captured["specter_embeddings"]["p1"].shape == (2,)
     assert load_info["selected_signature_ids"] == ["s1"]

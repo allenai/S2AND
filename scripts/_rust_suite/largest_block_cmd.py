@@ -349,9 +349,6 @@ def _run_single(
     import s2and.model as model_module
     from s2and.data import ANDData
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
-
-    set_fasttext_loading_enabled(False)
 
     resolved_model_path = _resolve_path(model_path)
     resolved_data_root = _resolve_path(data_root)
@@ -643,14 +640,11 @@ def _run_single_arrow(
 
     import s2and.model as model_module
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
     from scripts.eval_prod_models import (
         read_arrow_s2_blocks,
         read_signature_to_cluster_id,
         resolve_arrow_dataset_paths,
     )
-
-    set_fasttext_loading_enabled(False)
 
     resolved_model_path = _resolve_path(model_path)
     resolved_arrow_root = _resolve_path(arrow_data_root)

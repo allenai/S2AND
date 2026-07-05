@@ -301,7 +301,6 @@ def _write_raw_planner_indexes_and_layout(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
-    os.environ.setdefault("S2AND_SKIP_FASTTEXT", "1")
 
     from s2and.data import ANDData
     from s2and.feature_port import (
@@ -314,10 +313,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         write_name_counts_index,
     )
     from s2and.production_model import load_production_model
-    from s2and.text import set_fasttext_loading_enabled
     from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
-
-    set_fasttext_loading_enabled(False)
 
     timings: dict[str, float] = {}
     meta = _load_json(args.fixture_dir / "meta.json")

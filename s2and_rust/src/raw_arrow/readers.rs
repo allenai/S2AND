@@ -157,16 +157,17 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
                         .into_owned();
                     entry.insert(RawArrowSignature {
                         paper_id,
-                        author_first: first_values
-                            .required_value(row, "author_first")?
-                            .into_owned(),
-                        author_middle: middle_values
-                            .required_value(row, "author_middle")?
-                            .into_owned(),
-                        author_last: last_values.required_value(row, "author_last")?.into_owned(),
-                        author_suffix: suffix_values
-                            .required_value(row, "author_suffix")?
-                            .into_owned(),
+                        // These columns are legitimately empty for most rows
+                        // (e.g. author_suffix is ~100% empty; empty surnames are
+                        // valid per D6). The producer serializes empty as Arrow
+                        // NULL (`_optional_str` maps ""/None -> None), so NULL is
+                        // the normal "empty" representation, not a corruption
+                        // signal. Coerce NULL -> "" to match Python's
+                        // normalize_text(None) -> "" and keep Python<->Rust parity.
+                        author_first: first_values.optional_owned(row).unwrap_or_default(),
+                        author_middle: middle_values.optional_owned(row).unwrap_or_default(),
+                        author_last: last_values.optional_owned(row).unwrap_or_default(),
+                        author_suffix: suffix_values.optional_owned(row).unwrap_or_default(),
                         author_block: author_block_values
                             .as_ref()
                             .and_then(|col| col.optional_owned(row)),
@@ -252,15 +253,17 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
                 }
                 Entry::Vacant(entry) => {
                     entry.insert(RawArrowPaper {
-                        title: title_values.required_value(row, "title")?.into_owned(),
+                        // title/venue/journal_name are serialized with the same
+                        // ""/None -> NULL producer convention, so NULL means
+                        // empty. Coerce NULL -> "" to match Python parity (see
+                        // the signature author-name note above).
+                        title: title_values.optional_owned(row).unwrap_or_default(),
                         abstract_text: abstract_values
                             .as_ref()
                             .and_then(|col| col.optional_owned(row))
                             .unwrap_or_default(),
-                        venue: venue_values.required_value(row, "venue")?.into_owned(),
-                        journal_name: journal_values
-                            .required_value(row, "journal_name")?
-                            .into_owned(),
+                        venue: venue_values.optional_owned(row).unwrap_or_default(),
+                        journal_name: journal_values.optional_owned(row).unwrap_or_default(),
                         year: match year_values.as_ref() {
                             Some(values) => values.optional_value(row, "year")?,
                             None => None,
@@ -614,4 +617,45 @@ pub(crate) fn read_raw_arrow_specter_with_optional_index(
 
 pub(crate) fn read_raw_name_counts_index(path: &str) -> PyResult<RawNameCountMaps> {
     Ok(RawNameCountMaps::from_index(RawNameCountIndex::open(path)?))
+}
+
+#[cfg(test)]
+mod null_required_string_tests {
+    use super::read_raw_arrow_papers_from_batches;
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    #[test]
+    fn null_paper_strings_read_as_empty_not_error() {
+        // Regression: the Arrow producer serializes an empty title/venue/
+        // journal_name as Arrow NULL (via `_optional_str`, which maps ""/None ->
+        // None). NULL is therefore the normal "empty" representation, not a
+        // corruption signal, so the reader must coerce NULL -> "" (matching
+        // Python's normalize_text(None) -> "") rather than raising. A prior
+        // `required_value` change made this path raise on the ~100%-NULL
+        // author_suffix / frequently-NULL venue+journal columns of every real
+        // bundle; existing fixtures hand-wrote "" and missed it.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("paper_id", DataType::Utf8, false),
+            Field::new("title", DataType::Utf8, true),
+            Field::new("venue", DataType::Utf8, true),
+            Field::new("journal_name", DataType::Utf8, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![Some("p1")])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).expect("valid record batch");
+
+        let papers = read_raw_arrow_papers_from_batches("<test>", vec![batch], None)
+            .expect("NULL required-string columns must coerce to \"\", not error");
+        let paper = papers.get("p1").expect("p1 present");
+        assert_eq!(paper.title, "");
+        assert_eq!(paper.venue, "");
+        assert_eq!(paper.journal_name, "");
+    }
 }

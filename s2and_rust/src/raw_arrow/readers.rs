@@ -157,10 +157,16 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
                         .into_owned();
                     entry.insert(RawArrowSignature {
                         paper_id,
-                        author_first: first_values.required_value(row, "author_first")?.into_owned(),
-                        author_middle: middle_values.required_value(row, "author_middle")?.into_owned(),
+                        author_first: first_values
+                            .required_value(row, "author_first")?
+                            .into_owned(),
+                        author_middle: middle_values
+                            .required_value(row, "author_middle")?
+                            .into_owned(),
                         author_last: last_values.required_value(row, "author_last")?.into_owned(),
-                        author_suffix: suffix_values.required_value(row, "author_suffix")?.into_owned(),
+                        author_suffix: suffix_values
+                            .required_value(row, "author_suffix")?
+                            .into_owned(),
                         author_block: author_block_values
                             .as_ref()
                             .and_then(|col| col.optional_owned(row)),
@@ -252,7 +258,9 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
                             .and_then(|col| col.optional_owned(row))
                             .unwrap_or_default(),
                         venue: venue_values.required_value(row, "venue")?.into_owned(),
-                        journal_name: journal_values.required_value(row, "journal_name")?.into_owned(),
+                        journal_name: journal_values
+                            .required_value(row, "journal_name")?
+                            .into_owned(),
                         year: match year_values.as_ref() {
                             Some(values) => values.optional_value(row, "year")?,
                             None => None,

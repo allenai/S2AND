@@ -717,7 +717,9 @@ pub(crate) fn extract_specter_vec(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec
     }
     if let Ok(arr) = obj.downcast::<PyArray1<f64>>() {
         let readonly = arr.readonly();
-        return Ok(Some(readonly.as_slice()?.iter().map(|v| *v as f32).collect()));
+        return Ok(Some(
+            readonly.as_slice()?.iter().map(|v| *v as f32).collect(),
+        ));
     }
     // Fallback: try to extract as Vec<f64>
     let vec_f64: Vec<f64> = obj.extract()?;
@@ -950,7 +952,16 @@ pub(crate) fn build_name_counts_data_from_artifact(
         }
     };
 
-    let first = if py_len(&first_for_counts) > 1 {
+    // A count key is looked up only when its components are present. An empty
+    // surname must yield NaN (not the sentinel default 1.0), mirroring the
+    // Python ANDData._compute_signature_name_counts path (D6 in
+    // docs/normalization_migration_blocked.md; work_plan section 2). Without
+    // the last_present guard a genuinely missing last name would be
+    // indistinguishable from a corpus count of 1, diverging from Python.
+    let first_informative = py_len(&first_for_counts) > 1;
+    let last_present = py_len(&last_for_counts) > 0;
+
+    let first = if first_informative {
         match raw_name_counts.get(RawNameCountKind::First, &first_for_counts) {
             Some(value) => value,
             None => 1.0,
@@ -958,7 +969,7 @@ pub(crate) fn build_name_counts_data_from_artifact(
     } else {
         f64::NAN
     };
-    let first_last = if py_len(&first_for_counts) > 1 {
+    let first_last = if first_informative && last_present {
         let first_last_key = format!("{} {}", first_for_counts, last_for_counts);
         match raw_name_counts.get(RawNameCountKind::FirstLast, first_last_key.trim()) {
             Some(value) => value,
@@ -967,15 +978,22 @@ pub(crate) fn build_name_counts_data_from_artifact(
     } else {
         f64::NAN
     };
-    let last = match raw_name_counts.get(RawNameCountKind::Last, &last_for_counts) {
-        Some(value) => value,
-        None => 1.0,
+    let last = if last_present {
+        match raw_name_counts.get(RawNameCountKind::Last, &last_for_counts) {
+            Some(value) => value,
+            None => 1.0,
+        }
+    } else {
+        f64::NAN
     };
-    let last_first_initial =
+    let last_first_initial = if last_present {
         match raw_name_counts.get(RawNameCountKind::LastFirstInitial, &last_first_initial_key) {
             Some(value) => value,
             None => 1.0,
-        };
+        }
+    } else {
+        f64::NAN
+    };
 
     Some(NameCountsData {
         first,
@@ -983,4 +1001,104 @@ pub(crate) fn build_name_counts_data_from_artifact(
         last,
         last_first_initial,
     })
+}
+
+#[cfg(test)]
+mod name_counts_empty_surname_tests {
+    use crate::name_counts::{
+        NameCountsLastFirstInitialSemantics, RawNameCountIndex, RawNameCountMaps,
+    };
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // A valid 32-byte name-count index header describing zero records. It opens
+    // cleanly (so `has_data()` is true) and every lookup misses, which is all
+    // the empty-surname gate needs — no hashing or name blob required.
+    fn empty_index_bytes() -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0..8].copy_from_slice(b"S2NCI001");
+        // record_count = 0 (bytes 8..16 stay zero)
+        bytes[16..24].copy_from_slice(&32u64.to_le_bytes()); // blob_offset == header length
+                                                             // blob_len = 0 (bytes 24..32 stay zero)
+        bytes
+    }
+
+    fn write_empty_artifact() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = format!(
+            "s2and_nc_empty_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create temp index dir");
+        for name in ["first", "last", "first_last", "last_first_initial"] {
+            let mut file =
+                std::fs::File::create(dir.join(format!("{name}.bin"))).expect("create index file");
+            file.write_all(&empty_index_bytes())
+                .expect("write index header");
+        }
+        let manifest = concat!(
+            r#"{"schema_version":"name_counts_index_v1","files":{"#,
+            r#""first":{"path":"first.bin"},"last":{"path":"last.bin"},"#,
+            r#""first_last":{"path":"first_last.bin"},"#,
+            r#""last_first_initial":{"path":"last_first_initial.bin"}}}"#,
+        );
+        std::fs::write(dir.join("manifest.json"), manifest).expect("write manifest");
+        dir
+    }
+
+    #[test]
+    fn empty_surname_yields_nan_matching_python() {
+        // Regression for the Python<->Rust divergence found in the 2026-07-04
+        // pass: build_name_counts_data_from_artifact must return NaN for every
+        // last-dependent key when the surname is empty, exactly like the Python
+        // ANDData._compute_signature_name_counts path (D6). Before the fix these
+        // defaulted to the sentinel 1.0, so an empty surname was scored as a
+        // corpus count of 1 in Rust while Python reported NaN.
+        let dir = write_empty_artifact();
+        let maps = RawNameCountMaps::from_index(
+            RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path")).expect("open index"),
+        );
+        let semantics = NameCountsLastFirstInitialSemantics::InitialChar;
+
+        let empty_last =
+            super::build_name_counts_data_from_artifact(&maps, "Alice", "alice", "", "", semantics)
+                .expect("artifact present -> Some");
+        let present_last = super::build_name_counts_data_from_artifact(
+            &maps, "Alice", "alice", "Smith", "smith", semantics,
+        )
+        .expect("artifact present -> Some");
+
+        // Drop the mmap-backed maps before removing the dir (Windows keeps
+        // memory-mapped files locked while they are open).
+        drop(maps);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Empty surname: every last-dependent key is NaN. `first` is still an
+        // informative token, so it is looked up and misses -> sentinel 1.0.
+        assert!(
+            empty_last.last.is_nan(),
+            "last must be NaN for empty surname"
+        );
+        assert!(
+            empty_last.first_last.is_nan(),
+            "first_last must be NaN for empty surname"
+        );
+        assert!(
+            empty_last.last_first_initial.is_nan(),
+            "last_first_initial must be NaN for empty surname"
+        );
+        assert_eq!(
+            empty_last.first, 1.0,
+            "informative first is still looked up (miss -> 1.0)"
+        );
+
+        // Present surname: nothing is gated to NaN; every key misses -> 1.0.
+        assert!(!present_last.last.is_nan());
+        assert_eq!(present_last.last, 1.0);
+        assert_eq!(present_last.first_last, 1.0);
+        assert_eq!(present_last.last_first_initial, 1.0);
+        assert_eq!(present_last.first, 1.0);
+    }
 }

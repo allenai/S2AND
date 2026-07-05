@@ -140,8 +140,14 @@ verifies the two implementations still agree.
   `s2and.text.equal` and Rust `first_names_equal`.
 - ORCID Unicode digits (Python): `ORCID_PATTERN` uses `[0-9]` so only ASCII
   digits match, aligning with Rust `is_ascii_digit()`.
-- Reader NULL coercion (Rust): required string columns route through
-  `required_value` (errors on NULL; empty string still allowed).
+- Reader NULL handling (Rust): the raw-Arrow readers coerce NULL -> "" for the
+  nullable string columns (author first/middle/last/suffix, title/venue/
+  journal_name), matching Python's `normalize_text(None) -> ""`. (An interim
+  `required_value` change that errored on NULL was reverted: the producer's
+  `_optional_str` serializes empty as Arrow NULL, so NULL is the normal empty
+  representation -- e.g. author_suffix is ~100% NULL, and empty surnames are
+  valid per D6 -- not a corruption signal. A Rust round-trip test now pins
+  NULL -> "".)
 - SPECTER all-zero ingest (Rust): `extract_specter_vec` keeps all-zero rows as
   present, matching the Arrow ingest path; the featurizer still treats them as
   missing at feature time (no feature-value change).
@@ -151,24 +157,41 @@ verifies the two implementations still agree.
   `s2and/featurizer.py` and `s2and_rust/src/rust_featurizer.rs`. The Rust side
   needed the same restructure for parity even though the doc had scoped it
   Python-only.
-- Empty-surname name counts (Python, = D6): `_compute_signature_name_counts`
-  returns `np.nan` for every last-dependent key when the surname is empty,
-  rather than the sentinel default 1.
+- Empty-surname name counts (parity, = D6): `_compute_signature_name_counts`
+  (Python) and `build_name_counts_data_from_artifact` (Rust) both return NaN for
+  every last-dependent key when the surname is empty, rather than the sentinel
+  default 1. The Rust artifact-build path was a latent divergence the parity
+  suite missed (no empty-surname case exercised it) and is now covered by a
+  dedicated Rust regression test.
 - `get_text_ngrams` short-token filter (Python): decoupled from stopword
   removal so reference-author ngrams (stopwords=None) also drop 1-2 char
   tokens. Rust consumes the Python-built `reference_details` counters, so no
   Rust change was needed.
-- Same-signature `paper_author_list_*` guard (Tier B hardening): the
-  `same_signature` continue now precedes the `best_author_*` updates in
-  `s2and/incremental_linking/query_adapter.py`.
-- Sinonym stale fields: `apply_sinonym_overwrites` invalidates the derived
-  normalized-name and name-count fields when overwriting raw name parts.
+- Same-signature `paper_author_list_*` guard (Tier B): ATTEMPTED, then REVERTED.
+  Moving the `same_signature` continue above the `best_author_*` updates broke
+  the pre-existing `test_local10_evidence_ignores_query_signature_member`, which
+  deliberately locks paper-author-list self-matching (only the local10 window
+  excludes the query). It is a speculative guard for a caller that does not
+  exist (production and training already drop the query upstream), so per
+  CLAUDE.md it was dropped; the guard stays scoped to local10.
 
-Still open after this pass:
+Decided after this pass (implementation on this branch):
 
-- **`detect_language` single-detector `is_reliable`** — genuine product policy
-  call (should a single responding detector count as reliable?). Left unchanged
-  pending a decision; not a mechanical fix.
+- **`detect_language` reliability** — DECIDED: `is_reliable` requires BOTH
+  detectors (fastText + cld2) to agree. Any non-agreement (disagreement, or only
+  one detector responding) yields `predicted_language = "un"` and
+  `is_reliable = False`, preserving the invariant `is_reliable <=> language != "un"`.
+  Must change Python (`s2and/text.py`) AND Rust
+  (`s2and_rust/src/language_detection.rs`) in lockstep, AND regenerate the Arrow
+  bundle — the language columns are Python-computed and read verbatim in the
+  production Arrow path (Rust recomputes live only for NULL rows). Bumps
+  `FEATURIZER_VERSION` again (4 -> 5).
+- **fastText availability** — DECIDED: production no longer supports a missing
+  fastText model; a load failure raises instead of silently falling back to
+  cld2-only (`un_ft`). A testing off-switch (`S2AND_SKIP_FASTTEXT`) is retained.
+  Interacts with the reliability rule: with fastText off, agreement is
+  impossible, so detection is uniformly unreliable — language-detection tests
+  must opt into the real model.
 
 Required when picking these up:
 
@@ -179,15 +202,6 @@ Required when picking these up:
   current `1e-5` tolerance on any non-changed column.
 
 Open bugs (Python feature changes deferred for the next re-baseline cycle):
-
-- **Sinonym overwrite leaves stale normalized fields when run outside `__init__`.**
-  [s2and/data.py:2391-2395](../s2and/data.py#L2391-L2395) replaces only raw
-  `author_info_first/middle/last`. Inside `__init__` the subsequent
-  `preprocess_signatures()` call at
-  [s2and/data.py:815](../s2and/data.py#L815) rebuilds normalized fields, so the
-  canonical path is safe. Any call site that mutates signatures post-init
-  produces stale `_normalized_*` / `name_counts`. Invalidate or re-derive in
-  `apply_sinonym_overwrites` so the invariant is explicit.
 
 - **Self-cite signal returns 1.0 when both signatures share a self-citing paper (parity bug).**
   Same bug exists in Python at
@@ -373,8 +387,13 @@ re-baseline, or latent issues that are tracked but not actively fixed.
   ([scripts/production/model/linker_train_calibrate_eval.py:2591-2609](../scripts/production/model/linker_train_calibrate_eval.py#L2591-L2609))
   and drops the query from pair batches
   ([scripts/production/model/linker_train_calibrate_eval.py:1082](../scripts/production/model/linker_train_calibrate_eval.py#L1082)).
-  Fix as cheap hardening for future callers: move the `if same_signature:
-  continue` guard above the paper-author-list updates.
+  ~~Fix as cheap hardening for future callers: move the `if same_signature:
+  continue` guard above the paper-author-list updates.~~ REJECTED 2026-07-04
+  (won't-fix): implemented in the correctness pass, then reverted — it broke the
+  pre-existing `test_local10_evidence_ignores_query_signature_member`
+  (paper-author-list is intentionally allowed to self-match) and is a
+  speculative guard for a caller that does not exist. Per CLAUDE.md (no
+  speculative guards) the guard stays scoped to local10.
 
 - **`equal()` returns 1 (equal) for two whitespace-only first/middle/last inputs.**
   [s2and/text.py:698-707](../s2and/text.py#L698-L707): the empty check uses

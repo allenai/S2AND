@@ -5,7 +5,7 @@
     "D1": {
       "status": "decided",
       "title": "Spill on space, keep together on dash",
-      "description": "Canonical first keeps all tokens of the raw first field ONLY when the raw first contains a dash-like character; otherwise the first token stays and tokens 2..n spill into middle. Confirms the current dash-aware rule as canonical policy (ruled 2026-07-04, per the issue #39 findings: spaced Western firsts are usually first+middle, spaced Chinese compounds are Sinonym's job upstream, and cross-variant compatibility of Jo / Jo Ann / JoAnn is compare-time via same_prefix_tokens, not canonicalization-identity)."
+      "description": "Canonical first keeps all tokens of the raw first field ONLY when the raw first contains a dash-like character; otherwise the first token stays and tokens 2..n spill into middle. Confirms the current dash-aware rule as canonical policy (ruled 2026-07-04, per the issue #39 findings: spaced Western firsts are usually first+middle, spaced Chinese compounds are handled upstream, and cross-variant compatibility of Jo / Jo Ann / JoAnn is compare-time via same_prefix_tokens, not canonicalization-identity)."
     },
     "D2": {
       "status": "decided",
@@ -232,7 +232,7 @@
       "decisions": [
         "D1"
       ],
-      "notes": "The splitter itself spills; Sinonym overwrite (when enabled upstream) may rewrite detected Chinese spaced compounds before the splitter runs."
+      "notes": "The splitter itself spills; upstream normalization may rewrite detected Chinese spaced compounds before the splitter runs."
     },
     {
       "id": "yuzhong-dashed",
@@ -1380,7 +1380,7 @@
       "decisions": [
         "D1"
       ],
-      "notes": "Spaced Vietnamese first spills like any spaced first; Sinonym-style upstream rewriting is the place for language-aware compounds."
+      "notes": "Spaced Vietnamese first spills like any spaced first; upstream rewriting is the place for language-aware compounds."
     },
     {
       "id": "muller",

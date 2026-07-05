@@ -2,8 +2,7 @@
 
 These lock the observable behavior changes that a Python-vs-Rust parity run
 cannot by itself pin down: the self-citation same-paper guard, the
-reference-list features being computed without reference_details, and the
-Sinonym-overwrite invalidation of derived name fields.
+reference-list features being computed without reference_details.
 """
 
 from __future__ import annotations
@@ -12,10 +11,9 @@ import math
 
 import numpy as np
 
-from s2and.data import ANDData, NameCounts, apply_sinonym_overwrites
+from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from tests.helpers import tiny_name_counts
-from tests.test_sinonym_overwrite import make_parsed, make_sig
 
 _ALL_FEATURES = [
     "name_similarity",
@@ -105,33 +103,3 @@ def test_reference_list_features_computed_without_reference_details() -> None:
     # The two reference-list features only need paper.references -> computed.
     assert features[_SELF_CITE_IDX] == 1  # A cites B, distinct papers
     assert features[_REF_JACCARD_IDX] == 1 / 2  # {B,999} vs {999}
-
-
-def test_apply_sinonym_overwrites_invalidates_derived_name_fields() -> None:
-    _, sig = make_sig("s1", 100, 0, "Qi", "", "Ou-Yang")
-    # Simulate a fully-preprocessed signature: derived name fields populated.
-    sig = sig._replace(
-        author_info_first_normalized="qi",
-        author_info_first_normalized_without_apostrophe="qi",
-        author_info_middle_normalized_without_apostrophe="",
-        author_info_last_normalized="ou yang",
-        author_info_full_name="qi ou yang",
-        author_info_name_counts=NameCounts(first=5.0, last=5.0, first_last=5.0, last_first_initial=5.0),
-    )
-    signatures = {"s1": sig}
-    per_paper_results = {"100": {0: make_parsed("Xin", "Wang")}}
-
-    updated_count = apply_sinonym_overwrites(signatures, per_paper_results)
-    assert updated_count == 1
-
-    updated = signatures["s1"]
-    # Raw parts were overwritten...
-    assert updated.author_info_last == "Wang"
-    # ...and every field derived from the name parts was invalidated so a
-    # post-init caller cannot read stale normalized names / counts.
-    assert updated.author_info_first_normalized is None
-    assert updated.author_info_first_normalized_without_apostrophe is None
-    assert updated.author_info_middle_normalized_without_apostrophe is None
-    assert updated.author_info_last_normalized is None
-    assert updated.author_info_full_name is None
-    assert updated.author_info_name_counts is None

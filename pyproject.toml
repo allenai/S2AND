@@ -37,7 +37,6 @@ dependencies = [
   "orjson>=3.11.6,<4",
   "pyasn1>=0.6.3",
   "shap>=0.45",
-  "sinonym>=0.2.2",
   "pyarrow>=16,<19",
 ]
 
@@ -132,7 +131,6 @@ s2and-rust = { path = "s2and_rust" }
 # "numpy==1.24.3",
 # "orjson",
 # "shap",
-# "sinonym",
 # "click>=7.1.2",
 #
 # And dev tools (old pins):

@@ -31,6 +31,7 @@ import itertools
 import json
 import math
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -53,8 +54,8 @@ CASES = FIXTURE["cases"]
 CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES]
 CASES_BY_ID = {case["id"]: case for case in CASES}
 
-CANONICALIZE_NAME_PARTS = getattr(s2and_text, "canonicalize_name_parts", None)
-CANONICAL_NAME_COUNT_KEYS = getattr(s2and_text, "canonical_name_count_keys", None)
+CANONICALIZE_NAME_PARTS = cast(Any, getattr(s2and_text, "canonicalize_name_parts", None))
+CANONICAL_NAME_COUNT_KEYS = cast(Any, getattr(s2and_text, "canonical_name_count_keys", None))
 needs_canonical_api = pytest.mark.skipif(
     CANONICALIZE_NAME_PARTS is None or CANONICAL_NAME_COUNT_KEYS is None,
     reason="canonical normalizer not implemented yet (migration step 2)",
@@ -74,8 +75,36 @@ def _legacy_first_normalized_token(first_raw: str, middle_raw: str) -> str:
 
 
 def _skeleton_signature(author_info_last: str | None) -> Signature:
-    blank = Signature(*([None] * len(Signature._fields)))
-    return blank._replace(author_info_last=author_info_last)
+    return Signature(
+        author_info_first=None,
+        author_info_first_normalized_without_apostrophe=None,
+        author_info_middle=None,
+        author_info_middle_normalized_without_apostrophe=None,
+        author_info_last_normalized=None,
+        author_info_last=cast(str, author_info_last),
+        author_info_suffix_normalized=None,
+        author_info_suffix=None,
+        author_info_first_normalized=None,
+        author_info_coauthors=None,
+        author_info_coauthor_blocks=None,
+        author_info_full_name=None,
+        author_info_affiliations=[],
+        author_info_affiliations_n_grams=None,
+        author_info_coauthor_n_grams=None,
+        author_info_email=None,
+        author_info_orcid=None,
+        author_info_name_counts=None,
+        author_info_position=0,
+        author_info_block="",
+        author_info_given_block=None,
+        author_info_estimated_gender=None,
+        author_info_estimated_ethnicity=None,
+        paper_id=0,
+        sourced_author_source=None,
+        sourced_author_ids=[],
+        author_id=None,
+        signature_id="",
+    )
 
 
 # Sentinel count values, one per key, so a wrong-key lookup returns the default

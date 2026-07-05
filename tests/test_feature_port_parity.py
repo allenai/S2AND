@@ -85,7 +85,6 @@ def _load_dataset_from_dir(data_dir, name, *, compute_reference_features=False):
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=compute_reference_features,
     )
     return ds
@@ -289,7 +288,6 @@ def test_rust_featurizer_supports_string_paper_ids():
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=False,
     )
 
@@ -378,7 +376,6 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=False,
     )
     ref_features, _ = _single_pair_featurize(("s1", "s2"), dataset=ds)
@@ -557,7 +554,6 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases():
         random_seed=42,
         name_tuples={("yu", "yi")},
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=False,
     )
 

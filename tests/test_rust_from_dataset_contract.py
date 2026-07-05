@@ -112,7 +112,6 @@ def _build_minimal_dataset(name: str) -> ANDData:
             random_seed=42,
             name_tuples="filtered",
             use_orcid_id=True,
-            use_sinonym_overwrite=False,
             compute_reference_features=False,
         )
     finally:
@@ -287,7 +286,7 @@ def test_from_dataset_raw_language_detection_uses_fasttext_sensitive_outputs(mon
     monkeypatch.delenv("S2AND_SKIP_FASTTEXT", raising=False)
     text_mod.set_fasttext_loading_enabled(True)
     if text_mod._get_fasttext_model() is None:
-        pytest.skip("fastText language model is unavailable")
+        raise pytest.skip.Exception("fastText language model is unavailable")
 
     dataset_raw = _build_minimal_dataset("rust_contract_raw_fasttext_language")
     raw_titles = {

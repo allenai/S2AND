@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import s2and.data as data_module
-from s2and.data import ANDData, _parse_sinonym_name
+from s2and.data import ANDData
 from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
 
 
@@ -531,30 +531,6 @@ def test_pair_sampling_rejects_mixed_canonical_and_legacy_flags():
             load_name_counts=False,
             preprocess=False,
         )
-
-
-def test_parse_sinonym_name_matches_between_object_and_dict_inputs():
-    class _ParsedNameStub:
-        def __init__(self):
-            self.given_tokens = ["Xiao", "Ming"]
-            self.surname_tokens = ["Ou", "Yang"]
-            self.original_compound_surname = None
-            self.middle_tokens = ["Li"]
-            self.middle_name = None
-
-    object_output = _parse_sinonym_name(_ParsedNameStub())
-    dict_output = _parse_sinonym_name(
-        {
-            "given_tokens": ["Xiao", "Ming"],
-            "surname_tokens": ["Ou", "Yang"],
-            "original_compound_surname": None,
-            "middle_tokens": ["Li"],
-            "middle_name": None,
-        }
-    )
-
-    assert object_output == dict_output
-    assert object_output == ("Xiao Ming", "Li", "Ou Yang")
 
 
 def test_inference_dataset_with_clusters_initializes_signature_to_cluster_id():

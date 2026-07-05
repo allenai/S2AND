@@ -680,9 +680,9 @@ def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tup
     """Return current legacy-compatible first-name compatibility.
 
     This keeps the normalization migration shim in one place: legacy
-    `name_tuples` were curated over single-token names, while Sinonym-aware
-    first names can be multi-token. Remove the joined/first-token probes only
-    after canonical name-tuple artifacts are regenerated.
+    `name_tuples` were curated over single-token names, while normalized first
+    names can be multi-token. Remove the joined/first-token probes only after
+    canonical name-tuple artifacts are regenerated.
     """
 
     if same_prefix_tokens(first_a, first_b):

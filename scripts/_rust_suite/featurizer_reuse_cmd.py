@@ -60,7 +60,6 @@ def _build_train_dataset(dataset_name: str, n_jobs: int, paths: dict[str, str], 
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=True,
     )
 
 

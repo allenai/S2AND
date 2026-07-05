@@ -141,7 +141,6 @@ def _build_dataset(
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=bool(compute_reference_features),
     )
 

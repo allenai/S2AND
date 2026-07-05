@@ -2,10 +2,8 @@ import pytest
 
 from s2and.data import (
     ANDData,
-    Signature,
     _canonicalize_last_for_counts,
     _lasts_equivalent_for_constraint,
-    apply_sinonym_overwrites,
 )
 
 
@@ -94,105 +92,3 @@ def test_constraint_accepts_name_tuple_compatibility_forms(name_tuples):
     dataset = _constraint_dataset(name_tuples=name_tuples)
 
     assert dataset.get_constraint("s1", "s2") is None
-
-
-def test_apply_sinonym_overwrites_block_compound_surname():
-    # Single signature with a compound surname; expect block to use joined surname
-    sig = Signature(
-        author_info_first="qi",
-        author_info_first_normalized_without_apostrophe=None,
-        author_info_middle="",
-        author_info_middle_normalized_without_apostrophe=None,
-        author_info_last_normalized=None,
-        author_info_last="yang",
-        author_info_suffix_normalized=None,
-        author_info_suffix=None,
-        author_info_first_normalized=None,
-        author_info_coauthors=None,
-        author_info_coauthor_blocks=None,
-        author_info_full_name=None,
-        author_info_affiliations=[],
-        author_info_affiliations_n_grams=None,
-        author_info_coauthor_n_grams=None,
-        author_info_email=None,
-        author_info_orcid=None,
-        author_info_name_counts=None,
-        author_info_position=0,
-        author_info_block="q yang",  # initial block (legacy)
-        author_info_given_block=None,
-        author_info_estimated_gender=None,
-        author_info_estimated_ethnicity=None,
-        paper_id=1,
-        sourced_author_source=None,
-        sourced_author_ids=[],
-        author_id=None,
-        signature_id="s1",
-    )
-    signatures = {"s1": sig}
-
-    per_paper_results = {
-        "1": {
-            0: {
-                "given_tokens": ["Qi"],
-                "surname_tokens": ["Ou", "Yang"],
-                "original_compound_surname": "Ou-Yang",
-            }
-        }
-    }
-
-    updated = apply_sinonym_overwrites(
-        signatures,
-        per_paper_results,
-        overwrite_blocks=True,
-        allow_overwrite_pos=None,
-    )
-    assert updated == 1
-    new_sig = signatures["s1"]
-    assert new_sig.author_info_block == "q ou yang"
-
-
-def test_sinonym_overwrite_block_preserves_s2and_block_shape(monkeypatch):
-    signatures = {
-        "s1": _raw_signature("s1", paper_id=1, first="Bo", last="Wang"),
-    }
-    papers = {
-        "1": _raw_paper(1, "Bo Wang"),
-    }
-    sinonym_results = {
-        "1": {
-            0: {
-                "given_tokens": ["Alex"],
-                "middle_tokens": ["G"],
-                "surname_tokens": ["Wang"],
-                "original_compound_surname": None,
-            }
-        }
-    }
-
-    def _fake_sinonym_preprocess(_papers_dict, _n_jobs):
-        return sinonym_results
-
-    block_inputs = []
-
-    def custom_compute_block(author_name: str) -> str:
-        block_inputs.append(author_name)
-        return f"custom::{author_name.replace(' ', '_')}"
-
-    monkeypatch.setattr("s2and.data.sinonym_preprocess_papers_parallel", _fake_sinonym_preprocess)
-
-    dataset = ANDData(
-        signatures,
-        papers,
-        name="sinonym_custom_compute_block",
-        mode="inference",
-        load_name_counts=False,
-        preprocess=False,
-        name_tuples=set(),
-        n_jobs=1,
-        use_sinonym_overwrite=True,
-        sinonym_overwrite_min_ratio=None,
-        compute_block_fn=custom_compute_block,
-    )
-
-    assert block_inputs == []
-    assert dataset.signatures["s1"].author_info_block == "a wang"

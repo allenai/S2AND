@@ -26,11 +26,11 @@ Status
 
 Scope
 - Unify name normalization for first/middle/last across data preparation, modeling, subblocking, and auxiliary datasets (name counts, name tuples, ORCID prefix counts).
-- Ensure training-time and inference-time normalization are identical, including Sinonym-dependent behavior.
+- Ensure training-time and inference-time normalization are identical, including upstream normalized-name behavior.
 
 Decided (from issue history)
 - Apostrophes: canonical fields should remove apostrophes globally (no dual stream).
-- Chinese given names: Sinonym-aware handling is part of canonicalization; hyphenated given names should stay together.
+- Chinese given names: upstream data preparation handles language-aware compounds; hyphenated given names should stay together.
 - Spaced given names (ruled 2026-07-04, per issue #39): when the raw first has no dash-like
   character, tokens after the first spill into middle; any dash keeps the first-field tokens
   together. Cross-variant compatibility (`Jo` / `Jo Ann` / `JoAnn`) is a compare-time concern
@@ -57,7 +57,7 @@ Decided (from issue history)
   - Name counts.
   - Name tuples.
   - ORCID prefix counts.
-- Retraining requirement: production retraining data must go through the same normalization + Sinonym path as production inference.
+- Retraining requirement: production retraining data must go through the same normalization path as production inference.
 
 Open Decisions (remaining before migration freeze)
 1) Compatibility-mode decommission window
@@ -96,7 +96,7 @@ Rust Alignment Decisions (effective February 20, 2026; refreshed 2026-05-23)
    - Do not remove `_canonicalize_last_for_counts`, `_lasts_equivalent_for_constraint`,
      name-tuple compatibility probing, or ORCID first-token fallback until canonical artifacts are validated in rollout.
 4) Retraining contract
-   - Before enabling canonical mode by default, production retraining and production inference must use the same canonical normalization + Sinonym path.
+   - Before enabling canonical mode by default, production retraining and production inference must use the same canonical normalization path.
 5) Rust coupling
    - Any Rust ingestion change that affects normalized names, name-count keys, ORCID fallbacks, or block keys must be treated as a policy-sensitive change, not a pure performance refactor.
 
@@ -133,7 +133,7 @@ Implementation notes (2026-07-04 blast-radius review)
     subblocking, and model-scoring paths consume `author_info_first_normalized_without_apostrophe`
     instead. Remove it with the dual-field unification.
 
-Current State (post-Sinonym hyphen pass)
+Current State (post-hyphen pass)
 - Given-name canonicalization currently preserves hyphenated Chinese given names:
   - `s2and.text.split_first_middle_hyphen_aware`.
 - Generic text normalization treats all punctuation/dash-like characters as separators after transliteration; this is
@@ -149,8 +149,6 @@ Current State (post-Sinonym hyphen pass)
   - Subblocking: ORCID prefix map lookup has a first-token fallback for multi-token first names.
   - Name tuples in constraints and incremental new-name guarding: shared helper
     `first_names_name_compatible(...)` probes exact, joined, and first-token forms for compatibility with legacy tuples.
-  - Sinonym overwrite block recomputation preserves spaced compound surnames for blocking (`q ou yang`) when overwriting
-    blocks.
 - Subblocking first/middle keys have an additional measured legacy-compatibility repair:
   - Canonical first/middle fields keep dash-like given names together.
   - Current subblocking quality is recovered by keeping ASCII-hyphen compounds together while spilling non-ASCII dash
@@ -351,12 +349,10 @@ References in code (as of this migration doc)
   `first_names_name_compatible(...)` in `s2and/text.py`, consumed by `ANDData.get_constraint`
   and incremental clustering guards.
 - ORCID prefix fallback in subblocking: lookup path in `s2and/subblocking.py` during merge-pair scoring.
-- Sinonym overwrite gating/application: `compute_sinonym_overwrite_allowlist`, `apply_sinonym_overwrites` in `s2and/data.py`.
-
 Tests (current)
 - `tests/test_surname_hyphen_aware.py`
   - Transitional regression coverage for surname count canonicalization, last-name constraint equivalence,
-    name-tuple compatibility forms, and block compaction behavior under Sinonym overwrites.
+    and name-tuple compatibility forms.
 - `tests/test_cluster_incremental.py`
   - Transitional regression coverage that incremental new-name guarding accepts the same legacy
     name-tuple compatibility forms as constraints.

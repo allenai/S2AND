@@ -189,7 +189,6 @@ def _single_run(
             random_seed=42,
             name_tuples="filtered",
             use_orcid_id=True,
-            use_sinonym_overwrite=True,
         )
         anddata_seconds = time.perf_counter() - anddata_start
 

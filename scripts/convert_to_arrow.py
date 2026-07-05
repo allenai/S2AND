@@ -1008,7 +1008,6 @@ def convert_service_json_to_arrow(
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=False,
     )
     anddata_seconds = time.perf_counter() - start
@@ -1160,7 +1159,6 @@ def convert_runtime_dataset_to_arrow(
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=False,
     )
     anddata_seconds = time.perf_counter() - start

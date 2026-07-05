@@ -239,7 +239,6 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         random_seed=int(args.seed),
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
         compute_reference_features=False,
     )
     anddata_seconds = time.perf_counter() - started

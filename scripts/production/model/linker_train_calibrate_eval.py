@@ -1142,7 +1142,6 @@ def _load_minimal_raw_specter_dataset(
         n_jobs=max(1, int(n_jobs)),
         compute_reference_features=False,
         use_orcid_id=False,
-        use_sinonym_overwrite=False,
         name_tuples="filtered",
     )
     _apply_dataset_name_count_semantics_for_prediction(clusterer, dataset)

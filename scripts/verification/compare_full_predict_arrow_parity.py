@@ -369,7 +369,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        use_sinonym_overwrite=False,
     )
     if cluster_seeds_require:
         dataset.cluster_seeds_require = cluster_seeds_require

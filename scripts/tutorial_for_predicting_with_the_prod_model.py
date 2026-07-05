@@ -417,7 +417,6 @@ def main() -> None:
             random_seed=random_seed,
             name_tuples="filtered",
             use_orcid_id=True,
-            use_sinonym_overwrite=True,
         )
 
         if args.warm_rust_featurizer_before_predict:

@@ -250,7 +250,6 @@ Rows must provide the source values needed for the local Rust runtime to produce
 the same feature view that S2AND would expose after normal preprocessing:
 
 - `preprocess=True`
-- `use_sinonym_overwrite=False`
 - `use_orcid_id=True`
 - `block_type="s2"`
 - `name_tuples="filtered"`
@@ -735,7 +734,7 @@ s2and/data` after the public Arrow release has been synced locally.
 
 This Arrow dataset contract is not a full `ANDData` replacement. Do not include
 training pair samples, train/val/test split construction artifacts, reference
-features, sinonym overwrite outputs, or pair-sampling policy state unless a
+features, upstream normalization artifacts, or pair-sampling policy state unless a
 separate training/eval contract explicitly asks for them.
 
 The direct Rust inference path should consume only the narrow feature-block

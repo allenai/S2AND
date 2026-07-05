@@ -197,6 +197,51 @@ def test_query_and_summary_orcids_are_canonicalized_and_empty_values_ignored() -
     assert summary.orcid_values == frozenset({"0000-0002-1825-0097"})
 
 
+def test_orcid_enabled_false_suppresses_populated_orcid_field() -> None:
+    # work_plan section-2 #229 invariant: the per-request orcid_enabled flag is
+    # authoritative, NOT ORCID field presence. A populated, valid
+    # author_info_orcid must be suppressed at both the query-feature and
+    # cluster-summary layers when orcid_enabled=False, matching Rust
+    # (raw_arrow_features.rs gates the orcid_hash on orcid_enabled). This guards
+    # against re-introducing a field-presence-only gate on the Python side,
+    # which was the (now-resolved) divergence risk in work_plan item #229.
+    dataset = SimpleNamespace(
+        signatures={
+            "q_trim": SimpleNamespace(
+                **{**_signature("p_q_trim").__dict__, "author_info_orcid": "0000-0002-1825-0097"}
+            ),
+            "seed_trim": SimpleNamespace(
+                **{**_signature("p_seed_trim").__dict__, "author_info_orcid": "0000-0002-1825-0097"}
+            ),
+        },
+        papers={
+            "p_q_trim": SimpleNamespace(title="Trim Query", venue=None, journal_name=None, year=2020, authors=[]),
+            "p_seed_trim": SimpleNamespace(title="Trim Seed", venue=None, journal_name=None, year=2021, authors=[]),
+        },
+        specter_embeddings=None,
+    )
+    feature_cache = {}
+
+    # Query feature: ORCID suppressed despite a populated, valid field.
+    assert (
+        extract_query_features(_dataset_arg(dataset), "q_trim", feature_cache=feature_cache, orcid_enabled=False).orcid
+        is None
+    )
+
+    # Cluster summary: no ORCID values collected despite a populated seed field.
+    summary = build_cluster_summary(
+        _dataset_arg(dataset),
+        cluster_id="cluster",
+        component_key="component",
+        signature_ids=("seed_trim",),
+        max_exemplars=4,
+        feature_cache=feature_cache,
+        orcid_enabled=False,
+        block_key="block",
+    )
+    assert summary.orcid_values == frozenset()
+
+
 def test_query_view_for_features_uses_full_only_for_full_first_name() -> None:
     assert query_view_for_features(build_query_features(first="alice", has_full_first=True)) == "full"
     assert query_view_for_features(build_query_features(first="a", has_full_first=False)) == "initial_only"

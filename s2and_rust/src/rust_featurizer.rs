@@ -364,16 +364,7 @@ impl RustFeaturizer {
             }
         }
 
-        let f1_join: String = first1.split_whitespace().collect();
-        let f2_join: String = first2.split_whitespace().collect();
-        let f1_tok = first1.split_whitespace().next().unwrap_or(first1);
-        let f2_tok = first2.split_whitespace().next().unwrap_or(first2);
-        let known_alias = name_tuple_contains(&self.name_tuples, first1, first2)
-            || name_tuple_contains(&self.name_tuples, &f1_join, &f2_join)
-            || name_tuple_contains(&self.name_tuples, f1_tok, f2_tok);
-
-        let prefix = same_prefix_tokens(first1, first2);
-        if !prefix && !known_alias {
+        if !first_names_name_compatible(first1, first2, &self.name_tuples) {
             return Some(high_value);
         }
 
@@ -1062,6 +1053,7 @@ impl RustFeaturizer {
                                     false,
                                     true,
                                     Some(&stop_words),
+                                    true,
                                 ))
                             } else {
                                 None
@@ -1072,6 +1064,7 @@ impl RustFeaturizer {
                                     false,
                                     true,
                                     Some(&venue_stop_words),
+                                    true,
                                 ))
                             } else {
                                 None
@@ -1082,6 +1075,7 @@ impl RustFeaturizer {
                                     false,
                                     true,
                                     Some(&venue_stop_words),
+                                    true,
                                 ))
                             } else {
                                 None

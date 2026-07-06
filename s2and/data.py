@@ -261,7 +261,8 @@ def _python_signature_ngrams_batch(
     coauthor_texts: list[str], affiliation_texts: list[str]
 ) -> tuple[list[Counter], list[Counter]]:
     coauthor_counters = [
-        get_text_ngrams(text, stopwords=None, use_bigrams=True) if text else Counter() for text in coauthor_texts
+        get_text_ngrams(text, stopwords=None, use_bigrams=True, drop_short_tokens=False) if text else Counter()
+        for text in coauthor_texts
     ]
     affiliation_counters = [
         get_text_ngrams_words(text, stopwords=AFFILIATIONS_STOP_WORDS) if text else Counter()

@@ -32,6 +32,12 @@ _FASTTEXT_LOAD_FAILED = False
 _FASTTEXT_MODEL_LOCK = threading.Lock()
 
 
+def _fasttext_skip_env_enabled() -> bool:
+    """Return whether S2AND_SKIP_FASTTEXT requests fastText skip mode."""
+
+    return os.environ.get("S2AND_SKIP_FASTTEXT", "").strip().lower() in {"1", "true", "yes"}
+
+
 def set_fasttext_loading_enabled(enabled: bool) -> None:
     """Configure whether language detection may load the fastText model."""
 
@@ -50,7 +56,7 @@ def set_fasttext_loading_enabled(enabled: bool) -> None:
                 _FASTTEXT_MODEL is None
                 and _FASTTEXT_MODEL_INITIALIZED
                 and not _FASTTEXT_LOAD_FAILED
-                and os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() not in {"1", "true", "yes"}
+                and not _fasttext_skip_env_enabled()
             ):
                 _FASTTEXT_MODEL_INITIALIZED = False
             return
@@ -77,7 +83,7 @@ def _get_fasttext_model():
     global _FASTTEXT_MODEL
     global _FASTTEXT_MODEL_INITIALIZED
     global _FASTTEXT_LOAD_FAILED
-    if os.environ.get("S2AND_SKIP_FASTTEXT", "").lower() in {"1", "true", "yes"}:
+    if _fasttext_skip_env_enabled():
         with _FASTTEXT_MODEL_LOCK:
             _FASTTEXT_MODEL = None
             _FASTTEXT_MODEL_INITIALIZED = True
@@ -340,7 +346,7 @@ VENUE_STOP_WORDS = STOPWORDS.union(
     }
 )
 
-NAME_PREFIXES = {"dr", "prof", "professor", "mr", "miss", "mrs", "ms", "mx", "sir", "phd", "md", "doctor"}
+NAME_PREFIXES = {"dr", "prof", "professor", "mr", "miss", "mrs", "ms", "mx", "sir", "phd", "doctor"}
 
 
 def prefix_dist(string_1: str, string_2: str) -> float:
@@ -487,7 +493,7 @@ def split_first_middle_hyphen_aware(first_raw: str | None, middle_raw: str | Non
     - Apostrophes in first are removed (no spaces introduced).
     - If a hyphen exists in the raw first name, keep all first tokens together (no spill into middle).
     - Otherwise, first token stays in first; remaining first tokens spill into middle.
-    - A single leading prefix from NAME_PREFIXES is dropped if present.
+    - A single leading title prefix from NAME_PREFIXES is dropped if present.
 
     Returns (first_without_apostrophe, middle_without_apostrophe), both already normalized.
     """
@@ -588,7 +594,11 @@ def email_prefix_suffix(email: str) -> tuple[str, str | None]:
 
 
 def get_text_ngrams(
-    text: str | None, use_unigrams: bool = False, use_bigrams: bool = True, stopwords: set[str] | None = STOPWORDS
+    text: str | None,
+    use_unigrams: bool = False,
+    use_bigrams: bool = True,
+    stopwords: set[str] | None = STOPWORDS,
+    drop_short_tokens: bool = True,
 ) -> Counter:
     """
     Get character bigrams, trigrams, quadgrams, and optionally unigrams for a piece of text.
@@ -602,6 +612,8 @@ def get_text_ngrams(
         whether or not to include unigrams
     stopwords: Set
         The set of stopwords to filter out before computing character ngrams
+    drop_short_tokens: bool
+        Whether to drop word tokens of length <= 2 before computing character ngrams.
 
     Returns
     -------
@@ -610,10 +622,10 @@ def get_text_ngrams(
     if text is None or len(text) == 0:
         return Counter()
 
-    # The short-token filter is applied whenever word tokenization happens, and
-    # is independent of stopword removal. Callers that pass stopwords=None (e.g.
-    # reference-author ngrams) still drop 1-2 char tokens like title/venue do.
-    words = [word for word in text.split(" ") if len(word) > 2]
+    # The short-token filter is independent of stopword removal. Reference-author
+    # ngrams use it with stopwords=None, while coauthor ngrams explicitly keep
+    # short names like "li" and "wu".
+    words = [word for word in text.split(" ") if not drop_short_tokens or len(word) > 2]
     if stopwords is not None:
         words = [word for word in words if word not in stopwords]
     text = " ".join(words)
@@ -689,6 +701,8 @@ def same_prefix_tokens(a: str, b: str) -> bool:
            one token is a prefix of the other.
     """
     ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return False
     for x, y in zip(ta, tb, strict=False):
         if not (x.startswith(y) or y.startswith(x)):
             return False
@@ -703,6 +717,10 @@ def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tup
     names can be multi-token. Remove the joined/first-token probes only after
     canonical name-tuple artifacts are regenerated.
     """
+
+    if not first_a.split() or not first_b.split():
+        # Missing first-name evidence is unknown, not an incompatibility signal.
+        return True
 
     if same_prefix_tokens(first_a, first_b):
         return True

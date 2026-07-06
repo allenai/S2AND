@@ -102,6 +102,53 @@ def _specter_dataset(name: str, specter_embeddings: Any) -> ANDData:
     )
 
 
+def _empty_first_constraint_dataset() -> ANDData:
+    def signature(signature_id: str, first: str, paper_id: str) -> dict[str, Any]:
+        return {
+            "signature_id": signature_id,
+            "paper_id": paper_id,
+            "author_info": {
+                "first": first,
+                "middle": "",
+                "last": "Smith",
+                "suffix": "",
+                "affiliations": [],
+                "email": "",
+                "position": 0,
+                "block": "smith",
+                "given_block": "smith",
+            },
+            "sourced_author_ids": [],
+            "sourced_author_source": "Extracted",
+        }
+
+    def paper(paper_id: str) -> dict[str, Any]:
+        return {
+            "paper_id": paper_id,
+            "title": "Untitled",
+            "abstract": "",
+            "venue": "",
+            "journal_name": "",
+            "year": 2020,
+            "authors": [{"position": 0, "author_name": "Smith"}],
+            "references": [],
+        }
+
+    return ANDData(
+        signatures={
+            "empty": signature("empty", "", "p1"),
+            "named": signature("named", "Alice", "p2"),
+        },
+        papers={"p1": paper("p1"), "p2": paper("p2")},
+        name="empty_first_constraint_dataset",
+        mode="inference",
+        load_name_counts=False,
+        preprocess=True,
+        name_tuples=set(),
+        n_jobs=1,
+    )
+
+
 def _indexed_pair_matrix(featurizer: Any, pairs: list[tuple[str, str]]) -> np.ndarray:
     signature_id_to_index = {str(signature_id): index for index, signature_id in enumerate(featurizer.signature_ids())}
     indexed_pairs = [(signature_id_to_index[left], signature_id_to_index[right]) for left, right in pairs]
@@ -182,6 +229,20 @@ def test_rust_from_dataset_expects_python_normalized_specter_dict():
     )
     with pytest.raises(TypeError, match="specter_embeddings to be a dict"):
         s2and_rust.RustFeaturizer.from_dataset(dict_dataset, 0.0, 10000.0, 1)
+
+
+def test_rust_constraint_allows_missing_first_name_like_python():
+    dataset = _empty_first_constraint_dataset()
+
+    assert dataset.get_constraint("empty", "named", low_value=0, high_value=LARGE_DISTANCE, suppress_orcid=True) is None
+
+    featurizer = s2and_rust.RustFeaturizer.from_dataset(dataset, 0.0, float(LARGE_DISTANCE), 1)
+    signature_id_to_index = {str(signature_id): index for index, signature_id in enumerate(featurizer.signature_ids())}
+
+    assert featurizer.get_constraints_matrix_indexed(
+        [(signature_id_to_index["empty"], signature_id_to_index["named"])],
+        suppress_orcid=True,
+    ) == [None]
 
 
 def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):

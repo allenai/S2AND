@@ -521,6 +521,7 @@ pub(crate) fn preprocess_stage_papers(
                     false,
                     true,
                     Some(stop_words),
+                    true,
                 ))
             } else {
                 None
@@ -531,6 +532,7 @@ pub(crate) fn preprocess_stage_papers(
                     false,
                     true,
                     Some(venue_stop_words),
+                    true,
                 ))
             } else {
                 None
@@ -541,6 +543,7 @@ pub(crate) fn preprocess_stage_papers(
                     false,
                     true,
                     Some(venue_stop_words),
+                    true,
                 ))
             } else {
                 None

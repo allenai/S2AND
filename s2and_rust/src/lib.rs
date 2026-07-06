@@ -31,8 +31,7 @@ mod text_compat;
 
 use arrow_batch_lookup::IndexedArrowReadStats;
 use constraints::{
-    first_names_name_compatible, lasts_equivalent_for_constraint, name_tuple_contains,
-    same_prefix_tokens,
+    first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
 };
 use features::*;
 pub(crate) use ingest_dataset::*;

@@ -22,14 +22,16 @@ pub(crate) fn lasts_equivalent_for_constraint(l1: &str, l2: &str) -> bool {
 pub(crate) fn same_prefix_tokens(a: &str, b: &str) -> bool {
     let mut ita = a.split_whitespace();
     let mut itb = b.split_whitespace();
+    let mut saw_pair = false;
     loop {
         match (ita.next(), itb.next()) {
             (Some(x), Some(y)) => {
+                saw_pair = true;
                 if !(x.starts_with(y) || y.starts_with(x)) {
                     return false;
                 }
             }
-            _ => return true,
+            _ => return saw_pair,
         }
     }
 }
@@ -60,6 +62,10 @@ pub(crate) fn first_names_name_compatible(
     first_2: &str,
     name_tuples: &HashMap<String, HashSet<String>>,
 ) -> bool {
+    if first_1.split_whitespace().next().is_none() || first_2.split_whitespace().next().is_none() {
+        // Missing first-name evidence is unknown, not an incompatibility signal.
+        return true;
+    }
     if same_prefix_tokens(first_1, first_2) {
         return true;
     }
@@ -85,5 +91,12 @@ mod tests {
             "william",
             &name_tuples
         ));
+    }
+
+    #[test]
+    fn empty_prefix_tokens_are_not_positive_evidence() {
+        assert!(!same_prefix_tokens("", "alice"));
+        assert!(!same_prefix_tokens("", ""));
+        assert!(first_names_name_compatible("", "alice", &HashMap::new()));
     }
 }

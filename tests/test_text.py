@@ -21,6 +21,7 @@ from s2and.text import (
     equal,
     equal_initial,
     equal_middle,
+    first_names_name_compatible,
     get_text_ngrams,
     get_text_ngrams_words,
     jaccard,
@@ -30,6 +31,7 @@ from s2and.text import (
     normalize_orcid_compact,
     normalize_text,
     reconcile_detected_languages,
+    same_prefix_tokens,
     split_first_middle_hyphen_aware,
 )
 
@@ -61,6 +63,11 @@ class TestClusterer(unittest.TestCase):
         assert split_first_middle_hyphen_aware("Amin-ul-Haq", None) == ("amin ul haq", "")
         assert split_first_middle_hyphen_aware("Arif\u2010ullah", None) == ("arif ullah", "")
         assert split_first_middle_hyphen_aware("Hua\uff0dli", None) == ("hua li", "")
+
+    def test_split_first_middle_preserves_md_as_given_name(self):
+        assert split_first_middle_hyphen_aware("Md Karim", None) == ("md", "karim")
+        assert split_first_middle_hyphen_aware("Md", None) == ("md", "")
+        assert split_first_middle_hyphen_aware("Dr Md Karim", None) == ("md", "karim")
 
     def test_name_similarity_features(self):
         assert [NUMPY_NAN] * 4 == name_text_features("", cast(Any, None))
@@ -176,17 +183,25 @@ class TestClusterer(unittest.TestCase):
         assert email_prefix_suffix("a@b@c") == ("ab", "c")
 
     def test_get_text_ngrams_short_token_filter_decoupled_from_stopwords(self):
-        # The short-token (len<=2) filter now applies regardless of stopwords,
-        # so reference-author ngrams (stopwords=None) drop "li"/"wu" like
-        # title/venue ngrams do.
+        # Reference-author ngrams pass stopwords=None but still drop short tokens.
         with_none = get_text_ngrams("li wu abcd", stopwords=None)
         assert "li" not in with_none
         assert "ab" in with_none
         # With stopwords None vs an (empty) set the result is now identical:
         # the two filters are independent.
         assert with_none == get_text_ngrams("li wu abcd", stopwords=set())
+        # Coauthor ngrams opt out so short romanized names still contribute.
+        coauthor_style = get_text_ngrams("li wu abcd", stopwords=None, drop_short_tokens=False)
+        assert "li" in coauthor_style
+        assert "wu" in coauthor_style
+        assert "ab" in coauthor_style
         # Providing real stopwords still removes those words too.
         assert "ab" not in get_text_ngrams("abcd efgh", stopwords={"abcd"})
+
+    def test_same_prefix_tokens_empty_is_not_positive_evidence(self):
+        assert not same_prefix_tokens("", "alice")
+        assert not same_prefix_tokens("", "")
+        assert first_names_name_compatible("", "alice", set()) is True
 
     def test_equal_initial(self):
         assert np.isnan(equal_initial(None, None))
@@ -285,7 +300,8 @@ def test_fasttext_skip_overrides_cached_model():
     assert text_module_any._FASTTEXT_MODEL is None
 
 
-def test_fasttext_skip_env_prevents_loading(monkeypatch):
+@pytest.mark.parametrize("skip_value", ["1", " 1 ", "TRUE ", " yes"])
+def test_fasttext_skip_env_prevents_loading(monkeypatch, skip_value):
     import s2and.text as text_module
 
     text_module_any = cast(Any, text_module)
@@ -295,7 +311,7 @@ def test_fasttext_skip_env_prevents_loading(monkeypatch):
         load_calls["count"] += 1
         return object()
 
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
+    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", skip_value)
     monkeypatch.setattr(text_module.fasttext, "load_model", _fake_load_model)
     monkeypatch.setattr(text_module, "cached_path", lambda path: path)
     text_module_any.set_fasttext_loading_enabled(True)

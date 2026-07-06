@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 
 from s2and import feature_port
-from s2and.featurizer import _single_pair_featurize
+from s2and.data import ANDData
+from s2and.featurizer import FeaturizationInfo, _single_pair_featurize
 from s2and.subblocking import make_subblocks
-from tests.helpers import build_dummy_dataset, equalish
+from tests.helpers import build_dummy_dataset, equalish, tiny_name_counts
 
 if not feature_port.rust_featurizer_available():
     raise pytest.skip.Exception("s2and_rust featurizer API is unavailable", allow_module_level=True)
@@ -52,6 +53,79 @@ def _sample_pairs(signature_ids: list[str], limit: int = 8) -> list[tuple[str, s
         if len(pairs) >= limit:
             break
     return pairs
+
+
+def _short_coauthor_dataset(name: str, backend: str) -> ANDData:
+    signatures = {
+        "s1": {
+            "author_info": {
+                "first": "Alice",
+                "middle": "",
+                "last": "Smith",
+                "suffix": None,
+                "position": 0,
+                "email": None,
+                "affiliations": [],
+                "block": "a smith",
+            },
+            "signature_id": "s1",
+            "paper_id": 1,
+        },
+        "s2": {
+            "author_info": {
+                "first": "Alice",
+                "middle": "",
+                "last": "Smith",
+                "suffix": None,
+                "position": 0,
+                "email": None,
+                "affiliations": [],
+                "block": "a smith",
+            },
+            "signature_id": "s2",
+            "paper_id": 2,
+        },
+    }
+    papers = {
+        "1": {
+            "paper_id": 1,
+            "title": "Short coauthor parity study",
+            "abstract": "",
+            "journal_name": "",
+            "venue": "",
+            "year": 2024,
+            "authors": [
+                {"position": 0, "author_name": "Alice Smith"},
+                {"position": 1, "author_name": "Li"},
+            ],
+            "references": [],
+        },
+        "2": {
+            "paper_id": 2,
+            "title": "Short coauthor parity followup",
+            "abstract": "",
+            "journal_name": "",
+            "venue": "",
+            "year": 2025,
+            "authors": [
+                {"position": 0, "author_name": "Alice Smith"},
+                {"position": 1, "author_name": "Li"},
+            ],
+            "references": [],
+        },
+    }
+    with _temporary_env("S2AND_BACKEND", backend):
+        return ANDData(
+            signatures,
+            papers,
+            clusters={},
+            name=name,
+            mode="inference",
+            load_name_counts=tiny_name_counts(),
+            preprocess=True,
+            n_jobs=1,
+            compute_reference_features=False,
+        )
 
 
 def test_signature_preprocess_dataset_rust_defers_signature_fields():
@@ -129,6 +203,35 @@ def test_signature_preprocess_lazy_materialization_ngrams_match_python():
         signature_rust = dataset_rust.signatures[signature_id]
         assert signature_python.author_info_affiliations_n_grams == signature_rust.author_info_affiliations_n_grams
         assert signature_python.author_info_coauthor_n_grams == signature_rust.author_info_coauthor_n_grams
+
+
+def test_short_coauthor_tokens_match_python_and_rust_featurizers():
+    dataset_python = _short_coauthor_dataset("short_coauthor_python", "python")
+    python_features, _ = _single_pair_featurize(("s1", "s2"), dataset=dataset_python)
+    coauthor_similarity_idx = FeaturizationInfo().feature_group_to_index["coauthor_similarity"][1]
+
+    python_coauthor_ngrams = dataset_python.signatures["s1"].author_info_coauthor_n_grams
+    assert python_coauthor_ngrams is not None
+    assert "li" in python_coauthor_ngrams
+    assert python_features[coauthor_similarity_idx] == 1.0
+
+    dataset_rust = _short_coauthor_dataset("short_coauthor_rust", "rust")
+    rust_featurizer = feature_port._get_rust_featurizer(dataset_rust)  # noqa: SLF001
+    rust_signature_id_to_index = {
+        str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
+    }
+    rust_features = np.asarray(
+        rust_featurizer.featurize_pairs_matrix_indexed(
+            [(rust_signature_id_to_index["s1"], rust_signature_id_to_index["s2"])],
+            None,
+            getattr(dataset_rust, "n_jobs", 1),
+            np.nan,
+        ),
+        dtype=np.float64,
+    )[0]
+
+    assert equalish(python_features[coauthor_similarity_idx], rust_features[coauthor_similarity_idx])
+    assert rust_features[coauthor_similarity_idx] == 1.0
 
 
 def test_subblocking_handles_missing_signature_affiliation_ngrams():

@@ -75,7 +75,9 @@ Canonicalization Pipeline (target `canonical_v2`)
    outside this set.
 5. Transliterate with `text-unidecode`, lowercase, replace remaining non-letter/non-whitespace
    characters with spaces, and collapse repeated whitespace.
-6. Drop at most one leading `NAME_PREFIXES` token from the normalized first field.
+6. Drop at most one leading title-prefix token from the normalized first field.
+   `md` is retained as a common South Asian given-name abbreviation, not dropped as a
+   title prefix.
 7. Split first/middle after normalization:
    - If normalized first has no dash-bound group, keep the first token as first and spill later
      first tokens into middle ahead of existing middle tokens.
@@ -112,6 +114,8 @@ Truth table pinned by `tests/fixtures/canonical_name_examples.json`:
 | `yu` | `yusuf` | yes | short token is a prefix of longer token |
 | `john david` | `j f` | no | second aligned token mismatches |
 | `yu` | `wei` | no | no aligned prefix relation |
+| `` | `alice` | no | empty first is missing evidence |
+| `` | `` | no | missing evidence on both sides is still not compatibility |
 
 Fixture Metadata
 - `family` is a reviewer-facing category label.

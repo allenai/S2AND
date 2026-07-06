@@ -37,12 +37,13 @@ pub(crate) fn extract_string_vec_map(
 pub(crate) fn filter_text_for_char_ngrams(
     text: &str,
     stopwords: Option<&HashSet<String>>,
+    drop_short_tokens: bool,
 ) -> String {
-    let Some(stopwords_set) = stopwords else {
-        return text.to_string();
-    };
     text.split(' ')
-        .filter(|word| !stopwords_set.contains(*word) && py_len(word) > 2)
+        .filter(|word| {
+            (!drop_short_tokens || py_len(word) > 2)
+                && stopwords.map_or(true, |stopwords_set| !stopwords_set.contains(*word))
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -52,11 +53,12 @@ pub(crate) fn char_ngrams_counter_python_compat(
     use_unigrams: bool,
     use_bigrams: bool,
     stopwords: Option<&HashSet<String>>,
+    drop_short_tokens: bool,
 ) -> HashMap<String, usize> {
     if text.is_empty() {
         return HashMap::new();
     }
-    let filtered_text = filter_text_for_char_ngrams(text, stopwords);
+    let filtered_text = filter_text_for_char_ngrams(text, stopwords, drop_short_tokens);
     if filtered_text.is_empty() {
         return HashMap::new();
     }
@@ -199,6 +201,23 @@ pub(crate) fn word_ngrams_counter(text: &str) -> HashMap<String, usize> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod char_ngram_tests {
+    use super::char_ngrams_counter_python_compat;
+
+    #[test]
+    fn explicit_short_token_filter_applies_without_stopwords() {
+        let filtered = char_ngrams_counter_python_compat("li wu abcd", false, true, None, true);
+        assert!(!filtered.contains_key("li"));
+        assert!(filtered.contains_key("ab"));
+
+        let unfiltered = char_ngrams_counter_python_compat("li wu abcd", false, true, None, false);
+        assert!(unfiltered.contains_key("li"));
+        assert!(unfiltered.contains_key("wu"));
+        assert!(unfiltered.contains_key("ab"));
+    }
 }
 
 pub(crate) fn counter_jaccard_data(

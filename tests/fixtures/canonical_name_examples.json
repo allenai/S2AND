@@ -35,7 +35,7 @@
     "D7": {
       "status": "decided",
       "title": "Leading title prefixes dropped",
-      "description": "A single leading NAME_PREFIXES token (dr, prof, ...) is dropped from first, as today. A prefix-only first therefore canonicalizes to empty, and its first-dependent count keys are null per D6 (matches current field behavior)."
+      "description": "A single leading title prefix token (dr, prof, ...) is dropped from first, as today. The common South Asian given-name abbreviation 'md' is not a title prefix and is retained. A prefix-only first therefore canonicalizes to empty, and its first-dependent count keys are null per D6 (matches current field behavior)."
     },
     "D8": {
       "status": "decided",
@@ -150,6 +150,18 @@
         "b": "wei",
         "compatible": false,
         "notes": "No aligned prefix relation."
+      },
+      {
+        "a": "",
+        "b": "alice",
+        "compatible": false,
+        "notes": "An empty first field is missing evidence, not positive prefix evidence."
+      },
+      {
+        "a": "",
+        "b": "",
+        "compatible": false,
+        "notes": "Two empty first fields are still missing evidence, not compare-time compatibility."
       }
     ]
   },
@@ -2862,6 +2874,117 @@
         "D7"
       ],
       "notes": ""
+    },
+    {
+      "id": "md-given-abbrev",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Md Karim",
+        "middle": "",
+        "last": "Ahmed"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "karim",
+        "last": "ahmed",
+        "count_keys": {
+          "first": "md",
+          "last": "ahmed",
+          "first_last": "md ahmed",
+          "last_first_initial": "ahmed m"
+        }
+      },
+      "legacy": {
+        "first_normalized": "md",
+        "first_normalized_without_apostrophe": "md",
+        "middle_normalized_without_apostrophe": "karim",
+        "last_normalized": "ahmed",
+        "count_keys": {
+          "first": "md",
+          "last": "ahmed",
+          "first_last": "md ahmed",
+          "last_first_initial": "ahmed m"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "Md is retained as a given-name abbreviation, not dropped as a title prefix."
+    },
+    {
+      "id": "md-only",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Md",
+        "middle": "",
+        "last": "Rahman"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "",
+        "last": "rahman",
+        "count_keys": {
+          "first": "md",
+          "last": "rahman",
+          "first_last": "md rahman",
+          "last_first_initial": "rahman m"
+        }
+      },
+      "legacy": {
+        "first_normalized": "md",
+        "first_normalized_without_apostrophe": "md",
+        "middle_normalized_without_apostrophe": "",
+        "last_normalized": "rahman",
+        "count_keys": {
+          "first": "md",
+          "last": "rahman",
+          "first_last": "md rahman",
+          "last_first_initial": "rahman m"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "A bare Md first name is retained rather than canonicalized to empty."
+    },
+    {
+      "id": "dr-md-given-abbrev",
+      "family": "prefix",
+      "equivalence_group": null,
+      "input": {
+        "first": "Dr Md Karim",
+        "middle": "",
+        "last": "Ahmed"
+      },
+      "canonical": {
+        "first": "md",
+        "middle": "karim",
+        "last": "ahmed",
+        "count_keys": {
+          "first": "md",
+          "last": "ahmed",
+          "first_last": "md ahmed",
+          "last_first_initial": "ahmed m"
+        }
+      },
+      "legacy": {
+        "first_normalized": "md",
+        "first_normalized_without_apostrophe": "md",
+        "middle_normalized_without_apostrophe": "karim",
+        "last_normalized": "ahmed",
+        "count_keys": {
+          "first": "md",
+          "last": "ahmed",
+          "first_last": "md ahmed",
+          "last_first_initial": "ahmed m"
+        }
+      },
+      "decisions": [
+        "D7"
+      ],
+      "notes": "The leading title is dropped, then Md is retained as the first-name token."
     },
     {
       "id": "prefix-only",

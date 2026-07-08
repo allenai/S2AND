@@ -47,10 +47,19 @@ from s2and.incremental_linking.runtime import (
 from s2and.incremental_linking.runtime import (
     compute_candidate_batch_pairwise_model_and_aggregate_stats as _pairwise_model_stats_impl,
 )
-from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset
+from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, import_s2and_rust
 from tests.promoted_linking_helpers import build_tiny_promoted_booster
 
 runtime_module: Any = runtime_module
+
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
+    required_module_attrs=("RustLightGBMBooster",),
+    prefer_site_packages=True,
+)
+requires_rust_lightgbm = pytest.mark.skipif(
+    not _HAS_RUST_LIGHTGBM,
+    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+)
 
 
 def assemble_linker_feature_matrix(*args: Any, **kwargs: Any) -> Any:
@@ -642,7 +651,7 @@ def _retrieval_batch(
 
 def _empty_feature_matrix(candidate_batch: LinkerCandidateBatch) -> LinkerFeatureMatrix:
     return LinkerFeatureMatrix(
-        matrix=np.empty((candidate_batch.row_count, len(promoted_linker_feature_columns())), dtype=np.float32),
+        matrix=np.zeros((candidate_batch.row_count, len(promoted_linker_feature_columns())), dtype=np.float32),
         feature_columns=promoted_linker_feature_columns(),
         candidate_batch=candidate_batch,
         pairwise_stats=_static_pairwise_stats(candidate_batch.row_count),
@@ -1259,6 +1268,7 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     )
 
 
+@requires_rust_lightgbm
 def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
     save_incremental_linking_artifact(
@@ -1297,6 +1307,7 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
     assert result.decisions[1].component_key == "c_single"
 
 
+@requires_rust_lightgbm
 def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
     save_incremental_linking_artifact(

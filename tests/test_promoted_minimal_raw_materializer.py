@@ -34,7 +34,7 @@ from scripts.production.model.linker_train_calibrate_eval import (
     _score_candidate_summaries_with_frozen_rust_policy,
     _write_minimal_raw_partial_frame,
 )
-from tests.helpers import patch_tiny_name_counts_loader
+from tests.helpers import import_s2and_rust, patch_tiny_name_counts_loader
 
 
 class _ConstraintClusterer:
@@ -763,7 +763,12 @@ def test_minimal_raw_query_first_prefix_uses_full_author_before_masked_view() ->
 
 
 def test_minimal_raw_retrieval_score_uses_frozen_rust_policy() -> None:
-    pytest.importorskip("s2and_rust")
+    rust_available, rust_payload = import_s2and_rust(
+        required_module_attrs=("RustHybridCentroidRetriever",),
+        prefer_site_packages=True,
+    )
+    if not rust_available:
+        raise pytest.skip.Exception(f"RustHybridCentroidRetriever unavailable: {rust_payload!r}")
     query = retrieval.QueryFeatures(
         first="john",
         middle="",

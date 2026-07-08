@@ -8,11 +8,17 @@ import pytest
 from s2and.incremental_linking.artifact import load_incremental_linking_artifact
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.model import DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
+from tests.helpers import import_s2and_rust
 
-s2and_rust = pytest.importorskip(
-    "s2and_rust",
-    reason="default incremental linker artifact requires the Rust extension",
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
+    required_module_attrs=("RustLightGBMBooster",),
+    prefer_site_packages=True,
 )
+if not _HAS_RUST_LIGHTGBM:
+    raise pytest.skip.Exception(
+        f"default incremental linker artifact requires RustLightGBMBooster: {_RUST_LIGHTGBM_PAYLOAD!r}",
+        allow_module_level=True,
+    )
 
 
 def test_default_incremental_linker_artifact_loads_with_current_schema() -> None:

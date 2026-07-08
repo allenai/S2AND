@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -12,10 +13,19 @@ from s2and.incremental_linking import (
 )
 from s2and.incremental_linking.query_adapter import mask_query_features
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
-from tests.helpers import build_cluster_summary, build_query_features
+from tests.helpers import build_cluster_summary, build_query_features, import_s2and_rust
 from tests.linker_row_feature_reference import build_promoted_non_pairwise_row_features_python_reference
 
-s2and_rust = pytest.importorskip("s2and_rust", reason="s2and_rust is unavailable")
+_HAS_RUST_RETRIEVER, _RUST_RETRIEVER_PAYLOAD = import_s2and_rust(
+    required_module_attrs=("RustHybridCentroidRetriever",),
+    prefer_site_packages=True,
+)
+if not _HAS_RUST_RETRIEVER:
+    raise pytest.skip.Exception(
+        f"s2and_rust RustHybridCentroidRetriever is unavailable: {_RUST_RETRIEVER_PAYLOAD!r}",
+        allow_module_level=True,
+    )
+s2and_rust = cast(Any, _RUST_RETRIEVER_PAYLOAD)
 
 
 def test_rust_retrieval_public_exports_are_available() -> None:

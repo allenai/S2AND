@@ -5,6 +5,7 @@ from typing import Any, cast
 import pytest
 
 import s2and.runtime as rust_capabilities
+from tests.helpers import import_s2and_rust
 
 # A rust extension version that satisfies the current minimum. Derived from the
 # guard itself so these fixtures track the lockstep version bump instead of going
@@ -313,7 +314,13 @@ def test_detect_rust_runtime_capabilities_requires_pair_plan_orcid_signal_marker
 
 
 def test_rust_get_build_info_contract():
-    s2and_rust = pytest.importorskip("s2and_rust")
+    rust_available, rust_payload = import_s2and_rust(
+        required_module_attrs=("get_build_info",),
+        prefer_site_packages=True,
+    )
+    if not rust_available:
+        raise pytest.skip.Exception(f"s2and_rust.get_build_info unavailable: {rust_payload!r}")
+    s2and_rust = rust_payload
 
     get_build_info = getattr(s2and_rust, "get_build_info", None)
     if not callable(get_build_info):

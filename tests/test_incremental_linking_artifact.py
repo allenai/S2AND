@@ -20,7 +20,17 @@ from s2and.incremental_linking.contracts import (
 )
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
+from tests.helpers import import_s2and_rust
 from tests.promoted_linking_helpers import build_tiny_promoted_booster
+
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
+    required_module_attrs=("RustLightGBMBooster",),
+    prefer_site_packages=True,
+)
+requires_rust_lightgbm = pytest.mark.skipif(
+    not _HAS_RUST_LIGHTGBM,
+    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+)
 
 
 def _logistic_gate_config(link: bool = True) -> dict[str, object]:
@@ -33,6 +43,7 @@ def _logistic_gate_config(link: bool = True) -> dict[str, object]:
     )
 
 
+@requires_rust_lightgbm
 def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
     metadata = save_incremental_linking_artifact(

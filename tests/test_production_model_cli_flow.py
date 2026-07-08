@@ -12,6 +12,16 @@ import pytest
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
 from s2and.production_model import load_production_model
+from tests.helpers import import_s2and_rust
+
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
+    required_module_attrs=("RustLightGBMBooster",),
+    prefer_site_packages=True,
+)
+requires_rust_lightgbm = pytest.mark.skipif(
+    not _HAS_RUST_LIGHTGBM,
+    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+)
 
 
 def _run_cli(args: list[str], *, repo_root: Path, timeout: int = 300) -> subprocess.CompletedProcess[str]:
@@ -231,6 +241,7 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
     )
 
 
+@requires_rust_lightgbm
 def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     bundle_dir = tmp_path / "production_model_v9.8"

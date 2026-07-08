@@ -67,9 +67,13 @@ def equalish(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-3) -
 def import_s2and_rust(
     *,
     required_method: str | None = None,
+    required_module_attrs: tuple[str, ...] = (),
     prefer_site_packages: bool = False,
 ) -> tuple[bool, Any | Exception | None]:
     def _has_required_api(module: Any) -> bool:
+        for attr_name in required_module_attrs:
+            if not hasattr(module, attr_name):
+                return False
         rust_featurizer = getattr(module, "RustFeaturizer", None)
         if rust_featurizer is None:
             return False
@@ -84,7 +88,7 @@ def import_s2and_rust(
 
         if _has_required_api(s2and_rust):
             return True, s2and_rust
-        raise AttributeError("s2and_rust imported, but required RustFeaturizer API is unavailable")
+        raise AttributeError("s2and_rust imported, but required Rust runtime API is unavailable")
     except Exception as err:
         if not prefer_site_packages:
             return False, err
@@ -101,7 +105,9 @@ def import_s2and_rust(
             sys.modules["s2and_rust"] = module
             spec.loader.exec_module(module)
             if not _has_required_api(module):
-                raise AttributeError("s2and_rust imported from site-packages, but required API is unavailable")
+                raise AttributeError(
+                    "s2and_rust imported from site-packages, but required Rust runtime API is unavailable"
+                )
             return True, module
         except Exception as fallback_err:
             return False, fallback_err

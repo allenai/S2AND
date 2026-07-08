@@ -40,7 +40,11 @@ if _RUST_FEATURIZER is None:
     _MISSING_RUST_RAW_APIS.append("RustFeaturizer")
 elif not hasattr(_RUST_FEATURIZER, "from_arrow_paths"):
     _MISSING_RUST_RAW_APIS.append("RustFeaturizer.from_arrow_paths")
-assert not _MISSING_RUST_RAW_APIS, f"s2and_rust is missing required raw Arrow APIs: {_MISSING_RUST_RAW_APIS}"
+if _MISSING_RUST_RAW_APIS:
+    _missing_rust_raw_api_message = f"s2and_rust is missing required raw Arrow APIs: {_MISSING_RUST_RAW_APIS}"
+    if os.environ.get("S2AND_BACKEND") == "python":
+        raise pytest.skip.Exception(_missing_rust_raw_api_message, allow_module_level=True)
+    raise AssertionError(_missing_rust_raw_api_message)
 
 _FNV64_OFFSET = 14695981039346656037
 _FNV64_PRIME = 1099511628211

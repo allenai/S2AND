@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import import_s2and_rust
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = (
     REPO_ROOT / "docs",
@@ -58,9 +60,7 @@ def test_removed_rust_escape_hatches_do_not_reappear() -> None:
 def test_raw_arrow_runtime_does_not_accept_query_compatibility_args() -> None:
     from s2and.incremental_linking import runtime as runtime_module
 
-    parameters = inspect.signature(
-        runtime_module.predict_incremental_link_or_abstain_from_raw_arrow_paths
-    ).parameters
+    parameters = inspect.signature(runtime_module.predict_incremental_link_or_abstain_from_raw_arrow_paths).parameters
 
     assert "query_signature_ids" not in parameters
     assert "query_view" not in parameters
@@ -78,7 +78,13 @@ def test_raw_planner_direct_constructor_has_no_call_sites() -> None:
 
 
 def test_raw_planner_has_no_python_direct_constructor() -> None:
-    s2and_rust = pytest.importorskip("s2and_rust", reason="s2and_rust is unavailable")
+    rust_available, rust_payload = import_s2and_rust(
+        required_module_attrs=("RawBlockQueryCandidatePlanner",),
+        prefer_site_packages=True,
+    )
+    if not rust_available:
+        raise pytest.skip.Exception(f"RawBlockQueryCandidatePlanner unavailable: {rust_payload!r}")
+    s2and_rust = rust_payload
     raw_planner_cls = getattr(s2and_rust, "RawBlock" + "QueryCandidatePlanner")
 
     with pytest.raises(TypeError, match="No constructor defined"):

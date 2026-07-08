@@ -23,6 +23,14 @@ from tests.helpers import import_s2and_rust, tiny_name_counts
 
 _NATIVE_BUNDLE_PATH = "s2and/data/production_model_v1.21"
 _LEGACY_PICKLE_PATH = "s2and/data/production_model_v1.2.pickle"
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
+    required_module_attrs=("RustLightGBMBooster",),
+    prefer_site_packages=True,
+)
+requires_rust_lightgbm = pytest.mark.skipif(
+    not _HAS_RUST_LIGHTGBM,
+    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+)
 
 
 def _load_dummy_inference_dataset(name: str) -> ANDData:
@@ -57,6 +65,7 @@ def _predict_dummy_block(clusterer, *, batching_threshold: int | None) -> dict[s
     return predictions
 
 
+@requires_rust_lightgbm
 def test_native_production_bundle_loads_as_mutable_clusterer() -> None:
     clusterer = load_production_model(_NATIVE_BUNDLE_PATH)
 
@@ -75,6 +84,7 @@ def test_native_production_bundle_loads_as_mutable_clusterer() -> None:
     assert clusterer.cluster_model.eps == 0.5
 
 
+@requires_rust_lightgbm
 def test_native_lightgbm_set_params_rejects_unknown_params() -> None:
     clusterer = load_production_model(_NATIVE_BUNDLE_PATH)
 
@@ -82,6 +92,7 @@ def test_native_lightgbm_set_params_rejects_unknown_params() -> None:
         clusterer.classifier.set_params(learning_rate=0.1)
 
 
+@requires_rust_lightgbm
 def test_native_lightgbm_deepcopy_does_not_require_model_path(tmp_path: Path) -> None:
     clusterer = load_production_model(_NATIVE_BUNDLE_PATH)
     classifier = clusterer.classifier
@@ -94,6 +105,7 @@ def test_native_lightgbm_deepcopy_does_not_require_model_path(tmp_path: Path) ->
     assert copied.model_path == classifier.model_path
 
 
+@requires_rust_lightgbm
 def test_native_pairwise_models_match_v12_pickle_fixture() -> None:
     native_clusterer = load_production_model(_NATIVE_BUNDLE_PATH)
     legacy_clusterer = load_pickle_with_verified_label_encoder_compat(_LEGACY_PICKLE_PATH)["clusterer"]
@@ -122,6 +134,7 @@ def test_native_pairwise_models_match_v12_pickle_fixture() -> None:
     )
 
 
+@requires_rust_lightgbm
 def test_native_clusterer_predict_matches_v12_pickle_python(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("S2AND_BACKEND", "python")
 
@@ -139,6 +152,7 @@ def test_native_clusterer_predict_matches_v12_pickle_python(monkeypatch: pytest.
         )
 
 
+@requires_rust_lightgbm
 def test_native_clusterer_predict_rust_requires_arrow_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     rust_available, rust_error = import_s2and_rust(required_method="from_arrow_paths")
     if not rust_available:
@@ -153,6 +167,7 @@ def test_native_clusterer_predict_rust_requires_arrow_paths(monkeypatch: pytest.
         _predict_dummy_block(native_clusterer, batching_threshold=None)
 
 
+@requires_rust_lightgbm
 def test_native_clusterer_predict_auto_without_arrow_paths_uses_python(monkeypatch: pytest.MonkeyPatch) -> None:
     rust_available, rust_error = import_s2and_rust(required_method="from_arrow_paths")
     if not rust_available:
@@ -173,6 +188,7 @@ def test_native_clusterer_predict_auto_without_arrow_paths_uses_python(monkeypat
     assert _predict_dummy_block(native_clusterer, batching_threshold=None) == expected
 
 
+@requires_rust_lightgbm
 def test_native_clusterer_runtime_config_matches_v12_pickle() -> None:
     native_clusterer = load_production_model(_NATIVE_BUNDLE_PATH)
     legacy_clusterer = load_pickle_with_verified_label_encoder_compat(_LEGACY_PICKLE_PATH)["clusterer"]
@@ -231,6 +247,7 @@ def test_production_runtime_cluster_eps_policy_is_version_scoped(tmp_path: Path)
     )
 
 
+@requires_rust_lightgbm
 def test_pairwise_stage_finalizes_into_loadable_production_bundle(tmp_path: Path) -> None:
     source_bundle = Path(_NATIVE_BUNDLE_PATH)
     source_clusterer = load_production_model(source_bundle)
@@ -279,6 +296,7 @@ def test_pairwise_stage_finalizes_into_loadable_production_bundle(tmp_path: Path
         )
 
 
+@requires_rust_lightgbm
 def test_finalize_production_bundle_rejects_invalid_incremental_linker_artifact(tmp_path: Path) -> None:
     source_bundle = Path(_NATIVE_BUNDLE_PATH)
     corrupt_linker = tmp_path / "corrupt_incremental_linker"

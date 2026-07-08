@@ -12,7 +12,7 @@ import pytest
 
 import scripts.eval_prod_models as eval_prod_models
 from s2and.incremental_linking.feature_block import write_name_counts_index
-from tests.helpers import patch_tiny_name_counts_loader
+from tests.helpers import import_s2and_rust, patch_tiny_name_counts_loader
 
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 
@@ -640,7 +640,12 @@ def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
 
 @pytest.mark.requires_lfs
 def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
-    pytest.importorskip("s2and_rust")
+    rust_available, rust_payload = import_s2and_rust(
+        required_module_attrs=("RustLightGBMBooster",),
+        prefer_site_packages=True,
+    )
+    if not rust_available:
+        raise pytest.skip.Exception(f"RustLightGBMBooster unavailable: {rust_payload!r}")
 
     from s2and.production_model import load_production_model
 

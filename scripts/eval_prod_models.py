@@ -201,8 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--compare-train-modes",
         action="store_true",
         help=(
-            "Run the qian-only pairwise training parity harness: ANDData/Python, "
-            "and Arrow/Rust from_arrow_paths."
+            "Run the qian-only pairwise training parity harness: ANDData/Python, " "and Arrow/Rust from_arrow_paths."
         ),
     )
     parser.add_argument(

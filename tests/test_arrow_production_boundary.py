@@ -22,10 +22,6 @@ class ArrowOnlyRustFeaturizer:
         cls.calls.append((args, kwargs))
         return cls()
 
-    @classmethod
-    def from_dataset(cls, *_args: Any, **_kwargs: Any) -> ArrowOnlyRustFeaturizer:
-        raise AssertionError("production Arrow build must not call RustFeaturizer.from_dataset")
-
     def signature_ids(self) -> list[str]:
         return []
 

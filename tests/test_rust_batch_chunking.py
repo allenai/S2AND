@@ -119,7 +119,7 @@ def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
     captured_fixed: list[int] = []
     fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()))
 
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(feature_port, "s2and_rust", object())
     monkeypatch.setattr(
         feature_port,
@@ -172,7 +172,7 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
     fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()), call_sizes=call_sizes)
     pairs = _build_pairs(5)
 
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(
         memory_budget,
         "compute_rust_batch_chunk_plan",
@@ -224,7 +224,7 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
     fake_rust_featurizer = FakeRustFeaturizer()
     pairs = _build_pairs(5)
 
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(
         memory_budget,
         "compute_rust_batch_chunk_plan",
@@ -282,7 +282,7 @@ def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
     string_pairs = _build_pairs(5)
     pairs = [(int(left), int(right), label) for left, right, label in string_pairs]
 
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(
         memory_budget,
         "compute_rust_batch_chunk_plan",
@@ -323,7 +323,7 @@ def test_rust_batch_uses_same_process_featurizer_without_cache_flag(monkeypatch)
     fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()))
     pairs = [("0", "1", 0.0)]
 
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(
         memory_budget,
         "compute_rust_batch_chunk_plan",
@@ -368,7 +368,7 @@ def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch):
         total_ram_bytes=total_ram_bytes,
     )
 
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None: True)
+    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
     monkeypatch.setattr(feature_port, "s2and_rust", object())
     monkeypatch.setattr(
         feature_port,

@@ -240,8 +240,7 @@ class TestClusterer(unittest.TestCase):
         # Reliability now requires fastText AND cld2 to agree. The suite disables
         # fastText (see conftest), so the two detectors cannot agree and
         # detection collapses to unreliable / "un" regardless of the text. (The
-        # real-model agreement path is covered by the reconcile unit tests below
-        # and the fastText-sensitive parity test in test_rust_from_dataset_contract.)
+        # real-model agreement path is covered by the reconcile unit tests below.)
         text = "Genetic behavior of resistance to the beet cyst as a way to enchant"
         is_reliable, is_english, predicted_language = detect_language(text)
         assert is_reliable is False

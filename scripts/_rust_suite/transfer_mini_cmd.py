@@ -92,6 +92,9 @@ def _build_workload(
     n_iter: int,
     random_seed: int,
     train_pairs_size_mode: str,
+    ingest: str = "auto",
+    data_dir: str = "",
+    prediction_arrow_data_dir: str = "",
 ) -> dict[str, Any]:
     return {
         "datasets": list(datasets),
@@ -101,11 +104,34 @@ def _build_workload(
         "n_iter": int(n_iter),
         "random_seed": int(random_seed),
         "train_pairs_size_mode": str(train_pairs_size_mode),
+        "ingest": str(ingest),
+        "data_dir": str(data_dir),
+        "prediction_arrow_data_dir": str(prediction_arrow_data_dir),
     }
 
 
 def _workload_id(workload: dict[str, Any]) -> str:
     return canonical_sha256(workload)
+
+
+def _resolve_ingest(ingest: str, backend: str) -> str:
+    """Resolve the ingestion mode for one run.
+
+    Rust featurization requires Arrow ingestion (RustFeaturizer is built
+    exclusively through from_arrow_paths); JSON ingestion featurizes in
+    Python.
+    """
+
+    if ingest == "auto":
+        return "arrow" if backend == "rust" else "json"
+    if ingest == "arrow" and backend != "rust":
+        raise ValueError("--ingest arrow requires --backend rust (featurization runs via from_arrow_paths)")
+    if ingest == "json" and backend == "rust":
+        raise ValueError(
+            "--ingest json is Python-only: Rust featurization requires a converted Arrow bundle "
+            "(use --ingest arrow, or --backend python for JSON ingestion)"
+        )
+    return ingest
 
 
 def _resolve_workload(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
@@ -120,6 +146,7 @@ def _resolve_workload(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
     n_iter = int(args.n_iter) if args.n_iter is not None else int(cast(int, preset_defaults["n_iter"]))
     random_seed = int(args.random_seed) if args.random_seed is not None else 1
     train_pairs_size_mode = str(args.train_pairs_size_mode) if args.train_pairs_size_mode is not None else "scaled"
+    ingest = _resolve_ingest(str(args.ingest), str(args.backend)) if args.mode == "single" else str(args.ingest)
     workload = _build_workload(
         datasets=datasets,
         target=target,
@@ -128,6 +155,9 @@ def _resolve_workload(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
         n_iter=n_iter,
         random_seed=random_seed,
         train_pairs_size_mode=train_pairs_size_mode,
+        ingest=ingest,
+        data_dir=str(args.data_dir),
+        prediction_arrow_data_dir=str(args.prediction_arrow_data_dir),
     )
     return workload, _workload_id(workload)
 
@@ -271,6 +301,57 @@ def _resolve_dataset_file(
     return None
 
 
+def _resolve_arrow_dataset_paths(
+    data_dir: str,
+    dataset_name: str,
+    *,
+    require_clusters: bool = True,
+) -> tuple[dict[str, str], str | None]:
+    """Resolve a converted dataset's Arrow manifest paths for arrow ingestion.
+
+    Manifest path values vary by converter vintage (dataset-dir-relative or
+    repo-root-relative), so try both anchors plus the data root.
+    """
+
+    dataset_root = Path(data_dir) / dataset_name
+    manifest_path = dataset_root / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Arrow dataset manifest is missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw_paths = manifest.get("paths")
+    if not isinstance(raw_paths, dict) or not raw_paths:
+        raise ValueError(f"Arrow dataset manifest has no paths mapping: {manifest_path}")
+    resolved: dict[str, str] = {}
+    for key, value in raw_paths.items():
+        candidate_path = Path(str(value))
+        if candidate_path.is_absolute():
+            candidates = [candidate_path]
+        else:
+            candidates = [
+                dataset_root / candidate_path,
+                Path(PROJECT_ROOT) / candidate_path,
+                Path(data_dir) / candidate_path,
+                # Manifests written before a bundle was relocated may carry
+                # stale roots; re-anchor by basename at the dataset/data root.
+                dataset_root / candidate_path.name,
+                Path(data_dir) / candidate_path.name,
+            ]
+        found = next((candidate for candidate in candidates if candidate.exists()), None)
+        if found is None:
+            raise FileNotFoundError(
+                f"Cannot resolve arrow manifest path {key}={value!r} for dataset {dataset_name}. Tried: "
+                + ", ".join(str(candidate) for candidate in candidates)
+            )
+        resolved[str(key)] = str(found.resolve())
+    clusters_path = resolved.pop("clusters", None)
+    if require_clusters and clusters_path is None:
+        raise FileNotFoundError(
+            f"Arrow dataset manifest for {dataset_name} has no clusters ground truth; "
+            "arrow ingest supports clustered training datasets only"
+        )
+    return resolved, clusters_path
+
+
 def _build_anddata_kwargs(
     *,
     data_dir: str,
@@ -352,7 +433,11 @@ def _single_run(
     workload_id: str,
     require_rust_release: bool,
     rust_cleanup_boundary: bool,
+    ingest: str = "auto",
+    data_dir: str = "",
+    prediction_arrow_data_dir: str = "",
 ) -> dict[str, Any]:
+    ingest = _resolve_ingest(str(ingest), str(backend))
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
     os.environ["S2AND_BACKEND"] = backend
 
@@ -373,7 +458,7 @@ def _single_run(
     from s2and.file_cache import cached_path
     from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
-    DATA_DIR = _resolve_data_dir()
+    DATA_DIR = data_dir or _resolve_data_dir()
     N_VAL_TEST_SIZE = 10000
 
     FEATURES_TO_USE = [
@@ -384,7 +469,6 @@ def _single_run(
         "venue_similarity",
         "year_diff",
         "title_similarity",
-        # "reference_features",  # matches internal script
         "misc_features",
         "name_counts",
         "embedding_similarity",
@@ -408,15 +492,19 @@ def _single_run(
 
     with ProcessTreeRSSMonitor(interval_seconds=0.05) as monitor:
         # ----- load name counts -----
+        # Arrow ingestion reads name counts in Rust from the name_counts_index
+        # sidecar; the Python-side pickle is not needed.
         t0 = time.perf_counter()
-        with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-            first_dict, last_dict, first_last_dict, last_first_initial_dict = pickle.load(f)
-        name_counts = {
-            "first_dict": first_dict,
-            "last_dict": last_dict,
-            "first_last_dict": first_last_dict,
-            "last_first_initial_dict": last_first_initial_dict,
-        }
+        name_counts: dict[str, Any] | None = None
+        if ingest != "arrow":
+            with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
+                first_dict, last_dict, first_last_dict, last_first_initial_dict = pickle.load(f)
+            name_counts = {
+                "first_dict": first_dict,
+                "last_dict": last_dict,
+                "first_last_dict": first_last_dict,
+                "last_first_initial_dict": last_first_initial_dict,
+            }
         stage_timings["name_counts_load_seconds"] = round(time.perf_counter() - t0, 3)
         _snapshot_stage_rss(stage_rss_gb, monitor, "name_counts_load")
 
@@ -429,19 +517,59 @@ def _single_run(
             print(f"  [{run_label}] Loading {dataset_name}...")
 
             t0 = time.perf_counter()
-            anddata_kwargs = _build_anddata_kwargs(
-                data_dir=DATA_DIR,
-                dataset_name=dataset_name,
-                n_jobs=n_jobs,
-                random_seed=random_seed,
-                n_train_pairs=n_train_pairs,
-                n_val_test_size=N_VAL_TEST_SIZE,
-                name_counts=name_counts,
-                train_pairs_size_mode=train_pairs_size_mode,
-            )
-            anddata = ANDData(**anddata_kwargs)
+            effective_train_pairs_size = _effective_train_pairs_size(n_train_pairs, train_pairs_size_mode)
+            if ingest == "arrow":
+                if dataset_name in PAIRWISE_ONLY_DATASETS:
+                    raise ValueError(
+                        f"dataset={dataset_name!r} is pairwise-only (fixed CSV pairs); "
+                        "arrow ingest supports clustered training datasets only"
+                    )
+                from s2and.arrow_training import build_training_anddata_from_arrow
+
+                arrow_paths, clusters_path = _resolve_arrow_dataset_paths(DATA_DIR, dataset_name, require_clusters=True)
+                if clusters_path is None:
+                    raise AssertionError("require_clusters=True should return a clusters path")
+                anddata = build_training_anddata_from_arrow(
+                    arrow_paths,
+                    dataset_name,
+                    clusters=clusters_path,
+                    mode="train",
+                    block_type=BLOCK_TYPE,
+                    train_pairs_size=effective_train_pairs_size,
+                    val_pairs_size=N_VAL_TEST_SIZE,
+                    test_pairs_size=N_VAL_TEST_SIZE,
+                    n_jobs=n_jobs,
+                    load_name_counts=False,
+                    preprocess=PREPROCESS,
+                    random_seed=random_seed,
+                    name_tuples="filtered",
+                )
+            else:
+                if name_counts is None:
+                    raise AssertionError("JSON ingest requires Python-side name counts")
+                anddata_kwargs = _build_anddata_kwargs(
+                    data_dir=DATA_DIR,
+                    dataset_name=dataset_name,
+                    n_jobs=n_jobs,
+                    random_seed=random_seed,
+                    n_train_pairs=n_train_pairs,
+                    n_val_test_size=N_VAL_TEST_SIZE,
+                    name_counts=name_counts,
+                    train_pairs_size_mode=train_pairs_size_mode,
+                )
+                anddata = ANDData(**anddata_kwargs)
+                if prediction_arrow_data_dir:
+                    # Rust production prediction (cluster_eval) requires explicit
+                    # dataset.arrow_paths; JSON-ingested runs borrow them from the
+                    # converted bundle so the eval stage rides identical artifacts.
+                    prediction_arrow_paths, _prediction_clusters = _resolve_arrow_dataset_paths(
+                        prediction_arrow_data_dir,
+                        dataset_name,
+                        require_clusters=False,
+                    )
+                    anddata.arrow_paths = prediction_arrow_paths
             dt["anddata_build_seconds"] = round(time.perf_counter() - t0, 3)
-            dt["anddata_train_pairs_size"] = int(anddata_kwargs["train_pairs_size"])
+            dt["anddata_train_pairs_size"] = int(effective_train_pairs_size)
             dt["rss_after_anddata_build_gb"] = round(monitor.sample_gb(), 3)
             print(f"  [{run_label}] {dataset_name} built in {_fmt(dt['anddata_build_seconds'])}s")
 
@@ -640,6 +768,8 @@ def _single_run(
     return {
         "run_label": run_label,
         "backend": backend,
+        "ingest": ingest,
+        "data_dir": DATA_DIR,
         # Stage-level override knobs were removed; backend is now uniform.
         "constraints_backend": backend if backend == "rust" else "",
         "pair_featurization_backend": backend if backend == "rust" else "",
@@ -683,6 +813,9 @@ def _run_subprocess(
     require_rust_release: int,
     run_label: str = "",
     rust_cleanup_boundary: int = 1,
+    ingest: str = "auto",
+    data_dir: str = "",
+    prediction_arrow_data_dir: str = "",
 ) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -691,6 +824,10 @@ def _run_subprocess(
         "single",
         "--backend",
         backend,
+        "--ingest",
+        ingest,
+        *(["--data-dir", data_dir] if data_dir else []),
+        *(["--prediction-arrow-data-dir", prediction_arrow_data_dir] if prediction_arrow_data_dir else []),
         "--datasets",
         *datasets,
         "--target",
@@ -772,6 +909,9 @@ def _compare(args: argparse.Namespace, workload: dict[str, Any], workload_id: st
             require_rust_release=int(args.require_rust_release),
             rust_cleanup_boundary=int(args.rust_cleanup_boundary),
             run_label=config["run_label"],
+            ingest=_resolve_ingest(str(common.get("ingest", "auto")), config["backend"]),
+            data_dir=str(common.get("data_dir", "")),
+            prediction_arrow_data_dir=str(common.get("prediction_arrow_data_dir", "")),
         )
         results.append(result)
 
@@ -1037,6 +1177,29 @@ def main() -> None:
     parser.add_argument("--mode", choices=["compare", "single", "gate"], default="compare")
     parser.add_argument("--preset", choices=sorted(WORKLOAD_PRESETS), default="smoke")
     parser.add_argument("--backend", choices=["python", "rust"], default="rust")
+    parser.add_argument(
+        "--ingest",
+        choices=["auto", "json", "arrow"],
+        default="auto",
+        help=(
+            "Dataset ingestion: 'json' (signatures/papers JSON + specter pickle; Python backend only) or "
+            "'arrow' (converted Arrow bundle; required for Rust featurization). "
+            "'auto' resolves per backend: rust -> arrow, python -> json."
+        ),
+    )
+    parser.add_argument(
+        "--data-dir",
+        default="",
+        help="Override the dataset root directory (defaults to the configured data dir).",
+    )
+    parser.add_argument(
+        "--prediction-arrow-data-dir",
+        default="",
+        help=(
+            "For --ingest json: attach dataset.arrow_paths from this converted Arrow bundle root so the "
+            "Rust cluster_eval prediction stage (which requires explicit Arrow artifacts) can run."
+        ),
+    )
     parser.add_argument("--datasets", nargs="+", default=None, help="Override workload preset datasets.")
     parser.add_argument("--target", default=None, help="Override workload preset target dataset.")
     parser.add_argument("--n-jobs", type=int, default=None, help="Override workload preset n_jobs.")
@@ -1103,6 +1266,9 @@ def main() -> None:
             workload_id=workload_id,
             require_rust_release=bool(args.require_rust_release),
             rust_cleanup_boundary=bool(args.rust_cleanup_boundary),
+            ingest=workload["ingest"],
+            data_dir=workload["data_dir"],
+            prediction_arrow_data_dir=workload["prediction_arrow_data_dir"],
         )
         if args.write_json:
             out_path = Path(args.write_json)

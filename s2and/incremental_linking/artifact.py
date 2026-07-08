@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -141,16 +142,39 @@ class IncrementalLinkingArtifactMetadata:
         return payload
 
 
+def _rust_lightgbm_booster_unavailable_error(found_version: Any = None) -> RuntimeError:
+    from s2and.runtime import min_supported_rust_extension_version_string
+
+    found = "unknown" if found_version is None else str(found_version)
+    minimum = min_supported_rust_extension_version_string()
+    return RuntimeError(
+        "RustLightGBMBooster requires s2and-rust>="
+        f"{minimum}; found {found}. Rebuild the local extension or install the matching s2and-rust package."
+    )
+
+
+def _load_rust_lightgbm_booster(booster_path: Path) -> Any:
+    try:
+        rust_module = importlib.import_module("s2and_rust")
+    except ImportError as exc:
+        raise _rust_lightgbm_booster_unavailable_error() from exc
+    booster_cls = getattr(rust_module, "RustLightGBMBooster", None)
+    if booster_cls is None:
+        raise _rust_lightgbm_booster_unavailable_error(getattr(rust_module, "__version__", None))
+
+    return booster_cls(str(booster_path))
+
+
 @dataclass(frozen=True)
 class IncrementalLinkingArtifact:
-    """Loaded LightGBM booster plus validated linker metadata."""
+    """Loaded linker booster (scored by the Rust evaluator) plus validated metadata."""
 
-    booster: lgb.Booster
+    booster: Any
     metadata: IncrementalLinkingArtifactMetadata
     artifact_dir: Path
     gate_model: NumpyLogisticGate
 
-    def predict_probabilities(self, matrix: np.ndarray) -> np.ndarray:
+    def predict_probabilities(self, matrix: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
         """Predict positive-class probabilities for an artifact-ordered matrix."""
 
         features = np.asarray(matrix, dtype=np.float32, order="C")
@@ -159,11 +183,15 @@ class IncrementalLinkingArtifact:
         expected_cols = len(self.metadata.feature_columns)
         if features.shape[1] != expected_cols:
             raise ValueError(f"feature matrix width must be {expected_cols}, got {features.shape[1]}")
-        probabilities = np.asarray(self.booster.predict(features), dtype=np.float64)
-        if probabilities.ndim == 2:
-            if probabilities.shape[1] < 2:
-                raise ValueError(f"booster returned unsupported probability shape={probabilities.shape}")
-            probabilities = probabilities[:, 1]
+        # Quantize through float32 exactly as the historical float32 LightGBM
+        # C-API path did, then widen losslessly for the Rust scorer.
+        probabilities = np.asarray(
+            self.booster.predict_proba_positive(
+                np.ascontiguousarray(features, dtype=np.float64),
+                num_threads=num_threads,
+            ),
+            dtype=np.float64,
+        )
         return probabilities.reshape(-1)
 
 
@@ -269,8 +297,10 @@ def load_incremental_linking_artifact(
 ) -> IncrementalLinkingArtifact:
     """Load and validate an incremental linker artifact.
 
-    Set ``require_rust_capabilities=False`` when loading for Python-only use (e.g.
-    bundle validation or non-Rust inference) where the Rust extension is not required.
+    Booster scoring always runs through the Rust evaluator, so the Rust
+    extension must be importable. ``require_rust_capabilities=False`` only
+    skips the named runtime-capability validation (e.g. for bundle validation
+    during training/finalization).
     """
 
     artifact_dir = Path(artifact_dir)
@@ -283,7 +313,7 @@ def load_incremental_linking_artifact(
             raise ValueError("Incremental linker artifact booster_sha256 mismatch")
     if require_rust_capabilities:
         validate_required_rust_capabilities(metadata.required_rust_capabilities)
-    booster = lgb.Booster(model_file=str(booster_path))
+    booster = _load_rust_lightgbm_booster(booster_path)
     artifact = IncrementalLinkingArtifact(
         booster=booster,
         metadata=metadata,

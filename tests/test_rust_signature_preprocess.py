@@ -10,7 +10,7 @@ from s2and import feature_port
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, _single_pair_featurize
 from s2and.subblocking import make_subblocks
-from tests.helpers import build_dummy_dataset, equalish, tiny_name_counts
+from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, equalish, tiny_name_counts
 
 if not feature_port.rust_featurizer_available():
     raise pytest.skip.Exception("s2and_rust featurizer API is unavailable", allow_module_level=True)
@@ -124,11 +124,10 @@ def _short_coauthor_dataset(name: str, backend: str) -> ANDData:
             load_name_counts=tiny_name_counts(),
             preprocess=True,
             n_jobs=1,
-            compute_reference_features=False,
         )
 
 
-def test_signature_preprocess_dataset_rust_defers_signature_fields():
+def test_signature_preprocess_json_dataset_rust_backend_uses_python_signature_fields():
     with _temporary_env("S2AND_BACKEND", "python"):
         dataset_python = build_dummy_dataset("dummy_signature_preprocess_python")
     with _temporary_env("S2AND_BACKEND", "rust"):
@@ -136,23 +135,17 @@ def test_signature_preprocess_dataset_rust_defers_signature_fields():
 
     assert set(dataset_python.signatures.keys()) == set(dataset_rust.signatures.keys())
     for signature_id in dataset_python.signatures:
+        signature_python = dataset_python.signatures[signature_id]
         signature_rust = dataset_rust.signatures[signature_id]
-        assert signature_rust.author_info_first_normalized is None
-        assert signature_rust.author_info_first_normalized_without_apostrophe is None
-        assert signature_rust.author_info_middle_normalized_without_apostrophe is None
-        assert signature_rust.author_info_last_normalized is None
-        assert signature_rust.author_info_suffix_normalized is None
-        assert signature_rust.author_info_coauthors is None
-        assert signature_rust.author_info_coauthor_blocks is None
-        assert dataset_rust.signatures[signature_id].author_info_affiliations_n_grams is None
-        assert dataset_rust.signatures[signature_id].author_info_coauthor_n_grams is None
+        assert _signature_scalar_fields(signature_rust) == _signature_scalar_fields(signature_python)
 
 
-def test_signature_preprocess_pair_features_and_constraints_parity_with_deferred_signature_fields():
+def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fields(tmp_path):
     with _temporary_env("S2AND_BACKEND", "python"):
-        dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python")
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python", load_name_counts=True)
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust")
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust", load_name_counts=True)
+    attach_arrow_featurizer_bundle(dataset_rust, tmp_path)
 
     signature_ids = list(dataset_python.signatures.keys())
     pairs = _sample_pairs(signature_ids, limit=8)
@@ -205,7 +198,7 @@ def test_signature_preprocess_lazy_materialization_ngrams_match_python():
         assert signature_python.author_info_coauthor_n_grams == signature_rust.author_info_coauthor_n_grams
 
 
-def test_short_coauthor_tokens_match_python_and_rust_featurizers():
+def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path):
     dataset_python = _short_coauthor_dataset("short_coauthor_python", "python")
     python_features, _ = _single_pair_featurize(("s1", "s2"), dataset=dataset_python)
     coauthor_similarity_idx = FeaturizationInfo().feature_group_to_index["coauthor_similarity"][1]
@@ -216,6 +209,7 @@ def test_short_coauthor_tokens_match_python_and_rust_featurizers():
     assert python_features[coauthor_similarity_idx] == 1.0
 
     dataset_rust = _short_coauthor_dataset("short_coauthor_rust", "rust")
+    attach_arrow_featurizer_bundle(dataset_rust, tmp_path)
     rust_featurizer = feature_port._get_rust_featurizer(dataset_rust)  # noqa: SLF001
     rust_signature_id_to_index = {
         str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
@@ -259,21 +253,12 @@ def test_subblocking_membership_parity_python_vs_rust():
     assert clusters_python == clusters_rust
 
 
-def test_rust_inference_from_dataset_runs_python_paper_preprocess():
-    with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_train = build_dummy_dataset(
-            "dummy_signature_preprocess_full_papers",
-            mode="train",
-            compute_reference_features=True,
-        )
+def test_rust_inference_without_arrow_featurizer_runs_python_paper_preprocess():
     with _temporary_env("S2AND_BACKEND", "rust"):
         dataset_inference = build_dummy_dataset("dummy_signature_preprocess_minimal_papers", mode="inference")
 
-    paper_id = next(iter(dataset_train.papers.keys()))
-    train_paper = dataset_train.papers[paper_id]
+    paper_id = next(iter(dataset_inference.papers.keys()))
     inference_paper = dataset_inference.papers[paper_id]
 
-    assert train_paper.title_ngrams_chars is not None
     assert inference_paper.title_ngrams_chars is not None
-    assert train_paper.title_ngrams_words is not None
     assert inference_paper.title_ngrams_words is not None

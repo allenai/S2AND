@@ -16,16 +16,10 @@ def _missing_module(name: str) -> ModuleNotFoundError:
     return ModuleNotFoundError(f"No module named {name!r}", name=name)
 
 
-def _make_core_rust_featurizer(*, supports_from_dataset_paper_preprocess: bool = False):
+def _make_core_rust_featurizer():
     class RustFeaturizer:
-        SUPPORTS_FROM_DATASET_PAPER_PREPROCESS = supports_from_dataset_paper_preprocess
-
         @staticmethod
         def from_arrow_paths(*args, **kwargs):
-            return None
-
-        @staticmethod
-        def from_dataset(*args, **kwargs):
             return None
 
         def signature_ids(self):
@@ -140,8 +134,8 @@ def test_load_s2and_rust_extension_reraises_nested_missing_dependency(monkeypatc
 def test_detect_rust_runtime_capabilities_requires_core_markers():
     class MissingMarkerRustFeaturizer:
         @staticmethod
-        def from_dataset(*args, **kwargs):
-            return None
+        def signature_ids(*args, **kwargs):
+            return []
 
     class Module:
         __version__ = "0.49.0"
@@ -180,20 +174,6 @@ def test_detect_rust_runtime_capabilities_rejects_unparseable_version():
     assert blocked.reason.startswith("rust_version_unparseable:")
 
 
-def test_detect_rust_runtime_capabilities_reads_from_dataset_paper_preprocess_marker():
-    RustFeaturizer = _make_core_rust_featurizer(supports_from_dataset_paper_preprocess=True)
-
-    class Module:
-        __version__ = _SUPPORTED_VERSION
-
-    cast(Any, Module).RustFeaturizer = RustFeaturizer
-
-    capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
-    assert capabilities.core_runtime_available is True
-    assert capabilities.from_dataset_available is True
-    assert capabilities.from_dataset_paper_preprocess_available is True
-
-
 def test_detect_rust_runtime_capabilities_does_not_require_json_ingest_markers():
     class RustFeaturizerWithoutJsonCompat:
         @staticmethod
@@ -219,8 +199,6 @@ def test_detect_rust_runtime_capabilities_does_not_require_json_ingest_markers()
     capabilities = rust_capabilities.detect_rust_runtime_capabilities(extension_module=Module)
 
     assert capabilities.core_runtime_available is True
-    assert capabilities.from_dataset_available is False
-    assert capabilities.from_dataset_paper_preprocess_available is False
     assert capabilities.reason == "rust_core_available"
 
 

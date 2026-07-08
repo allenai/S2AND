@@ -392,7 +392,6 @@ def _compare_runs(args: argparse.Namespace) -> None:
     script_path = Path(__file__).resolve()
     arrow_profile_path = str(scratch_dir / "profile_kisti_rust_arrow.txt")
     python_profile_path = str(scratch_dir / "profile_kisti_python_path.txt")
-    rust_dataset_profile_path = str(scratch_dir / "profile_kisti_rust_from_dataset.txt")
 
     print("Running Rust path (Arrow predict_from_arrow_paths)...")
     arrow_result = _run_single_subprocess(
@@ -430,32 +429,12 @@ def _compare_runs(args: argparse.Namespace) -> None:
         )
         results.append(python_result)
 
-    if args.include_rust_from_dataset:
-        print("Running legacy Rust path (from_dataset)...")
-        rust_dataset_result = _run_single_subprocess(
-            script_path=script_path,
-            backend="rust",
-            dataset_name=args.dataset_name,
-            n_jobs=args.n_jobs,
-            profile_output_path=rust_dataset_profile_path,
-            model_path=args.model_path,
-            data_root=args.data_root,
-            specter_file=args.specter_file,
-            input_format="json",
-            rust_warm_featurizer_before_predict=args.rust_warm_featurizer_before_predict,
-            run_label="rust_from_dataset_json",
-            require_rust_release=args.require_rust_release,
-        )
-        results.append(rust_dataset_result)
-
     print("")
     print(_render_markdown_table(results))
     print("")
     print(f"Rust profile output (Arrow): {arrow_profile_path}")
     if args.include_python_baseline:
         print(f"Python profile output: {python_profile_path}")
-    if args.include_rust_from_dataset:
-        print(f"Rust profile output (from_dataset): {rust_dataset_profile_path}")
 
     if args.write_json:
         summary_path = Path(args.write_json)
@@ -550,11 +529,6 @@ def main() -> None:
         "--include-python-baseline",
         action="store_true",
         help="In compare mode, also run the legacy JSON/ANDData Python path.",
-    )
-    parser.add_argument(
-        "--include-rust-from-dataset",
-        action="store_true",
-        help="In compare mode, also run the legacy JSON/ANDData Rust from_dataset path.",
     )
     args = parser.parse_args()
 

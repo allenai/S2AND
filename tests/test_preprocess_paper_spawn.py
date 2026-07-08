@@ -23,9 +23,7 @@ def test_preprocess_paper_1_spawn_respects_preprocess_flag():
         title_ngrams_chars=None,
         venue_ngrams=None,
         journal_ngrams=None,
-        reference_details=None,
         year=2020,
-        references=None,
         paper_id=1,
     )
     item = ("1", paper)

@@ -7,35 +7,31 @@ from s2and.runtime import Backend
 
 RustLifecycleMode = Literal[
     "python_only",
-    "rust_from_dataset_no_preprocess",
-    "rust_inference_from_dataset",
-    "rust_training_from_dataset",
-    "rust_training_skip_preprocess",
+    "rust_inference",
+    "rust_arrow_training",
 ]
 
 _SKIP_PYTHON_PAPER_PREPROCESS_MODES: frozenset[RustLifecycleMode] = frozenset(
     {
-        "rust_training_skip_preprocess",
+        "rust_arrow_training",
     }
 )
 _DEFER_SIGNATURE_NGRAM_MODES: frozenset[RustLifecycleMode] = frozenset(
     {
-        "rust_inference_from_dataset",
-        "rust_training_from_dataset",
-        "rust_training_skip_preprocess",
+        "rust_inference",
+        "rust_arrow_training",
     }
 )
 _DEFER_SIGNATURE_FIELD_MODES: frozenset[RustLifecycleMode] = frozenset(
     {
-        "rust_training_from_dataset",
-        "rust_training_skip_preprocess",
+        "rust_arrow_training",
     }
 )
 
 
 @dataclass(frozen=True)
 class RustLifecyclePolicy:
-    """Frozen compatibility/training Rust lifecycle decision for a dataset."""
+    """Frozen Rust lifecycle decision for a dataset."""
 
     mode: RustLifecycleMode
 
@@ -70,25 +66,28 @@ def build_rust_lifecycle_policy(
     backend: Backend,
     mode: str,
     preprocess: bool,
-    compute_reference_features: bool = False,
-    from_dataset_available: bool = True,
-    from_dataset_paper_preprocess_available: bool = False,
+    arrow_featurization: bool = False,
 ) -> RustLifecyclePolicy:
+    """Decide which dataset-build work Python may defer to Rust.
+
+    ``arrow_featurization`` marks datasets whose Rust featurizer is built from
+    Arrow IPC artifacts (``RustFeaturizer.from_arrow_paths``); Rust reads text,
+    n-grams, and name counts from the Arrow bundle, so Python-side paper
+    preprocessing and signature n-gram/field materialization are skipped.
+    Rust-backend datasets without Arrow featurizer paths featurize in Python
+    (there is no Python-object ingestion door in Rust), so they get the full
+    Python preprocessing lifecycle.
+    """
+
     if backend == "python":
         return PYTHON_ONLY_POLICY
-    if not from_dataset_available:
-        return PYTHON_ONLY_POLICY
 
-    is_inference = _is_inference_mode(mode)
+    if arrow_featurization:
+        return RustLifecyclePolicy(mode="rust_arrow_training")
 
-    if is_inference:
-        return RustLifecyclePolicy(
-            mode="rust_inference_from_dataset" if preprocess else "rust_from_dataset_no_preprocess"
-        )
+    if _is_inference_mode(mode) and preprocess:
+        # Rust prediction reads Arrow artifacts; Python fallbacks materialize
+        # signature n-grams lazily (featurizer._ensure_python_pair_signature_ngrams).
+        return RustLifecyclePolicy(mode="rust_inference")
 
-    if not preprocess:
-        return RustLifecyclePolicy(mode="rust_from_dataset_no_preprocess")
-
-    if from_dataset_paper_preprocess_available and not compute_reference_features:
-        return RustLifecyclePolicy(mode="rust_training_skip_preprocess")
-    return RustLifecyclePolicy(mode="rust_training_from_dataset")
+    return PYTHON_ONLY_POLICY

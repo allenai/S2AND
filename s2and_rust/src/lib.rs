@@ -16,6 +16,7 @@ mod constraints;
 mod features;
 mod ingest_dataset;
 mod language_detection;
+mod lightgbm_booster;
 mod name_counts;
 mod orcid;
 mod pair_indexing;
@@ -55,7 +56,7 @@ use raw_arrow::readers::{
 };
 use raw_arrow_features::{
     build_raw_arrow_author_signal_data, build_raw_arrow_feature, build_raw_arrow_summary,
-    build_raw_arrow_summary_signals, extract_specter_for_paper_id, mask_raw_arrow_query,
+    build_raw_arrow_summary_signals, mask_raw_arrow_query,
     raw_arrow_name_count_rarity_row, raw_arrow_paper_evidence_row, round_six,
 };
 #[cfg(test)]
@@ -192,12 +193,6 @@ struct PaperData {
     venue_ngrams: Option<CounterData>,
     title_words: Option<CounterData>,
     title_chars: Option<CounterData>,
-    ref_authors: Option<CounterData>,
-    ref_titles: Option<CounterData>,
-    ref_venues: Option<CounterData>,
-    ref_blocks: Option<CounterData>,
-    ref_details_present: bool,
-    references: HashSet<PaperId>,
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
@@ -276,7 +271,6 @@ fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::types::{PyList, PyString};
 
     const ARROW_SCHEMA_CONTRACT_COLUMNS: &[(&str, &str, &str, bool)] = &[
         ("altered_cluster_signatures", "signature_id", "string", true),
@@ -479,34 +473,6 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, ("alice".to_string(), "bob".to_string()));
         assert!(candidates[0].1.is_nan());
-    }
-
-    #[test]
-    fn reference_details_extraction_errors_are_not_silenced() {
-        prepare_python_for_test();
-        Python::with_gil(|py| {
-            let non_tuple = PyString::new(py, "not-a-tuple");
-            let result = extract_reference_details_counters(py, non_tuple.as_any());
-            assert!(result.is_err(), "non-tuple reference_details should raise");
-            let err = result
-                .err()
-                .unwrap_or_else(|| unreachable!("assert above guarantees error"));
-            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
-        });
-    }
-
-    #[test]
-    fn extract_id_string_rejects_non_scalar_ids() {
-        prepare_python_for_test();
-        Python::with_gil(|py| {
-            let value = PyList::empty(py);
-            let result = extract_id_string(value.as_any());
-            assert!(result.is_err(), "non-scalar ids should raise");
-            let err = result
-                .err()
-                .unwrap_or_else(|| unreachable!("assert above guarantees error"));
-            assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
-        });
     }
 
     #[test]
@@ -902,6 +868,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;
     promoted_linker::add_to_module(m)?;
+    lightgbm_booster::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(
         make_subblocks_with_telemetry_arrow_native_graph,
         m

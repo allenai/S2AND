@@ -92,5 +92,5 @@ uv run --with psutil python scripts/rust_suite.py stress-rebuild \
   --write-json scratch/baselines_YYYYMMDD/stress_rust_from_arrow_paths_aminer_6x_YYYYMMDD.json
 ```
 
-Use `--build-path from_dataset` only for explicit classic `ANDData` lifecycle
-comparisons against the Arrow constructor.
+`stress-rebuild` is Arrow-only; classic `ANDData` lifecycle comparisons should
+use Python featurization tests.

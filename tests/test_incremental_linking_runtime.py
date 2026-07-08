@@ -47,7 +47,7 @@ from s2and.incremental_linking.runtime import (
 from s2and.incremental_linking.runtime import (
     compute_candidate_batch_pairwise_model_and_aggregate_stats as _pairwise_model_stats_impl,
 )
-from tests.helpers import build_dummy_dataset
+from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset
 from tests.promoted_linking_helpers import build_tiny_promoted_booster
 
 runtime_module: Any = runtime_module
@@ -81,14 +81,16 @@ class StaticPairwiseStats:
 class StaticArtifact:
     def __init__(self, probabilities: np.ndarray, gate_config: dict[str, Any]) -> None:
         self.probabilities = np.asarray(probabilities, dtype=np.float64)
+        self.last_num_threads: int | None = None
         self.metadata = SimpleNamespace(
             feature_columns=promoted_linker_feature_columns(),
             gate_config=gate_config,
             retrieval_top_k=25,
         )
 
-    def predict_probabilities(self, matrix: np.ndarray) -> np.ndarray:
+    def predict_probabilities(self, matrix: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
         assert matrix.shape[0] == len(self.probabilities)
+        self.last_num_threads = num_threads
         return self.probabilities
 
 
@@ -647,6 +649,29 @@ def _empty_feature_matrix(candidate_batch: LinkerCandidateBatch) -> LinkerFeatur
     )
 
 
+def test_compact_artifact_scoring_forwards_num_threads() -> None:
+    artifact = _static_artifact(
+        np.asarray([0.9], dtype=np.float64),
+        gate_config=_promoted_gate_config(0.0),
+    )
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=np.zeros(0, dtype=np.uint32),
+        right_signature_indices=np.zeros(0, dtype=np.uint32),
+        pair_row_indices=np.zeros(0, dtype=np.uint32),
+        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
+        row_component_keys=("c0",),
+    )
+
+    _predict_incremental_link_or_abstain_compact(
+        artifact,
+        _empty_feature_matrix(candidate_batch),
+        num_threads=7,
+    )
+
+    assert artifact.last_num_threads == 7
+
+
 def _production_retrieval_batch(
     *,
     row_query_signature_indices: np.ndarray,
@@ -1157,10 +1182,12 @@ def test_fused_pairwise_model_requires_rust_distance_accumulator(monkeypatch: py
 
 def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     if not runtime_module.feature_port.rust_featurizer_available():
         raise pytest.skip.Exception("s2and_rust core runtime is unavailable")
     dataset = build_dummy_dataset("dummy_linker_rust_distance_accumulator_parity", load_name_counts=True)
+    attach_arrow_featurizer_bundle(dataset, tmp_path)
     rust_featurizer = runtime_module.feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
     if not hasattr(rust_featurizer, "linker_pair_distance_accumulators"):
         raise pytest.skip.Exception("linker_pair_distance_accumulators is unavailable")

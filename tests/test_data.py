@@ -58,60 +58,7 @@ def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
     assert "" not in dataset.signatures["s1"].author_info_affiliations
 
 
-def test_compute_reference_features_retains_unsigned_reference_papers() -> None:
-    dataset = ANDData(
-        signatures={
-            "s1": {
-                "signature_id": "s1",
-                "paper_id": "p1",
-                "author_info": {
-                    "position": 0,
-                    "block": "a lovelace",
-                    "first": "Ada",
-                    "middle": "",
-                    "last": "Lovelace",
-                    "suffix": None,
-                    "email": None,
-                    "affiliations": [],
-                },
-            }
-        },
-        papers={
-            "p1": {
-                "paper_id": "p1",
-                "title": "Signed Paper",
-                "abstract": "",
-                "journal_name": "",
-                "venue": "",
-                "year": 1843,
-                "authors": [{"position": 0, "author_name": "Ada Lovelace"}],
-                "references": ["p2"],
-            },
-            "p2": {
-                "paper_id": "p2",
-                "title": "Analytical Engine Notes",
-                "abstract": "",
-                "journal_name": "Computing",
-                "venue": "London",
-                "year": 1842,
-                "authors": [{"position": 0, "author_name": "Charles Babbage"}],
-                "references": [],
-            },
-        },
-        name="reference_feature_unsigned_paper",
-        mode="inference",
-        load_name_counts=False,
-        preprocess=True,
-        compute_reference_features=True,
-        n_jobs=1,
-    )
-
-    assert dataset.papers["p2"].in_signatures is False
-    assert dataset.papers["p1"].reference_details is not None
-    assert dataset.papers["p1"].reference_details[1]
-
-
-def test_anddata_passes_from_dataset_capability_to_rust_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_anddata_passes_arrow_featurization_to_rust_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         data_module,
@@ -122,14 +69,6 @@ def test_anddata_passes_from_dataset_capability_to_rust_lifecycle(monkeypatch: p
             use_rust=False,
             run_id="test-run",
             source="default",
-        ),
-    )
-    monkeypatch.setattr(
-        data_module,
-        "detect_rust_runtime_capabilities",
-        lambda: SimpleNamespace(
-            from_dataset_available=False,
-            from_dataset_paper_preprocess_available=True,
         ),
     )
 
@@ -173,11 +112,11 @@ def test_anddata_passes_from_dataset_capability_to_rust_lifecycle(monkeypatch: p
         load_name_counts=False,
         preprocess=False,
         name_tuples=set(),
+        rust_arrow_featurization=True,
     )
 
     assert captured["backend"] == "rust"
-    assert captured["from_dataset_available"] is False
-    assert captured["from_dataset_paper_preprocess_available"] is True
+    assert captured["arrow_featurization"] is True
 
 
 class TestData(unittest.TestCase):

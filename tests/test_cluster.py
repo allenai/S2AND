@@ -1,3 +1,4 @@
+import os
 import unittest
 from collections import Counter
 
@@ -15,6 +16,8 @@ from tests.helpers import tiny_name_counts
 class TestClusterer(unittest.TestCase):
     def setUp(self):
         super().setUp()
+        self._previous_s2and_backend = os.environ.get("S2AND_BACKEND")
+        os.environ["S2AND_BACKEND"] = "python"
         self.dummy_dataset = ANDData(
             "tests/dummy/signatures.json",
             "tests/dummy/papers.json",
@@ -40,6 +43,13 @@ class TestClusterer(unittest.TestCase):
             use_cache=False,
             use_default_constraints_as_supervision=False,
         )
+
+    def tearDown(self):
+        if self._previous_s2and_backend is None:
+            os.environ.pop("S2AND_BACKEND", None)
+        else:
+            os.environ["S2AND_BACKEND"] = self._previous_s2and_backend
+        super().tearDown()
 
     def _fill_python_featurizer_fields(self):
         for signature_id, signature in list(self.dummy_dataset.signatures.items()):

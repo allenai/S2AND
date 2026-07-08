@@ -13,12 +13,14 @@ from s2and.rust_lifecycle import (
 
 def test_python_backend_always_returns_python_only_policy():
     for mode in ("train", "inference"):
-        policy = build_rust_lifecycle_policy(
-            backend="python",
-            mode=mode,
-            preprocess=True,
-        )
-        assert policy == PYTHON_ONLY_POLICY
+        for arrow_featurization in (False, True):
+            policy = build_rust_lifecycle_policy(
+                backend="python",
+                mode=mode,
+                preprocess=True,
+                arrow_featurization=arrow_featurization,
+            )
+            assert policy == PYTHON_ONLY_POLICY
 
 
 def test_rust_inference_does_not_skip_python_paper_preprocess():
@@ -27,72 +29,44 @@ def test_rust_inference_does_not_skip_python_paper_preprocess():
         mode="inference",
         preprocess=True,
     )
+    assert policy.mode == "rust_inference"
     assert policy.skip_python_paper_preprocess is False
+    assert policy.defer_signature_ngrams_to_rust is True
+    assert policy.defer_signature_fields_to_rust is False
 
 
-@pytest.mark.parametrize(
-    ("compute_reference_features", "from_dataset_paper_preprocess_available", "expected_mode", "expected_skip"),
-    [
-        (False, True, "rust_training_skip_preprocess", True),
-        (True, True, "rust_training_from_dataset", False),
-        (False, False, "rust_training_from_dataset", False),
-    ],
-)
-def test_rust_training_from_dataset_skip_preprocess_semantics(
-    compute_reference_features: bool,
-    from_dataset_paper_preprocess_available: bool,
-    expected_mode: str,
-    expected_skip: bool,
-):
+def test_rust_inference_without_preprocess_is_python_only():
     policy = build_rust_lifecycle_policy(
         backend="rust",
-        mode="train",
-        preprocess=True,
-        compute_reference_features=compute_reference_features,
-        from_dataset_paper_preprocess_available=from_dataset_paper_preprocess_available,
+        mode="inference",
+        preprocess=False,
     )
-    assert policy.mode == expected_mode
-    assert policy.skip_python_paper_preprocess is expected_skip
-
-
-def test_rust_training_requires_from_dataset_capability():
-    policy = build_rust_lifecycle_policy(
-        backend="rust",
-        mode="train",
-        preprocess=True,
-        from_dataset_available=False,
-        from_dataset_paper_preprocess_available=True,
-    )
-
     assert policy == PYTHON_ONLY_POLICY
 
 
-@pytest.mark.parametrize("preprocess", [False, True])
-@pytest.mark.parametrize("use_rust", [False, True])
-def test_defer_signature_ngrams_requires_preprocess_and_rust(preprocess: bool, use_rust: bool):
-    backend = "rust" if use_rust else "python"
+def test_rust_training_without_arrow_featurization_is_python_only():
+    """JSON-ingested training datasets featurize in Python (no Rust ingestion door)."""
+
     policy = build_rust_lifecycle_policy(
-        backend=backend,
+        backend="rust",
         mode="train",
-        preprocess=preprocess,
+        preprocess=True,
     )
-    assert policy.defer_signature_ngrams_to_rust is (preprocess and use_rust)
+    assert policy == PYTHON_ONLY_POLICY
 
 
 @pytest.mark.parametrize("mode", ["train", "inference"])
-@pytest.mark.parametrize("use_rust", [False, True])
-def test_defer_signature_fields_requires_rust_and_non_inference(
-    mode: str,
-    use_rust: bool,
-):
-    backend = "rust" if use_rust else "python"
+def test_arrow_featurization_defers_dataset_build_work_to_rust(mode: str):
     policy = build_rust_lifecycle_policy(
-        backend=backend,
+        backend="rust",
         mode=mode,
         preprocess=True,
+        arrow_featurization=True,
     )
-    expected = bool(mode == "train" and use_rust)
-    assert policy.defer_signature_fields_to_rust is expected
+    assert policy.mode == "rust_arrow_training"
+    assert policy.skip_python_paper_preprocess is True
+    assert policy.defer_signature_ngrams_to_rust is True
+    assert policy.defer_signature_fields_to_rust is True
 
 
 def test_lifecycle_policy_stores_only_canonical_mode():

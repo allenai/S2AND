@@ -49,7 +49,6 @@ class FacetEvalResult(NamedTuple):
     email_f1: dict[int, list]
     abstract_f1: dict[int, list]
     venue_f1: dict[int, list]
-    references_f1: dict[int, list]
     coauthors_f1: dict[int, list]
     signature_lookup: list[dict]
 
@@ -325,7 +324,6 @@ def facet_eval(
     email_f1 = defaultdict(list)
     abstract_f1 = defaultdict(list)
     venue_f1 = defaultdict(list)
-    references_f1 = defaultdict(list)
     coauthors_f1 = defaultdict(list)
 
     signature_lookup = list()
@@ -386,13 +384,6 @@ def facet_eval(
             venue_f1[0].append(f1)
             _signature_dict["venue"] = 0
 
-        if paper.references and len(paper.references) > 0:
-            references_f1[1].append(f1)
-            _signature_dict["references"] = 1
-        else:
-            references_f1[0].append(f1)
-            _signature_dict["references"] = 0
-
         has_coauthors = (
             len(signature.author_info_coauthors) > 0
             if signature.author_info_coauthors is not None
@@ -448,7 +439,6 @@ def facet_eval(
         email_f1,
         abstract_f1,
         venue_f1,
-        references_f1,
         coauthors_f1,
         signature_lookup,
     )

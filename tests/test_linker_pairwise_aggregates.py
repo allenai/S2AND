@@ -7,7 +7,7 @@ import pytest
 
 from s2and import feature_port, memory_budget
 from s2and.incremental_linking import linker_pairwise
-from tests.helpers import build_dummy_dataset, import_s2and_rust
+from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, import_s2and_rust
 
 HAS_LINKER_ARRAY_FEATURE_AGG_RUST, LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR = import_s2and_rust(
     required_method="linker_pair_index_arrays_and_aggregate_stats"
@@ -631,8 +631,9 @@ def test_localize_row_indices_handles_ungrouped_chunks() -> None:
     not HAS_LINKER_ARRAY_FEATURE_AGG_RUST,
     reason=f"s2and_rust linker array feature aggregate API unavailable: {LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR}",
 )
-def test_candidate_batch_aggregates_match_existing_rust_matrix_path() -> None:
+def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) -> None:
     dataset = build_dummy_dataset("dummy_linker_candidate_batch_real", load_name_counts=True)
+    attach_arrow_featurizer_bundle(dataset, tmp_path)
     pairs = [("0", "1"), ("0", "2"), ("3", "4"), ("0", "3"), ("1", "4")]
     row_indices = [0, 0, 1, 1, 1]
     feature_names = ("first_names_equal", "affiliation_overlap", "title_overlap_words")

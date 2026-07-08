@@ -174,14 +174,12 @@ def summary_features_analysis(
     union_email_f1,
     union_abstract_f1,
     union_venue_f1,
-    union_references_f1,
     union_coauthors_f1,
     union_s2_firstname_f1,
     union_s2_affiliation_f1,
     union_s2_email_f1,
     union_s2_abstract_f1,
     union_s2_venue_f1,
-    union_s2_references_f1,
     union_s2_coauthors_f1,
 ):
     """
@@ -203,7 +201,6 @@ def summary_features_analysis(
             union_email_f1,
             union_abstract_f1,
             union_venue_f1,
-            union_references_f1,
             union_coauthors_f1,
         ],
         [
@@ -212,7 +209,6 @@ def summary_features_analysis(
             union_s2_email_f1,
             union_s2_abstract_f1,
             union_s2_venue_f1,
-            union_s2_references_f1,
             union_s2_coauthors_f1,
         ],
         strict=False,
@@ -237,8 +233,7 @@ def summary_features_analysis(
         "email_diff": np.round(feature_summary[2][0], 3) - np.round(feature_summary[2][1], 3),
         "abstract_diff": np.round(feature_summary[3][0], 3) - np.round(feature_summary[3][1], 3),
         "venue_diff": np.round(feature_summary[4][0], 3) - np.round(feature_summary[4][1], 3),
-        "references_diff": np.round(feature_summary[5][0], 3) - np.round(feature_summary[5][1], 3),
-        "coauthors_diff": np.round(feature_summary[6][0], 3) - np.round(feature_summary[6][1], 3),
+        "coauthors_diff": np.round(feature_summary[5][0], 3) - np.round(feature_summary[5][1], 3),
     }
 
     s2_feature_facet_scores = {
@@ -247,8 +242,7 @@ def summary_features_analysis(
         "email_diff": np.round(feature_summary[2][2], 3) - np.round(feature_summary[2][3], 3),
         "abstract_diff": np.round(feature_summary[3][2], 3) - np.round(feature_summary[3][3], 3),
         "venue_diff": np.round(feature_summary[4][2], 3) - np.round(feature_summary[4][3], 3),
-        "references_diff": np.round(feature_summary[5][2], 3) - np.round(feature_summary[5][3], 3),
-        "coauthors_diff": np.round(feature_summary[6][2], 3) - np.round(feature_summary[6][3], 3),
+        "coauthors_diff": np.round(feature_summary[5][2], 3) - np.round(feature_summary[5][3], 3),
     }
 
     return s2and_feature_facet_scores, s2_feature_facet_scores
@@ -348,7 +342,6 @@ def update_facets(
     email_f1,
     abstract_f1,
     venue_f1,
-    references_f1,
     coauthors_f1,
     comb_gender_f1,
     comb_ethnicity_f1,
@@ -363,7 +356,6 @@ def update_facets(
     comb_email_f1,
     comb_abstract_f1,
     comb_venue_f1,
-    comb_references_f1,
     comb_coauthors_f1,
 ):
     """
@@ -384,7 +376,6 @@ def update_facets(
             email_f1,
             abstract_f1,
             venue_f1,
-            references_f1,
             coauthors_f1,
         ],
         [
@@ -401,7 +392,6 @@ def update_facets(
             comb_email_f1,
             comb_abstract_f1,
             comb_venue_f1,
-            comb_references_f1,
             comb_coauthors_f1,
         ],
         strict=False,
@@ -423,7 +413,6 @@ def update_facets(
         comb_email_f1,
         comb_abstract_f1,
         comb_venue_f1,
-        comb_references_f1,
         comb_coauthors_f1,
     )
 
@@ -1078,7 +1067,6 @@ def main(
         union_email_f1: dict[int, list] = defaultdict(list)
         union_abstract_f1: dict[int, list] = defaultdict(list)
         union_venue_f1: dict[int, list] = defaultdict(list)
-        union_references_f1: dict[int, list] = defaultdict(list)
         union_coauthors_f1: dict[int, list] = defaultdict(list)
 
         union_s2_gender_f1: dict[str, list] = defaultdict(list)
@@ -1096,7 +1084,6 @@ def main(
         union_s2_email_f1: dict[int, list] = defaultdict(list)
         union_s2_abstract_f1: dict[int, list] = defaultdict(list)
         union_s2_venue_f1: dict[int, list] = defaultdict(list)
-        union_s2_references_f1: dict[int, list] = defaultdict(list)
         union_s2_coauthors_f1: dict[int, list] = defaultdict(list)
 
         logger.info("started evaluating unions")
@@ -1159,7 +1146,6 @@ def main(
                     email_f1,
                     abstract_f1,
                     venue_f1,
-                    references_f1,
                     coauthors_f1,
                     signature_wise_facets,
                 ) = facet_eval(target_dataset["anddata"], b3_metrics_per_signature, BLOCK_TYPE)
@@ -1178,7 +1164,6 @@ def main(
                     union_email_f1,
                     union_abstract_f1,
                     union_venue_f1,
-                    union_references_f1,
                     union_coauthors_f1,
                 ) = update_facets(
                     gender_f1,
@@ -1194,7 +1179,6 @@ def main(
                     email_f1,
                     abstract_f1,
                     venue_f1,
-                    references_f1,
                     coauthors_f1,
                     union_gender_f1,
                     union_ethnicity_f1,
@@ -1209,7 +1193,6 @@ def main(
                     union_email_f1,
                     union_abstract_f1,
                     union_venue_f1,
-                    union_references_f1,
                     union_coauthors_f1,
                 )
 
@@ -1228,7 +1211,6 @@ def main(
                     s2_email_f1,
                     s2_abstract_f1,
                     s2_venue_f1,
-                    s2_references_f1,
                     s2_coauthors_f1,
                     s2_signature_wise_facets,
                 ) = facet_eval(target_dataset["anddata"], s2_b3_metrics_per_signature, BLOCK_TYPE)
@@ -1247,7 +1229,6 @@ def main(
                     union_s2_email_f1,
                     union_s2_abstract_f1,
                     union_s2_venue_f1,
-                    union_s2_references_f1,
                     union_s2_coauthors_f1,
                 ) = update_facets(
                     s2_gender_f1,
@@ -1263,7 +1244,6 @@ def main(
                     s2_email_f1,
                     s2_abstract_f1,
                     s2_venue_f1,
-                    s2_references_f1,
                     s2_coauthors_f1,
                     union_s2_gender_f1,
                     union_s2_ethnicity_f1,
@@ -1278,7 +1258,6 @@ def main(
                     union_s2_email_f1,
                     union_s2_abstract_f1,
                     union_s2_venue_f1,
-                    union_s2_references_f1,
                     union_s2_coauthors_f1,
                 )
 
@@ -1318,14 +1297,12 @@ def main(
             union_email_f1,
             union_abstract_f1,
             union_venue_f1,
-            union_references_f1,
             union_coauthors_f1,
             union_s2_firstname_f1,
             union_s2_affiliation_f1,
             union_s2_email_f1,
             union_s2_abstract_f1,
             union_s2_venue_f1,
-            union_s2_references_f1,
             union_s2_coauthors_f1,
         )
 

@@ -202,7 +202,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Run the qian-only pairwise training parity harness: ANDData/Python, "
-            "ANDData/Rust from_dataset, and Arrow/Rust from_arrow_paths."
+            "and Arrow/Rust from_arrow_paths."
         ),
     )
     parser.add_argument(
@@ -1077,7 +1077,7 @@ def apply_fixed_cluster_eps(clusterer: Any, fixed_cluster_eps: float | None) -> 
     return clusterer
 
 
-# feature categories (all except reference_features)
+# feature categories
 features_to_use = [
     "name_similarity",
     "affiliation_similarity",
@@ -1086,7 +1086,6 @@ features_to_use = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    # "reference_features",
     "misc_features",
     "name_counts",
     "embedding_similarity",

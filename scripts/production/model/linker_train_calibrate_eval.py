@@ -1140,7 +1140,6 @@ def _load_minimal_raw_specter_dataset(
         load_name_counts=True,
         preprocess=True,
         n_jobs=max(1, int(n_jobs)),
-        compute_reference_features=False,
         use_orcid_id=False,
         name_tuples="filtered",
     )

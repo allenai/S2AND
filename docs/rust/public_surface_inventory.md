@@ -17,6 +17,7 @@ cleanup risk, not a user-facing API promise.
 | `promoted_linker_non_pairwise_features(...)` | `s2and/incremental_linking/row_features.py` | Production promoted-linker row feature builder. |
 | `make_subblocks_with_telemetry_arrow_native_graph(...)` | `s2and/subblocking.py` | Arrow-native graph subblocking helper used by large-block prediction. |
 | `get_build_info(...)` | `s2and/runtime.py`, `scripts/_rust_suite/common.py`, capability tests | Diagnostics and ABI metadata. |
+| `RustLightGBMBooster` | `s2and/production_model.py` (`NativeLightGBMBinaryClassifier`), `s2and/incremental_linking/artifact.py` (`IncrementalLinkingArtifact`), parity tests | Pure-Rust `.lgb` text-model scorer for binary numerical-split boosters; the production scoring path for pairwise and linker models. Raw scores are bit-exact vs Python `lightgbm` (`tests/test_rust_lightgbm_booster_parity.py`); rejects categorical/linear/multiclass models at load. Python `lgb.Booster` remains only as the lazily-loaded `booster_` surface for bundle writing and SHAP. |
 
 ## Module Constants and ABI Markers
 
@@ -33,7 +34,6 @@ cleanup risk, not a user-facing API promise.
 | Method | Owner / caller | Status |
 |---|---|---|
 | `from_arrow_paths(...)` | `feature_port.build_rust_featurizer_from_arrow_paths(...)`; full predict, subblocked predict, raw Arrow scoring | Production Arrow constructor. The Python production wrapper requires batch indexes for filtered reads. |
-| `from_dataset(...)` | `feature_port.build_rust_featurizer(...)`, `_get_rust_featurizer(...)`; training/eval, parity, classic `ANDData` callers | Keep callable for `ANDData` paths; do not present as the production inference boundary. |
 | `update_cluster_seeds(...)` and `update_signature_name_counts(...)` | cache/seed update helpers in `feature_port.py` and tests | Compatibility/training lifecycle helpers. |
 | `signature_ids(...)` | pairwise matrix wrappers, promoted incremental runtime, parity scripts | Shared index-order contract; keep. |
 | `signature_rule_metadata(...)`, `signature_name_counts_present(...)`, `cluster_seeds_require(...)` | `predict_from_rust_featurizer(...)`, parity tests, and state restoration checks | Required metadata for direct Rust-featurizer prediction and parity. |
@@ -59,8 +59,8 @@ cleanup risk, not a user-facing API promise.
 
 | Wrapper | Owner / caller | Status |
 |---|---|---|
-| `feature_port.build_rust_featurizer_from_arrow_paths(...)` | strict full predict, subblocked predict, raw Arrow scoring | Production constructor wrapper. |
-| `feature_port.build_rust_featurizer(...)`, `_get_rust_featurizer(...)`, `warm_rust_featurizer(...)` | `ANDData` training/eval, parity, classic scripts | `ANDData` dispatcher; file-backed production inference should use Arrow wrappers. |
+| `feature_port.build_rust_featurizer_from_arrow_paths(...)` | strict full predict, subblocked predict, raw Arrow scoring, arrow-native training (`s2and/arrow_training.py`) | Production constructor wrapper and the training featurizer door for Arrow-ingested train datasets. |
+| `feature_port.build_rust_featurizer(...)`, `_get_rust_featurizer(...)`, `warm_rust_featurizer(...)` | Arrow-backed datasets with `rust_featurizer_arrow_paths` | Dataset-scoped dispatcher; classic `ANDData`/JSON datasets use Python featurization. |
 | `rust_calls.get_constraints_matrix_indexed_rust(...)` and `get_constraints_block_upper_triangle_indexed_rust(...)` | full predict and parity | Maintained constraint wrappers. |
 | `rust_calls.build_linker_pair_features_and_aggregate_stats_arrays_rust(...)` | promoted incremental pairwise scoring | Maintained canonical array wrapper. |
 | `rust_calls.build_linker_pair_aggregate_stats_arrays_rust(...)` | promoted incremental aggregate-only path | Thin Python wrapper over `linker_pair_index_arrays_and_aggregate_stats(..., emit_matrix=False)`. |
@@ -108,11 +108,11 @@ cleanup risk, not a user-facing API promise.
   `featurize_pairs_matrix(...)` were removed after repo-local tests and scripts
   moved to `featurize_pairs_matrix_indexed(...)`.
 - Status 2026-05-26: `RustFeaturizer.from_json_paths(...)` and the Python
-  JSON-ingest lifecycle were removed. Scripts now use either Arrow
-  `from_arrow_paths(...)` or classic `ANDData`/`from_dataset(...)`.
-- Status 2026-05-26: direct Rust tuple handling for SPECTER pickle payloads
-  was removed from `RustFeaturizer.from_dataset(...)`. Python `ANDData` remains
-  responsible for loading/normalizing pickle payloads before delegating to Rust.
+  JSON-ingest lifecycle were removed. Scripts now use Arrow
+  `from_arrow_paths(...)` for Rust featurization.
+- Status 2026-07-08: `RustFeaturizer.from_dataset(...)` was removed. Python
+  `ANDData` remains responsible for JSON/pickle payloads and uses Python
+  featurization unless a validated Arrow bundle is attached.
 - Status 2026-05-26: `RustFeaturizer.save(...)` and
   `RustFeaturizer.load(...)` were removed. Counter-data measurement now uses
   build-time RSS deltas rather than Rust featurizer serialization.

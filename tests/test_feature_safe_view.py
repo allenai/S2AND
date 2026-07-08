@@ -14,10 +14,10 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
 )
 from s2and.runtime import build_runtime_context
-from tests.helpers import import_s2and_rust
+from tests.helpers import attach_arrow_featurizer_bundle, import_s2and_rust
 
 _ORCID = "0000-0000-0000-0001"
-_HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust(required_method="from_dataset", prefer_site_packages=True)
+_HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust(required_method="from_arrow_paths", prefer_site_packages=True)
 
 
 def _signature(
@@ -107,9 +107,10 @@ def test_get_constraint_suppress_orcid_python() -> None:
     assert dataset.get_constraint("same_a", "same_b", suppress_orcid=True) is None
 
 
-def test_get_constraint_suppress_orcid_rust_parity() -> None:
+def test_get_constraint_suppress_orcid_rust_parity(tmp_path) -> None:
     _require_rust()
     dataset = _feature_safe_dataset()
+    attach_arrow_featurizer_bundle(dataset, tmp_path, name_counts="empty")
     clear_rust_featurizer_cache()
     rust_featurizer = _get_rust_featurizer(dataset)
     signature_index = {str(sig_id): idx for idx, sig_id in enumerate(rust_featurizer.signature_ids())}
@@ -128,9 +129,10 @@ def test_get_constraint_suppress_orcid_rust_parity() -> None:
     ) == [dataset.get_constraint("same_a", "same_b", suppress_orcid=True)]
 
 
-def test_cached_rust_featurizer_respects_suppress_orcid_per_call() -> None:
+def test_cached_rust_featurizer_respects_suppress_orcid_per_call(tmp_path) -> None:
     _require_rust()
     dataset = _feature_safe_dataset()
+    attach_arrow_featurizer_bundle(dataset, tmp_path, name_counts="empty")
     clear_rust_featurizer_cache()
     rust_featurizer = _get_rust_featurizer(dataset)
     signature_index = {str(sig_id): idx for idx, sig_id in enumerate(rust_featurizer.signature_ids())}

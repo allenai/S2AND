@@ -17,7 +17,7 @@ contracts live in:
 | Topic | Decision |
 |---|---|
 | `ANDData` | Keep as Python reference, training/eval, parity, fixture, and compatibility surface. Do not port all of `ANDData` to Rust. |
-| Production inference | Production Rust inference should enter through raw Arrow IPC artifacts. JSON, Python objects, and `RustFeaturizer.from_dataset(...)` are compatibility surfaces. |
+| Production inference | Production Rust inference should enter through raw Arrow IPC artifacts. JSON and Python objects are Python compatibility surfaces. |
 | Arrow preprocessing | Production Arrow rows are runtime inputs, not preprocessed `ANDData` caches. Rust owns local normalization, ngram construction, unidecode, name handling, and language detection from raw Arrow inputs. |
 | Name counts | Use manifest-backed `name_counts_index/` for hot-path lookups. Do not satisfy strict production bundles from ambient package/global fallbacks. |
 | Batch indexes | Filtered production Arrow reads require raw-planner batch lookup indexes. Full scans are explicit test/compatibility opt-ins only. |
@@ -126,7 +126,7 @@ prescribed, decision-free items below are now fixed, Python and Rust in
 lockstep where both sides were affected, with `FEATURIZER_VERSION` bumped 3->4
 to invalidate the pair-feature cache. Covered by `tests/test_text.py`,
 `tests/test_correctness_pass.py`, and the existing parity battery
-(`test_feature_port_parity.py`, `test_rust_from_dataset_contract.py`) which
+(`test_feature_port_parity.py`, `test_arrow_training_ingestion.py`) which
 verifies the two implementations still agree.
 
 - Self-cite shared-paper (parity): guarded on `paper_id_1 != paper_id_2` in
@@ -363,7 +363,7 @@ artifacts exist.
 Verification gate (compatibility behavior stays stable):
 
 ```powershell
-uv run pytest -q tests/test_surname_hyphen_aware.py tests/test_subblocking_telemetry.py tests/test_text.py tests/test_rust_from_dataset_contract.py tests/test_cluster_incremental.py
+uv run pytest -q tests/test_surname_hyphen_aware.py tests/test_subblocking_telemetry.py tests/test_text.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 ```
 
 ## Documentation Cleanup
@@ -383,9 +383,8 @@ These are not TODOs, but they should shape future work:
 - Keep full scans and compatibility fallbacks explicit test-only or
   parity-only options.
 - Prefer `Clusterer.predict_from_arrow_paths(...)` or Arrow-routed
-  `predict(...)` for production inference; keep
-  `feature_block_from_arrow_paths(...)` and `RustFeaturizer.from_dataset(...)`
-  as fixture/parity/training surfaces only.
+  `predict(...)` for production inference; keep JSON/`ANDData` compatibility
+  on Python paths.
 - Keep production-scale `name_counts_index/` in S3, not Git/LFS;
   `name_counts.arrow` stays available for generation/inspection/parity, not
   request-time reads.

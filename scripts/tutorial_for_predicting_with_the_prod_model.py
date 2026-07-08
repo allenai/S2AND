@@ -309,7 +309,6 @@ def main() -> None:
         "venue_similarity",
         "year_diff",
         "title_similarity",
-        # "reference_features",  # removed in the v1.1. model
         "misc_features",
         "name_counts",
         "embedding_similarity",

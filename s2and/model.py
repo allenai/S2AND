@@ -74,7 +74,13 @@ from s2and.incremental_linking.policy import (
 )
 from s2and.incremental_linking.production import predict_incremental_promoted_linker_from_arrow_paths
 from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify
-from s2and.runtime import RequestedBackend, RuntimeContext, build_runtime_context, stage_uses_rust
+from s2and.runtime import (
+    RequestedBackend,
+    RuntimeContext,
+    build_runtime_context,
+    dataset_stage_uses_rust,
+    stage_uses_rust,
+)
 from s2and.rust_calls import (
     build_block_upper_triangle_feature_matrix_indexed_rust,
     get_constraints_block_upper_triangle_indexed_rust,
@@ -417,6 +423,13 @@ def _estimator_cache_fingerprint(estimator: Any) -> Any:
             type(estimator).__qualname__,
             _estimator_cache_fingerprint(inner),
         )
+    cache_fingerprint = getattr(estimator, "cache_fingerprint", None)
+    if callable(cache_fingerprint):
+        return (
+            type(estimator).__module__,
+            type(estimator).__qualname__,
+            tuple(cache_fingerprint()),
+        )
     booster = getattr(estimator, "booster_", None)
     model_to_string = getattr(booster, "model_to_string", None)
     if callable(model_to_string):
@@ -545,11 +558,6 @@ def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None)
 def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
     """Count the number of feature indices selected by features_to_use."""
     return len(_selected_feature_indices(featurizer_info))
-
-
-def _uses_reference_features(featurizer_info: FeaturizationInfo | None) -> bool:
-    """Return whether the featurizer configuration requests reference features."""
-    return featurizer_info is not None and "reference_features" in featurizer_info.features_to_use
 
 
 def _coerce_existing_arrow_paths(
@@ -981,6 +989,67 @@ def _explicit_dataset_arrow_paths_for_prediction(
             require_batch_indexes=True,
             context=context,
             producer_hint=producer_hint,
+        )
+    return None
+
+
+def _runtime_context_explicitly_requested_rust(runtime_context: RuntimeContext) -> bool:
+    return stage_uses_rust(runtime_context) and runtime_context.requested_backend == "rust"
+
+
+def _dataset_arrow_paths_for_prediction_or_python(
+    clusterer: Any,
+    dataset: Any,
+    runtime_context: RuntimeContext,
+    *,
+    context: str,
+    producer_hint: str,
+) -> dict[str, str] | None:
+    if not stage_uses_rust(runtime_context):
+        return None
+
+    try:
+        arrow_paths = _explicit_dataset_arrow_paths_for_prediction(
+            clusterer,
+            dataset,
+            context=context,
+            producer_hint=producer_hint,
+        )
+    except MissingArrowArtifactError as exc:
+        if _runtime_context_explicitly_requested_rust(runtime_context):
+            raise
+        logger.info(
+            "Rust backend resolved but dataset=%s has incomplete Arrow prediction artifacts; "
+            "using Python prediction (op=%s run=%s missing_keys=%s)",
+            getattr(dataset, "name", "<unnamed>"),
+            runtime_context.operation,
+            runtime_context.run_id,
+            exc.missing_keys,
+        )
+        return None
+
+    if arrow_paths is not None:
+        return arrow_paths
+
+    if _runtime_context_explicitly_requested_rust(runtime_context):
+        raise _missing_arrow_prediction_artifacts_error(
+            clusterer,
+            context=context,
+            arrow_paths=_first_explicit_dataset_arrow_paths(dataset),
+            producer_hint=producer_hint,
+        )
+
+    if not getattr(dataset, "_s2and_python_prediction_degrade_logged", False):
+        try:
+            dataset._s2and_python_prediction_degrade_logged = True
+        except AttributeError:
+            pass
+        logger.info(
+            "Rust backend resolved but dataset=%s has no Arrow prediction artifacts; "
+            "using Python prediction (op=%s run=%s)",
+            getattr(dataset, "name", "<unnamed>"),
+            runtime_context.operation,
+            runtime_context.run_id,
         )
     return None
 
@@ -1652,11 +1721,12 @@ def _predict_class0_with_runtime(
     # is LightGBM-specific and breaks sklearn-compatible wrappers.
     del num_threads
 
+    backend = str(getattr(classifier, "prediction_backend", "python"))
     python_start = time.perf_counter()
     with warnings.catch_warnings():
         suppress_sklearn_feature_name_warnings()
         predictions = classifier.predict_proba(features_2d)[:, 0]
-    return predictions, time.perf_counter() - python_start, "python"
+    return predictions, time.perf_counter() - python_start, backend
 
 
 def _predict_and_combine(
@@ -1760,10 +1830,17 @@ def _predict_and_combine(
     return predictions, seconds
 
 
-def _use_rust_constraints(runtime_context: RuntimeContext | None = None) -> bool:
+def _use_rust_constraints(
+    runtime_context: RuntimeContext | None = None,
+    dataset: ANDData | None = None,
+) -> bool:
     if runtime_context is None:
         runtime_context = build_runtime_context("constraints")
-    return stage_uses_rust(runtime_context)
+    if dataset is None:
+        return stage_uses_rust(runtime_context)
+    # Rust constraints run on the dataset's Rust featurizer, which is built
+    # exclusively from Arrow artifacts; datasets without them use Python constraints.
+    return dataset_stage_uses_rust(runtime_context, dataset)
 
 
 def _handle_optional_rust_exception(
@@ -1986,7 +2063,7 @@ def _sync_rust_cluster_seeds(
 ) -> None:
     if runtime_context is None:
         runtime_context = build_runtime_context("constraints")
-    if _use_rust_constraints(runtime_context):
+    if _use_rust_constraints(runtime_context, dataset):
         # Best-effort instrumentation for subblocking lifecycle overhead.
         # Stored on the dataset to avoid changing return payloads on hot paths.
         dataset._rust_cluster_seeds_sync_calls = int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) + 1
@@ -2060,7 +2137,7 @@ def _initialize_incremental_constraint_backend(
     if not use_default_constraints_as_supervision:
         return None, None
 
-    use_rust_constraints = _use_rust_constraints(runtime_context)
+    use_rust_constraints = _use_rust_constraints(runtime_context, dataset)
     if not use_rust_constraints:
         return None, False
 
@@ -3308,7 +3385,7 @@ class Clusterer:
         # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
         num_pairs = 0
-        use_rust_blockwise = stage_uses_rust(runtime_context)
+        use_rust_blockwise = dataset_stage_uses_rust(runtime_context, dataset)
         fastcluster_dtype = np.float64 if use_rust_blockwise else np.float16
         for block_key, signatures in block_dict.items():
             block_size = len(signatures)
@@ -3819,12 +3896,6 @@ class Clusterer:
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict full blocks directly from Arrow IPC inputs through Rust."""
 
-        if _uses_reference_features(self.featurizer_info) or _uses_reference_features(self.nameless_featurizer_info):
-            raise ValueError(
-                "Clusterer.predict_from_arrow_paths does not support reference_features; "
-                "use the ANDData predict path until Arrow reference-feature artifacts are available."
-            )
-
         require_name_counts_index = clusterer_uses_name_count_features(self) or load_name_counts is True
         arrow_path_payload = validate_arrow_prediction_artifacts(
             arrow_paths,
@@ -4307,8 +4378,6 @@ class Clusterer:
         try:
             synthetic_arrow_paths_available = (
                 stage_uses_rust(runtime_context)
-                and not _uses_reference_features(self.featurizer_info)
-                and not _uses_reference_features(self.nameless_featurizer_info)
                 and _explicit_dataset_arrow_paths_for_prediction(
                     self,
                     dataset,
@@ -4761,35 +4830,17 @@ class Clusterer:
             partial_supervision = {}
 
         arrow_paths = None
-        rust_prediction_can_use_arrow = (
-            dists is None
-            and not use_s2_clusters
-            and stage_uses_rust(runtime_context)
-            and not _uses_reference_features(self.featurizer_info)
-            and not _uses_reference_features(self.nameless_featurizer_info)
-        )
-        if rust_prediction_can_use_arrow:
-            arrow_paths = _explicit_dataset_arrow_paths_for_prediction(
+        if dists is None and not use_s2_clusters:
+            arrow_paths = _dataset_arrow_paths_for_prediction_or_python(
                 self,
                 dataset,
+                runtime_context,
                 context="Clusterer.predict Rust prediction",
                 producer_hint=(
-                    "pass complete explicit dataset.arrow_paths for signatures, papers, paper_authors, "
-                    "selected embeddings, model-required sidecars, and raw-planner batch indexes; "
-                    "Rust production prediction does not infer sibling Arrow bundles"
+                    "pass complete Arrow paths for signatures, papers, paper_authors, selected embeddings, "
+                    "and model-required sidecars; Rust production prediction requires complete Arrow artifacts"
                 ),
             )
-            if arrow_paths is None:
-                raise _missing_arrow_prediction_artifacts_error(
-                    self,
-                    context="Clusterer.predict Rust prediction",
-                    arrow_paths=_first_explicit_dataset_arrow_paths(dataset),
-                    producer_hint=(
-                        "pass complete Arrow paths for signatures, papers, paper_authors, selected embeddings, "
-                        "and model-required sidecars; Rust production prediction no longer falls back to "
-                        "ANDData/RustFeaturizer.from_dataset when Arrow artifacts are incomplete"
-                    ),
-                )
 
         if arrow_paths is not None and batching_threshold is None:
             logger.info("Running predict through Arrow/Rust paths - no subblocking")
@@ -5082,7 +5133,7 @@ class Clusterer:
                 float(batch_chunk_plan.effective_available_fraction),
                 int(batch_chunk_plan.stage_budget_bytes),
             )
-        use_rust_blockwise = stage_uses_rust(runtime_context)
+        use_rust_blockwise = dataset_stage_uses_rust(runtime_context, dataset)
         if use_rust_blockwise:
             for prediction_chunk in self._iter_rust_predicted_distance_matrix_chunks(
                 block_dict,
@@ -5729,11 +5780,7 @@ class Clusterer:
             getattr(self, "incremental_linker_artifact_dir", None) or DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
         )
         resolved_arrow_paths = arrow_paths
-        if (
-            resolved_arrow_paths is None
-            and not _uses_reference_features(self.featurizer_info)
-            and not _uses_reference_features(self.nameless_featurizer_info)
-        ):
+        if resolved_arrow_paths is None:
             resolved_arrow_paths = _explicit_dataset_arrow_paths_for_prediction(
                 self,
                 dataset,
@@ -5751,8 +5798,8 @@ class Clusterer:
                 arrow_paths=_first_explicit_dataset_arrow_paths(dataset),
                 producer_hint=(
                     "pass complete Arrow paths for signatures, papers, paper_authors, selected embeddings, "
-                    "and model-required sidecars; promoted incremental Rust prediction no longer uses "
-                    "ANDData/RustFeaturizer.from_dataset as a production fallback"
+                    "and model-required sidecars; promoted incremental Rust prediction requires complete "
+                    "Arrow artifacts"
                 ),
             )
         logger.info("Running promoted incremental linker through Arrow/Rust paths")
@@ -5795,11 +5842,6 @@ class Clusterer:
         by `arrow_paths["cluster_seeds"]`.
         """
 
-        if _uses_reference_features(self.featurizer_info) or _uses_reference_features(self.nameless_featurizer_info):
-            raise ValueError(
-                "Clusterer.predict_incremental_from_arrow_paths does not support reference_features; "
-                "use the ANDData predict_incremental path until Arrow reference-feature artifacts are available."
-            )
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_incremental_from_arrow_paths")
         if partial_supervision is None:
@@ -5969,11 +6011,7 @@ class Clusterer:
             partial_supervision = {}
         use_rust_backend = stage_uses_rust(runtime_context)
         resolved_arrow_paths_for_incremental = None
-        if (
-            use_rust_backend
-            and not _uses_reference_features(self.featurizer_info)
-            and not _uses_reference_features(self.nameless_featurizer_info)
-        ):
+        if use_rust_backend:
             resolved_arrow_paths_for_incremental = _explicit_dataset_arrow_paths_for_prediction(
                 self,
                 dataset,
@@ -5992,8 +6030,8 @@ class Clusterer:
                 arrow_paths=_first_explicit_dataset_arrow_paths(dataset),
                 producer_hint=(
                     "pass complete Arrow paths for signatures, papers, paper_authors, selected embeddings, "
-                    "and model-required sidecars; promoted incremental Rust prediction no longer uses "
-                    "ANDData/RustFeaturizer.from_dataset as a production fallback"
+                    "and model-required sidecars; promoted incremental Rust prediction requires complete "
+                    "Arrow artifacts"
                 ),
             )
         promoted_seed_inputs_available = _has_incremental_seed_source(dataset, resolved_arrow_paths_for_incremental)

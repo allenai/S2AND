@@ -1,6 +1,3 @@
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -16,7 +13,7 @@ use crate::text_compat::{
     compute_block_compat, normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
 };
 use crate::{
-    build_name_counts_data_from_artifact, counter_data_from_hash_count_map, extract_specter_vec,
+    build_name_counts_data_from_artifact, counter_data_from_hash_count_map,
     fnv64, hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
     raw_arrow_year_mean, term_set_from_normalized_text, validate_row_signal_year, vector_norm_f32,
     RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
@@ -692,24 +689,4 @@ pub(crate) fn raw_arrow_paper_evidence_row(
         local_author_window10_overlap_count_max: round_six(best_local10_overlap_count),
         best_author_count_log_absdiff: round_six(best_author_count_log_absdiff.unwrap_or(0.0)),
     }
-}
-
-pub(crate) fn extract_specter_for_paper_id(
-    spec_dict: &Bound<'_, PyDict>,
-    paper_id: &str,
-) -> PyResult<Option<Vec<f32>>> {
-    if let Ok(Some(val)) = spec_dict.get_item(paper_id) {
-        return extract_specter_vec(&val);
-    }
-    if let Ok(i) = paper_id.parse::<i64>() {
-        if let Ok(Some(val)) = spec_dict.get_item(i) {
-            return extract_specter_vec(&val);
-        }
-    }
-    if let Ok(u) = paper_id.parse::<u64>() {
-        if let Ok(Some(val)) = spec_dict.get_item(u) {
-            return extract_specter_vec(&val);
-        }
-    }
-    Ok(None)
 }

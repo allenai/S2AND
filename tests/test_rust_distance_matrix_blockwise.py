@@ -34,6 +34,11 @@ def _dummy_dataset(name: str) -> ANDData:
     )
 
 
+def _mark_arrow_backed(dataset: ANDData) -> ANDData:
+    cast(Any, dataset).rust_featurizer_arrow_paths = {"signatures": "mock-signatures.arrow"}
+    return dataset
+
+
 def _specter_dataset(name: str, specter_embeddings: Any) -> ANDData:
     signatures = {
         "s1": {
@@ -198,53 +203,6 @@ def _partial_supervision_for_upper_triangle(signatures: list[str]) -> tuple[dict
     return partial_supervision, np.asarray(values, dtype=np.float64)
 
 
-def test_rust_from_dataset_expects_python_normalized_specter_dict():
-    tuple_input_dataset = _specter_dataset(
-        "tuple_specter_python_normalized_dataset",
-        (np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32), ["p1", "p2"]),
-    )
-    dict_dataset = _specter_dataset(
-        "dict_specter_rust_dataset",
-        {
-            "p1": np.asarray([1.0, 0.0], dtype=np.float32),
-            "p2": np.asarray([1.0, 0.0], dtype=np.float32),
-        },
-    )
-    no_specter_dataset = _specter_dataset("no_specter_rust_dataset", None)
-
-    tuple_featurizer = s2and_rust.RustFeaturizer.from_dataset(tuple_input_dataset, 0.0, 10000.0, 1)
-    dict_featurizer = s2and_rust.RustFeaturizer.from_dataset(dict_dataset, 0.0, 10000.0, 1)
-    no_specter_featurizer = s2and_rust.RustFeaturizer.from_dataset(no_specter_dataset, 0.0, 10000.0, 1)
-    pairs = [("s1", "s2")]
-    tuple_features = _indexed_pair_matrix(tuple_featurizer, pairs)
-    dict_features = _indexed_pair_matrix(dict_featurizer, pairs)
-    no_specter_features = _indexed_pair_matrix(no_specter_featurizer, pairs)
-
-    np.testing.assert_allclose(tuple_features, dict_features, equal_nan=True)
-    assert not np.allclose(tuple_features, no_specter_features, equal_nan=True)
-
-    dict_dataset.specter_embeddings = (
-        np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32),
-        ["p1", "p2"],
-    )
-    with pytest.raises(TypeError, match="specter_embeddings to be a dict"):
-        s2and_rust.RustFeaturizer.from_dataset(dict_dataset, 0.0, 10000.0, 1)
-
-
-def test_rust_constraint_allows_missing_first_name_like_python():
-    dataset = _empty_first_constraint_dataset()
-
-    assert dataset.get_constraint("empty", "named", low_value=0, high_value=LARGE_DISTANCE, suppress_orcid=True) is None
-
-    featurizer = s2and_rust.RustFeaturizer.from_dataset(dataset, 0.0, float(LARGE_DISTANCE), 1)
-    signature_id_to_index = {str(signature_id): index for index, signature_id in enumerate(featurizer.signature_ids())}
-
-    assert featurizer.get_constraints_matrix_indexed(
-        [(signature_id_to_index["empty"], signature_id_to_index["named"])],
-        suppress_orcid=True,
-    ) == [None]
-
-
 def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
@@ -278,7 +236,7 @@ def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
     monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
 
-    dataset = _dummy_dataset("dummy_rust_blockwise_fastcluster")
+    dataset = _mark_arrow_backed(_dummy_dataset("dummy_rust_blockwise_fastcluster"))
     clusterer = _dummy_clusterer(cluster_model=None)
     signatures = ["0", "1", "2", "3"]
     partial_supervision, expected_flat = _partial_supervision_for_upper_triangle(signatures)
@@ -328,7 +286,7 @@ def test_make_distance_matrices_rust_blockwise_square_matrix(monkeypatch):
     monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
 
-    dataset = _dummy_dataset("dummy_rust_blockwise_square")
+    dataset = _mark_arrow_backed(_dummy_dataset("dummy_rust_blockwise_square"))
     clusterer = _dummy_clusterer(cluster_model=object())
     signatures = ["0", "1", "2", "3"]
     partial_supervision, expected_flat = _partial_supervision_for_upper_triangle(signatures)
@@ -406,7 +364,7 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
             block_size = len(block_signature_indices)
             all_pairs = [(i, j) for i in range(block_size) for j in range(i + 1, block_size)]
             pair_slice = all_pairs[start_offset : start_offset + int(max_pairs or len(all_pairs))]
-            out_cols = len(selected_indices) if selected_indices is not None else 39
+            out_cols = len(selected_indices) if selected_indices is not None else 33
             out = np.zeros((len(pair_slice), out_cols), dtype=np.float64)
             for row_offset in range(len(pair_slice)):
                 out[row_offset, :] = float(start_offset + row_offset + 1) / 10.0
@@ -429,7 +387,7 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
 
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
 
-    dataset = _dummy_dataset("dummy_rust_blockwise_fused")
+    dataset = _mark_arrow_backed(_dummy_dataset("dummy_rust_blockwise_fused"))
     clusterer = _dummy_clusterer(
         cluster_model=None,
         use_default_constraints_as_supervision=True,
@@ -494,7 +452,7 @@ def test_make_distance_matrices_from_rust_featurizer_avoids_anddata_lookup(monke
             block_size = len(block_signature_indices)
             all_pairs = [(i, j) for i in range(block_size) for j in range(i + 1, block_size)]
             pair_slice = all_pairs[start_offset : start_offset + int(max_pairs or len(all_pairs))]
-            out_cols = len(selected_indices) if selected_indices is not None else 39
+            out_cols = len(selected_indices) if selected_indices is not None else 33
             out = np.zeros((len(pair_slice), out_cols), dtype=np.float64)
             for row_offset in range(len(pair_slice)):
                 out[row_offset, :] = float(start_offset + row_offset + 1) / 10.0
@@ -980,25 +938,6 @@ def test_predict_from_arrow_paths_omits_unused_specter_for_non_embedding_model(m
     assert captured["signature_ids"] == ("0", "1")
     assert "specter" not in captured["paths"]
     assert "specter_batch_index" not in captured["paths"]
-
-
-def test_predict_from_arrow_paths_rejects_reference_features(monkeypatch):
-    def fail_build_from_arrow_paths(*_args, **_kwargs):
-        raise AssertionError("Arrow featurizer build should fail fast before touching inputs")
-
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fail_build_from_arrow_paths)
-
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["reference_features"]),
-        classifier=None,
-        cluster_model=None,
-        n_jobs=1,
-    )
-    with pytest.raises(ValueError, match="reference_features"):
-        clusterer.predict_from_arrow_paths(
-            {"block": ["0", "1"]},
-            {"signatures": "signatures.arrow", "papers": "papers.arrow", "paper_authors": "paper_authors.arrow"},
-        )
 
 
 def test_predict_from_arrow_paths_merges_explicit_disallows(monkeypatch):

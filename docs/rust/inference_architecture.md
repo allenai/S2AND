@@ -24,7 +24,7 @@ narrow set of typed inference inputs read directly by Rust.
 | Name alias data | Some paths could pass per-dataset Arrow `name_pairs` / `name_tuples` overrides. | Runtime aliases now come from the explicit `name_tuples` argument; production path bundles must not carry alias override paths. |
 | SPECTER | Pickle remained common in Python paths; Rust paths handled some payloads through Python objects. | Direct Arrow uses fixed-size-list `float32` embedding tables. Safetensors is still only a future benchmark if SPECTER read time becomes material. |
 | Cluster seeds | Seed semantics were mostly Python maps on the incremental path. | Seeded/incremental Arrow requires a seed source: either `cluster_seeds.arrow` or a normalized seed mapping that production materializes into request-local Arrow. `cluster_seed_disallows.arrow` is optional unless disallow constraints are declared. Unseeded full predict can omit both. |
-| Reference features | Legacy feature slots and training paths still supported citation-derived reference features. | Direct Arrow predict fails fast if a model requests reference features; current production models do not use them. |
+| Reference features | Legacy feature slots and training paths still supported citation-derived reference features. | Removed entirely: the featurizer no longer defines the `reference_features` group and the feature vector carries no reference columns. |
 | Data ingestion | JSON/pickle plus `ANDData` preprocessing was the default ingestion shape. | Arrow IPC is the preferred table-shaped ingestion format when the hot path stays Rust/columnar. JSON remains compatibility/test input. |
 | Verification | Performance and parity evidence lived across several design logs. | Current gates should point to this architecture doc, `arrow_dataset_spec.md`, `artifact_formats.md`, `runtime.md`, and `baselines.md`. |
 
@@ -47,7 +47,7 @@ are not alternate production paths.
 
 | Job | Production route | Not production |
 |---|---|---|
-| Full-block prediction | `Clusterer.predict_from_arrow_paths(...)` or Arrow-routed `Clusterer.predict(...)` -> `feature_port.build_rust_featurizer_from_arrow_paths(...)` -> `RustFeaturizer.from_arrow_paths(...)`. | `RustFeaturizer.from_dataset(...)`, JSON loaders, raw Python object scoring. |
+| Full-block prediction | `Clusterer.predict_from_arrow_paths(...)` or Arrow-routed `Clusterer.predict(...)` -> `feature_port.build_rust_featurizer_from_arrow_paths(...)` -> `RustFeaturizer.from_arrow_paths(...)`. | JSON loaders and raw Python object scoring. |
 | Raw incremental candidate planning | `RawBlockQueryCandidatePlanner.from_query_signatures(paths_with_query_signatures_and_batch_indexes, ...)` -> `.plan_query_signatures()` or subset `.plan(...)` calls. | Unindexed filtered Arrow scans, Python mini object materialization, direct retriever wiring from callers. |
 | Pairwise feature and prediction inputs | `LinkerCandidateBatch` index arrays -> indexed Rust pairwise APIs. | String-pair feature APIs or ad hoc per-pair calls. |
 | Constraints | `get_constraints_matrix_indexed`, `get_constraints_block_upper_triangle_indexed`, or linker label-array APIs. | Single-pair Rust constraints. |
@@ -74,10 +74,9 @@ now use typed Arrow query-signature request sidecars for raw planner entry.
 
 | Path | Current Python dependency | Production status |
 |---|---|---|
-| `Clusterer.predict(...)` without Arrow paths | Explicit Python/legacy routes can still build normal `ANDData` and use Python block orchestration. | Rust production now raises `MissingArrowArtifactError`. Provide complete Arrow artifacts or select `backend="python"` for compatibility/reference execution. |
+| `Clusterer.predict(...)` without Arrow paths | Explicit Python/legacy routes can still build normal `ANDData` and use Python block orchestration. Auto/default routes also fall back to Python for non-Arrow datasets. | Explicit Rust production raises `MissingArrowArtifactError`. Provide complete Arrow artifacts or select `backend="python"` for compatibility/reference execution. |
 | `Clusterer.predict_incremental(...)` without base Arrow paths or seed source | Explicit Python/legacy routes can still use Python incremental helpers and `ANDData` seed state. | Rust production now raises `MissingArrowArtifactError`. Provide `signatures`, `papers`, `paper_authors`, required embedding/name-count artifacts, and a seed source via `cluster_seeds` or `dataset.cluster_seeds_require`. |
-| `RustFeaturizer.from_dataset(...)` | Traverses Python `ANDData` objects over PyO3. | Keep as incumbent/reference, training/eval, parity, and compatibility surface; do not present or optimize it as the production hot path. |
-| JSON Rust loaders | Avoid `ANDData`, but still read compatibility JSON and call Python text normalization helpers. | Fixture, legacy script, and benchmark surface only; Arrow IPC is the production table-shaped target. |
+| JSON/`ANDData` featurization | Uses Python `ANDData` and Python feature code. | Compatibility/reference execution only; Arrow IPC is the Rust table-shaped target. |
 | Training and release replay | Python owns data cleaning, feature table materialization, LightGBM training, calibration, and metrics. | Not a no-`ANDData` inference target; keep Python unless runtime profiling shows a training bottleneck worth porting. |
 
 Incremental seed and altered-profile behavior is part of the production

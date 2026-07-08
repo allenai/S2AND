@@ -17,9 +17,9 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
 )
 from s2and.featurizer import _single_pair_featurize
-from tests.helpers import equalish, import_s2and_rust, tiny_name_counts
+from tests.helpers import attach_arrow_featurizer_bundle, equalish, import_s2and_rust, tiny_name_counts
 
-HAS_RUST, _rust_import_payload = import_s2and_rust(required_method="from_dataset", prefer_site_packages=True)
+HAS_RUST, _rust_import_payload = import_s2and_rust(prefer_site_packages=True)
 _RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
 print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
 if not HAS_RUST:
@@ -61,7 +61,7 @@ def _constraint_indexed_rust(dataset, sig_id_1: str, sig_id_2: str, **kwargs):
     )[0]
 
 
-def _load_dataset_from_dir(data_dir, name, *, compute_reference_features=False):
+def _load_dataset_from_dir(data_dir, name):
     cluster_seeds_path = os.path.join(data_dir, "cluster_seeds.json")
     cluster_seeds = cluster_seeds_path if os.path.exists(cluster_seeds_path) else None
     ds = ANDData(
@@ -85,7 +85,6 @@ def _load_dataset_from_dir(data_dir, name, *, compute_reference_features=False):
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        compute_reference_features=compute_reference_features,
     )
     return ds
 
@@ -95,15 +94,16 @@ def _attach_fake_specter_embeddings(ds, max_papers=2, dim=8):
     if ds.specter_embeddings is None:
         ds.specter_embeddings = {}
     added = 0
+    # Independent of preprocessing backend: paper fields like predicted_language
+    # may be deferred to Rust, so attach purely by signature iteration order.
     for sig_id in ds.signatures.keys():
         paper = _paper_for_sig(ds, sig_id)
-        if paper.predicted_language in {"en", "un"}:
-            paper_id = str(paper.paper_id)
-            if paper_id not in ds.specter_embeddings:
-                ds.specter_embeddings[paper_id] = rng.normal(size=(dim,)).astype(np.float32)
-                added += 1
-                if added >= max_papers:
-                    break
+        paper_id = str(paper.paper_id)
+        if paper_id not in ds.specter_embeddings:
+            ds.specter_embeddings[paper_id] = rng.normal(size=(dim,)).astype(np.float32)
+            added += 1
+            if added >= max_papers:
+                break
     return ds
 
 
@@ -140,7 +140,7 @@ def _build_labeled_pairs(sig_ids, count=20, seed=123):
 
 
 @pytest.fixture(scope="session")
-def dataset():
+def dataset(tmp_path_factory):
     with _temporary_env(S2AND_BACKEND="python"):
         # Avoid reusing stale process-level env caches between parity fixtures.
         _reset_featurizer_env_caches()
@@ -148,6 +148,9 @@ def dataset():
         data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
         ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
         ds = _attach_fake_specter_embeddings(ds)
+        # Rust featurizers build exclusively from Arrow artifacts; spool the
+        # dataset to a bundle sharing the same tiny name counts as the Python side.
+        attach_arrow_featurizer_bundle(ds, tmp_path_factory.mktemp("parity_session_bundle"))
     return ds
 
 
@@ -201,7 +204,7 @@ def test_rust_extension_available():
     assert HAS_RUST, f"s2and_rust not available: {_RUST_IMPORT_ERROR}"
 
 
-def test_rust_featurizer_supports_string_paper_ids():
+def test_rust_featurizer_supports_string_paper_ids(tmp_path):
     # Regression guard: datasets may use non-numeric paper IDs (e.g., "app:123").
     signatures = {
         "s1": {
@@ -288,9 +291,9 @@ def test_rust_featurizer_supports_string_paper_ids():
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        compute_reference_features=False,
     )
 
+    attach_arrow_featurizer_bundle(ds, tmp_path, name_counts="empty")
     features = _featurize_pair_indexed_rust(ds, "s1", "s2")
     assert len(features) > 0
 
@@ -298,7 +301,7 @@ def test_rust_featurizer_supports_string_paper_ids():
     assert constraint is None or isinstance(constraint, int | float)
 
 
-def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.MonkeyPatch):
+def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("S2AND_BACKEND", "python")
     _reset_featurizer_env_caches()
     signatures = {
@@ -376,8 +379,8 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        compute_reference_features=False,
     )
+    attach_arrow_featurizer_bundle(ds, tmp_path, name_counts="empty")
     ref_features, _ = _single_pair_featurize(("s1", "s2"), dataset=ds)
     rust_features = _featurize_pair_indexed_rust(ds, "s1", "s2")
     feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
@@ -400,16 +403,12 @@ def test_indexed_pair_matrix_rust_parity(dataset, sample_pairs):
             )
 
 
-def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch):
+def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
 
     monkeypatch.setenv("S2AND_BACKEND", "python")
     _reset_featurizer_env_caches()
-    ds_python = _load_dataset_from_dir(
-        data_dir,
-        "dummy_python_end_to_end",
-        compute_reference_features=True,
-    )
+    ds_python = _load_dataset_from_dir(data_dir, "dummy_python_end_to_end")
     ds_python = _attach_fake_specter_embeddings(ds_python)
     sig_ids = list(ds_python.signatures.keys())
     pairs = _build_labeled_pairs(sig_ids, count=25, seed=7)
@@ -426,12 +425,9 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch):
 
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     _reset_featurizer_env_caches()
-    ds_rust = _load_dataset_from_dir(
-        data_dir,
-        "dummy_rust_end_to_end",
-        compute_reference_features=True,
-    )
+    ds_rust = _load_dataset_from_dir(data_dir, "dummy_rust_end_to_end")
     ds_rust = _attach_fake_specter_embeddings(ds_rust)
+    attach_arrow_featurizer_bundle(ds_rust, tmp_path)
     features_rust, labels_rust, _ = featurizer_mod.many_pairs_featurize(
         pairs,
         ds_rust,
@@ -449,7 +445,7 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch):
     _reset_featurizer_env_caches()
 
 
-def test_indexed_constraint_rust_ignores_reliable_language_mismatch():
+def test_indexed_constraint_rust_ignores_reliable_language_mismatch(tmp_path):
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
     ds = _load_dataset_from_dir(data_dir, "dummy_language_constraint_removed")
 
@@ -460,6 +456,7 @@ def test_indexed_constraint_rust_ignores_reliable_language_mismatch():
 
     ds.papers[paper_id_1] = ds.papers[paper_id_1]._replace(predicted_language="en", is_reliable=True)
     ds.papers[paper_id_2] = ds.papers[paper_id_2]._replace(predicted_language="fr", is_reliable=True)
+    attach_arrow_featurizer_bundle(ds, tmp_path)
 
     ref_val = ds.get_constraint(s1, s2)
     got_val = _constraint_indexed_rust(ds, s1, s2)
@@ -480,7 +477,7 @@ def test_indexed_constraint_rust_ignores_reliable_language_mismatch():
     assert got_indexed == [None]
 
 
-def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases():
+def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     signatures = {
         "s1": {
             "signature_id": "s1",
@@ -554,10 +551,10 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases():
         random_seed=42,
         name_tuples={("yu", "yi")},
         use_orcid_id=True,
-        compute_reference_features=False,
     )
 
     assert ds.get_constraint("s1", "s2") is None
+    attach_arrow_featurizer_bundle(ds, tmp_path, name_counts="empty")
     rust_featurizer = _get_rust_featurizer(ds)
     assert _constraint_indexed_rust(ds, "s1", "s2", featurizer=rust_featurizer) is None
     signature_ids = list(rust_featurizer.signature_ids())

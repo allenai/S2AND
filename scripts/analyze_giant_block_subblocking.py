@@ -295,7 +295,6 @@ def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
         random_seed=int(random_seed),
         name_tuples="filtered",
         use_orcid_id=True,
-        compute_reference_features=False,
     )
 
 

@@ -4,12 +4,12 @@ This document collects the operational details for using the released S2AND prod
 
 ## Which production model to use
 
-| Model artifact | Status | Embeddings | Uses reference features? | Format |
+| Model artifact | Status | Embeddings | Usable with current S2AND? | Format |
 | --- | --- | --- | --- | --- |
-| `production_model_v1.21/` | Current | SPECTER2 PRX | No | Native LightGBM + JSON bundle |
-| `production_model_v1.2.pickle` | Legacy pairwise pickle | SPECTER2 PRX | No | Pickle |
-| `production_model_v1.1.pickle` | Legacy | SPECTER1 | No | Pickle |
-| `production_model_v1.0.pickle` | Deprecated | SPECTER1 | Yes | Pickle |
+| `production_model_v1.21/` | Current | SPECTER2 PRX | Yes | Native LightGBM + JSON bundle |
+| `production_model_v1.2.pickle` | Legacy pairwise pickle | SPECTER2 PRX | Yes | Pickle |
+| `production_model_v1.1.pickle` | Legacy | SPECTER1 | Yes | Pickle |
+| `production_model_v1.0.pickle` | Deprecated | SPECTER1 | No (required removed reference features) | Pickle |
 
 Recommended default:
 
@@ -96,10 +96,10 @@ plus `pw_*` aggregate features, and the artifact audit metadata records the
 pairwise model path, version, and digest.
 
 Before replay, confirm the new pairwise model is compatible with the replay
-source bundle. The default minimal-raw bundle does not store reference papers,
-so the replay script rejects pairwise models that require
-`reference_features`. If the pairwise model changes embedding source or input
-contract, rebuild the source bundle and pass it with `--source-bundle-root`.
+source bundle. The replay script rejects legacy pairwise models whose
+`features_to_use` still names the removed `reference_features` group. If the
+pairwise model changes embedding source or input contract, rebuild the source
+bundle and pass it with `--source-bundle-root`.
 The current train/calibrate/eval source bundle is published as an Arrow-only
 replay bundle with the other Arrow release data:
 
@@ -266,26 +266,11 @@ no shipped machine-local default for precomputed feature tables.
 
 ## Reference-feature behavior
 
-Models `v1.21`, `v1.2`, and `v1.1` were trained with
-`compute_reference_features=False`. That means they do not use features derived
-from cited references.
-
-The disabled reference-derived features are:
-
-- `references_authors_overlap`
-- `references_titles_overlap`
-- `references_venues_overlap`
-- `references_author_blocks_jaccard`
-- `references_self_citation`
-- `references_overlap`
-
-Practical consequence:
-
-- For `v1.21`, `v1.2`, and `v1.1`, `papers.references` can be omitted or set
-  to `null`.
-- Signature fields are still required as usual.
-
-If you use `v1.0`, you must provide the paper-reference lists needed for those features.
+Reference features have been removed from S2AND entirely. The featurizer no
+longer computes features derived from cited references, `ANDData` ignores
+`papers.references`, and the feature vector no longer reserves columns for
+them. Model `v1.0`, which required reference features, is no longer usable
+with current S2AND.
 
 ## Minimal input contract
 
@@ -302,8 +287,7 @@ Minimal paper entry for `v1.21`, `v1.2`, and `v1.1`:
   "authors": [
     {"position": 0, "author_name": "Jane Smith"},
     {"position": 1, "author_name": "John Doe"}
-  ],
-  "references": null
+  ]
 }
 ```
 

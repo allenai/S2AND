@@ -146,8 +146,14 @@ Incrementation history
     fastText is mandatory in production (load failure raises). Affects the
     is_reliable-sum, predicted_language-equality, and english_or_unknown_count
     features. (Sinonym normalization path removed; no feature-value effect.)
+6 - reference features removed entirely: the six reference_features columns
+    (references_authors_overlap, references_titles_overlap,
+    references_venues_overlap, references_author_blocks_jaccard,
+    references_self_citation, references_overlap) no longer exist and the
+    feature vector shrank from 39 to 33 columns. Models trained on the old
+    layout are incompatible.
 """
-FEATURIZER_VERSION = 5
+FEATURIZER_VERSION = 6
 
 # important constant values
 NUMPY_NAN = np.nan

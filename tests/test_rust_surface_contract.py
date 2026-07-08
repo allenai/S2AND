@@ -55,24 +55,6 @@ def test_removed_rust_escape_hatches_do_not_reappear() -> None:
     assert offenders == []
 
 
-def test_production_scripts_do_not_call_rust_from_dataset() -> None:
-    production_roots = (
-        REPO_ROOT / "scripts" / "production",
-        REPO_ROOT / "s2and" / "incremental_linking",
-    )
-    offenders: list[str] = []
-    call_pattern = re.compile(r"RustFeaturizer\.from_dataset\s*\(")
-    for root in production_roots:
-        for path in root.rglob("*.py"):
-            if any(part in SKIP_DIR_NAMES for part in path.parts):
-                continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            if call_pattern.search(text):
-                offenders.append(str(path.relative_to(REPO_ROOT)))
-
-    assert offenders == []
-
-
 def test_raw_arrow_runtime_does_not_accept_query_compatibility_args() -> None:
     from s2and.incremental_linking import runtime as runtime_module
 

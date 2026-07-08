@@ -140,7 +140,7 @@ def test_native_clusterer_predict_matches_v12_pickle_python(monkeypatch: pytest.
 
 
 def test_native_clusterer_predict_rust_requires_arrow_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    rust_available, rust_error = import_s2and_rust(required_method="from_dataset")
+    rust_available, rust_error = import_s2and_rust(required_method="from_arrow_paths")
     if not rust_available:
         raise pytest.skip.Exception(f"Rust runtime unavailable: {rust_error!r}")
 
@@ -149,8 +149,28 @@ def test_native_clusterer_predict_rust_requires_arrow_paths(monkeypatch: pytest.
         load_production_model(_NATIVE_BUNDLE_PATH, require_incremental_linker=False)
     )
 
-    with pytest.raises(MissingArrowArtifactError, match="Rust production prediction no longer falls back"):
+    with pytest.raises(MissingArrowArtifactError, match="Rust production prediction requires complete Arrow artifacts"):
         _predict_dummy_block(native_clusterer, batching_threshold=None)
+
+
+def test_native_clusterer_predict_auto_without_arrow_paths_uses_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    rust_available, rust_error = import_s2and_rust(required_method="from_arrow_paths")
+    if not rust_available:
+        raise pytest.skip.Exception(f"Rust runtime unavailable: {rust_error!r}")
+
+    monkeypatch.delenv("S2AND_BACKEND", raising=False)
+    native_clusterer = _prepare_prediction_clusterer(
+        load_production_model(_NATIVE_BUNDLE_PATH, require_incremental_linker=False)
+    )
+
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    legacy_clusterer = _prepare_prediction_clusterer(
+        load_pickle_with_verified_label_encoder_compat(_LEGACY_PICKLE_PATH)["clusterer"]
+    )
+    expected = _predict_dummy_block(legacy_clusterer, batching_threshold=None)
+
+    monkeypatch.delenv("S2AND_BACKEND", raising=False)
+    assert _predict_dummy_block(native_clusterer, batching_threshold=None) == expected
 
 
 def test_native_clusterer_runtime_config_matches_v12_pickle() -> None:

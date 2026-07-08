@@ -778,7 +778,7 @@ def test_rust_featurizer_from_arrow_paths_accepts_empty_specter_table(tmp_path: 
         )
     )
 
-    assert matrix.shape == (1, 39)
+    assert matrix.shape == (1, 33)
     assert np.isnan(matrix).any()
 
 
@@ -1201,7 +1201,7 @@ def test_rust_featurizer_from_arrow_paths_uses_batch_indexes(tmp_path: Path) -> 
     )
 
     assert tuple(indexed.signature_ids()) == ("q1", "s1")
-    assert _indexed_pair_matrix(indexed, [("q1", "s1")]).shape == (1, 39)
+    assert _indexed_pair_matrix(indexed, [("q1", "s1")]).shape == (1, 33)
 
     with Path(paths["signatures"]).open("ab") as outfile:
         outfile.write(b"\0")
@@ -2023,7 +2023,7 @@ def test_rust_featurizer_from_arrow_paths_applies_cluster_seed_disallows(tmp_pat
     pairs = [("q1", "s1"), ("q1", "s2")]
 
     assert tuple(direct.signature_ids()) == signature_order.signature_ids
-    assert _indexed_pair_matrix(direct, pairs).shape == (2, 39)
+    assert _indexed_pair_matrix(direct, pairs).shape == (2, 33)
     signature_index = {str(signature_id): index for index, signature_id in enumerate(direct.signature_ids())}
     assert direct.get_constraints_matrix_indexed([(signature_index["q1"], signature_index["s1"])]) == [None]
     assert direct.get_constraints_matrix_indexed([(signature_index["q1"], signature_index["s2"])]) == [10000.0]

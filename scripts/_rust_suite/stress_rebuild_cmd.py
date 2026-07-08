@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT = _SCRIPTS_DIR.parent
@@ -24,7 +24,7 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
     compute_rss_growth_fraction,
 )
 
-BUILD_PATH_CHOICES = ("from_arrow_paths", "from_dataset")
+BUILD_PATH_CHOICES = ("from_arrow_paths",)
 DEFAULT_ARROW_DATA_ROOT = os.path.join("s2and", "data")
 DEFAULT_ARROW_SPECTER_SUFFIX = "_specter2.pkl"
 
@@ -108,7 +108,6 @@ def _validate_paths(paths: dict[str, str | None]) -> None:
 def _build_dataset(
     *,
     paths: dict[str, str | None],
-    compute_reference_features: bool,
     preprocess: bool,
     num_threads: int,
     use_specter: bool,
@@ -141,7 +140,6 @@ def _build_dataset(
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
-        compute_reference_features=bool(compute_reference_features),
     )
 
 
@@ -164,38 +162,12 @@ def _build_from_arrow_paths(
     )
 
 
-def _build_from_dataset(
-    *,
-    s2and_rust_module: Any,
-    paths: dict[str, str | None],
-    compute_reference_features: bool,
-    preprocess: bool,
-    num_threads: int,
-    use_specter: bool,
-) -> tuple[Any, Any]:
-    dataset = _build_dataset(
-        paths=paths,
-        compute_reference_features=compute_reference_features,
-        preprocess=preprocess,
-        num_threads=num_threads,
-        use_specter=use_specter,
-    )
-    featurizer = s2and_rust_module.RustFeaturizer.from_dataset(
-        dataset,
-        0.0,
-        10000.0,
-        max(1, int(num_threads)),
-    )
-    return featurizer, dataset
-
-
 def run_rebuild_stress(
     *,
     dataset: str,
     build_path: str,
     repeats: int,
     num_threads: int,
-    compute_reference_features: bool = False,
     preprocess: bool = True,
     use_specter: bool = False,
     rss_sample_ms: int = 50,
@@ -211,20 +183,13 @@ def run_rebuild_stress(
         raise ValueError(f"build_path must be one of: {', '.join(BUILD_PATH_CHOICES)}")
     if int(rss_sample_ms) <= 0:
         raise ValueError("rss_sample_ms must be positive")
-    if build_path == "from_arrow_paths" and compute_reference_features:
-        raise ValueError("compute_reference_features is only supported with build_path='from_dataset'")
 
     os.environ.setdefault("S2AND_BACKEND", "rust")
     dataset_name = dataset.strip().lower()
     resolved_arrow_data_root = None
-    if build_path == "from_arrow_paths":
-        resolved_arrow_data_root = _resolve_path(arrow_data_root)
-        paths = _arrow_dataset_paths(dataset_name, arrow_data_root, specter_suffix)
-    else:
-        paths = _dataset_paths(dataset_name)
-        _validate_paths(paths)
-        dataset_name = str(paths["dataset_name"])
-    s2and_rust_module = _import_rust_module()
+    resolved_arrow_data_root = _resolve_path(arrow_data_root)
+    paths = _arrow_dataset_paths(dataset_name, arrow_data_root, specter_suffix)
+    _import_rust_module()
     rust_extension_identity = collect_rust_extension_identity(
         require_release=bool(require_rust_release),
         fail_if_unavailable=True,
@@ -235,7 +200,7 @@ def run_rebuild_stress(
     rss_peak_gb_by_iteration: list[float] = []
     started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sample_interval_seconds = max(0.001, float(rss_sample_ms) / 1000.0)
-    arrow_specter_suffix = specter_suffix if build_path == "from_arrow_paths" else None
+    arrow_specter_suffix = specter_suffix
     print(
         "Starting rebuild stress: "
         f"dataset={dataset_name} build_path={build_path} repeats={repeats} "
@@ -252,21 +217,11 @@ def run_rebuild_stress(
             featurizer = None
             dataset_obj = None
             try:
-                if build_path == "from_arrow_paths":
-                    featurizer = _build_from_arrow_paths(
-                        paths=cast(dict[str, str], paths),
-                        preprocess=preprocess,
-                        num_threads=num_threads,
-                    )
-                else:
-                    featurizer, dataset_obj = _build_from_dataset(
-                        s2and_rust_module=s2and_rust_module,
-                        paths=cast(dict[str, str | None], paths),
-                        compute_reference_features=compute_reference_features,
-                        preprocess=preprocess,
-                        num_threads=num_threads,
-                        use_specter=use_specter,
-                    )
+                featurizer = _build_from_arrow_paths(
+                    paths=paths,
+                    preprocess=preprocess,
+                    num_threads=num_threads,
+                )
                 del featurizer
                 del dataset_obj
                 success_count += 1
@@ -311,11 +266,10 @@ def run_rebuild_stress(
         "build_path": str(build_path),
         "repeats": int(repeats),
         "num_threads": int(max(1, int(num_threads))),
-        "compute_reference_features": bool(compute_reference_features),
         "preprocess": bool(preprocess),
         "use_specter": bool(use_specter),
         "arrow_data_root": resolved_arrow_data_root,
-        "specter_suffix": str(specter_suffix) if build_path == "from_arrow_paths" else None,
+        "specter_suffix": str(specter_suffix),
         "rss_sample_ms": int(rss_sample_ms),
         "rss_growth_max_fraction": (None if rss_growth_max_fraction is None else float(rss_growth_max_fraction)),
         "rss_peak_gb_by_iteration": rss_peak_gb_by_iteration,
@@ -351,8 +305,7 @@ def _rss_growth_fraction(rss_peak_gb_by_iteration: list[float]) -> float | None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Repeatedly build/drop RustFeaturizer using from_arrow_paths or from_dataset "
-            "to stress lifecycle robustness."
+            "Repeatedly build/drop RustFeaturizer using from_arrow_paths to stress lifecycle robustness."
         )
     )
     parser.add_argument("--dataset", required=True, help="Dataset name (e.g. dummy, qian, aminer)")
@@ -374,11 +327,6 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repeats", type=int, default=3, help="Number of rebuild iterations.")
     parser.add_argument("--num-threads", type=int, default=1, help="Thread count passed to RustFeaturizer build.")
-    parser.add_argument(
-        "--compute-reference-features",
-        action="store_true",
-        help="Build featurizer with reference features enabled.",
-    )
     parser.add_argument(
         "--no-preprocess",
         action="store_true",
@@ -419,7 +367,6 @@ def main() -> None:
         build_path=args.build_path,
         repeats=args.repeats,
         num_threads=args.num_threads,
-        compute_reference_features=bool(args.compute_reference_features),
         preprocess=not bool(args.no_preprocess),
         use_specter=bool(args.use_specter),
         rss_sample_ms=int(args.rss_sample_ms),

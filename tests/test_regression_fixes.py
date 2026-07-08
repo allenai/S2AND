@@ -667,6 +667,7 @@ def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
             cluster_seeds_require={},
             cluster_seeds_disallow=set(),
             _cluster_seeds_version=1,
+            rust_featurizer_arrow_paths={"signatures": "mock-signatures.arrow"},
         )
     )
     runtime_context = RuntimeContext(
@@ -713,6 +714,7 @@ def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
             cluster_seeds_require={"s1": "c1", "s2": "c1"},
             cluster_seeds_disallow={("s1", "s3")},
             _cluster_seeds_version=1,
+            rust_featurizer_arrow_paths={"signatures": "mock-signatures.arrow"},
         )
     )
     runtime_context = RuntimeContext(

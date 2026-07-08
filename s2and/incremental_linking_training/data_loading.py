@@ -181,7 +181,6 @@ def load_giant_block_dataset(
             random_seed=int(meta.get("random_seed", 0) if isinstance(meta, dict) else 0),
             name_tuples="filtered",
             use_orcid_id=False,
-            compute_reference_features=False,
         )
     finally:
         for key, value in previous_env.items():

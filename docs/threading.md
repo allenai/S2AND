@@ -19,46 +19,44 @@ Within the Python API, treat `n_jobs` as the canonical concurrency setting for a
 
 ## Python preprocessing parallelism
 
-S2AND has three main Python preprocessing phases that can dominate end-to-end runtime:
+S2AND has two main Python preprocessing phases that can dominate end-to-end runtime:
 
-1. **Papers 1/2**: `preprocess_paper_1` (title/author normalization + word ngrams; and venue/journal normalization when `preprocess=True`)
-2. **Papers 2/2**: `preprocess_paper_2` (reference-details ngrams + block counts)
-3. **Signatures**: `ANDData.preprocess_signatures` (normalization + feature creation)
+1. **Papers**: `preprocess_paper_1` (title/author normalization + word ngrams; and venue/journal normalization when `preprocess=True`)
+2. **Signatures**: `ANDData.preprocess_signatures` (normalization + feature creation)
 
 **Production default behavior (as of 2026-02-27):**
 
-- **Linux / WSL2**: use a process pool for **Papers 1/2** when `n_jobs > 1`; run **Papers 2/2** serial; run **Signatures** serial.
-- **Windows/macOS (native)**: run **Papers 1/2** serial (even if `n_jobs > 1`); run **Papers 2/2** serial; run **Signatures** serial.
+- **Linux / WSL2**: use a process pool for **Papers** when `n_jobs > 1`; run **Signatures** serial.
+- **Windows/macOS (native)**: run **Papers** serial (even if `n_jobs > 1`); run **Signatures** serial.
 
 Rationale (high level): `preprocess_paper_1` is CPU-bound and benefits from `fork` multiprocessing on Linux, while
-`spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For `preprocess_paper_2` and signature preprocessing,
+`spawn` platforms (Windows/macOS) pay heavy import/pickle overhead. For signature preprocessing,
 the overhead of shipping large Python objects around dominates, so pooling is net negative.
 
 Implementation notes:
 
 - `preprocess_paper_1` takes an explicit `preprocess=...` flag (spawn-safe; no worker globals).
-- `preprocess_papers_parallel` uses `UniversalPool` only for the **Papers 1/2** phase on Linux; **Papers 2/2** always runs serial.
+- `preprocess_papers_parallel` uses `UniversalPool` only on Linux.
 - Production `UniversalPool` call sites pass explicit `use_threads=...` so pool mode does not rely on implicit defaults.
 - `UniversalPool` remains platform-aware for helpers/callers that do not pass `use_threads`: processes on Linux (`fork`), threads on Windows/macOS by default.
 
 Benchmark script:
 
-- `scripts/bench_preprocess_phases.py` benchmarks the three phases separately.
+- `scripts/bench_preprocess_phases.py` benchmarks the phases separately.
 
-Rust `from_dataset` bypass (Bundle 1):
+Arrow-backed Rust training:
 
-When training/eval runs use the Rust backend, paper preprocessing can be deferred to Rust (see
-`docs/rust/runtime.md` section "Training-mode deferred paper preprocessing"). In that mode,
-`preprocess_papers_parallel` is **skipped entirely**, and Rust’s `from_dataset` handles paper
-normalization, ngrams, and language detection via Rayon parallelism, making the Python parallelism
-discussion above moot for Rust-enabled training runs.
+When training/eval runs use Arrow-backed Rust featurization, paper preprocessing can be deferred to Rust
+(see `docs/rust/runtime.md` section "Arrow Training Deferred Preprocessing"). In that mode,
+`preprocess_papers_parallel` is **skipped entirely**, and Rust Arrow readers handle paper normalization,
+ngrams, and language detection via Rayon parallelism, making the Python parallelism discussion above moot
+for those runs.
 
 Conditions for the bypass:
 
 - Backend resolves to Rust (`S2AND_BACKEND=rust` or `auto` resolved to Rust)
 - `preprocess=True`
-- Rust extension supports `SUPPORTS_FROM_DATASET_PAPER_PREPROCESS`
-- `compute_reference_features=False`
+- The dataset is constructed through `s2and.arrow_training` or passes `rust_arrow_featurization=True`
 
 ## Recommended run setup
 
@@ -135,7 +133,8 @@ Rules of thumb:
   worker.
 - Prefer **one parallelism layer per phase**:
   - Rust batch featurization: Rayon handles parallelism; avoid wrapping it in additional thread pools.
-  - LightGBM inference: let LightGBM/OpenMP use threads; avoid concurrent `predict_proba()` calls from multiple workers.
+  - LightGBM inference: scoring runs in Rust (`RustLightGBMBooster`) on the estimator's configured `n_jobs` via the
+    shared Rayon pools; avoid concurrent `predict_proba()` calls from multiple workers.
 - BLAS / NumExpr are usually **not** the parallelism layer you want to scale first in S2AND. Leave
   `MKL_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and `NUMEXPR_NUM_THREADS=1` unless profiling shows otherwise.
 

@@ -33,14 +33,3 @@ def test_dataset_paths_resolve_json_datasets_under_package_data(
 
     assert paths["signatures"] == str(dataset_root / "aminer_signatures.json")
     assert paths["papers"] == str(dataset_root / "aminer_papers.json")
-
-
-def test_arrow_build_path_rejects_reference_features() -> None:
-    with pytest.raises(ValueError, match="compute_reference_features"):
-        stress_rebuild_cmd.run_rebuild_stress(
-            dataset="qian",
-            build_path="from_arrow_paths",
-            repeats=1,
-            num_threads=1,
-            compute_reference_features=True,
-        )

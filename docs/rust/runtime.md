@@ -52,8 +52,9 @@ Python path remains available via explicit backend and stage overrides at any ti
 - Core runtime capability requires extension importability plus the current
   Rust markers used by production Arrow paths: direct Arrow ingest, indexed
   featurization, constraints, seed updates, and name-count index support.
-  `ANDData`/`from_dataset` remains the maintained compatibility, training,
-  benchmark, and parity surface; it is not the production inference authority.
+  Rust featurization enters through Arrow IPC artifacts only. Classic
+  `ANDData`/JSON datasets remain supported through the Python featurizer unless
+  validated Arrow artifacts are attached.
 
 ### Stage defaults (resolved backend = `rust`)
 
@@ -63,9 +64,13 @@ Python path remains available via explicit backend and stage overrides at any ti
 | `constraints` | Rust |
 | `pair_featurization` | Rust |
 
-- Direct Arrow inputs are the production inference boundary. Rust production
-  prediction fails fast when required Arrow paths are incomplete.
-- Train/eval and classic `ANDData` payloads use `from_dataset`.
+- Direct Arrow inputs are the production inference boundary. Explicit Rust
+  production prediction fails fast when required Arrow paths are incomplete;
+  auto/default prediction falls back to Python for non-Arrow datasets.
+- Arrow-ingested training datasets (`s2and/arrow_training.py`) attach
+  `rust_featurizer_arrow_paths` and build through `from_arrow_paths`.
+- Train/eval and classic `ANDData` payloads without Arrow artifacts use Python
+  featurization.
 - `S2AND_BACKEND` controls all stages uniformly.
 
 ### Failure semantics
@@ -101,10 +106,10 @@ These gates must pass before promoting any Rust defaults further.
 3. Rust featurizer cache/build lifecycle core machinery.
 
 **Intentionally divergent** (by design):
-1. Direct Arrow inference uses typed runtime files that train/eval does not
-   require.
-2. Classic train/eval still starts from `ANDData`; production file-backed
-   inference starts from Arrow artifacts.
+1. Direct Arrow inference uses typed runtime files that classic JSON/`ANDData`
+   workflows do not require.
+2. Classic train/eval still starts from `ANDData`; Rust train/eval requires an
+   Arrow-ingested dataset with attached `rust_featurizer_arrow_paths`.
 
 ---
 
@@ -130,8 +135,9 @@ Key design decisions and their rationale (in order of implementation):
   keys (~2.7e-8 at 1M; ~2.7e-6 at 10M), but a collision would merge counts silently.
 - **Windows memory budgeting without `psutil`**: total RAM via `GlobalMemoryStatusEx`; RSS via
   `GetProcessMemoryInfo` (working set).
-- **Training-mode deferred paper preprocessing**: capability-gated via
-  `SUPPORTS_FROM_DATASET_PAPER_PREPROCESS` (see dedicated section below).
+- **Arrow training deferred preprocessing**: `s2and.arrow_training` can mark
+  Arrow-ingested datasets so paper preprocessing and signature n-gram/field
+  materialization are deferred to Rust Arrow readers.
 - **L1b cleanup boundary**: `scripts/transfer_experiment_seed_paper.py` runs targeted
   `evict_rust_featurizer(dataset)` + `gc.collect()` after LightGBM fit; emits
   `Telemetry: post_rust_cleanup ...`.
@@ -140,42 +146,40 @@ Key design decisions and their rationale (in order of implementation):
 
 ---
 
-## Training-mode deferred paper preprocessing
+## Arrow Training Deferred Preprocessing
 
-In training/eval mode, S2AND can skip Python paper preprocessing (`preprocess_papers_parallel`) and let Rust
-`RustFeaturizer.from_dataset` compute missing paper-derived fields from raw strings. This targets the GIL-bound
-`preprocess_paper_1` bottleneck on Windows and reduces wall time when the Rust backend is enabled.
+Arrow-ingested training datasets can skip Python paper preprocessing
+(`preprocess_papers_parallel`) and signature n-gram/field materialization
+because Rust reads the preprocessed Arrow bundle directly through
+`RustFeaturizer.from_arrow_paths`.
 
-This section describes the training/eval `from_dataset` bypass.
+### Gating
 
-### Gating (when Python paper preprocessing is skipped)
-
-Python skips `preprocess_papers_parallel` only when all of the following hold:
+Python skips these build steps only when all of the following hold:
 
 - Backend resolves to Rust (`S2AND_BACKEND=rust` or `auto` resolved to Rust).
 - `preprocess=True`.
-- Rust build path is `from_dataset` (training/eval mode).
-- Rust extension exposes `RustFeaturizer.SUPPORTS_FROM_DATASET_PAPER_PREPROCESS`.
-- `compute_reference_features=False` (reference-details preprocessing remains Python-only).
+- The dataset is constructed through `s2and.arrow_training` or otherwise passes
+  `rust_arrow_featurization=True`.
 
 Code pointers:
-- Lifecycle decision: `s2and/rust_lifecycle.py` (`build_rust_lifecycle_policy`, field `skip_python_paper_preprocess`).
-- Python skip behavior: `s2and/data.py` (skips `preprocess_papers_parallel` when `skip_python_paper_preprocess=True`).
-- Capability probe: `s2and/runtime.py` (`detect_rust_runtime_capabilities`, field `from_dataset_paper_preprocess_available`).
-- Rust ingestion + deferred compute: `s2and_rust/src/lib.rs` (`RustFeaturizer.from_dataset`,
-  `FROM_DATASET_PAPER_PREPROCESS_CHUNK_SIZE=4096`).
+- Lifecycle decision: `s2and/rust_lifecycle.py` (`build_rust_lifecycle_policy`).
+- Python skip behavior: `s2and/data.py` (skips `preprocess_papers_parallel` when
+  `skip_python_paper_preprocess=True`).
+- Rust ingestion: `s2and/feature_port.py`
+  (`build_rust_featurizer_from_arrow_paths`).
 
-### How to verify (when touched)
+### How to verify
 
 Maintenance checklist:
 1. Build release extension: `uv run maturin develop -m s2and_rust/Cargo.toml --release`
 2. Run focused tests:
-   - `uv run pytest -q tests/test_rust_from_dataset_contract.py tests/test_preprocess_papers_parallel_defaults.py tests/test_rust_lifecycle.py tests/test_rust_capabilities.py`
+   - `uv run pytest -q tests/test_arrow_training_ingestion.py tests/test_preprocess_papers_parallel_defaults.py tests/test_rust_lifecycle.py tests/test_rust_capabilities.py`
 3. Optional: rerun transfer-mini compare and write the JSON under `scratch/baselines_YYYYMMDD/` (see `baselines.md`).
 
 Current watchlist items for this area are tracked in
-[../work_plan.md](../work_plan.md), especially the reference-feature training
-gate and blocked normalization migration.
+[../work_plan.md](../work_plan.md), especially the blocked normalization
+migration.
 
 ---
 

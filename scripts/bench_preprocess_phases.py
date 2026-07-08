@@ -1,11 +1,10 @@
-"""Benchmark preprocessing phases (papers 1/2, papers 2/2, signatures).
+"""Benchmark preprocessing phases (papers, signatures).
 
 Focus: compare serial vs threads vs processes via UniversalPool across OSes.
 
 Phases:
-  1) Papers 1/2: `preprocess_paper_1` across papers
-  2) Papers 2/2: `preprocess_paper_2` reference-details computation
-  3) Signatures: `ANDData.preprocess_signatures` with swappable Python ngram backend
+  1) Papers: `preprocess_paper_1` across papers
+  2) Signatures: `ANDData.preprocess_signatures` with swappable Python ngram backend
 
 Notes:
   - Default `--limit-signatures` keeps the run small; set `--limit-signatures 0` for full dataset.
@@ -149,7 +148,6 @@ def build_namedtuples(
             venue=paper.get("venue", "") or "",
             journal_name=paper.get("journal_name", "") or "",
             year=paper.get("year"),
-            references=paper.get("references"),
             has_abstract=bool(paper.get("abstract", "") or paper.get("has_abstract", False)),
             predicted_language=None,
             is_english=None,
@@ -158,7 +156,6 @@ def build_namedtuples(
             title_ngrams_chars=None,
             venue_ngrams=None,
             journal_ngrams=None,
-            reference_details=None,
             in_signatures=True,
         )
 
@@ -227,26 +224,6 @@ def _run_paper_stage(
     work = time.perf_counter() - t1
     _ = label  # keep param for symmetry/readability
     return pool_create, work, out_count
-
-
-def _build_reference_inputs(*, papers: dict[str, Any]) -> list[tuple[str, Any, list[Any]]]:
-    from s2and.data import MiniPaper
-
-    input_2: list[tuple[str, Any, list[Any]]] = []
-    for key, value in papers.items():
-        refs = value.references or []
-        reference_papers = [
-            MiniPaper(
-                title=p.title,
-                venue=p.venue,
-                journal_name=p.journal_name,
-                authors=[a.author_name for a in p.authors],
-            )
-            for p in (papers.get(str(rid)) for rid in refs)
-            if p is not None
-        ]
-        input_2.append((key, value, reference_papers))
-    return input_2
 
 
 def _bench_phase(
@@ -422,7 +399,6 @@ def main() -> None:
         help="Limit signatures (and thus papers) for quicker runs; 0 = full dataset (default: 5000)",
     )
     parser.add_argument("--chunk-size-paper1", type=int, default=1000, help="Paper stage 1 imap chunk size")
-    parser.add_argument("--chunk-size-paper2", type=int, default=100, help="Paper stage 2 imap chunk size")
     parser.add_argument(
         "--signature-ngram-chunk-size",
         type=int,
@@ -439,11 +415,6 @@ def main() -> None:
         choices=["python", "rust", "auto"],
         default="python",
         help="Set S2AND_BACKEND for this run (default: python)",
-    )
-    parser.add_argument(
-        "--skip-paper2",
-        action="store_true",
-        help="Skip papers 2/2 (reference-details) benchmarking",
     )
     parser.add_argument(
         "--skip-signatures",
@@ -475,12 +446,12 @@ def main() -> None:
     print(f"  namedtuples: {len(base_papers):,} papers | {len(base_signatures):,} signatures")
     print(flush=True)
 
-    # --- Papers 1/2 ---
-    from s2and.data import preprocess_paper_1, preprocess_paper_2
+    # --- Papers ---
+    from s2and.data import preprocess_paper_1
 
     paper1_func = partial(preprocess_paper_1, preprocess=True)
 
-    need_papers_preprocessed = not args.skip_paper2 or not args.skip_signatures
+    need_papers_preprocessed = not args.skip_signatures
     papers_preprocessed: dict[str, Any] | None = None
 
     def run_paper1(use_threads: bool | None) -> tuple[float, float, int]:
@@ -496,7 +467,7 @@ def main() -> None:
             return 0.0, elapsed, len(out)
 
         return _run_paper_stage(
-            label="papers 1/2",
+            label="papers",
             items=paper_items,
             func=paper1_func,
             n_jobs=args.n_jobs,
@@ -505,7 +476,7 @@ def main() -> None:
         )
 
     _bench_phase(
-        phase_name="Papers 1/2: preprocess_paper_1",
+        phase_name="Papers: preprocess_paper_1",
         run_once=run_paper1,
         n_jobs=args.n_jobs,
         rounds=args.rounds,
@@ -517,33 +488,7 @@ def main() -> None:
     )
 
     if need_papers_preprocessed and papers_preprocessed is None:
-        raise RuntimeError("Expected papers_preprocessed to be materialized during serial papers 1/2 run.")
-
-    # --- Papers 2/2 (reference_details) ---
-    if not args.skip_paper2:
-        print()
-        print("Building papers 2/2 input (reference-details)...", flush=True)
-        t_build0 = time.perf_counter()
-        input_2 = _build_reference_inputs(papers=papers_preprocessed or {})
-        build_input_2 = time.perf_counter() - t_build0
-        print(f"  input_2: {_fmt(build_input_2)} ({len(input_2):,} items)", flush=True)
-
-        def run_paper2(use_threads: bool | None) -> tuple[float, float, int]:
-            return _run_paper_stage(
-                label="papers 2/2",
-                items=input_2,
-                func=preprocess_paper_2,
-                n_jobs=args.n_jobs,
-                use_threads=use_threads,
-                chunk_size=args.chunk_size_paper2,
-            )
-
-        _bench_phase(
-            phase_name=f"Papers 2/2: preprocess_paper_2 (reference_details) [build input: {_fmt(build_input_2)}]",
-            run_once=run_paper2,
-            n_jobs=args.n_jobs,
-            rounds=args.rounds,
-        )
+        raise RuntimeError("Expected papers_preprocessed to be materialized during serial papers run.")
 
     # --- Signatures ---
     if not args.skip_signatures:

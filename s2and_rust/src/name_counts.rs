@@ -34,8 +34,8 @@ pub(crate) enum RawNameCountKind {
 
 /// Mirrors `s2and.data.NAME_COUNTS_LAST_FIRST_INITIAL_*`. Today only the Arrow
 /// raw-ingest path computes `last_first_initial` keys in Rust, and Arrow datasets
-/// always use `InitialChar`. `from_dataset` reuses `ANDData`-precomputed values,
-/// which respect the user-selected semantics on the Python side. The enum and
+/// always use `InitialChar`. Python `ANDData` paths keep Python-computed values
+/// and do not enter Rust through an `ANDData` constructor. The enum and
 /// `LegacyFullFirstToken` variant exist as a contract surface so any future
 /// Rust-side legacy-mode ingest can opt into the matching lookup-key form.
 #[allow(dead_code)]

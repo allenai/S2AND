@@ -43,7 +43,6 @@ _MODULE_IMPORTS = {
     "stress_rebuild": "_rust_suite.stress_rebuild_cmd",
     "calibrate_phase_a": "_rust_suite.calibrate_phase_a_cmd",
     "calibrate_rust_batch": "_rust_suite.calibrate_rust_batch_cmd",
-    "measure_counter_data": "_rust_suite.measure_counter_data_cmd",
     "summarize_memory_telemetry": "_rust_suite.summarize_memory_telemetry_cmd",
 }
 
@@ -312,11 +311,6 @@ _COMMANDS = {
         "module": "summarize_memory_telemetry",
         "help": "Summarize memory prediction error ratios from memory telemetry JSONL.",
         "main_kind": "argv",
-    },
-    "measure-counter-data": {
-        "module": "measure_counter_data",
-        "help": "Measure CounterData memory impact workflow.",
-        "main_kind": "noargv",
     },
 }
 

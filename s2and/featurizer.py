@@ -26,7 +26,7 @@ from s2and.consts import (
 )
 from s2and.data import ANDData
 from s2and.mp import UniversalPool
-from s2and.runtime import RuntimeContext, build_runtime_context, stage_uses_rust
+from s2and.runtime import RuntimeContext, build_runtime_context, dataset_stage_uses_rust, stage_uses_rust
 from s2and.text import (
     TEXT_FUNCTIONS,
     cosine_sim,
@@ -54,10 +54,24 @@ _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES: int | None = None
 _RUST_BATCH_CALIBRATION_ATTEMPTED = False
 
 
-def _use_rust_featurizer(runtime_context: RuntimeContext | None = None) -> bool:
+def _use_rust_featurizer(
+    runtime_context: RuntimeContext | None = None,
+    dataset: ANDData | None = None,
+) -> bool:
+    """Return whether Rust pair featurization applies.
+
+    With a dataset, this is the dataset-shape decision: Rust featurizers are
+    built exclusively from Arrow artifacts, so datasets without
+    ``rust_featurizer_arrow_paths`` use the Python featurizer (or raise when
+    the Rust backend was requested explicitly). Without a dataset, this is the
+    backend-level decision only.
+    """
+
     if runtime_context is None:
         runtime_context = build_runtime_context("pair_featurization")
-    return stage_uses_rust(runtime_context)
+    if dataset is None:
+        return stage_uses_rust(runtime_context)
+    return dataset_stage_uses_rust(runtime_context, dataset)
 
 
 def _has_missing_signature_ngrams_for_pairs(
@@ -89,7 +103,7 @@ def _ensure_python_pair_signature_ngrams(
     signature_pairs: list[tuple[str, str, int | float]],
     runtime_context: RuntimeContext,
 ) -> None:
-    if _use_rust_featurizer(runtime_context):
+    if _use_rust_featurizer(runtime_context, dataset):
         return
     if getattr(dataset, "_s2and_python_pair_ngrams_ready", False):
         return
@@ -597,7 +611,6 @@ class FeaturizationInfo:
                 "venue_similarity",
                 "year_diff",
                 "title_similarity",
-                "reference_features",
                 "misc_features",
                 "name_counts",
                 "embedding_similarity",
@@ -614,12 +627,11 @@ class FeaturizationInfo:
             "venue_similarity": [12],
             "year_diff": [13],
             "title_similarity": [14, 15],
-            "reference_features": [16, 17, 18, 19, 20, 21],
-            "misc_features": [22, 23, 24, 25, 26],
-            "name_counts": [27, 28, 29, 30, 31, 32],
-            "embedding_similarity": [33],
-            "journal_similarity": [34],
-            "advanced_name_similarity": [35, 36, 37, 38],
+            "misc_features": [16, 17, 18, 19, 20],
+            "name_counts": [21, 22, 23, 24, 25, 26],
+            "embedding_similarity": [27],
+            "journal_similarity": [28],
+            "advanced_name_similarity": [29, 30, 31, 32],
         }
 
         max_feature_index = max(
@@ -636,7 +648,6 @@ class FeaturizationInfo:
             "venue_similarity": ["0"],
             "year_diff": ["-1"],
             "title_similarity": ["1", "1"],
-            "reference_features": ["1", "1", "1", "1", "1", "1"],
             "misc_features": ["0", "0", "0", "0", "0"],
             "name_counts": ["0", "-1", "-1", "-1", "0", "-1"],
             "embedding_similarity": ["0"],
@@ -662,6 +673,18 @@ class FeaturizationInfo:
 
         # NOTE: Increment this anytime a change is made to the featurization logic
         self.featurizer_version = featurizer_version
+
+    def __setstate__(self, state: dict) -> None:
+        # Derived state (feature_group_to_index, number_of_features, monotone
+        # constraints) must reflect the current feature layout, not the layout
+        # at pickle time. Old pickles carry index maps for removed feature
+        # groups (e.g. reference_features), so rebuild everything from
+        # features_to_use. featurizer_version stays artifact-pinned, matching
+        # how native bundles reconstruct FeaturizationInfo from metadata.
+        self.__init__(
+            features_to_use=list(state["features_to_use"]),
+            featurizer_version=int(state.get("featurizer_version", FEATURIZER_VERSION)),
+        )
 
     def get_feature_names(self) -> list[str]:
         """
@@ -715,19 +738,6 @@ class FeaturizationInfo:
         # title features
         if "title_similarity" in self.features_to_use:
             feature_names.extend(["title_overlap_words", "title_overlap_chars"])
-
-        # reference features
-        if "reference_features" in self.features_to_use:
-            feature_names.extend(
-                [
-                    "references_authors_overlap",
-                    "references_titles_overlap",
-                    "references_venues_overlap",
-                    "references_author_blocks_jaccard",
-                    "references_self_citation",
-                    "references_overlap",
-                ]
-            )
 
         # position features
         if "misc_features" in self.features_to_use:
@@ -1161,38 +1171,6 @@ def _single_pair_featurize(
             counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
         ]
     )
-
-    # Reference-derived features: optionally disabled
-    references_1 = set(paper_1.references or [])
-    references_2 = set(paper_2.references or [])
-    compute_ref = bool(getattr(dataset, "compute_reference_features", False))
-    if compute_ref:
-        # The four ngram-Counter features need reference_details; the two
-        # reference-list features only need paper.references (always populated),
-        # so compute them whenever reference features are enabled.
-        if paper_1.reference_details is not None and paper_2.reference_details is not None:
-            features.extend(
-                [
-                    counter_jaccard(paper_1.reference_details[0], paper_2.reference_details[0], denominator_max=5000),
-                    counter_jaccard(paper_1.reference_details[1], paper_2.reference_details[1]),
-                    counter_jaccard(paper_1.reference_details[2], paper_2.reference_details[2]),
-                    counter_jaccard(paper_1.reference_details[3], paper_2.reference_details[3]),
-                ]
-            )
-        else:
-            features.extend([NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN])
-        # Self-citation is a signal only between two distinct papers; when both
-        # signatures are on the same paper, a paper citing itself is not a
-        # cross-paper self-cite.
-        features.extend(
-            [
-                int(paper_id_1 != paper_id_2 and (paper_id_2 in references_1 or paper_id_1 in references_2)),
-                jaccard(references_1, references_2),
-            ]
-        )
-    else:
-        # When reference features are not computed, fill with NaNs to preserve shape
-        features.extend([NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN, NUMPY_NAN])
 
     english_or_unknown_count = int(paper_1.predicted_language in {"en", "un"}) + int(
         paper_2.predicted_language in {"en", "un"}
@@ -1667,13 +1645,6 @@ def many_pairs_featurize(
     np.ndarray: the labels for all the pairs
     np.ndarray: the nameless features for all the pairs
     """
-    # Strict guard: don't allow reference_features when dataset disabled them
-    if "reference_features" in featurizer_info.features_to_use and not getattr(
-        dataset, "compute_reference_features", False
-    ):
-        raise ValueError(
-            "'reference_features' requested in features_to_use but dataset.compute_reference_features is False."
-        )
     featurize_start = time.perf_counter()
     backend_used = "cached_only"
     if runtime_context is None:
@@ -1700,9 +1671,9 @@ def many_pairs_featurize(
     rust_batch_adaptive_halvings = 0
 
     rust_module_available = False
-    if _use_rust_featurizer(runtime_context):
+    if _use_rust_featurizer(runtime_context, dataset):
         try:
-            # Prewarm so from_dataset build doesn't land inside the RSS measurement window.
+            # Prewarm so the Arrow featurizer build doesn't land inside the RSS measurement window.
             feature_port._get_rust_featurizer(
                 dataset,
                 runtime_context=runtime_context,
@@ -1831,7 +1802,7 @@ def many_pairs_featurize(
     logger.info("Created pieces of work")
 
     if cache_changed:
-        use_rust = _use_rust_featurizer(runtime_context)
+        use_rust = _use_rust_featurizer(runtime_context, dataset)
         if use_rust and not rust_module_available:
             raise RuntimeError(
                 "Rust backend requested for pair_featurization but s2and_rust extension is unavailable "

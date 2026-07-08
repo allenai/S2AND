@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import importlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -29,26 +31,73 @@ _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
 
 
+def _load_rust_lightgbm_booster(model_path: str) -> Any:
+    try:
+        rust_module = importlib.import_module("s2and_rust")
+    except ImportError as exc:
+        from s2and.runtime import min_supported_rust_extension_version_string
+
+        minimum = min_supported_rust_extension_version_string()
+        raise RuntimeError(
+            "RustLightGBMBooster requires s2and-rust>="
+            f"{minimum}; the Rust extension is not importable. Rebuild the local extension or install the "
+            "matching s2and-rust package."
+        ) from exc
+    booster_cls = getattr(rust_module, "RustLightGBMBooster", None)
+    if booster_cls is None:
+        from s2and.runtime import min_supported_rust_extension_version_string
+
+        minimum = min_supported_rust_extension_version_string()
+        found = getattr(rust_module, "__version__", None)
+        found_version = "unknown" if found is None else str(found)
+        raise RuntimeError(
+            "RustLightGBMBooster requires s2and-rust>="
+            f"{minimum}; found {found_version}. Rebuild the local extension or install the matching "
+            "s2and-rust package."
+        )
+
+    return booster_cls(model_path)
+
+
 class NativeLightGBMBinaryClassifier:
-    """Small sklearn-compatible wrapper around a native LightGBM binary model."""
+    """Small sklearn-compatible wrapper around a native LightGBM binary model.
+
+    Scoring runs through the pure-Rust evaluator (``RustLightGBMBooster``),
+    whose raw scores are parity-gated bit-exact against Python lightgbm
+    (tests/test_rust_lightgbm_booster_parity.py). ``booster_`` lazily loads a
+    Python ``lgb.Booster`` only for training-side consumers such as bundle
+    writing and SHAP diagnostics; runtime scoring never touches it.
+    """
+
+    prediction_backend = "rust_lightgbm"
 
     def __init__(self, model_path: str | Path, *, n_jobs: int = 1, n_features: int | None = None) -> None:
         self.model_path = str(Path(model_path))
         self.n_jobs = resolve_n_jobs(n_jobs)
-        self._Booster = lgb.Booster(model_file=self.model_path)
+        self._scorer = _load_rust_lightgbm_booster(self.model_path)
+        self._lazy_booster: lgb.Booster | None = None
+        self._model_sha256: str | None = None
         self._set_feature_count(n_features)
         self._classes = np.asarray([0.0, 1.0])
         self.classes_ = self._classes.copy()
         self.fitted_ = True
 
     def _set_feature_count(self, n_features: int | None) -> None:
-        self._n_features = int(n_features if n_features is not None else self._Booster.num_feature())
+        self._n_features = int(n_features if n_features is not None else self._scorer.num_features())
         self._n_features_in = self._n_features
         self.n_features_in_ = self._n_features
 
     @property
     def booster_(self) -> lgb.Booster:
-        return self._Booster
+        if self._lazy_booster is None:
+            self._lazy_booster = lgb.Booster(model_file=self.model_path)
+        return self._lazy_booster
+
+    def cache_fingerprint(self) -> tuple[str, str, int]:
+        """Stable prediction-cache fingerprint that avoids materializing the Python booster."""
+        if self._model_sha256 is None:
+            self._model_sha256 = _sha256_file(Path(self.model_path))
+        return ("native_lightgbm", self._model_sha256, self._n_features)
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         del deep
@@ -67,7 +116,9 @@ class NativeLightGBMBinaryClassifier:
             model_path = str(Path(params["model_path"]))
             if model_path != self.model_path:
                 self.model_path = model_path
-                self._Booster = lgb.Booster(model_file=self.model_path)
+                self._scorer = _load_rust_lightgbm_booster(self.model_path)
+                self._lazy_booster = None
+                self._model_sha256 = None
         if "n_jobs" in params:
             self.n_jobs = resolve_n_jobs(params["n_jobs"])
         if "model_path" in params or "n_features" in params:
@@ -80,12 +131,9 @@ class NativeLightGBMBinaryClassifier:
             raise ValueError(f"features must be 2D, got shape={features_2d.shape}")
         if features_2d.shape[1] != self._n_features:
             raise ValueError(f"features must have {self._n_features} columns, got {features_2d.shape[1]}")
-        positive = np.asarray(self._Booster.predict(features_2d, num_threads=self.n_jobs), dtype=np.float64)
-        if positive.ndim == 2:
-            if positive.shape[1] != 2:
-                raise ValueError(f"unsupported LightGBM prediction shape={positive.shape}")
-            positive = positive[:, 1]
-        positive = positive.reshape(-1)
+        positive = np.asarray(
+            self._scorer.predict_proba_positive(features_2d, num_threads=self.n_jobs), dtype=np.float64
+        ).reshape(-1)
         return np.column_stack((1.0 - positive, positive))
 
     def __deepcopy__(self, memo: dict[int, Any]) -> NativeLightGBMBinaryClassifier:
@@ -93,12 +141,27 @@ class NativeLightGBMBinaryClassifier:
         memo[id(self)] = copied
         copied.model_path = self.model_path
         copied.n_jobs = self.n_jobs
-        copied._Booster = lgb.Booster(model_str=self._Booster.model_to_string())
+        copied._scorer = copy.deepcopy(self._scorer, memo)
+        copied._lazy_booster = None
+        copied._model_sha256 = self._model_sha256
         copied._set_feature_count(self._n_features)
         copied._classes = self._classes.copy()
         copied.classes_ = self.classes_.copy()
         copied.fitted_ = self.fitted_
         return copied
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        # The Rust scorer and lazily-loaded Python booster are rebuilt from
+        # model_path on unpickle.
+        state["_scorer"] = None
+        state["_lazy_booster"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._scorer = _load_rust_lightgbm_booster(self.model_path)
+        self._lazy_booster = None
 
 
 def _sha256_file(path: Path) -> str:

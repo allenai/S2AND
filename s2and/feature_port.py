@@ -61,7 +61,7 @@ class _InFlightFeaturizerBuild:
 
 @dataclass(frozen=True)
 class _CollectionFingerprint:
-    """Cheap shallow fingerprint for objects consumed by RustFeaturizer.from_dataset."""
+    """Cheap shallow fingerprint for dataset objects that key cached Rust featurizers."""
 
     object_id: int
     length: int
@@ -70,7 +70,6 @@ class _CollectionFingerprint:
 
 @dataclass(frozen=True)
 class _RustFeaturizerNonSeedFingerprint:
-    compute_reference_features: bool
     preprocess: bool
     n_jobs: int
     source_paths: tuple[tuple[str, str | None], ...]
@@ -209,7 +208,7 @@ def _collection_fingerprint(value: Any) -> _CollectionFingerprint:
 
 
 def _rust_featurizer_source_paths(dataset: Any) -> tuple[tuple[str, str | None], ...]:
-    return tuple(
+    source_paths = [
         (field_name, None if (value := getattr(dataset, field_name, None)) is None else str(value))
         for field_name in (
             "original_signatures_path",
@@ -220,12 +219,19 @@ def _rust_featurizer_source_paths(dataset: Any) -> tuple[tuple[str, str | None],
             "cluster_seeds_path",
             "specter_embeddings_path",
         )
-    )
+    ]
+    # Arrow featurizer artifacts are the material inputs of from_arrow_paths builds.
+    arrow_paths = getattr(dataset, "rust_featurizer_arrow_paths", None)
+    if isinstance(arrow_paths, Mapping):
+        source_paths.extend(
+            (f"rust_featurizer_arrow_paths.{key}", None if value is None else str(value))
+            for key, value in sorted(arrow_paths.items(), key=lambda item: str(item[0]))
+        )
+    return tuple(source_paths)
 
 
 def _rust_featurizer_non_seed_fingerprint(dataset: Any) -> _RustFeaturizerNonSeedFingerprint:
     return _RustFeaturizerNonSeedFingerprint(
-        compute_reference_features=bool(getattr(dataset, "compute_reference_features", False)),
         preprocess=bool(getattr(dataset, "preprocess", False)),
         n_jobs=resolve_n_jobs(getattr(dataset, "n_jobs", 1)),
         source_paths=_rust_featurizer_source_paths(dataset),
@@ -373,7 +379,7 @@ def _rust_featurizer_build_count_key(
     cache_key: _RustFeaturizerCacheKey | None,
 ) -> _RustFeaturizerBuildCountKey:
     del cache_key
-    return "from_dataset"
+    return "from_arrow_paths"
 
 
 def _increment_rust_featurizer_build_count(
@@ -456,20 +462,38 @@ def build_rust_featurizer_from_arrow_paths(
 
 
 def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
-    """Build a Rust featurizer through the dataset compatibility ingest path."""
+    """Build a Rust featurizer for a dataset.
+
+    Rust featurizers are built exclusively from Arrow IPC artifacts: the
+    dataset must carry ``rust_featurizer_arrow_paths`` (attached by
+    ``s2and.arrow_training``), which builds through ``from_arrow_paths`` —
+    the same fast Arrow door production inference uses — loading every
+    signature in the bundle (sorted ids) with Rust-side name counts.
+    """
     pre_build_start = time.perf_counter()
-    rust_module = _require_rust_runtime()
+    _require_rust_runtime()
     num_threads = resolve_n_jobs(getattr(dataset, "n_jobs", 1))
+    arrow_paths = getattr(dataset, "rust_featurizer_arrow_paths", None)
+    if not arrow_paths:
+        raise RuntimeError(
+            "Rust featurizer construction requires Arrow IPC artifacts "
+            "(dataset.rust_featurizer_arrow_paths). Build the dataset through "
+            "s2and.arrow_training.build_training_anddata_from_arrow (or attach validated paths via "
+            "s2and.arrow_training.attach_training_arrow_featurizer_paths), or use the Python featurizer."
+        )
     pre_build_seconds = time.perf_counter() - pre_build_start
-    ffi_seconds = 0.0
     ffi_start = time.perf_counter()
-    featurizer = rust_module.RustFeaturizer.from_dataset(
-        dataset,
-        CLUSTER_SEEDS_LOOKUP["require"],
-        CLUSTER_SEEDS_LOOKUP["disallow"],
-        num_threads,
+    featurizer = build_rust_featurizer_from_arrow_paths(
+        arrow_paths,
+        signature_ids=None,
+        name_tuples=getattr(dataset, "name_tuples", "filtered"),
+        load_name_counts=True,
+        preprocess=bool(getattr(dataset, "preprocess", True)),
+        cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),
+        cluster_seed_disallow_value=float(CLUSTER_SEEDS_LOOKUP["disallow"]),
+        num_threads=num_threads,
     )
-    ffi_seconds += time.perf_counter() - ffi_start
+    ffi_seconds = time.perf_counter() - ffi_start
     return (
         featurizer,
         {
@@ -648,7 +672,7 @@ def _build_and_cache_rust_featurizer(
             "Telemetry: rust_core_build seconds=%.3f dataset=%s path=%s count=%d pre=%.3f ffi=%.3f post=%.3f",
             build_seconds,
             build_context.dataset_name_for_logs,
-            "from_dataset",
+            "from_arrow_paths",
             _rust_featurizer_build_count(dataset, cache_key),
             build_timings.get("pre_build_seconds", 0.0),
             build_timings.get("ffi_seconds", 0.0),
@@ -700,7 +724,7 @@ def _build_and_cache_rust_featurizer(
             logger.info(
                 "Telemetry: rust_featurizer_cache_fill source=build dataset=%s path=%s count=%d",
                 build_context.dataset_name_for_logs,
-                "from_dataset",
+                "from_arrow_paths",
                 build_count,
             )
             inflight_build.error = None

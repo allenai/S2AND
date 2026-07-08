@@ -295,18 +295,6 @@ pub(crate) fn set_jaccard_data<T: Eq + std::hash::Hash>(
     (intersection as f64) / (union as f64)
 }
 
-pub(crate) fn refs_jaccard<T: Eq + std::hash::Hash>(set1: &HashSet<T>, set2: &HashSet<T>) -> f64 {
-    if set1.is_empty() || set2.is_empty() {
-        return f64::NAN;
-    }
-    let intersection = set1.intersection(set2).count();
-    let union = set1.len() + set2.len() - intersection;
-    if union == 0 {
-        return f64::NAN;
-    }
-    (intersection as f64) / (union as f64)
-}
-
 pub(crate) fn nanmin(a: f64, b: f64) -> f64 {
     if a.is_nan() && b.is_nan() {
         f64::NAN
@@ -786,83 +774,7 @@ pub(crate) fn name_text_features(name1: Option<&str>, name2: Option<&str>) -> [f
     [lev, pref, lcs, jaro]
 }
 
-pub(crate) const PAPER_IDX_TITLE: usize = 0;
-pub(crate) const PAPER_IDX_HAS_ABSTRACT: usize = 1;
-pub(crate) const PAPER_IDX_IN_SIGNATURES: usize = 2;
-pub(crate) const PAPER_IDX_IS_RELIABLE: usize = 4;
-pub(crate) const PAPER_IDX_PREDICTED_LANGUAGE: usize = 5;
-pub(crate) const PAPER_IDX_TITLE_NGRAMS_WORDS: usize = 6;
-pub(crate) const PAPER_IDX_AUTHORS: usize = 7;
-pub(crate) const PAPER_IDX_VENUE: usize = 8;
-pub(crate) const PAPER_IDX_JOURNAL_NAME: usize = 9;
-pub(crate) const PAPER_IDX_TITLE_NGRAMS_CHARS: usize = 10;
-pub(crate) const PAPER_IDX_VENUE_NGRAMS: usize = 11;
-pub(crate) const PAPER_IDX_JOURNAL_NGRAMS: usize = 12;
-pub(crate) const PAPER_IDX_REFERENCE_DETAILS: usize = 13;
-pub(crate) const PAPER_IDX_YEAR: usize = 14;
-pub(crate) const PAPER_IDX_REFERENCES: usize = 15;
-pub(crate) const PAPER_IDX_PAPER_ID: usize = 16;
-pub(crate) const FROM_DATASET_PAPER_PREPROCESS_CHUNK_SIZE: usize = 4096;
-pub(crate) const PAPER_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 16] = [
-    (PAPER_IDX_TITLE, "title"),
-    (PAPER_IDX_HAS_ABSTRACT, "has_abstract"),
-    (PAPER_IDX_IN_SIGNATURES, "in_signatures"),
-    (PAPER_IDX_IS_RELIABLE, "is_reliable"),
-    (PAPER_IDX_PREDICTED_LANGUAGE, "predicted_language"),
-    (PAPER_IDX_TITLE_NGRAMS_WORDS, "title_ngrams_words"),
-    (PAPER_IDX_AUTHORS, "authors"),
-    (PAPER_IDX_VENUE, "venue"),
-    (PAPER_IDX_JOURNAL_NAME, "journal_name"),
-    (PAPER_IDX_TITLE_NGRAMS_CHARS, "title_ngrams_chars"),
-    (PAPER_IDX_VENUE_NGRAMS, "venue_ngrams"),
-    (PAPER_IDX_JOURNAL_NGRAMS, "journal_ngrams"),
-    (PAPER_IDX_REFERENCE_DETAILS, "reference_details"),
-    (PAPER_IDX_YEAR, "year"),
-    (PAPER_IDX_REFERENCES, "references"),
-    (PAPER_IDX_PAPER_ID, "paper_id"),
-];
-
-pub(crate) const SIG_IDX_FIRST_RAW: usize = 0;
-pub(crate) const SIG_IDX_FIRST_NORMALIZED_NO_APOSTROPHE: usize = 1;
-pub(crate) const SIG_IDX_MIDDLE_RAW: usize = 2;
-pub(crate) const SIG_IDX_MIDDLE_NORMALIZED_NO_APOSTROPHE: usize = 3;
-pub(crate) const SIG_IDX_LAST_NORMALIZED: usize = 4;
-pub(crate) const SIG_IDX_LAST_RAW: usize = 5;
-pub(crate) const SIG_IDX_COAUTHORS: usize = 9;
-pub(crate) const SIG_IDX_COAUTHOR_BLOCKS: usize = 10;
-pub(crate) const SIG_IDX_AFFILIATIONS: usize = 12;
-pub(crate) const SIG_IDX_AFFILIATIONS_NGRAMS: usize = 13;
-pub(crate) const SIG_IDX_COAUTHOR_NGRAMS: usize = 14;
-pub(crate) const SIG_IDX_EMAIL: usize = 15;
-pub(crate) const SIG_IDX_ORCID: usize = 16;
-pub(crate) const SIG_IDX_NAME_COUNTS: usize = 17;
-pub(crate) const SIG_IDX_POSITION: usize = 18;
-pub(crate) const SIG_IDX_PAPER_ID: usize = 23;
-pub(crate) const FULL_FEATURE_COUNT: usize = 39;
-pub(crate) const SIGNATURE_FASTPATH_REQUIRED_FIELDS: [(usize, &str); 13] = [
-    (
-        SIG_IDX_FIRST_NORMALIZED_NO_APOSTROPHE,
-        "author_info_first_normalized_without_apostrophe",
-    ),
-    (
-        SIG_IDX_MIDDLE_NORMALIZED_NO_APOSTROPHE,
-        "author_info_middle_normalized_without_apostrophe",
-    ),
-    (SIG_IDX_LAST_NORMALIZED, "author_info_last_normalized"),
-    (SIG_IDX_COAUTHORS, "author_info_coauthors"),
-    (SIG_IDX_COAUTHOR_BLOCKS, "author_info_coauthor_blocks"),
-    (SIG_IDX_AFFILIATIONS, "author_info_affiliations"),
-    (
-        SIG_IDX_AFFILIATIONS_NGRAMS,
-        "author_info_affiliations_n_grams",
-    ),
-    (SIG_IDX_COAUTHOR_NGRAMS, "author_info_coauthor_n_grams"),
-    (SIG_IDX_EMAIL, "author_info_email"),
-    (SIG_IDX_ORCID, "author_info_orcid"),
-    (SIG_IDX_NAME_COUNTS, "author_info_name_counts"),
-    (SIG_IDX_POSITION, "author_info_position"),
-    (SIG_IDX_PAPER_ID, "paper_id"),
-];
+pub(crate) const FULL_FEATURE_COUNT: usize = 33;
 
 pub(crate) struct MatrixAggregateIndexSelection {
     pub(crate) matrix_indices: Vec<usize>,

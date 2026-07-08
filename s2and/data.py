@@ -28,7 +28,6 @@ from s2and.mp import UniversalPool
 from s2and.runtime import (
     RuntimeContext,
     build_runtime_context,
-    detect_rust_runtime_capabilities,
     stage_uses_rust,
 )
 from s2and.rust_lifecycle import build_rust_lifecycle_policy
@@ -350,17 +349,8 @@ class Paper(NamedTuple):
     title_ngrams_chars: Counter | None
     venue_ngrams: Counter | None
     journal_ngrams: Counter | None
-    reference_details: tuple[Counter, Counter, Counter, Counter] | None
     year: int | None
-    references: list[int] | None
     paper_id: int
-
-
-class MiniPaper(NamedTuple):
-    title: str
-    venue: str | None
-    journal_name: str | None
-    authors: list[str]
 
 
 class ANDData:
@@ -414,10 +404,9 @@ class ANDData:
             `last_first_initial` lookup key in `name_counts`.
             - "initial_char": `<last> <first[0]>` (current semantics)
             - "legacy_full_first_token": `<last> <first_token>` (legacy compatibility)
-        compute_reference_features: whether to materialize reference-detail Counters.
-            Defaults to False. When False, reference_details are initialized to empty Counters
-            to maintain featurization compatibility while avoiding the expensive reference graph
-            materialization.
+        rust_arrow_featurization: set by s2and.arrow_training when this dataset's Rust
+            featurizer is built from Arrow IPC artifacts; defers paper preprocessing and
+            signature n-gram/field materialization to the Rust Arrow readers
     """
 
     def __init__(
@@ -427,7 +416,7 @@ class ANDData:
         name: str,
         mode: str = "train",
         clusters: str | dict | None = None,
-        specter_embeddings: str | dict | None = None,
+        specter_embeddings: str | dict | tuple | None = None,
         cluster_seeds: str | dict | None = None,
         altered_cluster_signatures: str | list | set | None = None,
         train_pairs: str | pd.DataFrame | None = None,
@@ -459,9 +448,9 @@ class ANDData:
         name_tuples: set[tuple[str, str]] | str | None = "filtered",
         use_orcid_id: bool = True,
         name_counts_last_first_initial_semantics: NameCountsLastFirstInitialSemantics | None = None,
-        compute_reference_features: bool = False,
         compute_block_fn: Callable[[str], str] = compute_block,
         pair_sampling_mode: PairSamplingMode | None = None,
+        rust_arrow_featurization: bool = False,
     ):
         init_start = time.perf_counter()
         self.runtime_context = build_runtime_context("dataset_build")
@@ -477,15 +466,15 @@ class ANDData:
         self.clusters_path = clusters if isinstance(clusters, str) else None
         self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
+        # Explicit Arrow prediction artifacts; populated by s2and.arrow_training
+        # when the dataset is built from an Arrow bundle.
+        self.arrow_paths: dict[str, Any] | None = None
         self.compute_block_fn = compute_block_fn
-        rust_capabilities = detect_rust_runtime_capabilities()
         self.rust_lifecycle_policy = build_rust_lifecycle_policy(
             backend=self.runtime_context.resolved_backend,
             mode=mode,
             preprocess=preprocess,
-            compute_reference_features=compute_reference_features,
-            from_dataset_available=rust_capabilities.from_dataset_available,
-            from_dataset_paper_preprocess_available=rust_capabilities.from_dataset_paper_preprocess_available,
+            arrow_featurization=rust_arrow_featurization,
         )
         pair_sampling_mode = _resolve_pair_sampling_mode(
             pair_sampling_mode=pair_sampling_mode,
@@ -573,13 +562,7 @@ class ANDData:
         papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
         raw_papers = self.maybe_load_json(papers)
-        retained_paper_ids = set(needed_paper_ids)
-        if compute_reference_features:
-            for pid, paper in raw_papers.items():
-                if str(pid) not in needed_paper_ids:
-                    continue
-                retained_paper_ids.update(str(reference_id) for reference_id in paper.get("references", []))
-        filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in retained_paper_ids}
+        filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
         self.papers = {}
         # convert dictionary to namedtuples for memory reduction
         for paper_id, paper in filtered_papers.items():
@@ -603,9 +586,7 @@ class ANDData:
                 title_ngrams_chars=None,
                 venue_ngrams=None,
                 journal_ngrams=None,
-                reference_details=None,
                 year=paper["year"],
-                references=paper.get("references", []),
                 paper_id=paper["paper_id"],
             )
         logger.info(f"loaded papers subset: {len(self.papers)}/{len(raw_papers)} relevant")
@@ -733,7 +714,6 @@ class ANDData:
         self.name_counts_loaded = bool(name_counts_loaded)
 
         self.n_jobs = resolve_n_jobs(n_jobs)
-        self.compute_reference_features = compute_reference_features
         self.signature_to_block = self.get_signatures_to_block()
         papers_from_signatures = {str(signature.paper_id) for signature in self.signatures.values()}
         for paper_id, paper in self.papers.items():
@@ -761,8 +741,6 @@ class ANDData:
                 self.papers,
                 self.n_jobs,
                 self.preprocess,
-                compute_reference_features=self.compute_reference_features,
-                compute_block_fn=self.compute_block_fn,
             )
             logger.info("preprocessed papers")
         logger.debug(
@@ -1276,7 +1254,7 @@ class ANDData:
         raise TypeError(f"Expected dataframe path or DataFrame, got {type(path_or_dataframe)}")
 
     @staticmethod
-    def maybe_load_specter(path_or_pickle: str | dict | None) -> dict | None:
+    def maybe_load_specter(path_or_pickle: str | dict | tuple | None) -> dict | None:
         """
         Either loads a dictionary from a pickle file or passes through the object
 
@@ -2082,58 +2060,10 @@ def preprocess_paper_1(item: tuple[str, Paper], *, preprocess: bool = True) -> t
     return (key, paper)
 
 
-def preprocess_paper_2(
-    item: tuple[str, Paper, list[MiniPaper]],
-    *,
-    compute_block_fn: Callable[[str], str] = compute_block,
-) -> tuple[str, Paper]:
-    """
-    helper function to perform preprocessing of the reference details for a paper.
-    Note: this happens after the main paper preprocessing has occurred.
-
-    Parameters
-    ----------
-    item: Tuple[str, Paper, List[MiniPaper]]
-        tuple of paper id, Paper object, and list of MiniPaper objects for the references
-
-    Returns
-    -------
-    Tuple[str, Paper]: tuple of paper id and preprocessed Paper object
-    """
-    key, paper, reference_papers = item
-
-    titles = " ".join(filter(None, [paper.title for paper in reference_papers]))
-    venues = " ".join(filter(None, [paper.venue for paper in reference_papers]))
-    journals = " ".join(filter(None, [paper.journal_name for paper in reference_papers]))
-
-    authors: list[str] = list(
-        filter(
-            None,
-            [author.strip() for paper in reference_papers for author in paper.authors],
-        )
-    )
-    blocks = [compute_block_fn(author) for author in authors]
-    names = " ".join(authors)
-    reference_details = (
-        get_text_ngrams(names.strip(), use_bigrams=True, stopwords=None),
-        get_text_ngrams(titles, use_bigrams=True),
-        get_text_ngrams(
-            venues + " " + journals if venues != journals else venues, stopwords=VENUE_STOP_WORDS, use_bigrams=True
-        ),
-        Counter(blocks),
-    )
-    paper = paper._replace(reference_details=reference_details)
-
-    return (key, paper)
-
-
 def preprocess_papers_parallel(
     papers_dict: dict,
     n_jobs: int,
     preprocess: bool,
-    *,
-    compute_reference_features: bool = False,
-    compute_block_fn: Callable[[str], str] = compute_block,
 ) -> dict:
     """
     helper function to preprocess papers
@@ -2154,51 +2084,17 @@ def preprocess_papers_parallel(
     output: dict = {}
     use_pool_stage_1 = n_jobs > 1 and platform.system() == "Linux"
     if use_pool_stage_1:
-        # Linux/WSL2: force process workers for CPU-bound paper 1 preprocessing.
+        # Linux/WSL2: force process workers for CPU-bound paper preprocessing.
         with UniversalPool(processes=n_jobs, use_threads=False) as p:
             _max = len(papers_dict)
-            with tqdm(total=_max, desc="Preprocessing papers 1/2") as pbar:
+            with tqdm(total=_max, desc="Preprocessing papers") as pbar:
                 func = partial(preprocess_paper_1, preprocess=preprocess)
                 for key, value in p.imap(func, papers_dict.items(), CHUNK_SIZE):
                     output[key] = value
                     pbar.update()
     else:
-        for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers 1/2"):
+        for item in tqdm(papers_dict.items(), total=len(papers_dict), desc="Preprocessing papers"):
             k, v = preprocess_paper_1(item, preprocess=preprocess)
             output[k] = v
-
-    # -------- second stage (reference features) -------
-    if preprocess and compute_reference_features:
-        input_2 = [
-            (
-                key,
-                value,
-                [
-                    MiniPaper(
-                        title=p.title,
-                        venue=p.venue,
-                        journal_name=p.journal_name,
-                        authors=[a.author_name for a in p.authors],
-                    )
-                    for p in [output.get(str(rid)) for rid in (value.references or [])]
-                    if p is not None
-                ],
-            )
-            for key, value in output.items()
-        ]
-        for item in tqdm(input_2, total=len(input_2), desc="Preprocessing papers 2/2"):
-            k, v = preprocess_paper_2(item, compute_block_fn=compute_block_fn)
-            output[k] = v
-    elif preprocess and not compute_reference_features:
-        # Ensure reference_details exists as empty counters to keep downstream code safe
-        empty_tuple: tuple[Counter, Counter, Counter, Counter] = (
-            Counter(),
-            Counter(),
-            Counter(),
-            Counter(),
-        )
-        for k, v in output.items():
-            if v.reference_details is None:
-                output[k] = v._replace(reference_details=empty_tuple)
 
     return output

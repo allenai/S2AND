@@ -19,7 +19,7 @@ RuntimeSource = Literal["S2AND_BACKEND", "argument", "default"]
 _STARTUP_WARNING_EMITTED = False
 _STARTUP_WARNING_LOCK = threading.Lock()
 
-MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 51, 1)
+MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 60, 0)
 _CORE_REQUIRED_FEATURIZER_MARKERS = (
     "from_arrow_paths",
     "signature_ids",
@@ -50,23 +50,15 @@ _REQUIRED_RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS = (
     "plan_query_signatures",
     "build_telemetry",
 )
-_FROM_DATASET_RUNTIME_OPERATIONS = frozenset(
-    {
-        "constraints",
-        "dataset_build",
-        "featurization_run",
-        "model_predict",
-        "pair_featurization",
-    }
-)
+# Attribute holding validated Arrow IPC paths for RustFeaturizer.from_arrow_paths;
+# attached by s2and.arrow_training. Datasets without it featurize in Python.
+RUST_FEATURIZER_ARROW_PATHS_ATTR = "rust_featurizer_arrow_paths"
 
 
 @dataclass(frozen=True)
 class RustRuntimeCapabilities:
     extension_importable: bool
     core_runtime_available: bool
-    from_dataset_available: bool
-    from_dataset_paper_preprocess_available: bool
     reason: str
     named_capabilities: tuple[str, ...] = ()
 
@@ -77,7 +69,6 @@ class BackendResolution:
     resolved_backend: Backend
     source: RuntimeSource
     capability_reason: str
-    from_dataset_available: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -88,7 +79,6 @@ class RuntimeContext:
     use_rust: bool
     run_id: str
     source: RuntimeSource
-    from_dataset_available: bool | None = None
 
     def stage_backend(self) -> Backend:
         return "rust" if self.use_rust else "python"
@@ -259,8 +249,6 @@ def detect_rust_runtime_capabilities(
         return RustRuntimeCapabilities(
             extension_importable=False,
             core_runtime_available=False,
-            from_dataset_available=False,
-            from_dataset_paper_preprocess_available=False,
             reason="rust_extension_unavailable",
             named_capabilities=(),
         )
@@ -270,8 +258,6 @@ def detect_rust_runtime_capabilities(
         return RustRuntimeCapabilities(
             extension_importable=True,
             core_runtime_available=False,
-            from_dataset_available=False,
-            from_dataset_paper_preprocess_available=False,
             reason="rust_featurizer_missing",
             named_capabilities=_detect_named_rust_capabilities(module),
         )
@@ -298,23 +284,9 @@ def detect_rust_runtime_capabilities(
         else:
             reason = "rust_core_available"
 
-    from_dataset_available = bool(
-        core_runtime_available and callable(getattr(rust_featurizer_cls, "from_dataset", None))
-    )
-    from_dataset_paper_preprocess_available = bool(
-        from_dataset_available
-        and getattr(
-            rust_featurizer_cls,
-            "SUPPORTS_FROM_DATASET_PAPER_PREPROCESS",
-            False,
-        )
-    )
-
     return RustRuntimeCapabilities(
         extension_importable=True,
         core_runtime_available=core_runtime_available,
-        from_dataset_available=from_dataset_available,
-        from_dataset_paper_preprocess_available=from_dataset_paper_preprocess_available,
         reason=reason,
         named_capabilities=_detect_named_rust_capabilities(module),
     )
@@ -357,7 +329,6 @@ def _resolve_auto_backend(
         resolved_backend=resolved_backend,
         source=source,
         capability_reason=capability_reason,
-        from_dataset_available=None,
     )
 
 
@@ -376,7 +347,6 @@ def _resolve_explicit_rust_backend(*, source: RuntimeSource) -> BackendResolutio
         resolved_backend="rust",
         source=source,
         capability_reason=capabilities.reason,
-        from_dataset_available=capabilities.from_dataset_available,
     )
 
 
@@ -454,42 +424,57 @@ def build_runtime_context(
     if not operation:
         raise ValueError("operation must be a non-empty string")
     resolved_backend = resolution.resolved_backend
-    use_rust = resolved_backend == "rust"
-    from_dataset_available = resolution.from_dataset_available
-    if use_rust and operation in _FROM_DATASET_RUNTIME_OPERATIONS:
-        if from_dataset_available is None:
-            from_dataset_available = detect_rust_runtime_capabilities().from_dataset_available
-        if not from_dataset_available:
-            if resolution.requested_backend == "rust":
-                request_label = "backend='rust'" if resolution.source == "argument" else "S2AND_BACKEND='rust'"
-                raise RuntimeError(
-                    f"{request_label} requested for {operation!r}, but RustFeaturizer.from_dataset is unavailable. "
-                    "Use backend='python'/'auto' for ANDData training/inference paths or use Arrow production paths."
-                )
-            resolved_backend = "python"
-            use_rust = False
     effective_run_id = run_id or f"{operation}-{uuid.uuid4().hex[:12]}"
     return RuntimeContext(
         operation=operation,
         requested_backend=resolution.requested_backend,
         resolved_backend=resolved_backend,
-        use_rust=use_rust,
+        use_rust=resolved_backend == "rust",
         run_id=effective_run_id,
         source=resolution.source,
-        from_dataset_available=from_dataset_available,
     )
 
 
 def stage_uses_rust(runtime_context: RuntimeContext) -> bool:
     """Returns whether Rust is enabled for the current runtime context."""
-    if not runtime_context.use_rust:
+    return bool(runtime_context.use_rust)
+
+
+def dataset_stage_uses_rust(runtime_context: RuntimeContext, dataset: Any) -> bool:
+    """Returns whether Rust featurization applies to this dataset.
+
+    Rust featurizers are built exclusively from Arrow IPC artifacts
+    (``RustFeaturizer.from_arrow_paths``), so a Rust-resolved backend only
+    engages for datasets carrying validated Arrow featurizer paths (attached
+    by ``s2and.arrow_training``). Explicitly requesting the Rust backend for
+    a dataset without them is an error; an auto-resolved backend degrades to
+    the Python featurizer with a one-time log per dataset.
+    """
+
+    if not stage_uses_rust(runtime_context):
         return False
-    if (
-        runtime_context.operation in _FROM_DATASET_RUNTIME_OPERATIONS
-        and getattr(runtime_context, "from_dataset_available", None) is False
-    ):
-        return False
-    return True
+    if getattr(dataset, RUST_FEATURIZER_ARROW_PATHS_ATTR, None):
+        return True
+    if runtime_context.requested_backend == "rust":
+        request_label = "backend='rust'" if runtime_context.source == "argument" else "S2AND_BACKEND='rust'"
+        raise RuntimeError(
+            f"{request_label} requested for {runtime_context.operation!r}, but the dataset has no Arrow "
+            "featurizer artifacts. Build the dataset through s2and.arrow_training (or attach validated "
+            f"paths via {RUST_FEATURIZER_ARROW_PATHS_ATTR!r}), or use backend='python'/'auto'."
+        )
+    if not getattr(dataset, "_s2and_python_featurizer_degrade_logged", False):
+        try:
+            dataset._s2and_python_featurizer_degrade_logged = True
+        except AttributeError:
+            pass
+        logger.info(
+            "Rust backend resolved but dataset=%s has no Arrow featurizer artifacts; "
+            "using the Python featurizer (op=%s run=%s)",
+            getattr(dataset, "name", "<unnamed>"),
+            runtime_context.operation,
+            runtime_context.run_id,
+        )
+    return False
 
 
 def reset_runtime_warning_state_for_tests() -> None:

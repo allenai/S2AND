@@ -28,7 +28,6 @@ _FULL_FEATURES = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
     "misc_features",
     "name_counts",
     "journal_similarity",
@@ -39,7 +38,6 @@ _FULL_FEATURES = [
 def _dummy_dataset(
     name: str,
     *,
-    compute_reference_features: bool = True,
     load_name_counts: bool = True,
 ) -> ANDData:
     return ANDData(
@@ -48,7 +46,6 @@ def _dummy_dataset(
         clusters="tests/dummy/clusters.json",
         name=name,
         load_name_counts=tiny_name_counts() if load_name_counts else False,
-        compute_reference_features=compute_reference_features,
     )
 
 
@@ -152,7 +149,16 @@ def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch:
 
 
 def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = cast(ANDData, SimpleNamespace(name="dummy", mode="train", compute_reference_features=False))
+    # Placeholder Arrow paths mark the dataset as Rust-eligible; the actual Rust
+    # featurizer build is mocked out below via feature_port._get_rust_featurizer.
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            name="dummy",
+            mode="train",
+            rust_featurizer_arrow_paths={"signatures": "signatures.arrow"},
+        ),
+    )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",
@@ -213,7 +219,16 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
 def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dataset = cast(ANDData, SimpleNamespace(name="dummy", mode="train", compute_reference_features=False))
+    # Placeholder Arrow paths mark the dataset as Rust-eligible; the actual Rust
+    # featurizer build is mocked out below via feature_port._get_rust_featurizer.
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            name="dummy",
+            mode="train",
+            rust_featurizer_arrow_paths={"signatures": "signatures.arrow"},
+        ),
+    )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",
@@ -259,30 +274,8 @@ def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
     assert state["prewarm_called"] is True
 
 
-def test_featurizer_without_reference_features_raises() -> None:
-    dataset_no_ref = _dummy_dataset(
-        "dummy_no_ref",
-        compute_reference_features=False,
-    )
-    featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
-
-    with pytest.raises(ValueError):
-        many_pairs_featurize(
-            [("3", "0", 0)],
-            dataset_no_ref,
-            featurizer,
-            n_jobs=1,
-            use_cache=False,
-            chunk_size=1,
-            nan_value=np.nan,
-        )
-
-
-def test_featurizer_without_reference_group_ok() -> None:
-    dataset_no_ref = _dummy_dataset(
-        "dummy_no_ref_ok",
-        compute_reference_features=False,
-    )
+def test_featurizer_with_feature_subset_ok() -> None:
+    dataset_no_ref = _dummy_dataset("dummy_no_ref_ok")
     features_to_use = [
         "name_similarity",
         "affiliation_similarity",
@@ -472,7 +465,15 @@ def test_signature_id_to_index_or_raise_reports_missing_signature_id() -> None:
 
 
 def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = cast(ANDData, SimpleNamespace(name="dummy", compute_reference_features=False))
+    # Placeholder Arrow paths mark the dataset as Rust-eligible; the Rust build
+    # itself is replaced with fail_prewarm below, so no real build happens.
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            name="dummy",
+            rust_featurizer_arrow_paths={"signatures": "signatures.arrow"},
+        ),
+    )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",

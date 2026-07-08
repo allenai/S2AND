@@ -12,8 +12,7 @@
 | `rust_suite.py featurizer-reuse` | Repeated production-model predictions through Arrow by default; `--input-format json` keeps the legacy same-object vs re-instantiated `ANDData` cache check | Per-iteration timing, RSS, Arrow telemetry or legacy featurizer cache counts |
 | `rust_suite.py largest-block` | Profile one large block; `--mode single --backend rust --input-format arrow` uses Arrow `predict_from_arrow_paths`, while compare/constraint parity remain JSON reference workflows | Partition diff (digest + per-signature), latency, RSS; optional `--quality-check` + JSON-only `--constraint-sample` |
 | `rust_suite.py promoted-incremental-arrow-profile` | Arrow-only promoted Rust `predict_incremental` profiling against the canonical `s2and_and_big_blocks_linker_dataset_20260525` bundle | Per-run wall time, p50 latency, peak RSS, promoted incremental telemetry, Arrow planner/summary timings |
-| `rust_suite.py stress-rebuild` | Repeat Rust featurizer construction (`from_arrow_paths` by default; `from_dataset` explicit for classic `ANDData`) to stress lifecycle stability | Per-iteration elapsed + RSS peaks, RSS growth fraction, failure payloads |
-| `rust_suite.py measure-counter-data` | Measure CounterData memory contribution to Rust featurizer | Build-time RSS delta with vs without CounterData fields |
+| `rust_suite.py stress-rebuild` | Repeat Arrow Rust featurizer construction to stress lifecycle stability | Per-iteration elapsed + RSS peaks, RSS growth fraction, failure payloads |
 | `rust_suite.py calibrate-phase-a` | Calibrate memory estimates for phase-A accumulator from memory telemetry JSONL | Per-entry byte overhead percentiles |
 | `rust_suite.py calibrate-rust-batch` | Calibrate memory estimates for Rust batch persistent overhead from memory telemetry JSONL | Per-row byte overhead percentiles |
 

@@ -2,13 +2,13 @@
 
 This is a bounded verification gate for release artifacts that already exist in
 ``s2and/data`` and original JSON/pickle inputs that exist in ``s2and/data-backup``.
-It compares Rust feature matrices from two ingestion paths:
+It compares feature matrices from two supported ingestion paths:
 
-- ``RustFeaturizer.from_dataset(...)`` over a preprocessed ``ANDData`` subset.
+- Python featurization over a preprocessed ``ANDData`` subset.
 - ``RustFeaturizer.from_arrow_paths(...)`` over the existing Arrow bundle.
 
-The target is ingestion/preprocessing parity. Feature generation itself stays in
-Rust on both sides so drift points at source-policy or staging differences.
+The target is ingestion/preprocessing parity after the Rust ``from_dataset``
+constructor removal.
 """
 
 from __future__ import annotations
@@ -193,14 +193,10 @@ def _numeric_report(left: np.ndarray, right: np.ndarray, *, atol: float, rtol: f
 
 
 def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
-    from s2and.consts import CLUSTER_SEEDS_LOOKUP
     from s2and.data import ANDData
     from s2and.feature_port import build_rust_featurizer_from_arrow_paths, clear_rust_featurizer_cache
-    from s2and.runtime import load_s2and_rust_extension
-
-    rust_module = load_s2and_rust_extension()
-    if rust_module is None:
-        raise RuntimeError("s2and_rust extension is unavailable")
+    from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+    from s2and.runtime import RuntimeContext
 
     raw_dir = args.raw_root / dataset_name
     arrow_dir = args.arrow_root / dataset_name
@@ -239,7 +235,6 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         random_seed=int(args.seed),
         name_tuples="filtered",
         use_orcid_id=True,
-        compute_reference_features=False,
     )
     anddata_seconds = time.perf_counter() - started
 
@@ -248,13 +243,24 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
 
     clear_rust_featurizer_cache()
     started = time.perf_counter()
-    anddata_featurizer = rust_module.RustFeaturizer.from_dataset(
+    anddata_features, _labels, _nameless_features = many_pairs_featurize(
+        [(left, right, 0) for left, right in pairs],
         dataset,
-        float(CLUSTER_SEEDS_LOOKUP["require"]),
-        float(CLUSTER_SEEDS_LOOKUP["disallow"]),
-        int(args.n_jobs),
+        FeaturizationInfo(),
+        n_jobs=int(args.n_jobs),
+        use_cache=False,
+        chunk_size=max(1, int(args.pair_count)),
+        nan_value=np.nan,
+        runtime_context=RuntimeContext(
+            operation="verification_python_anddata_feature_parity",
+            requested_backend="python",
+            resolved_backend="python",
+            use_rust=False,
+            run_id="verification-python-anddata",
+            source="argument",
+        ),
     )
-    anddata_featurizer_seconds = time.perf_counter() - started
+    python_feature_seconds = time.perf_counter() - started
 
     started = time.perf_counter()
     arrow_featurizer = build_rust_featurizer_from_arrow_paths(
@@ -268,9 +274,8 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
     arrow_featurizer_seconds = time.perf_counter() - started
 
     started = time.perf_counter()
-    anddata_features = _feature_matrix(anddata_featurizer, pairs, n_jobs=int(args.n_jobs))
     arrow_features = _feature_matrix(arrow_featurizer, pairs, n_jobs=int(args.n_jobs))
-    feature_seconds = time.perf_counter() - started
+    arrow_feature_seconds = time.perf_counter() - started
 
     report = _numeric_report(anddata_features, arrow_features, atol=float(args.atol), rtol=float(args.rtol))
     report.update(
@@ -283,9 +288,9 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
             "embedding": str(args.embedding),
             "timings_seconds": {
                 "anddata_build": float(anddata_seconds),
-                "anddata_featurizer": float(anddata_featurizer_seconds),
+                "python_features": float(python_feature_seconds),
                 "arrow_featurizer": float(arrow_featurizer_seconds),
-                "feature_compare": float(feature_seconds),
+                "arrow_features": float(arrow_feature_seconds),
             },
         }
     )

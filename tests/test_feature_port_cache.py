@@ -33,13 +33,8 @@ class DummyRustFeaturizer:
         return []
 
     @classmethod
-    def from_dataset(cls, dataset, _require_value, _disallow_value, _num_threads=None):
-        cls.created.append(dataset.name)
-        return cls(dataset.name)
-
-    @classmethod
     def from_arrow_paths(cls, *_args, **_kwargs):
-        return cls("arrow")
+        raise AssertionError("cache tests route builds through the patched feature_port.build_rust_featurizer")
 
     def update_signature_name_counts(self, signatures):
         self.__class__.signature_overlay_payloads.append(signatures)
@@ -75,7 +70,6 @@ class DummyDataset(ANDData):
         self.signatures = {}
         self.papers = {}
         self.name_tuples = set()
-        self.compute_reference_features = False
         self.preprocess = True
         self.n_jobs = 1
         self.original_signatures_path = None
@@ -114,12 +108,28 @@ def _cache_keys(dataset: DummyDataset) -> list[feature_port._RustFeaturizerCache
     return list(feature_port._RUST_FEATURIZER_CACHE[dataset])
 
 
+def _dummy_build_rust_featurizer(dataset):
+    """Dataset-aware stand-in for the Arrow featurizer build door.
+
+    The cache machinery under test only cares that a build happened for a
+    given dataset/cache-key; the real build (from_arrow_paths over validated
+    Arrow artifacts) is covered by tests/test_arrow_training_ingestion.py.
+    """
+
+    DummyRustFeaturizer.created.append(dataset.name)
+    return (
+        DummyRustFeaturizer(dataset.name),
+        {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_feature_port_state(monkeypatch):
     feature_port.clear_rust_featurizer_cache()
     DummyRustFeaturizer.created = []
     DummyRustFeaturizer.signature_overlay_payloads = []
     monkeypatch.setattr(feature_port, "s2and_rust", DummyRustModule)
+    monkeypatch.setattr(feature_port, "build_rust_featurizer", _dummy_build_rust_featurizer)
     yield
     feature_port.clear_rust_featurizer_cache()
 
@@ -225,7 +235,6 @@ def test_rust_featurizer_cache_retries_when_seed_version_changes_during_build(mo
 @pytest.mark.parametrize(
     ("case_name", "mutate_dataset"),
     [
-        ("compute_reference_features", lambda dataset: setattr(dataset, "compute_reference_features", True)),
         ("preprocess", lambda dataset: setattr(dataset, "preprocess", False)),
         ("n_jobs", lambda dataset: setattr(dataset, "n_jobs", 2)),
         ("signatures_path", lambda dataset: setattr(dataset, "signatures_path", "new_signatures.json")),
@@ -235,7 +244,7 @@ def test_rust_featurizer_cache_retries_when_seed_version_changes_during_build(mo
         ("name_tuples", lambda dataset: dataset.name_tuples.add(("bill", "william"))),
     ],
 )
-def test_rust_featurizer_cache_tracks_material_from_dataset_fields(case_name, mutate_dataset):
+def test_rust_featurizer_cache_tracks_material_dataset_fields(case_name, mutate_dataset):
     dataset = DummyDataset(f"material_cache_{case_name}", mode="train")
 
     first = feature_port._get_rust_featurizer(dataset)
@@ -261,19 +270,17 @@ def test_rust_featurizer_cache_tracks_material_mutation_beyond_prefix_sample():
 
 
 def test_rust_featurizer_cache_tracks_in_place_numpy_embedding_mutation(monkeypatch):
-    class EmbeddingRustFeaturizer(DummyRustFeaturizer):
-        snapshots: list[float] = []
+    snapshots: list[float] = []
 
-        @classmethod
-        def from_dataset(cls, dataset, _require_value, _disallow_value, _num_threads=None):
-            cls.snapshots.append(float(dataset.specter_embeddings["p"][0]))
-            return cls(dataset.name)
+    def _embedding_build(dataset_arg):
+        snapshots.append(float(dataset_arg.specter_embeddings["p"][0]))
+        DummyRustFeaturizer.created.append(dataset_arg.name)
+        return (
+            DummyRustFeaturizer(dataset_arg.name),
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+        )
 
-    class EmbeddingRustModule:
-        __version__ = runtime.min_supported_rust_extension_version_string()
-        RustFeaturizer = EmbeddingRustFeaturizer
-
-    monkeypatch.setattr(feature_port, "s2and_rust", EmbeddingRustModule)
+    monkeypatch.setattr(feature_port, "build_rust_featurizer", _embedding_build)
     dataset = DummyDataset("embedding_mutation_cache_dataset", mode="train")
     dataset.specter_embeddings = {"p": np.asarray([0.0], dtype=np.float32)}
 
@@ -282,7 +289,7 @@ def test_rust_featurizer_cache_tracks_in_place_numpy_embedding_mutation(monkeypa
     second = feature_port._get_rust_featurizer(dataset)
 
     assert second is not first
-    assert EmbeddingRustFeaturizer.snapshots == [0.0, 1.0]
+    assert snapshots == [0.0, 1.0]
 
 
 def test_update_rust_cluster_seeds_reuses_cached_featurizer_without_default_version_bump():
@@ -776,7 +783,7 @@ def test_get_rust_featurizer_raises_after_repeated_stale_build(monkeypatch):
         ("inference", True),
     ],
 )
-def test_rust_featurizer_build_uses_dataset_constructor(mode: str, with_json_paths: bool):
+def test_rust_featurizer_build_runs_per_dataset_with_and_without_json_paths(mode: str, with_json_paths: bool):
     dataset = DummyDataset(f"{mode}_paths{int(with_json_paths)}", mode=mode)
     if with_json_paths:
         dataset.signatures_path = "signatures.json"
@@ -928,7 +935,7 @@ def test_load_s2and_rust_extension_falls_back_from_namespace_package(monkeypatch
 def test_load_s2and_rust_extension_returns_first_valid_module(monkeypatch):
     class ValidRustFeaturizer:
         @staticmethod
-        def from_dataset(*args, **kwargs):
+        def from_arrow_paths(*args, **kwargs):
             return None
 
         def signature_ids(self):

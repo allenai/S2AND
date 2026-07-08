@@ -387,6 +387,7 @@ def _predict_incremental_link_or_abstain_compact(
     feature_matrix: LinkerFeatureMatrix,
     *,
     row_signals: Mapping[str, Any] | None = None,
+    num_threads: int | None = None,
 ) -> LinkOrAbstainCompactResult:
     """Score artifact-ordered rows and apply the artifact's logistic gate.
 
@@ -398,7 +399,7 @@ def _predict_incremental_link_or_abstain_compact(
     candidate_batch = feature_matrix.candidate_batch
     if candidate_batch.row_query_signature_indices is None:
         raise ValueError("candidate_batch.row_query_signature_indices is required for compact decisions")
-    probabilities = artifact.predict_probabilities(feature_matrix.matrix)
+    probabilities = artifact.predict_probabilities(feature_matrix.matrix, num_threads=num_threads)
     if len(probabilities) != candidate_batch.row_count:
         raise ValueError("artifact probability count must match candidate row_count")
     query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
@@ -1249,6 +1250,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         feature_matrix,
         row_signals=row_signals,
+        num_threads=n_jobs,
     )
     no_candidate_decisions = _no_candidate_abstain_decisions(no_candidate_query_signature_indices)
     if no_candidate_decisions:

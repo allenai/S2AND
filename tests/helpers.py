@@ -73,7 +73,7 @@ def import_s2and_rust(
         rust_featurizer = getattr(module, "RustFeaturizer", None)
         if rust_featurizer is None:
             return False
-        method_name = required_method or "from_dataset"
+        method_name = required_method or "from_arrow_paths"
         if not hasattr(rust_featurizer, method_name):
             return False
         capabilities = detect_rust_runtime_capabilities(extension_module=module)
@@ -107,12 +107,59 @@ def import_s2and_rust(
             return False, fallback_err
 
 
+def attach_arrow_featurizer_bundle(
+    dataset: ANDData,
+    bundle_dir: Any,
+    *,
+    name_counts: str = "tiny",
+) -> dict[str, str]:
+    """Write a temporary Arrow bundle from an in-memory ``ANDData`` and attach it.
+
+    Rust featurizers are built exclusively through ``from_arrow_paths``, so
+    tests that exercise the Rust featurizer on a hand-built ``ANDData`` must
+    spool it to an Arrow bundle first. Writes signatures/papers/paper_authors
+    (+ specter when the dataset carries embeddings) with the same writers
+    production conversion uses, adds the raw-planner batch indexes and a
+    ``name_counts_index`` sidecar (``"tiny"`` -> ``tiny_name_counts()``,
+    ``"empty"`` -> empty lookups so every name-count query misses), then
+    attaches the validated paths for featurization and prediction.
+    """
+
+    from unittest import mock
+
+    import s2and.data as data_module
+    from s2and.arrow_training import attach_training_arrow_featurizer_paths
+    from s2and.incremental_linking.feature_block_arrow import (
+        write_name_counts_index,
+        write_raw_arrow_batch_lookup_indexes,
+    )
+    from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+
+    if name_counts == "tiny":
+        loader = tiny_name_counts_tuple
+    elif name_counts == "empty":
+        loader = lambda: ({}, {}, {}, {})  # noqa: E731
+    else:
+        raise ValueError(f"name_counts must be 'tiny' or 'empty', got {name_counts!r}")
+
+    include_specter = bool(getattr(dataset, "specter_embeddings", None))
+    arrow_paths = write_feature_block_arrow_from_anddata(
+        dataset,
+        bundle_dir,
+        include_specter=include_specter,
+    )
+    arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
+    with mock.patch.object(data_module, "_load_name_counts_cached", loader):
+        name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir, overwrite=True)
+    arrow_paths["name_counts_index"] = name_counts_index_path
+    return attach_training_arrow_featurizer_paths(dataset, arrow_paths)
+
+
 def build_dummy_dataset(
     name: str,
     *,
     mode: str = "train",
     load_name_counts: bool | dict[str, dict[str, int]] = False,
-    compute_reference_features: bool = False,
     n_jobs: int = 1,
 ) -> ANDData:
     resolved_name_counts = tiny_name_counts() if load_name_counts is True else load_name_counts
@@ -125,7 +172,6 @@ def build_dummy_dataset(
         load_name_counts=resolved_name_counts,
         preprocess=True,
         n_jobs=n_jobs,
-        compute_reference_features=compute_reference_features,
     )
 
 

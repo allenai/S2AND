@@ -128,12 +128,12 @@ Rust extension with `maturin develop`.
 
 ### Which model to use
 
-| Model artifact | Release line | Repo storage | Included in PyPI install? | Linker artifact | Loader | Embeddings | Uses reference features? |
+| Model artifact | Release line | Repo storage | Included in PyPI install? | Linker artifact | Loader | Embeddings | Usable with current S2AND? |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `production_model_v1.21/` | Current, starting with `0.50.0` | Directory bundle in Git LFS | Yes | Bundled in `incremental_linker/` | `load_production_model(...)` | SPECTER2 PRX | No |
-| `production_model_v1.2.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER2 PRX | No |
-| `production_model_v1.1.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER1 | No |
-| `production_model_v1.0.pickle` | Deprecated, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER1 | Yes |
+| `production_model_v1.21/` | Current, starting with `0.50.0` | Directory bundle in Git LFS | Yes | Bundled in `incremental_linker/` | `load_production_model(...)` | SPECTER2 PRX | Yes |
+| `production_model_v1.2.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER2 PRX | Yes |
+| `production_model_v1.1.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER1 | Yes |
+| `production_model_v1.0.pickle` | Deprecated, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER1 | No (required removed reference features) |
 
 Key points:
 
@@ -142,9 +142,8 @@ Key points:
 - Starting with S2AND `0.50.0`, production model releases are directory bundles named `production_model_vX.Y/`; new production releases should not be published as pickle files.
 - Git LFS is only a source-checkout concern. Published `s2and` wheels and sdists include the hydrated model files.
 - Use directory bundles for workflows that need a linker model. The legacy `v1.0`, `v1.1`, and `v1.2` pickle artifacts contain only the legacy pickled model state and do not bundle `incremental_linker/` artifacts.
-- Models `v1.1`, `v1.2`, and `v1.21` were trained with `compute_reference_features=False`.
-- For `v1.1`, `v1.2`, and `v1.21`, `papers.references` can be omitted or set to `null`.
-- `v1.0` still requires reference features and is kept only for backward compatibility.
+- Reference features have been removed from S2AND entirely; `papers.references` is ignored if present.
+- `v1.0` required reference features and is no longer usable with current S2AND.
 
 Minimal input shape for `v1.1`, `v1.2`, and `v1.21`:
 
@@ -159,8 +158,7 @@ Minimal input shape for `v1.1`, `v1.2`, and `v1.21`:
   "authors": [
     {"position": 0, "author_name": "Jane Smith"},
     {"position": 1, "author_name": "John Doe"}
-  ],
-  "references": null
+  ]
 }
 ```
 
@@ -366,7 +364,7 @@ git config core.hooksPath .githooks
 Workflow:
 ```bash
 # 1) edit VERSION
-echo 0.51.1 > VERSION
+echo 0.60.0 > VERSION
 
 # 2) sync manifests
 uv run python scripts/sync_version.py

@@ -524,6 +524,23 @@ def canonical_name_count_keys(parts: CanonicalNameParts) -> dict[str, str | None
     }
 
 
+def canonical_lasts_equivalent(last_a: str, last_b: str) -> bool:
+    """Compare-time equivalence for canonical last names (space-insensitive).
+
+    Canonical surnames are STORED spaced with particles preserved (D5:
+    ``ou yang``, ``van der berg``); at compare time, joined and spaced
+    spellings of the same surname are treated as equivalent (``ou yang`` ==
+    ``ouyang``). This is deliberate compare-time policy, not an artifact shim:
+    upstream blocking groups surname spelling variants under one block key, and
+    the within-block last-name constraint must not veto pairs that blocking
+    deliberately grouped (ruled 2026-07-09 with the canonical_v2 cutover).
+    """
+
+    if last_a == last_b:
+        return True
+    return last_a.replace(" ", "") == last_b.replace(" ", "")
+
+
 def name_text_features(
     name_1: str,
     name_2: str,

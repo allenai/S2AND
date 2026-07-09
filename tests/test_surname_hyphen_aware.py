@@ -8,7 +8,7 @@ replaced them (docs/normalization_migration_blocked.md, D4/D5).
 """
 
 from s2and.data import ANDData
-from s2and.text import canonicalize_name_text
+from s2and.text import canonical_lasts_equivalent, canonicalize_name_text
 
 
 def test_canonical_last_treats_dash_and_space_variants_identically():
@@ -19,6 +19,16 @@ def test_canonical_last_treats_dash_and_space_variants_identically():
     assert canonicalize_name_text("Ou Yang") == "ou yang"
     assert canonicalize_name_text("Ouyang") == "ouyang"
     assert canonicalize_name_text("van-der-Berg") == "van der berg"
+
+
+def test_canonical_lasts_equivalent_is_space_insensitive_compare_policy():
+    # Storage is spaced (D5); compare time treats joined and spaced spellings
+    # as one surname, but different surnames stay different.
+    assert canonical_lasts_equivalent("ou yang", "ouyang") is True
+    assert canonical_lasts_equivalent("ouyang", "ou yang") is True
+    assert canonical_lasts_equivalent("van der berg", "vanderberg") is True
+    assert canonical_lasts_equivalent("li", "ouyang") is False
+    assert canonical_lasts_equivalent("", "") is True
 
 
 def _raw_signature(signature_id: str, *, paper_id: int, first: str, last: str) -> dict:
@@ -85,12 +95,22 @@ def test_constraint_treats_hyphen_and_space_last_names_as_equivalent():
     assert dataset.get_constraint("s1", "s2") is None
 
 
-def test_constraint_disallows_joined_vs_spaced_last_names():
-    # Canonical policy: "ouyang" and "ou yang" are distinct canonical strings;
-    # joined-spelling aliasing is a compare-time concern outside canonicalization,
-    # so the exact-match constraint disallows the pair.
+def test_constraint_treats_joined_and_spaced_last_names_as_equivalent():
+    # "ouyang" and "ou yang" are distinct canonical STRINGS (storage is spaced,
+    # D5) but equivalent at compare time (canonical_lasts_equivalent): upstream
+    # blocking groups surname spelling variants, and the within-block constraint
+    # must not veto pairs that blocking deliberately grouped.
     dataset = _constraint_dataset(
         last_2="Ouyang",
+        name_tuples={("qi xin", "qadir"), ("qadir", "qi xin")},
+    )
+
+    assert dataset.get_constraint("s1", "s2") is None
+
+
+def test_constraint_disallows_genuinely_different_last_names():
+    dataset = _constraint_dataset(
+        last_2="Li",
         name_tuples={("qi xin", "qadir"), ("qadir", "qi xin")},
     )
 

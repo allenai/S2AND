@@ -37,6 +37,7 @@ from s2and.text import (
     DROPPED_AFFIXES,
     VENUE_STOP_WORDS,
     CanonicalNameParts,
+    canonical_lasts_equivalent,
     canonical_name_count_keys,
     canonicalize_name_parts,
     canonicalize_name_text,
@@ -1352,12 +1353,13 @@ class ANDData:
         # but if they are not equal, we can't say much
         elif not suppress_orcid and orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
             return low_value
-        # just-in-case last name constraint: if canonical last names differ, then
-        # disallow. Dash/space surname variants already canonicalize to the same
-        # spaced form (D5); joined-vs-spaced aliasing is a compare-time concern
-        # outside canonicalization.
-        elif _materialize_constraint_last_normalized(signature_1) != _materialize_constraint_last_normalized(
-            signature_2
+        # just-in-case last name constraint: if canonical last names differ at
+        # compare time, then disallow. Dash/space variants canonicalize to the
+        # same spaced form (D5); joined-vs-spaced spellings are additionally
+        # equivalent here by compare-time policy (see canonical_lasts_equivalent).
+        elif not canonical_lasts_equivalent(
+            _materialize_constraint_last_normalized(signature_1),
+            _materialize_constraint_last_normalized(signature_2),
         ):
             return high_value
         # just-in-case first initial constraint: if first initials are different, then disallow

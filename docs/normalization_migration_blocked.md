@@ -16,7 +16,11 @@ Execution status (last reconfirmed 2026-07-09; originally entered blocked state 
 - SINGLE-MODE CUTOVER CODE LANDED (2026-07-09, later same day, per OD4): the live Python and
   Rust pipelines now implement ONLY canonical_v2 (`NORMALIZATION_VERSION = "canonical_v2"` in
   `s2and/consts.py`; `FEATURIZER_VERSION` bumped for the feature-value change). All compatibility
-  shims are removed: `_canonicalize_last_for_counts`, `_lasts_equivalent_for_constraint`,
+  shims are removed: `_canonicalize_last_for_counts`, the `_lasts_equivalent_for_constraint`
+  shim (NOTE, ruled 2026-07-09 at cutover: space-insensitive last-name comparison is RETAINED
+  in the constraint as deliberate compare-time policy — `s2and.text.canonical_lasts_equivalent`,
+  mirrored by Rust `lasts_equivalent_for_constraint` — because upstream blocking groups
+  joined/spaced surname variants and the within-block constraint must not veto them),
   the joined/first-token name-tuple probing in `first_names_name_compatible` (Python + Rust),
   the subblocking ASCII/non-ASCII dash spill repair (Python + Rust), the ORCID prefix-count
   first-token lookup fallback, the vestigial `author_info_first_normalized` Signature field,

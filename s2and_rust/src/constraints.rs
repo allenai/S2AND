@@ -12,6 +12,10 @@ pub(crate) fn count_initials(s: &str) -> HashMap<char, usize> {
     counts
 }
 
+// Compare-time equivalence for canonical last names: joined and spaced
+// spellings of one surname are equivalent ("ou yang" == "ouyang"). Deliberate
+// canonical_v2 compare-time policy (not a legacy artifact shim); mirrors
+// s2and.text.canonical_lasts_equivalent.
 pub(crate) fn lasts_equivalent_for_constraint(l1: &str, l2: &str) -> bool {
     if l1 == l2 {
         return true;

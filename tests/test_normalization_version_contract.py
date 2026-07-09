@@ -56,9 +56,7 @@ def test_absent_manifest_field_defaults_to_legacy_compat(tmp_path):
 
 
 def test_explicit_manifest_field_is_read_back(tmp_path):
-    index_dir = _write_minimal_name_counts_index(
-        tmp_path, normalization_version=NORMALIZATION_VERSION_CANONICAL_V2
-    )
+    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION_CANONICAL_V2)
     assert read_name_counts_index_normalization_version(index_dir) == NORMALIZATION_VERSION_CANONICAL_V2
 
 
@@ -75,9 +73,7 @@ def test_invalid_manifest_token_fails_artifact_validation(tmp_path):
 
 
 def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path):
-    index_dir = _write_minimal_name_counts_index(
-        tmp_path, normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT
-    )
+    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT)
     for key in ("signatures", "papers", "paper_authors"):
         (tmp_path / f"{key}.arrow").write_bytes(b"")
     paths = {
@@ -108,9 +104,7 @@ class _ContractOnly:
 
 
 def test_clusterer_resolution_defaults_and_validates():
-    assert (
-        _resolve_clusterer_normalization_version(_ContractOnly({})) == NORMALIZATION_VERSION_LEGACY_COMPAT
-    )
+    assert _resolve_clusterer_normalization_version(_ContractOnly({})) == NORMALIZATION_VERSION_LEGACY_COMPAT
     assert (
         _resolve_clusterer_normalization_version(
             _ContractOnly({"normalization_version": NORMALIZATION_VERSION_CANONICAL_V2})
@@ -122,15 +116,18 @@ def test_clusterer_resolution_defaults_and_validates():
 
 
 def test_bundle_gate_accepts_matching_and_rejects_mismatching(tmp_path):
-    # Absent field implies legacy_compat and must match the package version today.
-    _require_bundle_normalization_version(tmp_path, {})
+    # This package is canonical_v2: a matching bundle loads; a pre-contract
+    # bundle (absent field implies legacy_compat) and an explicit legacy bundle
+    # fail fast; invalid tokens fail with a distinct message.
     _require_bundle_normalization_version(tmp_path, {"normalization_version": NORMALIZATION_VERSION})
     other = (
         NORMALIZATION_VERSION_CANONICAL_V2
         if NORMALIZATION_VERSION == NORMALIZATION_VERSION_LEGACY_COMPAT
         else NORMALIZATION_VERSION_LEGACY_COMPAT
     )
-    with pytest.raises(ValueError, match="one release unit|release unit"):
+    with pytest.raises(ValueError, match="release unit"):
+        _require_bundle_normalization_version(tmp_path, {})
+    with pytest.raises(ValueError, match="release unit"):
         _require_bundle_normalization_version(tmp_path, {"normalization_version": other})
     with pytest.raises(ValueError, match="invalid"):
         _require_bundle_normalization_version(tmp_path, {"normalization_version": "bogus"})

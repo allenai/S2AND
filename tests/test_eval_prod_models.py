@@ -16,6 +16,14 @@ from tests.helpers import import_s2and_rust, patch_tiny_name_counts_loader
 
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 
+requires_canonical_production_bundle = pytest.mark.skip(
+    reason=(
+        "packaged production bundle/pickle predates canonical_v2 and now fails fast at load; "
+        "unskip after the v1.3 retrain ships a canonical bundle "
+        "(docs/normalization_migration_blocked.md, cutover readiness checklist item 4)"
+    )
+)
+
 
 def _is_lfs_pointer(path: Path) -> bool:
     if not path.is_file():
@@ -638,6 +646,7 @@ def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
         eval_prod_models.construct_cluster_to_signatures({"s1": "c1"}, {"block": ["s1", "s2"]})
 
 
+@requires_canonical_production_bundle
 @pytest.mark.requires_lfs
 def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
     rust_available, rust_payload = import_s2and_rust(
@@ -691,6 +700,7 @@ def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
     assert cluster_metrics["B3 (P, R, F1)"] == pytest.approx((1.0, 0.9, 0.948), abs=5e-4)
 
 
+@requires_canonical_production_bundle
 @pytest.mark.requires_lfs
 def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
     monkeypatch: pytest.MonkeyPatch,

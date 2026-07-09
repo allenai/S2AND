@@ -71,8 +71,10 @@ def _legacy_sorted_subblock_merge_candidates(output, maximum_size, first_k_lette
                 score = min(len(name_for_splits_1), len(name_for_splits_2))
                 small_enough_pairs_counts.append((pair, 1e5 + score))
             else:
-                lookup_1 = name_for_splits_1.split(" ")[0]
-                lookup_2 = name_for_splits_2.split(" ")[0]
+                # canonical_v2: prefix-count lookups use the full canonical name
+                # string (the legacy first-token reduction is retired).
+                lookup_1 = name_for_splits_1
+                lookup_2 = name_for_splits_2
                 if lookup_1 in first_k_letter_counts_sorted and lookup_2 in first_k_letter_counts_sorted[lookup_1]:
                     small_enough_pairs_counts.append((pair, first_k_letter_counts_sorted[lookup_1][lookup_2]))
 
@@ -236,7 +238,9 @@ def test_sorted_subblock_merge_candidates_matches_legacy_many_keys() -> None:
             key = f"bo {index}"
         output[key] = [f"s{index}_{j}" for j in range(index % 4 + 1)]
     for left in range(0, 80, 5):
-        counts.setdefault(f"al{left}", {})["bo"] = left + 1
+        # Keyed by the FULL canonical name strings of the "bo {index}" keys so
+        # the prefix-count fallback branch is exercised under canonical lookups.
+        counts.setdefault(f"al{left}", {})[f"bo {left + 2}"] = left + 1
 
     assert _sorted_subblock_merge_candidates(output, 7, counts) == _legacy_sorted_subblock_merge_candidates(
         output,

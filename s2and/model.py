@@ -35,6 +35,7 @@ from s2and.consts import (
     DEFAULT_CHUNK_SIZE,
     LARGE_DISTANCE,
     LARGE_INTEGER,
+    NORMALIZATION_VERSION,
     NORMALIZATION_VERSION_LEGACY_COMPAT,
     PROJECT_ROOT_PATH,
     VALID_NORMALIZATION_VERSIONS,
@@ -2668,6 +2669,10 @@ class Clusterer:
             "name_counts_last_first_initial_semantics": (
                 default_name_count_semantics or NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
             ),
+            # A freshly constructed clusterer is born from this package, so it
+            # inherits the package's normalization policy. Loaded bundles carry
+            # their own recorded value instead.
+            "normalization_version": NORMALIZATION_VERSION,
         }
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
@@ -4067,6 +4072,8 @@ class Clusterer:
         if not isinstance(contract, dict):
             contract = {}
         contract["name_counts_last_first_initial_semantics"] = training_semantics
+        # Training runs under this package's normalization policy.
+        contract["normalization_version"] = NORMALIZATION_VERSION
         self.feature_contract = contract
 
         val_block_dict_list = []

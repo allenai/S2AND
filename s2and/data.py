@@ -368,9 +368,9 @@ class ANDData:
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
         name_counts_last_first_initial_semantics: semantics for constructing the
-            `last_first_initial` lookup key in `name_counts`.
-            - "initial_char": `<last> <first[0]>` (current semantics)
-            - "legacy_full_first_token": `<last> <first_token>` (legacy compatibility)
+            `last_first_initial` lookup key in `name_counts`. Only "initial_char"
+            (`<last> <first[0]>`) is accepted; the "legacy_full_first_token"
+            semantics was retired by the canonical_v2 cutover (D8).
         rust_arrow_featurization: set by s2and.arrow_training when this dataset's Rust
             featurizer is built from Arrow IPC artifacts; defers paper preprocessing and
             signature n-gram/field materialization to the Rust Arrow readers

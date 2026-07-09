@@ -34,7 +34,6 @@ def _temporary_env(name: str, value: str | None):
 
 def _signature_scalar_fields(signature) -> dict[str, object]:
     return {
-        "author_info_first_normalized": signature.author_info_first_normalized,
         "author_info_first_normalized_without_apostrophe": signature.author_info_first_normalized_without_apostrophe,
         "author_info_middle_normalized_without_apostrophe": signature.author_info_middle_normalized_without_apostrophe,
         "author_info_last_normalized": signature.author_info_last_normalized,

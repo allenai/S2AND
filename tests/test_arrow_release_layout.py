@@ -112,9 +112,7 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
         },
     )
 
-    for file_path in (
-        release_root / "LICENSE.txt",
-    ):
+    for file_path in (release_root / "LICENSE.txt",):
         _touch_file(file_path)
     dataset_root = release_root / dataset_name
     write_arrow_ipc_table(

@@ -1,26 +1,24 @@
-import pytest
+"""Canonical (canonical_v2) surname and first-name constraint behavior.
 
-from s2and.data import (
-    ANDData,
-    _canonicalize_last_for_counts,
-    _lasts_equivalent_for_constraint,
-)
+Historically this module pinned the legacy-compatibility shims
+(`_lasts_equivalent_for_constraint`, `_canonicalize_last_for_counts`, and the
+joined/first-token name-tuple probing forms). Those shims were removed by the
+canonical_v2 cutover; this module now pins the canonical semantics that
+replaced them (docs/normalization_migration_blocked.md, D4/D5).
+"""
 
-
-def test_last_equivalence_helper():
-    # Hyphen/space variants should be equivalent for constraints
-    assert _lasts_equivalent_for_constraint("ou yang", "ouyang") is True
-    assert _lasts_equivalent_for_constraint("ouyang", "ou yang") is True
-    assert _lasts_equivalent_for_constraint("li", "ouyang") is False
+from s2and.data import ANDData
+from s2and.text import canonicalize_name_text
 
 
-def test_canonicalize_last_for_counts():
-    # Join internal spaces for compound surnames
-    assert _canonicalize_last_for_counts("Ou-Yang", "ou yang") == "ouyang"
-    # Gracefully handle normalized-only signal
-    assert _canonicalize_last_for_counts(None, "ou yang") == "ouyang"
-    # Non-compound surnames should pass through
-    assert _canonicalize_last_for_counts("Smith", "smith") == "smith"
+def test_canonical_last_treats_dash_and_space_variants_identically():
+    # D4/D5: every dash-like character is a separator; canonical surnames are
+    # spaced with particles preserved. Joined spellings stay distinct strings.
+    assert canonicalize_name_text("Ou-Yang") == "ou yang"
+    assert canonicalize_name_text("Ou–Yang") == "ou yang"
+    assert canonicalize_name_text("Ou Yang") == "ou yang"
+    assert canonicalize_name_text("Ouyang") == "ouyang"
+    assert canonicalize_name_text("van-der-Berg") == "van der berg"
 
 
 def _raw_signature(signature_id: str, *, paper_id: int, first: str, last: str) -> dict:
@@ -53,14 +51,19 @@ def _raw_paper(paper_id: int, author_name: str) -> dict:
     }
 
 
-def _constraint_dataset(*, name_tuples: set[tuple[str, str]] | None = None) -> ANDData:
+def _constraint_dataset(
+    *,
+    last_1: str = "Ou-Yang",
+    last_2: str = "Ou Yang",
+    name_tuples: set[tuple[str, str]] | None = None,
+) -> ANDData:
     signatures = {
-        "s1": _raw_signature("s1", paper_id=1, first="Qi-Xin", last="Ou-Yang"),
-        "s2": _raw_signature("s2", paper_id=2, first="Qadir", last="Ou Yang"),
+        "s1": _raw_signature("s1", paper_id=1, first="Qi-Xin", last=last_1),
+        "s2": _raw_signature("s2", paper_id=2, first="Qadir", last=last_2),
     }
     papers = {
-        "1": _raw_paper(1, "Qi-Xin Ou-Yang"),
-        "2": _raw_paper(2, "Qadir Ou Yang"),
+        "1": _raw_paper(1, f"Qi-Xin {last_1}"),
+        "2": _raw_paper(2, f"Qadir {last_2}"),
     }
     return ANDData(
         signatures,
@@ -75,20 +78,31 @@ def _constraint_dataset(*, name_tuples: set[tuple[str, str]] | None = None) -> A
 
 
 def test_constraint_treats_hyphen_and_space_last_names_as_equivalent():
-    dataset = _constraint_dataset(name_tuples={("qi xin", "qadir")})
+    # Both variants canonicalize to "ou yang", so the last-name disallow does
+    # not fire and the curated alias keeps the firsts compatible.
+    dataset = _constraint_dataset(name_tuples={("qi xin", "qadir"), ("qadir", "qi xin")})
 
     assert dataset.get_constraint("s1", "s2") is None
 
 
-@pytest.mark.parametrize(
-    "name_tuples",
-    [
-        {("qi xin", "qadir")},
-        {("qixin", "qadir")},
-        {("qi", "qadir")},
-    ],
-)
-def test_constraint_accepts_name_tuple_compatibility_forms(name_tuples):
-    dataset = _constraint_dataset(name_tuples=name_tuples)
+def test_constraint_disallows_joined_vs_spaced_last_names():
+    # Canonical policy: "ouyang" and "ou yang" are distinct canonical strings;
+    # joined-spelling aliasing is a compare-time concern outside canonicalization,
+    # so the exact-match constraint disallows the pair.
+    dataset = _constraint_dataset(
+        last_2="Ouyang",
+        name_tuples={("qi xin", "qadir"), ("qadir", "qi xin")},
+    )
 
+    assert dataset.get_constraint("s1", "s2") is not None
+
+
+def test_constraint_name_tuples_use_exact_canonical_forms_only():
+    # The legacy joined ("qixin") and first-token ("qi") probing forms are
+    # retired: a tuple curated in a non-canonical form no longer matches.
+    for stale_tuples in ({("qixin", "qadir")}, {("qi", "qadir")}):
+        dataset = _constraint_dataset(name_tuples=stale_tuples)
+        assert dataset.get_constraint("s1", "s2") is not None
+
+    dataset = _constraint_dataset(name_tuples={("qi xin", "qadir")})
     assert dataset.get_constraint("s1", "s2") is None

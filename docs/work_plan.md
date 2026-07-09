@@ -1,6 +1,17 @@
 # Work Plan
 
-Status date: 2026-07-05
+Status date: 2026-07-09
+
+Landed on `canonical-v2-migration` since the 2026-07-05 status:
+
+- Rust Arrow migration completed: Rust featurization/ingest enters through
+  Arrow IPC only (the JSON `from_dataset` ingestion surface is removed);
+  classic JSON/`ANDData` datasets stay on the Python featurizer. See
+  [rust/runtime.md](rust/runtime.md). `FEATURIZER_VERSION` is now 9.
+- Native Rust LightGBM evaluator
+  ([../s2and_rust/src/lightgbm_booster.rs](../s2and_rust/src/lightgbm_booster.rs))
+  scores production `.lgb` boosters; parity is pinned by
+  `tests/test_rust_lightgbm_booster_parity.py`.
 
 This is the active Rust/Arrow platform backlog. Stable architecture and artifact
 contracts live in:
@@ -177,24 +188,20 @@ verifies the two implementations still agree.
 
 Decided after this pass (implementation on this branch):
 
-- **`detect_language` reliability** — DECIDED: `is_reliable` requires BOTH
-  detectors (fastText + cld2) to agree. Any non-agreement (disagreement, or only
-  one detector responding) yields `predicted_language = "un"` and
-  `is_reliable = False`, preserving the invariant `is_reliable <=> language != "un"`.
-  Python (`s2and/text.py`) and Rust
-  (`s2and_rust/src/language_detection.rs`) changed in lockstep. Production
-  Arrow datasets are not expected to carry language columns in general:
-  `predicted_language`/`is_reliable` are optional cached compatibility
-  overrides. When `predicted_language` is missing or NULL, Rust recomputes
-  language locally from the raw title with the same detector policy. Only
-  compatibility/offline Arrow bundles with non-NULL cached language values need
-  regeneration or clearing. Bumps `FEATURIZER_VERSION` again (4 -> 5).
-- **fastText availability** — DECIDED: production no longer supports a missing
-  fastText model; a load failure raises instead of silently falling back to
-  cld2-only (`un_ft`). A testing off-switch (`S2AND_SKIP_FASTTEXT`) is retained.
-  Interacts with the reliability rule: with fastText off, agreement is
-  impossible, so detection is uniformly unreliable — language-detection tests
-  must opt into the real model.
+- **`detect_language` reliability** — DECIDED: language detection is CLD2-only.
+  `predicted_language` is CLD2's top known language, `is_reliable` mirrors
+  CLD2's reliable flag for known languages, and `language_reliability` is the
+  CLD2 top-language percent divided by 100 when reliable, otherwise 0. Python
+  (`s2and/text.py`) and Rust (`s2and_rust/src/language_detection.rs`) changed
+  in lockstep. Production Arrow datasets are not expected to carry language
+  columns in general: `predicted_language`/`is_reliable`/`language_reliability`
+  are optional cached compatibility overrides. When the cached language columns
+  are missing or NULL, Rust recomputes language locally from the raw title.
+  Bumps `FEATURIZER_VERSION` for the renamed pairwise
+  `language_reliability_min` feature.
+- **fastText availability** — DECIDED: fastText is removed from runtime
+  language detection. The Python dependency, `lid.176.bin` release artifact,
+  and `S2AND_SKIP_FASTTEXT` test switch are gone.
 - **Sinonym API removal** — DECIDED: `ANDData(..., use_sinonym_overwrite=...)`
   and `sinonym_overwrite_min_ratio` are removed without a compatibility alias.
   Canonical-v2 data preparation is expected to supply upstream-normalized names
@@ -245,18 +252,22 @@ Remaining open bugs and decision items after the 2026-07-04 correctness pass:
   now guaranteed correct by construction at conversion time. Covered by
   `tests/test_feature_block.py::test_feature_block_from_anddata_rejects_legacy_name_count_semantics`.
 
-- **Unicode `is_alphabetic` / `is_uppercase` claim under review in the fastText
-  0.9 gate.** Original report claimed Python's `isalpha` counts category Lm
-  while Rust's `is_alphabetic` does not. Re-check on 2026-05-28: Python
-  `str.isalpha()` returns True for Lu/Ll/Lt/Lm/Lo, and Rust
-  `char::is_alphabetic()` is the Unicode `Alphabetic` property which also
-  includes Lm. The actual divergence is narrower (Rust's `Alphabetic` includes
-  `Other_Alphabetic` characters that Python's `isalpha` does not). If a real
-  fastText branch flip is reproducible, re-document the precise category set
-  and fix; otherwise close as a documentation correction.
-  Sites:
-  [s2and/text.py:360-365](../s2and/text.py#L360-L365);
-  [s2and_rust/src/language_detection.rs:80-86](../s2and_rust/src/language_detection.rs#L80-L86).
+- **Unicode `is_alphabetic` / `is_uppercase` claim in the language text gate.**
+  RESOLVED 2026-07-09 (reproduced and fixed). The divergence is real: Python
+  `str.isalpha()` accepts general category L* only, while Rust
+  `char::is_alphabetic()` is the derived `Alphabetic` property (L* plus Nl plus
+  `Other_Alphabetic`, e.g. Indic combining vowel signs). A text whose only
+  `Alphabetic` characters are combining marks hits Python's zero-isalpha "un"
+  early exit but proceeded to the detectors in Rust, and the same count skew
+  could flip the >0.9 uppercase-ratio lowercasing branch (`"A B C ि"`:
+  Python ratio 1.0, old Rust 0.75). Fixed by `is_python_alpha` /
+  language text-gate counting in
+  [s2and_rust/src/language_detection.rs](../s2and_rust/src/language_detection.rs)
+  (general-category check via `unicode-properties`); `is_uppercase` needed no
+  change (both sides use the derived `Uppercase` property, filtered to L*
+  chars on both sides). Pinned by the Rust language-detection tests and the
+  Python reference test in `tests/test_text.py`. This was part of the language
+  feature-policy bump that now lands at `FEATURIZER_VERSION=9`.
 
 ### Second-pass bugs (2026-05-28)
 
@@ -265,63 +276,93 @@ The 2026-07-04 correctness pass fixed or rejected the resolved entries; only
 the still-open items remain below. Tier A bugs change observable production
 behavior today; Tier B bugs are latent, currently masked, or decision cleanup.
 
+Status update (2026-07-08): three Tier B entries were closed.
+
+Status update (2026-07-09): the section is fully closed. The Tier A
+query-vs-query disallow bug is fixed (enforced at resolution time), the
+duplicate-signature Tier B entry is closed with a loud Rust-side check, the
+two-pair veto entry is confirmed as intentional policy and pinned, and the
+Unicode `is_alphabetic` gate item in section 2 is reproduced and fixed. No
+open bugs remain in this section; the entries below are kept as resolution
+records.
+
+- Stale-index `indexed_source_mtime_ns` header field: removed from the entry
+  list as stale — the field no longer exists in
+  [s2and_rust/src/arrow_batch_lookup.rs](../s2and_rust/src/arrow_batch_lookup.rs)
+  (the header carries only size + full-content fingerprint); it had already
+  been removed on `main` before this branch.
+- Duplicate-id detection depending on the `keep_ids` filter: fixed. The
+  signatures reader already checked pre-filter; the papers and specter readers
+  now do the same, so a duplicate id whose copies are excluded by the
+  keep-filter still fails (a filtered scan is never more permissive than a
+  full scan). Pinned by the `filtered_duplicate_detection_tests` Rust unit
+  tests in [s2and_rust/src/raw_arrow/readers.rs](../s2and_rust/src/raw_arrow/readers.rs).
+- FNV64 batch-lookup collisions: resolved via the prescribed document-loudly
+  option. A comment on `batch_indices_for_keys` in
+  [s2and_rust/src/arrow_batch_lookup.rs](../s2and_rust/src/arrow_batch_lookup.rs)
+  states the hash-only match, why the downstream exact-id re-filter makes it
+  safe, the `rows_scanned` inflation side effect, and that any exact-mapping
+  consumer must first add key verification material with a format-version
+  bump.
+
 #### Tier A — observable in production
 
 - **Query-vs-query `cluster_seed_disallows` pairs silently dropped from raw planner exclusion.**
-  [s2and_rust/src/raw_candidate_planner.rs:174-201](../s2and_rust/src/raw_candidate_planner.rs#L174-L201)
-  only records exclusions when exactly one endpoint is a query; pairs where
-  both endpoints are residual queries write nothing.
-  [s2and/incremental_linking/runtime.py:1156-1160](../s2and/incremental_linking/runtime.py#L1156-L1160)
-  merely increments a counter for the same case. Two mutually-disallowed
-  residual queries can still be linked to the same predicted cluster within
-  one batch. Fix: enforce the constraint at batch reconciliation, or reject
-  query-vs-query disallows at validation time with a typed error.
+  RESOLVED 2026-07-09 (enforced at resolution time, not end-of-run
+  reconciliation). A query-vs-query disallow pair is unenforceable at plan
+  time — neither endpoint has a component — so enforcement happens the moment
+  one endpoint resolves, at cost O(#query-vs-query disallow pairs):
+  - Same batch: after batch scoring, contended queries finalize in priority
+    order (require-forced links first, then descending link score); a
+    lower-priority partner that landed on the same component is re-decided
+    over its already-scored rows with that component removed (link to
+    runner-up if it passes the gate, else abstain into residual Phase B). No
+    re-scoring or re-featurization.
+    ([runtime.py `_resolve_same_batch_disallow_conflicts`](../s2and/incremental_linking/runtime.py)).
+  - Cross batch/window: before each batch, partners already present in
+    `linked_signature_clusters` contribute their component to the query's
+    hard-excluded set; excluded rows are treated exactly as if the planner had
+    excluded them at retrieval (so require/ORCID forcing cannot override — a
+    conflicting require raises
+    `cluster_seed_disallow_conflicts_with_require_constraint`).
+    ([production.py `_query_disallow_partner_ids`](../s2and/incremental_linking/production.py),
+    [runtime.py `_cluster_seed_disallow_excluded_rows`](../s2and/incremental_linking/runtime.py)).
+  - Both-abstain was already enforced: residual Phase B merges cluster-seed
+    disallows into partial supervision
+    ([model.py:5667](../s2and/model.py#L5667)).
+  Both `cluster_seed_disallows` and partial-supervision disallow pairs feed the
+  partner map. Telemetry: `cluster_seed_disallow_excluded_{row,query}_count`
+  and `cluster_seed_disallow_same_batch_{conflict,reassigned_link,demoted_abstain}_count`
+  (the validation counter `partial_supervision_disallow_between_residual_queries`
+  remains as window telemetry). Pinned by the same-batch/cross-batch/require-
+  conflict tests in `tests/test_incremental_linking_runtime.py`.
 
 #### Tier B — latent, masked, or training-only
 
-- **Stale-index header reserves `indexed_source_mtime_ns` but freshness check ignores it.**
-  [s2and_rust/src/arrow_batch_lookup.rs:78-109](../s2and_rust/src/arrow_batch_lookup.rs#L78-L109):
-  the 8-byte field is read into `_indexed_source_mtime_ns` (underscore →
-  discarded) and only `(size, fingerprint)` are compared. The fingerprint
-  hashes full file contents so freshness is correct, but the field is dead
-  documentation in the on-disk format. Either remove from the header (and
-  bump the format version) or actually enforce.
-
-- **`FNV64` batch-lookup keys can collide; downstream filtering masks but telemetry double-counts.**
-  [s2and_rust/src/arrow_batch_lookup.rs:161-186](../s2and_rust/src/arrow_batch_lookup.rs#L161-L186):
-  `lower_bound` matches on 64-bit hash equality, not on raw key, so two
-  distinct keys hashing to the same value return both batches. The reader
-  re-filters by `keep_ids.contains(...)`, so output rows are correct, but
-  `rows_scanned` telemetry is inflated and any future consumer trusting
-  `batch_indices_for_keys` as exact would be wrong. Either store enough key
-  material to verify, or document the FNV-collision assumption loudly.
-
-- **Duplicate-id detection in Arrow readers depends on the `keep_ids` filter.**
-  [s2and_rust/src/raw_arrow/readers.rs:128-146,222-240,473-516](../s2and_rust/src/raw_arrow/readers.rs#L128-L516):
-  `seen_paper_ids`/`seen_signature_ids` is populated after the filter runs,
-  so an Arrow file with two rows sharing the same id is rejected only when
-  both copies survive the filter. Pre-filter detection would catch upstream
-  corruption symmetrically.
-
 - **`apply_orcid_subblocking` Rust binds duplicate signature IDs to the last subblock visited; Python to flat dict insertion order.**
-  [s2and_rust/src/subblocking.rs:2270-2280](../s2and_rust/src/subblocking.rs#L2270-L2280)
-  vs
-  [s2and/subblocking.py:1937-1941](../s2and/subblocking.py#L1937-L1941).
-  Currently a non-issue because upstream is supposed to partition signatures
-  across subblocks (the function does not defend against a duplicate). The
-  Python `assert` at
-  [s2and/subblocking.py:2031](../s2and/subblocking.py#L2031) only checks set
-  equality, not multiplicity, so any future invariant break would silently
-  produce different ORCID merge graphs on the two implementations.
+  RESOLVED 2026-07-09 (Rust now fails loudly, closing the residual exposure).
+  `apply_orcid_subblocking` raises a typed error on any duplicated
+  signature_id instead of silently binding last-wins (the check is a free
+  test of the map insert it already performed), and the Rust final
+  complete-partition check now compares multisets, matching the Python
+  assert, so a duplicate fails loudly on Rust-only production runs even with
+  ORCID subblocking disabled. Pinned by the
+  `orcid_subblocking_rejects_duplicate_signature_id_instead_of_binding_last_wins`
+  Rust unit test.
 
 - **Disallow-veto coverage gap at `pair_count == 2 && disallow_count == 1`.**
-  [s2and/incremental_linking/runtime.py:254-258](../s2and/incremental_linking/runtime.py#L254-L258):
-  the three veto rules cover `pair_count <= 1` (`single_pair_disallow`),
-  `disallow_count >= pair_count` (`all_pairs_disallow`), and
-  `pair_count >= 3 && fraction >= 0.8` (`mostly_disallow`). The 2-pair
-  half-disallow case falls through the cracks while the 1-pair 100% disallow
-  case is honored. Confirm whether this is intentional product policy; if
-  not, add an explicit two-pair rule.
+  RESOLVED 2026-07-09 (confirmed intentional policy, no code change). The
+  three rules are the discrete form of one coherent policy: veto on unanimous
+  disallow evidence at any sample size, or >=80% with `pair_count >= 3`. At
+  2 pairs / 1 disallow (50%) one historical member matched fine — vetoing
+  there would make n=2 stricter than n>=3, which is non-monotonic. The
+  layering also supports it: request-level hard disallows are enforced
+  absolutely by candidate exclusion upstream (see the resolved Tier A entry);
+  this veto layer weighs derived, noisier constraint evidence and is
+  deliberately overridable by require/ORCID
+  ([runtime.py:263-268](../s2and/incremental_linking/runtime.py#L263-L268)).
+  Policy pinned by
+  `test_constraint_disallow_veto_policy_pins_two_pair_half_disallow_fall_through`.
 
 ## Watchlist
 
@@ -359,6 +400,24 @@ repairs, not the canonical target. Code TODO comments in
 [../s2and/data.py](../s2and/data.py) and the production count scripts point at
 this migration; do not schedule them as separate cleanup work before canonical
 artifacts exist.
+
+Update 2026-07-09: the four Open Decisions gating the migration freeze are
+ruled (see the plan doc for the full rulings): single-mode `canonical_v2`
+cutover (no runtime compatibility window, which moots the decommission-window
+decision), keep the current alignment thresholds, and re-export canonical
+names re-joined by signature id for the benchmark datasets used in production
+training (decision only — the re-join/re-export tooling is deliberately not
+written yet). The remaining blocker is canonical artifact regeneration plus
+the v1.3 retrain moving as one release unit.
+
+Update 2026-07-09 (later same day): migration step 2 landed —
+`s2and.text.canonicalize_name_parts` and `s2and.text.canonical_name_count_keys`
+implement the canonical_v2 pipeline as pure functions with no live consumers,
+and the canonical-contract tests in
+[../tests/test_canonical_name_examples.py](../tests/test_canonical_name_examples.py)
+are active (previously skipped). The shim-removal TODOs in
+[../s2and/data.py](../s2and/data.py) and the count-script rewrites remain
+gated on canonical artifacts + the v1.3 retrain, as before.
 
 Verification gate (compatibility behavior stays stable):
 

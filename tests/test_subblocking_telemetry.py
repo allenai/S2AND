@@ -25,7 +25,6 @@ def _signature(signature_id: str, *, first: str, middle: str | None = None, orci
         author_info_last="Wang",
         author_info_suffix_normalized=None,
         author_info_suffix=None,
-        author_info_first_normalized=first,
         author_info_coauthors=None,
         author_info_coauthor_blocks=None,
         author_info_full_name=None,
@@ -167,6 +166,8 @@ def test_normalize_orcid_for_subblocking_matches_rust_arrow_canonical_form() -> 
 
 
 def test_signature_name_parts_for_subblocking_recomputes_deferred_normalized_fields() -> None:
+    # canonical_v2 (D4): dash-bound compounds stay together regardless of the
+    # dash code point; the legacy non-ASCII-dash spill repair is retired.
     signature = SimpleNamespace(
         author_info_first="Arif\u2010ullah",
         author_info_middle=None,
@@ -174,10 +175,10 @@ def test_signature_name_parts_for_subblocking_recomputes_deferred_normalized_fie
         author_info_middle_normalized_without_apostrophe=None,
     )
 
-    assert subblocking.signature_name_parts_for_subblocking(signature) == ("arif", "ullah")
+    assert subblocking.signature_name_parts_for_subblocking(signature) == ("arif ullah", "")
 
 
-def test_signature_name_parts_for_subblocking_spills_only_non_ascii_dash_compounds() -> None:
+def test_signature_name_parts_for_subblocking_treats_all_dashes_uniformly() -> None:
     unicode_dash = SimpleNamespace(
         author_info_first="Sang\u2010Min",
         author_info_middle=None,
@@ -191,7 +192,7 @@ def test_signature_name_parts_for_subblocking_spills_only_non_ascii_dash_compoun
         author_info_middle_normalized_without_apostrophe="",
     )
 
-    assert subblocking.signature_name_parts_for_subblocking(unicode_dash) == ("sang", "min")
+    assert subblocking.signature_name_parts_for_subblocking(unicode_dash) == ("sang min", "")
     assert subblocking.signature_name_parts_for_subblocking(ascii_dash) == ("sang min", "")
 
 

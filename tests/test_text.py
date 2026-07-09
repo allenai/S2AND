@@ -1,6 +1,4 @@
 import random
-import threading
-import time
 import unittest
 from collections import Counter
 from typing import Any, cast
@@ -12,6 +10,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from s2and.consts import NUMPY_NAN
 from s2and.data import NameCounts
 from s2and.text import (
+    canonicalize_name_parts,
     compute_block,
     cosine_sim,
     counter_jaccard,
@@ -30,9 +29,7 @@ from s2and.text import (
     normalize_orcid,
     normalize_orcid_compact,
     normalize_text,
-    reconcile_detected_languages,
     same_prefix_tokens,
-    split_first_middle_hyphen_aware,
 )
 
 
@@ -59,15 +56,15 @@ class TestClusterer(unittest.TestCase):
         assert normalize_orcid("٠٠٠٠-٠٠٠٢-1825-009X") is None
         assert normalize_orcid("００００-0002-1825-0097") is None
 
-    def test_split_first_middle_treats_unicode_dashes_as_hyphens(self):
-        assert split_first_middle_hyphen_aware("Amin-ul-Haq", None) == ("amin ul haq", "")
-        assert split_first_middle_hyphen_aware("Arif\u2010ullah", None) == ("arif ullah", "")
-        assert split_first_middle_hyphen_aware("Hua\uff0dli", None) == ("hua li", "")
+    def test_canonical_first_treats_unicode_dashes_as_hyphens(self):
+        assert canonicalize_name_parts("Amin-ul-Haq", None, None)[:2] == ("amin ul haq", "")
+        assert canonicalize_name_parts("Arif\u2010ullah", None, None)[:2] == ("arif ullah", "")
+        assert canonicalize_name_parts("Hua\uff0dli", None, None)[:2] == ("hua li", "")
 
-    def test_split_first_middle_preserves_md_as_given_name(self):
-        assert split_first_middle_hyphen_aware("Md Karim", None) == ("md", "karim")
-        assert split_first_middle_hyphen_aware("Md", None) == ("md", "")
-        assert split_first_middle_hyphen_aware("Dr Md Karim", None) == ("md", "karim")
+    def test_canonical_first_preserves_md_as_given_name(self):
+        assert canonicalize_name_parts("Md Karim", None, None)[:2] == ("md", "karim")
+        assert canonicalize_name_parts("Md", None, None)[:2] == ("md", "")
+        assert canonicalize_name_parts("Dr Md Karim", None, None)[:2] == ("md", "karim")
 
     def test_name_similarity_features(self):
         assert [NUMPY_NAN] * 4 == name_text_features("", cast(Any, None))
@@ -236,192 +233,55 @@ class TestClusterer(unittest.TestCase):
         nc2 = NameCounts(first=4, first_last=99, last=11, last_first_initial=201)
         assert [4, 99, 10, 200, 5, 100] == name_counts(nc1, nc2)
 
-    def test_detect_language_unreliable_when_fasttext_disabled(self):
-        # Reliability now requires fastText AND cld2 to agree. The suite disables
-        # fastText (see conftest), so the two detectors cannot agree and
-        # detection collapses to unreliable / "un" regardless of the text. (The
-        # real-model agreement path is covered by the reconcile unit tests below.)
-        text = "Genetic behavior of resistance to the beet cyst as a way to enchant"
-        is_reliable, is_english, predicted_language = detect_language(text)
-        assert is_reliable is False
-        assert is_english is False
-        assert predicted_language == "un"
+    def test_detect_language_uses_cld2_reliable_confidence(self):
+        import s2and.text as text_module
 
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(
+                text_module.cld2,
+                "detect",
+                lambda _text: (True, None, [("ENGLISH", "en", 92, 0.0)]),
+            )
 
-def test_fasttext_model_lazy_load_is_thread_safe(monkeypatch):
-    import s2and.text as text_module
+            detection = detect_language("hello world")
 
-    fake_model = object()
-    load_calls = {"count": 0}
-    load_calls_lock = threading.Lock()
-    start_event = threading.Event()
-    outputs: list[object | None] = []
+        assert detection.is_reliable is True
+        assert detection.is_english is True
+        assert detection.predicted_language == "en"
+        assert detection.language_reliability == pytest.approx(0.92)
 
-    def _fake_load_model(_path: str):
-        with load_calls_lock:
-            load_calls["count"] += 1
-        time.sleep(0.05)
-        return fake_model
+    def test_detect_language_keeps_unreliable_known_language_with_zero_reliability(self):
+        import s2and.text as text_module
 
-    def _worker() -> None:
-        start_event.wait(timeout=2.0)
-        outputs.append(text_module._get_fasttext_model())
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(
+                text_module.cld2,
+                "detect",
+                lambda _text: (False, None, [("FRENCH", "fr", 82, 0.0)]),
+            )
 
-    monkeypatch.setattr(text_module.fasttext, "load_model", _fake_load_model)
-    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
-    monkeypatch.setattr(text_module, "FASTTEXT_PATH", "dummy_model_path.bin")
-    text_module.set_fasttext_loading_enabled(True)
-    text_module._FASTTEXT_MODEL = None
-    text_module._FASTTEXT_MODEL_INITIALIZED = False
+            detection = detect_language("bonjour monde")
 
-    threads = [threading.Thread(target=_worker) for _ in range(8)]
-    for thread in threads:
-        thread.start()
-    start_event.set()
-    for thread in threads:
-        thread.join(timeout=3.0)
+        assert detection.is_reliable is False
+        assert detection.is_english is False
+        assert detection.predicted_language == "fr"
+        assert detection.language_reliability == 0.0
 
-    assert load_calls["count"] == 1
-    assert len(outputs) == 8
-    assert all(model is fake_model for model in outputs)
-
-
-def test_fasttext_skip_overrides_cached_model():
-    import s2and.text as text_module
-
-    text_module_any = cast(Any, text_module)
-    text_module_any.set_fasttext_loading_enabled(True)
-    text_module_any._FASTTEXT_MODEL = object()
-    text_module_any._FASTTEXT_MODEL_INITIALIZED = True
-    text_module_any.set_fasttext_loading_enabled(False)
-
-    assert text_module_any._get_fasttext_model() is None
-    assert text_module_any._FASTTEXT_MODEL is None
-
-
-@pytest.mark.parametrize("skip_value", ["1", " 1 ", "TRUE ", " yes"])
-def test_fasttext_skip_env_prevents_loading(monkeypatch, skip_value):
-    import s2and.text as text_module
-
-    text_module_any = cast(Any, text_module)
-    load_calls = {"count": 0}
-
-    def _fake_load_model(_path: str):
-        load_calls["count"] += 1
-        return object()
-
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", skip_value)
-    monkeypatch.setattr(text_module.fasttext, "load_model", _fake_load_model)
-    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
-    text_module_any.set_fasttext_loading_enabled(True)
-    text_module_any._FASTTEXT_MODEL = object()
-    text_module_any._FASTTEXT_MODEL_INITIALIZED = True
-
-    assert text_module_any._get_fasttext_model() is None
-    assert text_module_any._FASTTEXT_MODEL is None
-    assert load_calls["count"] == 0
-
-
-def test_fasttext_can_reenable_after_skip_env(monkeypatch):
-    import s2and.text as text_module
-
-    fake_model = object()
-    load_calls = {"count": 0}
-
-    def _fake_load_model(_path: str):
-        load_calls["count"] += 1
-        return fake_model
-
-    monkeypatch.setattr(text_module.fasttext, "load_model", _fake_load_model)
-    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
-    monkeypatch.setattr(text_module, "FASTTEXT_PATH", "dummy_model_path.bin")
-    text_module.set_fasttext_loading_enabled(True)
-    text_module._FASTTEXT_MODEL = None
-    text_module._FASTTEXT_MODEL_INITIALIZED = False
-
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
-    assert text_module._get_fasttext_model() is None
-
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "0")
-    text_module.set_fasttext_loading_enabled(True)
-
-    assert text_module._get_fasttext_model() is fake_model
-    assert load_calls["count"] == 1
-
-
-def test_fasttext_enable_preserves_loaded_model(monkeypatch):
-    import s2and.text as text_module
-
-    fake_model = object()
-    load_calls = {"count": 0}
-
-    def _fake_load_model(_path: str):
-        load_calls["count"] += 1
-        return fake_model
-
-    monkeypatch.setattr(text_module.fasttext, "load_model", _fake_load_model)
-    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
-    monkeypatch.setattr(text_module, "FASTTEXT_PATH", "dummy_model_path.bin")
-    text_module.set_fasttext_loading_enabled(True)
-    text_module._FASTTEXT_MODEL = None
-    text_module._FASTTEXT_MODEL_INITIALIZED = False
-
-    assert text_module._get_fasttext_model() is fake_model
-    text_module.set_fasttext_loading_enabled(True)
-
-    assert text_module._get_fasttext_model() is fake_model
-    assert load_calls["count"] == 1
-
-
-def test_fasttext_failed_load_raises(monkeypatch):
-    import s2and.text as text_module
-
-    load_calls = {"count": 0}
-
-    def _raise_os_error(_path: str):
-        load_calls["count"] += 1
-        raise OSError("missing model")
-
-    monkeypatch.setattr(text_module.fasttext, "load_model", _raise_os_error)
-    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
-    monkeypatch.delenv("S2AND_SKIP_FASTTEXT", raising=False)
-    text_module.set_fasttext_loading_enabled(True)
-    text_module._FASTTEXT_MODEL = None
-    text_module._FASTTEXT_MODEL_INITIALIZED = False
-    text_module._FASTTEXT_LOAD_FAILED = False
-
-    # fastText is mandatory in production: a load failure must raise, not
-    # silently degrade to a cld2-only path.
-    with pytest.raises(RuntimeError, match="fastText language model is required"):
-        text_module._get_fasttext_model()
-    # The failure is not cached as "initialized", so a later call re-attempts
-    # the load and raises again (rather than returning a silent None).
-    with pytest.raises(RuntimeError, match="fastText language model is required"):
-        text_module._get_fasttext_model()
-    assert load_calls["count"] == 2
-
-
-def test_fasttext_unexpected_load_error_propagates(monkeypatch):
-    import s2and.text as text_module
-
-    def _raise_type_error(_path: str):
-        raise TypeError("bad monkeypatch")
-
-    monkeypatch.setattr(text_module.fasttext, "load_model", _raise_type_error)
-    monkeypatch.setattr(text_module, "cached_path", lambda path: path)
-    monkeypatch.delenv("S2AND_SKIP_FASTTEXT", raising=False)
-    text_module.set_fasttext_loading_enabled(True)
-    text_module._FASTTEXT_MODEL = None
-    text_module._FASTTEXT_MODEL_INITIALIZED = False
-
-    with pytest.raises(TypeError, match="bad monkeypatch"):
-        text_module._get_fasttext_model()
+    def test_detect_language_returns_unknown_for_combining_marks_only_text(self):
+        # str.isalpha counts general-category Letter (L*) characters only, so a
+        # text whose alphabetic-looking characters are all combining vowel signs
+        # (Mn, Other_Alphabetic) hits the zero-isalpha early exit. This is the
+        # Python reference behavior mirrored by the Rust tests in
+        # s2and_rust/src/language_detection.rs.
+        detection = detect_language("\u093f\u0941 \u093f")
+        assert detection.is_reliable is False
+        assert detection.is_english is False
+        assert detection.predicted_language == "un"
+        assert detection.language_reliability == 0.0
 
 
 def test_cld2_unexpected_error_propagates(monkeypatch):
     import s2and.text as text_module
-
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "1")
 
     def _raise_type_error(_text: str):
         raise TypeError("bad cld2 state")
@@ -430,26 +290,3 @@ def test_cld2_unexpected_error_propagates(monkeypatch):
 
     with pytest.raises(TypeError, match="bad cld2 state"):
         detect_language("hello world")
-
-
-# reconcile_detected_languages truth table (mirrored by the Rust unit tests in
-# s2and_rust/src/language_detection.rs::reconcile_tests). is_reliable is True
-# only when both detectors return a concrete language AND agree.
-def test_reconcile_detected_languages_agreement_is_reliable():
-    assert reconcile_detected_languages("en", "en") == ("en", True)
-    assert reconcile_detected_languages("fr", "fr") == ("fr", True)
-
-
-def test_reconcile_detected_languages_disagreement_is_unknown():
-    assert reconcile_detected_languages("en", "fr") == ("un", False)
-
-
-def test_reconcile_detected_languages_single_detector_is_unknown():
-    # Only cld2 responded (fastText unknown, e.g. disabled during tests).
-    assert reconcile_detected_languages("un_ft", "en") == ("un", False)
-    # Only fastText responded (cld2 unknown/failed).
-    assert reconcile_detected_languages("en", "un_2") == ("un", False)
-
-
-def test_reconcile_detected_languages_both_unknown_is_unknown():
-    assert reconcile_detected_languages("un_ft", "un_2") == ("un", False)

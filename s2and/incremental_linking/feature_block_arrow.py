@@ -23,6 +23,7 @@ from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     normalize_arrow_paths,
 )
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
     FeatureBlockPaper,
@@ -1360,6 +1361,7 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
 
         manifest = {
             "schema_version": NAME_COUNTS_INDEX_SCHEMA_VERSION,
+            "normalization_version": NORMALIZATION_VERSION,
             "magic": _NAME_COUNTS_INDEX_MAGIC.decode("ascii"),
             "fingerprint": fingerprint,
             "record_layout": "hash1:u64,hash2:u64,name_offset:u64,name_len:u32,reserved:u32,count:f64",
@@ -1447,6 +1449,15 @@ def _require_arrow_bool_columns(table: Any, table_name: str, required_columns: s
             raise ValueError(f"{table_name} Arrow column {column_name} expected bool, got {column_type}")
 
 
+def _require_arrow_float_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
+    _require_arrow_columns(table, table_name, required_columns)
+    pa = __import__("pyarrow")
+    for column_name in sorted(required_columns):
+        column_type = table[column_name].type
+        if not (pa.types.is_float32(column_type) or pa.types.is_float64(column_type)):
+            raise ValueError(f"{table_name} Arrow column {column_name} expected float, got {column_type}")
+
+
 def _require_arrow_string_list_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
     _require_arrow_columns(table, table_name, required_columns)
     pa = __import__("pyarrow")
@@ -1523,6 +1534,8 @@ def feature_block_from_arrow_paths(
         _require_arrow_int64_columns(papers_table, "papers", {"year"})
     if "is_reliable" in papers_table.column_names:
         _require_arrow_bool_columns(papers_table, "papers", {"is_reliable"})
+    if "language_reliability" in papers_table.column_names:
+        _require_arrow_float_columns(papers_table, "papers", {"language_reliability"})
     papers_table = _filter_arrow_table_by_values(pa, pc, papers_table, "paper_id", paper_ids)
     papers_by_id = _arrow_rows_by_unique_key(
         papers_table.to_pylist(),
@@ -1667,6 +1680,10 @@ def _feature_block_signature_from_arrow_row(signature_id: str, row: Mapping[str,
 
 
 def _feature_block_paper_from_arrow_row(paper_id: str, row: Mapping[str, Any]) -> FeatureBlockPaper:
+    is_reliable = _optional_bool(row.get("is_reliable"), field_name="papers.is_reliable")
+    language_reliability = row.get("language_reliability")
+    if language_reliability is None and is_reliable is not None:
+        language_reliability = 1.0 if is_reliable else 0.0
     return FeatureBlockPaper(
         paper_id=str(row.get("paper_id", paper_id)),
         title=_optional_str(row.get("title")),
@@ -1675,5 +1692,6 @@ def _feature_block_paper_from_arrow_row(paper_id: str, row: Mapping[str, Any]) -
         journal_name=_optional_str(row.get("journal_name")),
         year=_optional_int(row.get("year"), field_name="papers.year"),
         predicted_language=_optional_str(row.get("predicted_language")),
-        is_reliable=_optional_bool(row.get("is_reliable"), field_name="papers.is_reliable"),
+        is_reliable=is_reliable,
+        language_reliability=language_reliability,
     )

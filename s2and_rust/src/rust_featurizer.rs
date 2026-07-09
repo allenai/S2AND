@@ -200,7 +200,7 @@ impl RustFeaturizer {
             _ => false,
         };
         push_feat!(if same_lang { 1.0 } else { 0.0 });
-        push_feat!((p1.is_reliable as i64 + p2.is_reliable as i64) as f64);
+        push_feat!(p1.language_reliability.min(p2.language_reliability));
 
         let counts = compute_name_counts_data(s1.name_counts.as_ref(), s2.name_counts.as_ref());
         for value in counts.iter() {
@@ -857,10 +857,17 @@ impl RustFeaturizer {
                     "Arrow paper_authors are missing rows for paper_id '{paper_id}'"
                 ))
             })?;
-            let (is_reliable, predicted_language) = if raw_paper.predicted_language.is_some() {
+            let (is_reliable, predicted_language, language_reliability) = if raw_paper
+                .predicted_language
+                .is_some()
+            {
+                let is_reliable = raw_paper.is_reliable.unwrap_or(false);
                 (
-                    raw_paper.is_reliable.unwrap_or(false),
+                    is_reliable,
                     raw_paper.predicted_language.clone(),
+                    raw_paper
+                        .language_reliability
+                        .unwrap_or(if is_reliable { 1.0 } else { 0.0 }),
                 )
             } else {
                 if language_detector.is_none() {
@@ -869,8 +876,9 @@ impl RustFeaturizer {
                 let detector = language_detector
                     .as_ref()
                     .expect("language detector was just initialized");
-                let (reliable, _is_english, language) = detector.detect(&raw_paper.title)?;
-                (reliable, Some(language))
+                let (reliable, _is_english, language, reliability) =
+                    detector.detect(&raw_paper.title)?;
+                (reliable, Some(language), reliability)
             };
             paper_inputs.push(StagePaperInput {
                 paper_id: paper_id.clone(),
@@ -882,6 +890,7 @@ impl RustFeaturizer {
                 has_abstract: !raw_paper.abstract_text.is_empty(),
                 predicted_language,
                 is_reliable,
+                language_reliability,
             });
         }
 
@@ -912,8 +921,6 @@ impl RustFeaturizer {
                     &affiliation_stopwords,
                     &unidecode_char_map,
                     preprocess,
-                    // Arrow-ingest datasets always use the current initial-char semantics.
-                    NameCountsLastFirstInitialSemantics::InitialChar,
                 )
             };
             install_with_optional_rayon_pool(num_threads, compute)
@@ -938,6 +945,7 @@ impl RustFeaturizer {
                     has_abstract: paper.has_abstract,
                     predicted_language: paper.predicted_language,
                     is_reliable: paper.is_reliable,
+                    language_reliability: paper.language_reliability,
                     journal_ngrams: paper.journal_ngrams,
                     specter,
                     specter_norm,

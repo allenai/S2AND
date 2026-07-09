@@ -205,6 +205,15 @@ impl ArrowBatchLookupIndex {
         lo
     }
 
+    // COLLISION ASSUMPTION: records match on the 64-bit FNV hash only; the raw
+    // key is not stored, so two distinct keys that hash equal both return their
+    // batches. This is safe ONLY because every consumer re-filters rows by exact
+    // id (`keep_ids.contains(...)`) after reading the batches — the result is a
+    // superset of the batches actually needed, never a wrong final row. Side
+    // effect: `rows_scanned` telemetry counts the extra batches' rows. Any new
+    // consumer that treats this as an exact key->batch mapping (no downstream
+    // exact-id re-filter) is wrong and must add key verification material to the
+    // index format (with a format-version bump) first.
     fn batch_indices_for_keys(&self, keys: &HashSet<String>) -> HashSet<usize> {
         let mut out = HashSet::new();
         for key in keys {

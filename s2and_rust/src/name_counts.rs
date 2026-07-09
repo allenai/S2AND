@@ -11,6 +11,14 @@ use crate::{
 
 const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v1";
 
+// Manifest "normalization_version" values accepted by this crate. An absent
+// field means the artifact predates the canonical_v2 migration and carries
+// legacy_compat keys. The crate does not hard-fail on legacy_compat here:
+// Python asserts model-vs-artifact normalization compatibility upstream; this
+// gate only rejects unknown values, like the schema_version gate.
+const NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT: &str = "legacy_compat";
+const NAME_COUNTS_NORMALIZATION_CANONICAL_V2: &str = "canonical_v2";
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NameCountsData {
     pub(crate) first: f64,
@@ -30,19 +38,6 @@ pub(crate) enum RawNameCountKind {
     Last,
     FirstLast,
     LastFirstInitial,
-}
-
-/// Mirrors `s2and.data.NAME_COUNTS_LAST_FIRST_INITIAL_*`. Today only the Arrow
-/// raw-ingest path computes `last_first_initial` keys in Rust, and Arrow datasets
-/// always use `InitialChar`. Python `ANDData` paths keep Python-computed values
-/// and do not enter Rust through an `ANDData` constructor. The enum and
-/// `LegacyFullFirstToken` variant exist as a contract surface so any future
-/// Rust-side legacy-mode ingest can opt into the matching lookup-key form.
-#[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NameCountsLastFirstInitialSemantics {
-    LegacyFullFirstToken,
-    InitialChar,
 }
 
 impl RawNameCountKind {
@@ -73,6 +68,7 @@ struct RawNameCountIndexPaths {
     last: PathBuf,
     first_last: PathBuf,
     last_first_initial: PathBuf,
+    normalization_version: String,
 }
 
 impl RawNameCountIndex {
@@ -381,6 +377,31 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
             NAME_COUNTS_INDEX_SCHEMA_VERSION
         )));
     }
+    let normalization_version = match manifest.get("normalization_version") {
+        // Artifacts written before the canonical_v2 migration carry no
+        // normalization_version field and are legacy_compat by definition.
+        None => NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT.to_string(),
+        Some(value) => {
+            let version = value.as_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "name-count index manifest {} has non-string normalization_version",
+                    manifest_path.display()
+                ))
+            })?;
+            if version != NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT
+                && version != NAME_COUNTS_NORMALIZATION_CANONICAL_V2
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "name-count index manifest {} has unsupported normalization_version {:?}; expected {:?} or {:?}",
+                    manifest_path.display(),
+                    version,
+                    NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT,
+                    NAME_COUNTS_NORMALIZATION_CANONICAL_V2
+                )));
+            }
+            version.to_string()
+        }
+    };
     let files = manifest
         .get("files")
         .and_then(serde_json::Value::as_object)
@@ -399,7 +420,17 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
             files,
             "last_first_initial",
         )?,
+        normalization_version,
     })
+}
+
+/// Return the validated `normalization_version` recorded in a name-count index
+/// manifest without opening the index files ("legacy_compat" when the field is
+/// absent). Exposed to Python so callers can assert artifact-vs-model
+/// normalization compatibility before loading the index.
+#[pyfunction]
+pub(crate) fn read_name_counts_index_normalization_version(path: &str) -> PyResult<String> {
+    Ok(resolve_name_counts_index_paths(path)?.normalization_version)
 }
 
 fn resolve_name_counts_index_paths(path: &str) -> PyResult<RawNameCountIndexPaths> {
@@ -424,6 +455,107 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
     second = fnv64_update(second, b"\0");
     second = fnv64_update(second, name_bytes);
     (first, second)
+}
+
+#[cfg(test)]
+mod normalization_version_tests {
+    use super::read_name_counts_index_normalization_version;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // A valid 32-byte name-count index header describing zero records; the
+    // manifest reader only checks the files exist.
+    fn empty_index_bytes() -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0..8].copy_from_slice(b"S2NCI001");
+        bytes[16..24].copy_from_slice(&32u64.to_le_bytes());
+        bytes
+    }
+
+    fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = format!(
+            "s2and_nc_version_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create temp index dir");
+        for name in ["first", "last", "first_last", "last_first_initial"] {
+            let mut file =
+                std::fs::File::create(dir.join(format!("{name}.bin"))).expect("create index file");
+            file.write_all(&empty_index_bytes())
+                .expect("write index header");
+        }
+        let version_field = normalization_version_json
+            .map(|value| format!(r#""normalization_version":{value},"#))
+            .unwrap_or_default();
+        let manifest = format!(
+            concat!(
+                r#"{{"schema_version":"name_counts_index_v1",{}"files":{{"#,
+                r#""first":{{"path":"first.bin"}},"last":{{"path":"last.bin"}},"#,
+                r#""first_last":{{"path":"first_last.bin"}},"#,
+                r#""last_first_initial":{{"path":"last_first_initial.bin"}}}}}}"#,
+            ),
+            version_field
+        );
+        std::fs::write(dir.join("manifest.json"), manifest).expect("write manifest");
+        dir
+    }
+
+    fn read_version(dir: &std::path::Path) -> pyo3::PyResult<String> {
+        read_name_counts_index_normalization_version(dir.to_str().expect("utf-8 temp path"))
+    }
+
+    fn py_err_message(err: pyo3::PyErr) -> String {
+        #[cfg(windows)]
+        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
+            std::env::set_var("PYTHONHOME", python_home);
+        }
+        pyo3::prepare_freethreaded_python();
+        pyo3::Python::with_gil(|py| err.value(py).to_string())
+    }
+
+    #[test]
+    fn absent_normalization_version_defaults_to_legacy_compat() {
+        let dir = write_artifact(None);
+        let version = read_version(&dir).expect("manifest without version is valid");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(version, "legacy_compat");
+    }
+
+    #[test]
+    fn canonical_v2_normalization_version_is_accepted_and_exposed() {
+        let dir = write_artifact(Some(r#""canonical_v2""#));
+        let version = read_version(&dir).expect("canonical_v2 is a supported version");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(version, "canonical_v2");
+    }
+
+    #[test]
+    fn unknown_normalization_version_fails_like_the_schema_gate() {
+        let dir = write_artifact(Some(r#""canonical_v3""#));
+        let error = read_version(&dir).expect_err("unknown version must be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = py_err_message(error);
+        assert!(
+            message.contains("unsupported normalization_version"),
+            "{message}"
+        );
+        assert!(message.contains("canonical_v3"), "{message}");
+    }
+
+    #[test]
+    fn non_string_normalization_version_is_rejected() {
+        let dir = write_artifact(Some("7"));
+        let error = read_version(&dir).expect_err("non-string version must be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = py_err_message(error);
+        assert!(
+            message.contains("non-string normalization_version"),
+            "{message}"
+        );
+    }
 }
 
 fn read_u64_le(bytes: &[u8], offset: usize) -> PyResult<u64> {

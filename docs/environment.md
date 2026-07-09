@@ -29,16 +29,6 @@ See [caching.md](caching.md) for cache semantics and on-disk layout.
 | `S2AND_PATH_CONFIG` | `<path>` | `s2and/data/path_config.json` | Path to the JSON data-path config. Use when data lives outside the package default path. |
 | `S2AND_NORMALIZATION_VERSION` | `<version>` | code default | Expected normalization contract for Rust feature-port inputs. Use only when validating regenerated normalization-sensitive artifacts. |
 
----
-
-## Import & Model Loading
-
-| Variable | Values | Default | Description |
-|----------|--------|---------|-------------|
-| `S2AND_SKIP_FASTTEXT` | `1`, `true`, `yes` to skip | unset | Test-only escape hatch that disables fastText model loading. Production and repository scripts should leave this unset so language detection uses the mandatory fastText + cld2 agreement path. |
-
----
-
 ## Threading & Parallelism
 
 These variables control thread counts for various libraries. Set them **before importing** compute-heavy libraries.

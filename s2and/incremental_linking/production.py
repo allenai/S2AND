@@ -151,6 +151,46 @@ def _request_cluster_seed_disallows(
     return request_cluster_seed_disallow_parts(dataset, arrow_disallows)
 
 
+def _query_disallow_partner_ids(
+    unassigned_signature_ids: Sequence[str],
+    request_disallows: set[tuple[str, str]],
+    partial_supervision: Mapping[tuple[str, str], int | float],
+) -> dict[str, set[str]]:
+    """Map each unassigned query to its mutually-disallowed unassigned queries.
+
+    Query-vs-seed disallow pairs are enforced by the raw planner's candidate
+    exclusion at plan time. A pair between two queries has no component to
+    exclude until one endpoint links, so those pairs are threaded to the
+    decision layer instead: same-batch pairs resolve in link-score order and
+    cross-batch pairs become component exclusions once a partner links.
+    """
+
+    query_id_set = {str(signature_id) for signature_id in unassigned_signature_ids}
+    partners: dict[str, set[str]] = {}
+
+    def _add_pair(left_id: str, right_id: str) -> None:
+        if left_id == right_id:
+            return
+        partners.setdefault(left_id, set()).add(right_id)
+        partners.setdefault(right_id, set()).add(left_id)
+
+    for left, right in request_disallows:
+        left_id = str(left)
+        right_id = str(right)
+        if left_id in query_id_set and right_id in query_id_set:
+            _add_pair(left_id, right_id)
+    for (left, right), value in partial_supervision.items():
+        left_id = str(left)
+        right_id = str(right)
+        if (
+            left_id in query_id_set
+            and right_id in query_id_set
+            and runtime_module._partial_supervision_kind(value) == "disallow"  # noqa: SLF001
+        ):
+            _add_pair(left_id, right_id)
+    return partners
+
+
 def _cluster_seed_map_fingerprint(cluster_seeds_require: Mapping[Any, Any]) -> tuple[int, str]:
     digest = hashlib.blake2b(digest_size=16)
     items = sorted(
@@ -617,6 +657,11 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         dataset,
         base_arrow_path_payload,
     )
+    query_disallow_partners = _query_disallow_partner_ids(
+        unassigned_signature_ids,
+        request_disallows,
+        partial_supervision,
+    )
     seed_arrow_start = time.perf_counter()
     seed_arrow_matches_cluster_seeds_require = _cluster_seeds_arrow_matches(
         base_arrow_path_payload.get("cluster_seeds"),
@@ -777,6 +822,30 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 raw_window_planner_batch_plan_count += 1
                 raw_window_subset_seconds += time.perf_counter() - raw_window_subset_start
                 raw_window_featurizer_reused_batch_count += int(raw_window_featurizer is not None)
+                batch_disallow_partner_ids: dict[str, set[str]] | None = None
+                batch_disallow_excluded_components: dict[str, set[str]] | None = None
+                if query_disallow_partners:
+                    batch_query_id_set = {str(signature_id) for signature_id in query_batch}
+                    same_batch_partner_ids: dict[str, set[str]] = {}
+                    excluded_components_by_query: dict[str, set[str]] = {}
+                    for query_signature_id in batch_query_id_set:
+                        partner_ids = query_disallow_partners.get(query_signature_id)
+                        if not partner_ids:
+                            continue
+                        same_batch_partners = {
+                            partner_id for partner_id in partner_ids if partner_id in batch_query_id_set
+                        }
+                        if same_batch_partners:
+                            same_batch_partner_ids[query_signature_id] = same_batch_partners
+                        linked_components = {
+                            str(linked_signature_clusters[partner_id])
+                            for partner_id in partner_ids
+                            if partner_id in linked_signature_clusters
+                        }
+                        if linked_components:
+                            excluded_components_by_query[query_signature_id] = linked_components
+                    batch_disallow_partner_ids = same_batch_partner_ids or None
+                    batch_disallow_excluded_components = excluded_components_by_query or None
                 result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
                     clusterer,
                     artifact,
@@ -793,6 +862,8 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                     load_name_counts=None,
                     name_tuples=None,
                     partial_supervision_seed_signature_to_component=cluster_seeds_require,
+                    cluster_seed_disallow_partner_ids=batch_disallow_partner_ids,
+                    cluster_seed_disallow_excluded_components=batch_disallow_excluded_components,
                 )
                 linked_signature_clusters.update(dict(result.linked_signature_clusters))
                 batch_telemetries.append(dict(result.telemetry))

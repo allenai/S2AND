@@ -10,7 +10,7 @@ import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.arrow_inputs import MissingArrowArtifactError
-from s2and.data import NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY, ANDData, NameCounts
+from s2and.data import ANDData, NameCounts
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
@@ -443,11 +443,12 @@ def test_feature_block_from_anddata_rejects_signature_missing_paper() -> None:
 
 
 def test_feature_block_from_anddata_rejects_legacy_name_count_semantics() -> None:
-    # Arrow bundles are contractually initial_char; a bundle built from a
-    # legacy_full_first_token ANDData would silently mis-key last_first_initial
-    # lookups in Rust, so conversion must fail fast.
+    # Arrow bundles are contractually initial_char; the retired
+    # legacy_full_first_token semantics would silently mis-key
+    # last_first_initial lookups in Rust, so conversion must fail fast even if
+    # the attribute is forced onto a dataset out-of-band.
     dataset = _tiny_anddata()
-    dataset.name_counts_last_first_initial_semantics = NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY
+    dataset.name_counts_last_first_initial_semantics = "legacy_full_first_token"
 
     with pytest.raises(ValueError, match="initial_char"):
         feature_block_from_anddata(
@@ -490,6 +491,7 @@ def test_feature_block_to_arrow_tables_matches_raw_schema() -> None:
     assert tables["papers"].schema.field("abstract").type == pa.string()
     assert tables["papers"].schema.field("predicted_language").type == pa.string()
     assert tables["papers"].schema.field("is_reliable").type == pa.bool_()
+    assert tables["papers"].schema.field("language_reliability").type == pa.float64()
     assert tables["cluster_seeds"].to_pydict() == {"signature_id": ["s1"], "cluster_id": ["c_ada"]}
     assert tables["cluster_seed_disallows"].to_pydict() == {"signature_id_1": [], "signature_id_2": []}
 
@@ -528,6 +530,7 @@ def test_feature_block_to_arrow_tables_keeps_all_null_optional_columns_typed() -
     assert tables["signatures"].schema.field("author_email").type == pa.string()
     assert tables["papers"].schema.field("predicted_language").type == pa.string()
     assert tables["papers"].schema.field("is_reliable").type == pa.bool_()
+    assert tables["papers"].schema.field("language_reliability").type == pa.float64()
     assert tables["cluster_seeds"].schema.field("signature_id").type == pa.string()
     assert tables["cluster_seed_disallows"].schema.field("signature_id_1").type == pa.string()
 

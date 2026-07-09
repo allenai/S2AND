@@ -1,18 +1,68 @@
 # Release Notes
 
-## Unreleased
+## 0.60.0
 
+- Fixes query-vs-query `cluster_seed_disallows` enforcement in promoted
+  incremental linking. Previously a disallow pair whose endpoints were both
+  residual queries was silently unenforced at link time, so two mutually
+  disallowed queries could link into the same predicted cluster. Enforcement
+  now happens at the moment a pair becomes resolvable: same-batch conflicts
+  resolve in priority order (require-forced links first, then descending link
+  score) over already-scored candidate rows, and a query whose disallowed
+  partner linked in an earlier batch has that component excluded as if never
+  retrieved. Contradictory hard constraints (a require into a component that a
+  mutually-disallowed partner already claimed) raise
+  `cluster_seed_disallow_conflicts_with_require_constraint`. New telemetry:
+  `cluster_seed_disallow_excluded_row_count`,
+  `cluster_seed_disallow_excluded_query_count`, and the
+  `cluster_seed_disallow_same_batch_{conflict,reassigned_link,demoted_abstain}_count`
+  counters.
+- Rust subblocking now fails loudly on duplicate signature ids: the final
+  complete-partition check compares multisets (matching the Python assert),
+  and the ORCID merge pass raises a typed error instead of silently binding a
+  duplicated signature to the last subblock visited.
+- Rust language detection's text gate now counts alphabetic characters with
+  Python `str.isalpha` semantics (general category L* only) instead of
+  `char::is_alphabetic` (which also counts `Other_Alphabetic` combining marks
+  and Nl characters). This removes a Python/Rust divergence on titles whose
+  alphabetic content includes Indic combining vowel signs and similar marks
+  near the zero-alpha and >0.9-uppercase-ratio gate boundaries.
 - Breaking: `s2and-rust` is now a required runtime dependency of `s2and`.
   `uv pip install s2and` installs the Rust package; `s2and[rust]` remains only
   as a compatibility alias.
 - Breaking: removes the Sinonym-dependent `ANDData` rewrite API. `ANDData(...)`
   no longer accepts `use_sinonym_overwrite` or `sinonym_overwrite_min_ratio`;
   callers must provide upstream-normalized names before constructing `ANDData`.
+- Breaking: language detection is now CLD2-only; the fastText runtime
+  dependency and `lid.176.bin` release artifact are removed. The pairwise
+  language feature `language_reliability_count` is replaced by
+  `language_reliability_min`, the minimum CLD2 reliable-confidence score for
+  the two papers. Cached `predicted_language`/`is_reliable`/language
+  reliability Arrow columns produced under the old policy must be regenerated
+  or cleared; when the cached language columns are missing or NULL, Rust
+  recomputes language locally from the raw title. `FEATURIZER_VERSION` is
+  bumped to 9.
+- Breaking: Rust featurization and ingest enter through Arrow IPC artifacts
+  only; the JSON `from_dataset` ingestion surface is removed. Classic
+  JSON/`ANDData` datasets remain supported through the Python featurizer.
+- Feature caches are invalidated: `FEATURIZER_VERSION` is bumped 3 -> 9 across
+  the feature-correctness pass (self-cite shared-paper guard, email
+  missing-suffix handling, multi-token middle-initial comparison, empty-surname
+  name-count keys, and related parity fixes), the language-detection policy
+  change, and the Arrow migration.
+- Adds a pure-Rust LightGBM evaluator for the production `.lgb` boosters
+  (single-model binary-objective GBDTs with numerical splits; unsupported
+  model types are rejected at load time). Production scoring no longer round
+  trips through the Python `lightgbm` package; parity is pinned bit-for-bit by
+  `tests/test_rust_lightgbm_booster_parity.py`.
 - Arrow-backed training ingestion now streams IPC record batches for
   signatures/papers/authors and skips Python SPECTER embedding materialization
   by default when Rust featurization is attached. Pass
   `load_python_specter=True` only for Python reference featurization or direct
   Python embedding access.
+- Filtered Arrow reads now reject duplicate signature/paper ids even when
+  every copy of the duplicated id falls outside the requested id filter, so a
+  filtered scan is never more permissive than a full scan.
 
 ## 0.51.1
 

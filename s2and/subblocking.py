@@ -24,12 +24,12 @@ from s2and.consts import _PACKAGE_DATA_DIR, SPECTER_DIM
 from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_lookup_index_batch_indices_for_request
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
+    canonicalize_name_parts,
     compute_block,
     get_text_ngrams_words,
     normalize_orcid,
     normalize_text,
     same_prefix_tokens,
-    split_first_middle_hyphen_aware,
 )
 
 logger = logging.getLogger("s2and")
@@ -1330,33 +1330,20 @@ def make_dataset_graph_subblocking_cluster_fn(
 
 
 def signature_name_parts_for_subblocking(signature) -> tuple[str, str]:
-    raw_first = signature.author_info_first
-    raw_middle = signature.author_info_middle
+    """Canonical (canonical_v2) first/middle for subblocking keys.
+
+    Dash handling is uniform (D4): every dash-like character binds given-name
+    compounds identically, replacing the retired ASCII-kept/non-ASCII-spilled
+    legacy repair.
+    """
+
     first = signature.author_info_first_normalized_without_apostrophe
     middle = signature.author_info_middle_normalized_without_apostrophe
     if first is not None and middle is not None:
-        return _spill_non_ascii_dash_first_for_subblocking(raw_first, first, middle)
+        return first, middle
     # Rust preprocessing can defer normalized name fields; reconstruct with Python-equivalent logic.
-    first, middle = split_first_middle_hyphen_aware(raw_first, raw_middle)
-    return _spill_non_ascii_dash_first_for_subblocking(raw_first, first, middle)
-
-
-def _spill_non_ascii_dash_first_for_subblocking(
-    raw_first: str | None,
-    first: str,
-    middle: str,
-) -> tuple[str, str]:
-    """Spill non-ASCII dash compounds to match legacy subblocking keys."""
-
-    raw_first = raw_first or ""
-    non_ascii_dashes = "\u2010\u2011\u2012\u2013\u2014\u2212\ufe58\ufe63\uff0d"
-    if "-" in raw_first or not any(character in raw_first for character in non_ascii_dashes):
-        return first, middle
-    first_parts = first.split()
-    if len(first_parts) <= 1:
-        return first, middle
-    middle_parts = middle.split()
-    return first_parts[0], " ".join(first_parts[1:] + middle_parts)
+    parts = canonicalize_name_parts(signature.author_info_first, signature.author_info_middle, None)
+    return parts.first, parts.middle
 
 
 def _signature_coauthor_blocks_for_specter(signature, anddata, compute_block_fn=compute_block) -> list[str]:
@@ -1550,7 +1537,10 @@ def _subblock_merge_candidate_metadata(key: str, size: int) -> tuple[int, str, s
         name_for_splits = middle_name
     else:
         name_for_splits = None
-    lookup = None if name_for_splits is None else name_for_splits.split(" ")[0]
+    # canonical_v2: prefix-count lookups use the full canonical name string; the
+    # legacy first-token reduction for multi-token names is retired with the
+    # regenerated ORCID prefix-count artifact.
+    lookup = name_for_splits
     return size, first_name, middle_name, name_for_splits, lookup
 
 
@@ -2027,8 +2017,13 @@ def make_subblocks_with_telemetry(
                 del output[subblock_id]
             output[key_of_keys] = signature_ids_stacked
 
-    # let's assert that we have done a complete partition
-    assert set(np.hstack([output[k] for k in output])) == set(signature_ids)
+    # let's assert that we have done a complete partition. Multiset equality, not
+    # set equality: a signature_id duplicated across subblocks would pass a set
+    # check but bind nondeterministically in the downstream ORCID merge (Python
+    # dict insertion order vs Rust last-subblock-wins), silently diverging the
+    # two implementations.
+    output_signature_ids = sorted(str(signature_id) for k in output for signature_id in output[k])
+    assert output_signature_ids == sorted(str(signature_id) for signature_id in signature_ids)
 
     # before the end, makes sure everything is a standard list
     for k in list(output.keys()):

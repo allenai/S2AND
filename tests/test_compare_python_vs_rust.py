@@ -26,7 +26,7 @@ def test_language_feature_indices_detect_expected_columns():
         "f0",
         "english_count",
         "same_language",
-        "language_reliability_count",
+        "language_reliability_min",
         "f4",
     ]
     indices = module._language_feature_indices(feature_names)
@@ -39,7 +39,7 @@ def test_feature_parity_allows_small_language_mismatch():
         "first_names_equal",
         "english_count",
         "same_language",
-        "language_reliability_count",
+        "language_reliability_min",
         "year_diff",
     ]
 

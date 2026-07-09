@@ -25,7 +25,8 @@
       {"name": "journal_name", "datatype": "string", "required": true},
       {"name": "year", "datatype": "int64", "required": false},
       {"name": "predicted_language", "datatype": "string", "required": false},
-      {"name": "is_reliable", "datatype": "bool", "required": false}
+      {"name": "is_reliable", "datatype": "bool", "required": false},
+      {"name": "language_reliability", "datatype": "float64", "required": false}
     ],
     "signatures": [
       {"name": "signature_id", "datatype": "string", "required": true},

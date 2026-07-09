@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -137,6 +137,7 @@ class LinkOrAbstainCompactResult:
 
     probabilities: np.ndarray
     decisions: tuple[LinkOrAbstainDecision, ...]
+    decision_telemetry: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -382,14 +383,225 @@ def _subset_feature_matrix_for_rows(
     )
 
 
+def _gate_decision_for_rows(
+    rows: np.ndarray,
+    *,
+    gate: NumpyLogisticGate,
+    feature_matrix: LinkerFeatureMatrix,
+    probabilities: np.ndarray,
+    row_signals: Mapping[str, Any] | None,
+) -> tuple[int, float, bool]:
+    """Re-run the logistic gate over one query's row subset.
+
+    Returns the best row in original row-index space, the runner-up score, and
+    the gate's link decision for the best row.
+    """
+
+    candidate_batch = feature_matrix.candidate_batch
+    subset_matrix = _subset_feature_matrix_for_rows(feature_matrix, rows)
+    subset_row_signals = _subset_row_signals(row_signals, rows, candidate_batch.row_count)
+    subset_gate_matrix, subset_gate_rows = build_runtime_logistic_gate_matrix(
+        gate,
+        subset_matrix,
+        np.asarray(probabilities[rows], dtype=np.float64),
+        row_signals=subset_row_signals,
+    )
+    subset_gate_links = gate.predict_link(subset_gate_matrix)
+    subset_ranked = subset_gate_rows.ranked_groups[0]
+    best_row = int(rows[int(subset_gate_rows.best_rows[0])])
+    runner_up_score = float(probabilities[int(rows[int(subset_ranked[1])])]) if len(subset_ranked) > 1 else float("nan")
+    return best_row, runner_up_score, bool(subset_gate_links[0])
+
+
+def _raise_if_require_rows_excluded(
+    *,
+    excluded_rows: np.ndarray,
+    constraint_requires: np.ndarray | None,
+    component_keys: tuple[object, ...] | None,
+    query_signature_index: int,
+) -> None:
+    if constraint_requires is None or len(excluded_rows) == 0:
+        return
+    excluded_require_rows = excluded_rows[constraint_requires[excluded_rows]]
+    if len(excluded_require_rows) == 0:
+        return
+    required_components = (
+        tuple(sorted({str(component_keys[int(row_index)]) for row_index in excluded_require_rows}))
+        if component_keys is not None
+        else ()
+    )
+    raise ValueError(
+        "cluster_seed_disallow_conflicts_with_require_constraint: "
+        f"query_signature_index={query_signature_index} component_keys={required_components} "
+        "(a require constraint targets a candidate component that is excluded because a "
+        "mutually-disallowed signature already linked to it)"
+    )
+
+
+def _decide_query_rows(
+    allowed_rows: np.ndarray,
+    *,
+    query_signature_index: int,
+    fast_path: tuple[int, float, float, bool] | None,
+    gate: NumpyLogisticGate,
+    feature_matrix: LinkerFeatureMatrix,
+    probabilities: np.ndarray,
+    row_signals: Mapping[str, Any] | None,
+    orcid_matches: np.ndarray | None,
+    constraint_requires: np.ndarray | None,
+    constraint_vetoes: np.ndarray | None,
+    component_keys: tuple[object, ...] | None,
+    candidate_batch: LinkerCandidateBatch,
+) -> LinkOrAbstainDecision:
+    """Decide link-or-abstain for one query over an explicit allowed row set.
+
+    ``fast_path`` carries the precomputed full-group gate outputs
+    ``(best_row, runner_up_score, score_margin, gate_link)`` and must only be
+    provided when ``allowed_rows`` is the query's complete retrieved group;
+    subset callers (disallow exclusions, same-batch conflict re-decisions) pass
+    ``None`` and the gate is re-run over the subset.
+    """
+
+    if len(allowed_rows) == 0:
+        return LinkOrAbstainDecision(
+            query_signature_index=query_signature_index,
+            action="abstain",
+            row_index=None,
+            component_key=None,
+            score=None,
+            runner_up_score=None,
+            score_margin=None,
+        )
+    forced_orcid_rows = np.asarray([], dtype=np.int64)
+    if orcid_matches is not None:
+        forced_orcid_rows = allowed_rows[orcid_matches[allowed_rows]]
+    forced_constraint_rows = np.asarray([], dtype=np.int64)
+    if constraint_requires is not None:
+        forced_constraint_rows = allowed_rows[constraint_requires[allowed_rows]]
+    # Runner-up score for forced (require/ORCID) branches is reported against the
+    # eligible (non-vetoed) subset of the query group, so a constraint-disallowed
+    # competitor cannot inflate or deflate the reported margin.
+    eligible_rows = allowed_rows
+    if constraint_vetoes is not None:
+        eligible_mask = ~constraint_vetoes[allowed_rows]
+        if not bool(np.all(eligible_mask)):
+            eligible_rows = allowed_rows[eligible_mask]
+    if len(forced_constraint_rows):
+        # An explicit require constraint is the user's hard contract; it takes
+        # precedence over the ORCID heuristic and over the disallow veto branch.
+        _validate_single_constraint_require_target(
+            forced_constraint_rows=forced_constraint_rows,
+            component_keys=component_keys,
+            query_signature_index=query_signature_index,
+        )
+        best_row = _best_row_for_group(
+            forced_constraint_rows,
+            probabilities=probabilities,
+            retrieval_ranks=candidate_batch.retrieval_ranks,
+            component_keys=component_keys,
+        )
+        runner_up_score = _forced_runner_up_score(
+            eligible_rows,
+            best_row=best_row,
+            probabilities=probabilities,
+            retrieval_ranks=candidate_batch.retrieval_ranks,
+            component_keys=component_keys,
+        )
+        margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
+        action: LinkAction = "link"
+    elif len(forced_orcid_rows):
+        best_row = _best_row_for_group(
+            forced_orcid_rows,
+            probabilities=probabilities,
+            retrieval_ranks=candidate_batch.retrieval_ranks,
+            component_keys=component_keys,
+        )
+        runner_up_score = _forced_runner_up_score(
+            eligible_rows,
+            best_row=best_row,
+            probabilities=probabilities,
+            retrieval_ranks=candidate_batch.retrieval_ranks,
+            component_keys=component_keys,
+        )
+        margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
+        action = "link"
+    elif len(eligible_rows) < len(allowed_rows):
+        if len(eligible_rows) == 0:
+            if fast_path is not None:
+                best_row, runner_up_score, fast_margin, _fast_link = fast_path
+                margin = None if np.isnan(runner_up_score) else float(fast_margin)
+            else:
+                best_row = _best_row_for_group(
+                    allowed_rows,
+                    probabilities=probabilities,
+                    retrieval_ranks=candidate_batch.retrieval_ranks,
+                    component_keys=component_keys,
+                )
+                runner_up_score = _forced_runner_up_score(
+                    allowed_rows,
+                    best_row=best_row,
+                    probabilities=probabilities,
+                    retrieval_ranks=candidate_batch.retrieval_ranks,
+                    component_keys=component_keys,
+                )
+                margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
+            action = "abstain"
+        else:
+            best_row, runner_up_score, gate_link = _gate_decision_for_rows(
+                eligible_rows,
+                gate=gate,
+                feature_matrix=feature_matrix,
+                probabilities=probabilities,
+                row_signals=row_signals,
+            )
+            margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
+            action = "link" if gate_link else "abstain"
+    else:
+        if fast_path is not None:
+            best_row, runner_up_score, fast_margin, gate_link = fast_path
+            margin = None if np.isnan(runner_up_score) else float(fast_margin)
+        else:
+            best_row, runner_up_score, gate_link = _gate_decision_for_rows(
+                allowed_rows,
+                gate=gate,
+                feature_matrix=feature_matrix,
+                probabilities=probabilities,
+                row_signals=row_signals,
+            )
+            margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
+        action = "link" if gate_link else "abstain"
+    component_key = None
+    if action == "link" and component_keys is not None:
+        component_key = str(component_keys[best_row])
+    return LinkOrAbstainDecision(
+        query_signature_index=query_signature_index,
+        action=action,
+        row_index=best_row if action == "link" else None,
+        component_key=component_key,
+        score=float(probabilities[best_row]),
+        runner_up_score=None if np.isnan(runner_up_score) else float(runner_up_score),
+        score_margin=margin,
+    )
+
+
 def _predict_incremental_link_or_abstain_compact(
     artifact: IncrementalLinkingArtifact,
     feature_matrix: LinkerFeatureMatrix,
     *,
     row_signals: Mapping[str, Any] | None = None,
     num_threads: int | None = None,
+    hard_excluded_rows: np.ndarray | None = None,
+    disallow_partner_query_indices: Mapping[int, Collection[int]] | None = None,
 ) -> LinkOrAbstainCompactResult:
     """Score artifact-ordered rows and apply the artifact's logistic gate.
+
+    ``hard_excluded_rows`` removes candidate rows from consideration entirely,
+    as if the raw planner had excluded them at retrieval time; it carries
+    cluster-seed-disallow exclusions against components that a mutually
+    disallowed query linked to in an earlier batch. ``disallow_partner_query_indices``
+    maps a query signature index to same-batch mutually-disallowed query
+    signature indices; when two partners link to the same component, the
+    lower-priority link is re-decided without that component.
 
     This is intentionally not a public API. It exists to keep the first vertical
     slice concrete while retrieval policy, constraint handling, and telemetry are
@@ -415,113 +627,189 @@ def _predict_incremental_link_or_abstain_compact(
     orcid_matches = _orcid_match_signal(row_signals, candidate_batch.row_count)
     constraint_requires = _constraint_require_signal(row_signals, candidate_batch.row_count)
     constraint_vetoes = _constraint_disallow_veto_signal(row_signals, candidate_batch.row_count)
+    excluded_rows_mask: np.ndarray | None = None
+    if hard_excluded_rows is not None:
+        excluded_rows_mask = np.asarray(hard_excluded_rows, dtype=bool)
+        if excluded_rows_mask.shape != (int(candidate_batch.row_count),):
+            raise ValueError(
+                "hard_excluded_rows must be 1D with "
+                f"row_count={candidate_batch.row_count}, got {excluded_rows_mask.shape}"
+            )
+    decision_telemetry: dict[str, int] = {
+        "cluster_seed_disallow_excluded_row_count": (
+            0 if excluded_rows_mask is None else int(excluded_rows_mask.sum())
+        ),
+        "cluster_seed_disallow_excluded_query_count": 0,
+        "cluster_seed_disallow_same_batch_conflict_count": 0,
+        "cluster_seed_disallow_same_batch_reassigned_link_count": 0,
+        "cluster_seed_disallow_same_batch_demoted_abstain_count": 0,
+    }
+    decide_kwargs: dict[str, Any] = {
+        "gate": gate,
+        "feature_matrix": feature_matrix,
+        "probabilities": probabilities,
+        "row_signals": row_signals,
+        "orcid_matches": orcid_matches,
+        "constraint_requires": constraint_requires,
+        "constraint_vetoes": constraint_vetoes,
+        "component_keys": component_keys,
+        "candidate_batch": candidate_batch,
+    }
     decisions: list[LinkOrAbstainDecision] = []
+    group_rows_by_query_index: dict[int, np.ndarray] = {}
     for query_pos, group in enumerate(gate_query_rows.groups):
-        best_row = int(gate_query_rows.best_rows[query_pos])
-        forced_orcid_rows = np.asarray([], dtype=np.int64)
-        if orcid_matches is not None:
-            forced_orcid_rows = group[orcid_matches[group]]
-        forced_constraint_rows = np.asarray([], dtype=np.int64)
-        if constraint_requires is not None:
-            forced_constraint_rows = group[constraint_requires[group]]
-        # Runner-up score for forced (require/ORCID) branches is reported against the
-        # eligible (non-vetoed) subset of the query group, so a constraint-disallowed
-        # competitor cannot inflate or deflate the reported margin.
-        eligible_group = group
-        if constraint_vetoes is not None:
-            eligible_mask = ~constraint_vetoes[group]
-            if not bool(np.all(eligible_mask)):
-                eligible_group = group[eligible_mask]
-        if len(forced_constraint_rows):
-            # An explicit require constraint is the user's hard contract; it takes
-            # precedence over the ORCID heuristic and over the disallow veto branch.
-            _validate_single_constraint_require_target(
-                forced_constraint_rows=forced_constraint_rows,
+        group = np.asarray(group, dtype=np.int64)
+        query_signature_index = int(query_indices[int(group[0])])
+        group_rows_by_query_index[query_signature_index] = group
+        allowed_rows = group
+        fast_path: tuple[int, float, float, bool] | None = (
+            int(gate_query_rows.best_rows[query_pos]),
+            float(gate_query_rows.runner_up_scores[query_pos]),
+            float(gate_query_rows.score_margins[query_pos]),
+            bool(gate_links[query_pos]),
+        )
+        if excluded_rows_mask is not None and bool(np.any(excluded_rows_mask[group])):
+            decision_telemetry["cluster_seed_disallow_excluded_query_count"] += 1
+            excluded_group_rows = group[excluded_rows_mask[group]]
+            _raise_if_require_rows_excluded(
+                excluded_rows=excluded_group_rows,
+                constraint_requires=constraint_requires,
                 component_keys=component_keys,
-                query_signature_index=int(query_indices[best_row]),
+                query_signature_index=query_signature_index,
             )
-            best_row = _best_row_for_group(
-                forced_constraint_rows,
-                probabilities=probabilities,
-                retrieval_ranks=candidate_batch.retrieval_ranks,
-                component_keys=component_keys,
-            )
-            runner_up_score = _forced_runner_up_score(
-                eligible_group,
-                best_row=best_row,
-                probabilities=probabilities,
-                retrieval_ranks=candidate_batch.retrieval_ranks,
-                component_keys=component_keys,
-            )
-            margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
-            action: LinkAction = "link"
-        elif len(forced_orcid_rows):
-            best_row = _best_row_for_group(
-                forced_orcid_rows,
-                probabilities=probabilities,
-                retrieval_ranks=candidate_batch.retrieval_ranks,
-                component_keys=component_keys,
-            )
-            runner_up_score = _forced_runner_up_score(
-                eligible_group,
-                best_row=best_row,
-                probabilities=probabilities,
-                retrieval_ranks=candidate_batch.retrieval_ranks,
-                component_keys=component_keys,
-            )
-            margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
-            action = "link"
-        elif constraint_vetoes is not None and np.any(constraint_vetoes[group]):
-            eligible_original_rows = group[~constraint_vetoes[group]]
-            if len(eligible_original_rows) == 0:
-                runner_up_score = float(gate_query_rows.runner_up_scores[query_pos])
-                margin = None if np.isnan(runner_up_score) else float(gate_query_rows.score_margins[query_pos])
-                action = "abstain"
-            else:
-                eligible_matrix = _subset_feature_matrix_for_rows(feature_matrix, eligible_original_rows)
-                eligible_row_signals = _subset_row_signals(
-                    row_signals,
-                    eligible_original_rows,
-                    candidate_batch.row_count,
-                )
-                eligible_gate_matrix, eligible_gate_rows = build_runtime_logistic_gate_matrix(
-                    gate,
-                    eligible_matrix,
-                    np.asarray(probabilities[eligible_original_rows], dtype=np.float64),
-                    row_signals=eligible_row_signals,
-                )
-                eligible_gate_links = gate.predict_link(eligible_gate_matrix)
-                eligible_ranked = eligible_gate_rows.ranked_groups[0]
-                best_row = int(eligible_original_rows[int(eligible_gate_rows.best_rows[0])])
-                runner_up_score = (
-                    float(probabilities[int(eligible_original_rows[int(eligible_ranked[1])])])
-                    if len(eligible_ranked) > 1
-                    else float("nan")
-                )
-                margin = None if np.isnan(runner_up_score) else float(probabilities[best_row] - runner_up_score)
-                action = "link" if bool(eligible_gate_links[0]) else "abstain"
-        else:
-            runner_up_score = float(gate_query_rows.runner_up_scores[query_pos])
-            margin = None if np.isnan(runner_up_score) else float(gate_query_rows.score_margins[query_pos])
-            action = "link" if bool(gate_links[query_pos]) else "abstain"
-        component_key = None
-        if action == "link" and component_keys is not None:
-            component_key = str(component_keys[best_row])
+            allowed_rows = group[~excluded_rows_mask[group]]
+            fast_path = None
         decisions.append(
-            LinkOrAbstainDecision(
-                query_signature_index=int(query_indices[best_row]),
-                action=action,
-                row_index=best_row if action == "link" else None,
-                component_key=component_key,
-                score=float(probabilities[best_row]),
-                runner_up_score=None if np.isnan(runner_up_score) else float(runner_up_score),
-                score_margin=margin,
+            _decide_query_rows(
+                allowed_rows,
+                query_signature_index=query_signature_index,
+                fast_path=fast_path,
+                **decide_kwargs,
             )
+        )
+    if disallow_partner_query_indices:
+        _resolve_same_batch_disallow_conflicts(
+            decisions,
+            disallow_partner_query_indices=disallow_partner_query_indices,
+            group_rows_by_query_index=group_rows_by_query_index,
+            excluded_rows_mask=excluded_rows_mask,
+            decision_telemetry=decision_telemetry,
+            decide_kwargs=decide_kwargs,
         )
     return LinkOrAbstainCompactResult(
         probabilities=np.asarray(probabilities, dtype=np.float64),
         decisions=tuple(decisions),
+        decision_telemetry=decision_telemetry,
     )
+
+
+def _resolve_same_batch_disallow_conflicts(
+    decisions: list[LinkOrAbstainDecision],
+    *,
+    disallow_partner_query_indices: Mapping[int, Collection[int]],
+    group_rows_by_query_index: Mapping[int, np.ndarray],
+    excluded_rows_mask: np.ndarray | None,
+    decision_telemetry: dict[str, int],
+    decide_kwargs: Mapping[str, Any],
+) -> None:
+    """Enforce query-vs-query disallow pairs whose endpoints share a batch.
+
+    A disallow pair between two queries is unenforceable at plan time (neither
+    endpoint has a component yet) and becomes an ordinary component exclusion
+    the moment one endpoint links. Decisions are finalized in priority order --
+    require-forced links first (they cannot move), then descending link score --
+    and a lower-priority partner that landed on the same component is re-decided
+    over its already-scored rows with that component removed, so no re-scoring
+    or re-featurization happens.
+    """
+
+    constraint_requires = decide_kwargs["constraint_requires"]
+    component_keys = decide_kwargs["component_keys"]
+    partners: dict[int, set[int]] = {}
+    for query_index, partner_indices in disallow_partner_query_indices.items():
+        for partner_index in partner_indices:
+            left = int(query_index)
+            right = int(partner_index)
+            if left == right:
+                continue
+            partners.setdefault(left, set()).add(right)
+            partners.setdefault(right, set()).add(left)
+    position_by_query_index: dict[int, int] = {}
+    for position, decision in enumerate(decisions):
+        position_by_query_index.setdefault(decision.query_signature_index, position)
+
+    def _allowed_rows(query_index: int) -> np.ndarray:
+        rows = group_rows_by_query_index[query_index]
+        if excluded_rows_mask is None:
+            return rows
+        return rows[~excluded_rows_mask[rows]]
+
+    def _has_require_force(query_index: int) -> bool:
+        if constraint_requires is None or query_index not in group_rows_by_query_index:
+            return False
+        rows = _allowed_rows(query_index)
+        return bool(np.any(constraint_requires[rows])) if len(rows) else False
+
+    contended = [
+        query_index
+        for query_index in sorted(partners)
+        if query_index in position_by_query_index
+        and query_index in group_rows_by_query_index
+        and decisions[position_by_query_index[query_index]].action == "link"
+    ]
+    order = sorted(
+        contended,
+        key=lambda query_index: (
+            0 if _has_require_force(query_index) else 1,
+            -float(decisions[position_by_query_index[query_index]].score or 0.0),
+            query_index,
+        ),
+    )
+    finalized: dict[int, LinkOrAbstainDecision] = {}
+    for query_index in order:
+        position = position_by_query_index[query_index]
+        decision = decisions[position]
+        excluded_components: set[str] = set()
+        was_conflicted = False
+        while decision.action == "link" and decision.component_key is not None:
+            conflict_components = {
+                finalized[partner_index].component_key
+                for partner_index in partners.get(query_index, ())
+                if partner_index in finalized
+                and finalized[partner_index].action == "link"
+                and finalized[partner_index].component_key == decision.component_key
+            }
+            if not conflict_components:
+                break
+            if component_keys is None:
+                raise ValueError("same-batch cluster_seed_disallow resolution requires row_component_keys")
+            was_conflicted = True
+            decision_telemetry["cluster_seed_disallow_same_batch_conflict_count"] += 1
+            excluded_components |= {str(key) for key in conflict_components if key is not None}
+            allowed = _allowed_rows(query_index)
+            component_excluded = np.asarray(
+                [str(component_keys[int(row_index)]) in excluded_components for row_index in allowed],
+                dtype=bool,
+            )
+            _raise_if_require_rows_excluded(
+                excluded_rows=allowed[component_excluded],
+                constraint_requires=constraint_requires,
+                component_keys=component_keys,
+                query_signature_index=query_index,
+            )
+            decision = _decide_query_rows(
+                allowed[~component_excluded],
+                query_signature_index=query_index,
+                fast_path=None,
+                **decide_kwargs,
+            )
+        if was_conflicted:
+            if decision.action == "link":
+                decision_telemetry["cluster_seed_disallow_same_batch_reassigned_link_count"] += 1
+            else:
+                decision_telemetry["cluster_seed_disallow_same_batch_demoted_abstain_count"] += 1
+        finalized[query_index] = decision
+        decisions[position] = decision
 
 
 def _pairwise_model_feature_indices(featurizer_info: FeaturizationInfo) -> tuple[int, ...]:
@@ -1214,6 +1502,8 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     nan_value: float = _PAIRWISE_AGGREGATE_NAN_VALUE,
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
+    hard_excluded_rows: np.ndarray | None = None,
+    disallow_partner_query_indices: Mapping[int, Collection[int]] | None = None,
 ) -> LinkOrAbstainRetrievedCandidatesResult:
     """Private vertical slice over retrieved candidates.
 
@@ -1242,12 +1532,15 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
         feature_matrix,
         row_signals=row_signals,
         num_threads=n_jobs,
+        hard_excluded_rows=hard_excluded_rows,
+        disallow_partner_query_indices=disallow_partner_query_indices,
     )
     no_candidate_decisions = _no_candidate_abstain_decisions(no_candidate_query_signature_indices)
     if no_candidate_decisions:
         compact_result = LinkOrAbstainCompactResult(
             probabilities=compact_result.probabilities,
             decisions=(*compact_result.decisions, *no_candidate_decisions),
+            decision_telemetry=compact_result.decision_telemetry,
         )
     link_count = sum(1 for decision in compact_result.decisions if decision.action == "link")
     abstain_count = sum(1 for decision in compact_result.decisions if decision.action == "abstain")
@@ -1261,6 +1554,7 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
             "decision_count": int(len(compact_result.decisions)),
             "link_count": int(link_count),
             "abstain_count": int(abstain_count),
+            **{key: int(value) for key, value in compact_result.decision_telemetry.items()},
             **{f"row_feature_{key}": int(value) for key, value in row_feature_telemetry.items()},
         },
     )
@@ -1286,6 +1580,8 @@ def _predict_incremental_link_or_abstain_production_private(
     n_jobs: int | None = None,
     total_ram_bytes: int | None = None,
     retrieval_top_k: int | None = None,
+    cluster_seed_disallow_partner_ids: Mapping[str, Collection[str]] | None = None,
+    cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run the private M3a production-shaped link-or-abstain slice.
 
@@ -1372,7 +1668,45 @@ def _predict_incremental_link_or_abstain_production_private(
         n_jobs=n_jobs_resolved,
         total_ram_bytes=total_ram_bytes,
         retrieval_top_k=retrieval_top_k,
+        cluster_seed_disallow_partner_ids=cluster_seed_disallow_partner_ids,
+        cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
     )
+
+
+def _cluster_seed_disallow_excluded_rows(
+    candidate_batch: LinkerCandidateBatch,
+    *,
+    signature_id_to_index: Mapping[str, int],
+    excluded_components_by_query_id: Mapping[str, Collection[str]],
+) -> np.ndarray | None:
+    """Materialize per-(query, component) disallow exclusions to a row mask.
+
+    Semantics match plan-time seed exclusion: the rows are treated as never
+    retrieved for that query.
+    """
+
+    if candidate_batch.row_query_signature_indices is None or int(candidate_batch.row_count) == 0:
+        return None
+    if candidate_batch.row_component_keys is None:
+        raise ValueError("cluster_seed_disallow exclusion requires candidate_batch.row_component_keys")
+    row_query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
+    row_components = np.asarray([str(key) for key in candidate_batch.row_component_keys], dtype=object)
+    excluded = np.zeros(int(candidate_batch.row_count), dtype=bool)
+    matched = False
+    for query_id, components in excluded_components_by_query_id.items():
+        query_key = str(query_id)
+        if query_key not in signature_id_to_index:
+            continue
+        component_set = [str(component) for component in components]
+        if not component_set:
+            continue
+        mask = (row_query_indices == np.uint32(signature_id_to_index[query_key])) & np.isin(
+            row_components, component_set
+        )
+        if bool(np.any(mask)):
+            matched = True
+            excluded |= mask
+    return excluded if matched else None
 
 
 def _predict_incremental_link_or_abstain_production_from_retrieval_private(
@@ -1394,6 +1728,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     n_jobs: int | None = None,
     total_ram_bytes: int | None = None,
     retrieval_top_k: int | None = None,
+    cluster_seed_disallow_partner_ids: Mapping[str, Collection[str]] | None = None,
+    cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run production scoring/gating from an already retrieved candidate batch."""
 
@@ -1531,6 +1867,29 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         constraint_row_signals,
         merged_extra_row_signals,
     )
+    hard_excluded_rows: np.ndarray | None = None
+    if cluster_seed_disallow_excluded_components:
+        hard_excluded_rows = _cluster_seed_disallow_excluded_rows(
+            candidate_batch,
+            signature_id_to_index=signature_id_to_index,
+            excluded_components_by_query_id=cluster_seed_disallow_excluded_components,
+        )
+    disallow_partner_query_indices: dict[int, set[int]] | None = None
+    if cluster_seed_disallow_partner_ids:
+        disallow_partner_query_indices = {}
+        for partner_query_id, partner_ids in cluster_seed_disallow_partner_ids.items():
+            query_key = str(partner_query_id)
+            if query_key not in signature_id_to_index:
+                continue
+            partner_indices = {
+                int(signature_id_to_index[str(partner_id)])
+                for partner_id in partner_ids
+                if str(partner_id) in signature_id_to_index
+            }
+            if partner_indices:
+                disallow_partner_query_indices[int(signature_id_to_index[query_key])] = partner_indices
+        if not disallow_partner_query_indices:
+            disallow_partner_query_indices = None
     private_result = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
@@ -1543,6 +1902,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         nan_value=_PAIRWISE_AGGREGATE_NAN_VALUE,
         runtime_context=resolved_runtime_context,
         featurizer=featurizer,
+        hard_excluded_rows=hard_excluded_rows,
+        disallow_partner_query_indices=disallow_partner_query_indices,
     )
 
     raw_linked_clusters = {
@@ -2052,6 +2413,8 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     load_name_counts: bool | None | dict[str, Any] = None,
     name_tuples: set[tuple[str, str]] | str | None = "filtered",
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
+    cluster_seed_disallow_partner_ids: Mapping[str, Collection[str]] | None = None,
+    cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Shared raw Arrow scoring implementation."""
 
@@ -2124,6 +2487,8 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         n_jobs=n_jobs_resolved,
         total_ram_bytes=total_ram_bytes,
         retrieval_top_k=top_k_resolved,
+        cluster_seed_disallow_partner_ids=cluster_seed_disallow_partner_ids,
+        cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
     )
     raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.plan)
     telemetry = {

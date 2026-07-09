@@ -261,15 +261,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cfasttext-sys"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "982185af4edba23861639c25e46b36e077d2d60e553c20d1341c9fbf17fdb369"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -369,15 +360,6 @@ name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
-
-[[package]]
-name = "fasttext"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd26f3978ff7b22e594af9026912da644237fd7d360889d0c5a6ac8ec4f940c8"
-dependencies = [
- "cfasttext-sys",
-]
 
 [[package]]
 name = "find-msvc-tools"
@@ -987,13 +969,13 @@ version = "0.60.0"
 dependencies = [
  "arrow",
  "cld2",
- "fasttext",
  "memmap2",
  "numpy",
  "pyo3",
  "rayon",
  "serde",
  "serde_json",
+ "unicode-properties",
  "unidecode",
 ]
 
@@ -1117,6 +1099,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-properties"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
 name = "unidecode"

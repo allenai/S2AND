@@ -887,11 +887,6 @@ def _component_member_details_by_key(
     return out
 
 
-def _enable_fasttext_language_detection() -> None:
-    os.environ["S2AND_SKIP_FASTTEXT"] = "0"
-    s2and_text.set_fasttext_loading_enabled(True)
-
-
 def _signature_id_to_index(featurizer: Any) -> dict[str, int]:
     out: dict[str, int] = {}
     for index, signature_id in enumerate(featurizer.signature_ids()):
@@ -1126,7 +1121,6 @@ def _load_minimal_raw_specter_dataset(
         raise KeyError(f"Minimal raw metadata is missing dataset {dataset_name!r}")
     if dataset_name not in embedding_datasets:
         raise KeyError(f"Minimal SPECTER2 embeddings are missing dataset {dataset_name!r}")
-    _enable_fasttext_language_detection()
     raw_spec = dict(raw_datasets[dataset_name])
     signatures_path = _resolve_path(bundle, str(raw_spec["signatures_path"]))
     papers_path = _resolve_path(bundle, str(raw_spec["papers_path"]))

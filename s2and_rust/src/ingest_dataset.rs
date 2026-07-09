@@ -58,7 +58,7 @@ pub(crate) fn insert_name_tuple_alias(
     // Directed insert to match the Python reference, which stores name tuples as a
     // `set[tuple[str, str]]` keyed on the curated (a, b) order (see
     // `_load_name_tuples_from_file` in s2and/data.py). The shipped
-    // `s2and_name_tuples_filtered.txt` lists both directions explicitly for every
+    // `s2and_name_tuples_canonical.txt` lists both directions explicitly for every
     // pair, so directed insertion still yields both lookups while staying faithful
     // to any asymmetric tuples a caller might supply.
     map.entry(a).or_insert_with(HashSet::new).insert(b);
@@ -371,6 +371,7 @@ pub(crate) fn preprocess_stage_papers(
                     has_abstract: paper_input.has_abstract,
                     predicted_language: paper_input.predicted_language.clone(),
                     is_reliable: paper_input.is_reliable,
+                    language_reliability: paper_input.language_reliability,
                     title_words,
                     title_chars,
                     venue_ngrams,
@@ -389,20 +390,21 @@ pub(crate) fn preprocess_stage_signatures(
     affiliation_stopwords: &HashSet<String>,
     unidecode_char_map: &HashMap<char, String>,
     preprocess: bool,
-    name_counts_semantics: NameCountsLastFirstInitialSemantics,
 ) -> Vec<(String, SignatureData)> {
     signature_inputs
         .par_iter()
         .map(|entry| {
-            let (first_without_apostrophe, middle_without_apostrophe) =
-                split_first_middle_hyphen_aware_compat(
+            // Signature author-name fields are canonical_v2; paper titles,
+            // venues, affiliations, and authors-as-text keep the legacy
+            // normalize_text_compat pipeline.
+            let (canonical_first, canonical_middle, canonical_last) =
+                canonicalize_name_parts_compat(
                     &entry.raw_first,
                     &entry.raw_middle,
+                    &entry.raw_last,
                     name_prefixes,
-                    unidecode_char_map,
+                    Some(unidecode_char_map),
                 );
-            let last_normalized =
-                normalize_text_compat_from_map(&entry.raw_last, false, unidecode_char_map);
             let mut coauthor_list: Vec<String> = Vec::new();
             if let Some(preprocessed_paper) = preprocessed_papers.get(&entry.paper_id) {
                 for (author_position, author_name) in preprocessed_paper.authors.iter() {
@@ -469,18 +471,15 @@ pub(crate) fn preprocess_stage_signatures(
                 .and_then(|value| normalize_orcid_compact_owned(value));
             let name_counts = build_name_counts_data_from_artifact(
                 raw_name_counts,
-                &entry.raw_first,
-                &first_without_apostrophe,
-                &entry.raw_last,
-                &last_normalized,
-                name_counts_semantics,
+                &canonical_first,
+                &canonical_last,
             );
             (
                 entry.sig_id.clone(),
                 SignatureData {
-                    first: Some(first_without_apostrophe.clone()),
-                    middle: Some(middle_without_apostrophe),
-                    last_normalized: Some(last_normalized),
+                    first: Some(canonical_first.clone()),
+                    middle: Some(canonical_middle),
+                    last_normalized: Some(canonical_last),
                     orcid: normalized_orcid,
                     email: entry.email.clone(),
                     affiliations,
@@ -490,7 +489,7 @@ pub(crate) fn preprocess_stage_signatures(
                     position: entry.position,
                     paper_id: entry.paper_id.clone(),
                     name_counts,
-                    adv_name: Some(first_without_apostrophe),
+                    adv_name: Some(canonical_first),
                 },
             )
         })
@@ -673,7 +672,7 @@ pub(crate) fn default_name_tuples_path(py: Python<'_>) -> PyResult<String> {
     let path_obj = pathlib
         .getattr("Path")?
         .call1((package_data_dir,))?
-        .call_method1("joinpath", ("s2and_name_tuples_filtered.txt",))?;
+        .call_method1("joinpath", ("s2and_name_tuples_canonical.txt",))?;
     path_obj.call_method0("as_posix")?.extract()
 }
 
@@ -711,113 +710,40 @@ pub(crate) fn has_name_counts_artifact(raw_name_counts: &RawNameCountMaps) -> bo
     raw_name_counts.has_data()
 }
 
-pub(crate) fn canonical_last_for_counts(raw_last: &str, normalized_last: &str) -> String {
-    if contains_name_dash(raw_last) || normalized_last.contains(' ') {
-        normalized_last.replace(' ', "")
-    } else {
-        normalized_last.to_string()
-    }
-}
-
 pub(crate) fn build_name_counts_data_from_artifact(
     raw_name_counts: &RawNameCountMaps,
-    raw_first: &str,
-    first_without_apostrophe: &str,
-    raw_last: &str,
-    last_normalized: &str,
-    semantics: NameCountsLastFirstInitialSemantics,
+    canonical_first: &str,
+    canonical_last: &str,
 ) -> Option<NameCountsData> {
     if !has_name_counts_artifact(raw_name_counts) {
         return None;
     }
 
-    let mut first_for_counts = first_without_apostrophe
-        .split(' ')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if contains_name_dash(raw_first) {
-        let joined = first_without_apostrophe.replace(' ', "");
-        if !joined.is_empty() {
-            first_for_counts = joined;
-        }
-    }
-
-    let last_for_counts = canonical_last_for_counts(raw_last, last_normalized);
-    let last_first_initial_key = match semantics {
-        NameCountsLastFirstInitialSemantics::LegacyFullFirstToken => {
-            format!("{} {}", last_for_counts, first_for_counts)
-                .trim()
-                .to_string()
-        }
-        NameCountsLastFirstInitialSemantics::InitialChar => {
-            let first_initial = first_for_counts
-                .chars()
-                .next()
-                .map(|ch| ch.to_string())
-                .unwrap_or_default();
-            format!("{} {}", last_for_counts, first_initial)
-                .trim()
-                .to_string()
-        }
-    };
-
-    // A count key is looked up only when its components are present. An empty
-    // surname must yield NaN (not the sentinel default 1.0), mirroring the
-    // Python ANDData._compute_signature_name_counts path (D6 in
-    // docs/normalization_migration_blocked.md; work_plan section 2). Without
-    // the last_present guard a genuinely missing last name would be
-    // indistinguishable from a corpus count of 1, diverging from Python.
-    let first_informative = py_len(&first_for_counts) > 1;
-    let last_present = py_len(&last_for_counts) > 0;
-
-    let first = if first_informative {
-        match raw_name_counts.get(RawNameCountKind::First, &first_for_counts) {
-            Some(value) => value,
-            None => 1.0,
-        }
-    } else {
-        f64::NAN
-    };
-    let first_last = if first_informative && last_present {
-        let first_last_key = format!("{} {}", first_for_counts, last_for_counts);
-        match raw_name_counts.get(RawNameCountKind::FirstLast, first_last_key.trim()) {
-            Some(value) => value,
-            None => 1.0,
-        }
-    } else {
-        f64::NAN
-    };
-    let last = if last_present {
-        match raw_name_counts.get(RawNameCountKind::Last, &last_for_counts) {
-            Some(value) => value,
-            None => 1.0,
-        }
-    } else {
-        f64::NAN
-    };
-    let last_first_initial = if last_present {
-        match raw_name_counts.get(RawNameCountKind::LastFirstInitial, &last_first_initial_key) {
-            Some(value) => value,
-            None => 1.0,
-        }
-    } else {
-        f64::NAN
+    // canonical_v2 key construction (D5/D6/D8): keys are the full canonical
+    // fields, spaced — no first-token reduction and no compact-joins. A key is
+    // looked up only when its components pass the gate; a gated-out key must
+    // yield NaN (not the sentinel default 1.0), mirroring the Python
+    // `canonical_name_count_keys` path (docs/normalization_migration_blocked.md;
+    // work_plan section 2). Without the gates a genuinely missing component
+    // would be indistinguishable from a corpus count of 1, diverging from
+    // Python. A present key that misses the artifact defaults to 1.0.
+    let keys = canonical_name_count_keys_compat(canonical_first, canonical_last);
+    let lookup = |kind: RawNameCountKind, key: &Option<String>| match key {
+        Some(key) => raw_name_counts.get(kind, key).unwrap_or(1.0),
+        None => f64::NAN,
     };
 
     Some(NameCountsData {
-        first,
-        first_last,
-        last,
-        last_first_initial,
+        first: lookup(RawNameCountKind::First, &keys.first),
+        first_last: lookup(RawNameCountKind::FirstLast, &keys.first_last),
+        last: lookup(RawNameCountKind::Last, &keys.last),
+        last_first_initial: lookup(RawNameCountKind::LastFirstInitial, &keys.last_first_initial),
     })
 }
 
 #[cfg(test)]
 mod name_counts_empty_surname_tests {
-    use crate::name_counts::{
-        NameCountsLastFirstInitialSemantics, RawNameCountIndex, RawNameCountMaps,
-    };
+    use crate::name_counts::{RawNameCountIndex, RawNameCountMaps};
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -870,15 +796,22 @@ mod name_counts_empty_surname_tests {
         let maps = RawNameCountMaps::from_index(
             RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path")).expect("open index"),
         );
-        let semantics = NameCountsLastFirstInitialSemantics::InitialChar;
 
-        let empty_last =
-            super::build_name_counts_data_from_artifact(&maps, "Alice", "alice", "", "", semantics)
-                .expect("artifact present -> Some");
-        let present_last = super::build_name_counts_data_from_artifact(
-            &maps, "Alice", "alice", "Smith", "smith", semantics,
-        )
-        .expect("artifact present -> Some");
+        let empty_last = super::build_name_counts_data_from_artifact(&maps, "alice", "")
+            .expect("artifact present -> Some");
+        let present_last = super::build_name_counts_data_from_artifact(&maps, "alice", "smith")
+            .expect("artifact present -> Some");
+        // canonical_v2 D6: an empty first suppresses the last_first_initial
+        // lookup (legacy still looked up the bare surname key).
+        let empty_first = super::build_name_counts_data_from_artifact(&maps, "", "smith")
+            .expect("artifact present -> Some");
+        // A single-initial first is uninformative for first/first_last but
+        // still contributes its initial char to last_first_initial.
+        let initial_first = super::build_name_counts_data_from_artifact(&maps, "j", "doe")
+            .expect("artifact present -> Some");
+        // D5: spaced canonical fields are looked up as-is (no compact-join).
+        let spaced = super::build_name_counts_data_from_artifact(&maps, "sang min", "ou yang")
+            .expect("artifact present -> Some");
 
         // Drop the mmap-backed maps before removing the dir (Windows keeps
         // memory-mapped files locked while they are open).
@@ -910,5 +843,29 @@ mod name_counts_empty_surname_tests {
         assert_eq!(present_last.first_last, 1.0);
         assert_eq!(present_last.last_first_initial, 1.0);
         assert_eq!(present_last.first, 1.0);
+
+        // Empty first: every first-dependent key is NaN, including
+        // last_first_initial (canonical_v2 change from legacy).
+        assert!(empty_first.first.is_nan());
+        assert!(empty_first.first_last.is_nan());
+        assert!(
+            empty_first.last_first_initial.is_nan(),
+            "last_first_initial must be NaN for empty first (D6)"
+        );
+        assert_eq!(empty_first.last, 1.0);
+
+        // Single-initial first: uninformative for first/first_last, but the
+        // initial-char last_first_initial key is still looked up.
+        assert!(initial_first.first.is_nan());
+        assert!(initial_first.first_last.is_nan());
+        assert_eq!(initial_first.last_first_initial, 1.0);
+        assert_eq!(initial_first.last, 1.0);
+
+        // Spaced canonical fields all pass their gates and are looked up
+        // verbatim (misses -> 1.0 against the empty artifact).
+        assert_eq!(spaced.first, 1.0);
+        assert_eq!(spaced.first_last, 1.0);
+        assert_eq!(spaced.last, 1.0);
+        assert_eq!(spaced.last_first_initial, 1.0);
     }
 }

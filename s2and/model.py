@@ -30,10 +30,17 @@ from s2and.arrow_inputs import (
     require_arrow_artifacts,
     validate_arrow_prediction_artifacts,
 )
-from s2and.consts import _PACKAGE_DATA_DIR, DEFAULT_CHUNK_SIZE, LARGE_DISTANCE, LARGE_INTEGER, PROJECT_ROOT_PATH
+from s2and.consts import (
+    _PACKAGE_DATA_DIR,
+    DEFAULT_CHUNK_SIZE,
+    LARGE_DISTANCE,
+    LARGE_INTEGER,
+    NORMALIZATION_VERSION_LEGACY_COMPAT,
+    PROJECT_ROOT_PATH,
+    VALID_NORMALIZATION_VERSIONS,
+)
 from s2and.data import (
     NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-    NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
     ANDData,
     _load_name_tuples_from_file,
 )
@@ -97,7 +104,7 @@ from s2and.subblocking import (
     make_subblocks,
     rust_arrow_subblocking_available,
 )
-from s2and.text import first_names_name_compatible, normalize_orcid_compact, split_first_middle_hyphen_aware
+from s2and.text import canonicalize_name_parts, first_names_name_compatible, normalize_orcid_compact
 from s2and.thread_config import resolve_n_jobs
 
 logger = logging.getLogger("s2and")
@@ -881,7 +888,7 @@ def _load_arrow_incremental_signature_info(
                     raise ValueError(f"signatures Arrow contains duplicate signature_id: {signature_id!r}")
                 first = _optional_arrow_string(row.get("author_first"))
                 middle = _optional_arrow_string(row.get("author_middle"))
-                first_without_apostrophe, _middle_without_apostrophe = split_first_middle_hyphen_aware(first, middle)
+                first_without_apostrophe = canonicalize_name_parts(first, middle, None).first
                 signatures[signature_id] = _ArrowIncrementalSignatureInfo(
                     paper_id=_optional_arrow_string(row.get("paper_id")),
                     author_info_first=first,
@@ -987,6 +994,7 @@ def _explicit_dataset_arrow_paths_for_prediction(
             require_specter=clusterer_uses_embedding_features(clusterer),
             require_name_counts_index=clusterer_uses_name_count_features(clusterer),
             require_batch_indexes=True,
+            expected_normalization_version=_resolve_clusterer_normalization_version(clusterer),
             context=context,
             producer_hint=producer_hint,
         )
@@ -1124,6 +1132,7 @@ def _missing_arrow_prediction_artifacts_error(
                 require_specter=clusterer_uses_embedding_features(clusterer),
                 require_name_counts_index=clusterer_uses_name_count_features(clusterer),
                 require_batch_indexes=True,
+                expected_normalization_version=_resolve_clusterer_normalization_version(clusterer),
                 context=context,
                 producer_hint=producer_hint,
             )
@@ -1485,7 +1494,7 @@ def _signature_first_for_rules(signature: Any) -> str:
 @lru_cache(maxsize=2)
 def _load_name_tuples_for_incremental_rules(name_tuples: str | None) -> frozenset[tuple[str, str]]:
     if name_tuples == "filtered":
-        return frozenset(_load_name_tuples_from_file("s2and_name_tuples_filtered.txt"))
+        return frozenset(_load_name_tuples_from_file("s2and_name_tuples_canonical.txt"))
     if name_tuples is None:
         return frozenset(_load_name_tuples_from_file("s2and_name_tuples.txt"))
     raise ValueError("name_tuples must be None, 'filtered', or a set of (first_a, first_b) tuples")
@@ -1693,16 +1702,29 @@ def _name_count_semantics_from_featurizer_version(
     return NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
 
 
+def _resolve_clusterer_normalization_version(clusterer: Any) -> str:
+    """Resolve the normalization policy a model was trained under.
+
+    Absent feature_contract["normalization_version"] means the model predates the
+    normalization contract and implies "legacy_compat". Invalid tokens raise.
+    """
+
+    contract = getattr(clusterer, "feature_contract", None)
+    value = NORMALIZATION_VERSION_LEGACY_COMPAT
+    if isinstance(contract, dict):
+        value = contract.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
+    if value not in VALID_NORMALIZATION_VERSIONS:
+        raise ValueError(f"Invalid clusterer feature_contract['normalization_version'] value: {value!r}")
+    return str(value)
+
+
 def _resolve_clusterer_name_count_semantics(
     clusterer: Any,
 ) -> str:
     contract = getattr(clusterer, "feature_contract", None)
     if isinstance(contract, dict):
         contract_value = contract.get("name_counts_last_first_initial_semantics")
-        if contract_value in {
-            NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
-            NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-        }:
+        if contract_value == NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
             return str(contract_value)
         if contract_value is not None:
             raise ValueError(
@@ -3923,6 +3945,7 @@ class Clusterer:
             require_specter=clusterer_uses_embedding_features(self),
             require_name_counts_index=require_name_counts_index,
             require_batch_indexes=True,
+            expected_normalization_version=_resolve_clusterer_normalization_version(self),
             context="Clusterer.predict_from_arrow_paths",
             producer_hint=(
                 "provide signatures, papers, paper_authors, model-required specter, and model-required "
@@ -4035,10 +4058,7 @@ class Clusterer:
                 f"observed={sorted(repr(value) for value in dataset_semantics)}"
             )
         training_semantics = next(iter(dataset_semantics))
-        if training_semantics not in {
-            NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
-            NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-        }:
+        if training_semantics != NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
             raise ValueError(
                 "Clusterer.fit could not determine valid dataset name-count semantics; "
                 f"observed={training_semantics!r}"
@@ -4722,6 +4742,7 @@ class Clusterer:
                         require_specter=clusterer_uses_embedding_features(self),
                         require_name_counts_index=clusterer_uses_name_count_features(self),
                         require_batch_indexes=True,
+                        expected_normalization_version=_resolve_clusterer_normalization_version(self),
                         context="Clusterer.predict subblocked Arrow prediction",
                         producer_hint=(
                             "include signatures, papers, paper_authors, raw-planner batch indexes, "
@@ -5889,6 +5910,7 @@ class Clusterer:
             require_specter=clusterer_uses_embedding_features(self),
             require_name_counts_index=require_name_counts_index,
             require_batch_indexes=True,
+            expected_normalization_version=_resolve_clusterer_normalization_version(self),
             context="Clusterer.predict_incremental_from_arrow_paths",
             producer_hint=(
                 "provide signatures, papers, paper_authors, model-required specter, model-required "

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from s2and.consts import NORMALIZATION_VERSION_LEGACY_COMPAT, VALID_NORMALIZATION_VERSIONS
+
 
 @dataclass(frozen=True)
 class ArrowBatchIndexContract:
@@ -62,6 +64,12 @@ def _name_counts_index_error(path: Path) -> str | None:
             f"{manifest_path} (unsupported schema_version {schema_version!r}; "
             f"expected {NAME_COUNTS_INDEX_SCHEMA_VERSION!r})"
         )
+    normalization_version = manifest.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
+    if normalization_version not in VALID_NORMALIZATION_VERSIONS:
+        return (
+            f"{manifest_path} (invalid normalization_version {normalization_version!r}; "
+            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)})"
+        )
     files = manifest.get("files")
     if not isinstance(files, Mapping):
         return f"{manifest_path} (missing files mapping)"
@@ -78,6 +86,24 @@ def _name_counts_index_error(path: Path) -> str | None:
         if not resolved.is_file():
             return f"{resolved} (missing files.{file_key}.path target)"
     return None
+
+
+def read_name_counts_index_normalization_version(path: Any) -> str:
+    """Read the normalization_version recorded in a name_counts_index/ manifest.
+
+    An absent field means the artifact predates the normalization contract and is
+    treated as "legacy_compat". Invalid tokens raise ValueError.
+    """
+
+    manifest_path = Path(os.fspath(path)) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    value = manifest.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
+    if value not in VALID_NORMALIZATION_VERSIONS:
+        raise ValueError(
+            f"{manifest_path} has invalid normalization_version {value!r}; "
+            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
+        )
+    return str(value)
 
 
 def require_name_counts_index_artifact(
@@ -261,6 +287,7 @@ def validate_arrow_prediction_artifacts(
     require_name_counts_index: bool,
     require_cluster_seeds: bool = False,
     require_batch_indexes: bool = False,
+    expected_normalization_version: str | None = None,
     context: str = "Arrow prediction",
     producer_hint: str = (
         "generate a complete Arrow bundle with scripts/convert_to_arrow.py or use the published "
@@ -325,4 +352,21 @@ def validate_arrow_prediction_artifacts(
             missing_files=missing_files,
             producer_hint=producer_hint,
         )
+    if expected_normalization_version is not None and "name_counts_index" in normalized:
+        artifact_version = read_name_counts_index_normalization_version(normalized["name_counts_index"])
+        if artifact_version != expected_normalization_version:
+            raise MissingArrowArtifactError(
+                context=context,
+                required_keys=sorted(required),
+                missing_keys=(),
+                missing_files={
+                    "name_counts_index": (
+                        f"normalization_version mismatch: artifact is {artifact_version!r} but the model "
+                        f"feature contract requires {expected_normalization_version!r}; regenerate the "
+                        "artifact bundle and model as one release unit "
+                        "(docs/normalization_migration_blocked.md)"
+                    )
+                },
+                producer_hint=producer_hint,
+            )
     return normalized

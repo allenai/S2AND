@@ -7,8 +7,8 @@ use crate::name_counts::{NameCountsData, RawNameCountIndex, RawNameCountMaps};
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::arrow_io::{
     arrow_column_index, arrow_optional_bool, arrow_optional_column_index,
-    arrow_optional_f32_vector, arrow_optional_string_list, read_arrow_batches, ArrowI64Column,
-    ArrowStringColumn,
+    arrow_optional_f32_vector, arrow_optional_f64, arrow_optional_string_list, read_arrow_batches,
+    ArrowI64Column, ArrowStringColumn,
 };
 use crate::{canonical_signature_pair_owned, RetrievalQueryData};
 
@@ -35,6 +35,7 @@ pub(crate) struct RawArrowPaper {
     pub(crate) year: Option<i64>,
     pub(crate) predicted_language: Option<String>,
     pub(crate) is_reliable: Option<bool>,
+    pub(crate) language_reliability: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -197,6 +198,7 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowPaper>> {
     let mut out = HashMap::new();
+    let mut seen_all_paper_ids = HashSet::<String>::new();
     for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -233,25 +235,41 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
         };
         let is_reliable_col = arrow_optional_column_index(&batch, "is_reliable")
             .map(|index| batch.column(index).as_ref());
+        let language_reliability_col = arrow_optional_column_index(&batch, "language_reliability")
+            .map(|index| batch.column(index).as_ref());
         for row in 0..batch.num_rows() {
             let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
-            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
-                continue;
-            }
             if paper_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "papers Arrow cannot contain empty paper_id values",
                 ));
             }
+            // Detect duplicates regardless of the keep-filter so that an upstream
+            // corruption is caught symmetrically (a filtered scan must not be more
+            // permissive than a full scan).
+            if !seen_all_paper_ids.insert(paper_id_value.as_ref().to_string()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "papers Arrow contains duplicate paper_id: {:?}",
+                    paper_id_value.as_ref()
+                )));
+            }
+            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
+                continue;
+            }
             let paper_id = paper_id_value.into_owned();
             match out.entry(paper_id) {
-                Entry::Occupied(entry) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "papers Arrow contains duplicate paper_id: {:?}",
-                        entry.key()
-                    )));
-                }
+                Entry::Occupied(_) => unreachable!(
+                    "duplicate paper_id should be caught by the pre-filter check above"
+                ),
                 Entry::Vacant(entry) => {
+                    let is_reliable = match is_reliable_col {
+                        Some(col) => arrow_optional_bool(col, row, "is_reliable")?,
+                        None => None,
+                    };
+                    let language_reliability = match language_reliability_col {
+                        Some(col) => arrow_optional_f64(col, row, "language_reliability")?,
+                        None => is_reliable.map(|value| if value { 1.0 } else { 0.0 }),
+                    };
                     entry.insert(RawArrowPaper {
                         // title/venue/journal_name are serialized with the same
                         // ""/None -> NULL producer convention, so NULL means
@@ -271,10 +289,8 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
                         predicted_language: predicted_language_values
                             .as_ref()
                             .and_then(|col| col.optional_owned(row)),
-                        is_reliable: match is_reliable_col {
-                            Some(col) => arrow_optional_bool(col, row, "is_reliable")?,
-                            None => None,
-                        },
+                        is_reliable,
+                        language_reliability,
                     });
                 }
             }
@@ -499,20 +515,24 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
         let embedding_col = batch.column(arrow_column_index(&batch, "embedding", path)?);
         for row in 0..batch.num_rows() {
             let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
-            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
-                continue;
-            }
             if paper_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "specter Arrow cannot contain empty paper_id values",
                 ));
             }
-            let paper_id = paper_id_value.into_owned();
-            if !seen_paper_ids.insert(paper_id.clone()) {
+            // Detect duplicates regardless of the keep-filter so that an upstream
+            // corruption is caught symmetrically (a filtered scan must not be more
+            // permissive than a full scan).
+            if !seen_paper_ids.insert(paper_id_value.as_ref().to_string()) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "specter Arrow contains duplicate paper_id: {paper_id:?}"
+                    "specter Arrow contains duplicate paper_id: {:?}",
+                    paper_id_value.as_ref()
                 )));
             }
+            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
+                continue;
+            }
+            let paper_id = paper_id_value.into_owned();
             let vector = arrow_optional_f32_vector(embedding_col.as_ref(), row, "embedding")?
                 .ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(format!(
@@ -657,5 +677,128 @@ mod null_required_string_tests {
         assert_eq!(paper.title, "");
         assert_eq!(paper.venue, "");
         assert_eq!(paper.journal_name, "");
+    }
+}
+
+#[cfg(test)]
+mod filtered_duplicate_detection_tests {
+    use super::{read_raw_arrow_papers_from_batches, read_raw_arrow_specter_from_batches};
+    use arrow::array::{ArrayRef, FixedSizeListArray, StringArray};
+    use arrow::datatypes::{DataType, Field, Float32Type, Schema};
+    use arrow::record_batch::RecordBatch;
+    use pyo3::types::PyAnyMethods;
+    use pyo3::{PyErr, Python};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn py_err_message(err: PyErr) -> String {
+        #[cfg(windows)]
+        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
+            std::env::set_var("PYTHONHOME", python_home);
+        }
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            err.value(py)
+                .str()
+                .expect("PyErr value should stringify")
+                .to_string()
+        })
+    }
+
+    fn papers_batch(paper_ids: &[&str]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("paper_id", DataType::Utf8, false),
+            Field::new("title", DataType::Utf8, true),
+            Field::new("venue", DataType::Utf8, true),
+            Field::new("journal_name", DataType::Utf8, true),
+        ]));
+        let n = paper_ids.len();
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(paper_ids.to_vec())),
+            Arc::new(StringArray::from(vec![None::<&str>; n])),
+            Arc::new(StringArray::from(vec![None::<&str>; n])),
+            Arc::new(StringArray::from(vec![None::<&str>; n])),
+        ];
+        RecordBatch::try_new(schema, columns).expect("valid record batch")
+    }
+
+    fn specter_batch(paper_ids: &[&str]) -> RecordBatch {
+        let embedding_field = Arc::new(Field::new("item", DataType::Float32, true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("paper_id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(embedding_field, 1),
+                true,
+            ),
+        ]));
+        let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            paper_ids.iter().map(|_| Some(vec![Some(0.5f32)])),
+            1,
+        );
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(paper_ids.to_vec())),
+            Arc::new(embeddings),
+        ];
+        RecordBatch::try_new(schema, columns).expect("valid record batch")
+    }
+
+    fn keep(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    // A duplicate id whose copies are all excluded by the keep-filter must still
+    // fail: a filtered scan must not be more permissive than a full scan.
+    #[test]
+    fn papers_duplicate_outside_keep_filter_is_rejected() {
+        let batch = papers_batch(&["p1", "p1", "p2"]);
+        let keep_ids = keep(&["p2"]);
+        let err = read_raw_arrow_papers_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .err()
+            .expect("duplicate paper_id must be detected even when filtered out");
+        let message = py_err_message(err);
+        assert!(message.contains("duplicate paper_id"), "{message}");
+    }
+
+    #[test]
+    fn papers_duplicate_inside_keep_filter_is_rejected() {
+        let batch = papers_batch(&["p1", "p1"]);
+        let keep_ids = keep(&["p1"]);
+        let err = read_raw_arrow_papers_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .err()
+            .expect("duplicate paper_id must be detected inside the keep-filter");
+        let message = py_err_message(err);
+        assert!(message.contains("duplicate paper_id"), "{message}");
+    }
+
+    #[test]
+    fn papers_unique_ids_with_keep_filter_read_ok() {
+        let batch = papers_batch(&["p1", "p2"]);
+        let keep_ids = keep(&["p2"]);
+        let papers = read_raw_arrow_papers_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .expect("unique ids must read");
+        assert_eq!(papers.len(), 1);
+        assert!(papers.contains_key("p2"));
+    }
+
+    #[test]
+    fn specter_duplicate_outside_keep_filter_is_rejected() {
+        let batch = specter_batch(&["p1", "p1", "p2"]);
+        let keep_ids = keep(&["p2"]);
+        let err = read_raw_arrow_specter_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .err()
+            .expect("duplicate paper_id must be detected even when filtered out");
+        let message = py_err_message(err);
+        assert!(message.contains("duplicate paper_id"), "{message}");
+    }
+
+    #[test]
+    fn specter_unique_ids_with_keep_filter_read_ok() {
+        let batch = specter_batch(&["p1", "p2"]);
+        let keep_ids = keep(&["p2"]);
+        let specter = read_raw_arrow_specter_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .expect("unique ids must read");
+        assert_eq!(specter.len(), 1);
+        assert!(specter.contains_key("p2"));
     }
 }

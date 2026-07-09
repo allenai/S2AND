@@ -755,7 +755,7 @@ class FeaturizationInfo:
         # position features
         if "misc_features" in self.features_to_use:
             feature_names.extend(
-                ["position_diff", "abstract_count", "english_count", "same_language", "language_reliability_count"]
+                ["position_diff", "abstract_count", "english_count", "same_language", "language_reliability_min"]
             )
 
         # name count features
@@ -1201,7 +1201,7 @@ def _single_pair_featurize(
             int(paper_1.has_abstract) + int(paper_2.has_abstract),
             english_or_unknown_count,
             paper_1.predicted_language == paper_2.predicted_language,
-            int(paper_1.is_reliable) + int(paper_2.is_reliable),
+            min(float(paper_1.language_reliability or 0.0), float(paper_2.language_reliability or 0.0)),
         ]
     )
 

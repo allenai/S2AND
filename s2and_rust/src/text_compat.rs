@@ -137,52 +137,196 @@ fn is_name_dash(ch: char) -> bool {
     )
 }
 
-pub(crate) fn contains_name_dash(value: &str) -> bool {
-    value.chars().any(is_name_dash)
+// D3 apostrophe-like marks (mirrors Python `NAME_APOSTROPHE_LIKE_CHARS` in
+// s2and/text.py): ASCII apostrophe, backtick, spacing acute, curly quotes,
+// modifier letters (okina/apostrophe), primes, saltillo, U+FE4D (classified with
+// apostrophe-like marks by issue #39 despite its Unicode name), fullwidth
+// apostrophe.
+fn is_name_apostrophe_like(ch: char) -> bool {
+    matches!(
+        ch,
+        '\'' | '`'
+            | '\u{00B4}'
+            | '\u{2018}'
+            | '\u{2019}'
+            | '\u{02BB}'
+            | '\u{02BC}'
+            | '\u{2032}'
+            | '\u{2035}'
+            | '\u{A78C}'
+            | '\u{FE4D}'
+            | '\u{FF07}'
+    )
 }
 
-pub(crate) fn contains_non_ascii_name_dash(value: &str) -> bool {
-    value.chars().any(|ch| ch != '-' && is_name_dash(ch))
+// Invisible formatting controls deleted before tokenization (mirrors Python
+// `_NAME_INVISIBLE_FORMAT_CHARS`): soft hyphen (not a dash separator) and
+// zero-width joiner.
+fn is_name_invisible_format(ch: char) -> bool {
+    matches!(ch, '\u{00AD}' | '\u{200D}')
 }
 
-pub(crate) fn split_first_middle_hyphen_aware_compat(
+/// canonical_v2 pre-translation on raw code points, before transliteration
+/// (mirrors Python `_canonical_name_pretranslate`): delete invisible format
+/// controls, unify apostrophe-like marks to ASCII apostrophe, and unify
+/// dash-like characters to ASCII hyphen.
+fn canonical_name_pretranslate(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if is_name_invisible_format(ch) {
+            continue;
+        }
+        if is_name_apostrophe_like(ch) {
+            out.push('\'');
+        } else if is_name_dash(ch) {
+            out.push('-');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// canonical_v2 token normalization of a pre-translated string (mirrors Python
+/// `_canonical_name_tokens`): transliterate, lowercase, delete apostrophes and
+/// backticks post-transliteration (no token boundary), and split on everything
+/// that is not an ASCII letter. Dash binding is decided by the caller before
+/// this runs.
+fn canonical_name_tokens(
+    pretranslated: &str,
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let consume = |mapped_ch: char, current: &mut String, tokens: &mut Vec<String>| {
+        let lowered = mapped_ch.to_ascii_lowercase();
+        if lowered.is_ascii_lowercase() {
+            current.push(lowered);
+        } else if lowered == '\'' || lowered == '`' {
+            // Deleted, not a separator: O'Brien -> obrien.
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(current));
+        }
+    };
+    for ch in pretranslated.chars() {
+        if ch.is_ascii() {
+            consume(ch, &mut current, &mut tokens);
+            continue;
+        }
+        let mapped = unidecode_char_map
+            .and_then(|char_map| char_map.get(&ch).map(String::as_str))
+            .unwrap_or_else(|| text_unidecode_char(ch));
+        for mapped_ch in mapped.chars() {
+            consume(mapped_ch, &mut current, &mut tokens);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Canonicalize a whole name string to spaced canonical_v2 tokens (mirrors
+/// Python `canonicalize_name_text`). This is the normalization for canonical
+/// middle and last fields and for whole-string artifact keys.
+pub(crate) fn canonicalize_name_text_compat(
+    raw: &str,
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> String {
+    canonical_name_tokens(&canonical_name_pretranslate(raw), unidecode_char_map).join(" ")
+}
+
+/// Canonicalize raw first/middle/last per the canonical_v2 pipeline (mirrors
+/// Python `canonicalize_name_parts`). Returns (first, middle, last).
+///
+/// - At most one leading title-prefix token is dropped from first (D7).
+/// - First/middle split (D1): a leading dash-bound group stays together in
+///   first as spaced tokens; otherwise the first token stays and later tokens
+///   spill into middle ahead of existing middle tokens. Space tokens after a
+///   dash-bound group still spill.
+pub(crate) fn canonicalize_name_parts_compat(
     first_raw: &str,
     middle_raw: &str,
+    last_raw: &str,
     name_prefixes: &HashSet<String>,
-    unidecode_char_map: &HashMap<char, String>,
-) -> (String, String) {
-    let has_dash_in_first = contains_name_dash(first_raw);
-    let first_noapos = normalize_text_compat_from_map(first_raw, true, unidecode_char_map);
-    let middle_norm = normalize_text_compat_from_map(middle_raw, false, unidecode_char_map);
+    unidecode_char_map: Option<&HashMap<char, String>>,
+) -> (String, String, String) {
+    let first_clean = canonical_name_pretranslate(first_raw);
+    let middle_text = canonicalize_name_text_compat(middle_raw, unidecode_char_map);
+    let last = canonicalize_name_text_compat(last_raw, unidecode_char_map);
 
-    let mut f_parts: Vec<String> = first_noapos
-        .split_whitespace()
-        .map(|token| token.to_string())
-        .collect();
-    let m_parts: Vec<String> = middle_norm
-        .split_whitespace()
-        .map(|token| token.to_string())
-        .collect();
-    if let Some(prefix) = f_parts.first() {
-        if name_prefixes.contains(prefix) {
-            f_parts.remove(0);
+    // Whitespace chunks of the raw first field, each normalized to tokens and
+    // tagged with whether a dash bound it together.
+    let mut flattened: Vec<(String, usize)> = Vec::new();
+    let mut dash_bound: Vec<bool> = Vec::new();
+    for (group_index, chunk) in first_clean.split_whitespace().enumerate() {
+        dash_bound.push(chunk.contains('-'));
+        for token in canonical_name_tokens(&chunk.replace('-', " "), unidecode_char_map) {
+            flattened.push((token, group_index));
         }
     }
 
-    if f_parts.is_empty() {
-        return (String::new(), m_parts.join(" "));
+    if let Some((token, _group)) = flattened.first() {
+        if name_prefixes.contains(token) {
+            flattened.remove(0);
+        }
     }
-    if has_dash_in_first {
-        return (f_parts.join(" "), m_parts.join(" "));
+
+    let (first_field_tokens, spilled_tokens): (Vec<String>, Vec<String>) = if flattened.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let lead_group = flattened[0].1;
+        if dash_bound[lead_group] {
+            // partition preserves order within both halves.
+            let (kept, spilled): (Vec<_>, Vec<_>) = flattened
+                .into_iter()
+                .partition(|(_token, group)| *group == lead_group);
+            (
+                kept.into_iter().map(|(token, _)| token).collect(),
+                spilled.into_iter().map(|(token, _)| token).collect(),
+            )
+        } else {
+            let mut iter = flattened.into_iter().map(|(token, _)| token);
+            let head = iter.next().expect("flattened is non-empty");
+            (vec![head], iter.collect())
+        }
+    };
+
+    let first = first_field_tokens.join(" ");
+    let middle = if spilled_tokens.is_empty() {
+        middle_text
+    } else if middle_text.is_empty() {
+        spilled_tokens.join(" ")
+    } else {
+        format!("{} {}", spilled_tokens.join(" "), middle_text)
+    };
+    (first, middle, last)
+}
+
+/// Canonical_v2 count keys built from canonical fields after gating (mirrors
+/// Python `canonical_name_count_keys`, D6/D8). A `None` key means no lookup
+/// (NaN feature), never a sentinel count. `first` and `first_last` require an
+/// informative first (string length > 1); `last_first_initial` requires first
+/// and last present and stays initial-char semantics.
+pub(crate) struct CanonicalNameCountKeys {
+    pub(crate) first: Option<String>,
+    pub(crate) last: Option<String>,
+    pub(crate) first_last: Option<String>,
+    pub(crate) last_first_initial: Option<String>,
+}
+
+pub(crate) fn canonical_name_count_keys_compat(first: &str, last: &str) -> CanonicalNameCountKeys {
+    let first_informative = crate::py_len(first) > 1;
+    let last_present = !last.is_empty();
+    CanonicalNameCountKeys {
+        first: first_informative.then(|| first.to_string()),
+        last: last_present.then(|| last.to_string()),
+        first_last: (first_informative && last_present).then(|| format!("{first} {last}")),
+        last_first_initial: (!first.is_empty() && last_present).then(|| {
+            let first_initial = first.chars().next().expect("first is non-empty");
+            format!("{last} {first_initial}")
+        }),
     }
-    let first = f_parts[0].clone();
-    let middle = f_parts[1..]
-        .iter()
-        .chain(m_parts.iter())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
-    (first, middle)
 }
 
 pub(crate) fn compute_block_compat(name: &str) -> String {
@@ -201,7 +345,12 @@ pub(crate) fn compute_block_compat(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_text_compat_native, text_unidecode_char};
+    use super::{
+        canonical_name_count_keys_compat, canonicalize_name_parts_compat,
+        normalize_text_compat_native, text_unidecode_char,
+    };
+    use std::collections::HashSet;
+    use std::path::Path;
 
     #[test]
     fn text_unidecode_char_matches_python_text_unidecode_compat_overrides() {
@@ -210,6 +359,100 @@ mod tests {
         assert_eq!(text_unidecode_char('\u{02FF}'), "[?] ");
         assert_eq!(text_unidecode_char('\u{25F4}'), "#");
         assert_eq!(text_unidecode_char('\u{FDFD}'), "[?]");
+    }
+
+    // Mirrors `NAME_PREFIXES` in s2and/text.py. Note "md" is deliberately NOT a
+    // prefix (D7): it is a common South Asian given-name abbreviation.
+    fn python_name_prefixes() -> HashSet<String> {
+        [
+            "dr",
+            "prof",
+            "professor",
+            "mr",
+            "miss",
+            "mrs",
+            "ms",
+            "mx",
+            "sir",
+            "phd",
+            "doctor",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn fixture_string(value: &serde_json::Value) -> String {
+        // Fixture inputs use null for missing fields; canonicalization treats
+        // null and empty identically.
+        value.as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn canonical_name_fixture_matches_python_reference_for_all_cases() {
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("canonical_name_examples.json");
+        let fixture_text =
+            std::fs::read_to_string(&fixture_path).expect("read canonical_name_examples.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&fixture_text).expect("parse canonical_name_examples.json");
+        assert_eq!(
+            fixture["normalization_version"].as_str(),
+            Some("canonical_v2")
+        );
+        let cases = fixture["cases"].as_array().expect("fixture cases array");
+        assert!(!cases.is_empty(), "fixture has no cases");
+
+        let name_prefixes = python_name_prefixes();
+        for case in cases {
+            let case_id = case["id"].as_str().expect("case id");
+            let input = &case["input"];
+            let canonical = &case["canonical"];
+            // Native transliteration table (no Python-supplied unidecode map):
+            // the crate's `text_unidecode_char` carries the python parity
+            // overrides, so the fixture must pass without a supplied map.
+            let (first, middle, last) = canonicalize_name_parts_compat(
+                &fixture_string(&input["first"]),
+                &fixture_string(&input["middle"]),
+                &fixture_string(&input["last"]),
+                &name_prefixes,
+                None,
+            );
+            assert_eq!(
+                first,
+                canonical["first"].as_str().expect("canonical first"),
+                "case {case_id}: first"
+            );
+            assert_eq!(
+                middle,
+                canonical["middle"].as_str().expect("canonical middle"),
+                "case {case_id}: middle"
+            );
+            assert_eq!(
+                last,
+                canonical["last"].as_str().expect("canonical last"),
+                "case {case_id}: last"
+            );
+
+            let expected_keys = &canonical["count_keys"];
+            let keys = canonical_name_count_keys_compat(&first, &last);
+            for (name, actual) in [
+                ("first", &keys.first),
+                ("last", &keys.last),
+                ("first_last", &keys.first_last),
+                ("last_first_initial", &keys.last_first_initial),
+            ] {
+                let expected = expected_keys[name].as_str();
+                assert_eq!(
+                    actual.as_deref(),
+                    expected,
+                    "case {case_id}: count key {name}"
+                );
+            }
+        }
     }
 
     #[test]

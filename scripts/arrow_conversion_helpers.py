@@ -163,6 +163,10 @@ def _feature_block_papers_from_anddata(
         if paper is None:
             raise ValueError(f"ANDData papers are missing signature paper_id: {paper_id!r}")
         seen.add(paper_id)
+        is_reliable = _optional_bool(getattr(paper, "is_reliable", None), field_name="papers.is_reliable")
+        language_reliability = getattr(paper, "language_reliability", None)
+        if language_reliability is None and is_reliable is not None:
+            language_reliability = 1.0 if is_reliable else 0.0
         papers.append(
             FeatureBlockPaper(
                 paper_id=paper_id,
@@ -172,7 +176,8 @@ def _feature_block_papers_from_anddata(
                 journal_name=_optional_str(getattr(paper, "journal_name", None)),
                 year=_optional_int(getattr(paper, "year", None), field_name="papers.year"),
                 predicted_language=_optional_str(getattr(paper, "predicted_language", None)),
-                is_reliable=_optional_bool(getattr(paper, "is_reliable", None), field_name="papers.is_reliable"),
+                is_reliable=is_reliable,
+                language_reliability=language_reliability,
             )
         )
     return tuple(papers)

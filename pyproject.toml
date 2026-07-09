@@ -15,7 +15,6 @@ authors = [{ name = "Sergey Feldman, Daniel King, Shivashankar Subramanian" }]
 dependencies = [
   "setuptools>=78.1.1,<82",
   "awscli>=1.44.38",
-  "fasttext-wheel>=0.9.2",
   "pillow>=12.2.0",
   "pycld2>=0.41",
   "scikit-learn==1.7.1",
@@ -68,6 +67,8 @@ s2and = [
   "data/first_k_letter_counts_from_orcid.json",
   "data/s2and_name_tuples.txt",
   "data/s2and_name_tuples_filtered.txt",
+  "data/s2and_name_tuples_canonical.txt",
+  "data/s2and_name_tuples_canonical.txt.meta.json",
   "data/s2and_unnormalized_filtered_name_tuples.txt",
   "data/production_model_v1.0.pickle",
   "data/production_model_v1.1.pickle",

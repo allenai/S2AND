@@ -1157,12 +1157,7 @@ def test_rust_featurizer_from_arrow_paths_rejects_null_author_position(tmp_path:
         )
 
 
-def test_rust_featurizer_from_arrow_paths_reuses_cached_language_without_fasttext(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import s2and.file_cache as file_cache
-
+def test_rust_featurizer_from_arrow_paths_reuses_cached_language(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     with pa.memory_map(paths["papers"], "r") as source:
         papers = pa.ipc.open_file(source).read_all()
@@ -1170,12 +1165,6 @@ def test_rust_featurizer_from_arrow_paths_reuses_cached_language_without_fasttex
     papers = papers.append_column("is_reliable", pa.array([True, True, True], type=pa.bool_()))
     paths["papers"] = _write_ipc(tmp_path / "papers_with_language.arrow", papers)
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
-    monkeypatch.delenv("S2AND_SKIP_FASTTEXT", raising=False)
-    monkeypatch.setattr(
-        file_cache,
-        "cached_path",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fastText path should not be resolved")),
-    )
 
     featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
         paths,

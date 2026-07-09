@@ -18,8 +18,8 @@ use crate::raw_arrow::readers::{
     read_raw_arrow_with_optional_index,
 };
 use crate::text_compat::{
-    compute_block_compat, contains_non_ascii_name_dash, ensure_unidecode_for_text,
-    normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
+    canonicalize_name_parts_compat, compute_block_compat, ensure_unidecode_for_text,
+    normalize_text_compat_from_map,
 };
 use crate::{
     extract_affiliation_stopwords, extract_required_string_set, fnv64_update, py_len, FNV_OFFSET,
@@ -52,38 +52,19 @@ pub(crate) struct SubblockingSignatureRow {
     pub(crate) position: Option<i64>,
 }
 
-pub(crate) fn spill_non_ascii_dash_first_for_subblocking(
-    raw_first: &str,
-    first: &str,
-    middle: &str,
-) -> (String, String) {
-    if raw_first.contains('-') || !contains_non_ascii_name_dash(raw_first) {
-        return (first.to_string(), middle.to_string());
-    }
-    let first_parts: Vec<&str> = first.split_whitespace().collect();
-    if first_parts.len() <= 1 {
-        return (first.to_string(), middle.to_string());
-    }
-    let mut middle_parts: Vec<&str> = first_parts[1..].to_vec();
-    middle_parts.extend(middle.split_whitespace());
-    (first_parts[0].to_string(), middle_parts.join(" "))
-}
-
 pub(crate) fn normalize_subblocking_signature_rows(
     rows: &mut [SubblockingSignatureRow],
     name_prefixes: &HashSet<String>,
     unidecode_char_map: &HashMap<char, String>,
 ) {
     for row in rows.iter_mut() {
-        let raw_first = row.first.clone();
-        let (first, middle) = split_first_middle_hyphen_aware_compat(
+        let (first, middle, _last) = canonicalize_name_parts_compat(
             &row.first,
             &row.middle,
+            "",
             name_prefixes,
-            unidecode_char_map,
+            Some(unidecode_char_map),
         );
-        let (first, middle) =
-            spill_non_ascii_dash_first_for_subblocking(&raw_first, &first, &middle);
         row.first = first;
         row.middle = middle;
     }
@@ -2030,9 +2011,11 @@ pub(crate) fn subblock_merge_candidate_metadata(key: &str, size: usize) -> Subbl
     } else {
         None
     };
-    let lookup = name_for_splits
-        .as_ref()
-        .map(|name| name.split(' ').next().unwrap_or_default().to_string());
+    // canonical_v2: the ORCID first-k-letter prefix-count artifact is keyed on
+    // slices of FULL canonical first names (spaces included), so the lookup key
+    // is the whole canonical name string. The legacy first-token reduction was
+    // a shim for compact-joined keys and is retired.
+    let lookup = name_for_splits.clone();
     SubblockMergeMetadata {
         size,
         first_name,
@@ -2265,16 +2248,25 @@ pub(crate) fn apply_orcid_subblocking(
     row_by_signature_id: &HashMap<String, SubblockingSignatureRow>,
     maximum_size: usize,
     telemetry: &mut SubblockingTelemetry,
-) {
+) -> PyResult<()> {
     let subblock_ids: Vec<String> = output.iter().map(|(key, _values)| key.clone()).collect();
     let mut sig_id_to_subblock_index: HashMap<String, usize> = HashMap::new();
     let mut sig_id_order = Vec::<String>::new();
-    for (subblock_index, (_subblock_id, sig_ids)) in output.entries.iter().enumerate() {
+    for (subblock_index, (subblock_id, sig_ids)) in output.entries.iter().enumerate() {
         for sig_id in sig_ids {
-            if !sig_id_to_subblock_index.contains_key(sig_id) {
-                sig_id_order.push(sig_id.clone());
+            // Upstream subblocking must produce a partition; a duplicated
+            // signature_id would otherwise bind to an arbitrary subblock here
+            // (last-wins) and silently diverge from the Python implementation.
+            if sig_id_to_subblock_index
+                .insert(sig_id.clone(), subblock_index)
+                .is_some()
+            {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                    "duplicate signature_id {sig_id:?} reached ORCID subblocking in subblock {subblock_id:?}; \
+                     upstream subblocking must produce a complete partition"
+                )));
             }
-            sig_id_to_subblock_index.insert(sig_id.clone(), subblock_index);
+            sig_id_order.push(sig_id.clone());
         }
     }
 
@@ -2401,6 +2393,7 @@ pub(crate) fn apply_orcid_subblocking(
         }
         output.insert(key_of_keys, signature_ids_stacked);
     }
+    Ok(())
 }
 
 pub(crate) fn extract_string_vec_entries(
@@ -2583,15 +2576,24 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
             &row_by_signature_id,
             maximum_size,
             &mut telemetry,
-        );
+        )?;
     }
 
-    let input_set: HashSet<String> = signature_ids.into_iter().collect();
-    let output_set: HashSet<String> = output
-        .iter()
-        .flat_map(|(_key, values)| values.iter().cloned())
-        .collect();
-    if input_set != output_set {
+    // Multiset equality, not set equality: a signature_id duplicated across
+    // subblocks would pass a set check but bind to an arbitrary subblock in the
+    // downstream ORCID merge, silently diverging from the Python implementation
+    // (which asserts multiset equality).
+    let mut input_counts: HashMap<String, usize> = HashMap::new();
+    for signature_id in signature_ids.into_iter() {
+        *input_counts.entry(signature_id).or_insert(0) += 1;
+    }
+    let mut output_counts: HashMap<String, usize> = HashMap::new();
+    for (_key, values) in output.iter() {
+        for signature_id in values.iter() {
+            *output_counts.entry(signature_id.clone()).or_insert(0) += 1;
+        }
+    }
+    if input_counts != output_counts {
         return Err(pyo3::exceptions::PyAssertionError::new_err(
             "Subblocking did not produce a complete partition",
         ));

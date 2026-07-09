@@ -282,30 +282,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fasttext-wheel"
-version = "0.9.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "pybind11" },
-    { name = "setuptools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c8/51/022e84b23ec435248a39f727dae94240321ebe2fdc104800de80410e1550/fasttext-wheel-0.9.2.tar.gz", hash = "sha256:056e088318ef0e0cc690c4cb18637320eaa3cdb986b62d67bb50d6a7a82e4051", size = 71384, upload-time = "2023-05-05T12:02:55.501Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e8/87/ff2a0cdcd422a951a3c000a809c2f77462085dde0192f10405377f5454e3/fasttext_wheel-0.9.2-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:a32cc0bee31985c5a15ae2ec4f7d777c84e84294d70969d7382961305b0851cf", size = 307771, upload-time = "2022-10-25T08:51:47.354Z" },
-    { url = "https://files.pythonhosted.org/packages/02/8a/625195477d08abc9d1674ee99c818f565c4a49849db75078c1e319a189db/fasttext_wheel-0.9.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:aefd4dbecf4c243628a513c3f9f9008a4c94d63f4194cfde6d11975710f04b7c", size = 330705, upload-time = "2022-10-25T08:33:31.472Z" },
-    { url = "https://files.pythonhosted.org/packages/e3/24/8a85a2d6c80b303762f2bd296f7a3bbc1027ce6731a3d6f0bc28665c8065/fasttext_wheel-0.9.2-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:ef5be5e24ad4aab61eb42c30e1a7909464b20958907c23dfe4037ef247755254", size = 2882873, upload-time = "2022-11-02T13:00:35.222Z" },
-    { url = "https://files.pythonhosted.org/packages/05/75/105f62d1d24e0bae7c53893c1bbe3cf6eed71c6aa33961105058647e2409/fasttext_wheel-0.9.2-cp311-cp311-manylinux2014_armv7l.whl", hash = "sha256:2dcbe5cb3ebad68667772ff2457d1d5ced69e9caa19fe35e53fe1b0c68db69f6", size = 2661872, upload-time = "2022-11-02T13:00:54.818Z" },
-    { url = "https://files.pythonhosted.org/packages/2d/86/2b43814c0f0722e3800ffb0ab873f7d17d9ec107d0b7b477583e6e8ac769/fasttext_wheel-0.9.2-cp311-cp311-manylinux2014_ppc64.whl", hash = "sha256:b1e6c4aee8dfc5629aba54c0c044eb0c699b3f82ee5f0f1a8edf69c84ffaa1bd", size = 2931234, upload-time = "2022-11-02T13:01:55.116Z" },
-    { url = "https://files.pythonhosted.org/packages/31/c4/74783db26f0067ce9508678b18e033b0d0575e389a7a93431aae0338afcd/fasttext_wheel-0.9.2-cp311-cp311-manylinux2014_ppc64le.whl", hash = "sha256:ad1a3e10354cb71cb2e182ce4cb7fa61fd2396fe4e28d52002b8f6a749138e4d", size = 2809784, upload-time = "2022-11-02T13:00:41.575Z" },
-    { url = "https://files.pythonhosted.org/packages/5d/bf/a9053e329d43a8daac6afe21f4e856b9f2dabfd69e2a8359c23e3c2e345b/fasttext_wheel-0.9.2-cp311-cp311-manylinux2014_s390x.whl", hash = "sha256:c7b94290bc5bf1a8f2cf6ca2e84364bca3588525625907323d3a77bc96365915", size = 2849750, upload-time = "2022-11-02T13:00:38.967Z" },
-    { url = "https://files.pythonhosted.org/packages/64/4d/39e0520fbbde6861467948dfd188aefca614c671e5801ca86b95059f9b1d/fasttext_wheel-0.9.2-cp311-cp311-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:9e09cff3f2002cdef5f046a0969a0bf886d5386c2eb1c15874d90f9a95edb8d0", size = 4351369, upload-time = "2022-10-25T07:09:18.669Z" },
-    { url = "https://files.pythonhosted.org/packages/f6/13/94644fa56b36d5638e2c689f4506e2685a13c78765d03ae22294711460d4/fasttext_wheel-0.9.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1ec13d485e0202e729b3bcb7283dda9c499581f691fa8e835e237ee5cf69a2b5", size = 4430756, upload-time = "2022-10-25T07:10:01.452Z" },
-    { url = "https://files.pythonhosted.org/packages/d9/e3/401187b0dbb79c9e878f74aa70921478817ef3a154d2edd2b41c5ab4d476/fasttext_wheel-0.9.2-cp311-cp311-win32.whl", hash = "sha256:39d3201a8e6dabf59c0d8f9a7064d12bb996bca38f5f15e5a678e12fcbd39a35", size = 202482, upload-time = "2022-10-25T07:12:43.423Z" },
-    { url = "https://files.pythonhosted.org/packages/96/58/2d1c2557cefa8d30c7e7ed182cac53cc811b4dcf265ffa64fb8e8a6287c5/fasttext_wheel-0.9.2-cp311-cp311-win_amd64.whl", hash = "sha256:1afb40118fb1b39e159bbdded14834a6a95415c0be957553647b9d70c7cc45ff", size = 232405, upload-time = "2022-10-25T07:10:33.006Z" },
-]
-
-[[package]]
 name = "fonttools"
 version = "4.61.1"
 source = { registry = "https://pypi.org/simple" }
@@ -897,15 +873,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pybind11"
-version = "3.0.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2f/7b/a6d8dcb83c457e24a9df1e4d8fd5fb8034d4bbc62f3c324681e8a9ba57c2/pybind11-3.0.1.tar.gz", hash = "sha256:9c0f40056a016da59bab516efb523089139fcc6f2ba7e4930854c61efb932051", size = 546914, upload-time = "2025-08-22T20:09:27.265Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cd/8a/37362fc2b949d5f733a8b0f2ff51ba423914cabefe69f1d1b6aab710f5fe/pybind11-3.0.1-py3-none-any.whl", hash = "sha256:aa8f0aa6e0a94d3b64adfc38f560f33f15e589be2175e103c0a33c6bce55ee89", size = 293611, upload-time = "2025-08-22T20:09:25.235Z" },
-]
-
-[[package]]
 name = "pycld2"
 version = "0.42"
 source = { registry = "https://pypi.org/simple" }
@@ -1139,7 +1106,6 @@ source = { editable = "." }
 dependencies = [
     { name = "awscli" },
     { name = "fastcluster" },
-    { name = "fasttext-wheel" },
     { name = "fonttools" },
     { name = "genieclust" },
     { name = "hyperopt" },
@@ -1181,7 +1147,6 @@ requires-dist = [
     { name = "awscli", specifier = ">=1.44.38" },
     { name = "click", marker = "extra == 'dev'", specifier = ">=8,<9" },
     { name = "fastcluster", specifier = ">=1.2.6,<2" },
-    { name = "fasttext-wheel", specifier = ">=0.9.2" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "genieclust", specifier = ">=1.1.4,<2" },
     { name = "hyperopt", specifier = "==0.2.7" },

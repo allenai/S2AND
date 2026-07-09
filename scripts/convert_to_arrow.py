@@ -30,6 +30,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from s2and.arrow_inputs import require_name_counts_index_artifact  # noqa: E402
+from s2and.consts import (  # noqa: E402
+    NORMALIZATION_VERSION,
+    NORMALIZATION_VERSION_LEGACY_COMPAT,
+    VALID_NORMALIZATION_VERSIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1068,6 +1073,7 @@ def convert_service_json_to_arrow(
     manifest_paths = _portable_manifest_paths(paths, output_dir)
     manifest = {
         "schema": FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
         "dataset": dataset_name,
         "source_path": str(input_json),
         "conversion_kind": "service-json",
@@ -1233,6 +1239,7 @@ def convert_runtime_dataset_to_arrow(
     manifest_paths = _portable_manifest_paths(paths, output_dir)
     manifest = {
         "schema": FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
         "dataset": dataset_name,
         "source_dir": str(sources.source_dir),
         "conversion_kind": "table-runtime",
@@ -1403,6 +1410,12 @@ def validate_arrow_dataset_manifest(
 ) -> dict[str, Any]:
     """Validate the generated Arrow tables and return compact audit metrics."""
 
+    manifest_normalization = manifest.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
+    if manifest_normalization not in VALID_NORMALIZATION_VERSIONS:
+        raise ValueError(
+            f"manifest has invalid normalization_version {manifest_normalization!r}; "
+            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
+        )
     if not isinstance(manifest.get("paths"), Mapping):
         raise ValueError("manifest is missing paths")
     paths = {str(key): str(_resolve_manifest_path(value, base_dir)) for key, value in manifest["paths"].items()}

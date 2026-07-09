@@ -53,23 +53,12 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
 
 
-def test_eps_sweep_runtime_environment_preserves_fasttext(monkeypatch) -> None:
-    from s2and import text as s2and_text
+def test_eps_sweep_runtime_environment_sets_backend_and_threads() -> None:
+    sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(backend="python", n_jobs=2)))
 
-    previous_enabled = s2and_text.fasttext_loading_enabled()
-    s2and_text.set_fasttext_loading_enabled(True)
-    monkeypatch.setenv("S2AND_SKIP_FASTTEXT", "preexisting")
-
-    try:
-        sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(backend="python", n_jobs=2)))
-
-        assert s2and_text.fasttext_loading_enabled() is True
-        assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "python"
-        assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
-        assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
-        assert sweep_eps_on_linking_gold.os.environ["S2AND_SKIP_FASTTEXT"] == "preexisting"
-    finally:
-        s2and_text.set_fasttext_loading_enabled(previous_enabled)
+    assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "python"
+    assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
+    assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
 
 
 def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path, monkeypatch) -> None:

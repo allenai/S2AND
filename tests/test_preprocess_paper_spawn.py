@@ -15,6 +15,7 @@ def test_preprocess_paper_1_spawn_respects_preprocess_flag():
         in_signatures=False,  # keep this test light; avoids language detection + ngram features
         is_english=None,
         is_reliable=None,
+        language_reliability=None,
         predicted_language=None,
         title_ngrams_words=None,
         authors=[Author(author_name="John Smith", position=0)],

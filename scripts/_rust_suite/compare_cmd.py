@@ -26,7 +26,7 @@ RESULT_JSON_START, RESULT_JSON_END = get_result_markers("compare")
 LANGUAGE_FEATURE_NAMES = {
     "english_count",
     "same_language",
-    "language_reliability_count",
+    "language_reliability_min",
 }
 FEATURES_TO_USE = [
     "name_similarity",

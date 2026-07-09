@@ -20,7 +20,6 @@ from s2and.arrow_inputs import (
 ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
 ROOT_HELPER_FILES = (
     "LICENSE.txt",
-    "lid.176.bin",
     "production_model_v1.21/manifest.json",
 )
 DECLARED_DIRECTORY_KEYS = frozenset({"name_counts_index"})

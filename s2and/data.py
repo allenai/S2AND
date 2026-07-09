@@ -35,17 +35,18 @@ from s2and.sampling import random_sampling, sampling
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
     DROPPED_AFFIXES,
-    NAME_PREFIXES,
     VENUE_STOP_WORDS,
+    CanonicalNameParts,
+    canonical_name_count_keys,
+    canonicalize_name_parts,
+    canonicalize_name_text,
     compute_block,
     detect_language,
     first_names_name_compatible,
     get_text_ngrams,
     get_text_ngrams_words,
-    has_name_dash,
     normalize_orcid_compact,
     normalize_text,
-    split_first_middle_hyphen_aware,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -58,12 +59,10 @@ _PAIR_LABEL_MAP: dict[str | int, int] = {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1
 _NAME_COUNTS_CACHE: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
 _NAME_COUNTS_CACHE_LOCK = threading.Lock()
 SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
-NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY = "legacy_full_first_token"
+# canonical_v2 retired the "legacy_full_first_token" last_first_initial semantics
+# (D8: initial-char only); the knob remains so artifact contracts stay explicit.
 NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR = "initial_char"
-NameCountsLastFirstInitialSemantics = Literal[
-    "legacy_full_first_token",
-    "initial_char",
-]
+NameCountsLastFirstInitialSemantics = Literal["initial_char"]
 PairSamplingMode = Literal[
     "within_block_random",
     "within_block_balanced_classes",
@@ -133,36 +132,6 @@ def _resolve_pair_sampling_mode(
     )
 
 
-# ------------------------ Local helpers (backcompat shims) ------------------------
-
-
-def _lasts_equivalent_for_constraint(l1: str, l2: str) -> bool:
-    """Treat hyphen/space variants as equivalent for last-name constraint checks.
-
-    Examples: "ou yang" == "ouyang"; strictly unequal strings otherwise.
-
-    TODO(s2and): Remove only after the canonical-artifact rollout gate in
-    docs/normalization_migration_blocked.md is satisfied.
-    """
-    if l1 == l2:
-        return True
-    return l1.replace(" ", "") == l2.replace(" ", "")
-
-
-def _canonicalize_last_for_counts(raw_last: str | None, normalized_last: str) -> str:
-    """Canonicalize last name for legacy count lookups.
-
-    Join internal spaces for hyphen/compound surnames so historical single-token
-    count keys still match (e.g., "ou yang" -> "ouyang").
-
-    TODO(s2and): Remove only after the canonical-artifact rollout gate in
-    docs/normalization_migration_blocked.md is satisfied.
-    """
-    if (raw_last is not None and "-" in raw_last) or (" " in normalized_last):
-        return (normalized_last or "").replace(" ", "")
-    return normalized_last or ""
-
-
 def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
     """Load name count dictionaries once per process and cache them.
 
@@ -198,15 +167,13 @@ def _resolve_name_counts_last_first_initial_semantics(
     if value is None:
         return default
     normalized = value.strip().lower()
-    if normalized in {
-        NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY,
-        NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-    }:
+    if normalized == NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
         return cast(NameCountsLastFirstInitialSemantics, normalized)
     if strict:
         raise ValueError(
-            "name_counts_last_first_initial_semantics must be one of "
-            f"{NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY!r}, {NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR!r}; got {value!r}"
+            "name_counts_last_first_initial_semantics must be "
+            f"{NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR!r} (canonical_v2 retired "
+            f"'legacy_full_first_token'); got {value!r}"
         )
     return default
 
@@ -308,7 +275,6 @@ class Signature(NamedTuple):
     author_info_last: str
     author_info_suffix_normalized: str | None
     author_info_suffix: str | None
-    author_info_first_normalized: str | None
     author_info_coauthors: set[str] | None
     author_info_coauthor_blocks: set[str] | None
     author_info_full_name: str | None
@@ -341,6 +307,7 @@ class Paper(NamedTuple):
     in_signatures: bool | None
     is_english: bool | None
     is_reliable: bool | None
+    language_reliability: float | None
     predicted_language: str | None
     title_ngrams_words: Counter | None
     authors: list[Author]
@@ -517,7 +484,6 @@ class ANDData:
                 author_info_last=signature["author_info"]["last"],
                 author_info_suffix_normalized=None,
                 author_info_suffix=signature["author_info"]["suffix"],
-                author_info_first_normalized=None,
                 author_info_coauthors=None,
                 author_info_coauthor_blocks=None,
                 author_info_full_name=None,
@@ -572,6 +538,7 @@ class ANDData:
                 in_signatures=None,
                 is_english=None,
                 is_reliable=None,
+                language_reliability=None,
                 predicted_language=None,
                 title_ngrams_words=None,
                 authors=[
@@ -722,7 +689,9 @@ class ANDData:
 
         resolved_name_tuples: set[tuple[str, str]]
         if name_tuples == "filtered":
-            resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples_filtered.txt")
+            # canonical_v2 alias artifact, regenerated deterministically by
+            # scripts/production/generate_canonical_name_tuples.py.
+            resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples_canonical.txt")
         elif name_tuples is None:
             resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples.txt")
         elif isinstance(name_tuples, set):
@@ -794,57 +763,31 @@ class ANDData:
         first_without_apostrophe: str | None,
         last_normalized: str | None,
     ) -> NameCounts:
-        # Backward-compatibility for name count keys:
-        # - Historically, counts used the legacy single-token `author_info_first_normalized`.
-        # - The hyphen-aware splitter can retain multi-token first names (e.g., "qi xin"). For counts only,
-        #   join internal spaces to form a single token ("qixin") IF the raw first contained a hyphen.
-        # - This preserves old behavior for most names while improving lookups for hyphenated cases.
-        # TODO(s2and): revisit after the canonical-artifact rollout gate in
-        # docs/normalization_migration_blocked.md is satisfied.
-        counts_first_without_apostrophe = first_without_apostrophe
-        counts_last_normalized = last_normalized
-        if counts_first_without_apostrophe is None or counts_last_normalized is None:
-            counts_first_without_apostrophe, _ = split_first_middle_hyphen_aware(first_raw, middle_raw)
-            counts_last_normalized = normalize_text(signature.author_info_last)
-        # need this for name counts (legacy single-token behavior)
-        first_normalized_token_for_counts = (
-            counts_first_without_apostrophe.split(" ")[0] if counts_first_without_apostrophe else ""
-        )
-        first_for_counts = first_normalized_token_for_counts
-        if has_name_dash(first_raw):
-            joined = (counts_first_without_apostrophe or "").replace(" ", "")
-            if joined:
-                first_for_counts = joined
-
-        # Backward-compatibility for last name keys:
-        # - Historically, last names were single tokens; normalization turns hyphens into spaces
-        #   (e.g., "ou-yang" -> "ou yang"). For counts only, treat space/hyphen variants as the
-        #   same token by joining internal spaces ("ouyang").
-        # TODO(s2and): remove after the canonical-artifact rollout gate in
-        # docs/normalization_migration_blocked.md is satisfied.
-        last_for_counts = _canonicalize_last_for_counts(signature.author_info_last, counts_last_normalized)
-
-        first_last_for_count = (first_for_counts + " " + last_for_counts).strip()
-        if self.name_counts_last_first_initial_semantics == NAME_COUNTS_LAST_FIRST_INITIAL_LEGACY:
-            last_first_initial_for_count = (last_for_counts + " " + first_for_counts).strip()
-        else:
-            first_initial = first_for_counts[0] if first_for_counts else ""
-            last_first_initial_for_count = (last_for_counts + " " + first_initial).strip()
-
-        # A count key is looked up only when its components are present. An empty
-        # surname must yield np.nan (not the sentinel default 1), otherwise a
-        # genuinely missing last name is indistinguishable from a corpus count of
-        # 1 (D6 in docs/normalization_migration_blocked.md; work_plan section 2).
-        first_informative = len(first_for_counts) > 1
-        last_present = len(last_for_counts) > 0
+        # canonical_v2 count keys (D6/D8): keys are the canonical fields after missing
+        # and informativeness gating. A missing/uninformative component means no lookup
+        # (NaN feature), never a sentinel count; a present key that is absent from the
+        # corpus dictionaries keeps the default count of 1.
+        canonical_first = first_without_apostrophe
+        canonical_last = last_normalized
+        if canonical_first is None or canonical_last is None:
+            parts = canonicalize_name_parts(first_raw, middle_raw, signature.author_info_last)
+            if canonical_first is None:
+                canonical_first = parts.first
+            if canonical_last is None:
+                canonical_last = parts.last
+        keys = canonical_name_count_keys(CanonicalNameParts(first=canonical_first, middle="", last=canonical_last))
+        first_key = keys["first"]
+        last_key = keys["last"]
+        first_last_key = keys["first_last"]
+        last_first_initial_key = keys["last_first_initial"]
         return NameCounts(
-            first=(self.first_dict.get(first_for_counts, 1) if first_informative else np.nan),
-            last=(self.last_dict.get(last_for_counts, 1) if last_present else np.nan),
-            first_last=(
-                self.first_last_dict.get(first_last_for_count, 1) if first_informative and last_present else np.nan
-            ),
+            first=(self.first_dict.get(first_key, 1) if first_key is not None else np.nan),
+            last=(self.last_dict.get(last_key, 1) if last_key is not None else np.nan),
+            first_last=(self.first_last_dict.get(first_last_key, 1) if first_last_key is not None else np.nan),
             last_first_initial=(
-                self.last_first_initial_dict.get(last_first_initial_for_count, 1) if last_present else np.nan
+                self.last_first_initial_dict.get(last_first_initial_key, 1)
+                if last_first_initial_key is not None
+                else np.nan
             ),
         )
 
@@ -894,7 +837,6 @@ class ANDData:
 
                     first_raw = signature.author_info_first or ""
                     middle_raw = signature.author_info_middle or ""
-                    stored_first_normalized_token: str | None = signature.author_info_first_normalized
                     stored_first_without_apostrophe: str | None = (
                         signature.author_info_first_normalized_without_apostrophe
                     )
@@ -922,7 +864,6 @@ class ANDData:
 
                     if self.preprocess:
                         if defer_signature_fields_to_rust:
-                            stored_first_normalized_token = None
                             stored_first_without_apostrophe = None
                             stored_middle_without_apostrophe = None
                             stored_last_normalized = None
@@ -939,37 +880,19 @@ class ANDData:
                                     ]
                                 )
                         else:
-                            # our normalization scheme is to normalize first and middle separately,
-                            # join them, then take the first token of the combined join
-                            # NOTE: Hyphen-aware handling
-                            # - First/middle: handled via split_first_middle_hyphen_aware (keeps hyphenated Chinese
-                            #   given names together).
-                            # - Surname: for downstream lookups/constraints we also treat hyphen/space variants
-                            #   equivalently.
-                            # TODO(s2and): Remove the backward-compat shims added below for last-name
-                            #              counts/constraints after the canonical-artifact rollout gate in
-                            #              docs/normalization_migration_blocked.md is satisfied.
-                            # Default normalization (keeps legacy behavior for counts/lookups)
-                            first_normalized = normalize_text(first_raw)
-                            middle_normalized = normalize_text(middle_raw)
-                            first_middle_normalized_split = (first_normalized + " " + middle_normalized).split(" ")
-                            if first_middle_normalized_split and first_middle_normalized_split[0] in NAME_PREFIXES:
-                                first_middle_normalized_split = first_middle_normalized_split[1:]
-
-                            # Hyphen-preserving split for the "without_apostrophe" canonical fields
-                            # Centralize in s2and.text for reuse by other scripts
-                            first_without_apostrophe, middle_without_apostrophe = split_first_middle_hyphen_aware(
+                            # canonical_v2 normalization: one routine for first/middle/last
+                            # (apostrophe-like marks deleted, dash-like characters uniform,
+                            # dash-bound given-name compounds stay together, spill on space,
+                            # spaced canonical surnames). Suffixes stay on the generic
+                            # normalizer; suffix policy is outside canonical_v2.
+                            canonical_parts = canonicalize_name_parts(
                                 first_raw,
                                 middle_raw,
+                                signature.author_info_last,
                             )
-                            # need this for name counts (legacy single-token behavior)
-                            # canonical fields used across featurization, prediction, etc.
-                            stored_first_normalized_token = (
-                                first_middle_normalized_split[0] if first_middle_normalized_split else ""
-                            )
-                            stored_first_without_apostrophe = first_without_apostrophe
-                            stored_middle_without_apostrophe = middle_without_apostrophe
-                            stored_last_normalized = normalize_text(signature.author_info_last)
+                            stored_first_without_apostrophe = canonical_parts.first
+                            stored_middle_without_apostrophe = canonical_parts.middle
+                            stored_last_normalized = canonical_parts.last
                             stored_suffix_normalized = normalize_text(signature.author_info_suffix or "")
                             affiliations = [
                                 normalized_affiliation
@@ -1012,7 +935,6 @@ class ANDData:
                         {
                             "signature_id": signature_id,
                             "signature": signature,
-                            "first_normalized_token": stored_first_normalized_token,
                             "first_without_apostrophe": stored_first_without_apostrophe,
                             "middle_without_apostrophe": stored_middle_without_apostrophe,
                             "last_normalized": stored_last_normalized,
@@ -1042,7 +964,6 @@ class ANDData:
 
                 for idx, row in enumerate(batch_rows):
                     replace_kwargs = {
-                        "author_info_first_normalized": row["first_normalized_token"],
                         "author_info_first_normalized_without_apostrophe": row["first_without_apostrophe"],
                         "author_info_middle_normalized_without_apostrophe": row["middle_without_apostrophe"],
                         "author_info_last_normalized": row["last_normalized"],
@@ -1386,20 +1307,21 @@ class ANDData:
             first = signature.author_info_first_normalized_without_apostrophe
             middle = signature.author_info_middle_normalized_without_apostrophe
             if first is None or middle is None:
-                computed_first, computed_middle = split_first_middle_hyphen_aware(
+                computed = canonicalize_name_parts(
                     signature.author_info_first,
                     signature.author_info_middle,
+                    None,
                 )
                 if first is None:
-                    first = computed_first
+                    first = computed.first
                 if middle is None:
-                    middle = computed_middle
+                    middle = computed.middle
             return first or "", middle or ""
 
         def _materialize_constraint_last_normalized(signature: Signature) -> str:
             if signature.author_info_last_normalized is not None:
                 return signature.author_info_last_normalized
-            return normalize_text(signature.author_info_last)
+            return canonicalize_name_text(signature.author_info_last)
 
         first_1, middle_1_text = _materialize_constraint_name_parts(signature_1)
         first_2, middle_2_text = _materialize_constraint_name_parts(signature_2)
@@ -1430,12 +1352,12 @@ class ANDData:
         # but if they are not equal, we can't say much
         elif not suppress_orcid and orcid_1 is not None and orcid_2 is not None and orcid_1 == orcid_2:
             return low_value
-        # just-in-case last name constraint: if last names are different (hyphen/space-insensitive), then disallow
-        # TODO(s2and): remove after the canonical-artifact rollout gate in
-        # docs/normalization_migration_blocked.md is satisfied.
-        elif not _lasts_equivalent_for_constraint(
-            _materialize_constraint_last_normalized(signature_1),
-            _materialize_constraint_last_normalized(signature_2),
+        # just-in-case last name constraint: if canonical last names differ, then
+        # disallow. Dash/space surname variants already canonicalize to the same
+        # spaced form (D5); joined-vs-spaced aliasing is a compare-time concern
+        # outside canonicalization.
+        elif _materialize_constraint_last_normalized(signature_1) != _materialize_constraint_last_normalized(
+            signature_2
         ):
             return high_value
         # just-in-case first initial constraint: if first initials are different, then disallow
@@ -1445,11 +1367,6 @@ class ANDData:
         else:
             # either a known alias or a prefix of the other
             # if neither, then we'll say it's impossible to be the same person
-            # Backward-compatibility: `first_1`/`first_2` can now be multi-token after name normalization.
-            # Legacy name_tuples were curated over single-token first names. To remain compatible,
-            # try multiple forms for alias membership: exact, joined-without-spaces, and first-token only.
-            # TODO(s2and): remove after the canonical-artifact rollout gate in
-            # docs/normalization_migration_blocked.md is satisfied.
             if not first_names_name_compatible(first_1, first_2, self.name_tuples):
                 return high_value
             # dont cluster together if there is no intersection between the sets of middle initials
@@ -2030,8 +1947,13 @@ def preprocess_paper_1(item: tuple[str, Paper], *, preprocess: bool = True) -> t
     key, paper = item
 
     if paper.in_signatures:
-        is_reliable, is_english, predicted_language = detect_language(paper.title)
-        paper = paper._replace(is_english=is_english, predicted_language=predicted_language, is_reliable=is_reliable)
+        language_detection = detect_language(paper.title)
+        paper = paper._replace(
+            is_english=language_detection.is_english,
+            predicted_language=language_detection.predicted_language,
+            is_reliable=language_detection.is_reliable,
+            language_reliability=language_detection.language_reliability,
+        )
     title = normalize_text(paper.title)
     title_ngrams_words = get_text_ngrams_words(title)
     authors = [

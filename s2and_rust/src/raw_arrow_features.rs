@@ -3,14 +3,14 @@ use std::sync::Arc;
 
 use crate::constraints::same_prefix_tokens;
 use crate::features::{compute_name_counts_data, word_ngrams_counter};
-use crate::name_counts::{NameCountsData, NameCountsLastFirstInitialSemantics, RawNameCountMaps};
+use crate::name_counts::{NameCountsData, RawNameCountMaps};
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::readers::{
     RawArrowAuthorSignalData, RawArrowFeature, RawArrowNameCountRarityRow, RawArrowPaper,
     RawArrowPaperEvidenceRow, RawArrowSignature, RawArrowSummarySignalData,
 };
 use crate::text_compat::{
-    compute_block_compat, normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
+    canonicalize_name_parts_compat, compute_block_compat, normalize_text_compat_from_map,
 };
 use crate::{
     build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
@@ -29,24 +29,18 @@ pub(crate) fn build_raw_arrow_feature(
     unidecode_char_map: &HashMap<char, String>,
     orcid_enabled: bool,
 ) -> RawArrowFeature {
-    let (first, middle) = split_first_middle_hyphen_aware_compat(
+    // Signature author-name fields are canonical_v2; paper titles, venues,
+    // affiliations, and authors-as-text keep the legacy normalize_text_compat
+    // pipeline below.
+    let (first, middle, last_normalized) = canonicalize_name_parts_compat(
         &signature.author_first,
         &signature.author_middle,
-        name_prefixes,
-        unidecode_char_map,
-    );
-    let last_normalized =
-        normalize_text_compat_from_map(&signature.author_last, false, unidecode_char_map);
-    let name_counts = build_name_counts_data_from_artifact(
-        raw_name_counts,
-        &signature.author_first,
-        &first,
         &signature.author_last,
-        &last_normalized,
-        // Arrow datasets always use the current `<last> <first-initial>` lookup-key form;
-        // legacy `<last> <full-first-token>` semantics only apply to Python ANDData ingest.
-        NameCountsLastFirstInitialSemantics::InitialChar,
+        name_prefixes,
+        Some(unidecode_char_map),
     );
+    let name_counts =
+        build_name_counts_data_from_artifact(raw_name_counts, &first, &last_normalized);
     let middle_initials: HashSet<char> = middle
         .split_whitespace()
         .filter_map(|token| token.chars().next())

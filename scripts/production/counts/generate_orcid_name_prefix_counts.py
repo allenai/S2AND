@@ -1,15 +1,19 @@
 """
-Note: This script won't run because it relies on an internal Semantic Scholar package
-called pys2, and is here for documentation of how the prefix counts for subblocking were built.
+Note: This script won't run outside internal infrastructure because it relies on an
+internal Semantic Scholar package called pys2; it documents (and, on internal infra,
+performs) how the prefix counts for subblocking are built.
 
-TODO(s2and): This JSON was generated with legacy normalization (single-token first, apostrophes handled via
-             special_case_apostrophes=True for first). When we finalize the new unified normalization
-             (hyphen-aware, consistent apostrophe handling), rewrite this script to call
-             s2and.text.split_first_middle_hyphen_aware (or its eventual unified equivalent) and regenerate
-             s2and/data/first_k_letter_counts_from_orcid.json. Until then, runtime lookups use a first-token fallback
-             for compatibility.
+canonical_v2 rewrite (docs/normalization_migration_blocked.md, migration step 3):
+first names are canonicalized with s2and.text.canonicalize_name_parts — the same
+routine the runtime uses — so the generated JSON keys align with runtime lookups
+without the first-token compatibility fallback (which the cutover removes). A
+canonical first can be multi-token for dash-bound compounds ("sang min"); prefix
+keys are plain slices of that spaced string, identically on both sides. Name tuples
+are read from the canonically regenerated tuples file (see
+scripts/production/generate_canonical_name_tuples.py).
 """
 
+import datetime
 import json
 import os
 from collections import Counter
@@ -18,7 +22,9 @@ from itertools import combinations
 from pys2.pys2 import _evaluate_redshift_query  # type: ignore
 
 from s2and.consts import _PACKAGE_DATA_DIR
-from s2and.text import NAME_PREFIXES, normalize_text, same_prefix_tokens
+from s2and.text import canonicalize_name_parts, same_prefix_tokens
+
+NORMALIZATION_VERSION = "canonical_v2"
 
 """
 Step 1: Get orcid name pairs from our internal databases
@@ -52,10 +58,10 @@ cache = {}
 
 
 def normalize_names(row):
-    """Legacy normalization used when building ORCID prefix counts.
+    """Canonical (canonical_v2) first/middle for ORCID prefix counting.
 
-    TODO(s2and): Align with s2and.text.split_first_middle_hyphen_aware when regenerating counts.
-    Currently kept to document how the existing JSON was produced.
+    Uses the exact runtime canonicalization routine so generated keys align
+    with runtime lookups (no divergent inline copy, no token fallback).
     """
     first = row["first_name"]
     middle = row["middle"]
@@ -63,24 +69,9 @@ def normalize_names(row):
     if (first, middle) in cache:
         return cache[(first, middle)]
 
-    first_normalized_without_apostrophe = normalize_text(first or "", special_case_apostrophes=True)
-
-    middle_normalized = normalize_text(middle or "")
-
-    first_middle_normalized_split_without_apostrophe = (
-        first_normalized_without_apostrophe + " " + middle_normalized
-    ).split(" ")
-    if first_middle_normalized_split_without_apostrophe[0] in NAME_PREFIXES:
-        first_middle_normalized_split_without_apostrophe = first_middle_normalized_split_without_apostrophe[1:]
-
-    author_info_first_normalized_without_apostrophe = first_middle_normalized_split_without_apostrophe[0]
-    author_info_middle_normalized_without_apostrophe = " ".join(first_middle_normalized_split_without_apostrophe[1:])
-    cache[(first, middle)] = (
-        author_info_first_normalized_without_apostrophe,
-        author_info_middle_normalized_without_apostrophe,
-    )
-
-    return author_info_first_normalized_without_apostrophe, author_info_middle_normalized_without_apostrophe
+    parts = canonicalize_name_parts(first, middle, None)
+    cache[(first, middle)] = (parts.first, parts.middle)
+    return parts.first, parts.middle
 
 
 normed_first_second = df_all.apply(normalize_names, axis=1, result_type="expand")
@@ -91,7 +82,7 @@ orcids = df_all[["cluster_block_key", "orcid", "first_norm", "middle_norm"]]
 Step 2: Get name pairs that are included in S2AND
 """
 name_tuples = set()
-with open(os.path.join(_PACKAGE_DATA_DIR, "s2and_name_tuples_filtered.txt")) as f2:
+with open(os.path.join(_PACKAGE_DATA_DIR, "s2and_name_tuples_canonical.txt")) as f2:
     for line in f2:
         line_split = line.strip().split(",")
         name_tuples.add((line_split[0], line_split[1]))
@@ -174,3 +165,14 @@ for name_tuple, count in name_tuples_first_k_letter_counts.items():
 # save it
 with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.json"), "w") as f:
     json.dump(merged_first_k_letter_counts_sorted, f)
+
+# Generation provenance (migration exit criteria).
+metadata = {
+    "normalization_version": NORMALIZATION_VERSION,
+    "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    "source": "content_ext.paper_authors_orcids (Redshift, Crossref) + s2and_name_tuples_canonical.txt",
+    "outer_key_cardinality": len(merged_first_k_letter_counts_sorted),
+}
+with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.meta.json"), "w", encoding="utf-8") as f:
+    json.dump(metadata, f, indent=2)
+print(json.dumps(metadata, indent=2))

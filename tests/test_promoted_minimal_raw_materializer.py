@@ -11,7 +11,6 @@ import pandas as pd
 import pytest
 
 import s2and.incremental_linking.query_adapter as retrieval
-from s2and import text as s2and_text
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training.classic import OfficialBundle
@@ -23,7 +22,6 @@ from scripts.production.model.linker_train_calibrate_eval import (
     _arrow_row_seed_bypass_mask,
     _clean_minimal_raw_structural_rows,
     _component_member_details_by_key,
-    _enable_fasttext_language_detection,
     _has_query_seed_connection,
     _load_target,
     _query_first_token_for_prefix,
@@ -454,18 +452,6 @@ def test_minimal_raw_positive_label_marks_training_disallow_ignore() -> None:
     assert _row_label_is_positive(SimpleNamespace(label=1.0))
     assert not _row_label_is_positive(SimpleNamespace(label=0))
     assert not _row_label_is_positive(SimpleNamespace(label=np.nan))
-
-
-def test_minimal_raw_loader_enables_fasttext_language_detection() -> None:
-    previous_enabled = s2and_text.fasttext_loading_enabled()
-    s2and_text.set_fasttext_loading_enabled(False)
-
-    try:
-        _enable_fasttext_language_detection()
-
-        assert s2and_text.fasttext_loading_enabled() is True
-    finally:
-        s2and_text.set_fasttext_loading_enabled(previous_enabled)
 
 
 def test_minimal_raw_seed_bypass_detects_seeded_query_component() -> None:

@@ -1,24 +1,23 @@
-"""Frozen canonical name-normalization example table (migration step 1).
+"""Frozen canonical name-normalization example table.
 
 This test module enforces ``tests/fixtures/canonical_name_examples.json``, the
 step-1 artifact of ``docs/normalization_migration_blocked.md``, in four
-layers:
+layers (post-cutover: the live pipeline IS canonical_v2, so the live-path
+layers assert the fixture's ``canonical`` values; the fixture's ``legacy``
+values remain as the historical record of pre-cutover behavior):
 
-- Legacy pins (run today): the fixture's ``legacy`` values are asserted
-  against the current normalizer, and the legacy count keys are asserted
-  through the LIVE ``ANDData._compute_signature_name_counts`` path with
-  seeded count dicts, so drift in the real method fails here.
-- Compare-time contract (run today): canonical first fields across variant
-  groups (``Jo`` / ``Jo Ann`` / ``JoAnn`` etc.) must be pairwise compatible
-  under the live ``same_prefix_tokens`` — this is issue #39's real invariant
-  after the D1 ruling (spill on space, keep together on dash).
-- Table coherence (run today): equivalence groups, decision references, and
+- Canonical contract: the fixture's ``canonical`` values are asserted against
+  ``s2and.text.canonicalize_name_parts`` and
+  ``s2and.text.canonical_name_count_keys``.
+- Live count-key wiring: the canonical count keys are asserted through the
+  LIVE ``ANDData._compute_signature_name_counts`` path with seeded count
+  dicts, so drift between the pure functions and the real method fails here.
+- Compare-time contract: canonical first fields across variant groups
+  (``Jo`` / ``Jo Ann`` / ``JoAnn`` etc.) must be pairwise compatible under the
+  live ``same_prefix_tokens`` — issue #39's real invariant after the D1
+  ruling (spill on space, keep together on dash).
+- Table coherence: equivalence groups, decision references, and
   normalized-form invariants of the ``canonical`` values.
-- Canonical contract (skipped until implemented): the fixture's ``canonical``
-  values are asserted against ``s2and.text.canonicalize_name_parts`` and
-  ``s2and.text.canonical_name_count_keys`` once migration step 2 lands. The
-  function names are the proposed step-2 surface; adjust here and in the
-  fixture description together if the API lands under different names.
 
 The JSON fixture is the frozen source of truth. The generator that produced it
 (``scratch/generate_canonical_name_examples.py``) exists only to add cases;
@@ -41,12 +40,7 @@ from s2and.data import (
     ANDData,
     Signature,
 )
-from s2and.text import (
-    NAME_PREFIXES,
-    normalize_text,
-    same_prefix_tokens,
-    split_first_middle_hyphen_aware,
-)
+from s2and.text import same_prefix_tokens
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "canonical_name_examples.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -62,18 +56,6 @@ needs_canonical_api = pytest.mark.skipif(
 )
 
 
-def _legacy_first_normalized_token(first_raw: str, middle_raw: str) -> str:
-    # Mirrors ANDData.preprocess_signatures' legacy single-token construction.
-    # Documentation-grade only: the field is vestigial (write-only) and is
-    # scheduled for removal with the dual-field unification.
-    first_normalized = normalize_text(first_raw)
-    middle_normalized = normalize_text(middle_raw)
-    first_middle_split = (first_normalized + " " + middle_normalized).split(" ")
-    if first_middle_split and first_middle_split[0] in NAME_PREFIXES:
-        first_middle_split = first_middle_split[1:]
-    return first_middle_split[0] if first_middle_split else ""
-
-
 def _skeleton_signature(author_info_last: str | None) -> Signature:
     return Signature(
         author_info_first=None,
@@ -84,7 +66,6 @@ def _skeleton_signature(author_info_last: str | None) -> Signature:
         author_info_last=cast(str, author_info_last),
         author_info_suffix_normalized=None,
         author_info_suffix=None,
-        author_info_first_normalized=None,
         author_info_coauthors=None,
         author_info_coauthor_blocks=None,
         author_info_full_name=None,
@@ -112,18 +93,18 @@ def _skeleton_signature(author_info_last: str | None) -> Signature:
 _COUNT_SENTINELS = {"first": 7.0, "last": 11.0, "first_last": 13.0, "last_first_initial": 17.0}
 
 
-def _live_legacy_name_counts(case):
+def _live_canonical_name_counts(case):
     """Run the real ANDData count path with dicts seeded at the fixture's keys.
 
-    Each dict maps only the fixture's expected legacy key (when non-None) to a
-    sentinel value, so if ``_compute_signature_name_counts`` ever builds a
+    Each dict maps only the fixture's expected canonical key (when non-None) to
+    a sentinel value, so if ``_compute_signature_name_counts`` ever builds a
     different key string the lookup falls back to the default (1) and the
     assertions fail. A None fixture key means the method should do no lookup and
     return NaN. ``first_without_apostrophe=None`` forces the method to recompute
-    the normalized fields itself, exercising the full live path.
+    the canonical fields itself, exercising the full live path.
     """
     raw = case["input"]
-    keys = case["legacy"]["count_keys"]
+    keys = case["canonical"]["count_keys"]
     dataset = ANDData.__new__(ANDData)
     dataset.first_dict = {} if keys["first"] is None else {keys["first"]: _COUNT_SENTINELS["first"]}
     dataset.last_dict = {} if keys["last"] is None else {keys["last"]: _COUNT_SENTINELS["last"]}
@@ -144,21 +125,9 @@ def _live_legacy_name_counts(case):
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
-def test_legacy_normalized_fields_match_current_code(case):
-    raw = case["input"]
-    expected = case["legacy"]
-
-    first_wo, middle_wo = split_first_middle_hyphen_aware(raw["first"], raw["middle"])
-    assert first_wo == expected["first_normalized_without_apostrophe"]
-    assert middle_wo == expected["middle_normalized_without_apostrophe"]
-    assert normalize_text(raw["last"]) == expected["last_normalized"]
-    assert _legacy_first_normalized_token(raw["first"], raw["middle"]) == expected["first_normalized"]
-
-
-@pytest.mark.parametrize("case", CASE_PARAMS)
-def test_legacy_count_keys_via_live_anddata_path(case):
-    counts = _live_legacy_name_counts(case)
-    keys = case["legacy"]["count_keys"]
+def test_canonical_count_keys_via_live_anddata_path(case):
+    counts = _live_canonical_name_counts(case)
+    keys = case["canonical"]["count_keys"]
     for name, count_value in [
         ("first", counts.first),
         ("last", counts.last),

@@ -316,7 +316,6 @@ def _read_arrow_signatures_for_planning(
             author_info_last_normalized=None,
             author_info_suffix=_optional_str(data["author_suffix"][index]),
             author_info_suffix_normalized=None,
-            author_info_first_normalized=None,
             author_info_orcid=_optional_str(data["author_orcid"][index]),
             author_info_position=data["author_position"][index],
         )

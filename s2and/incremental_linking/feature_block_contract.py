@@ -125,6 +125,7 @@ class FeatureBlockPaper:
     year: int | None
     predicted_language: str | None = None
     is_reliable: bool | None = None
+    language_reliability: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "paper_id", str(self.paper_id))
@@ -136,6 +137,11 @@ class FeatureBlockPaper:
             self,
             "is_reliable",
             _optional_bool(self.is_reliable, field_name="FeatureBlockPaper.is_reliable"),
+        )
+        object.__setattr__(
+            self,
+            "language_reliability",
+            _optional_float(self.language_reliability, field_name="FeatureBlockPaper.language_reliability"),
         )
 
 
@@ -341,6 +347,10 @@ class FeatureBlock:
                         type=pa.string(),
                     ),
                     "is_reliable": pa.array([row.is_reliable for row in self.papers], type=pa.bool_()),
+                    "language_reliability": pa.array(
+                        [row.language_reliability for row in self.papers],
+                        type=pa.float64(),
+                    ),
                 }
             ),
             "paper_authors": pa.table(
@@ -505,6 +515,15 @@ def _optional_bool(value: Any, *, field_name: str = "value") -> bool | None:
         if normalized in {"1", "true"}:
             return True
     raise ValueError(f"{field_name} must be a boolean, 0/1, true/false, or null, got {value!r}")
+
+
+def _optional_float(value: Any, *, field_name: str = "value") -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a float or null, got {value!r}") from exc
 
 
 def _feature_block_specter_from_mapping(

@@ -23,7 +23,6 @@ CONFIG_LOCATION_ENV = "S2AND_PATH_CONFIG"
 CONFIG_LOCATION = os.path.join(_PACKAGE_DATA_DIR, "path_config.json")
 _MAIN_DATA_DIR_PLACEHOLDER = "absolute path of wherever you downloaded the data to"
 _NAME_COUNTS_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/name_counts.pickle"
-_FASTTEXT_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/lid.176.bin"
 _CONFIG: dict[str, Any] | None = None
 _CONFIG_LOCK = threading.Lock()
 
@@ -128,7 +127,6 @@ CONFIG: MutableMapping[str, Any] = _LazyConfig()
 
 # Lazily-resolved artifact paths
 NAME_COUNTS_PATH = _LazyDataPath("name_counts.pickle", fallback_url=_NAME_COUNTS_FALLBACK_URL)
-FASTTEXT_PATH = _LazyDataPath("lid.176.bin", fallback_url=_FASTTEXT_FALLBACK_URL)
 
 # feature caching related consts
 CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and"))).resolve()
@@ -141,19 +139,55 @@ Incrementation history
     missing-suffix, equal_middle multi-token initials, empty-surname name
     counts, unconditional reference-list features, decoupled ngram short-token
     filter, whitespace-only equal)
-5 - language detection: is_reliable now requires both detectors (fastText +
-    cld2) to agree; any non-agreement collapses to predicted_language="un".
-    fastText is mandatory in production (load failure raises). Affects the
-    is_reliable-sum, predicted_language-equality, and english_or_unknown_count
-    features. (Sinonym normalization path removed; no feature-value effect.)
+5 - language detection: is_reliable requires the detector to return a known,
+    reliable language. Affects the language reliability, predicted-language
+    equality, and english_or_unknown_count features. (Sinonym normalization
+    path removed; no feature-value effect.)
 6 - reference features removed entirely: the six reference_features columns
     (references_authors_overlap, references_titles_overlap,
     references_venues_overlap, references_author_blocks_jaccard,
     references_self_citation, references_overlap) no longer exist and the
     feature vector shrank from 39 to 33 columns. Models trained on the old
     layout are incompatible.
+7 - Rust language-detection text gate aligned to Python str.isalpha semantics
+    (general category L* only). Rust's char::is_alphabetic additionally counted
+    Other_Alphabetic (e.g. Indic combining vowel signs) and Nl characters,
+    which could flip the zero-alpha early exit and the >0.9 uppercase-ratio
+    lowercasing branch on such titles, diverging Rust language detection from
+    Python. Python feature values are unchanged; Rust-side values change only
+    for titles containing those characters near the gate boundaries.
+8 - canonical_v2 name normalization cutover (docs/normalization_migration_blocked.md).
+    Signature first/middle/last fields are canonicalized with one routine
+    (apostrophe-like marks deleted in all fields, uniform dash separators,
+    dash-bound given-name compounds kept as spaced tokens, spaced canonical
+    surnames with particles preserved). Count keys use the gated canonical
+    fields (no compact-join shims; missing components are NaN, and the
+    "legacy_full_first_token" last_first_initial semantics is retired).
+    Name-tuple compatibility probing (joined/first-token forms) and the
+    subblocking ASCII/non-ASCII dash spill repair are removed. Every name
+    field value and count feature can change for names with dashes,
+    apostrophe-like marks, compound surnames, or title prefixes.
+9 - fastText removed from language detection; CLD2 is now the single detector.
+    The old boolean `language_reliability_count` pair feature is replaced by
+    `language_reliability_min`, the minimum CLD2 reliable-confidence score for
+    the two papers. Models trained on the old language-feature policy are
+    incompatible.
 """
-FEATURIZER_VERSION = 6
+FEATURIZER_VERSION = 9
+
+# Name-normalization contract (docs/normalization_migration_blocked.md, OD4 single-mode
+# cutover). NORMALIZATION_VERSION declares which normalization policy THIS code
+# implements. Model bundles record theirs in feature_contract["normalization_version"];
+# data artifacts record theirs in the name_counts_index/ and Arrow dataset manifests.
+# An absent field means "legacy_compat" (artifacts and bundles that predate the
+# contract). Mismatches fail fast: rollback is redeploying the previous package +
+# artifact set, never a runtime compatibility mode.
+NORMALIZATION_VERSION_LEGACY_COMPAT = "legacy_compat"
+NORMALIZATION_VERSION_CANONICAL_V2 = "canonical_v2"
+VALID_NORMALIZATION_VERSIONS = frozenset(
+    {NORMALIZATION_VERSION_LEGACY_COMPAT, NORMALIZATION_VERSION_CANONICAL_V2}
+)
+NORMALIZATION_VERSION = NORMALIZATION_VERSION_CANONICAL_V2
 
 # important constant values
 NUMPY_NAN = np.nan

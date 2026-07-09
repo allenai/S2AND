@@ -39,7 +39,6 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
     required_paths = [
         release_root / "manifest.json",
         release_root / "LICENSE.txt",
-        release_root / "lid.176.bin",
         release_root / "production_model_v1.21" / "manifest.json",
         release_root / "name_counts_index" / "manifest.json",
         release_root / dataset_name / "manifest.json",
@@ -115,7 +114,6 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
 
     for file_path in (
         release_root / "LICENSE.txt",
-        release_root / "lid.176.bin",
     ):
         _touch_file(file_path)
     dataset_root = release_root / dataset_name

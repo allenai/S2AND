@@ -15,7 +15,13 @@ from typing import Any, cast
 import lightgbm as lgb
 import numpy as np
 
-from s2and.consts import _PACKAGE_DATA_DIR, FEATURIZER_VERSION
+from s2and.consts import (
+    _PACKAGE_DATA_DIR,
+    FEATURIZER_VERSION,
+    NORMALIZATION_VERSION,
+    NORMALIZATION_VERSION_LEGACY_COMPAT,
+    VALID_NORMALIZATION_VERSIONS,
+)
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import load_incremental_linking_artifact
 from s2and.incremental_linking.contracts import validate_artifact_contract_metadata
@@ -309,6 +315,31 @@ def _apply_production_runtime_cluster_eps(clusterer: Clusterer, eps: float | Non
     return clusterer
 
 
+def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Mapping[str, Any]) -> None:
+    """Fail fast when a bundle's normalization policy differs from this package's.
+
+    An absent feature_contract["normalization_version"] means the bundle predates the
+    normalization contract and implies "legacy_compat". Unlike the featurizer-version
+    warning, a mismatch here is a hard error: normalization changes the name fields
+    and count keys every feature consumes, and the rollback path is redeploying the
+    matching package + artifact set (docs/normalization_migration_blocked.md, OD4).
+    """
+
+    bundle_version = feature_contract.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
+    if bundle_version not in VALID_NORMALIZATION_VERSIONS:
+        raise ValueError(
+            f"Production bundle {bundle_dir} has invalid feature_contract['normalization_version'] "
+            f"{bundle_version!r}; expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
+        )
+    if bundle_version != NORMALIZATION_VERSION:
+        raise ValueError(
+            f"Production bundle {bundle_dir} was built with normalization_version {bundle_version!r} "
+            f"but this package implements {NORMALIZATION_VERSION!r}. Code, model, and artifacts move "
+            "as one release unit; redeploy the matching package or rebuild the bundle "
+            "(docs/normalization_migration_blocked.md)."
+        )
+
+
 def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool = True) -> Clusterer:
     manifest = _validate_manifest(bundle_dir)
     clusterer_config = _read_json(bundle_dir / str(manifest["files"]["clusterer_config"]))
@@ -361,6 +392,7 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
         suppress_orcid=bool(clusterer_config["suppress_orcid"]),
     )
     clusterer.feature_contract = dict(clusterer_config["feature_contract"])
+    _require_bundle_normalization_version(bundle_dir, clusterer.feature_contract)
     clusterer.best_params = dict(clusterer_config["best_params"])
     clusterer.incremental_precluster_broadcast_mode = cast(
         IncrementalBroadcastMode,
@@ -412,6 +444,7 @@ def load_production_model(path: str | Path | None = None, *, require_incremental
     clusterer = loaded.get("clusterer") if isinstance(loaded, dict) else loaded
     if not isinstance(clusterer, Clusterer):
         raise TypeError(f"Expected a Clusterer in production model artifact, got {type(clusterer)!r}")
+    _require_bundle_normalization_version(model_path, getattr(clusterer, "feature_contract", None) or {})
     versions = {"featurizer_info": int(clusterer.featurizer_info.featurizer_version)}
     nameless_info = getattr(clusterer, "nameless_featurizer_info", None)
     if nameless_info is not None:

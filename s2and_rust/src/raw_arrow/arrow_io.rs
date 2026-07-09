@@ -1,6 +1,6 @@
 use arrow::array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, Int64Array, LargeListArray,
-    LargeStringArray, ListArray, StringArray,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int64Array,
+    LargeListArray, LargeStringArray, ListArray, StringArray,
 };
 use arrow::datatypes::DataType;
 use arrow::ipc::reader::FileReader as ArrowFileReader;
@@ -149,6 +149,44 @@ pub(crate) fn arrow_optional_bool(
         DataType::Null => Ok(None),
         other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
             "{context} must be a boolean column, got {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn arrow_optional_f64(
+    array: &dyn Array,
+    row: usize,
+    context: &str,
+) -> PyResult<Option<f64>> {
+    if array.is_null(row) {
+        return Ok(None);
+    }
+    match array.data_type() {
+        DataType::Float32 => {
+            let values = array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyTypeError::new_err(format!(
+                        "{context} is not a Float32 array"
+                    ))
+                })?;
+            Ok(Some(values.value(row) as f64))
+        }
+        DataType::Float64 => {
+            let values = array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyTypeError::new_err(format!(
+                        "{context} is not a Float64 array"
+                    ))
+                })?;
+            Ok(Some(values.value(row)))
+        }
+        DataType::Null => Ok(None),
+        other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{context} must be a float column, got {other:?}"
         ))),
     }
 }

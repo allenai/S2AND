@@ -38,7 +38,8 @@ use features::*;
 pub(crate) use ingest_dataset::*;
 use language_detection::LanguageDetectorCompat;
 use name_counts::{
-    NameCountsData, NameCountsLastFirstInitialSemantics, RawNameCountKind, RawNameCountMaps,
+    read_name_counts_index_normalization_version, NameCountsData, RawNameCountKind,
+    RawNameCountMaps,
 };
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
 use pair_indexing::upper_triangle_pairs_for_range;
@@ -67,8 +68,8 @@ pub(crate) use retrieval::*;
 pub(crate) use rust_featurizer::RustFeaturizer;
 use subblocking::*;
 use text_compat::{
-    compute_block_compat, contains_name_dash, ensure_unidecode_for_text,
-    normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
+    canonical_name_count_keys_compat, canonicalize_name_parts_compat, compute_block_compat,
+    ensure_unidecode_for_text, normalize_text_compat_from_map,
 };
 
 fn py_len(s: &str) -> usize {
@@ -197,6 +198,8 @@ struct PaperData {
     has_abstract: bool,
     predicted_language: Option<String>,
     is_reliable: bool,
+    #[serde(default)]
+    language_reliability: f64,
     journal_ngrams: Option<CounterData>,
     specter: Option<Vec<f32>>,
     #[serde(default)]
@@ -227,6 +230,7 @@ struct StagePaperInput {
     has_abstract: bool,
     predicted_language: Option<String>,
     is_reliable: bool,
+    language_reliability: f64,
 }
 
 #[derive(Clone)]
@@ -236,6 +240,7 @@ struct StagePaperPreprocessed {
     has_abstract: bool,
     predicted_language: Option<String>,
     is_reliable: bool,
+    language_reliability: f64,
     title_words: Option<CounterData>,
     title_chars: Option<CounterData>,
     venue_ngrams: Option<CounterData>,
@@ -289,6 +294,7 @@ mod tests {
         ("papers", "year", "int64", false),
         ("papers", "predicted_language", "string", false),
         ("papers", "is_reliable", "bool", false),
+        ("papers", "language_reliability", "float64", false),
         ("signatures", "signature_id", "string", true),
         ("signatures", "paper_id", "string", true),
         ("signatures", "author_first", "string", true),
@@ -571,7 +577,8 @@ mod tests {
         ]);
         let mut telemetry = SubblockingTelemetry::default();
 
-        apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry);
+        apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry)
+            .expect("orcid subblocking succeeds on a valid partition");
 
         assert_eq!(
             output.to_hashmap(),
@@ -586,6 +593,24 @@ mod tests {
             telemetry.orcid_merge_skipped_due_to_capacity_signature_count,
             4
         );
+    }
+
+    #[test]
+    fn orcid_subblocking_rejects_duplicate_signature_id_instead_of_binding_last_wins() {
+        let mut output = OrderedSubblocks::default();
+        output.insert("a".to_string(), vec!["s1".to_string()]);
+        output.insert("b".to_string(), vec!["s1".to_string(), "s2".to_string()]);
+        let rows = HashMap::new();
+        let mut telemetry = SubblockingTelemetry::default();
+
+        let error = apply_orcid_subblocking(&mut output, &rows, 3, &mut telemetry)
+            .expect_err("duplicate signature_id across subblocks must fail loudly");
+
+        pyo3::Python::with_gil(|py| {
+            let message = error.value(py).to_string();
+            assert!(message.contains("duplicate signature_id"), "{message}");
+            assert!(message.contains("s1"), "{message}");
+        });
     }
 
     #[test]
@@ -637,7 +662,10 @@ mod tests {
             },
         ];
         let prefixes = HashSet::new();
-        let unidecode_char_map = HashMap::from([('\u{2010}', "-".to_string())]);
+        // canonical_v2 pretranslation maps every dash-like code point (here
+        // U+2010) to '-' before transliteration, so no unidecode entry is
+        // needed for the dash.
+        let unidecode_char_map = HashMap::new();
 
         normalize_subblocking_signature_rows(&mut rows, &prefixes, &unidecode_char_map);
 
@@ -645,8 +673,10 @@ mod tests {
         assert_eq!(rows[1].first, "alice");
         assert_eq!(rows[2].first, "qi xin");
         assert_eq!(rows[2].middle, "a");
-        assert_eq!(rows[3].first, "arif");
-        assert_eq!(rows[3].middle, "ullah");
+        // Dash-bound given names stay together canonically (D1/D4); the legacy
+        // non-ASCII-dash spill shim is retired.
+        assert_eq!(rows[3].first, "arif ullah");
+        assert_eq!(rows[3].middle, "");
     }
 
     #[test]
@@ -700,6 +730,7 @@ mod tests {
             has_abstract: false,
             predicted_language: None,
             is_reliable: false,
+            language_reliability: 0.0,
         };
 
         let papers = preprocess_stage_papers(
@@ -867,6 +898,10 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        read_name_counts_index_normalization_version,
+        m
+    )?)?;
     promoted_linker::add_to_module(m)?;
     lightgbm_booster::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(

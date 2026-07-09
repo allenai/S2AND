@@ -13,6 +13,7 @@ from typing import Any
 import lightgbm as lgb
 import numpy as np
 
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, _selected_feature_indices
 from s2and.production_model import (
@@ -130,6 +131,9 @@ def _clusterer_config_payload(
     )
     if not feature_contract:
         feature_contract = {"name_counts_last_first_initial_semantics": "initial_char"}
+    # A bundle written by this package normalizes names with this package's policy;
+    # readers assert the recorded version against their own (fail-fast contract).
+    feature_contract.setdefault("normalization_version", NORMALIZATION_VERSION)
     return {
         "batch_size": int(getattr(clusterer, "batch_size", 1_000_000)),
         "best_params": dict(

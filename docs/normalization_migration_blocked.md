@@ -1,10 +1,19 @@
 # Normalization Unification Migration Plan
 
-Execution status (last reconfirmed 2026-07-04; originally entered blocked state 2026-03-02)
+Execution status (last reconfirmed 2026-07-09; originally entered blocked state 2026-03-02)
 - Blocked: normalization work is on hold until the required data/artifacts are ready.
 - Unblocking in progress (2026-07-04): canonical upstream names are arriving; this plan is
   expected to execute together with the production v1.3 retrain, with regenerated artifacts
   and retrained models moving as one release unit.
+- Open Decisions ruled (2026-07-09): single-mode cutover (OD4), decommission window moot (OD1),
+  thresholds unchanged (OD2), benchmark training names re-exported by signature-id re-join (OD3,
+  decision only — tooling not yet written). See the rulings inline below. The migration freeze is
+  no longer gated on decisions, only on canonical artifacts + the v1.3 retrain.
+- Step-2 canonical routines landed (2026-07-09): `s2and.text.canonicalize_name_parts` and
+  `s2and.text.canonical_name_count_keys` implement the canonical_v2 pipeline as pure functions,
+  and the fixture's canonical contract in `tests/test_canonical_name_examples.py` is active
+  (no longer skipped). They are deliberately not consumed by live code paths yet; wiring them
+  in is the cutover and moves with regenerated artifacts + the v1.3 retrain.
 - Keep this plan separate from the active execution plan in `docs/work_plan.md`.
 
 Status
@@ -123,27 +132,41 @@ Fixture Metadata
 - Per-case `decisions` are primary review highlights, not exhaustive dependency labels. The
   policy registry is the source of truth for global applicability.
 
-Open Decisions (remaining before migration freeze)
+Open Decisions (all ruled 2026-07-09; kept with their rulings as the decision record)
 1) Compatibility-mode decommission window
-   - finalize the exact number of releases/runs required before removing compatibility mode.
-   - moot if Open Decision 4 adopts the single-mode cutover.
+   - RULED 2026-07-09: moot. Open Decision 4 adopts the single-mode cutover, so there is no
+     runtime compatibility mode to decommission.
 2) Threshold tightening
-   - decide whether adopted Rust-alignment thresholds should be tightened for release-grade datasets.
+   - RULED 2026-07-09: keep the current thresholds (pairwise AUC delta <= 0.001, F1 <= 0.005,
+     clustering B3 <= 0.005; runtime/RSS <= 10%). They gate no-op alignment/refactor comparisons
+     on unchanged inputs — the retrain release gate is end-metric non-regression (clarified
+     2026-07-04) — so tightening buys no protection for the retrain and adds flake risk from
+     benign nondeterminism. Revisit only if a real regression slips under them.
 3) Benchmark training-data names (added 2026-07-04)
-   - decide whether the fixed benchmark gold datasets (pubmed, aminer, arnetminer, inspire, kisti,
-     qian, zbmath, plus the medline/augmented pair CSVs) receive re-exported canonical names
-     re-joined by signature id, or keep legacy raw names that are only re-normalized at read time.
-   - if they keep legacy names, pairwise training and production inference see different raw-name
-     distributions; no in-repo re-join/re-export tool exists today. Corpus-derived data (name
-     counts, ORCID prefix counts, the big-block replay bundle) receives new names either way.
+   - RULED 2026-07-09: re-export canonical names re-joined by signature id, at minimum for the
+     benchmark datasets used in production training. Rationale: read-time renormalization runs the
+     same code either way — the difference is the input distribution. Upstream data preparation
+     performs language-aware compound handling (see Decided) that `canonical_v2` applied to legacy
+     raw strings cannot reconstruct, and the benchmark datasets are the pairwise training data, so
+     the distribution gap would land in the shipped model exactly on the name-compound features
+     this migration targets.
+   - Execution notes (decision only — the re-join/re-export tooling is deliberately NOT written
+     yet, per 2026-07-09 ruling): join by signature id, log the join rate loudly, and add
+     canonical name columns alongside the raw fields rather than replacing them so historical
+     comparisons survive. Optional cheap pre-gate before building the tool: canonicalize benchmark
+     raw names and diff against upstream-canonical names for overlapping signature ids; if
+     divergence is genuinely negligible, the re-export can be deferred.
 4) Single-mode cutover vs compatibility window (added 2026-07-04)
-   - decide whether to drop the dual-mode `legacy_compat`/`canonical_v2` runtime contract in favor
-     of a single-mode release that only accepts `canonical_v2` artifacts (fail fast on mismatch),
-     with rollback = redeploying the previous package + artifact set.
-   - recommendation: single-mode. Artifacts, models, and code already ship as one checksummed
-     release unit, and "old code + canonical_v2" is unsupported either way; a runtime
-     compatibility mode doubles the cutover test matrix for a rollback path that package/artifact
-     pinning already provides.
+   - RULED 2026-07-09: single-mode, per the recommendation. Drop the dual-mode
+     `legacy_compat`/`canonical_v2` runtime contract; a release accepts only `canonical_v2`
+     artifacts and fails fast on code/artifact mismatch. Rollback = redeploying the previous
+     package + artifact set. Artifacts, models, and code already ship as one checksummed release
+     unit, and "old code + canonical_v2" is unsupported either way; a runtime compatibility mode
+     doubles the cutover test matrix for a rollback path that package/artifact pinning already
+     provides. Implement the fail-fast via `normalization_version` in the `name_counts_index/`
+     manifest and Arrow dataset manifests asserted against the model feature contract (see
+     "Implementation notes (2026-07-04)"), which also permanently discharges the
+     hardcoded-`InitialChar` concern.
 
 Rust Alignment Decisions (effective February 20, 2026; refreshed 2026-05-23)
 1) Canonical cutover contract
@@ -322,7 +345,8 @@ Migration Plan (phased, verifiable)
    - Status 2026-07-04: the frozen table exists at `tests/fixtures/canonical_name_examples.json`
      (89 cases, decisions D1-D8 ruled), enforced by `tests/test_canonical_name_examples.py`
      (legacy pins run now; canonical contract activates when the step-2 functions land).
-   - Resolve all Open Decisions above.
+   - Resolve all Open Decisions above. (Done 2026-07-09; rulings recorded inline in the Open
+     Decisions section.)
    - Freeze a canonical example table covering:
      - `Jo Ann`, `Jo-Ann`, `JoAnn`.
      - `Yu Zhong`, `Yu-Zhong`, `YuZhong`, `Y. Z.`.
@@ -343,8 +367,15 @@ Migration Plan (phased, verifiable)
    - Output: explicit normalization invariants used by tests and artifact builders.
 
 2) Implement unified canonicalization
-   - Provide one canonicalization routine for first/middle/last (extend or replace `split_first_middle_hyphen_aware`).
+   - Status 2026-07-09: the canonicalization routine landed as
+     `s2and.text.canonicalize_name_parts` (fields) + `s2and.text.canonical_name_count_keys`
+     (gated count keys), pure functions with no live consumers. The canonical-contract
+     layer of `tests/test_canonical_name_examples.py` now runs against them (all 89 cases).
+     The D3 apostrophe-like set is `s2and.text.NAME_APOSTROPHE_LIKE_CHARS`; soft hyphen and
+     zero-width joiner are deleted pre-tokenization per the pipeline spec.
+   - Provide one canonicalization routine for first/middle/last (extend or replace `split_first_middle_hyphen_aware`). (Done, above.)
    - Remove dual-read usage of `author_info_*_normalized*` fields in featurizer/subblocking/constraints and standardize on canonical fields.
+     (Cutover work — moves with regenerated artifacts + the v1.3 retrain, not before.)
    - Keep migration-scoped feature/version switch only if needed for safe rollout.
 
 3) Regenerate artifacts with canonical logic

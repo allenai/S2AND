@@ -27,7 +27,6 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 
 from s2and import feature_port  # noqa: E402
-from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_training import (  # noqa: E402
     attach_training_arrow_featurizer_paths,
     build_training_anddata_from_arrow,
@@ -211,14 +210,9 @@ def _json_training_anddata(name: str, specter: dict[str, np.ndarray], **override
 @pytest.fixture(scope="module")
 def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
     monkeypatch = pytest.MonkeyPatch()
-    previous_fasttext_enabled = s2and_text.fasttext_loading_enabled()
-    previous_fasttext_model = s2and_text._FASTTEXT_MODEL  # noqa: SLF001
-    previous_fasttext_initialized = s2and_text._FASTTEXT_MODEL_INITIALIZED  # noqa: SLF001
-    previous_fasttext_load_failed = s2and_text._FASTTEXT_LOAD_FAILED  # noqa: SLF001
     try:
         patch_tiny_name_counts_loader(monkeypatch)
         monkeypatch.setenv("S2AND_BACKEND", "auto")
-        s2and_text.set_fasttext_loading_enabled(False)
 
         rng = np.random.default_rng(0)
         paper_ids = list(json.loads((DUMMY_DIR / "papers.json").read_text(encoding="utf-8")))
@@ -252,10 +246,6 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
             "monkeypatch": monkeypatch,
         }
     finally:
-        s2and_text.set_fasttext_loading_enabled(previous_fasttext_enabled)
-        s2and_text._FASTTEXT_MODEL = previous_fasttext_model  # noqa: SLF001
-        s2and_text._FASTTEXT_MODEL_INITIALIZED = previous_fasttext_initialized  # noqa: SLF001
-        s2and_text._FASTTEXT_LOAD_FAILED = previous_fasttext_load_failed  # noqa: SLF001
         monkeypatch.undo()
 
 
@@ -280,7 +270,6 @@ def test_arrow_ingestion_reconstructs_training_fields(training_bundle: dict[str,
         ):
             assert getattr(json_signature, field) == getattr(arrow_signature, field), field
         for field in (
-            "author_info_first_normalized",
             "author_info_first_normalized_without_apostrophe",
             "author_info_middle_normalized_without_apostrophe",
             "author_info_last_normalized",

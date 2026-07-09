@@ -1,0 +1,10 @@
+{
+  "normalization_version": "canonical_v2",
+  "generated_at": "2026-07-09T18:00:32.740594+00:00",
+  "source": "s2and_unnormalized_filtered_name_tuples.txt",
+  "input_lines": 9925,
+  "output_pairs_directed": 7368,
+  "dropped_identity": 1385,
+  "dropped_prefix_compatible": 1088,
+  "dropped_empty": 0
+}

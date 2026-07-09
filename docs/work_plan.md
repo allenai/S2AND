@@ -392,37 +392,27 @@ uv run pytest -q tests/test_model_pairwise_exceptions.py
 
 ### Normalization Canonicalization Migration
 
-Blocked until canonical artifacts and retraining can move together. Full plan:
-[normalization_migration_blocked.md](normalization_migration_blocked.md). The
-ASCII/non-ASCII dash behavior, tuple probing fallbacks, ORCID prefix
-fallbacks, and block compaction workarounds are measured legacy-compatibility
-repairs, not the canonical target. Code TODO comments in
-[../s2and/data.py](../s2and/data.py) and the production count scripts point at
-this migration; do not schedule them as separate cleanup work before canonical
-artifacts exist.
+Update 2026-07-09 (cutover landed): the single-mode canonical_v2 cutover CODE is
+on this branch — Python and Rust implement only canonical_v2 (all compatibility
+shims removed, `NORMALIZATION_VERSION = "canonical_v2"`, `FEATURIZER_VERSION`
+bumped), `normalization_version` fail-fast enforcement is live in both
+languages, the count-generator scripts are rewritten to the canonical routines,
+and the canonical name-tuple artifact
+(`s2and/data/s2and_name_tuples_canonical.txt`) is regenerated and wired as the
+packaged default. The branch is intentionally UNRELEASABLE until the remaining
+artifacts land as one release unit — see the "Cutover readiness checklist" in
+[normalization_migration_blocked.md](normalization_migration_blocked.md):
+regenerated `name_counts.pickle` + `name_counts_index/`, regenerated ORCID
+prefix counts, the v1.3 retrain (its bundle must record
+`feature_contract.normalization_version = "canonical_v2"`), gate re-baselining,
+and the OD3 benchmark re-export decision execution. Legacy production bundles
+(v1.21 and the v1.0-1.2 pickles) now fail fast at load by design; their tests
+are version-gated skips until the canonical bundle exists.
 
-Update 2026-07-09: the four Open Decisions gating the migration freeze are
-ruled (see the plan doc for the full rulings): single-mode `canonical_v2`
-cutover (no runtime compatibility window, which moots the decommission-window
-decision), keep the current alignment thresholds, and re-export canonical
-names re-joined by signature id for the benchmark datasets used in production
-training (decision only — the re-join/re-export tooling is deliberately not
-written yet). The remaining blocker is canonical artifact regeneration plus
-the v1.3 retrain moving as one release unit.
-
-Update 2026-07-09 (later same day): migration step 2 landed —
-`s2and.text.canonicalize_name_parts` and `s2and.text.canonical_name_count_keys`
-implement the canonical_v2 pipeline as pure functions with no live consumers,
-and the canonical-contract tests in
-[../tests/test_canonical_name_examples.py](../tests/test_canonical_name_examples.py)
-are active (previously skipped). The shim-removal TODOs in
-[../s2and/data.py](../s2and/data.py) and the count-script rewrites remain
-gated on canonical artifacts + the v1.3 retrain, as before.
-
-Verification gate (compatibility behavior stays stable):
+Verification gate (canonical behavior stays stable):
 
 ```powershell
-uv run pytest -q tests/test_surname_hyphen_aware.py tests/test_subblocking_telemetry.py tests/test_text.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
+uv run pytest -q tests/test_canonical_name_examples.py tests/test_normalization_version_contract.py tests/test_surname_hyphen_aware.py tests/test_subblocking_telemetry.py tests/test_text.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 ```
 
 ## Documentation Cleanup

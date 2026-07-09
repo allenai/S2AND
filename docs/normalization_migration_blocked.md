@@ -12,8 +12,32 @@ Execution status (last reconfirmed 2026-07-09; originally entered blocked state 
 - Step-2 canonical routines landed (2026-07-09): `s2and.text.canonicalize_name_parts` and
   `s2and.text.canonical_name_count_keys` implement the canonical_v2 pipeline as pure functions,
   and the fixture's canonical contract in `tests/test_canonical_name_examples.py` is active
-  (no longer skipped). They are deliberately not consumed by live code paths yet; wiring them
-  in is the cutover and moves with regenerated artifacts + the v1.3 retrain.
+  (no longer skipped).
+- SINGLE-MODE CUTOVER CODE LANDED (2026-07-09, later same day, per OD4): the live Python and
+  Rust pipelines now implement ONLY canonical_v2 (`NORMALIZATION_VERSION = "canonical_v2"` in
+  `s2and/consts.py`; `FEATURIZER_VERSION` bumped for the feature-value change). All compatibility
+  shims are removed: `_canonicalize_last_for_counts`, `_lasts_equivalent_for_constraint`,
+  the joined/first-token name-tuple probing in `first_names_name_compatible` (Python + Rust),
+  the subblocking ASCII/non-ASCII dash spill repair (Python + Rust), the ORCID prefix-count
+  first-token lookup fallback, the vestigial `author_info_first_normalized` Signature field,
+  `split_first_middle_hyphen_aware` (both languages), and the `legacy_full_first_token`
+  name-count semantics. `normalization_version` fail-fast enforcement is live in both
+  languages (bundle load, prediction artifact validation, manifest writers/readers).
+- Cutover readiness checklist (what must land before this branch can RELEASE):
+  1. name_counts.pickle regenerated with the rewritten `generate_name_counts.py` on internal
+     infra; `name_counts_index/` re-serialized (its manifest now records
+     `normalization_version: canonical_v2`).
+  2. `first_k_letter_counts_from_orcid.json` regenerated with the rewritten
+     `generate_orcid_name_prefix_counts.py` (keys become full canonical-first prefixes).
+  3. DONE — name tuples: `s2and/data/s2and_name_tuples_canonical.txt` regenerated
+     deterministically (scripts/production/generate_canonical_name_tuples.py) and wired as the
+     packaged default in Python and Rust.
+  4. v1.3 retrain on canonical names/artifacts; its bundle records
+     `feature_contract.normalization_version = "canonical_v2"`. Until then, loading the legacy
+     v1.21 bundle (or v1.0-1.2 pickles) fails fast by design and the depending tests are
+     version-gated skips.
+  5. Re-baseline the pinned subblocking/eval gates (step 5 below) on the new artifacts.
+  6. OD3 benchmark canonical-name re-export (or its pre-gate diff) for training data.
 - Keep this plan separate from the active execution plan in `docs/work_plan.md`.
 
 Status

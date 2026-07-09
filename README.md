@@ -2,14 +2,17 @@
 
 S2AND provides the S2AND author-name-disambiguation benchmark datasets and the reference model described in the paper [S2AND: A Benchmark and Evaluation System for Author Name Disambiguation](https://api.semanticscholar.org/CorpusID:232233421) by Shivashankar Subramanian, Daniel King, Doug Downey, and Sergey Feldman.
 
-The repository supports both Python-only use and a Rust-accelerated runtime for the expensive inference and featurization paths.
+As of this version, S2AND requires the `s2and-rust` extension at install time.
+Python fallback paths still exist for selected stages, but production model
+loading and the maintained large-scale runtime assume the Rust package is
+installed.
 
 ## What S2AND Provides
 
 - The S2AND datasets used for author name disambiguation research.
 - Versioned production model artifacts used by Semantic Scholar.
 - Training, evaluation, and inference APIs in Python.
-- An optional Rust backend for faster runtime on supported installs.
+- A required Rust extension for production model scoring and maintained large-scale runtime paths.
 
 ## Choose a Workflow
 
@@ -30,11 +33,12 @@ Package install:
 
 ```bash
 uv pip install s2and
-uv pip install "s2and[rust]"
 ```
 
-Both package installs include the production model files as package data. You do
-not need Git LFS or a separate model download when installing from PyPI.
+The base install includes `s2and-rust` and the production model files as package
+data. You do not need Git LFS or a separate model download when installing from
+PyPI. The historical `s2and[rust]` extra is retained as a no-op compatibility
+alias; Rust is required either way.
 
 Repo checkout:
 
@@ -53,7 +57,9 @@ after cloning and after switching branches that change model artifacts. Small
 pointer files in `s2and/data/production_model_*` mean the LFS files were not
 hydrated.
 
-The Rust build step is optional and only needed when you want the native extension from source. For OS prerequisites, activation commands, WSL notes, and install variants, see [docs/install.md](docs/install.md).
+The Rust build step is required for source checkouts unless you are using an
+already-built compatible `s2and-rust` wheel. For OS prerequisites, activation
+commands, WSL notes, and install variants, see [docs/install.md](docs/install.md).
 
 ## Download Data or Model
 
@@ -275,9 +281,9 @@ For evaluation, model serialization, and fuller scripts such as `scripts/transfe
 
 Runtime controls:
 
-- `S2AND_BACKEND=auto` is the default. It uses Rust when available and capable, otherwise Python.
+- `S2AND_BACKEND=auto` is the default. It uses Rust when capable, otherwise Python for stages that still have Python fallbacks.
 - `S2AND_BACKEND=rust` is strict Rust mode and fails fast on Rust-stage errors.
-- `S2AND_BACKEND=python` disables Rust entirely.
+- `S2AND_BACKEND=python` selects Python fallback stages where they exist. It does not remove the install-time Rust requirement, and native production model scoring still requires `s2and-rust`.
 
 Cache behavior:
 
@@ -337,15 +343,15 @@ uv run python scripts/run_ci_locally.py
 - Rust parity guardrail tests in the `rust-enabled` lane
 
 The runner passes `-ra` to pytest so skip reasons are printed by lane. Rust-only tests may skip in `py-only` because
-that lane intentionally omits the `rust` extra and forces `S2AND_BACKEND=python`; they must run in `rust-enabled` after
-the local extension is built with `maturin develop`.
+that lane forces `S2AND_BACKEND=python`; they must run in `rust-enabled` after the local extension is built with
+`maturin develop`.
 
 By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
 To override platform emulation locally, set `S2AND_CI_TY_PLATFORM` (for example, `windows`).
 
 To run CI checks locally without Rust extension compilation (faster iteration):
 ```bash
-uv sync --active --extra dev --frozen
+uv sync --active --extra dev --frozen --no-install-package s2and-rust
 uv run --active --no-project ruff format --check s2and scripts/*.py
 uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute

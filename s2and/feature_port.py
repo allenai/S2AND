@@ -1,10 +1,12 @@
 import hashlib
+import json
 import logging
 import threading
 import time
 import weakref
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -33,6 +35,7 @@ s2and_rust: Any | None = None
 
 logger = logging.getLogger("s2and")
 _S2AND_RUST_LOAD_LOCK = threading.Lock()
+_SourcePathFingerprint = tuple[Any, ...]
 
 
 class _CacheEntry:
@@ -72,7 +75,7 @@ class _CollectionFingerprint:
 class _RustFeaturizerNonSeedFingerprint:
     preprocess: bool
     n_jobs: int
-    source_paths: tuple[tuple[str, str | None], ...]
+    source_paths: tuple[_SourcePathFingerprint, ...]
     signatures: _CollectionFingerprint
     papers: _CollectionFingerprint
     specter_embeddings: _CollectionFingerprint
@@ -98,7 +101,7 @@ _RustFeaturizerBuildCountKey = str
 _RUST_FEATURIZER_CACHE: "weakref.WeakKeyDictionary[ANDData, dict[_RustFeaturizerCacheKey, _CacheEntry]]" = (
     weakref.WeakKeyDictionary()
 )
-_RUST_FEATURIZER_CACHE_LOCK = threading.Lock()
+_RUST_FEATURIZER_CACHE_LOCK = threading.RLock()
 _RUST_FEATURIZER_INFLIGHT_BUILDS: weakref.WeakKeyDictionary[
     ANDData, dict[_RustFeaturizerCacheKey, _InFlightFeaturizerBuild]
 ] = weakref.WeakKeyDictionary()
@@ -106,6 +109,9 @@ _RUST_FEATURIZER_BUILD_COUNTS: "weakref.WeakKeyDictionary[ANDData, dict[_RustFea
     weakref.WeakKeyDictionary()
 )
 _RUST_FEATURIZER_CACHE_EPOCHS: "weakref.WeakKeyDictionary[ANDData, int]" = weakref.WeakKeyDictionary()
+_RUST_FEATURIZER_NON_SEED_FINGERPRINTS: "weakref.WeakKeyDictionary[Any, _RustFeaturizerNonSeedFingerprint]" = (
+    weakref.WeakKeyDictionary()
+)
 _RUST_CLUSTER_SEED_UPDATE_LOCKS: "weakref.WeakKeyDictionary[ANDData, Any]" = weakref.WeakKeyDictionary()
 _RUST_BUILD_ERROR = "s2and_rust extension not built. Build with: maturin develop -m s2and_rust/Cargo.toml"
 RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES = 3
@@ -207,9 +213,75 @@ def _collection_fingerprint(value: Any) -> _CollectionFingerprint:
     return _CollectionFingerprint(object_id=id(value), length=int(length), digest=_fingerprint_token_digest(tokens))
 
 
-def _rust_featurizer_source_paths(dataset: Any) -> tuple[tuple[str, str | None], ...]:
+def _path_stat_token(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _name_counts_index_fingerprint(
+    field_name: str,
+    path_text: str,
+    path: Path,
+) -> _SourcePathFingerprint:
+    directory_stat = _path_stat_token(path)
+    manifest_path = path / "manifest.json"
+    manifest_stat = _path_stat_token(manifest_path)
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        manifest = json.loads(manifest_text)
+    except (OSError, json.JSONDecodeError):
+        return (field_name, path_text, "name_counts_index", directory_stat, manifest_stat, None, ())
+
+    manifest_digest = hashlib.blake2b(manifest_text.encode("utf-8"), digest_size=8).hexdigest()
+    manifest_fingerprint = manifest.get("fingerprint") if isinstance(manifest, Mapping) else None
+    files = manifest.get("files") if isinstance(manifest, Mapping) else None
+    file_tokens: list[tuple[str, str | None, tuple[int, int] | None]] = []
+    if isinstance(files, Mapping):
+        for file_key, file_entry in sorted(files.items(), key=lambda item: str(item[0])):
+            if not isinstance(file_entry, Mapping):
+                file_tokens.append((str(file_key), None, None))
+                continue
+            path_value = file_entry.get("path")
+            if not isinstance(path_value, str) or not path_value.strip():
+                file_tokens.append((str(file_key), None if path_value is None else str(path_value), None))
+                continue
+            child_path = Path(path_value)
+            if not child_path.is_absolute():
+                child_path = path / child_path
+            file_tokens.append((str(file_key), path_value, _path_stat_token(child_path)))
+
+    return (
+        field_name,
+        path_text,
+        "name_counts_index",
+        directory_stat,
+        manifest_stat,
+        None if manifest_fingerprint is None else str(manifest_fingerprint),
+        manifest_digest,
+        tuple(file_tokens),
+    )
+
+
+def _source_path_fingerprint(field_name: str, value: Any) -> _SourcePathFingerprint:
+    if value is None:
+        return (field_name, None, None, None)
+    path_text = str(value)
+    path = Path(path_text)
+    try:
+        stat = path.stat()
+    except OSError:
+        return (field_name, path_text, None, None)
+    if field_name.endswith(".name_counts_index") and path.is_dir():
+        return _name_counts_index_fingerprint(field_name, path_text, path)
+    return (field_name, path_text, int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _rust_featurizer_source_paths(dataset: Any) -> tuple[_SourcePathFingerprint, ...]:
     source_paths = [
-        (field_name, None if (value := getattr(dataset, field_name, None)) is None else str(value))
+        _source_path_fingerprint(field_name, getattr(dataset, field_name, None))
         for field_name in (
             "original_signatures_path",
             "original_papers_path",
@@ -224,7 +296,7 @@ def _rust_featurizer_source_paths(dataset: Any) -> tuple[tuple[str, str | None],
     arrow_paths = getattr(dataset, "rust_featurizer_arrow_paths", None)
     if isinstance(arrow_paths, Mapping):
         source_paths.extend(
-            (f"rust_featurizer_arrow_paths.{key}", None if value is None else str(value))
+            _source_path_fingerprint(f"rust_featurizer_arrow_paths.{key}", value)
             for key, value in sorted(arrow_paths.items(), key=lambda item: str(item[0]))
         )
     return tuple(source_paths)
@@ -242,6 +314,27 @@ def _rust_featurizer_non_seed_fingerprint(dataset: Any) -> _RustFeaturizerNonSee
     )
 
 
+def _cached_rust_featurizer_non_seed_fingerprint(dataset: Any) -> _RustFeaturizerNonSeedFingerprint:
+    try:
+        with _RUST_FEATURIZER_CACHE_LOCK:
+            cached = _RUST_FEATURIZER_NON_SEED_FINGERPRINTS.get(dataset)
+    except TypeError:
+        return _rust_featurizer_non_seed_fingerprint(dataset)
+    if cached is not None:
+        return cached
+
+    computed = _rust_featurizer_non_seed_fingerprint(dataset)
+    try:
+        with _RUST_FEATURIZER_CACHE_LOCK:
+            cached = _RUST_FEATURIZER_NON_SEED_FINGERPRINTS.get(dataset)
+            if cached is not None:
+                return cached
+            _RUST_FEATURIZER_NON_SEED_FINGERPRINTS[dataset] = computed
+    except TypeError:
+        return computed
+    return computed
+
+
 def _rust_featurizer_cache_key(
     dataset: Any,
     *,
@@ -251,7 +344,7 @@ def _rust_featurizer_cache_key(
         _cluster_seeds_version_for_cache(dataset) if cluster_seeds_version is None else int(cluster_seeds_version)
     )
     return _RustFeaturizerCacheKey(
-        non_seed=_rust_featurizer_non_seed_fingerprint(dataset),
+        non_seed=_cached_rust_featurizer_non_seed_fingerprint(dataset),
         seed=_RustFeaturizerSeedFingerprint(
             cluster_seeds_version=resolved_seed_version,
             cluster_seeds_require=_collection_fingerprint(getattr(dataset, "cluster_seeds_require", None)),
@@ -846,6 +939,8 @@ def evict_rust_featurizer(dataset: ANDData) -> bool:
                 inflight_build.event.set()
         if dataset in _RUST_FEATURIZER_BUILD_COUNTS:
             del _RUST_FEATURIZER_BUILD_COUNTS[dataset]
+        if dataset in _RUST_FEATURIZER_NON_SEED_FINGERPRINTS:
+            del _RUST_FEATURIZER_NON_SEED_FINGERPRINTS[dataset]
         return removed
 
 
@@ -865,6 +960,7 @@ def clear_rust_featurizer_cache() -> int:
         _RUST_FEATURIZER_CACHE.clear()
         _RUST_FEATURIZER_INFLIGHT_BUILDS.clear()
         _RUST_FEATURIZER_BUILD_COUNTS.clear()
+        _RUST_FEATURIZER_NON_SEED_FINGERPRINTS.clear()
         return count
 
 

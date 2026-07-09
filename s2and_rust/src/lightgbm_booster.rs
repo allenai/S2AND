@@ -67,7 +67,7 @@ impl LgbTree {
             return self.leaf_value[0];
         }
         let mut node = 0usize;
-        loop {
+        for _ in 0..self.left_child.len() {
             let decision_type = self.decision_type[node];
             let missing = missing_type(decision_type);
             let mut fval = row[self.split_feature[node] as usize];
@@ -92,6 +92,7 @@ impl LgbTree {
             }
             node = child as usize;
         }
+        unreachable!("validated LightGBM trees must terminate at a leaf")
     }
 }
 
@@ -134,7 +135,10 @@ fn parse_scalar<T: std::str::FromStr>(fields: &[(String, String)], key: &str) ->
         .map_err(|_| format!("could not parse field {key:?} value {raw:?}"))
 }
 
-fn parse_vec<T: std::str::FromStr>(fields: &[(String, String)], key: &str) -> Result<Vec<T>, String> {
+fn parse_vec<T: std::str::FromStr>(
+    fields: &[(String, String)],
+    key: &str,
+) -> Result<Vec<T>, String> {
     let raw = fields
         .iter()
         .find(|(field_key, _)| field_key == key)
@@ -168,7 +172,9 @@ fn parse_tree(
     }
     if let Ok(is_linear) = parse_scalar::<i64>(fields, "is_linear") {
         if is_linear != 0 {
-            return Err(describe("linear trees are unsupported (is_linear=1)".to_string()));
+            return Err(describe(
+                "linear trees are unsupported (is_linear=1)".to_string(),
+            ));
         }
     }
 
@@ -216,7 +222,8 @@ fn parse_tree(
     for value in &decision_type {
         if value & CATEGORICAL_MASK != 0 {
             return Err(describe(
-                "categorical splits are unsupported (decision_type categorical bit set)".to_string(),
+                "categorical splits are unsupported (decision_type categorical bit set)"
+                    .to_string(),
             ));
         }
         if missing_type(*value) > MISSING_TYPE_NAN {
@@ -232,14 +239,22 @@ fn parse_tree(
             )));
         }
     }
-    for child in left_child.iter().chain(right_child.iter()) {
-        let valid = if *child < 0 {
-            ((!*child) as usize) < num_leaves
+    for (node_index, child) in left_child.iter().chain(right_child.iter()).enumerate() {
+        let parent_index = node_index % internal_count;
+        if *child < 0 {
+            if ((!*child) as usize) >= num_leaves {
+                return Err(describe(format!("child index {child} out of range")));
+            }
         } else {
-            (*child as usize) < internal_count
-        };
-        if !valid {
-            return Err(describe(format!("child index {child} out of range")));
+            let child_index = *child as usize;
+            if child_index >= internal_count {
+                return Err(describe(format!("child index {child} out of range")));
+            }
+            if child_index <= parent_index {
+                return Err(describe(format!(
+                    "child index {child} must refer to a later internal node than parent {parent_index}"
+                )));
+            }
         }
     }
 
@@ -260,15 +275,27 @@ fn parse_model(model_text: &str) -> Result<LgbModel, String> {
     let mut current_tree: Option<Vec<(String, String)>> = None;
     let mut saw_tree_magic = false;
     let mut saw_end_of_trees = false;
+    let mut saw_first_content_line = false;
 
     for raw_line in model_text.lines() {
         let line = raw_line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        if line == "tree" && !saw_tree_magic {
+        if !saw_first_content_line {
+            saw_first_content_line = true;
+            if line != "tree" {
+                return Err(
+                    "model text does not start with the LightGBM 'tree' magic line".to_string(),
+                );
+            }
             saw_tree_magic = true;
             continue;
+        }
+        if line == "tree" {
+            return Err(
+                "unexpected LightGBM 'tree' magic line after model header started".to_string(),
+            );
         }
         if line == "end of trees" {
             if let Some(fields) = current_tree.take() {
@@ -326,7 +353,9 @@ fn parse_model(model_text: &str) -> Result<LgbModel, String> {
     let mut objective_tokens = objective.split_whitespace();
     let objective_name = objective_tokens.next().unwrap_or("").to_string();
     if objective_name != "binary" {
-        return Err(format!("only the binary objective is supported, got {objective:?}"));
+        return Err(format!(
+            "only the binary objective is supported, got {objective:?}"
+        ));
     }
     let mut sigmoid = 1.0f64;
     for token in objective_tokens {
@@ -365,7 +394,13 @@ fn parse_model(model_text: &str) -> Result<LgbModel, String> {
     })
 }
 
-fn predict_rows(model: &LgbModel, rows: &[f64], num_features: usize, num_threads: usize, apply_sigmoid: bool) -> Vec<f64> {
+fn predict_rows(
+    model: &LgbModel,
+    rows: &[f64],
+    num_features: usize,
+    num_threads: usize,
+    apply_sigmoid: bool,
+) -> Vec<f64> {
     let row_count = rows.len() / num_features.max(1);
     let score_chunk = |chunk: &[f64]| {
         let raw = model.predict_row_raw(chunk);
@@ -409,13 +444,14 @@ impl RustLightGBMBooster {
         if row_count == 0 {
             return Ok(Vec::<f64>::new().into_pyarray(py));
         }
+        let threads = num_threads.unwrap_or(1).max(1);
+        let model = &self.model;
         // Owned standard-layout copy so non-C-contiguous inputs work and the
         // buffer can be scored with the GIL released.
         let rows: Vec<f64> = features.as_array().iter().copied().collect();
-        let threads = num_threads.unwrap_or(1).max(1);
-        let model = &self.model;
-        let scores =
-            py.allow_threads(move || predict_rows(model, &rows, column_count, threads, apply_sigmoid));
+        let scores = py.allow_threads(move || {
+            predict_rows(model, &rows, column_count, threads, apply_sigmoid)
+        });
         Ok(scores.into_pyarray(py))
     }
 }
@@ -585,7 +621,24 @@ mod tests {
         assert_eq!(model.predict_row_raw(&[0.4, 0.0]), 1.0 + 20.0);
         // Just outside the zero threshold compares numerically again.
         let above_zero_threshold = K_ZERO_THRESHOLD * 1.01;
-        assert_eq!(model.predict_row_raw(&[0.4, above_zero_threshold]), 1.0 + 10.0);
+        assert_eq!(
+            model.predict_row_raw(&[0.4, above_zero_threshold]),
+            1.0 + 10.0
+        );
+    }
+
+    #[test]
+    fn tree_magic_after_header_fields_rejected() {
+        let corrupted = format!("objective=binary sigmoid:0.5\n{TOY_MODEL}");
+        let err = parse_model(&corrupted).unwrap_err();
+        assert!(err.contains("does not start with the LightGBM 'tree' magic line"));
+    }
+
+    #[test]
+    fn self_referential_child_rejected() {
+        let corrupted = TOY_MODEL.replacen("left_child=-1", "left_child=0", 1);
+        let err = parse_model(&corrupted).unwrap_err();
+        assert!(err.contains("must refer to a later internal node"));
     }
 
     #[test]

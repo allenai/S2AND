@@ -16,6 +16,7 @@ from s2and.production_model import (
     NativeLightGBMBinaryClassifier,
     _config_choice,
     _production_runtime_cluster_eps,
+    _warn_if_featurizer_version_mismatch,
     load_production_model,
 )
 from s2and.serialization import load_pickle_with_verified_label_encoder_compat
@@ -123,6 +124,12 @@ def test_native_pairwise_models_match_v12_pickle_fixture() -> None:
         legacy_clusterer.classifier.predict_proba(main_features),
         rtol=1e-10,
         atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        native_clusterer.classifier.predict_proba_positive(main_features),
+        native_clusterer.classifier.predict_proba(main_features)[:, 1],
+        rtol=0,
+        atol=0,
     )
     assert native_clusterer.nameless_classifier is not None
     assert legacy_clusterer.nameless_classifier is not None
@@ -245,6 +252,14 @@ def test_production_runtime_cluster_eps_policy_is_version_scoped(tmp_path: Path)
         )
         is None
     )
+
+
+def test_featurizer_version_mismatch_warns(tmp_path: Path) -> None:
+    with pytest.warns(RuntimeWarning, match="FEATURIZER_VERSION"):
+        _warn_if_featurizer_version_mismatch(
+            tmp_path / "production_model_vtest",
+            {"featurizer_info": -1, "nameless_featurizer_info": -1},
+        )
 
 
 @requires_rust_lightgbm

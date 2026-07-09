@@ -1538,6 +1538,7 @@ impl RustFeaturizer {
         if !emit_matrix {
             let resolved_aggregate_indices =
                 resolve_feature_indices("aggregate_indices", aggregate_indices, full_cols)?;
+            let resolved_aggregate_nan_value = aggregate_nan_value.unwrap_or(nan_value);
             let row_ranges = Self::pair_aggregate_row_ranges(owner_row_indices);
             let aggregate_cols = resolved_aggregate_indices.len();
             let aggregate_buffers = py.allow_threads(|| {
@@ -1548,7 +1549,7 @@ impl RustFeaturizer {
                         ranges,
                         row_count,
                         &resolved_aggregate_indices,
-                        nan_value,
+                        resolved_aggregate_nan_value,
                         &lookup,
                     ),
                     None => self.aggregate_pair_index_arrays_sequential(
@@ -1557,7 +1558,7 @@ impl RustFeaturizer {
                         owner_row_indices,
                         row_count,
                         &resolved_aggregate_indices,
-                        nan_value,
+                        resolved_aggregate_nan_value,
                         &lookup,
                     ),
                 };

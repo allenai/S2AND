@@ -17,6 +17,21 @@ class FakeClassifier:
         return np.stack([col0, col1], axis=1)
 
 
+class FakePositiveClassifier:
+    prediction_backend = "rust_lightgbm"
+
+    def __init__(self) -> None:
+        self.last_shape: tuple[int, int] | None = None
+
+    def predict_proba_positive(self, features_2d: np.ndarray) -> np.ndarray:
+        features_2d = np.asarray(features_2d, dtype=np.float64)
+        self.last_shape = tuple(int(v) for v in features_2d.shape)  # type: ignore[assignment]
+        return np.asarray([0.2, 0.7], dtype=np.float64)[: features_2d.shape[0]]
+
+    def predict_proba(self, features_2d: np.ndarray) -> np.ndarray:
+        raise AssertionError("predict_proba should not be called when predict_proba_positive is available")
+
+
 def test_predict_and_combine_all_predicted_rows():
     classifier = FakeClassifier(scale=0.1)
     features = np.asarray([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float64)
@@ -74,6 +89,25 @@ def test_predict_and_combine_respects_constrained_rows():
     expected[1] = 0.0
     expected[3] = 1.0
     assert np.allclose(predictions, expected)
+
+
+def test_predict_and_combine_uses_native_positive_probability_fast_path():
+    classifier = FakePositiveClassifier()
+    features = np.asarray([[1.0], [2.0]], dtype=np.float64)
+    labels = np.asarray([np.nan, np.nan], dtype=np.float64)
+
+    predictions, seconds = _predict_and_combine(
+        classifier,
+        None,
+        features,
+        labels,
+        None,
+        "batch",
+    )
+
+    assert classifier.last_shape == features.shape
+    assert seconds >= 0.0
+    assert np.allclose(predictions, [0.8, 0.3])
 
 
 def test_predict_and_combine_averages_nameless_classifier():

@@ -6,7 +6,12 @@ This document covers the fuller install and setup options for S2AND.
 
 - Python `3.11.x`
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- Rust, if you want to build the native extension from source: [`rustup`](https://www.rust-lang.org/tools/install)
+- Rust, if you are working from a source checkout or building the native extension from source:
+  [`rustup`](https://www.rust-lang.org/tools/install)
+
+As of this version, `s2and-rust` is a required runtime dependency. Package
+installs get the matching wheel when one is available; source checkouts should
+build the local extension.
 
 If you are building the Rust extension from source, install OS prerequisites first.
 
@@ -31,13 +36,14 @@ cargo --version
 
 ## Package install
 
-Python-only runtime:
+Runtime install:
 
 ```bash
 uv pip install s2and
 ```
 
-Rust-enabled runtime when wheels are available:
+The historical extra remains as a no-op compatibility alias, but Rust is no
+longer optional:
 
 ```bash
 uv pip install "s2and[rust]"

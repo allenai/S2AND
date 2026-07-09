@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+- Breaking: `s2and-rust` is now a required runtime dependency of `s2and`.
+  `uv pip install s2and` installs the Rust package; `s2and[rust]` remains only
+  as a compatibility alias.
 - Breaking: removes the Sinonym-dependent `ANDData` rewrite API. `ANDData(...)`
   no longer accepts `use_sinonym_overwrite` or `sinonym_overwrite_min_ratio`;
   callers must provide upstream-normalized names before constructing `ANDData`.
+- Arrow-backed training ingestion now streams IPC record batches for
+  signatures/papers/authors and skips Python SPECTER embedding materialization
+  by default when Rust featurization is attached. Pass
+  `load_python_specter=True` only for Python reference featurization or direct
+  Python embedding access.
 
 ## 0.51.1
 

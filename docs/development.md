@@ -26,8 +26,8 @@ uv run python scripts/run_ci_locally.py
 - Rust parity guardrail tests in the `rust-enabled` lane
 
 The local runner passes `-ra` to pytest so skip reasons are printed under each lane. Rust-only tests may skip in the
-`py-only` lane because that lane intentionally syncs without the `rust` extra and forces `S2AND_BACKEND=python`; the
-same tests must run in the later `rust-enabled` lane after `maturin develop` builds the extension.
+`py-only` lane because that lane forces `S2AND_BACKEND=python`; the same tests must run in the later `rust-enabled`
+lane after `maturin develop` builds the extension.
 
 By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
 
@@ -35,12 +35,12 @@ To override the local platform emulation:
 
 - set `S2AND_CI_TY_PLATFORM`, for example `windows`
 
-## Python-only fast path
+## Python-backend fast path
 
 If you want to skip Rust extension compilation while iterating:
 
 ```bash
-uv sync --active --extra dev --frozen
+uv sync --active --extra dev --frozen --no-install-package s2and-rust
 uv run --active --no-project ruff format --check s2and scripts/*.py
 uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute

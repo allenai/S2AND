@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from pathlib import Path
@@ -185,6 +186,69 @@ def test_rust_featurizer_cache_tracks_cluster_seed_version():
     assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)]
 
 
+def test_rust_featurizer_cache_key_tracks_arrow_file_metadata(tmp_path: Path):
+    dataset = DummyDataset("arrow_file_metadata_cache_dataset", mode="train")
+    signatures_path = tmp_path / "signatures.arrow"
+    signatures_path.write_text("first", encoding="utf-8")
+    dataset.rust_featurizer_arrow_paths = {"signatures": str(signatures_path)}
+
+    first_key = feature_port._rust_featurizer_cache_key(dataset)
+    signatures_path.write_text("second payload", encoding="utf-8")
+    second_key = feature_port._rust_featurizer_cache_key(dataset)
+    feature_port.evict_rust_featurizer(dataset)
+    refreshed_key = feature_port._rust_featurizer_cache_key(dataset)
+
+    assert second_key == first_key
+    assert refreshed_key != first_key
+
+
+def test_rust_featurizer_cache_key_tracks_name_counts_index_child_metadata(tmp_path: Path):
+    dataset = DummyDataset("name_counts_index_metadata_cache_dataset", mode="train")
+    index_dir = tmp_path / "name_counts_index"
+    generation_dir = index_dir / "generations" / "gen-1"
+    generation_dir.mkdir(parents=True)
+    child_path = generation_dir / "first.bin"
+    child_path.write_bytes(b"first")
+    (index_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "fingerprint": "test-fingerprint",
+                "files": {"first": {"path": "generations/gen-1/first.bin"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset.rust_featurizer_arrow_paths = {"name_counts_index": str(index_dir)}
+
+    first_key = feature_port._rust_featurizer_cache_key(dataset)
+    child_path.write_bytes(b"second payload")
+    second_key = feature_port._rust_featurizer_cache_key(dataset)
+    feature_port.evict_rust_featurizer(dataset)
+    refreshed_key = feature_port._rust_featurizer_cache_key(dataset)
+
+    assert second_key == first_key
+    assert refreshed_key != first_key
+
+
+def test_rust_featurizer_cache_key_memoizes_non_seed_fingerprint(monkeypatch):
+    dataset = DummyDataset("memoized_non_seed_cache_dataset", mode="train")
+    calls = {"count": 0}
+
+    def fake_source_paths(_dataset):
+        calls["count"] += 1
+        return ()
+
+    monkeypatch.setattr(feature_port, "_rust_featurizer_source_paths", fake_source_paths)
+
+    first_key = feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=0)
+    second_key = feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)
+
+    assert calls["count"] == 1
+    assert first_key.non_seed == second_key.non_seed
+    assert first_key.seed.cluster_seeds_version == 0
+    assert second_key.seed.cluster_seeds_version == 1
+
+
 def test_rust_featurizer_cache_retries_when_seed_version_changes_during_lookup(monkeypatch):
     dataset = DummyDataset("seed_version_race_dataset", mode="train")
     versions = [0, 1]
@@ -244,32 +308,40 @@ def test_rust_featurizer_cache_retries_when_seed_version_changes_during_build(mo
         ("name_tuples", lambda dataset: dataset.name_tuples.add(("bill", "william"))),
     ],
 )
-def test_rust_featurizer_cache_tracks_material_dataset_fields(case_name, mutate_dataset):
+def test_rust_featurizer_cache_requires_evict_for_material_dataset_fields(case_name, mutate_dataset):
     dataset = DummyDataset(f"material_cache_{case_name}", mode="train")
 
     first = feature_port._get_rust_featurizer(dataset)
     mutate_dataset(dataset)
     second = feature_port._get_rust_featurizer(dataset)
+    removed = feature_port.evict_rust_featurizer(dataset)
+    third = feature_port._get_rust_featurizer(dataset)
 
-    assert second is not first
+    assert second is first
+    assert removed is True
+    assert third is not first
     assert DummyRustFeaturizer.created == [dataset.name, dataset.name]
     assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset)]
 
 
-def test_rust_featurizer_cache_tracks_material_mutation_beyond_prefix_sample():
+def test_rust_featurizer_cache_requires_evict_for_material_mutation_beyond_prefix_sample():
     dataset = DummyDataset("material_cache_full_digest", mode="train")
     dataset.signatures = {f"s{index}": object() for index in range(64)}
 
     first = feature_port._get_rust_featurizer(dataset)
     dataset.signatures["s63"] = object()
     second = feature_port._get_rust_featurizer(dataset)
+    removed = feature_port.evict_rust_featurizer(dataset)
+    third = feature_port._get_rust_featurizer(dataset)
 
-    assert second is not first
+    assert second is first
+    assert removed is True
+    assert third is not first
     assert DummyRustFeaturizer.created == [dataset.name, dataset.name]
     assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset)]
 
 
-def test_rust_featurizer_cache_tracks_in_place_numpy_embedding_mutation(monkeypatch):
+def test_rust_featurizer_cache_requires_evict_for_in_place_numpy_embedding_mutation(monkeypatch):
     snapshots: list[float] = []
 
     def _embedding_build(dataset_arg):
@@ -287,8 +359,12 @@ def test_rust_featurizer_cache_tracks_in_place_numpy_embedding_mutation(monkeypa
     first = feature_port._get_rust_featurizer(dataset)
     dataset.specter_embeddings["p"][0] = 1.0
     second = feature_port._get_rust_featurizer(dataset)
+    removed = feature_port.evict_rust_featurizer(dataset)
+    third = feature_port._get_rust_featurizer(dataset)
 
-    assert second is not first
+    assert second is first
+    assert removed is True
+    assert third is not first
     assert snapshots == [0.0, 1.0]
 
 

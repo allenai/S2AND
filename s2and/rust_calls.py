@@ -332,6 +332,7 @@ def build_linker_pair_aggregate_stats_arrays_rust(
     aggregate_indices: list[int] | None = None,
     num_threads: int | None = None,
     nan_value: float = np.nan,
+    aggregate_nan_value: float | None = None,
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -345,6 +346,7 @@ def build_linker_pair_aggregate_stats_arrays_rust(
             "rebuild/install a newer s2and-rust extension."
         )
     resolved_num_threads = None if num_threads is None else resolve_n_jobs(num_threads)
+    resolved_aggregate_nan_value = nan_value if aggregate_nan_value is None else float(aggregate_nan_value)
     result = method(
         as_uint32_1d("left_signature_indices", left_signature_indices),
         as_uint32_1d("right_signature_indices", right_signature_indices),
@@ -354,7 +356,7 @@ def build_linker_pair_aggregate_stats_arrays_rust(
         aggregate_indices,
         resolved_num_threads,
         nan_value,
-        None,
+        resolved_aggregate_nan_value,
         False,
     )
     try:

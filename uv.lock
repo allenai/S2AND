@@ -1154,6 +1154,7 @@ dependencies = [
     { name = "pyasn1" },
     { name = "pycld2" },
     { name = "requests" },
+    { name = "s2and-rust" },
     { name = "scikit-learn" },
     { name = "seaborn" },
     { name = "setuptools" },
@@ -1173,9 +1174,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
     { name = "ty" },
-]
-rust = [
-    { name = "s2and-rust" },
 ]
 
 [package.metadata]
@@ -1203,7 +1201,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4,<6" },
     { name = "requests", specifier = ">=2.33.0,<3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.6.9" },
-    { name = "s2and-rust", marker = "extra == 'rust'", directory = "s2and_rust" },
+    { name = "s2and-rust", directory = "s2and_rust" },
     { name = "scikit-learn", specifier = "==1.7.1" },
     { name = "seaborn", specifier = ">=0.12,<0.14" },
     { name = "setuptools", specifier = ">=78.1.1,<82" },

@@ -63,6 +63,11 @@ def test_default_features_are_instance_isolated() -> None:
     assert first.features_to_use is not second.features_to_use
 
 
+def test_featurization_info_rejects_unknown_feature_groups() -> None:
+    with pytest.raises(ValueError, match="Unknown feature group"):
+        FeaturizationInfo(features_to_use=["year_diff", "reference_features"])
+
+
 def test_featurizer_computes_requested_pairs() -> None:
     dataset = _dummy_dataset("dummy_featurizer")
     featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
@@ -112,6 +117,27 @@ def test_empty_python_pair_featurization_does_not_mark_missing_ngrams_ready() ->
     _ensure_python_pair_signature_ngrams(dataset, [("a", "a", 1)], runtime_context)
     assert state["materialized"] == 1
     assert dataset._s2and_python_pair_ngrams_ready is True
+
+
+def test_python_pair_featurization_rejects_rust_deferred_signature_fields() -> None:
+    runtime_context = RuntimeContext(
+        operation="featurization_run",
+        requested_backend="python",
+        resolved_backend="python",
+        use_rust=False,
+        run_id="run-python-deferred-fields",
+        source="argument",
+    )
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            signatures={},
+            rust_lifecycle_policy=SimpleNamespace(defer_signature_fields_to_rust=True),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="normalized signature fields deferred to Rust"):
+        _ensure_python_pair_signature_ngrams(dataset, [("a", "b", 1)], runtime_context)
 
 
 def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch: pytest.MonkeyPatch) -> None:

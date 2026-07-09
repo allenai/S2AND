@@ -31,10 +31,14 @@ from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_training import (  # noqa: E402
     attach_training_arrow_featurizer_paths,
     build_training_anddata_from_arrow,
+    load_papers_dict_from_arrow,
+    load_signatures_dict_from_arrow,
+    load_specter_tuple_from_arrow,
 )
 from s2and.consts import FEATURIZER_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.featurizer import FeaturizationInfo, featurize  # noqa: E402
+from s2and.incremental_linking.feature_block import write_arrow_ipc_table  # noqa: E402
 from s2and.incremental_linking.feature_block_arrow import (  # noqa: E402
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
@@ -69,6 +73,105 @@ PRODUCTION_FEATURES = (
 NAMELESS_FEATURES = tuple(
     name for name in PRODUCTION_FEATURES if name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
 )
+
+
+def _write_minimal_signatures_table(path: Path, signature_ids: list[str | None]) -> None:
+    row_count = len(signature_ids)
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "signature_id": pa.array(signature_ids, type=pa.string()),
+                "paper_id": pa.array([f"p{i}" for i in range(row_count)], type=pa.string()),
+                "author_first": pa.array(["Ada"] * row_count, type=pa.string()),
+                "author_middle": pa.array([""] * row_count, type=pa.string()),
+                "author_last": pa.array(["Lovelace"] * row_count, type=pa.string()),
+                "author_suffix": pa.array([""] * row_count, type=pa.string()),
+                "author_affiliations": pa.array([[] for _ in range(row_count)], type=pa.list_(pa.string())),
+                "author_position": pa.array([0] * row_count, type=pa.int64()),
+            }
+        ),
+        path,
+    )
+
+
+def _write_minimal_papers_table(path: Path, paper_ids: list[str | None]) -> None:
+    row_count = len(paper_ids)
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(paper_ids, type=pa.string()),
+                "title": pa.array(["title"] * row_count, type=pa.string()),
+                "venue": pa.array(["venue"] * row_count, type=pa.string()),
+                "journal_name": pa.array(["journal"] * row_count, type=pa.string()),
+            }
+        ),
+        path,
+    )
+
+
+def _write_minimal_paper_authors_table(path: Path, paper_ids: list[str | None]) -> None:
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(paper_ids, type=pa.string()),
+                "position": pa.array([0] * len(paper_ids), type=pa.int64()),
+                "author_name": pa.array(["Ada Lovelace"] * len(paper_ids), type=pa.string()),
+            }
+        ),
+        path,
+    )
+
+
+def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+
+    _write_minimal_signatures_table(signatures_path, [None, "s1"])
+    with pytest.raises(ValueError, match="null signature_id"):
+        load_signatures_dict_from_arrow(signatures_path)
+
+    _write_minimal_signatures_table(signatures_path, ["s1", "s1"])
+    with pytest.raises(ValueError, match="duplicate signature_id"):
+        load_signatures_dict_from_arrow(signatures_path)
+
+
+def test_arrow_training_rejects_null_and_duplicate_paper_ids(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_paper_authors_table(authors_path, ["p1"])
+
+    _write_minimal_papers_table(papers_path, [None, "p1"])
+    with pytest.raises(ValueError, match="null paper_id"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+    _write_minimal_papers_table(papers_path, ["p1", "p1"])
+    with pytest.raises(ValueError, match="duplicate paper_id"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+
+def test_arrow_training_rejects_null_paper_author_ids(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1"])
+    _write_minimal_paper_authors_table(authors_path, [None])
+
+    with pytest.raises(ValueError, match="null paper_id"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+
+def test_arrow_training_rejects_duplicate_specter_ids(tmp_path: Path) -> None:
+    specter_path = tmp_path / "specter.arrow"
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1", "p1"], type=pa.string()),
+                "embedding": pa.array([[1.0, 0.0], [0.0, 1.0]], type=pa.list_(pa.float32(), 2)),
+            }
+        ),
+        specter_path,
+    )
+
+    with pytest.raises(ValueError, match="duplicate paper_id"):
+        load_specter_tuple_from_arrow(specter_path)
 
 
 def _json_training_anddata(name: str, specter: dict[str, np.ndarray], **overrides: Any) -> ANDData:
@@ -120,6 +223,7 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
             mode="train",
             block_type="s2",
             load_name_counts=tiny_name_counts(),
+            load_python_specter=True,
             preprocess=True,
             random_seed=42,
             n_jobs=1,
@@ -210,6 +314,7 @@ def test_arrow_ingestion_loads_specter2_alias_embeddings(training_bundle: dict[s
         mode="train",
         block_type="s2",
         load_name_counts=tiny_name_counts(),
+        load_python_specter=True,
         preprocess=True,
         random_seed=42,
         n_jobs=1,
@@ -223,6 +328,50 @@ def test_arrow_ingestion_loads_specter2_alias_embeddings(training_bundle: dict[s
     assert attached_paths is not None
     assert "specter" in attached_paths
     assert "specter_batch_index" in attached_paths
+
+
+def test_arrow_training_skips_python_specter_by_default_when_rust_attached(
+    training_bundle: dict[str, Any],
+) -> None:
+    arrow_dataset = build_training_anddata_from_arrow(
+        training_bundle["arrow_paths"],
+        "dummy_arrow_training_skip_python_specter",
+        clusters=str(DUMMY_DIR / "clusters.json"),
+        mode="train",
+        block_type="s2",
+        load_name_counts=tiny_name_counts(),
+        preprocess=True,
+        random_seed=42,
+        n_jobs=1,
+    )
+
+    assert arrow_dataset.specter_embeddings == {}
+    attached_paths = getattr(arrow_dataset, "rust_featurizer_arrow_paths", None)
+    assert attached_paths is not None
+    assert "specter" in attached_paths
+
+
+def test_arrow_training_loads_python_specter_by_default_when_backend_python(
+    training_bundle: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+
+    arrow_dataset = build_training_anddata_from_arrow(
+        training_bundle["arrow_paths"],
+        "dummy_arrow_training_python_backend_specter",
+        clusters=str(DUMMY_DIR / "clusters.json"),
+        mode="train",
+        block_type="s2",
+        load_name_counts=tiny_name_counts(),
+        preprocess=True,
+        random_seed=42,
+        n_jobs=1,
+    )
+
+    assert arrow_dataset.specter_embeddings != {}
+    for paper_id, vector in training_bundle["specter"].items():
+        np.testing.assert_array_equal(np.asarray(arrow_dataset.specter_embeddings[paper_id]), vector)
 
 
 def _fixed_pair_frames(json_dataset: ANDData) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

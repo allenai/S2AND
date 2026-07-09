@@ -28,6 +28,7 @@ def test_py_only_lane_reports_expected_rust_skips(monkeypatch, capsys) -> None:
     assert len(calls) == 1
     assert calls[0][0] == [
         "run",
+        "--no-sync",
         "pytest",
         "-ra",
         "tests/",
@@ -50,8 +51,8 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
 
     run_ci.run_lint_job(lock_present=True)
 
-    assert calls[0] == ["run", "python", "scripts/sync_version.py", "--check"]
-    assert ["run", "ruff", "check", "s2and", "scripts", "tests"] in calls
+    assert calls[0] == ["run", "--no-sync", "python", "scripts/sync_version.py", "--check"]
+    assert ["run", "--no-sync", "ruff", "check", "s2and", "scripts", "tests"] in calls
 
 
 def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch) -> None:
@@ -67,12 +68,13 @@ def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch)
 
     run_ci.run_typecheck_and_test_lane(lane="rust-enabled", lock_present=True)
 
-    pytest_calls = [args for args, _env in calls if args[:2] == ["run", "pytest"]]
+    pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == len(run_ci.RUST_PARITY_TESTS) + 1
     assert all("-ra" in args for args in pytest_calls)
-    assert pytest_calls[0] == ["run", "pytest", "-q", "-ra", run_ci.RUST_PARITY_TESTS[0]]
+    assert pytest_calls[0] == ["run", "--no-sync", "pytest", "-q", "-ra", run_ci.RUST_PARITY_TESTS[0]]
     assert pytest_calls[-1] == [
         "run",
+        "--no-sync",
         "pytest",
         "-ra",
         "tests/",

@@ -437,6 +437,7 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
     n_jobs: int = 1,
     total_ram_bytes: int | None = None,
     nan_value: float = math.nan,
+    aggregate_nan_value: float | None = None,
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
 ) -> PairwiseAggregateStats:
@@ -483,6 +484,7 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
                 aggregate_indices=list(aggregate_indices),
                 num_threads=resolve_n_jobs(n_jobs),
                 nan_value=float(nan_value),
+                aggregate_nan_value=aggregate_nan_value,
                 runtime_context=runtime_context,
                 featurizer=featurizer,
             )

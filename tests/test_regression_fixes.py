@@ -582,7 +582,7 @@ def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypa
     assert output == {"ab|middle=cd": ["s1"]}
 
 
-def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monkeypatch):
+def test_clusterer_predict_disables_incremental_batch_threshold_for_python_subblocks(monkeypatch):
     class Signature:
         def __init__(self, first_name):
             self.author_info_first_normalized_without_apostrophe = first_name
@@ -650,7 +650,7 @@ def test_clusterer_predict_uses_minimum_one_for_incremental_batch_threshold(monk
         backend="python",
     )
 
-    assert captured["batching_threshold"] == 1
+    assert captured["batching_threshold"] is None
 
 
 def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):

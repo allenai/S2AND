@@ -1869,6 +1869,85 @@ def _build_minimal_incremental_clusterer() -> Clusterer:
     )
 
 
+def _strict_rust_context(run_id: str = "test-strict-rust") -> SimpleNamespace:
+    return SimpleNamespace(
+        operation="cluster_predict",
+        requested_backend="rust",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id=run_id,
+        source="argument",
+    )
+
+
+def test_predict_subblocked_strict_rust_requires_arrow_paths() -> None:
+    clusterer = _build_minimal_incremental_clusterer()
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            name="strict_rust_missing_arrow",
+            cluster_seeds_require={},
+            cluster_seeds_disallow=set(),
+            name_tuples="filtered",
+        ),
+    )
+
+    with pytest.raises(model_module.MissingArrowArtifactError, match="strict Rust subblocked prediction"):
+        clusterer._predict_subblocked(
+            {"block": ["s1", "s2"]},
+            dataset,
+            cluster_model_params=None,
+            partial_supervision={},
+            use_s2_clusters=True,
+            incremental_dont_use_cluster_seeds=False,
+            batching_threshold=1,
+            desired_memory_use=None,
+            runtime_context=cast(Any, _strict_rust_context()),
+            dists=None,
+            total_ram_bytes=None,
+            restore_rust_cluster_seeds_on_exit=True,
+            arrow_paths=None,
+        )
+
+
+def test_subblocked_single_letter_cleanup_skips_missing_dataset_rust_featurizer(monkeypatch) -> None:
+    clusterer = _build_minimal_incremental_clusterer()
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            name="transient_arrow_only",
+            cluster_seeds_require={"seed": "seed_cluster"},
+            cluster_seeds_disallow=set(),
+            name_tuples="filtered",
+        ),
+    )
+
+    def fake_predict_incremental(self, block_signatures, *_args, **_kwargs):
+        del self
+        return {"clusters": {"single": list(block_signatures)}}
+
+    monkeypatch.setattr(Clusterer, "predict_incremental", fake_predict_incremental)
+    monkeypatch.setattr(
+        model_module,
+        "_sync_rust_cluster_seeds",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dataset featurizer sync should be skipped")),
+    )
+
+    result = clusterer._predict_subblocked_single_letter_incremental_groups(
+        {"block|single": ["s1", "s2"]},
+        pred_clusters={},
+        desired_memory_use=4,
+        dataset=dataset,
+        partial_supervision={},
+        runtime_context=cast(Any, _strict_rust_context("cleanup-no-dataset-featurizer")),
+        restore_rust_cluster_seeds_on_exit=True,
+        total_ram_bytes=None,
+    )
+
+    assert result == {"single": ["s1", "s2"]}
+    assert dataset.cluster_seeds_require == {"seed": "seed_cluster"}
+
+
 def test_next_unused_cluster_id_prevents_overwrite():
     pred_clusters = {
         "0": ["s0"],

@@ -548,6 +548,9 @@ def _matrix_positions(matrix_indices: Sequence[int], selected_indices: Sequence[
 def _predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
     # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
     # is LightGBM-specific and breaks sklearn-compatible wrappers.
+    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
+    if callable(predict_proba_positive):
+        return 1.0 - np.asarray(predict_proba_positive(features), dtype=np.float64).reshape(-1)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="X does not have valid feature names", category=UserWarning)
         probabilities = classifier.predict_proba(features)

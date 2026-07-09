@@ -75,6 +75,7 @@ from s2and.incremental_linking.policy import (
 from s2and.incremental_linking.production import predict_incremental_promoted_linker_from_arrow_paths
 from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify
 from s2and.runtime import (
+    RUST_FEATURIZER_ARROW_PATHS_ATTR,
     RequestedBackend,
     RuntimeContext,
     build_runtime_context,
@@ -997,6 +998,36 @@ def _runtime_context_explicitly_requested_rust(runtime_context: RuntimeContext) 
     return stage_uses_rust(runtime_context) and runtime_context.requested_backend == "rust"
 
 
+def _runtime_context_for_python_prediction(runtime_context: RuntimeContext) -> RuntimeContext:
+    if not stage_uses_rust(runtime_context):
+        return runtime_context
+    return RuntimeContext(
+        operation=runtime_context.operation,
+        requested_backend=runtime_context.requested_backend,
+        resolved_backend="python",
+        use_rust=False,
+        run_id=runtime_context.run_id,
+        source=runtime_context.source,
+    )
+
+
+def _dataset_has_rust_featurizer_paths(dataset: Any) -> bool:
+    return bool(getattr(dataset, RUST_FEATURIZER_ARROW_PATHS_ATTR, None))
+
+
+def _sync_cached_rust_cluster_seeds_if_available(dataset: ANDData, runtime_context: RuntimeContext) -> None:
+    if stage_uses_rust(runtime_context) and not _dataset_has_rust_featurizer_paths(dataset):
+        logger.info(
+            "Skipping Rust cluster seed sync for dataset=%s because no dataset-level Rust featurizer "
+            "artifacts are attached (op=%s run=%s)",
+            getattr(dataset, "name", "<unnamed>"),
+            runtime_context.operation,
+            runtime_context.run_id,
+        )
+        return
+    _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
+
+
 def _dataset_arrow_paths_for_prediction_or_python(
     clusterer: Any,
     dataset: Any,
@@ -1723,6 +1754,10 @@ def _predict_class0_with_runtime(
 
     backend = str(getattr(classifier, "prediction_backend", "python"))
     python_start = time.perf_counter()
+    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
+    if callable(predict_proba_positive):
+        predictions = 1.0 - np.asarray(predict_proba_positive(features_2d), dtype=np.float64).reshape(-1)
+        return predictions, time.perf_counter() - python_start, backend
     with warnings.catch_warnings():
         suppress_sklearn_feature_name_warnings()
         predictions = classifier.predict_proba(features_2d)[:, 0]
@@ -4396,7 +4431,7 @@ class Clusterer:
                         "Skipping synthetic Rust cluster seed sync; promoted incremental will use current Arrow seeds"
                     )
                     return
-                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
+                _sync_cached_rust_cluster_seeds_if_available(dataset, runtime_context)
 
             for cluster_id, signatures in pred_clusters_intermediate.items():
                 for signature in signatures:
@@ -4419,7 +4454,7 @@ class Clusterer:
                 )
                 if n_assigned <= 0:
                     loop_batching_threshold = None
-                elif actual_memory_usage > desired_memory_use:
+                elif stage_uses_rust(runtime_context) and actual_memory_usage > desired_memory_use:
                     loop_batching_threshold = max(1, int(desired_memory_use / n_assigned))
                 else:
                     loop_batching_threshold = None
@@ -4470,7 +4505,7 @@ class Clusterer:
             _bump_cluster_seeds_version(dataset)
             _ensure_cluster_seed_version_tracking(dataset)
             if restore_rust_cluster_seeds_on_exit:
-                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
+                _sync_cached_rust_cluster_seeds_if_available(dataset, runtime_context)
             else:
                 logger.info("Skipping final Rust cluster seed restore sync; evicting cached featurizer for dataset")
                 evict_rust_featurizer(dataset)
@@ -4493,6 +4528,19 @@ class Clusterer:
         restore_rust_cluster_seeds_on_exit: bool,
         arrow_paths: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, list[str]], None]:
+        if arrow_paths is None:
+            if _runtime_context_explicitly_requested_rust(runtime_context):
+                raise _missing_arrow_prediction_artifacts_error(
+                    self,
+                    context="Clusterer.predict subblocked Rust prediction",
+                    arrow_paths=_first_explicit_dataset_arrow_paths(dataset),
+                    producer_hint=(
+                        "pass complete Arrow paths for signatures, papers, paper_authors, selected embeddings, "
+                        "raw-planner batch indexes, and model-required sidecars; strict Rust subblocked prediction "
+                        "does not fall back to Python"
+                    ),
+                )
+            runtime_context = _runtime_context_for_python_prediction(runtime_context)
         assert batching_threshold > 0, "Batching threshold must be positive"
         assert dists is None, "If batching_threshold is not None, then can't use precomputed dists"
         effective_desired_memory_use = (
@@ -4516,7 +4564,7 @@ class Clusterer:
             _bump_cluster_seeds_version(dataset)
             _ensure_cluster_seed_version_tracking(dataset)
             if restore_rust_cluster_seeds_on_exit:
-                _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
+                _sync_cached_rust_cluster_seeds_if_available(dataset, runtime_context)
             else:
                 logger.info(
                     "Skipping final Rust cluster seed restore sync after bulk altered pre-split; "
@@ -4830,6 +4878,7 @@ class Clusterer:
             partial_supervision = {}
 
         arrow_paths = None
+        prediction_runtime_context = runtime_context
         if dists is None and not use_s2_clusters:
             arrow_paths = _dataset_arrow_paths_for_prediction_or_python(
                 self,
@@ -4841,6 +4890,8 @@ class Clusterer:
                     "and model-required sidecars; Rust production prediction requires complete Arrow artifacts"
                 ),
             )
+            if arrow_paths is None:
+                prediction_runtime_context = _runtime_context_for_python_prediction(runtime_context)
 
         if arrow_paths is not None and batching_threshold is None:
             logger.info("Running predict through Arrow/Rust paths - no subblocking")
@@ -4858,7 +4909,7 @@ class Clusterer:
                     cluster_model_params=cluster_model_params,
                     partial_supervision=partial_supervision,
                     incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                    runtime_context=runtime_context,
+                    runtime_context=prediction_runtime_context,
                     total_ram_bytes=total_ram_bytes,
                     load_name_counts=clusterer_uses_name_count_features(self),
                     name_tuples=getattr(dataset, "name_tuples", "filtered"),
@@ -4878,7 +4929,7 @@ class Clusterer:
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 batching_threshold=int(batching_threshold),
                 desired_memory_use=desired_memory_use,
-                runtime_context=runtime_context,
+                runtime_context=prediction_runtime_context,
                 dists=dists,
                 total_ram_bytes=total_ram_bytes,
                 restore_rust_cluster_seeds_on_exit=restore_rust_cluster_seeds_on_exit,
@@ -4897,7 +4948,7 @@ class Clusterer:
                 partial_supervision=partial_supervision,
                 use_s2_clusters=use_s2_clusters,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
-                runtime_context=runtime_context,
+                runtime_context=prediction_runtime_context,
                 total_ram_bytes=total_ram_bytes,
             )
             end = time.time()
@@ -6012,9 +6063,10 @@ class Clusterer:
         use_rust_backend = stage_uses_rust(runtime_context)
         resolved_arrow_paths_for_incremental = None
         if use_rust_backend:
-            resolved_arrow_paths_for_incremental = _explicit_dataset_arrow_paths_for_prediction(
+            resolved_arrow_paths_for_incremental = _dataset_arrow_paths_for_prediction_or_python(
                 self,
                 dataset,
+                runtime_context,
                 context="Clusterer.predict_incremental promoted Rust prediction",
                 producer_hint=(
                     "pass complete explicit dataset.arrow_paths for signatures, papers, paper_authors, "
@@ -6023,24 +6075,24 @@ class Clusterer:
                 ),
             )
         arrow_paths_available = resolved_arrow_paths_for_incremental is not None
-        if use_rust_backend and not arrow_paths_available:
-            raise _missing_arrow_prediction_artifacts_error(
-                self,
-                context="Clusterer.predict_incremental promoted Rust prediction",
-                arrow_paths=_first_explicit_dataset_arrow_paths(dataset),
-                producer_hint=(
-                    "pass complete Arrow paths for signatures, papers, paper_authors, selected embeddings, "
-                    "and model-required sidecars; promoted incremental Rust prediction requires complete "
-                    "Arrow artifacts"
-                ),
-            )
         promoted_seed_inputs_available = _has_incremental_seed_source(dataset, resolved_arrow_paths_for_incremental)
-        if use_rust_backend and not promoted_seed_inputs_available:
-            _require_incremental_seed_source(
-                dataset,
-                resolved_arrow_paths_for_incremental,
-                context="Clusterer.predict_incremental promoted Rust prediction",
+        if use_rust_backend and arrow_paths_available and not promoted_seed_inputs_available:
+            if _runtime_context_explicitly_requested_rust(runtime_context):
+                _require_incremental_seed_source(
+                    dataset,
+                    resolved_arrow_paths_for_incremental,
+                    context="Clusterer.predict_incremental promoted Rust prediction",
+                )
+            logger.info(
+                "Rust backend resolved but dataset=%s has no promoted incremental seed source; "
+                "using Python incremental prediction (op=%s run=%s)",
+                getattr(dataset, "name", "<unnamed>"),
+                runtime_context.operation,
+                runtime_context.run_id,
             )
+        use_rust_backend = bool(use_rust_backend and arrow_paths_available and promoted_seed_inputs_available)
+        if not use_rust_backend:
+            runtime_context = _runtime_context_for_python_prediction(runtime_context)
         will_use_arrow_promoted = bool(use_rust_backend and arrow_paths_available and promoted_seed_inputs_available)
         if not will_use_arrow_promoted:
             _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)

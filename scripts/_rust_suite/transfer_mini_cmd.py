@@ -135,6 +135,11 @@ def _resolve_ingest(ingest: str, backend: str) -> str:
 
 
 def _resolve_workload(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    if args.mode == "compare" and str(args.ingest) != "auto":
+        raise ValueError(
+            "--mode compare requires --ingest auto so python uses JSON ingestion and rust uses Arrow ingestion. "
+            "Use --mode single for explicit --ingest json/arrow runs."
+        )
     preset_defaults = WORKLOAD_PRESETS[str(args.preset)]
     preset_datasets = list(cast(list[str], preset_defaults["datasets"]))
     datasets = list(args.datasets) if args.datasets is not None else preset_datasets

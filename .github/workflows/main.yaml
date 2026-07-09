@@ -31,24 +31,24 @@ jobs:
         shell: bash
         run: |
           if [[ -f uv.lock ]]; then
-            uv sync --extra dev --frozen
+            uv sync --extra dev --frozen --no-install-package s2and-rust
           else
-            uv sync --extra dev
+            uv sync --extra dev --no-install-package s2and-rust
           fi
 
       - name: version sync check
-        run: uv run python scripts/sync_version.py --check
+        run: uv run --no-sync python scripts/sync_version.py --check
       - name: ruff check
-        run: uv run ruff check s2and scripts tests
+        run: uv run --no-sync ruff check s2and scripts tests
       - name: ruff format (s2and/)
-        run: uv run ruff format --check s2and
+        run: uv run --no-sync ruff format --check s2and
       - name: ruff format (scripts/*.py)
         shell: bash
         run: |
           shopt -s nullglob
           files=(scripts/*.py)
           if (( ${#files[@]} )); then
-            uv run ruff format --check "${files[@]}"
+            uv run --no-sync ruff format --check "${files[@]}"
           fi
 
   typecheck-and-test:
@@ -171,42 +171,42 @@ jobs:
             if [[ "${{ matrix.lane }}" == "rust-enabled" ]]; then
               uv sync --extra dev --extra rust --frozen --no-install-package s2and-rust
             else
-              uv sync --extra dev --frozen
+              uv sync --extra dev --frozen --no-install-package s2and-rust
             fi
           else
             # No lock present; resolve once, then install
             if [[ "${{ matrix.lane }}" == "rust-enabled" ]]; then
               uv sync --extra dev --extra rust --no-install-package s2and-rust
             else
-              uv sync --extra dev
+              uv sync --extra dev --no-install-package s2and-rust
             fi
           fi
 
       # Build/install Rust extension for parity tests
       - name: Build Rust extension
         if: matrix.lane == 'rust-enabled'
-        run: uv run --with maturin maturin develop -m s2and_rust/Cargo.toml
+        run: uv run --no-sync --with maturin maturin develop -m s2and_rust/Cargo.toml
 
       - name: "Rust artifact guardrail: default incremental linker"
         if: matrix.lane == 'rust-enabled'
-        run: uv run pytest -q tests/test_incremental_linking_default_artifact.py
+        run: uv run --no-sync pytest -q tests/test_incremental_linking_default_artifact.py
 
       - name: "Rust parity guardrail: feature parity"
         if: matrix.lane == 'rust-enabled'
-        run: uv run pytest -q tests/test_feature_port_parity.py
+        run: uv run --no-sync pytest -q tests/test_feature_port_parity.py
 
       - name: "Rust parity guardrail: signature preprocess parity"
         if: matrix.lane == 'rust-enabled'
-        run: uv run pytest -q tests/test_rust_signature_preprocess.py
+        run: uv run --no-sync pytest -q tests/test_rust_signature_preprocess.py
 
       - name: "Rust parity guardrail: batch chunking/fallback parity"
         if: matrix.lane == 'rust-enabled'
-        run: uv run pytest -q tests/test_rust_batch_chunking.py
+        run: uv run --no-sync pytest -q tests/test_rust_batch_chunking.py
 
       # Type checking (ty with tuned migration rules)
       - name: ty (s2and)
         run: |
-          uv run ty check s2and \
+          uv run --no-sync ty check s2and \
             --ignore unresolved-import \
             --ignore unused-type-ignore-comment \
             --ignore possibly-missing-attribute \
@@ -217,7 +217,7 @@ jobs:
           shopt -s nullglob
           files=(scripts/*.py)
           if (( ${#files[@]} )); then
-            uv run ty check "${files[@]}" \
+            uv run --no-sync ty check "${files[@]}" \
               --ignore unresolved-import \
               --ignore unused-type-ignore-comment \
               --ignore possibly-missing-attribute \
@@ -232,11 +232,11 @@ jobs:
           # keep startup lean; avoid user-level plugins on hosted runners
           S2AND_BACKEND: python
         run: |
-          uv run pytest tests/ \
+          uv run --no-sync pytest tests/ \
             --cov=s2and --cov-report=term-missing --cov-fail-under=40
 
       - name: pytest (coverage, rust-enabled)
         if: matrix.lane == 'rust-enabled'
         run: |
-          uv run pytest tests/ \
+          uv run --no-sync pytest tests/ \
             --cov=s2and --cov-report=term-missing --cov-fail-under=40

@@ -53,96 +53,6 @@ def _arrow_dataset_paths(dataset_name: str, arrow_data_root: str, specter_suffix
     return resolve_arrow_dataset_paths(_resolve_path(arrow_data_root), dataset_name.strip().lower(), specter_suffix)
 
 
-def _dataset_paths(dataset_name: str) -> dict[str, str | None]:
-    dataset = dataset_name.strip().lower()
-    from s2and.consts import PROJECT_ROOT_PATH
-
-    project_root = Path(PROJECT_ROOT_PATH)
-    if dataset in {"dummy", "qian"}:
-        dataset_root = project_root / "tests" / dataset
-        signatures = dataset_root / "signatures.json"
-        papers = dataset_root / "papers.json"
-        clusters = dataset_root / "clusters.json"
-        cluster_seeds = dataset_root / "cluster_seeds.json"
-        return {
-            "dataset_name": dataset,
-            "signatures": str(signatures),
-            "papers": str(papers),
-            "clusters": str(clusters) if clusters.exists() else None,
-            "cluster_seeds": str(cluster_seeds) if cluster_seeds.exists() else None,
-            "specter": None,
-        }
-
-    dataset_root = project_root / "s2and" / "data" / dataset
-    signatures = dataset_root / f"{dataset}_signatures.json"
-    papers = dataset_root / f"{dataset}_papers.json"
-    clusters = dataset_root / f"{dataset}_clusters.json"
-    cluster_seeds = dataset_root / f"{dataset}_cluster_seeds.json"
-    specter = dataset_root / f"{dataset}_specter.pickle"
-    return {
-        "dataset_name": dataset,
-        "signatures": str(signatures),
-        "papers": str(papers),
-        "clusters": str(clusters) if clusters.exists() else None,
-        "cluster_seeds": str(cluster_seeds) if cluster_seeds.exists() else None,
-        "specter": str(specter) if specter.exists() else None,
-    }
-
-
-def _validate_paths(paths: dict[str, str | None]) -> None:
-    for required_key in ("signatures", "papers"):
-        path = paths.get(required_key)
-        if path is None or not os.path.exists(path):
-            raise FileNotFoundError(f"Missing required dataset path for {required_key}: {path}")
-    clusters_path = paths.get("clusters")
-    if clusters_path is not None and not os.path.exists(clusters_path):
-        raise FileNotFoundError(f"Configured clusters path does not exist: {clusters_path}")
-    cluster_seeds_path = paths.get("cluster_seeds")
-    if cluster_seeds_path is not None and not os.path.exists(cluster_seeds_path):
-        raise FileNotFoundError(f"Configured cluster seeds path does not exist: {cluster_seeds_path}")
-    specter_path = paths.get("specter")
-    if specter_path is not None and not os.path.exists(specter_path):
-        raise FileNotFoundError(f"Configured specter path does not exist: {specter_path}")
-
-
-def _build_dataset(
-    *,
-    paths: dict[str, str | None],
-    preprocess: bool,
-    num_threads: int,
-    use_specter: bool,
-) -> Any:
-    from s2and.data import ANDData
-
-    signatures_path = paths["signatures"]
-    papers_path = paths["papers"]
-    if signatures_path is None or papers_path is None:
-        raise ValueError("Missing required signatures/papers paths")
-
-    return ANDData(
-        signatures=signatures_path,
-        papers=papers_path,
-        name=f"{paths['dataset_name']}_stress",
-        mode="train",
-        specter_embeddings=paths["specter"] if use_specter else None,
-        clusters=paths["clusters"],
-        cluster_seeds=paths["cluster_seeds"],
-        block_type="s2",
-        train_pairs=None,
-        val_pairs=None,
-        test_pairs=None,
-        train_pairs_size=1000,
-        val_pairs_size=1000,
-        test_pairs_size=1000,
-        n_jobs=max(1, int(num_threads)),
-        load_name_counts=False,
-        preprocess=bool(preprocess),
-        random_seed=42,
-        name_tuples="filtered",
-        use_orcid_id=True,
-    )
-
-
 def _build_from_arrow_paths(
     *,
     paths: dict[str, str],
@@ -169,7 +79,6 @@ def run_rebuild_stress(
     repeats: int,
     num_threads: int,
     preprocess: bool = True,
-    use_specter: bool = False,
     rss_sample_ms: int = 50,
     rss_growth_max_fraction: float | None = None,
     require_rust_release: bool = False,
@@ -204,7 +113,7 @@ def run_rebuild_stress(
     print(
         "Starting rebuild stress: "
         f"dataset={dataset_name} build_path={build_path} repeats={repeats} "
-        f"num_threads={num_threads} preprocess={preprocess} use_specter={use_specter} "
+        f"num_threads={num_threads} preprocess={preprocess} "
         f"rss_sample_ms={rss_sample_ms} "
         f"arrow_data_root={resolved_arrow_data_root} specter_suffix={arrow_specter_suffix}"
     )
@@ -267,7 +176,6 @@ def run_rebuild_stress(
         "repeats": int(repeats),
         "num_threads": int(max(1, int(num_threads))),
         "preprocess": bool(preprocess),
-        "use_specter": bool(use_specter),
         "arrow_data_root": resolved_arrow_data_root,
         "specter_suffix": str(specter_suffix),
         "rss_sample_ms": int(rss_sample_ms),
@@ -333,11 +241,6 @@ def _parse_args() -> argparse.Namespace:
         help="Disable preprocess at ingest time (for toggle-matrix triage).",
     )
     parser.add_argument(
-        "--use-specter",
-        action="store_true",
-        help="Load and pass specter embeddings for the dataset build path.",
-    )
-    parser.add_argument(
         "--rss-sample-ms",
         type=int,
         default=50,
@@ -368,7 +271,6 @@ def main() -> None:
         repeats=args.repeats,
         num_threads=args.num_threads,
         preprocess=not bool(args.no_preprocess),
-        use_specter=bool(args.use_specter),
         rss_sample_ms=int(args.rss_sample_ms),
         rss_growth_max_fraction=args.rss_growth_max_fraction,
         require_rust_release=bool(args.require_rust_release),

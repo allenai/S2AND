@@ -25,7 +25,7 @@ Project goals:
 1. Keep quality parity with Python.
 2. Keep or improve latency on maintained train/eval workloads.
 3. Keep Rust peak RSS non-regressed vs Python (inference and train/eval).
-4. Respect install-aware runtime defaults: `s2and` => Python; `s2and[rust]` => Rust on beneficial stages.
+4. Treat `s2and-rust` as a required install dependency while preserving explicit Python fallback modes where stages still support them.
 5. Keep rollback controls and explicit-Rust override behavior.
 6. Reach full train/eval + inference Rust unification only after all gates pass.
 
@@ -35,10 +35,10 @@ Project goals:
 
 | Install | Default runtime |
 |---|---|
-| `uv pip install s2and` | Python end-to-end |
-| `uv pip install "s2and[rust]"` | Rust for beneficial stages (when extension is importable and core-capable) |
+| `uv pip install s2and` | Installs S2AND plus required `s2and-rust`; `auto` uses Rust for capable stages |
+| `uv pip install "s2and[rust]"` | Compatibility alias; equivalent runtime dependency set |
 
-Python path remains available via explicit backend and stage overrides at any time.
+Python fallback paths remain available via explicit backend and stage overrides for stages that still support them.
 
 ### Backend resolution
 
@@ -68,7 +68,11 @@ Python path remains available via explicit backend and stage overrides at any ti
   production prediction fails fast when required Arrow paths are incomplete;
   auto/default prediction falls back to Python for non-Arrow datasets.
 - Arrow-ingested training datasets (`s2and/arrow_training.py`) attach
-  `rust_featurizer_arrow_paths` and build through `from_arrow_paths`.
+  `rust_featurizer_arrow_paths` and build through `from_arrow_paths`. When
+  that Rust attachment is enabled, Python-side SPECTER embedding materialization
+  is skipped by default; pass `load_python_specter=True` to
+  `build_training_anddata_from_arrow(...)` only for Python reference work or
+  direct Python embedding access.
 - Train/eval and classic `ANDData` payloads without Arrow artifacts use Python
   featurization.
 - `S2AND_BACKEND` controls all stages uniformly.

@@ -167,6 +167,53 @@ def test_combined_array_feature_wrapper_passes_separate_nan_policies() -> None:
     assert sums.shape == mins.shape == maxs.shape == (1, 1)
 
 
+def test_aggregate_only_wrapper_passes_separate_nan_policy() -> None:
+    calls: list[tuple[float, float, bool]] = []
+
+    class FakeRustFeaturizer:
+        def linker_pair_index_arrays_and_aggregate_stats(
+            self,
+            left_signature_indices,
+            right_signature_indices,
+            row_indices,
+            row_count,
+            matrix_indices,
+            aggregate_indices,
+            num_threads,
+            nan_value,
+            aggregate_nan_value,
+            emit_matrix,
+        ):
+            del right_signature_indices, row_indices, matrix_indices, aggregate_indices, num_threads
+            calls.append((float(nan_value), float(aggregate_nan_value), bool(emit_matrix)))
+            return (
+                np.zeros((len(left_signature_indices), 0), dtype=np.float64),
+                np.ones(int(row_count), dtype=np.uint32),
+                np.ones((int(row_count), 1), dtype=np.uint64),
+                np.zeros((int(row_count), 1), dtype=np.float64),
+                np.zeros((int(row_count), 1), dtype=np.float64),
+                np.zeros((int(row_count), 1), dtype=np.float64),
+            )
+
+    feature_port.build_linker_pair_aggregate_stats_arrays_rust(
+        cast(Any, object()),
+        np.asarray([0, 1], dtype=np.uint32),
+        np.asarray([1, 2], dtype=np.uint32),
+        np.asarray([0, 0], dtype=np.uint32),
+        1,
+        aggregate_indices=[0],
+        num_threads=2,
+        nan_value=np.nan,
+        aggregate_nan_value=0.0,
+        featurizer=FakeRustFeaturizer(),
+    )
+
+    assert len(calls) == 1
+    assert np.isnan(calls[0][0])
+    assert calls[0][1] == 0.0
+    assert calls[0][2] is False
+
+
 def test_combined_array_feature_wrapper_rejects_outdated_aggregate_contract() -> None:
     class FakeRustFeaturizer:
         def linker_pair_index_arrays_and_aggregate_stats(self, *args):

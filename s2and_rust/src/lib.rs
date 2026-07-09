@@ -56,8 +56,8 @@ use raw_arrow::readers::{
 };
 use raw_arrow_features::{
     build_raw_arrow_author_signal_data, build_raw_arrow_feature, build_raw_arrow_summary,
-    build_raw_arrow_summary_signals, mask_raw_arrow_query,
-    raw_arrow_name_count_rarity_row, raw_arrow_paper_evidence_row, round_six,
+    build_raw_arrow_summary_signals, mask_raw_arrow_query, raw_arrow_name_count_rarity_row,
+    raw_arrow_paper_evidence_row, round_six,
 };
 #[cfg(test)]
 use raw_candidate_planner::raw_arrow_summary_signals_for_members_cached;

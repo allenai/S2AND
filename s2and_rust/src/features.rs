@@ -398,13 +398,14 @@ pub(crate) fn middle_names_equal(name1: Option<&str>, name2: Option<&str>) -> f6
     // initials so a joined multi-token middle ("james lee") matches the other
     // side's initial for ANY of its tokens, not just the first one.
     if py_len(n1) == 1 || py_len(n2) == 1 {
-        let initials_1: HashSet<char> = n1.split(' ').filter_map(|t| t.chars().next()).collect();
-        let initials_2: HashSet<char> = n2.split(' ').filter_map(|t| t.chars().next()).collect();
-        return if initials_1.is_disjoint(&initials_2) {
-            0.0
-        } else {
-            1.0
-        };
+        for initial_1 in n1.split(' ').filter_map(|t| t.chars().next()) {
+            for initial_2 in n2.split(' ').filter_map(|t| t.chars().next()) {
+                if initial_1 == initial_2 {
+                    return 1.0;
+                }
+            }
+        }
+        return 0.0;
     }
     if n1 == n2 {
         1.0

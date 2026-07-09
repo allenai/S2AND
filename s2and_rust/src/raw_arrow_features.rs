@@ -13,8 +13,8 @@ use crate::text_compat::{
     compute_block_compat, normalize_text_compat_from_map, split_first_middle_hyphen_aware_compat,
 };
 use crate::{
-    build_name_counts_data_from_artifact, counter_data_from_hash_count_map,
-    fnv64, hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
+    build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
+    hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
     raw_arrow_year_mean, term_set_from_normalized_text, validate_row_signal_year, vector_norm_f32,
     RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
 };

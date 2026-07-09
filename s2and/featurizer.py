@@ -105,6 +105,13 @@ def _ensure_python_pair_signature_ngrams(
 ) -> None:
     if _use_rust_featurizer(runtime_context, dataset):
         return
+    rust_lifecycle_policy = getattr(dataset, "rust_lifecycle_policy", None)
+    if bool(getattr(rust_lifecycle_policy, "defer_signature_fields_to_rust", False)) and signature_pairs:
+        raise RuntimeError(
+            "Python featurization cannot run on a dataset built with normalized signature fields deferred to Rust. "
+            "Rebuild the dataset with S2AND_BACKEND=python/backend='python', or keep Rust featurization active with "
+            "validated Arrow featurizer paths."
+        )
     if getattr(dataset, "_s2and_python_pair_ngrams_ready", False):
         return
 
@@ -633,6 +640,12 @@ class FeaturizationInfo:
             "journal_similarity": [28],
             "advanced_name_similarity": [29, 30, 31, 32],
         }
+        unknown_feature_groups = sorted(set(self.features_to_use) - set(self.feature_group_to_index))
+        if unknown_feature_groups:
+            known_feature_groups = ", ".join(sorted(self.feature_group_to_index))
+            raise ValueError(
+                f"Unknown feature group(s): {unknown_feature_groups}. Known feature groups: {known_feature_groups}"
+            )
 
         max_feature_index = max(
             (feature_index for group in self.feature_group_to_index.values() for feature_index in group),

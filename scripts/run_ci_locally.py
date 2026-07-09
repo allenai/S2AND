@@ -82,8 +82,12 @@ def run_uv(args: list[str], *, env: dict[str, str] | None = None) -> None:
     run(uv_exe() + args, env=env)
 
 
+def uv_run_args(*args: str) -> list[str]:
+    return ["run", "--no-sync", *args]
+
+
 def pytest_args(*args: str, quiet: bool = False) -> list[str]:
-    cmd = ["run", "pytest"]
+    cmd = uv_run_args("pytest")
     if quiet:
         cmd.append("-q")
     cmd.extend(PYTEST_REPORT_FLAGS)
@@ -122,7 +126,7 @@ def _rust_extension_artifacts() -> list[Path]:
 
 
 def run_maturin_develop_with_retries() -> None:
-    args = ["run", "--with", "maturin", "maturin", "develop", "-m", "s2and_rust/Cargo.toml"]
+    args = uv_run_args("--with", "maturin", "maturin", "develop", "-m", "s2and_rust/Cargo.toml")
     attempts = MATURIN_RETRY_ATTEMPTS_WINDOWS if os.name == "nt" else 1
     for attempt in range(1, attempts + 1):
         try:
@@ -155,20 +159,19 @@ def sync_deps(*, lock_present: bool, lane: str) -> None:
         args.extend(["--extra", "rust"])
     if lock_present:
         args.append("--frozen")
-    if lane == "rust-enabled":
-        args.extend(["--no-install-package", "s2and-rust"])
+    args.extend(["--no-install-package", "s2and-rust"])
     run_uv(args)
 
 
 def run_lint_job(*, lock_present: bool) -> None:
     print("\n=== lint ===")
     sync_deps(lock_present=lock_present, lane="py-only")
-    run_uv(["run", "python", "scripts/sync_version.py", "--check"])
-    run_uv(["run", "ruff", "check", "s2and", "scripts", "tests"])
-    run_uv(["run", "ruff", "format", "--check", "s2and"])
+    run_uv(uv_run_args("python", "scripts/sync_version.py", "--check"))
+    run_uv(uv_run_args("ruff", "check", "s2and", "scripts", "tests"))
+    run_uv(uv_run_args("ruff", "format", "--check", "s2and"))
     script_files = top_level_script_files()
     if script_files:
-        run_uv(["run", "ruff", "format", "--check", *script_files])
+        run_uv(uv_run_args("ruff", "format", "--check", *script_files))
 
 
 def run_ty_checks() -> None:
@@ -177,8 +180,7 @@ def run_ty_checks() -> None:
         ignore_args.extend(["--ignore", rule])
 
     run_uv(
-        [
-            "run",
+        uv_run_args(
             "ty",
             "check",
             "s2and",
@@ -187,7 +189,7 @@ def run_ty_checks() -> None:
             TY_PYTHON_VERSION,
             "--python-platform",
             TY_PYTHON_PLATFORM,
-        ]
+        )
     )
 
     script_files = top_level_script_files()
@@ -196,8 +198,7 @@ def run_ty_checks() -> None:
         for rule in TY_SCRIPT_EXTRA_IGNORES:
             script_ignore_args.extend(["--ignore", rule])
         run_uv(
-            [
-                "run",
+            uv_run_args(
                 "ty",
                 "check",
                 *script_files,
@@ -206,7 +207,7 @@ def run_ty_checks() -> None:
                 TY_PYTHON_VERSION,
                 "--python-platform",
                 TY_PYTHON_PLATFORM,
-            ]
+            )
         )
 
 

@@ -135,3 +135,96 @@ def test_rust_predict_requires_arrow_artifacts_before_legacy_dataset_paths(
     error = exc_info.value
     assert error.context == "Clusterer.predict Rust prediction"
     assert error.missing_keys == ("signatures", "papers", "paper_authors")
+
+
+def test_predict_incremental_auto_degrades_to_python_without_arrow_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime_context = runtime.RuntimeContext(
+        operation="cluster_predict_incremental",
+        requested_backend="auto",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-incremental-degrade",
+        source="argument",
+    )
+    dataset = SimpleNamespace(
+        name="json_dataset",
+        cluster_seeds_require={},
+        cluster_seeds_disallow=set(),
+    )
+    clusterer = Clusterer(
+        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
+        classifier=None,
+        cluster_model=None,
+        n_jobs=1,
+        use_cache=False,
+        batch_size=2,
+    )
+    observed: dict[str, Any] = {}
+
+    monkeypatch.setattr(model_module, "_apply_dataset_name_count_semantics_for_prediction", lambda *_args: None)
+    monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
+
+    def fake_python_fallback(self: Clusterer, *_args: Any, **kwargs: Any) -> dict[str, Any]:
+        del self
+        observed["runtime_context"] = kwargs["runtime_context"]
+        return {"clusters": {"c0": ["s1"]}}
+
+    def fail_promoted(self: Clusterer, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        del self
+        raise AssertionError("auto mode without Arrow paths must use Python incremental fallback")
+
+    monkeypatch.setattr(Clusterer, "_predict_incremental_python_fallback", fake_python_fallback)
+    monkeypatch.setattr(Clusterer, "_predict_incremental_promoted_linker", fail_promoted)
+
+    result = clusterer.predict_incremental(["s1"], dataset, runtime_context=runtime_context)  # type: ignore[arg-type]
+
+    assert result == {"clusters": {"c0": ["s1"]}}
+    degraded_context = observed["runtime_context"]
+    assert degraded_context.resolved_backend == "python"
+    assert degraded_context.use_rust is False
+    assert degraded_context.run_id == runtime_context.run_id
+
+
+def test_predict_subblocked_receives_python_context_after_auto_arrow_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_context = runtime.RuntimeContext(
+        operation="cluster_predict",
+        requested_backend="auto",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-subblocked-degrade",
+        source="argument",
+    )
+    dataset = SimpleNamespace(name="json_dataset")
+    clusterer = Clusterer(
+        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
+        classifier=None,
+        cluster_model=None,
+        n_jobs=1,
+        use_cache=False,
+        batch_size=2,
+    )
+    observed: dict[str, Any] = {}
+
+    def fake_subblocked(self: Clusterer, *_args: Any, **kwargs: Any) -> tuple[dict[str, list[str]], None]:
+        del self
+        observed["runtime_context"] = kwargs["runtime_context"]
+        observed["arrow_paths"] = kwargs["arrow_paths"]
+        return {"c0": ["s1"]}, None
+
+    monkeypatch.setattr(Clusterer, "_predict_subblocked", fake_subblocked)
+
+    clusters, dists = clusterer.predict(
+        {"block": ["s1", "s2"]},
+        dataset,  # type: ignore[arg-type]
+        batching_threshold=1,
+        runtime_context=runtime_context,
+    )
+
+    assert clusters == {"c0": ["s1"]}
+    assert dists is None
+    degraded_context = observed["runtime_context"]
+    assert degraded_context.resolved_backend == "python"
+    assert degraded_context.use_rust is False
+    assert observed["arrow_paths"] is None

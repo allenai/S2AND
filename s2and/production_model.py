@@ -6,6 +6,8 @@ import copy
 import hashlib
 import importlib
 import json
+import logging
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -13,7 +15,7 @@ from typing import Any, cast
 import lightgbm as lgb
 import numpy as np
 
-from s2and.consts import _PACKAGE_DATA_DIR
+from s2and.consts import _PACKAGE_DATA_DIR, FEATURIZER_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import load_incremental_linking_artifact
 from s2and.incremental_linking.contracts import validate_artifact_contract_metadata
@@ -29,6 +31,7 @@ _RUNTIME_CLUSTER_EPS_OVERRIDE_VERSIONS = frozenset({"1.2", "1.21"})
 _PRODUCTION_MODEL_PATH_PREFIX = "production_model_v"
 _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
+logger = logging.getLogger("s2and")
 
 
 def _load_rust_lightgbm_booster(model_path: str) -> Any:
@@ -125,15 +128,18 @@ class NativeLightGBMBinaryClassifier:
             self._set_feature_count(cast(int | None, params.get("n_features")))
         return self
 
-    def predict_proba(self, features: np.ndarray) -> np.ndarray:
+    def predict_proba_positive(self, features: np.ndarray) -> np.ndarray:
         features_2d = np.asarray(features, dtype=np.float64, order="C")
         if features_2d.ndim != 2:
             raise ValueError(f"features must be 2D, got shape={features_2d.shape}")
         if features_2d.shape[1] != self._n_features:
             raise ValueError(f"features must have {self._n_features} columns, got {features_2d.shape[1]}")
-        positive = np.asarray(
+        return np.asarray(
             self._scorer.predict_proba_positive(features_2d, num_threads=self.n_jobs), dtype=np.float64
         ).reshape(-1)
+
+    def predict_proba(self, features: np.ndarray) -> np.ndarray:
+        positive = self.predict_proba_positive(features)
         return np.column_stack((1.0 - positive, positive))
 
     def __deepcopy__(self, memo: dict[int, Any]) -> NativeLightGBMBinaryClassifier:
@@ -205,6 +211,19 @@ def _featurization_info_from_payload(payload: dict[str, Any]) -> FeaturizationIn
         features_to_use=[str(value) for value in payload["features_to_use"]],
         featurizer_version=int(payload["featurizer_version"]),
     )
+
+
+def _warn_if_featurizer_version_mismatch(model_path: Path, versions: Mapping[str, int]) -> None:
+    mismatched = {name: version for name, version in versions.items() if int(version) != FEATURIZER_VERSION}
+    if not mismatched:
+        return
+    version_text = ", ".join(f"{name}={version}" for name, version in sorted(mismatched.items()))
+    message = (
+        f"Production model artifact {model_path} was trained with {version_text}, "
+        f"but this package uses FEATURIZER_VERSION={FEATURIZER_VERSION}; feature semantics may differ."
+    )
+    logger.warning(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
 def _config_choice(payload: dict[str, Any], key: str, *, allowed: frozenset[str]) -> str:
@@ -301,6 +320,13 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
 
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
+    _warn_if_featurizer_version_mismatch(
+        bundle_dir,
+        {
+            "featurizer_info": featurizer_info.featurizer_version,
+            "nameless_featurizer_info": nameless_featurizer_info.featurizer_version,
+        },
+    )
     classifier = NativeLightGBMBinaryClassifier(
         bundle_dir / str(manifest["files"]["pairwise_main_model"]),
         n_features=int(clusterer_config["pairwise"]["main_feature_count"]),
@@ -386,5 +412,10 @@ def load_production_model(path: str | Path | None = None, *, require_incremental
     clusterer = loaded.get("clusterer") if isinstance(loaded, dict) else loaded
     if not isinstance(clusterer, Clusterer):
         raise TypeError(f"Expected a Clusterer in production model artifact, got {type(clusterer)!r}")
+    versions = {"featurizer_info": int(clusterer.featurizer_info.featurizer_version)}
+    nameless_info = getattr(clusterer, "nameless_featurizer_info", None)
+    if nameless_info is not None:
+        versions["nameless_featurizer_info"] = int(nameless_info.featurizer_version)
+    _warn_if_featurizer_version_mismatch(model_path, versions)
     runtime_cluster_eps = _production_runtime_cluster_eps(model_path)
     return _apply_production_runtime_cluster_eps(clusterer, runtime_cluster_eps)

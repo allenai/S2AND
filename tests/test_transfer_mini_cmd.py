@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,11 @@ def test_transfer_mini_resolve_ingest_auto_is_backend_specific() -> None:
 
     with pytest.raises(ValueError, match="Python-only"):
         transfer_mini_cmd._resolve_ingest("json", "rust")
+
+
+def test_transfer_mini_compare_rejects_explicit_ingest() -> None:
+    with pytest.raises(ValueError, match="--mode compare requires --ingest auto"):
+        transfer_mini_cmd._resolve_workload(SimpleNamespace(mode="compare", ingest="arrow"))
 
 
 def test_transfer_mini_prediction_arrow_manifest_does_not_require_clusters(tmp_path: Path) -> None:

@@ -123,6 +123,14 @@ class RejectsNumThreadsClassifier:
         return np.column_stack((distances, 1.0 - distances))
 
 
+class PositiveProbabilityClassifier:
+    def predict_proba_positive(self, features: np.ndarray) -> np.ndarray:
+        return np.asarray(features, dtype=np.float64)[:, 0]
+
+    def predict_proba(self, features: np.ndarray) -> np.ndarray:
+        raise AssertionError("predict_proba should not be called when predict_proba_positive is available")
+
+
 def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() -> None:
     predictions = runtime_module._predict_pairwise_class0(
         RejectsNumThreadsClassifier(),
@@ -132,8 +140,18 @@ def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() 
     assert np.allclose(predictions, [0.25, 0.75])
 
 
+def test_pairwise_predict_class0_uses_native_positive_probability_fast_path() -> None:
+    predictions = runtime_module._predict_pairwise_class0(
+        PositiveProbabilityClassifier(),
+        np.asarray([[0.25], [0.75]], dtype=np.float64),
+    )
+
+    assert np.allclose(predictions, [0.75, 0.25])
+
+
 def test_pairwise_model_feature_indices_match_sorted_featurizer_order() -> None:
-    featurizer_info = FeaturizationInfo(features_to_use=["second", "first"])
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    featurizer_info.features_to_use = ["second", "first"]
     featurizer_info.feature_group_to_index = {"first": [3, 1], "second": [5, 1]}
 
     assert runtime_module._pairwise_model_feature_indices(featurizer_info) == (1, 3, 5)  # noqa: SLF001

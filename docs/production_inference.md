@@ -388,9 +388,9 @@ Full cache details: [caching.md](caching.md)
 
 `S2AND_BACKEND` controls runtime backend selection:
 
-- `auto`: use Rust when available and capable, otherwise Python
+- `auto`: use Rust when capable, otherwise Python for stages that still have Python fallbacks
 - `rust`: strict Rust mode
-- `python`: Python-only mode
+- `python`: Python fallback mode where available. It does not remove the install-time `s2and-rust` requirement, and native production model scoring still requires Rust.
 
 Python callers can also pass `backend="python"`, `backend="rust"`, or `backend="auto"` to
 `Clusterer.predict(...)` for a single-call override. Subblocking follows the resolved backend:
@@ -399,8 +399,8 @@ direct `make_subblocks(...)` calls remain Python, while indexed Arrow subblockin
 
 Install contract:
 
-- `uv pip install s2and`: Python-only runtime
-- `uv pip install "s2and[rust]"`: Rust-enabled runtime when wheels are available
+- `uv pip install s2and`: installs S2AND plus required `s2and-rust`
+- `uv pip install "s2and[rust]"`: compatibility alias; equivalent runtime dependency set
 
 Full runtime contract: [rust/runtime.md](rust/runtime.md)
 

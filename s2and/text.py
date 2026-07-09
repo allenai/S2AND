@@ -804,9 +804,14 @@ def equal_middle(
     # token initials so a joined multi-token middle ("james lee") matches the
     # other side's initial for ANY of its tokens, not just the first one.
     if len(name_1) == 1 or len(name_2) == 1:
-        initials_1 = {token[0] for token in name_1.split() if token}
-        initials_2 = {token[0] for token in name_2.split() if token}
-        return 1 if not initials_1.isdisjoint(initials_2) else 0
+        for left_token in name_1.split():
+            if not left_token:
+                continue
+            left_initial = left_token[0]
+            for right_token in name_2.split():
+                if right_token and right_token[0] == left_initial:
+                    return 1
+        return 0
 
     return 1 if name_1 == name_2 else 0
 

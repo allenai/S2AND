@@ -16,6 +16,23 @@ from sklearn.metrics import roc_auc_score
 from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
 
+def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
+    """Predict class-0 probabilities with native positive-probability fast path support."""
+
+    features_2d = np.asarray(features, dtype=np.float64, order="C")
+    if features_2d.size == 0:
+        return np.asarray([], dtype=np.float64)
+
+    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
+    if callable(predict_proba_positive):
+        return 1.0 - np.asarray(predict_proba_positive(features_2d), dtype=np.float64).reshape(-1)
+
+    with warnings.catch_warnings():
+        suppress_sklearn_feature_name_warnings()
+        probabilities = classifier.predict_proba(features_2d)
+    return np.asarray(probabilities, dtype=np.float64)[:, 0]
+
+
 class PairwiseModeler:
     """
     Wrapper to learn the pairwise model + hyperparameter optimization

@@ -11,7 +11,7 @@ import warnings
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Literal, Self, TypeAlias, TypeVar, cast
@@ -73,7 +73,7 @@ from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
 from s2and.incremental_linking.production import predict_incremental_promoted_linker_from_arrow_paths
-from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify
+from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify, predict_pairwise_class0
 from s2and.runtime import (
     RUST_FEATURIZER_ARROW_PATHS_ATTR,
     RequestedBackend,
@@ -99,7 +99,6 @@ from s2and.subblocking import (
 )
 from s2and.text import first_names_name_compatible, normalize_orcid_compact, split_first_middle_hyphen_aware
 from s2and.thread_config import resolve_n_jobs
-from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
 logger = logging.getLogger("s2and")
 IncrementalPhaseBMode = Literal["exact"]
@@ -1001,14 +1000,7 @@ def _runtime_context_explicitly_requested_rust(runtime_context: RuntimeContext) 
 def _runtime_context_for_python_prediction(runtime_context: RuntimeContext) -> RuntimeContext:
     if not stage_uses_rust(runtime_context):
         return runtime_context
-    return RuntimeContext(
-        operation=runtime_context.operation,
-        requested_backend=runtime_context.requested_backend,
-        resolved_backend="python",
-        use_rust=False,
-        run_id=runtime_context.run_id,
-        source=runtime_context.source,
-    )
+    return replace(runtime_context, resolved_backend="python", use_rust=False)
 
 
 def _dataset_has_rust_featurizer_paths(dataset: Any) -> bool:
@@ -1049,7 +1041,7 @@ def _dataset_arrow_paths_for_prediction_or_python(
     except MissingArrowArtifactError as exc:
         if _runtime_context_explicitly_requested_rust(runtime_context):
             raise
-        logger.info(
+        logger.warning(
             "Rust backend resolved but dataset=%s has incomplete Arrow prediction artifacts; "
             "using Python prediction (op=%s run=%s missing_keys=%s)",
             getattr(dataset, "name", "<unnamed>"),
@@ -1075,7 +1067,7 @@ def _dataset_arrow_paths_for_prediction_or_python(
             dataset._s2and_python_prediction_degrade_logged = True
         except AttributeError:
             pass
-        logger.info(
+        logger.warning(
             "Rust backend resolved but dataset=%s has no Arrow prediction artifacts; "
             "using Python prediction (op=%s run=%s)",
             getattr(dataset, "name", "<unnamed>"),
@@ -1754,13 +1746,7 @@ def _predict_class0_with_runtime(
 
     backend = str(getattr(classifier, "prediction_backend", "python"))
     python_start = time.perf_counter()
-    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
-    if callable(predict_proba_positive):
-        predictions = 1.0 - np.asarray(predict_proba_positive(features_2d), dtype=np.float64).reshape(-1)
-        return predictions, time.perf_counter() - python_start, backend
-    with warnings.catch_warnings():
-        suppress_sklearn_feature_name_warnings()
-        predictions = classifier.predict_proba(features_2d)[:, 0]
+    predictions = predict_pairwise_class0(classifier, features_2d)
     return predictions, time.perf_counter() - python_start, backend
 
 

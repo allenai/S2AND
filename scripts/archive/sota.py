@@ -51,7 +51,6 @@ FEATURES_TO_USE = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
     "misc_features",
     "name_counts",
     "embedding_similarity",

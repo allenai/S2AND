@@ -174,6 +174,22 @@ def test_arrow_training_rejects_duplicate_specter_ids(tmp_path: Path) -> None:
         load_specter_tuple_from_arrow(specter_path)
 
 
+def test_arrow_training_rejects_null_specter_embeddings(tmp_path: Path) -> None:
+    specter_path = tmp_path / "specter.arrow"
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
+                "embedding": pa.array([[1.0, 0.0], None], type=pa.list_(pa.float32(), 2)),
+            }
+        ),
+        specter_path,
+    )
+
+    with pytest.raises(ValueError, match="null embedding"):
+        load_specter_tuple_from_arrow(specter_path)
+
+
 def _json_training_anddata(name: str, specter: dict[str, np.ndarray], **overrides: Any) -> ANDData:
     kwargs: dict[str, Any] = {
         "signatures": str(DUMMY_DIR / "signatures.json"),

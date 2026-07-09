@@ -47,6 +47,7 @@ from s2and.incremental_linking.runtime import (
 from s2and.incremental_linking.runtime import (
     compute_candidate_batch_pairwise_model_and_aggregate_stats as _pairwise_model_stats_impl,
 )
+from s2and.model_pairwise import predict_pairwise_class0
 from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, import_s2and_rust
 from tests.promoted_linking_helpers import build_tiny_promoted_booster
 
@@ -132,7 +133,7 @@ class PositiveProbabilityClassifier:
 
 
 def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() -> None:
-    predictions = runtime_module._predict_pairwise_class0(
+    predictions = predict_pairwise_class0(
         RejectsNumThreadsClassifier(),
         np.asarray([[0.25], [0.75]], dtype=np.float64),
     )
@@ -141,7 +142,7 @@ def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() 
 
 
 def test_pairwise_predict_class0_uses_native_positive_probability_fast_path() -> None:
-    predictions = runtime_module._predict_pairwise_class0(
+    predictions = predict_pairwise_class0(
         PositiveProbabilityClassifier(),
         np.asarray([[0.25], [0.75]], dtype=np.float64),
     )

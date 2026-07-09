@@ -188,7 +188,11 @@ def _signature_ngrams_one(pair: tuple[str, str]) -> tuple[Counter, Counter]:
     from s2and.text import get_text_ngrams, get_text_ngrams_words
 
     coauthor_text, affiliation_text = pair
-    coauthor_counter = get_text_ngrams(coauthor_text, stopwords=None, use_bigrams=True) if coauthor_text else Counter()
+    coauthor_counter = (
+        get_text_ngrams(coauthor_text, stopwords=None, use_bigrams=True, drop_short_tokens=False)
+        if coauthor_text
+        else Counter()
+    )
     affiliation_counter = get_text_ngrams_words(affiliation_text, stopwords=set()) if affiliation_text else Counter()
     return coauthor_counter, affiliation_counter
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-import warnings
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +58,7 @@ from s2and.incremental_linking.retrieval import (
     validate_raw_candidate_plan_schema,
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
+from s2and.model_pairwise import predict_pairwise_class0
 from s2and.runtime import (
     RUST_CAPABILITY_RAW_ARROW_QUERY_SIGNATURE_PLANNER_V1,
     build_runtime_context,
@@ -545,18 +545,6 @@ def _matrix_positions(matrix_indices: Sequence[int], selected_indices: Sequence[
     return tuple(position_by_index[int(index)] for index in selected_indices)
 
 
-def _predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
-    # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
-    # is LightGBM-specific and breaks sklearn-compatible wrappers.
-    predict_proba_positive = getattr(classifier, "predict_proba_positive", None)
-    if callable(predict_proba_positive):
-        return 1.0 - np.asarray(predict_proba_positive(features), dtype=np.float64).reshape(-1)
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="X does not have valid feature names", category=UserWarning)
-        probabilities = classifier.predict_proba(features)
-    return np.asarray(probabilities, dtype=np.float64)[:, 0]
-
-
 def _predict_pairwise_model_distances(
     *,
     classifier: Any,
@@ -573,9 +561,9 @@ def _predict_pairwise_model_distances(
     predictions = np.zeros(len(labels), dtype=np.float64)
     predict = np.isnan(labels)
     if np.any(predict):
-        predicted = _predict_pairwise_class0(classifier, features[predict])
+        predicted = predict_pairwise_class0(classifier, features[predict])
         if nameless_classifier is not None and nameless_features is not None:
-            nameless_predicted = _predict_pairwise_class0(
+            nameless_predicted = predict_pairwise_class0(
                 nameless_classifier,
                 nameless_features[predict],
             )

@@ -58,7 +58,6 @@ FEATURES_TO_USE = [
     "venue_similarity",
     "year_diff",
     "title_similarity",
-    "reference_features",
     "misc_features",
     "name_counts",
     "embedding_similarity",
@@ -93,16 +92,21 @@ def main(
     USE_MONOTONE_CONSTRAINTS = not dont_use_monotone_constraints
     N_JOBS = n_jobs
 
-    for feature_group in feature_groups_to_skip:
-        FEATURES_TO_USE.remove(feature_group)
+    feature_groups_to_skip_set = set(feature_groups_to_skip)
+    unknown_feature_groups_to_skip = sorted(feature_groups_to_skip_set - set(FEATURES_TO_USE) - {"reference_features"})
+    if unknown_feature_groups_to_skip:
+        raise ValueError(f"Unknown feature group(s) to skip: {unknown_feature_groups_to_skip}")
+    features_to_use = [
+        feature_group for feature_group in FEATURES_TO_USE if feature_group not in feature_groups_to_skip_set
+    ]
 
     NAMELESS_FEATURES_TO_USE = [
         feature_name
-        for feature_name in FEATURES_TO_USE
+        for feature_name in features_to_use
         if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
     ]
 
-    FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
+    FEATURIZER_INFO = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
     NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
         features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
     )

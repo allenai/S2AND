@@ -1,3 +1,4 @@
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ import pytest
 import s2and.eval as eval_module
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
-from s2and.data import ANDData, _ordered_coauthors_for_signature
+from s2and.data import ANDData, _ordered_coauthors_for_signature, _python_signature_ngrams_batch
 from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
@@ -37,6 +38,58 @@ def test_ordered_coauthors_rejects_missing_author_position() -> None:
 
     with pytest.raises(ValueError, match="missing author_info_position"):
         _ordered_coauthors_for_signature(cast(Any, signature), {"p1": cast(Any, paper)})
+
+
+def test_archived_eval_scripts_exclude_removed_reference_features() -> None:
+    from scripts.archive import blog_post_eval, sota
+
+    assert "reference_features" not in sota.FEATURES_TO_USE
+    assert "reference_features" not in blog_post_eval.FEATURES_TO_USE
+    FeaturizationInfo(features_to_use=sota.FEATURES_TO_USE)
+    FeaturizationInfo(features_to_use=blog_post_eval.FEATURES_TO_USE)
+
+
+def test_bench_preprocess_phase_coauthor_ngrams_match_production_short_token_policy() -> None:
+    from scripts.bench_preprocess_phases import _signature_ngrams_one
+
+    coauthor_text = "al li jo"
+    production_coauthor_ngrams, _ = _python_signature_ngrams_batch([coauthor_text], [""])
+    benchmark_coauthor_ngrams, _ = _signature_ngrams_one((coauthor_text, ""))
+
+    assert benchmark_coauthor_ngrams == production_coauthor_ngrams[0]
+
+
+def test_auto_rust_prediction_degrade_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
+    clusterer = SimpleNamespace(
+        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
+        nameless_featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
+    )
+    dataset = SimpleNamespace(name="auto_missing_arrow")
+    runtime_context = RuntimeContext(
+        operation="cluster_predict",
+        requested_backend="auto",
+        resolved_backend="rust",
+        use_rust=True,
+        run_id="test-auto-warning",
+        source="argument",
+    )
+
+    caplog.set_level(logging.WARNING, logger="s2and")
+
+    assert (
+        model_module._dataset_arrow_paths_for_prediction_or_python(
+            clusterer,
+            dataset,
+            runtime_context,
+            context="test auto prediction",
+            producer_hint="attach Arrow paths",
+        )
+        is None
+    )
+    assert any(
+        record.levelno == logging.WARNING and "using Python prediction" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 VALID_ORCID_1 = "0000-0001-2345-6789"

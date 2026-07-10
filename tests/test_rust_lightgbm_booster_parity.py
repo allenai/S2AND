@@ -27,7 +27,6 @@ import lightgbm as lgb
 import numpy as np
 import pytest
 
-from s2and.production_model import DEFAULT_PRODUCTION_MODEL_DIR
 from tests.helpers import import_s2and_rust
 
 HAS_RUST, s2and_rust = import_s2and_rust()
@@ -42,8 +41,8 @@ if _rust_lightgbm_booster_cls is None:
     )
 RustLightGBMBooster: Any = _rust_lightgbm_booster_cls
 
-BUNDLE_DIR = Path(DEFAULT_PRODUCTION_MODEL_DIR)
-BUNDLE_BOOSTER_RELPATHS = [
+SOURCE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "s2and" / "data" / "production_model_v1.21"
+SOURCE_BUNDLE_BOOSTER_RELPATHS = [
     "pairwise/main.lgb",
     "pairwise/nameless.lgb",
     "incremental_linker/booster.lgb",
@@ -198,15 +197,15 @@ def _rust_from_booster(lgb_booster: lgb.Booster) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Production bundle boosters: bit-exact raw scores, fixture agreement
+# Explicit historical source-bundle boosters: bit-exact raw scores, fixture agreement
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("relpath", BUNDLE_BOOSTER_RELPATHS)
-def test_bundle_booster_bit_exact_parity(relpath: str) -> None:
-    model_path = BUNDLE_DIR / relpath
+@pytest.mark.parametrize("relpath", SOURCE_BUNDLE_BOOSTER_RELPATHS)
+def test_source_bundle_booster_bit_exact_parity(relpath: str) -> None:
+    model_path = SOURCE_BUNDLE_DIR / relpath
     if not model_path.exists():
-        raise pytest.skip.Exception(f"production bundle booster missing: {model_path}")
+        raise pytest.skip.Exception(f"source bundle booster missing: {model_path}")
     lgb_booster = lgb.Booster(model_file=str(model_path))
     rust_booster = RustLightGBMBooster(str(model_path))
     assert rust_booster.num_trees() == lgb_booster.num_trees()
@@ -226,13 +225,13 @@ def test_bundle_booster_bit_exact_parity(relpath: str) -> None:
         ("pairwise/nameless.lgb", "pairwise/nameless_prediction_fixture.json"),
     ],
 )
-def test_bundle_fixture_probabilities(model_relpath: str, fixture_relpath: str) -> None:
+def test_source_bundle_fixture_probabilities(model_relpath: str, fixture_relpath: str) -> None:
     import json
 
-    model_path = BUNDLE_DIR / model_relpath
-    fixture_path = BUNDLE_DIR / fixture_relpath
+    model_path = SOURCE_BUNDLE_DIR / model_relpath
+    fixture_path = SOURCE_BUNDLE_DIR / fixture_relpath
     if not model_path.exists() or not fixture_path.exists():
-        raise pytest.skip.Exception(f"production bundle artifacts missing under {BUNDLE_DIR}")
+        raise pytest.skip.Exception(f"source bundle artifacts missing under {SOURCE_BUNDLE_DIR}")
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     features = np.ascontiguousarray(fixture["features"], dtype=np.float64)
     expected = np.asarray(fixture["expected_probabilities"], dtype=np.float64)
@@ -247,12 +246,12 @@ def test_bundle_fixture_probabilities(model_relpath: str, fixture_relpath: str) 
     _assert_parity(lgb.Booster(model_file=str(model_path)), rust_booster, features)
 
 
-def test_bundle_decision_type_coverage() -> None:
-    """The bundle models must actually exercise both default directions and
+def test_source_bundle_decision_type_coverage() -> None:
+    """The source bundle models must exercise both default directions and
     more than one missing type, so the parity tests above are non-vacuous."""
-    model_path = BUNDLE_DIR / "pairwise/main.lgb"
+    model_path = SOURCE_BUNDLE_DIR / "pairwise/main.lgb"
     if not model_path.exists():
-        raise pytest.skip.Exception(f"production bundle booster missing: {model_path}")
+        raise pytest.skip.Exception(f"source bundle booster missing: {model_path}")
     summary = RustLightGBMBooster(str(model_path)).decision_type_summary()
     assert summary["num_splits"] > 0
     assert 0 < summary["default_left"] < summary["num_splits"]

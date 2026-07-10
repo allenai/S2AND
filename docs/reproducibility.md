@@ -25,9 +25,9 @@ are legacy artifacts for reproducing the original paper setup and should be used
 from the `s2and_paper` branch, not current `main`.
 
 Some historical model pickles used by the paper-era branch stored a dictionary
-with a `clusterer` key rather than a bare clusterer object. Current `main`
-compatibility artifacts use versioned names such as `production_model_v1.2.pickle`
-and are covered below.
+with a `clusterer` key rather than a bare clusterer object. The current branch
+does not distribute or load production-model pickles; use the paper-era branch
+and its released artifacts when reproducing those runs.
 
 ## Previous release and canonical migration branch
 
@@ -35,15 +35,10 @@ The checked-in native v1.21 bundle was the previous release default:
 
 - `production_model_v1.21/`
 
-Legacy pickles are still present as historical/parity inputs:
-
-- `production_model_v1.2.pickle`
-- `production_model_v1.1.pickle`
-
-Canonical-v2 rejects all of these artifacts because their normalization
-contract is legacy. No compatible default exists on this branch until v1.3 is
-trained and validated. Do not use their presence in package data as evidence
-that current inference is supported.
+The obsolete v1.0-v1.2 production pickles have been removed. Canonical-v2 also
+rejects the v1.21 source bundle because its normalization contract is legacy.
+No compatible default is distributed on this branch until v1.3 is trained and
+validated; current evaluation requires an explicit model bundle path.
 
 The v1.21 bundle includes the previous promoted incremental linker under
 `incremental_linker/`. Its replay target is tracked separately at

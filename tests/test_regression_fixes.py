@@ -1,5 +1,3 @@
-import logging
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,9 +14,16 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.runtime import RuntimeContext
 from s2and.sampling import sampling
+from tests.helpers import write_minimal_arrow_prediction_bundle
 
 
 def _as_anddata(dataset: object) -> ANDData:
+    if not hasattr(dataset, "runtime_context"):
+        cast(Any, dataset).runtime_context = RuntimeContext(
+            operation="test_classic_dataset",
+            backend="python",
+            run_id="test-classic-dataset",
+        )
     return cast(ANDData, dataset)
 
 
@@ -40,15 +45,6 @@ def test_ordered_coauthors_rejects_missing_author_position() -> None:
         _ordered_coauthors_for_signature(cast(Any, signature), {"p1": cast(Any, paper)})
 
 
-def test_archived_eval_scripts_exclude_removed_reference_features() -> None:
-    from scripts.archive import blog_post_eval, sota
-
-    assert "reference_features" not in sota.FEATURES_TO_USE
-    assert "reference_features" not in blog_post_eval.FEATURES_TO_USE
-    FeaturizationInfo(features_to_use=sota.FEATURES_TO_USE)
-    FeaturizationInfo(features_to_use=blog_post_eval.FEATURES_TO_USE)
-
-
 def test_bench_preprocess_phase_coauthor_ngrams_match_production_short_token_policy() -> None:
     from scripts.bench_preprocess_phases import _signature_ngrams_one
 
@@ -57,39 +53,6 @@ def test_bench_preprocess_phase_coauthor_ngrams_match_production_short_token_pol
     benchmark_coauthor_ngrams, _ = _signature_ngrams_one((coauthor_text, ""))
 
     assert benchmark_coauthor_ngrams == production_coauthor_ngrams[0]
-
-
-def test_auto_rust_prediction_degrade_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
-    clusterer = SimpleNamespace(
-        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
-        nameless_featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
-    )
-    dataset = SimpleNamespace(name="auto_missing_arrow")
-    runtime_context = RuntimeContext(
-        operation="cluster_predict",
-        requested_backend="auto",
-        resolved_backend="rust",
-        use_rust=True,
-        run_id="test-auto-warning",
-        source="argument",
-    )
-
-    caplog.set_level(logging.WARNING, logger="s2and")
-
-    assert (
-        model_module._dataset_arrow_paths_for_prediction_or_python(
-            clusterer,
-            dataset,
-            runtime_context,
-            context="test auto prediction",
-            producer_hint="attach Arrow paths",
-        )
-        is None
-    )
-    assert any(
-        record.levelno == logging.WARNING and "using Python prediction" in record.getMessage()
-        for record in caplog.records
-    )
 
 
 VALID_ORCID_1 = "0000-0001-2345-6789"
@@ -103,72 +66,6 @@ def test_cacheable_value_preserves_list_order_but_sorts_sets():
     assert model_module._cacheable_value({"year_diff", "name_counts"}) == model_module._cacheable_value(
         {"name_counts", "year_diff"}
     )
-
-
-def test_predict_arrow_full_predict_rewrites_stale_cluster_seed_sidecar(monkeypatch):
-    dataset = _as_anddata(
-        SimpleNamespace(
-            cluster_seeds_require={"s1": "c_current", "s2": "c_current"},
-            cluster_seeds_disallow=set(),
-            name_tuples=set(),
-        )
-    )
-    arrow_paths = {
-        "signatures": "signatures.arrow",
-        "papers": "papers.arrow",
-        "paper_authors": "paper_authors.arrow",
-        "cluster_seeds": "stale_cluster_seeds.arrow",
-    }
-    captured: dict[str, Any] = {}
-
-    monkeypatch.setattr(
-        model_module,
-        "_explicit_dataset_arrow_paths_for_prediction",
-        lambda *_args, **_kwargs: arrow_paths,
-    )
-    monkeypatch.setattr(model_module, "_cluster_seeds_require_from_arrow_paths", lambda _paths: {"s1": "stale"})
-
-    @contextmanager
-    def fake_temporary_arrow_paths_with_current_cluster_seeds(dataset_arg, arrow_paths_arg, **_kwargs):
-        captured["current_cluster_seeds"] = dict(dataset_arg.cluster_seeds_require)
-        yield {**dict(arrow_paths_arg), "cluster_seeds": "fresh_cluster_seeds.arrow"}
-
-    def fake_predict_from_arrow_paths(self, block_dict, arrow_paths_arg, **kwargs):
-        del self, kwargs
-        captured["block_dict"] = block_dict
-        captured["arrow_paths"] = dict(arrow_paths_arg)
-        return {"block": ["s1", "s2"]}, None
-
-    monkeypatch.setattr(
-        model_module,
-        "_temporary_arrow_paths_with_current_cluster_seeds",
-        fake_temporary_arrow_paths_with_current_cluster_seeds,
-    )
-    monkeypatch.setattr(Clusterer, "predict_from_arrow_paths", fake_predict_from_arrow_paths)
-
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
-        classifier=None,
-        n_jobs=1,
-        use_cache=False,
-    )
-    pred_clusters, dists = clusterer.predict(
-        {"block": ["s1", "s2"]},
-        dataset,
-        runtime_context=RuntimeContext(
-            operation="cluster_predict",
-            requested_backend="rust",
-            resolved_backend="rust",
-            use_rust=True,
-            run_id="test",
-            source="argument",
-        ),
-    )
-
-    assert pred_clusters == {"block": ["s1", "s2"]}
-    assert dists is None
-    assert captured["current_cluster_seeds"] == {"s1": "c_current", "s2": "c_current"}
-    assert captured["arrow_paths"]["cluster_seeds"] == "fresh_cluster_seeds.arrow"
 
 
 def _expected_upper_triangle_pairs_for_range(
@@ -268,11 +165,8 @@ def test_python_predicted_batches_use_effective_pair_chunk_size(monkeypatch):
             incremental_dont_use_cluster_seeds=False,
             runtime_context=RuntimeContext(
                 operation="model_predict",
-                requested_backend="python",
-                resolved_backend="python",
-                use_rust=False,
+                backend="python",
                 run_id="test-python-batches",
-                source="default",
             ),
             num_pairs=len(helper_items),
             pair_chunk_size=2,
@@ -349,11 +243,8 @@ def test_fused_constraint_fallback_resumes_at_failed_offset(monkeypatch):
             {},
             runtime_context=RuntimeContext(
                 operation="constraints",
-                requested_backend="rust",
-                resolved_backend="rust",
-                use_rust=True,
+                backend="rust",
                 run_id="test-fused-fallback",
-                source="default",
             ),
         )
     )
@@ -374,20 +265,7 @@ def test_predict_from_arrow_paths_rejects_disallows_with_precomputed_dists_befor
         use_cache=False,
     )
     dists = {"block": np.asarray([0.5], dtype=np.float64)}
-    arrow_paths = {}
-    for key, filename in {
-        "signatures": "signatures.arrow",
-        "papers": "papers.arrow",
-        "paper_authors": "paper_authors.arrow",
-    }.items():
-        path = tmp_path / filename
-        path.touch()
-        arrow_paths[key] = str(path)
-    for key in ("signatures", "papers", "paper_authors"):
-        index_key = f"{key}_batch_index"
-        index_path = tmp_path / f"{key}.{index_key}.bin"
-        index_path.touch()
-        arrow_paths[index_key] = str(index_path)
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path)
     with pytest.raises(ValueError, match="cluster_seeds_disallow cannot be used with precomputed dists"):
         clusterer.predict_from_arrow_paths(
             {"block": ["s0", "s1"]},
@@ -458,11 +336,8 @@ def test_make_distance_matrices_guards_allocation_before_pair_featurization(monk
         "build_runtime_context",
         lambda _operation: RuntimeContext(
             operation="model_predict",
-            requested_backend="python",
-            resolved_backend="python",
-            use_rust=False,
+            backend="python",
             run_id="test-matrix-guard",
-            source="default",
         ),
     )
     monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
@@ -684,7 +559,7 @@ def test_clusterer_predict_disables_incremental_batch_threshold_for_python_subbl
     captured = {"batching_threshold": None}
 
     def fake_predict_incremental(self, block_signatures, dataset, *args, **kwargs):
-        captured["batching_threshold"] = kwargs["batching_threshold"]
+        captured["batching_threshold"] = kwargs.get("batching_threshold")
         return {
             "clusters": {"merged": list(dataset.cluster_seeds_require.keys()) + list(block_signatures)},
             "phase_b_mode": "exact",
@@ -699,8 +574,6 @@ def test_clusterer_predict_disables_incremental_batch_threshold_for_python_subbl
         {"block": ["m1", "m2", "m3", "m4", "m5", "m6", "s1", "s2"]},
         dataset,
         batching_threshold=2,
-        desired_memory_use=4,
-        backend="python",
     )
 
     assert captured["batching_threshold"] is None
@@ -720,16 +593,13 @@ def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
             cluster_seeds_require={},
             cluster_seeds_disallow=set(),
             _cluster_seeds_version=1,
-            rust_featurizer_arrow_paths={"signatures": "mock-signatures.arrow"},
+            arrow_paths={"signatures": "mock-signatures.arrow"},
         )
     )
     runtime_context = RuntimeContext(
         operation="constraints",
-        requested_backend="rust",
-        resolved_backend="rust",
-        use_rust=True,
+        backend="rust",
         run_id="run-1",
-        source="default",
     )
 
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
@@ -767,16 +637,13 @@ def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
             cluster_seeds_require={"s1": "c1", "s2": "c1"},
             cluster_seeds_disallow={("s1", "s3")},
             _cluster_seeds_version=1,
-            rust_featurizer_arrow_paths={"signatures": "mock-signatures.arrow"},
+            arrow_paths={"signatures": "mock-signatures.arrow"},
         )
     )
     runtime_context = RuntimeContext(
         operation="constraints",
-        requested_backend="rust",
-        resolved_backend="rust",
-        use_rust=True,
+        backend="rust",
         run_id="run-2",
-        source="default",
     )
 
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)

@@ -32,7 +32,7 @@ from scripts.production.model.linker_train_calibrate_eval import (
     _score_candidate_summaries_with_frozen_rust_policy,
     _write_minimal_raw_partial_frame,
 )
-from tests.helpers import import_s2and_rust, patch_tiny_name_counts_loader
+from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
 class _ConstraintClusterer:
@@ -59,6 +59,31 @@ class _ConstraintClusterer:
             )
         )
         return [-90_000.0 for _pair in pairs], {}
+
+
+def _validate_resolved_arrow_path_keys(
+    paths: dict[str, str],
+    *,
+    require_specter: bool,
+    require_name_counts_index: bool,
+    **_kwargs: Any,
+) -> dict[str, str]:
+    required = {
+        "signatures",
+        "papers",
+        "paper_authors",
+        "signatures_batch_index",
+        "papers_batch_index",
+        "paper_authors_batch_index",
+    }
+    if require_specter:
+        required.update(("specter", "specter_batch_index"))
+    if require_name_counts_index:
+        required.add("name_counts_index")
+    missing = sorted(required.difference(paths))
+    if missing:
+        raise ValueError(f"missing Arrow path keys: {', '.join(missing)}")
+    return paths
 
 
 def test_load_target_accepts_current_supported_promoted_features(tmp_path) -> None:
@@ -593,6 +618,11 @@ def test_arrow_paths_use_manifest_name_counts_index_unless_explicit_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        promoted_train,
+        "validate_arrow_prediction_artifacts",
+        _validate_resolved_arrow_path_keys,
+    )
     bundle_root = tmp_path / "bundle"
     dataset_dir = bundle_root / "datasets" / "toy"
     dataset_dir.mkdir(parents=True)
@@ -607,8 +637,9 @@ def test_arrow_paths_use_manifest_name_counts_index_unless_explicit_override(
         "specter.specter_batch_index.bin",
     ):
         (dataset_dir / filename).write_bytes(b"placeholder")
-    patch_tiny_name_counts_loader(monkeypatch)
-    manifest_index, _metrics = write_name_counts_index(bundle_root)
+    manifest_index, _metrics = write_name_counts_index(
+        bundle_root, tiny_name_counts_tuple(), tiny_name_counts_provenance()
+    )
     manifest_path = dataset_dir / "manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -639,7 +670,9 @@ def test_arrow_paths_use_manifest_name_counts_index_unless_explicit_override(
     paths = _arrow_paths_for_dataset(bundle, "toy")
     assert paths["name_counts_index"] == str(Path(manifest_index).resolve())
 
-    override_index, _metrics = write_name_counts_index(tmp_path / "override")
+    override_index, _metrics = write_name_counts_index(
+        tmp_path / "override", tiny_name_counts_tuple(), tiny_name_counts_provenance()
+    )
     paths = _arrow_paths_for_dataset(bundle, "toy", name_counts_index_root=Path(override_index))
     assert paths["name_counts_index"] == str(Path(override_index).resolve())
 
@@ -686,6 +719,11 @@ def test_arrow_paths_alias_specter2_manifest_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        promoted_train,
+        "validate_arrow_prediction_artifacts",
+        _validate_resolved_arrow_path_keys,
+    )
     bundle_root = tmp_path / "bundle"
     dataset_dir = bundle_root / "datasets" / "toy"
     dataset_dir.mkdir(parents=True)
@@ -700,8 +738,9 @@ def test_arrow_paths_alias_specter2_manifest_keys(
         "specter2.specter_batch_index.bin",
     ):
         (dataset_dir / filename).write_bytes(b"placeholder")
-    patch_tiny_name_counts_loader(monkeypatch)
-    manifest_index, _metrics = write_name_counts_index(bundle_root)
+    manifest_index, _metrics = write_name_counts_index(
+        bundle_root, tiny_name_counts_tuple(), tiny_name_counts_provenance()
+    )
     (dataset_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -751,7 +790,6 @@ def test_minimal_raw_query_first_prefix_uses_full_author_before_masked_view() ->
 def test_minimal_raw_retrieval_score_uses_frozen_rust_policy() -> None:
     rust_available, rust_payload = import_s2and_rust(
         required_module_attrs=("RustHybridCentroidRetriever",),
-        prefer_site_packages=True,
     )
     if not rust_available:
         raise pytest.skip.Exception(f"RustHybridCentroidRetriever unavailable: {rust_payload!r}")

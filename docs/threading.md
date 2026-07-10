@@ -1,6 +1,6 @@
 # Threading and parallelism
 
-Status date: 2026-05-22
+Status date: 2026-07-10
 
 S2AND uses multiple libraries that can each create their own thread pools (Rust Rayon, LightGBM/OpenMP, BLAS, etc.).
 If those pools are configured independently, runs can oversubscribe CPU cores and show higher-than-expected CPU usage.
@@ -11,7 +11,7 @@ This doc describes the intended “single knob” behavior and the practical rul
 
 Within the Python API, treat `n_jobs` as the canonical concurrency setting for a run:
 
-- **Rust backend**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
+- **Rust Arrow routes**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
 - **LightGBM inference**: `Clusterer.n_jobs` propagates into the underlying estimators; prediction uses the
   estimator's configured threading rather than passing a separate `num_threads` override to `predict_proba()`.
 - **Python preprocessing**: `ANDData(n_jobs=...)` controls the limited (and platform-dependent) pooling used in some
@@ -54,9 +54,13 @@ for those runs.
 
 Conditions for the bypass:
 
-- Backend resolves to Rust (`S2AND_BACKEND=rust` or `auto` resolved to Rust)
-- `preprocess=True`
-- The dataset is constructed through `s2and.arrow_training` or passes `rust_arrow_featurization=True`
+- The dataset is constructed by the fixed Rust-training constructor,
+  `build_training_anddata_from_arrow(...)`.
+- `preprocess=True`.
+
+The constructor selects Rust explicitly and binds one immutable
+`dataset.arrow_paths` mapping. Classic `ANDData` construction remains on the
+Python preprocessing route.
 
 ## Recommended run setup
 
@@ -88,7 +92,6 @@ Conditions for the bypass:
 
      ```bash
      export PYTHONUNBUFFERED=1
-     export S2AND_BACKEND=rust
      export OMP_NUM_THREADS=36
      export MKL_NUM_THREADS=1
      export OPENBLAS_NUM_THREADS=1
@@ -105,7 +108,6 @@ Conditions for the bypass:
 
      ```bash
      export PYTHONUNBUFFERED=1
-     export S2AND_BACKEND=rust
      export OMP_NUM_THREADS=1
      export MKL_NUM_THREADS=1
      export OPENBLAS_NUM_THREADS=1

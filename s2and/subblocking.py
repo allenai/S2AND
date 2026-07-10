@@ -1054,6 +1054,7 @@ def _read_arrow_rows_by_values(
     values: Sequence[str],
     *,
     required_columns: set[str],
+    optional_columns: Sequence[str] = (),
     table_name: str,
     load_metrics: dict[str, int] | None = None,
 ) -> list[Mapping[str, Any]]:
@@ -1083,7 +1084,8 @@ def _read_arrow_rows_by_values(
         key_column_index = reader.schema.get_field_index(key_column)
         if key_column_index < 0:
             raise ValueError(f"{table_name} Arrow is missing key column for graph subblocking: {key_column!r}")
-        selected_column_names = [name for name in reader.schema.names if name in required_columns]
+        selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
+        selected_column_names = [name for name in reader.schema.names if name in selected_columns]
         selected_column_indices = [reader.schema.get_field_index(name) for name in selected_column_names]
         for batch_index in batch_indices:
             batch = reader.get_batch(batch_index)
@@ -1129,8 +1131,10 @@ def _require_arrow_column_type(
 def _validate_arrow_graph_schema(schema: Any, table_name: str) -> None:
     pa = __import__("pyarrow")
     if table_name == "signatures":
-        for column_name in ("signature_id", "paper_id", "author_first", "author_middle", "author_orcid"):
+        for column_name in ("signature_id", "paper_id", "author_first", "author_middle"):
             _require_arrow_column_type(schema, column_name, table_name, pa.types.is_string, "string")
+        if schema.get_field_index("author_orcid") >= 0:
+            _require_arrow_column_type(schema, "author_orcid", table_name, pa.types.is_string, "string")
         _require_arrow_column_type(schema, "author_position", table_name, pa.types.is_int64, "int64")
         _require_arrow_column_type(
             schema,
@@ -1401,9 +1405,9 @@ def _load_arrow_graph_subblocking_dataset(
             "author_first",
             "author_middle",
             "author_affiliations",
-            "author_orcid",
             "author_position",
         },
+        optional_columns=("author_orcid",),
         table_name="signatures",
         load_metrics=load_metrics,
     )

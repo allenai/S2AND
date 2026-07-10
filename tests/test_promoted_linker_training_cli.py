@@ -12,6 +12,13 @@ import pytest
 
 from scripts.production.model import linker_train_calibrate_eval as promoted_train
 
+REQUIRED_TRAINING_ARGS = (
+    "--pairwise-model-path",
+    "pairwise-stage",
+    "--target-json",
+    "target.json",
+)
+
 
 def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
     runtime_root = Path("s2and/incremental_linking")
@@ -37,14 +44,13 @@ def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
     assert model_imports == []
 
 
-def test_promoted_training_defaults_to_arrow_rust_source() -> None:
+def test_promoted_training_requires_explicit_artifacts_and_defaults_to_arrow_rust_source() -> None:
     parser = promoted_train.build_parser()
-    parser_defaults = vars(parser.parse_args([]))
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+    parser_defaults = vars(parser.parse_args(list(REQUIRED_TRAINING_ARGS)))
     feature_mode_action = next(action for action in parser._actions if action.dest == "feature_mode")  # noqa: SLF001
 
-    assert promoted_train.DEFAULT_TARGET_JSON.relative_to(promoted_train.REPO_ROOT) == Path(
-        "s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json"
-    )
     assert parser_defaults["feature_mode"] == "arrow-rust"
     assert feature_mode_action.choices == ("arrow-rust", "precomputed-promoted")
     assert parser_defaults["arrow_name_counts_index_root"] is None
@@ -61,14 +67,38 @@ def test_minimal_raw_rust_is_not_public_feature_mode() -> None:
     parser = promoted_train.build_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--feature-mode", "minimal-raw-rust"])
+        parser.parse_args([*REQUIRED_TRAINING_ARGS, "--feature-mode", "minimal-raw-rust"])
 
 
 def test_negative_limit_rows_is_rejected() -> None:
-    args = promoted_train.build_parser().parse_args(["--limit-rows", "-1"])
+    args = promoted_train.build_parser().parse_args([*REQUIRED_TRAINING_ARGS, "--limit-rows", "-1"])
 
     with pytest.raises(SystemExit, match="--limit-rows must be > 0"):
         promoted_train.run(args)
+
+
+def test_existing_production_bundle_output_is_rejected_before_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: {})  # noqa: SLF001
+    production_bundle = tmp_path / "production_model_v9.9"
+    production_bundle.mkdir()
+    run_output = tmp_path / "must_not_be_created"
+    args = promoted_train.build_parser().parse_args(
+        [
+            *REQUIRED_TRAINING_ARGS,
+            "--save-production-bundle-to",
+            str(production_bundle),
+            "--output-dir",
+            str(run_output),
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="must name a new directory"):
+        promoted_train.run(args)
+
+    assert not run_output.exists()
 
 
 @pytest.mark.parametrize("save_option", ["--save-artifact-to", "--save-production-bundle-to"])
@@ -84,6 +114,7 @@ def test_metric_drift_override_cannot_promote_before_loading_inputs(
     output_dir = tmp_path / "must_not_be_created"
     args = promoted_train.build_parser().parse_args(
         [
+            *REQUIRED_TRAINING_ARGS,
             "--allow-metric-drift",
             save_option,
             str(tmp_path / "promotion"),
@@ -492,8 +523,10 @@ def test_metric_gate_runs_before_artifact_promotion(
     monkeypatch.setattr(promoted_train, "run_classic", lambda *_args, **_kwargs: summary)
     monkeypatch.setattr(promoted_train, "_train_and_save_prod_artifact", fail_if_promoted)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path: {"test": "binding"})
+    monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: SimpleNamespace())
     args = promoted_train.build_parser().parse_args(
         [
+            *REQUIRED_TRAINING_ARGS,
             "--feature-mode",
             "precomputed-promoted",
             "--precomputed-feature-bundle-root",
@@ -815,6 +848,7 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     artifact_dir = tmp_path / "artifact"
     args = promoted_train.build_parser().parse_args(
         [
+            *REQUIRED_TRAINING_ARGS,
             "--feature-mode",
             "arrow-rust",
             "--run-full",
@@ -893,11 +927,13 @@ def test_run_uses_explicit_precomputed_promoted_bundle(
         "_load_precomputed_promoted_feature_bundle",
         fake_load_precomputed,
     )
+    monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: SimpleNamespace())
     monkeypatch.setattr(promoted_train, "run_classic", fake_run_classic)
 
     precomputed_root = tmp_path / "precomputed"
     args = promoted_train.build_parser().parse_args(
         [
+            *REQUIRED_TRAINING_ARGS,
             "--feature-mode",
             "precomputed-promoted",
             "--precomputed-feature-bundle-root",

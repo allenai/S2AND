@@ -39,7 +39,6 @@ from scripts.eps_sweep.common import (
     DEFAULT_ARROW_ROOT,
     DEFAULT_GOLD_ROOT,
     DEFAULT_LINKER_BUNDLE_ROOT,
-    DEFAULT_MODEL_PATH,
     DEFAULT_OUTPUT_ROOT,
     load_arrow_paths,
     sha1_text,
@@ -88,7 +87,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--bundle-root", type=Path, default=DEFAULT_LINKER_BUNDLE_ROOT)
     parser.add_argument("--arrow-root", type=Path, default=DEFAULT_ARROW_ROOT)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--backend", choices=["auto", "rust"], default="rust")
@@ -277,7 +276,6 @@ def _read_arrow_signatures_for_planning(
         "author_middle",
         "author_last",
         "author_suffix",
-        "author_orcid",
         "author_position",
         "author_block",
     }
@@ -285,7 +283,8 @@ def _read_arrow_signatures_for_planning(
     if missing:
         raise ValueError(f"Arrow signatures table is missing planning columns: {missing}")
 
-    table = table.select(sorted(required))
+    selected_columns = required.union({"author_orcid"}.intersection(table.column_names))
+    table = table.select(sorted(selected_columns))
     target_values = pa.array(sorted(target_signature_ids), type=table["signature_id"].type)
     pc_any = cast(Any, pc)
     target_table = table.filter(pc_any.is_in(table["signature_id"], value_set=target_values))
@@ -316,7 +315,7 @@ def _read_arrow_signatures_for_planning(
             author_info_last_normalized=None,
             author_info_suffix=_optional_str(data["author_suffix"][index]),
             author_info_suffix_normalized=None,
-            author_info_orcid=_optional_str(data["author_orcid"][index]),
+            author_info_orcid=_optional_str(data.get("author_orcid", [None] * row_count)[index]),
             author_info_position=data["author_position"][index],
         )
 
@@ -1127,7 +1126,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if gold.empty:
         raise ValueError(f"No gold rows for dataset={args.dataset}")
 
-    clusterer = load_production_model(args.model_path, require_incremental_linker=False)
+    clusterer = load_production_model(args.model_path)
     clusterer.use_cache = False
     clusterer.n_jobs = int(args.n_jobs)
     clusterer.suppress_orcid = bool(args.suppress_orcid_constraints)

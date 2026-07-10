@@ -1026,7 +1026,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         require_specter=clusterer_requires_specter,
         require_name_counts_index=clusterer_requires_name_counts,
         require_cluster_seeds=False,
-        require_batch_indexes=False,
         context="Promoted incremental Arrow input",
         producer_hint=(
             "include valid base Arrow tables and any declared seed sidecars before promoted incremental " "seed setup"
@@ -1126,14 +1125,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     same_batch_finalized_disallow_query_ids: set[str] = set()
     same_batch_finalized_disallow_components: set[frozenset[str]] = set()
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
-    query_disallow_replays: dict[str, Any] = {}
-    query_disallow_replay_live_bytes = 0
-    query_disallow_replay_peak_bytes = 0
-    query_disallow_replay_allocated_bytes = 0
-    query_disallow_replay_budget_bytes = max(1, int(initial_limits.stage_budget_bytes * 0.05))
-    query_disallow_replay_budget_skipped_count = 0
-    query_disallow_replay_pruned_count = 0
-    query_disallow_replay_stored_count = 0
     seed_arrow_start = time.perf_counter()
     seed_arrow_matches_cluster_seeds_require = _cluster_seeds_arrow_matches(
         base_arrow_path_payload.get("cluster_seeds"),
@@ -1162,7 +1153,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 require_specter=clusterer_requires_specter,
                 require_name_counts_index=clusterer_requires_name_counts,
                 require_cluster_seeds=True,
-                require_batch_indexes=True,
                 context="Promoted incremental Arrow scoring",
                 producer_hint=(
                     "include raw Arrow tables, raw-planner batch indexes, and the request-local "
@@ -1182,32 +1172,14 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         raw_window_plan_telemetry: dict[str, int | float | str] = {}
         final_limits_history: list[memory_budget.PromotedPhaseALimits] = []
 
-        rust_module = feature_port._require_rust_runtime() if unassigned_signature_ids else None
-        if rust_module is not None:
-            runtime_module._require_raw_arrow_query_signature_planner_capability(  # noqa: SLF001
-                rust_module,
-                context="raw Arrow promoted incremental linking",
-            )
         raw_window_planner_count = 0
         raw_window_planner_batch_plan_count = 0
         raw_window_planner_plan_call_count = 0
         raw_window_planner_plan_seconds = 0.0
         raw_request_planner: Any | None = None
         if unassigned_signature_ids:
-            raw_planner_cls = getattr(rust_module, "RawBlockQueryCandidatePlanner", None)
-            if raw_planner_cls is None:
-                raise RuntimeError(
-                    "raw Arrow promoted incremental linking requires "
-                    "s2and_rust.RawBlockQueryCandidatePlanner; rebuild the Rust extension"
-                )
-            from_auto_queries = getattr(raw_planner_cls, "from_auto_queries", None)
-            if not callable(from_auto_queries):
-                raise RuntimeError(
-                    "raw Arrow promoted incremental linking requires "
-                    "RawBlockQueryCandidatePlanner.from_auto_queries; rebuild the Rust extension"
-                )
             raw_window_start = time.perf_counter()
-            raw_request_planner = from_auto_queries(
+            raw_request_planner = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner.from_auto_queries(  # noqa: SLF001
                 arrow_path_payload,
                 top_k=retrieval_top_k,
                 orcid_enabled=bool(orcid_enabled),
@@ -1218,12 +1190,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             raw_window_plan_count += 1
             raw_window_plan_query_count += len(unassigned_signature_ids)
             raw_window_planner_count += 1
-            build_telemetry = getattr(raw_request_planner, "build_telemetry", None)
-            if callable(build_telemetry):
-                _merge_raw_window_plan_telemetry(
-                    raw_window_plan_telemetry,
-                    _raw_window_plan_telemetry_fields({"telemetry": build_telemetry()}),
-                )
+            _merge_raw_window_plan_telemetry(
+                raw_window_plan_telemetry,
+                _raw_window_plan_telemetry_fields({"telemetry": raw_request_planner.build_telemetry()}),
+            )
             post_planner_batch, final_limits = _memory_safe_promoted_query_batch(
                 unassigned_signature_ids[:query_batch_size],
                 orcid_fanout_by_query=orcid_fanout_by_query,
@@ -1433,79 +1403,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                             initial_query_disallow_decisions[signature_id] = scored
                         elif scored.decision.action == "link" and scored.decision.component_key is not None:
                             linked_signature_clusters[signature_id] = str(scored.decision.component_key)
-                    for replay_signature_id in tuple(query_disallow_replays):
-                        replay_scored = initial_query_disallow_decisions.get(replay_signature_id)
-                        if replay_scored is None:
-                            continue
-                        replay_needed = any(
-                            (partner := initial_query_disallow_decisions.get(partner_id)) is None
-                            or (
-                                partner.decision.action == "link"
-                                and partner.decision.component_key == replay_scored.decision.component_key
-                                and _query_decision_priority_key(partner) < _query_decision_priority_key(replay_scored)
-                            )
-                            for partner_id in query_disallow_partners[replay_signature_id]
-                        )
-                        if replay_needed:
-                            continue
-                        pruned_replay = query_disallow_replays.pop(replay_signature_id)
-                        query_disallow_replay_live_bytes -= int(pruned_replay.estimated_bytes)
-                        query_disallow_replay_pruned_count += 1
-
-                    replay_rows_by_query_index: dict[int, Any] | None = None
-                    for signature_id, scored in scored_batch.items():
-                        if (
-                            signature_id not in query_disallow_partners
-                            or signature_id in complete_disallow_query_ids
-                            or scored.decision.action != "link"
-                            or scored.require_forced
-                            or scored.decision.row_index is None
-                        ):
-                            continue
-                        partner_ids = query_disallow_partners[signature_id]
-                        unseen_partner = any(
-                            partner_id not in initial_query_disallow_decisions for partner_id in partner_ids
-                        )
-                        lower_priority_conflict = any(
-                            (partner := initial_query_disallow_decisions.get(partner_id)) is not None
-                            and partner.decision.action == "link"
-                            and partner.decision.component_key == scored.decision.component_key
-                            and _query_decision_priority_key(partner) < _query_decision_priority_key(scored)
-                            for partner_id in partner_ids
-                        )
-                        if not unseen_partner and not lower_priority_conflict:
-                            continue
-                        if replay_rows_by_query_index is None:
-                            replay_rows_by_query_index = runtime_module._query_row_indices_by_query_index(  # noqa: SLF001
-                                result.feature_matrix.candidate_batch
-                            )
-                        replay_row_indices = replay_rows_by_query_index.get(int(scored.decision.query_signature_index))
-                        if replay_row_indices is None:
-                            raise ValueError(
-                                "Promoted query decision replay is missing candidate rows: "
-                                f"signature_id={signature_id!r} "
-                                f"query_signature_index={scored.decision.query_signature_index}"
-                            )
-                        replay = runtime_module._build_query_decision_replay(  # noqa: SLF001
-                            result,
-                            query_signature_index=scored.decision.query_signature_index,
-                            row_indices=replay_row_indices,
-                        )
-                        replay_fits_budget = (
-                            query_disallow_replay_live_bytes + replay.estimated_bytes
-                            <= query_disallow_replay_budget_bytes
-                        )
-                        if replay_fits_budget:
-                            query_disallow_replays[signature_id] = replay
-                            query_disallow_replay_live_bytes += int(replay.estimated_bytes)
-                            query_disallow_replay_allocated_bytes += int(replay.estimated_bytes)
-                            query_disallow_replay_peak_bytes = max(
-                                query_disallow_replay_peak_bytes,
-                                query_disallow_replay_live_bytes,
-                            )
-                            query_disallow_replay_stored_count += 1
-                        else:
-                            query_disallow_replay_budget_skipped_count += 1
                 else:
                     linked_signature_clusters.update(dict(result.linked_signature_clusters))
                 batch_telemetries.append(dict(result.telemetry))
@@ -1529,9 +1426,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             global_rescore_candidate_rows = 0
             global_rescore_pairs = 0
             global_rescore_seconds = 0.0
-            global_replay_rescore_count = 0
-            global_full_rescore_count = 0
-            global_replay_excluded_row_count = 0
 
             def _rescore_query_disallow_endpoint(
                 signature_id: str,
@@ -1541,41 +1435,16 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 nonlocal global_rescore_candidate_rows
                 nonlocal global_rescore_pairs
                 nonlocal global_rescore_seconds
-                nonlocal global_replay_excluded_row_count
-                nonlocal global_replay_rescore_count
-                nonlocal global_full_rescore_count
                 nonlocal raw_window_featurizer_count
                 nonlocal raw_window_featurizer_seconds
                 nonlocal raw_window_featurizer_signature_count
                 nonlocal raw_window_planner_batch_plan_count
                 nonlocal raw_window_planner_plan_call_count
                 nonlocal raw_window_planner_plan_seconds
-                nonlocal query_disallow_replay_live_bytes
 
                 rescore_started = time.perf_counter()
-                replay = query_disallow_replays.pop(signature_id, None)
-                if replay is not None:
-                    query_disallow_replay_live_bytes -= int(replay.estimated_bytes)
-                    replay_decision, replay_telemetry = runtime_module._redecide_query_from_replay(  # noqa: SLF001
-                        artifact,
-                        replay,
-                        excluded_components=excluded_components,
-                    )
-                    global_replay_rescore_count += 1
-                    global_replay_excluded_row_count += int(
-                        replay_telemetry.get("cluster_seed_disallow_excluded_row_count", 0)
-                    )
-                    global_rescore_candidate_rows += int(replay.feature_matrix.candidate_batch.row_count)
-                    global_rescore_seconds += time.perf_counter() - rescore_started
-                    return _ScoredQueryDecision(
-                        signature_id=signature_id,
-                        decision=replay_decision,
-                        require_forced=False,
-                    )
-
                 if raw_request_planner is None:
                     raise RuntimeError("reusable raw Arrow planner was not initialized")
-                global_full_rescore_count += 1
                 plan_started = time.perf_counter()
                 raw_rescore_plan = raw_request_planner.plan([signature_id])
                 raw_window_planner_plan_call_count += 1
@@ -1643,19 +1512,8 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 "global_query_disallow_rescore_candidate_row_count": int(global_rescore_candidate_rows),
                 "global_query_disallow_rescore_pair_count": int(global_rescore_pairs),
                 "global_query_disallow_rescore_seconds": float(global_rescore_seconds),
-                "global_query_disallow_replay_rescore_count": int(global_replay_rescore_count),
-                "global_query_disallow_full_rescore_count": int(global_full_rescore_count),
-                "global_query_disallow_replay_excluded_row_count": int(global_replay_excluded_row_count),
-                "global_query_disallow_replay_stored_count": int(query_disallow_replay_stored_count),
-                "global_query_disallow_replay_stored_bytes": int(query_disallow_replay_allocated_bytes),
-                "global_query_disallow_replay_peak_bytes": int(query_disallow_replay_peak_bytes),
-                "global_query_disallow_replay_live_bytes": int(query_disallow_replay_live_bytes),
-                "global_query_disallow_replay_budget_bytes": int(query_disallow_replay_budget_bytes),
-                "global_query_disallow_replay_budget_skipped_count": int(query_disallow_replay_budget_skipped_count),
-                "global_query_disallow_replay_pruned_count": int(query_disallow_replay_pruned_count),
                 "global_query_disallow_same_batch_component_count": int(len(same_batch_finalized_disallow_components)),
             }
-            query_disallow_replays.clear()
 
         merged_telemetry = merge_promoted_incremental_batch_telemetry(
             batch_telemetries,

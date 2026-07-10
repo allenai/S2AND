@@ -8,7 +8,7 @@ Centralized reference for supported S2AND environment variables.
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `S2AND_BACKEND` | `python`, `rust`, `auto` | `auto` | Controls the default runtime backend for featurization, constraints, promoted incremental linking, and indexed Arrow subblocking. `auto` resolves to Rust when the extension is available and core-capable; otherwise Python. |
+| `S2AND_BACKEND` | `python`, `rust` | `python` | Backend used when a caller builds a runtime context without an explicit backend. Invalid values fail immediately. Public APIs have fixed routes: classic `ANDData` construction and prediction use Python, while Arrow-training and `*_from_arrow_paths` APIs use Rust. Rust requires exactly `s2and-rust==0.60.0`; there is no silent fallback. |
 
 ---
 

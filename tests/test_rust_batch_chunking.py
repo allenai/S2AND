@@ -113,7 +113,7 @@ def test_prefault_numpy_pages_inplace_mutates_scratch_buffer():
 
 
 def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_calibrated_fixed", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_rust_chunking_calibrated_fixed", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = _build_pairs(5)
     captured_fixed: list[int] = []
@@ -164,7 +164,7 @@ def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
 
 
 def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_rust_chunking", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     _pin_stable_rss(monkeypatch)
 
@@ -202,7 +202,7 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
 
 
 def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_indexed", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_rust_chunking_indexed", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     _pin_stable_rss(monkeypatch)
 
@@ -263,7 +263,7 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
 
 
 def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_indexed_int_ids", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_rust_chunking_indexed_int_ids", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     indexed_pairs_seen: list[tuple[int, int]] = []
 
@@ -317,7 +317,7 @@ def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
 
 
 def test_rust_batch_uses_same_process_featurizer_without_cache_flag(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_same_process_featurizer", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_rust_chunking_same_process_featurizer", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     featurizer_calls = {"count": 0}
     fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()))
@@ -357,7 +357,7 @@ def test_rust_batch_uses_same_process_featurizer_without_cache_flag(monkeypatch)
 
 
 def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_prediction", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_rust_chunking_prediction", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = _build_pairs(12_000)
     fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()))

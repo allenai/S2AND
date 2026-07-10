@@ -10,13 +10,6 @@ from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
-LEGACY_PRODUCTION_MODEL_PATHS = frozenset(
-    {
-        "s2and/data/production_model_v1.0.pickle",
-        "s2and/data/production_model_v1.1.pickle",
-        "s2and/data/production_model_v1.2.pickle",
-    }
-)
 FORBIDDEN_LEGACY_RUNTIME_PATHS = frozenset(
     {
         "s2and/data/first_k_letter_counts_from_orcid.json",
@@ -27,6 +20,8 @@ FORBIDDEN_LEGACY_RUNTIME_PATHS = frozenset(
 
 def _load_expected_paths(source_root: Path) -> set[str]:
     declaration_path = source_root / "s2and" / "data" / "default_production_model.json"
+    if not declaration_path.is_file():
+        return set()
     declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
     bundle_dir_name = str(declaration["bundle_dir"])
     bundle_version = str(declaration["bundle_version"])
@@ -36,7 +31,6 @@ def _load_expected_paths(source_root: Path) -> set[str]:
     if not default_dir.is_dir():
         raise FileNotFoundError(f"Declared default production bundle is missing: {default_dir}")
     expected = {
-        *LEGACY_PRODUCTION_MODEL_PATHS,
         "s2and/data/default_production_model.json",
         *(path.relative_to(source_root).as_posix() for path in sorted(default_dir.rglob("*")) if path.is_file()),
     }

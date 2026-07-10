@@ -1177,7 +1177,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.18" },
     { name = "urllib3", specifier = ">=2.7.0" },
 ]
-provides-extras = ["dev", "rust"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "s2and-rust"

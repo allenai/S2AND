@@ -20,10 +20,8 @@ from s2and.incremental_linking.artifact import (
     save_incremental_linking_artifact,
 )
 from s2and.incremental_linking.contracts import (
-    INCREMENTAL_LINKING_RUST_CAPABILITIES,
     retrieval_constraint_decision_policy_payload,
     retrieval_stack_contract_payload,
-    validate_required_rust_capabilities,
 )
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import load_logistic_gate_config, logistic_gate_config
@@ -32,7 +30,6 @@ from tests.promoted_linking_helpers import build_tiny_promoted_booster, syntheti
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
     required_module_attrs=("RustLightGBMBooster",),
-    prefer_site_packages=True,
 )
 _HAS_RUST_LIGHTGBM = bool(
     _HAS_RUST_LIGHTGBM
@@ -61,7 +58,6 @@ def _valid_metadata_payload() -> dict[str, Any]:
         gate_config=_logistic_gate_config(),
         prediction_fixture_matrix=((0.0,) * len(columns),),
         prediction_fixture_expected_probabilities=(0.5,),
-        required_rust_capabilities=INCREMENTAL_LINKING_RUST_CAPABILITIES,
         booster_sha256="a" * 64,
         lightgbm_version="test-version",
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
@@ -256,24 +252,16 @@ def test_retrieval_stack_contract_records_constraint_decision_policy() -> None:
     assert payload["constraint_decision_policy"] == retrieval_constraint_decision_policy_payload()
 
 
-def test_validate_required_rust_capabilities_rejects_missing_names() -> None:
-    with pytest.raises(RuntimeError, match="Missing required Rust capabilities"):
-        validate_required_rust_capabilities(
-            ("incremental_linking_pair_plan_v1",),
-            available=(),
-        )
-
-
 @pytest.mark.parametrize("field_name", sorted(_valid_metadata_payload()))
-def test_metadata_v2_rejects_every_deleted_top_level_field(field_name: str) -> None:
+def test_metadata_v3_rejects_every_deleted_top_level_field(field_name: str) -> None:
     payload = _valid_metadata_payload()
     del payload[field_name]
 
-    with pytest.raises(ValueError, match="fields do not match the v2 schema"):
+    with pytest.raises(ValueError, match="fields do not match the v3 schema"):
         IncrementalLinkingArtifactMetadata.from_mapping(payload)
 
 
-def test_metadata_v2_rejects_unknown_top_level_fields() -> None:
+def test_metadata_v3_rejects_unknown_top_level_fields() -> None:
     payload = _valid_metadata_payload()
     payload["future_implicit_default"] = True
 
@@ -288,14 +276,13 @@ def test_metadata_v2_rejects_unknown_top_level_fields() -> None:
         ("booster_sha256", ""),
         ("lightgbm_version", ""),
         ("feature_columns", []),
-        ("required_rust_capabilities", []),
         ("prediction_fixture_matrix", []),
         ("prediction_fixture_expected_probabilities", []),
         ("gate_config", {}),
         ("pairwise_bundle_binding", {}),
     ),
 )
-def test_metadata_v2_rejects_empty_required_values(field_name: str, empty_value: object) -> None:
+def test_metadata_v3_rejects_empty_required_values(field_name: str, empty_value: object) -> None:
     payload = _valid_metadata_payload()
     payload[field_name] = empty_value
 
@@ -315,7 +302,7 @@ def test_metadata_v2_rejects_empty_required_values(field_name: str, empty_value:
         "out_of_range_probability",
     ),
 )
-def test_metadata_v2_rejects_invalid_prediction_fixtures(case: str) -> None:
+def test_metadata_v3_rejects_invalid_prediction_fixtures(case: str) -> None:
     payload = _valid_metadata_payload()
     matrix = payload["prediction_fixture_matrix"]
     probabilities = payload["prediction_fixture_expected_probabilities"]
@@ -358,13 +345,13 @@ def test_load_always_verifies_booster_hash_before_loading_scorer(
         return _ConstantRustBooster()
 
     monkeypatch.setattr(artifact_module, "_load_rust_lightgbm_booster", load_booster)
-    loaded = load_incremental_linking_artifact(artifact_dir, require_rust_capabilities=False)
+    loaded = load_incremental_linking_artifact(artifact_dir)
     assert loaded.artifact_dir == artifact_dir.resolve()
     assert load_count == 1
 
     (artifact_dir / BOOSTER_FILENAME).write_bytes(b"mutated-booster")
     with pytest.raises(ValueError, match="booster_sha256 mismatch"):
-        load_incremental_linking_artifact(artifact_dir, require_rust_capabilities=False)
+        load_incremental_linking_artifact(artifact_dir)
     assert load_count == 1
 
 
@@ -381,7 +368,7 @@ def test_load_rejects_deleted_booster_file(
     )
 
     with pytest.raises(FileNotFoundError):
-        load_incremental_linking_artifact(artifact_dir, require_rust_capabilities=False)
+        load_incremental_linking_artifact(artifact_dir)
 
 
 def test_metadata_and_gate_state_are_transitively_immutable() -> None:
@@ -426,7 +413,7 @@ def test_deepcopy_shares_only_immutable_artifact_state(
         "_load_rust_lightgbm_booster",
         lambda booster_path: _ConstantRustBooster(),
     )
-    artifact = load_incremental_linking_artifact(artifact_dir, require_rust_capabilities=False)
+    artifact = load_incremental_linking_artifact(artifact_dir)
     fixture = np.asarray(artifact.metadata.prediction_fixture_matrix, dtype=np.float32)
     before = artifact.predict_probabilities(fixture)
 
@@ -446,11 +433,6 @@ def test_pickle_reload_is_independent_of_current_working_directory(
         artifact_module,
         "_load_rust_lightgbm_booster",
         lambda booster_path: _ConstantRustBooster(),
-    )
-    monkeypatch.setattr(
-        artifact_module,
-        "validate_required_rust_capabilities",
-        lambda required: tuple(required),
     )
     monkeypatch.chdir(tmp_path)
     artifact = load_incremental_linking_artifact(Path("artifact"))

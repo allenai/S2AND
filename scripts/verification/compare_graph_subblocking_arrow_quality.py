@@ -292,12 +292,18 @@ def _read_arrow_column_values(path: str | Path, column_name: str) -> list[Any]:
     return values
 
 
-def _read_arrow_rows(path: str | Path, required_columns: set[str]) -> list[dict[str, Any]]:
+def _read_arrow_rows(
+    path: str | Path,
+    required_columns: set[str],
+    *,
+    optional_columns: Sequence[str] = (),
+) -> list[dict[str, Any]]:
     pa = __import__("pyarrow")
     with pa.memory_map(str(path), "r") as source:
         reader = pa.ipc.open_file(source)
+        selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
         column_indices = {
-            column_name: reader.schema.get_field_index(column_name) for column_name in sorted(required_columns)
+            column_name: reader.schema.get_field_index(column_name) for column_name in sorted(selected_columns)
         }
         missing_columns = [column_name for column_name, column_index in column_indices.items() if column_index < 0]
         if missing_columns:
@@ -400,11 +406,14 @@ def load_lightweight_dataset_from_arrow(
         "author_first",
         "author_middle",
         "author_affiliations",
-        "author_orcid",
         "author_position",
     }
     if limit is None:
-        signature_rows = _read_arrow_rows(paths["signatures"], signature_columns)
+        signature_rows = _read_arrow_rows(
+            paths["signatures"],
+            signature_columns,
+            optional_columns=("author_orcid",),
+        )
         signature_ids = _select_signature_ids(
             (str(row["signature_id"]) for row in signature_rows if row.get("signature_id") is not None),
             limit=None,
@@ -429,6 +438,7 @@ def load_lightweight_dataset_from_arrow(
             "signature_id",
             signature_ids,
             required_columns=signature_columns,
+            optional_columns=("author_orcid",),
             table_name="signatures",
         )
     signature_rows_by_id = {str(row["signature_id"]): row for row in signature_rows}

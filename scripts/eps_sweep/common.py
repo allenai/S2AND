@@ -15,7 +15,6 @@ DEFAULT_LINKER_BUNDLE_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_bl
 DEFAULT_ARROW_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525"
 DEFAULT_GOLD_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_gold"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "scratch" / "linking_eps_sweeps_arrow"
-DEFAULT_MODEL_PATH = PROJECT_ROOT / "s2and" / "data" / "production_model_v1.21"
 
 
 def read_json(path: Path) -> Any:
@@ -94,7 +93,6 @@ def load_arrow_paths(arrow_root: Path, dataset: str) -> dict[str, str]:
             paths,
             require_specter=True,
             require_name_counts_index=True,
-            require_batch_indexes=True,
             context=f"EPS sweep Arrow dataset {dataset}",
             producer_hint=(
                 "convert the linker replay dataset with scripts/convert_to_arrow.py so the manifest "

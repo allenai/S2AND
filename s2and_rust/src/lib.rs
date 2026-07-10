@@ -38,8 +38,8 @@ use features::*;
 pub(crate) use ingest_dataset::*;
 use language_detection::LanguageDetectorCompat;
 use name_counts::{
-    read_name_counts_index_normalization_version, NameCountsData, NameCountsProvenanceBinding,
-    RawNameCountKind, RawNameCountMaps,
+    read_name_counts_index_normalization_version, NameCountsData, NameCountsIndex,
+    NameCountsProvenanceBinding, RawNameCountKind, RawNameCountMaps,
 };
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
 use pair_indexing::upper_triangle_pairs_for_range;
@@ -302,7 +302,7 @@ mod tests {
         ("signatures", "author_last", "string", true),
         ("signatures", "author_suffix", "string", true),
         ("signatures", "author_affiliations", "list<string>", true),
-        ("signatures", "author_orcid", "string", true),
+        ("signatures", "author_orcid", "string", false),
         ("signatures", "author_position", "int64", true),
         ("signatures", "author_block", "string", false),
         ("signatures", "author_email", "string", false),
@@ -956,6 +956,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_class::<RustFeaturizer>()?;
+    m.add_class::<NameCountsIndex>()?;
     m.add_class::<RustHybridCentroidRetriever>()?;
     m.add_class::<RawBlockQueryCandidatePlanner>()?;
     Ok(())

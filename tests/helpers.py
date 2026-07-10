@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-import importlib.util
+import atexit
 import json
 import math
 import os
-import sys
+import shutil
+import tempfile
+import threading
 from collections import Counter
-from importlib.machinery import PathFinder
 from pathlib import Path
 from typing import Any
 
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
-from s2and.runtime import detect_rust_runtime_capabilities
+from s2and.name_counts_index import NameCountsIndex
+from s2and.runtime import REQUIRED_RUST_EXTENSION_VERSION, load_s2and_rust_extension
 
 
 def write_test_arrow_artifact_manifest(bundle_dir: Any, paths: dict[str, str]) -> Path:
@@ -35,6 +37,45 @@ def write_test_arrow_artifact_manifest(bundle_dir: Any, paths: dict[str, str]) -
         encoding="utf-8",
     )
     return manifest_path
+
+
+def write_minimal_arrow_prediction_bundle(
+    bundle_dir: Any,
+    *,
+    include_specter: bool = False,
+) -> dict[str, str]:
+    """Write tiny valid Arrow tables, batch indexes, and a bound manifest."""
+
+    import pyarrow as pa
+
+    from s2and.arrow_inputs import RAW_PLANNER_ARROW_BATCH_INDEX_KEYS, RAW_PLANNER_ARROW_KEY_COLUMNS
+    from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
+
+    root = Path(bundle_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    signature_ids = [str(index) for index in range(10)] + ["q1", "q2", "seed1"]
+    tables = {
+        "signatures": pa.table({"signature_id": pa.array(signature_ids, type=pa.string())}),
+        "papers": pa.table({"paper_id": pa.array(["p0"], type=pa.string())}),
+        "paper_authors": pa.table({"paper_id": pa.array(["p0"], type=pa.string())}),
+    }
+    if include_specter:
+        tables["specter"] = pa.table({"paper_id": pa.array(["p0"], type=pa.string())})
+
+    paths: dict[str, str] = {}
+    for table_name, table in tables.items():
+        arrow_path = root / f"{table_name}.arrow"
+        paths[table_name] = write_arrow_ipc_table(table, arrow_path)
+        index_key = RAW_PLANNER_ARROW_BATCH_INDEX_KEYS[table_name]
+        index_path = root / f"{table_name}.{index_key}.bin"
+        paths[index_key], _metrics = write_arrow_batch_lookup_index(
+            arrow_path,
+            index_path,
+            key_column=RAW_PLANNER_ARROW_KEY_COLUMNS[table_name],
+            table_name=table_name,
+        )
+    write_test_arrow_artifact_manifest(root, paths)
+    return paths
 
 
 def tiny_name_counts_provenance() -> dict[str, Any]:
@@ -82,7 +123,7 @@ def tiny_name_counts() -> dict[str, Any]:
 
 
 def tiny_name_counts_tuple() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
-    """Return tiny name counts in the tuple shape used by the cached loader."""
+    """Return tiny mappings for offline index-writer tests."""
 
     counts = tiny_name_counts()
     return (
@@ -93,28 +134,41 @@ def tiny_name_counts_tuple() -> tuple[dict[str, int], dict[str, int], dict[str, 
     )
 
 
-def patch_tiny_name_counts_loader(monkeypatch: Any) -> None:
-    """Patch the production name-count loader to avoid huge fixture generation."""
+_TINY_NAME_COUNTS_ROOT = Path(tempfile.mkdtemp(prefix="s2and-test-name-counts-"))
+_TINY_NAME_COUNTS_LOCK = threading.Lock()
+_TINY_NAME_COUNTS_PATH: str | None = None
 
-    patch_name_counts_artifact(monkeypatch, tiny_name_counts_tuple())
+
+def _cleanup_tiny_name_counts() -> None:
+    shutil.rmtree(_TINY_NAME_COUNTS_ROOT, ignore_errors=True)
 
 
-def patch_name_counts_artifact(
-    monkeypatch: Any,
-    counts: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]],
-    *,
-    generation_id: str = "test-tiny-name-counts",
-) -> None:
-    """Patch the verified name-count artifact loader for a test fixture."""
+atexit.register(_cleanup_tiny_name_counts)
 
-    import s2and.data as data_module
 
-    provenance = {**tiny_name_counts_provenance(), "generation_id": generation_id}
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_artifact",
-        lambda: (counts, provenance),
-    )
+def tiny_name_counts_index_path() -> str:
+    """Build and share one manifest-backed tiny index for Python tests."""
+
+    global _TINY_NAME_COUNTS_PATH
+    if _TINY_NAME_COUNTS_PATH is not None:
+        return _TINY_NAME_COUNTS_PATH
+    with _TINY_NAME_COUNTS_LOCK:
+        if _TINY_NAME_COUNTS_PATH is None:
+            from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+
+            _TINY_NAME_COUNTS_PATH, _metrics = write_name_counts_index(
+                _TINY_NAME_COUNTS_ROOT,
+                tiny_name_counts_tuple(),
+                tiny_name_counts_provenance(),
+                overwrite=True,
+            )
+    return _TINY_NAME_COUNTS_PATH
+
+
+def tiny_name_counts_index() -> NameCountsIndex:
+    """Return the shared verified native handle used by Python tests."""
+
+    return NameCountsIndex.open(tiny_name_counts_index_path())
 
 
 def equalish(a: float, b: float, rel_tol: float = 0.0, abs_tol: float = 1e-6) -> bool:
@@ -127,7 +181,6 @@ def import_s2and_rust(
     *,
     required_method: str | None = None,
     required_module_attrs: tuple[str, ...] = (),
-    prefer_site_packages: bool = False,
 ) -> tuple[bool, Any | Exception | None]:
     require_rust = os.environ.get("S2AND_TEST_REQUIRE_RUST", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -141,61 +194,26 @@ def import_s2and_rust(
         method_name = required_method or "from_arrow_paths"
         if not hasattr(rust_featurizer, method_name):
             return False
-        capabilities = detect_rust_runtime_capabilities(extension_module=module)
-        return capabilities.core_runtime_available
+        return getattr(module, "__version__", None) == REQUIRED_RUST_EXTENSION_VERSION
 
     try:
-        import s2and_rust
-
+        s2and_rust = load_s2and_rust_extension()
         if _has_required_api(s2and_rust):
             return True, s2and_rust
         raise AttributeError("s2and_rust imported, but required Rust runtime API is unavailable")
     except Exception as err:
-        if not prefer_site_packages:
-            if require_rust:
-                raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from err
-            return False, err
-
-        module_names = ("s2and_rust", "s2and_rust.s2and_rust", "s2and_rust._s2and_rust")
-        missing = object()
-        original_modules = {name: sys.modules.get(name, missing) for name in module_names}
-        try:
-            for name in module_names:
-                sys.modules.pop(name, None)
-            site_paths = [path for path in sys.path if "site-packages" in path]
-            spec = PathFinder.find_spec("s2and_rust", site_paths)
-            if spec is None or spec.loader is None:
-                raise err
-            module = importlib.util.module_from_spec(spec)
-            sys.modules["s2and_rust"] = module
-            spec.loader.exec_module(module)
-            if not _has_required_api(module):
-                raise AttributeError(
-                    "s2and_rust imported from site-packages, but required Rust runtime API is unavailable"
-                )
-            return True, module
-        except Exception as fallback_err:
-            if require_rust:
-                raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from fallback_err
-            return False, fallback_err
-        finally:
-            # A capability probe may load a different extension build. Keep
-            # the returned module object usable by its caller, but never let
-            # that temporary package replace the process-wide import state.
-            for name in module_names:
-                sys.modules.pop(name, None)
-            for name, original in original_modules.items():
-                if original is not missing:
-                    sys.modules[name] = original
+        if require_rust:
+            raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from err
+        return False, err
 
 
-def attach_arrow_featurizer_bundle(
+def build_arrow_training_dataset(
     dataset: ANDData,
     bundle_dir: Any,
     *,
     name_counts: str = "tiny",
-) -> dict[str, str]:
-    """Write a temporary Arrow bundle from an in-memory ``ANDData`` and attach it.
+) -> ANDData:
+    """Round-trip an ``ANDData`` through the fixed Rust-training constructor.
 
     Rust featurizers are built exclusively through ``from_arrow_paths``, so
     tests that exercise the Rust featurizer on a hand-built ``ANDData`` must
@@ -204,13 +222,10 @@ def attach_arrow_featurizer_bundle(
     production conversion uses, adds the raw-planner batch indexes and a
     ``name_counts_index`` sidecar (``"tiny"`` -> ``tiny_name_counts()``,
     ``"empty"`` -> empty lookups so every name-count query misses), then
-    attaches the validated paths for featurization and prediction.
+    returns a new fully initialized Rust-backed dataset.
     """
 
-    from unittest import mock
-
-    import s2and.data as data_module
-    from s2and.arrow_training import attach_training_arrow_featurizer_paths
+    from s2and.arrow_training import build_training_anddata_from_arrow
     from s2and.incremental_linking.feature_block_arrow import (
         write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
@@ -231,38 +246,73 @@ def attach_arrow_featurizer_bundle(
         include_specter=include_specter,
     )
     arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
-    with mock.patch.object(
-        data_module,
-        "_load_name_counts_artifact",
-        lambda: (loader(), tiny_name_counts_provenance()),
-    ):
-        name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir, overwrite=True)
+    name_counts_index_path, _name_counts_metrics = write_name_counts_index(
+        bundle_dir,
+        loader(),
+        tiny_name_counts_provenance(),
+        overwrite=True,
+    )
     arrow_paths["name_counts_index"] = name_counts_index_path
     write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
     from s2and.consts import NORMALIZATION_VERSION
 
-    return attach_training_arrow_featurizer_paths(
-        dataset,
+    signature_to_cluster_id = getattr(dataset, "signature_to_cluster_id", None) or {}
+    members_by_cluster: dict[str, list[str]] = {}
+    for signature_id in dataset.signatures:
+        cluster_id = str(signature_to_cluster_id.get(signature_id, f"singleton_{signature_id}"))
+        members_by_cluster.setdefault(cluster_id, []).append(str(signature_id))
+    clusters = {
+        cluster_id: {
+            "cluster_id": cluster_id,
+            "signature_ids": signature_ids,
+            "model_version": -1,
+        }
+        for cluster_id, signature_ids in members_by_cluster.items()
+    }
+    name_tuples = getattr(dataset, "name_tuples", "filtered")
+    if isinstance(name_tuples, frozenset):
+        name_tuples = set(name_tuples)
+    arrow_dataset = build_training_anddata_from_arrow(
         arrow_paths,
+        f"{dataset.name}_arrow",
         expected_normalization_version=NORMALIZATION_VERSION,
+        clusters=clusters,
+        block_type=str(getattr(dataset, "block_type", "s2")),
+        train_pairs_size=int(getattr(dataset, "train_pairs_size", 30_000)),
+        val_pairs_size=int(getattr(dataset, "val_pairs_size", 5_000)),
+        test_pairs_size=int(getattr(dataset, "test_pairs_size", 5_000)),
+        random_seed=int(getattr(dataset, "random_seed", 1111)),
+        n_jobs=int(getattr(dataset, "n_jobs", 1)),
+        preprocess=bool(getattr(dataset, "preprocess", True)),
+        name_tuples=name_tuples,
     )
+    # Parity tests intentionally exercise Python reference methods on the same
+    # object. Keep that already-materialized reference view; Rust consumes only
+    # the immutable Arrow generation created above.
+    arrow_dataset.signatures = dict(dataset.signatures)
+    arrow_dataset.papers = dict(dataset.papers)
+    arrow_dataset.specter_embeddings = dict(getattr(dataset, "specter_embeddings", {}) or {})
+    arrow_dataset.signature_to_block = dict(getattr(dataset, "signature_to_block", {}))
+    arrow_dataset.cluster_seeds_require = dict(getattr(dataset, "cluster_seeds_require", {}))
+    arrow_dataset.cluster_seeds_disallow = set(getattr(dataset, "cluster_seeds_disallow", set()))
+    return arrow_dataset
 
 
 def build_dummy_dataset(
     name: str,
     *,
     mode: str = "train",
-    load_name_counts: bool | dict[str, Any] = False,
+    name_counts_index: bool | str | os.PathLike[str] | NameCountsIndex | None = None,
     n_jobs: int = 1,
 ) -> ANDData:
-    resolved_name_counts = tiny_name_counts() if load_name_counts is True else load_name_counts
+    resolved_name_counts_index = tiny_name_counts_index() if name_counts_index is True else name_counts_index
     return ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
         clusters="tests/dummy/clusters.json",
         name=name,
         mode=mode,
-        load_name_counts=resolved_name_counts,
+        name_counts_index=resolved_name_counts_index,
         preprocess=True,
         n_jobs=n_jobs,
     )

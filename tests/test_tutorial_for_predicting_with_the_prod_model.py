@@ -9,7 +9,13 @@ def test_tutorial_desired_memory_requires_batched_json_route(monkeypatch: pytest
     monkeypatch.setattr(
         sys,
         "argv",
-        ["tutorial_for_predicting_with_the_prod_model.py", "--desired-memory-use", "1000"],
+        [
+            "tutorial_for_predicting_with_the_prod_model.py",
+            "--model-path",
+            "unused-complete-bundle",
+            "--desired-memory-use",
+            "1000",
+        ],
     )
 
     with pytest.raises(ValueError, match="--desired-memory-use requires --batching-threshold"):

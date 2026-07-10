@@ -193,7 +193,7 @@ def _numeric_report(left: np.ndarray, right: np.ndarray, *, atol: float, rtol: f
 
 
 def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
-    from s2and.consts import NORMALIZATION_VERSION
+    from s2and.consts import NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import build_rust_featurizer_from_arrow_paths, clear_rust_featurizer_cache
     from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
@@ -231,7 +231,7 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         val_pairs=None,
         test_pairs=None,
         n_jobs=int(args.n_jobs),
-        load_name_counts=True,
+        name_counts_index=NAME_COUNTS_INDEX_PATH,
         preprocess=True,
         random_seed=int(args.seed),
         name_tuples="filtered",
@@ -254,11 +254,8 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         nan_value=np.nan,
         runtime_context=RuntimeContext(
             operation="verification_python_anddata_feature_parity",
-            requested_backend="python",
-            resolved_backend="python",
-            use_rust=False,
+            backend="python",
             run_id="verification-python-anddata",
-            source="argument",
         ),
     )
     python_feature_seconds = time.perf_counter() - started

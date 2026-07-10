@@ -302,16 +302,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
 
-    from s2and.consts import NORMALIZATION_VERSION
+    from s2and.consts import NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import (
         _get_rust_featurizer,
         build_rust_featurizer_from_arrow_paths,
         clear_rust_featurizer_cache,
-    )
-    from s2and.incremental_linking.feature_block import (
-        write_name_counts_arrow,
-        write_name_counts_index,
     )
     from s2and.production_model import load_production_model
     from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
@@ -361,7 +357,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         val_pairs=None,
         test_pairs=None,
         n_jobs=int(args.n_jobs),
-        load_name_counts=True,
+        name_counts_index=NAME_COUNTS_INDEX_PATH,
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
@@ -388,17 +384,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     timings["write_raw_planner_indexes_seconds"] = time.perf_counter() - start
 
-    start = time.perf_counter()
-    name_artifact_dir = args.name_artifact_dir or args.output_dir
-    name_counts_artifact_dir = name_artifact_dir
-    name_counts_arrow_path, name_counts_arrow_metrics = write_name_counts_arrow(name_counts_artifact_dir)
-    arrow_paths["name_counts"] = name_counts_arrow_path
-    timings["write_name_counts_arrow_seconds"] = time.perf_counter() - start
-
-    start = time.perf_counter()
-    name_counts_index_path, name_counts_index_metrics = write_name_counts_index(name_counts_artifact_dir)
-    arrow_paths["name_counts_index"] = name_counts_index_path
-    timings["write_name_counts_index_seconds"] = time.perf_counter() - start
+    arrow_paths["name_counts_index"] = str(NAME_COUNTS_INDEX_PATH)
+    name_counts_arrow_metrics = {"skipped": True}
+    name_counts_index_metrics = {"reused": True}
+    timings["write_name_counts_arrow_seconds"] = 0.0
+    timings["write_name_counts_index_seconds"] = 0.0
 
     start = time.perf_counter()
     clusterer = load_production_model(args.model_path)
@@ -523,7 +513,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--name-artifact-dir", type=Path, default=None)
-    parser.add_argument("--model-path", type=Path, default=Path("s2and/data/production_model_v1.21"))
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--block-size", type=int, required=True)
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=1_000_000_000_000)

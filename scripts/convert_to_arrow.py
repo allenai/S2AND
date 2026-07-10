@@ -972,7 +972,6 @@ def convert_service_json_to_arrow(
         FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
         raw_planner_arrow_physical_layout,
         write_arrow_ipc_table,
-        write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
     )
     from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
@@ -1017,7 +1016,7 @@ def convert_service_json_to_arrow(
         val_pairs_size=1000,
         test_pairs_size=1000,
         n_jobs=n_jobs,
-        load_name_counts=not skip_name_counts_index,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
@@ -1072,10 +1071,12 @@ def convert_service_json_to_arrow(
     if not skip_name_counts_index:
         start = time.perf_counter()
         index_root = output_root if name_counts_index_root is None else name_counts_index_root
-        name_counts_index_path, name_counts_index_metrics = write_name_counts_index(
-            index_root,
-            overwrite=overwrite_name_counts_index,
+        name_counts_index_path = require_name_counts_index_artifact(
+            Path(index_root) / "name_counts_index",
+            context="service JSON conversion",
+            producer_hint="run scripts/production/counts/generate_name_counts.py first",
         )
+        name_counts_index_metrics = {"validated": True}
         write_name_counts_index_seconds = time.perf_counter() - start
         paths["name_counts_index"] = name_counts_index_path
 
@@ -1139,7 +1140,6 @@ def convert_runtime_dataset_to_arrow(
     from s2and.incremental_linking.feature_block import (
         FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
         raw_planner_arrow_physical_layout,
-        write_name_counts_index,
         write_raw_arrow_batch_lookup_indexes,
     )
     from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
@@ -1169,7 +1169,7 @@ def convert_runtime_dataset_to_arrow(
         val_pairs_size=10000,
         test_pairs_size=10000,
         n_jobs=n_jobs,
-        load_name_counts=not skip_name_counts_index,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
@@ -1239,10 +1239,12 @@ def convert_runtime_dataset_to_arrow(
     if not skip_name_counts_index:
         start = time.perf_counter()
         index_root = root_manifest_dir if name_counts_index_root is None else name_counts_index_root
-        name_counts_index_path, name_counts_index_metrics = write_name_counts_index(
-            index_root,
-            overwrite=overwrite_name_counts_index,
+        name_counts_index_path = require_name_counts_index_artifact(
+            Path(index_root) / "name_counts_index",
+            context="runtime dataset conversion",
+            producer_hint="run scripts/production/counts/generate_name_counts.py first",
         )
+        name_counts_index_metrics = {"validated": True}
         write_name_counts_index_seconds = time.perf_counter() - start
         paths["name_counts_index"] = name_counts_index_path
 
@@ -1739,10 +1741,12 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
 
 
 def _run_name_counts_index(args: argparse.Namespace) -> None:
-    from s2and.incremental_linking.feature_block import write_name_counts_index
-
-    index_path, metrics = write_name_counts_index(args.output_root, overwrite=bool(args.overwrite))
-    print(json.dumps({"name_counts_index": index_path, "metrics": metrics}, indent=2, sort_keys=True))
+    index_path = require_name_counts_index_artifact(
+        args.output_root / "name_counts_index",
+        context="name-count index validation",
+        producer_hint="run scripts/production/counts/generate_name_counts.py first",
+    )
+    print(json.dumps({"name_counts_index": index_path, "metrics": {"validated": True}}, indent=2, sort_keys=True))
 
 
 def _run_validate(args: argparse.Namespace) -> None:

@@ -28,7 +28,7 @@ from s2and.consts import (
 )
 from s2and.model import _resolve_clusterer_normalization_version
 from s2and.production_model import _require_bundle_normalization_version
-from tests.helpers import patch_name_counts_artifact
+from tests.helpers import tiny_name_counts_provenance
 
 
 def _write_minimal_name_counts_index(root: Path, *, normalization_version: str | None) -> Path:
@@ -73,7 +73,12 @@ def test_invalid_manifest_token_fails_artifact_validation(tmp_path):
         require_name_counts_index_artifact(index_dir, context="test", producer_hint="test")
 
 
-def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path):
+def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path, monkeypatch):
+    from s2and import arrow_inputs
+
+    monkeypatch.setattr(arrow_inputs, "required_filtered_read_batch_index_keys", lambda _paths: ())
+    monkeypatch.setattr(arrow_inputs, "_validate_arrow_bundle_manifest", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(arrow_inputs, "_validate_batch_indexes_once", lambda _paths: None)
     index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT)
     for key in ("signatures", "papers", "paper_authors"):
         (tmp_path / f"{key}.arrow").write_bytes(b"")
@@ -138,7 +143,8 @@ def test_name_counts_index_writer_stamps_package_version(tmp_path, monkeypatch):
     from s2and.incremental_linking import feature_block_arrow
 
     seeded = ({"anna": 2.0}, {"smith": 3.0}, {"anna smith": 2.0}, {"smith a": 2.0})
-    patch_name_counts_artifact(monkeypatch, seeded)
-    index_dir, _ = feature_block_arrow.write_name_counts_index(tmp_path, overwrite=True)
+    index_dir, _ = feature_block_arrow.write_name_counts_index(
+        tmp_path, seeded, tiny_name_counts_provenance(), overwrite=True
+    )
     manifest = json.loads((Path(index_dir) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["normalization_version"] == NORMALIZATION_VERSION

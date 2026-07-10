@@ -80,7 +80,7 @@ def _constraint_dataset(
         papers,
         name="surname_hyphen_aware",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
         name_tuples=name_tuples or set(),
         n_jobs=1,

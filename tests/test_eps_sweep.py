@@ -181,17 +181,19 @@ def test_model_fingerprint_accepts_directory_model_path(tmp_path) -> None:
 
 
 def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
-    args = sweep_eps_on_linking_gold.parse_args(["--dataset", "dummy", "--compute-missing-dists"])
+    args = sweep_eps_on_linking_gold.parse_args(
+        ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists"]
+    )
 
     with pytest.raises(ValueError, match="--max-subblocks"):
         sweep_eps_on_linking_gold._validate_args(args)  # noqa: SLF001
 
     limited_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--compute-missing-dists", "--max-subblocks", "1"]
+        ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists", "--max-subblocks", "1"]
     )
     sweep_eps_on_linking_gold._validate_args(limited_args)  # noqa: SLF001
 
     full_run_args = sweep_eps_on_linking_gold.parse_args(
-        ["--dataset", "dummy", "--compute-missing-dists", "--allow-full-run"]
+        ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists", "--allow-full-run"]
     )
     sweep_eps_on_linking_gold._validate_args(full_run_args)  # noqa: SLF001

@@ -308,7 +308,6 @@ def test_convert_service_json_to_arrow_emits_empty_specter_for_empty_embeddings(
         resolved_paths,
         require_specter=True,
         require_name_counts_index=False,
-        require_batch_indexes=True,
         context="test",
         producer_hint="test",
     )

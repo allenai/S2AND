@@ -1,54 +1,42 @@
 # Production Inference
 
-This document collects the operational details for released S2AND production
-models and the current canonical-v2 migration boundary.
+S2AND is in the canonical-v2 cutover. This branch deliberately distributes no
+production model and declares no default. `load_production_model()` without a
+path therefore raises; callers must pass an explicit compatible bundle.
 
-> **Migration status (2026-07-09):** no production model is compatible with the
-> current canonical-v2 branch. The checked-in v1.21 bundle and v1.0-v1.2 pickles
-> are legacy artifacts and fail normalization-version validation. Use the
-> previous published package for v1.21 inference until canonical v1.3 is trained,
-> validated, and packaged. The remaining work is tracked in
-> [work_plan.md](work_plan.md).
+The removed `production_model_v1.0.pickle` through
+`production_model_v1.2.pickle` files are not package assets. The checked-in
+`production_model_v1.21/` directory is only an explicit historical source and
+parity artifact. It is not packaged, is rejected by canonical-v2, and must not
+be used for inference with this branch. Use the previous compatible S2AND
+release when reproducing v1.21 behavior.
 
-## Which production model to use
+The remaining release work is tracked in [work_plan.md](work_plan.md).
 
-| Model artifact | Status | Embeddings | Usable with current S2AND? | Format |
-| --- | --- | --- | --- | --- |
-| `production_model_v1.3/` | Pending canonical retrain | Not frozen | No | Future native bundle |
-| `production_model_v1.21/` | Previous release | SPECTER2 PRX | No, legacy normalization | Native LightGBM + JSON bundle |
-| `production_model_v1.2.pickle` | Legacy pairwise pickle | SPECTER2 PRX | No, legacy normalization | Pickle |
-| `production_model_v1.1.pickle` | Legacy | SPECTER1 | No, legacy normalization | Pickle |
-| `production_model_v1.0.pickle` | Deprecated | SPECTER1 | No (required removed reference features) | Pickle |
+## Complete model bundles
 
-Current default status:
+The public loader accepts one format: an explicit, complete, canonical native
+bundle.
 
-- There is no loadable default on the migration branch.
-- Use `production_model_v1.21/` only with the previous compatible S2AND release.
-- The v1.21 bundle contains pairwise artifacts whose source model version is
-  v1.2 and the v1.2 promoted Rust incremental linker. Linker audit metadata may
-  record the enclosing bundle path/version used during finalization.
-- The bundle is checked into `s2and/data/` and included in package data, so prediction does not require a separate model download.
+```python
+from s2and.production_model import load_production_model
 
-Embedding source:
+clusterer = load_production_model("/path/to/production_model_v1.3")
+```
 
-- For `v1.21` and `v1.2`, use `embedding.specter_v2` from the Semantic Scholar API.
-- For `v1.1`, use `embedding.specter_v1`.
-
-## Production model bundle
-
-The previous production model is a single directory retained as a migration
-input:
+A complete bundle contains the pairwise boosters, clusterer configuration,
+promoted incremental linker, reproducibility target, and a manifest that binds
+their schemas, versions, checksums, and normalization provenance. The important
+runtime layout is:
 
 ```text
-s2and/data/production_model_v1.21/
+production_model_vX.Y/
   manifest.json
   clusterer.json
   pairwise/
     main.lgb
     nameless.lgb
     metadata.json
-    main_prediction_fixture.json
-    nameless_prediction_fixture.json
   incremental_linker/
     booster.lgb
     metadata.json
@@ -56,581 +44,211 @@ s2and/data/production_model_v1.21/
     incremental_linker_training_target.json
 ```
 
-With the previous compatible package, load this directory once with
-`load_production_model(...)`. It is intentionally rejected by canonical-v2. In
-the previous release, the returned object
-is still a normal mutable `Clusterer`, so callers can set `clusterer.n_jobs`,
-`clusterer.use_cache`, or `clusterer.cluster_model.eps` just as they did with
-the old pickle-loaded clusterer.
-For v1.2-derived production artifacts, including `production_model_v1.2.pickle`
-and `production_model_v1.21/`, the loader applies the published runtime
-FastCluster threshold `eps=0.65` before returning the clusterer.
-Native bundles resolve that override from manifest/config metadata plus the
-directory name. Legacy pickle artifacts do not carry bundle metadata, so their
-override is path-name scoped; a v1.2-derived pickle saved under a noncanonical
-filename is loaded with its stored `eps`.
+`load_production_model(path)` rejects legacy pickles, incomplete directories,
+and `pairwise_only` manifests. A pairwise-only bundle is an internal training
+stage and has a separate internal loader; it is never a public inference model.
+The loader validates the complete bundle, loads the linker once, and retains
+that immutable native artifact on the clusterer. Deep copies share it; pickle
+round trips revalidate and reload it from the recorded bundle path.
 
-The `pairwise/*.lgb` files are native LightGBM models, so Python can load them
-without pickle and Rust/other runtimes can consume the same format directly.
-The `incremental_linker/` directory contains the promoted linker used by
-Rust-backed
-`Clusterer.predict_incremental(...)`. It is not intended to reproduce the
-legacy incremental output. When Rust mode is selected and the extension plus
-artifact pass validation, the target behavior is to use this promoted
-retrieval/linker/gate path because it has shown better runtime and quality than
-the long-standing legacy implementation.
+`clusterer.json` is the sole authority for the clustering `eps`. There are no
+version- or path-based threshold overrides.
 
-The file under `reproducibility/` is not consumed by prediction logic. It is
-included in manifest checksum validation at bundle load time and records the
-53-feature replay target and LightGBM training params for rebuilding or auditing
-the promoted incremental linker.
+### Atomic publication
 
-The canonical production release will be built as an atomic native bundle.
-`scripts/production/model/train_pairwise.py` and
-`scripts/production/model/train_linker_and_finalize.py` must write into a
-staging generation. Metric and integrity gates run there before the complete
-directory is renamed into a previously nonexistent final target. Production
-release scripts must not mutate a live bundle or write new pickle artifacts.
+Pairwise training writes an immutable pairwise-only source. Finalization does
+not add a linker to that directory and does not transition its manifest in
+place. It assembles a complete sibling staging directory, copies the verified
+pairwise files and newly trained linker into it, validates and fsyncs the whole
+tree, and renames that tree once into a previously nonexistent final path.
 
-The supported in-place transition is narrower: a pairwise-only staging bundle
-may be finalized at the same path. Finalization validates and fsyncs a complete
-sibling staging tree, installs the complete-only linker and replay target while
-the pairwise-only manifest remains authoritative, and atomically replaces
-`manifest.json` last. A normal process crash therefore leaves the directory
-continuously present and either pairwise-only or complete, and rerunning the
-same finalization is safe. On Windows, Python cannot portably fsync directory
-entries; file contents are flushed and the manifest replacement is atomic, but
-durability across sudden power loss still depends on the filesystem and storage
-stack. Always run the post-publication loader/checksum smoke after restart when
-power-loss durability is in doubt.
+A failed finalization therefore leaves the pairwise source unchanged and does
+not expose a partial final bundle. Publishing to an existing final path is an
+error; a changed release gets a new path.
 
-`load_production_model(...)` validates and loads the promoted linker once and
-retains that immutable artifact on the returned clusterer. Repeated incremental
-requests reuse the loaded booster instead of rereading, rehashing, and parsing
-it. A deep-copied clusterer safely shares the immutable artifact; pickling omits
-the native PyO3 object and revalidates/reloads it from the artifact directory on
-unpickle.
-
-New bundles must store their intended runtime `eps` in `clusterer.json` at
-export time. The loader's runtime eps override is scoped to v1.2-derived
-artifacts only (`_RUNTIME_CLUSTER_EPS_OVERRIDE_VERSIONS` in
-`s2and/production_model.py`); do not extend it to new versions.
-
-### Updating the linker after a pairwise model change
-
-Treat the pairwise model and promoted linker as one release unit. If
-the pairwise model changes, export a new native bundle such as
-`production_model_vX.Y/` and rebuild the `incremental_linker/` artifact from
-features recomputed with that exact pairwise model. Do not copy the old
-`booster.lgb`, reuse the old `metadata.json`, or only edit metadata to point at
-the new pairwise file. The promoted linker trains on pairwise-model distances
-plus `pw_*` aggregate features, and the artifact audit metadata records the
-pairwise model path, version, and digest.
-
-Before replay, confirm the new pairwise model is compatible with the replay
-source bundle. The replay script rejects legacy pairwise models whose
-`features_to_use` still names the removed `reference_features` group. If the
-pairwise model changes embedding source or input contract, rebuild the source
-bundle and pass it with `--source-bundle-root`.
-The current train/calibrate/eval source bundle is published as an Arrow-only
-replay bundle with the other Arrow release data:
-
-```powershell
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and\data\s2and_and_big_blocks_linker_dataset_20260525
-```
-
-This bundle intentionally omits legacy `raw/`, `embeddings/`, and
-`features_corrected/` directories. Replay uses Arrow tables under
-`datasets/<dataset>/` plus `components/`, `labels/`, and `splits/`; promoted
-feature rows are materialized into the run output for the selected pairwise
-model.
-
-#### What the replay script does
-
-`scripts/production/model/train_linker_and_finalize.py` is the official release
-entrypoint for the promoted incremental linker. It delegates to
-`scripts/production/model/linker_train_calibrate_eval.py`. It does not
-train the pairwise model. It takes a pairwise production bundle stage as input,
-recomputes or loads the promoted linker feature tables,
-trains/calibrates/evaluates the downstream LightGBM linker, writes the runtime
-linker artifact, and finalizes the complete production bundle.
-
-Its main inputs are:
-
-- `--pairwise-model-path`: the pairwise model whose distances feed the linker.
-- `--source-bundle-root`: the Arrow+labels train/calibrate/eval bundle.
-- `--target-json`: the replay target with feature order, LightGBM params,
-  expected metrics, status, and variant.
-- `--output-dir`: the scratch run directory for materialized features,
-  summaries, and replay outputs.
-- `--save-artifact-to`: optional output directory for `booster.lgb` and
-  `metadata.json`; this is a low-level linker-only output.
-- `--save-production-bundle-to`: preferred release output. It writes the linker
-  under `incremental_linker/`, copies the target JSON into `reproducibility/`,
-  verifies the linker's immutable pairwise-bundle binding, and writes the final
-  bundle manifest without rewriting linker metadata.
-
-In the default `--feature-mode arrow-rust`, the script rebuilds promoted
-features from the Arrow source bundle. For each selected table and dataset, it
-loads the Arrow papers, signatures, SPECTER2 rows, and labels; applies
-structural cleaning; builds block-local query/candidate context; uses the frozen
-Rust retrieval policy to choose candidate seed clusters; builds the
-candidate/member pair plan; computes pairwise model distances and `pw_*`
-aggregate features; adds the non-pairwise row features; then writes
-target-ordered feature tables and bundle metadata under `--output-dir`. These
-feature values are tied to the exact pairwise model passed with
-`--pairwise-model-path`.
-
-The other feature mode is narrower:
-
-- `precomputed-promoted` loads an already materialized portable feature bundle.
-  It validates relative table paths, row counts, required tables, target-spec
-  digest, feature-schema digest, and exact target feature-column order before
-  training.
-
-After features are available, the script runs the classic train/calibrate/eval
-stack. It trains the LightGBM linker with the target params, fits or applies the
-configured NumPy logistic gate, evaluates the configured S2AND/Hwang/extra/manual
-holdout tables, writes `classic/summary.json`, and writes `run_summary.json`
-with observed metrics and deltas from the replay target JSON. Unless
-`--allow-metric-drift` is passed, a full replay fails when observed metrics do
-not match the target metrics. That override is diagnostic-only: it cannot be
-combined with `--save-artifact-to` or `--save-production-bundle-to`, and this
-incompatibility is rejected before inputs are loaded or work directories are
-created.
-
-When `--save-artifact-to` or `--save-production-bundle-to` is set, the script
-also fits the final production linker on train rows plus weighted
-`calibration_fit`/`calibration_check` rows, then fits the final NumPy logistic
-gate on the configured `test` split and writes `booster.lgb` and
-`metadata.json`. The metadata includes the feature schema, gate config, required
-Rust capabilities, prediction fixture, booster digest, pairwise model
-path/version/digest, source bundle, feature mode, observed metrics, and
-production training summary. Keep the replay target under the bundle's
-`reproducibility/` directory. `--save-production-bundle-to` is the
-normal release path because it assembles the complete runtime directory and
-validates it with `load_production_model(...)`.
-
-Both native pairwise export and standalone linker-artifact export publish from
-validated, fsynced sibling staging directories. A pre-existing destination is
-accepted only when every file is byte-identical; a different destination is an
-immutable generation and must be given a new path. This prevents a failed
-writer from partially overwriting an earlier valid pairwise or linker artifact.
-
-Safety behavior is intentional: an unbounded full run requires `--run-full`;
-`--datasets`, `--tables`, and `--limit-rows` are smoke/materialization controls
-and require `--materialize-only`; and precomputed feature reuse is accepted only
-through explicit `--feature-mode precomputed-promoted`.
-
-The required update flow is:
-
-1. Train the pairwise stage. This writes native LightGBM files, `clusterer.json`,
-   pairwise prediction fixtures, pairwise reproducibility files, and a
-   pairwise-only manifest.
+A release flow is:
 
 ```powershell
 uv run python scripts\production\model\train_pairwise.py `
   --production-version X.Y `
-  --output-dir s2and\data\production_model_vX.Y `
+  --output-dir scratch\pairwise_stage\production_model_vX.Y `
   --run-full
-```
 
-2. Create or update
-   `s2and/data/production_model_vX.Y/reproducibility/incremental_linker_training_target.json`.
-   Start from the previous target only when the 53-feature schema and LightGBM
-   params are intentionally unchanged.
-3. Run a bounded materialization smoke test before any full replay:
-
-```powershell
-uv run python scripts\production\model\train_linker_and_finalize.py `
-  --pairwise-model-path s2and\data\production_model_vX.Y `
-  --target-json s2and\data\production_model_vX.Y\reproducibility\incremental_linker_training_target.json `
-  --output-dir scratch\joint_safe_link_promoted_vX.Y_smoke `
-  --datasets qian `
-  --limit-rows 200 `
-  --materialize-only
-```
-
-4. Run the full train/calibrate/eval replay and finalize the full production
-   bundle. This is a large job; report the command, expected runtime, output
-   directory, and monitoring plan before starting it.
-
-```powershell
 uv run python scripts\production\model\train_linker_and_finalize.py `
   --production-bundle-version X.Y `
-  --pairwise-model-path s2and\data\production_model_vX.Y `
-  --target-json s2and\data\production_model_vX.Y\reproducibility\incremental_linker_training_target.json `
+  --pairwise-model-path scratch\pairwise_stage\production_model_vX.Y `
+  --source-bundle-root path\to\canonical_arrow_training_bundle `
+  --target-json scratch\production_linker_vX.Y\incremental_linker_training_target.json `
   --save-production-bundle-to s2and\data\production_model_vX.Y `
   --linker-artifact-version vX.Y `
   --output-dir scratch\joint_safe_link_promoted_vX.Y_full `
   --run-full
 ```
 
-Use `--allow-metric-drift` only for exploratory candidate runs when the target
-metrics are intentionally stale. Do not use it as the final release gate.
+Run the existing small materialization smoke before the full command. The full
+retrain is a large job and requires explicit owner approval, captured logs, and
+quality/runtime/RSS evidence. `--allow-metric-drift` is diagnostic-only and
+cannot publish a linker or production bundle.
 
-5. Review `run_summary.json`, `classic/summary.json`, and
-   `prod_artifact_summary.json`. Report reviewed-label quality,
-   setup-inclusive and hot-path wall time, candidate rows, scored pairs,
-   residual pairs, residual count, exact-tail memory behavior, and observed RSS
-   versus `total_ram_bytes`.
-6. Promote the release as a coordinated update: the finalized
-   `production_model_vX.Y/` directory, default paths in `s2and/model.py` and
-   `scripts/production/model/linker_train_calibrate_eval.py`, and tests/docs
-   that hard-code the release version. `pyproject.toml` uses version-agnostic
-   `production_model_v*/...` package-data patterns, so adding a new release
-   directory should not require package-data edits.
-7. Verify the promoted artifact and release wiring:
+## Explicit execution routes
 
-```powershell
-uv run pytest -q tests/test_promoted_linker_training_cli.py tests/test_linker_feature_assembly.py tests/test_incremental_linking_default_artifact.py tests/test_production_model.py tests/test_production_model_cli_flow.py
-uv run ruff check scripts/production/model/linker_train_calibrate_eval.py tests/test_promoted_linker_training_cli.py tests/test_linker_feature_assembly.py tests/test_incremental_linking_default_artifact.py tests/test_production_model.py tests/test_production_model_cli_flow.py
-```
+The input type determines the backend. There is no automatic backend,
+capability matrix, or Python/Rust fallback:
 
-For repeated replay, `--feature-mode precomputed-promoted` is allowed only when
-the precomputed bundle was materialized for the same target and pairwise model;
-the full default replay recomputes promoted features from the source bundle.
+| API | Input authority | Backend | Result |
+| --- | --- | --- | --- |
+| `Clusterer.predict` | `ANDData` | Python | `(clusters, distance_matrices)` |
+| `Clusterer.predict_incremental` | `ANDData` | Python | structured mapping |
+| `Clusterer.predict_from_arrow_paths` | immutable Arrow paths | Rust | `(clusters, distance_matrices)` |
+| `Clusterer.predict_incremental_from_arrow_paths` | immutable Arrow paths | Rust | structured mapping |
 
-Training/evaluation replay normally recomputes promoted features from the
-Arrow source bundle. For compute-once/reuse workflows, the replay script also
-supports an explicit portable precomputed bundle mode:
+Passing a Rust runtime context to an `ANDData` API, or a Python context to an
+Arrow API, is an error. Rust entry points import exactly
+`s2and-rust==0.60.0` and fail on a missing or different version. That exact
+dependency is part of the normal S2AND install; there is no `s2and[rust]`
+compatibility extra.
 
-```powershell
-uv run python scripts\production\model\linker_train_calibrate_eval.py `
-  --feature-mode precomputed-promoted `
-  --precomputed-feature-bundle-root path\to\minimal_raw_feature_bundle `
-  --run-full
-```
-
-The script validates relative table paths, row counts, target/schema digests,
-required tables, and exact 53-feature column equality before training. There is
-no shipped machine-local default for precomputed feature tables.
-
-## Reference-feature behavior
-
-Reference features have been removed from S2AND entirely. The featurizer no
-longer computes features derived from cited references, `ANDData` ignores
-`papers.references`, and the feature vector no longer reserves columns for
-them. Model `v1.0`, which required reference features, is no longer usable
-with current S2AND.
-
-## Minimal input contract
-
-Historical minimal paper entry for `v1.21`, `v1.2`, and `v1.1`:
-
-```json
-{
-  "paper_id": 12345,
-  "title": "My Paper Title",
-  "abstract": "Optional but recommended for the has_abstract feature.",
-  "year": 2023,
-  "venue": "Conference Name",
-  "journal_name": "Journal Name",
-  "authors": [
-    {"position": 0, "author_name": "Jane Smith"},
-    {"position": 1, "author_name": "John Doe"}
-  ]
-}
-```
-
-Minimal signature entry:
-
-```json
-{
-  "signature_id": "0",
-  "paper_id": 12345,
-  "author_info": {
-    "position": 0,
-    "block": "j smith",
-    "first": "Jane",
-    "middle": null,
-    "last": "Smith",
-    "suffix": null,
-    "email": null,
-    "affiliations": ["University of Example"]
-  }
-}
-```
-
-## Canonical name-count contract
-
-Canonical-v2 has one runtime key contract. `last_first_initial_count_min` uses
-`<canonical last> <canonical first[0]>` when both fields exist and a null key
-otherwise. The model, dataset, count pickle/index, ORCID counts, name tuples,
-and linker must carry and agree on their normalization/generation contract.
-Legacy models and counts are rejected rather than adapted or relabeled.
-
-## Minimal Arrow Prediction Flow
-
-This v1.21 example is historical and requires the previous compatible package.
-Replace the model and artifact paths with the declared canonical default after
-v1.3 is released.
+Classic `ANDData` prediction remains useful for Python training, fixtures, and
+reference checks:
 
 ```python
-from scripts.eval_prod_models import (
-    read_arrow_s2_blocks,
-    resolve_arrow_dataset_paths,
-    split_blocks_like_anddata,
-)
-from s2and.production_model import load_production_model
-
-clusterer = load_production_model("s2and/data/production_model_v1.21")
-
-arrow_paths = resolve_arrow_dataset_paths(
-    "s2and/data",
-    "qian",
-    "_specter2.pkl",
-)
-_, _, test_blocks = split_blocks_like_anddata(read_arrow_s2_blocks(arrow_paths["signatures"]), random_seed=42)
-
-pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
-    test_blocks,
-    {key: value for key, value in arrow_paths.items() if key != "clusters"},
-    total_ram_bytes=32 * 1024**3,
-    load_name_counts=True,
-    name_tuples="filtered",
-)
-```
-
-`pred_distance_matrices` may be `None` when using memory-optimized fused clustering paths.
-Use `scripts/tutorial_for_predicting_with_the_prod_model.py --input-format arrow`
-for a runnable CLI example. JSON/`ANDData` prediction remains a compatibility
-path for fixtures, training references, and parity checks; it is not the
-production Rust inference route.
-
-## Caching
-
-Public cache controls for non-Arrow featurization paths:
-
-- `Clusterer.use_cache`
-- `featurize(..., use_cache=...)`
-- `many_pairs_featurize(..., use_cache=...)`
-
-Semantics:
-
-- `use_cache=True` enables the persistent pair-feature SQLite cache.
-- `use_cache=False` skips those persistent cache reads and writes.
-- Same-process Rust featurizer reuse still stays enabled even when
-  `use_cache=False`.
-- Direct Arrow/Rust production prediction bypasses the pair-feature SQLite
-  cache and reads the request/runtime Arrow artifacts directly.
-- Published artifacts are immutable content-addressed generations. In-process
-  Rust reuse binds exact paths, the full generation inventory, non-seed
-  settings, and seed version; filesystem watches invalidate same-path mutation
-  automatically before reuse.
-
-Recommended defaults:
-
-- Repeated inference on the same dataset or pair set: `use_cache=True`
-- One-shot jobs and experiments: `use_cache=False`
-- Direct Arrow production inference: keep Arrow artifacts local and do not rely
-  on the pair-feature SQLite cache.
-
-Full cache details: [caching.md](caching.md)
-
-## Rust backend
-
-`S2AND_BACKEND` controls runtime backend selection:
-
-- `auto`: use Rust when capable, otherwise Python for stages that still have Python fallbacks
-- `rust`: strict Rust mode
-- `python`: Python fallback mode where available. It does not remove the install-time `s2and-rust` requirement, and native production model scoring still requires Rust.
-
-Python callers can also pass `backend="python"`, `backend="rust"`, or `backend="auto"` to
-`Clusterer.predict(...)` for a single-call override. Subblocking follows the resolved backend:
-direct `make_subblocks(...)` calls remain Python, while indexed Arrow subblocking in
-`Clusterer.predict(...)` can run in Rust when the resolved backend is Rust.
-
-Install contract:
-
-- `uv pip install s2and`: installs S2AND plus required `s2and-rust`
-- `uv pip install "s2and[rust]"`: compatibility alias; equivalent runtime dependency set
-
-Full runtime contract: [rust/runtime.md](rust/runtime.md)
-
-## Large blocks and incremental inference
-
-For standard full-block prediction, subblocking keeps peak memory bounded. For
-the promoted Rust incremental target, query batching should provide the memory
-bound for the promoted retrieval/linker/gate path. The legacy incremental
-implementation remains a fallback or compatibility mode, not the output target.
-
-Promoted query-disallow outcomes are request-global and deterministic across
-input order, query windows, and `batching_threshold`. RAM limits are refreshed
-after planner, featurizer, and scorer allocations; work selected under a stale
-larger limit is discarded and re-planned before scoring. Planning uses the
-loaded model's exact final, pairwise, and aggregate feature widths. Release-scale
-profiling is still required, but these controls no longer change request
-semantics.
-
-Standard large-block prediction:
-
-```python
-pred_clusters, _ = clusterer.predict(
+pred_clusters, pred_distance_matrices = clusterer.predict(
     dataset.get_blocks(),
     dataset,
-    batching_threshold=5000,
-    desired_memory_use=5000 * 5000,
-)
-```
-
-Production Rust inference should call `Clusterer.predict_from_arrow_paths(...)`
-or provide complete Arrow paths to `Clusterer.predict(...)`: at least
-`signatures`, `papers`, `paper_authors`, and their raw-planner batch-index
-sidecars. Models that use SPECTER features also require `specter` plus
-`specter_batch_index`, and models that use name-count features require
-`name_counts_index`. Production routes also require a canonical manifest whose
-content-addressed inventory covers every immutable table/index artifact. The
-direct Arrow route validates required keys and declared files before Rust
-featurizer construction and raises
-`MissingArrowArtifactError` with structured `missing_keys` and `missing_files`
-fields. When the generic `Clusterer.predict(...)` route resolves to Rust,
-including subblocked large-block prediction, it follows the same strict artifact
-rule and raises instead of falling back to `ANDData`; select the Python backend
-explicitly for compatibility/reference execution.
-
-Request-time filtered Arrow reads validate sidecar magic, key column, file
-length, source file size, and whether the source changed during the read. They
-intentionally do not fingerprint the full source file per request. Run strict
-fingerprint validation when publishing or deploying Arrow artifacts, and rebuild
-batch indexes after any source Arrow rewrite, including same-size rewrites.
-
-Incremental prediction with explicit RAM budget:
-
-```python
-result = clusterer.predict_incremental(
-    block_signatures,
-    dataset,
-    batching_threshold=5000,
-    total_ram_bytes=32 * 1024**3,
 )
 
+result = clusterer.predict_incremental(block_signatures, dataset)
 clusters = result["clusters"]
 ```
 
-Incremental prediction directly from Arrow paths, without constructing an
-`ANDData`-shaped dataset object:
+Incremental APIs always return their structured result. There is no
+`return_clusters_only` mode.
+
+## Immutable Arrow contract
+
+Production Arrow input is a manifest-backed immutable generation. Validation
+checks the fixed prediction or training profile, normalization provenance, full
+generation inventory, checksums, table schemas, and batch-index fingerprints
+at the construction/deployment boundary. A successfully validated generation
+is then trusted and reused by exact identity; requests do not install
+filesystem watchers or repeatedly probe for same-path mutation.
+
+Never edit an Arrow generation in place. Publish changed content under a new
+generation/path, validate it once, and construct a new dataset or featurizer.
+Request-local seed sidecars are separate from the immutable base generation.
+
+Prediction requires `signatures`, `papers`, `paper_authors`, and their
+raw-planner batch indexes. A model that uses embeddings also requires `specter`
+and its batch index; a model that uses global name counts requires
+`name_counts_index`. The validator reports missing keys/files explicitly before
+building a Rust featurizer.
+
+`author_orcid` is optional in `signatures.arrow`. When the column is absent,
+every signature simply has no ORCID evidence; all other required signature
+columns retain their normal validation.
+
+### Rust training constructor
+
+Rust training has one constructor:
+`s2and.arrow_training.build_training_anddata_from_arrow`. It validates the
+fixed training profile and returns a fully initialized train-mode `ANDData`.
+The dataset owns one read-only `dataset.arrow_paths` mapping and one verified
+generation identity; there is no second Arrow-path field or caller mutation
+step.
+
+```python
+from s2and.arrow_training import build_training_anddata_from_arrow
+from s2and.consts import NORMALIZATION_VERSION
+
+dataset = build_training_anddata_from_arrow(
+    arrow_paths,
+    "training_dataset",
+    expected_normalization_version=NORMALIZATION_VERSION,
+    clusters="/path/to/clusters.json",
+)
+```
+
+Python SPECTER arrays and name-count mappings are not materialized for this
+route. Rust featurization reads them from `dataset.arrow_paths`.
+
+### Rust inference
+
+Full-block inference accepts blocks plus the validated Arrow-path mapping:
+
+```python
+pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
+    blocks,
+    arrow_paths,
+    total_ram_bytes=32 * 1024**3,
+)
+```
+
+Promoted incremental inference accepts either `cluster_seeds` in the Arrow
+paths or an explicit seed mapping:
 
 ```python
 result = clusterer.predict_incremental_from_arrow_paths(
     block_signatures,
-    {
-        "signatures": ".../signatures.arrow",
-        "papers": ".../papers.arrow",
-        "paper_authors": ".../paper_authors.arrow",
-        "signatures_batch_index": ".../signatures.signatures_batch_index.bin",
-        "papers_batch_index": ".../papers.papers_batch_index.bin",
-        "paper_authors_batch_index": ".../paper_authors.paper_authors_batch_index.bin",
-        "specter": ".../specter2.arrow",
-        "specter_batch_index": ".../specter2.specter_batch_index.bin",
-        "name_counts_index": ".../name_counts_index",
-        "cluster_seeds": ".../cluster_seeds.arrow",
-    },
+    arrow_paths,
+    cluster_seeds_require=signature_to_seed_cluster,
     batching_threshold=5000,
     total_ram_bytes=32 * 1024**3,
-    name_tuples="filtered",
 )
 
 clusters = result["clusters"]
 ```
 
-The direct Arrow incremental API preserves caller-supplied seed component ids
-from `cluster_seeds` or `cluster_seeds_require`. The legacy `ANDData`
-cluster-seed JSON loader may instead densify seed component ids to `0..N-1`.
-Compare partitions rather than exact cluster-id keys when checking parity
-between these entrypoints.
+The optional `cluster_seed_disallows` sidecar means “no seed-disallow evidence”
+when absent. An explicit sidecar path must exist. Arrow seed component IDs are
+preserved, so parity checks should compare partitions when another ingestion
+path assigns different cluster IDs.
 
-### Rust promoted incremental target
+## Incremental decision semantics
 
-The target behavior is that `Clusterer.predict_incremental(...)` uses the
-promoted Rust linker when `S2AND_BACKEND` selects Rust, the extension has the
-required promoted-incremental capabilities, and seed inputs are available from
-the dataset or Arrow artifacts. Without base Arrow artifacts or seed inputs,
-Rust mode raises `MissingArrowArtifactError` before seed sync or helper
-fallback. Legacy output parity is not a release goal; the promoted path
-intentionally uses different retrieval, linker, and logistic-gate decisions.
+Promoted query decisions are request-global and deterministic across input
+order, query windows, and `batching_threshold`. A global conflict is resolved
+by rebuilding and rescoring the lower-priority query from its complete
+single-query candidate plan with the winning component excluded. The runtime
+does not replay a compact retained subset as a substitute for that complete
+plan.
 
-There is no separate public force flag or artifact override: backend selection
-plus seed availability is the routing contract. Promoted query batching is
-available: `batching_threshold` caps the number of unassigned query signatures
-per promoted linker batch, while `total_ram_bytes` derives the default batch
-size when the caller does not pass a cap. The first meaningful promoted batch
-recalibrates rows/pairs per query for remaining batches, and telemetry records
-predicted/observed RSS deltas.
+RAM limits are refreshed after planner, featurizer, and scorer allocations. If
+a changed limit invalidates queued work, that work is discarded and replanned
+before scoring. Planning uses the loaded model’s actual final, pairwise, and
+aggregate feature widths.
 
-The current Rust inference boundary, direct Arrow path, and remaining
-Python-heavy paths are summarized in
-[rust/inference_architecture.md](rust/inference_architecture.md).
+## Name-count and cache boundaries
 
-Promoted Rust `predict_incremental(...)` requires FeatureBlock Arrow artifacts
-and seed inputs, then uses the raw Arrow/Rust retrieval and scoring bridge for
-Phase A before finishing residual abstains through the normal incremental
-completion path. Seeds can come from `cluster_seeds.arrow` or from
-`dataset.cluster_seeds_require`; when the latter is used, the runtime writes a
-request-local temporary seed table for Rust retrieval. A promoted Rust
-incremental request without base Arrow paths or without either seed source fails
-before seed sync or helper fallback. `cluster_seed_disallows.arrow` is optional
-and means "no pairwise seed disallow constraints" when omitted, but an explicit
-path must exist.
+Canonical-v2 uses one binary `NameCountsIndex` in Python and Rust. Classic
+`ANDData` accepts either a verified index path, a shared open index handle, or
+`None` when count features are intentionally absent. Arrow routes carry the
+same index under `arrow_paths["name_counts_index"]`. Runtime code does not open
+the historical source pickle. Python deduplicates each 2,048-signature batch
+before unique keys cross the native boundary, scatters the four result columns
+back onto signatures, and discards all temporary key maps with the batch. The
+v1 `pickle_sha256` field is source-lineage metadata, not a runtime dependency.
 
-### Incremental Seed Telemetry Contract
+`last_first_initial_count_min` uses
+`<canonical last> <canonical first[0]>` when both fields exist and a null key
+otherwise. Models, datasets, count indexes, ORCID counts, name tuples, and the
+linker must agree on their canonical-v2 provenance; legacy artifacts are
+rejected rather than adapted.
 
-Seed setup telemetry is part of the promoted incremental compatibility surface.
-Refactors may move the implementation, but these keys must keep their names and
-meanings until callers have an explicit migration path.
+The persistent pair-feature cache applies only to Python featurization through
+`Clusterer.use_cache` and `featurize(..., use_cache=...)`. Direct Arrow/Rust
+prediction bypasses it and reuses already validated immutable native state.
+See [caching.md](caching.md) for the Python cache details.
 
-| Key | Meaning | Emitter |
-|---|---|---|
-| `seed_setup_seconds` | Wall time spent building request seed state. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_seed_signature_count` | Number of signatures with seed assignments after request seed setup. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_component_count` | Number of unique seed components after request seed setup. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_signature_count` | Count of altered-cluster signatures considered during seed setup. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_presplit_block_count` | Altered-cluster blocks sent through pre-split reclustering. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_presplit_signature_count` | Altered-cluster signatures sent through pre-split reclustering. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_presplit_predict_seconds` | Wall time spent in altered-cluster pre-split prediction. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_presplit_cache_hit_count` | Pre-split reclustering cache hits. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_presplit_cache_miss_count` | Pre-split reclustering cache misses. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_presplit_orcid_skip_count` | Altered-cluster reclustering skips caused by compatible normalized ORCID groups. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_recluster_map_entry_count` | Number of temporary recluster component ids mapped back to source components. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_altered_cluster_count` | Number of source altered clusters involved in seed setup. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_cluster_seeds_source` | Seed assignment authority used for the request, currently `python` or `arrow`. | `Clusterer._build_incremental_seed_setup` |
-| `seed_setup_cluster_seeds_from_arrow` | Integer flag for `seed_setup_cluster_seeds_source == "arrow"`. | `Clusterer._build_incremental_seed_setup` |
+## Verification
 
-The bulk subblocked altered-profile pre-split path emits a second prefix. These
-keys are stored on `_last_subblocked_altered_presplit_telemetry` and may also be
-reported alongside promoted incremental telemetry.
+The focused code gate is:
 
-| Key | Meaning | Emitter |
-|---|---|---|
-| `bulk_altered_presplit_applied` | Integer flag indicating whether the bulk pre-split path ran. | `Clusterer.predict` |
-| `bulk_altered_presplit_seconds` | Wall time spent in the bulk pre-split setup. | `Clusterer.predict` |
-| `bulk_altered_presplit_seed_signature_count` | Number of seed signatures after bulk pre-split seed setup. | `Clusterer.predict` |
-| `bulk_altered_presplit_recluster_map_entry_count` | Number of temporary recluster ids mapped back to source components. | `Clusterer.predict` |
-| `bulk_altered_presplit_block_count` | Altered pre-split block count copied from `seed_setup_altered_presplit_block_count`. | `Clusterer.predict` |
-| `bulk_altered_presplit_signature_count` | Altered pre-split signature count copied from `seed_setup_altered_presplit_signature_count`. | `Clusterer.predict` |
-| `bulk_altered_presplit_cache_hit_count` | Cache-hit count copied from `seed_setup_altered_presplit_cache_hit_count`. | `Clusterer.predict` |
-| `bulk_altered_presplit_cache_miss_count` | Cache-miss count copied from `seed_setup_altered_presplit_cache_miss_count`. | `Clusterer.predict` |
-| `bulk_altered_presplit_orcid_skip_count` | ORCID-skip count copied from `seed_setup_altered_presplit_orcid_skip_count`. | `Clusterer.predict` |
-
-Supporting docs:
-
-- Subblocking behavior and tradeoffs: [subblocking.md](subblocking.md)
-- Threading guidance: [threading.md](threading.md)
-- Environment variables: [environment.md](environment.md)
-
-## Warm-starting compatibility featurizers
-
-`warm_rust_featurizer(dataset)` preloads the same-process Rust featurizer for
-`ANDData`/JSON compatibility paths. It is not the production Arrow inference
-entrypoint. Production services should keep model bundles and Arrow runtime
-artifacts local, then call `Clusterer.predict_from_arrow_paths(...)` or
-Arrow-routed `Clusterer.predict(...)` with complete artifact paths.
-
-For long-lived compatibility services that still own an `ANDData` object, you
-can pre-warm once at startup:
-
-```python
-from s2and.feature_port import warm_rust_featurizer
-
-warm_rust_featurizer(dataset)
+```powershell
+uv run pytest -q tests/test_production_model.py tests/test_production_model_cli_flow.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
+uv run ruff check s2and scripts/production/model tests/test_production_model.py tests/test_production_model_cli_flow.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
+git diff --check
 ```
+
+These tests validate code and synthetic bundles only. A release additionally
+needs a clean wheel/sdist check, exact-version Rust wheel install, a real
+canonical bundle, and the approved quality/runtime/RSS gates.

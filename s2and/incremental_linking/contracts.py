@@ -4,21 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS, promoted_linker_feature_columns
 from s2and.incremental_linking.linker_pairwise import promoted_pairwise_aggregate_columns
-from s2and.runtime import (
-    RUST_CAPABILITY_HYBRID_CENTROID_RETRIEVER_V1,
-    RUST_CAPABILITY_INCREMENTAL_LINKING_CONSTRAINT_ARRAYS_V1,
-    RUST_CAPABILITY_INCREMENTAL_LINKING_PAIR_PLAN_V1,
-    RUST_CAPABILITY_INDEXED_PAIR_ARRAY_FEATURIZATION_V1,
-    detect_rust_runtime_capabilities,
-)
 
-ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v2"
+ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v3"
 CONTRACT_SCHEMA_VERSION = "incremental_linking_contract_v1"
 MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER = "classic_lightgbm_linker"
 GATE_SURFACE_PROMOTED_LOGISTIC = "promoted_numpy_logistic_gate"
@@ -52,13 +45,6 @@ CONSTRAINT_DECISION_POLICY: dict[str, Any] = {
         "batch_and_input_order_invariant": True,
     },
 }
-
-INCREMENTAL_LINKING_RUST_CAPABILITIES: tuple[str, ...] = (
-    RUST_CAPABILITY_HYBRID_CENTROID_RETRIEVER_V1,
-    RUST_CAPABILITY_INDEXED_PAIR_ARRAY_FEATURIZATION_V1,
-    RUST_CAPABILITY_INCREMENTAL_LINKING_PAIR_PLAN_V1,
-    RUST_CAPABILITY_INCREMENTAL_LINKING_CONSTRAINT_ARRAYS_V1,
-)
 
 
 def canonical_json_digest(payload: Any) -> str:
@@ -170,27 +156,6 @@ def validate_promoted_feature_columns(feature_columns: Sequence[str]) -> tuple[s
             f"expected_count={len(expected)} observed_count={len(columns)}"
         )
     return columns
-
-
-def available_incremental_linking_rust_capabilities(extension_module: Any | None = None) -> tuple[str, ...]:
-    """Return named Rust capabilities currently available to incremental linking."""
-
-    return detect_rust_runtime_capabilities(extension_module=extension_module).named_capabilities
-
-
-def validate_required_rust_capabilities(
-    required: Iterable[str],
-    *,
-    available: Iterable[str] | None = None,
-) -> tuple[str, ...]:
-    """Validate that required named Rust capabilities are available."""
-
-    required_tuple = tuple(str(capability) for capability in required)
-    available_set = set(available_incremental_linking_rust_capabilities() if available is None else available)
-    missing = tuple(capability for capability in required_tuple if capability not in available_set)
-    if missing:
-        raise RuntimeError(f"Missing required Rust capabilities for incremental linker artifact: {missing}")
-    return required_tuple
 
 
 def validate_artifact_contract_metadata(metadata: Mapping[str, Any]) -> None:

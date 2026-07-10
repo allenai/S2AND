@@ -184,42 +184,6 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Hydrate production model LFS files
-        run: git lfs pull --include="s2and/data/production_model_v*.pickle,s2and/data/production_model_v*/**"
-
-      - name: Verify hydrated production model files
-        run: |
-          uv run --no-project python - <<'PY'
-          import json
-          from pathlib import Path
-
-          pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
-          declaration = json.loads(Path("s2and/data/default_production_model.json").read_text(encoding="utf-8"))
-          default_dir = Path("s2and/data") / declaration["bundle_dir"]
-          required_paths = [
-              Path("s2and/data/production_model_v1.0.pickle"),
-              Path("s2and/data/production_model_v1.1.pickle"),
-              Path("s2and/data/production_model_v1.2.pickle"),
-              Path("s2and/data/default_production_model.json"),
-          ]
-          required_paths.extend(
-              sorted(path for path in default_dir.rglob("*") if path.is_file())
-          )
-
-          failures = []
-          for path in required_paths:
-              if not path.exists():
-                  failures.append(f"missing: {path}")
-                  continue
-              head = path.read_bytes()[: len(pointer_prefix)]
-              if head == pointer_prefix:
-                  failures.append(f"LFS pointer was not hydrated: {path}")
-
-          if failures:
-              raise SystemExit("\n".join(failures))
-          print(f"Verified {len(required_paths)} hydrated production model files.")
-          PY
-
       - name: Build s2and distributions
         run: |
           rm -rf build
@@ -428,44 +392,6 @@ jobs:
           cd "$RUNNER_TEMP"
           uv run --no-project --python "$SMOKE_VENV/bin/python" python \
             "$GITHUB_WORKSPACE/scripts/verification/smoke_installed_incremental_arrow.py"
-
-      - name: Exercise declared default bundle
-        env:
-          ALLOW_LEGACY_DEFAULT_REJECTION: ${{ github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true' }}
-        run: |
-          SMOKE_VENV="$RUNNER_TEMP/s2and-release-smoke"
-          cd "$RUNNER_TEMP"
-          uv run --no-project --python "$SMOKE_VENV/bin/python" python - <<'PY'
-          import os
-
-          import numpy as np
-
-          from s2and.production_model import DEFAULT_PRODUCTION_MODEL_DIR, load_production_model
-
-          try:
-              clusterer = load_production_model()
-          except ValueError as exc:
-              expected_legacy_rejection = (
-                  f"Production bundle {DEFAULT_PRODUCTION_MODEL_DIR.resolve()} was built with "
-                  "normalization_version 'legacy_compat' but this package implements 'canonical_v2'. "
-                  "Code, model, and artifacts move as one release unit; redeploy the matching package "
-                  "or rebuild the bundle (docs/normalization_migration_blocked.md)."
-              )
-              if (
-                  os.environ["ALLOW_LEGACY_DEFAULT_REJECTION"].lower() == "true"
-                  and str(exc) == expected_legacy_rejection
-              ):
-                  print("Validated installed legacy-default rejection for canonical-v2 PR")
-                  raise SystemExit(0) from None
-              raise
-          width = clusterer.classifier.n_features_in_
-          probabilities = clusterer.classifier.predict_proba(np.zeros((2, width), dtype=np.float64))
-          if probabilities.shape != (2, 2) or not np.isfinite(probabilities).all():
-              raise SystemExit(f"invalid pairwise smoke output: shape={probabilities.shape}")
-          if clusterer.incremental_linker_artifact_dir is None:
-              raise SystemExit("declared default bundle has no incremental linker")
-          print(f"Validated installed default bundle v{clusterer.production_model_bundle_version}")
-          PY
 
   release-tests:
     name: release tests (exact commit)

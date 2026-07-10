@@ -37,14 +37,14 @@ def test_select_workload_uses_largest_block_and_stable_seed_queries() -> None:
 
 
 def test_run_refuses_unbounded_query_batch_without_full_run() -> None:
-    args = cmd.parse_args(["--dataset", "dummy", "--query-limit", "0"])
+    args = cmd.parse_args(["--dataset", "dummy", "--model-path", "model", "--query-limit", "0"])
 
     with pytest.raises(ValueError, match="--full-run"):
         cmd.run(args)
 
 
 def test_run_refuses_negative_query_limit_without_full_run() -> None:
-    args = cmd.parse_args(["--dataset", "dummy", "--query-limit", "-1"])
+    args = cmd.parse_args(["--dataset", "dummy", "--model-path", "model", "--query-limit", "-1"])
 
     with pytest.raises(ValueError, match="--query-limit must be >= 0"):
         cmd.run(args)

@@ -2,8 +2,8 @@
 
 This replaces the historical pickle dump flow. The output directory is a
 pairwise-only ``production_model_vX.Y`` bundle stage. Run
-``train_linker_and_finalize.py`` next to add the promoted incremental linker and
-write the final loadable production manifest.
+``train_linker_and_finalize.py`` next with this stage as input to publish the
+complete model into a separate, previously nonexistent directory.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ DEFAULT_FEATURE_CACHE_ROOT = REPO_ROOT / "data" / ".feature_cache"
 os.environ.setdefault("S2AND_CACHE", str(DEFAULT_FEATURE_CACHE_ROOT))
 os.environ.setdefault("S2AND_BACKEND", "rust")
 
-from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH  # noqa: E402
+from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.featurizer import FeaturizationInfo, featurize  # noqa: E402
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
@@ -219,6 +219,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             train_pairs_size=int(args.train_pairs_size),
             val_pairs_size=int(args.val_test_size),
             test_pairs_size=int(args.val_test_size),
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
         )
 

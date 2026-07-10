@@ -25,13 +25,8 @@ def _write_complete_stage(path: Path, writer: str) -> None:
     )
 
 
-def test_same_path_finalizers_publish_one_coherent_bundle(tmp_path: Path) -> None:
+def test_concurrent_publishers_create_one_coherent_new_bundle(tmp_path: Path) -> None:
     output = tmp_path / "production_model_v9.9"
-    output.mkdir()
-    (output / "manifest.json").write_text(
-        json.dumps({"bundle_status": "pairwise_only"}),
-        encoding="utf-8",
-    )
     stages = [tmp_path / "stage-a", tmp_path / "stage-b"]
     _write_complete_stage(stages[0], "a")
     _write_complete_stage(stages[1], "b")
@@ -39,11 +34,7 @@ def test_same_path_finalizers_publish_one_coherent_bundle(tmp_path: Path) -> Non
 
     def publish(stage: Path) -> None:
         barrier.wait(timeout=5)
-        production_bundle._publish_staged_bundle(  # noqa: SLF001
-            stage,
-            output,
-            allow_pairwise_replacement=True,
-        )
+        production_bundle._publish_staged_bundle(stage, output)  # noqa: SLF001
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(publish, stage) for stage in stages]

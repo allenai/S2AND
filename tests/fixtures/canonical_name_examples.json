@@ -1,5 +1,5 @@
 {
-  "description": "Frozen canonical name-normalization example table (migration step 1 of docs/normalization_migration_blocked.md). 'canonical' values are the ruled canonical_v2 policy; 'legacy' values are computed from the current code and pinned by tests/test_canonical_name_examples.py. 'family' is a reviewer-facing category label. 'equivalence_group' means the cases must share identical canonical first/middle/last fields. Case-level 'decisions' are primary review highlights, not exhaustive dependency labels. Count keys use initial_char semantics; null count keys mean no lookup (missing), never sentinel counts. compare_compatibility encodes the compare-time equivalence contract (same_prefix_tokens) across variant groups that are deliberately not canonicalization-identical. compatible_groups are case ids; incompatible_pairs/truth_table rows are raw first-name strings because they are predicate examples and need not correspond to fixture rows.",
+  "description": "Canonical-v2 name-normalization examples. canonical values are the reviewed policy; equivalence_group identifies cases that must share canonical fields, and decisions reference the migration decision registry.",
   "normalization_version": "canonical_v2",
   "decisions": {
     "D1": {
@@ -186,18 +186,6 @@
           "last_first_initial": "smith j"
         }
       },
-      "legacy": {
-        "first_normalized": "jo",
-        "first_normalized_without_apostrophe": "jo",
-        "middle_normalized_without_apostrophe": "ann",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": "jo",
-          "last": "smith",
-          "first_last": "jo smith",
-          "last_first_initial": "smith j"
-        }
-      },
       "decisions": [
         "D1"
       ],
@@ -220,18 +208,6 @@
           "first": "jo ann",
           "last": "smith",
           "first_last": "jo ann smith",
-          "last_first_initial": "smith j"
-        }
-      },
-      "legacy": {
-        "first_normalized": "jo",
-        "first_normalized_without_apostrophe": "jo ann",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": "joann",
-          "last": "smith",
-          "first_last": "joann smith",
           "last_first_initial": "smith j"
         }
       },
@@ -261,18 +237,6 @@
           "last_first_initial": "smith j"
         }
       },
-      "legacy": {
-        "first_normalized": "joann",
-        "first_normalized_without_apostrophe": "joann",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": "joann",
-          "last": "smith",
-          "first_last": "joann smith",
-          "last_first_initial": "smith j"
-        }
-      },
       "decisions": [],
       "notes": "Joined form is a distinct canonical string; equivalence to 'jo'/'jo ann' is a compare-time concern."
     },
@@ -289,18 +253,6 @@
         "first": "yu",
         "middle": "zhong",
         "last": "wang",
-        "count_keys": {
-          "first": "yu",
-          "last": "wang",
-          "first_last": "yu wang",
-          "last_first_initial": "wang y"
-        }
-      },
-      "legacy": {
-        "first_normalized": "yu",
-        "first_normalized_without_apostrophe": "yu",
-        "middle_normalized_without_apostrophe": "zhong",
-        "last_normalized": "wang",
         "count_keys": {
           "first": "yu",
           "last": "wang",
@@ -333,18 +285,6 @@
           "last_first_initial": "wang y"
         }
       },
-      "legacy": {
-        "first_normalized": "yu",
-        "first_normalized_without_apostrophe": "yu zhong",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "wang",
-        "count_keys": {
-          "first": "yuzhong",
-          "last": "wang",
-          "first_last": "yuzhong wang",
-          "last_first_initial": "wang y"
-        }
-      },
       "decisions": [
         "D1",
         "D4"
@@ -371,18 +311,6 @@
           "last_first_initial": "wang y"
         }
       },
-      "legacy": {
-        "first_normalized": "yuzhong",
-        "first_normalized_without_apostrophe": "yuzhong",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "wang",
-        "count_keys": {
-          "first": "yuzhong",
-          "last": "wang",
-          "first_last": "yuzhong wang",
-          "last_first_initial": "wang y"
-        }
-      },
       "decisions": [],
       "notes": ""
     },
@@ -399,18 +327,6 @@
         "first": "y",
         "middle": "z",
         "last": "wang",
-        "count_keys": {
-          "first": null,
-          "last": "wang",
-          "first_last": null,
-          "last_first_initial": "wang y"
-        }
-      },
-      "legacy": {
-        "first_normalized": "y",
-        "first_normalized_without_apostrophe": "y",
-        "middle_normalized_without_apostrophe": "z",
-        "last_normalized": "wang",
         "count_keys": {
           "first": null,
           "last": "wang",
@@ -444,18 +360,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -478,18 +382,6 @@
           "first": "sang min",
           "last": "lee",
           "first_last": "sang min lee",
-          "last_first_initial": "lee s"
-        }
-      },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
           "last_first_initial": "lee s"
         }
       },
@@ -518,18 +410,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -552,18 +432,6 @@
           "first": "sang min",
           "last": "lee",
           "first_last": "sang min lee",
-          "last_first_initial": "lee s"
-        }
-      },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
           "last_first_initial": "lee s"
         }
       },
@@ -592,18 +460,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -626,18 +482,6 @@
           "first": "sang min",
           "last": "lee",
           "first_last": "sang min lee",
-          "last_first_initial": "lee s"
-        }
-      },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
           "last_first_initial": "lee s"
         }
       },
@@ -666,18 +510,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -700,18 +532,6 @@
           "first": "sang min",
           "last": "lee",
           "first_last": "sang min lee",
-          "last_first_initial": "lee s"
-        }
-      },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
           "last_first_initial": "lee s"
         }
       },
@@ -740,18 +560,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -777,18 +585,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang min",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -807,18 +603,6 @@
         "first": "sang",
         "middle": "min",
         "last": "lee",
-        "count_keys": {
-          "first": "sang",
-          "last": "lee",
-          "first_last": "sang lee",
-          "last_first_initial": "lee s"
-        }
-      },
-      "legacy": {
-        "first_normalized": "sang",
-        "first_normalized_without_apostrophe": "sang",
-        "middle_normalized_without_apostrophe": "min",
-        "last_normalized": "lee",
         "count_keys": {
           "first": "sang",
           "last": "lee",
@@ -851,18 +635,6 @@
           "last_first_initial": "lee s"
         }
       },
-      "legacy": {
-        "first_normalized": "sangmin",
-        "first_normalized_without_apostrophe": "sangmin",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lee",
-        "count_keys": {
-          "first": "sangmin",
-          "last": "lee",
-          "first_last": "sangmin lee",
-          "last_first_initial": "lee s"
-        }
-      },
       "decisions": [],
       "notes": "Joined spelling is compare-compatible with split/dashed forms but is not canonicalization-identical."
     },
@@ -883,18 +655,6 @@
           "first": "qi xin",
           "last": "zhou",
           "first_last": "qi xin zhou",
-          "last_first_initial": "zhou q"
-        }
-      },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi xin",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "zhou",
-        "count_keys": {
-          "first": "qixin",
-          "last": "zhou",
-          "first_last": "qixin zhou",
           "last_first_initial": "zhou q"
         }
       },
@@ -923,18 +683,6 @@
           "last_first_initial": "zhou q"
         }
       },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi xin",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "zhou",
-        "count_keys": {
-          "first": "qixin",
-          "last": "zhou",
-          "first_last": "qixin zhou",
-          "last_first_initial": "zhou q"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -953,18 +701,6 @@
         "first": "qi",
         "middle": "xin",
         "last": "zhou",
-        "count_keys": {
-          "first": "qi",
-          "last": "zhou",
-          "first_last": "qi zhou",
-          "last_first_initial": "zhou q"
-        }
-      },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi",
-        "middle_normalized_without_apostrophe": "xin",
-        "last_normalized": "zhou",
         "count_keys": {
           "first": "qi",
           "last": "zhou",
@@ -997,18 +733,6 @@
           "last_first_initial": "zhou q"
         }
       },
-      "legacy": {
-        "first_normalized": "qixin",
-        "first_normalized_without_apostrophe": "qixin",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "zhou",
-        "count_keys": {
-          "first": "qixin",
-          "last": "zhou",
-          "first_last": "qixin zhou",
-          "last_first_initial": "zhou q"
-        }
-      },
       "decisions": [],
       "notes": "Joined spelling is compare-compatible with split/dashed forms but is not canonicalization-identical."
     },
@@ -1029,18 +753,6 @@
           "first": "amin ul haq",
           "last": "khan",
           "first_last": "amin ul haq khan",
-          "last_first_initial": "khan a"
-        }
-      },
-      "legacy": {
-        "first_normalized": "amin",
-        "first_normalized_without_apostrophe": "amin ul haq",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "khan",
-        "count_keys": {
-          "first": "aminulhaq",
-          "last": "khan",
-          "first_last": "aminulhaq khan",
           "last_first_initial": "khan a"
         }
       },
@@ -1069,18 +781,6 @@
           "last_first_initial": "khan a"
         }
       },
-      "legacy": {
-        "first_normalized": "arif",
-        "first_normalized_without_apostrophe": "arif ullah",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "khan",
-        "count_keys": {
-          "first": "arifullah",
-          "last": "khan",
-          "first_last": "arifullah khan",
-          "last_first_initial": "khan a"
-        }
-      },
       "decisions": [
         "D4"
       ],
@@ -1099,18 +799,6 @@
         "first": "dangelo",
         "middle": "",
         "last": "russell",
-        "count_keys": {
-          "first": "dangelo",
-          "last": "russell",
-          "first_last": "dangelo russell",
-          "last_first_initial": "russell d"
-        }
-      },
-      "legacy": {
-        "first_normalized": "d",
-        "first_normalized_without_apostrophe": "dangelo",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "russell",
         "count_keys": {
           "first": "dangelo",
           "last": "russell",
@@ -1143,18 +831,6 @@
           "last_first_initial": "russell d"
         }
       },
-      "legacy": {
-        "first_normalized": "d",
-        "first_normalized_without_apostrophe": "d",
-        "middle_normalized_without_apostrophe": "angelo",
-        "last_normalized": "russell",
-        "count_keys": {
-          "first": null,
-          "last": "russell",
-          "first_last": null,
-          "last_first_initial": "russell d"
-        }
-      },
       "decisions": [
         "D2",
         "D3"
@@ -1181,18 +857,6 @@
           "last_first_initial": "russell d"
         }
       },
-      "legacy": {
-        "first_normalized": "dangelo",
-        "first_normalized_without_apostrophe": "dangelo",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "russell",
-        "count_keys": {
-          "first": "dangelo",
-          "last": "russell",
-          "first_last": "dangelo russell",
-          "last_first_initial": "russell d"
-        }
-      },
       "decisions": [],
       "notes": "Joined spelling canonicalizes identically to apostrophe deletion."
     },
@@ -1209,18 +873,6 @@
         "first": "d",
         "middle": "angelo",
         "last": "russell",
-        "count_keys": {
-          "first": null,
-          "last": "russell",
-          "first_last": null,
-          "last_first_initial": "russell d"
-        }
-      },
-      "legacy": {
-        "first_normalized": "d",
-        "first_normalized_without_apostrophe": "d",
-        "middle_normalized_without_apostrophe": "angelo",
-        "last_normalized": "russell",
         "count_keys": {
           "first": null,
           "last": "russell",
@@ -1254,18 +906,6 @@
           "last_first_initial": "obrien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D2"
       ],
@@ -1284,18 +924,6 @@
         "first": "conor",
         "middle": "",
         "last": "obrien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "obrien",
         "count_keys": {
           "first": "conor",
           "last": "obrien",
@@ -1326,18 +954,6 @@
           "last_first_initial": "o brien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -1356,18 +972,6 @@
         "first": "conor",
         "middle": "",
         "last": "obrien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
         "count_keys": {
           "first": "conor",
           "last": "obrien",
@@ -1401,18 +1005,6 @@
           "last_first_initial": "obrien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D2",
         "D3"
@@ -1432,18 +1024,6 @@
         "first": "conor",
         "middle": "",
         "last": "obrien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
         "count_keys": {
           "first": "conor",
           "last": "obrien",
@@ -1477,18 +1057,6 @@
           "last_first_initial": "obrien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D2",
         "D3"
@@ -1508,18 +1076,6 @@
         "first": "conor",
         "middle": "",
         "last": "obrien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
         "count_keys": {
           "first": "conor",
           "last": "obrien",
@@ -1553,18 +1109,6 @@
           "last_first_initial": "obrien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D2",
         "D3"
@@ -1584,18 +1128,6 @@
         "first": "conor",
         "middle": "",
         "last": "obrien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
         "count_keys": {
           "first": "conor",
           "last": "obrien",
@@ -1629,18 +1161,6 @@
           "last_first_initial": "obrien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D2",
         "D3"
@@ -1660,18 +1180,6 @@
         "first": "conor",
         "middle": "",
         "last": "obrien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "obrien",
         "count_keys": {
           "first": "conor",
           "last": "obrien",
@@ -1705,18 +1213,6 @@
           "last_first_initial": "obrien c"
         }
       },
-      "legacy": {
-        "first_normalized": "conor",
-        "first_normalized_without_apostrophe": "conor",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "conor",
-          "last": "obrien",
-          "first_last": "conor obrien",
-          "last_first_initial": "obrien c"
-        }
-      },
       "decisions": [
         "D2",
         "D3"
@@ -1743,18 +1239,6 @@
           "last_first_initial": "adams m"
         }
       },
-      "legacy": {
-        "first_normalized": "mary",
-        "first_normalized_without_apostrophe": "mary",
-        "middle_normalized_without_apostrophe": "o neil",
-        "last_normalized": "adams",
-        "count_keys": {
-          "first": "mary",
-          "last": "adams",
-          "first_last": "mary adams",
-          "last_first_initial": "adams m"
-        }
-      },
       "decisions": [
         "D2"
       ],
@@ -1773,18 +1257,6 @@
         "first": "mary",
         "middle": "oneil",
         "last": "adams",
-        "count_keys": {
-          "first": "mary",
-          "last": "adams",
-          "first_last": "mary adams",
-          "last_first_initial": "adams m"
-        }
-      },
-      "legacy": {
-        "first_normalized": "mary",
-        "first_normalized_without_apostrophe": "mary",
-        "middle_normalized_without_apostrophe": "o neil",
-        "last_normalized": "adams",
         "count_keys": {
           "first": "mary",
           "last": "adams",
@@ -1818,18 +1290,6 @@
           "last_first_initial": "obrien j"
         }
       },
-      "legacy": {
-        "first_normalized": "jean",
-        "first_normalized_without_apostrophe": "jean luc",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "o brien",
-        "count_keys": {
-          "first": "jeanluc",
-          "last": "obrien",
-          "first_last": "jeanluc obrien",
-          "last_first_initial": "obrien j"
-        }
-      },
       "decisions": [
         "D2",
         "D4"
@@ -1856,18 +1316,6 @@
           "last_first_initial": "smith a"
         }
       },
-      "legacy": {
-        "first_normalized": "anne",
-        "first_normalized_without_apostrophe": "anne marie claire",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": "annemarieclaire",
-          "last": "smith",
-          "first_last": "annemarieclaire smith",
-          "last_first_initial": "smith a"
-        }
-      },
       "decisions": [
         "D1",
         "D4"
@@ -1887,18 +1335,6 @@
         "first": "h",
         "middle": "g",
         "last": "wells",
-        "count_keys": {
-          "first": null,
-          "last": "wells",
-          "first_last": null,
-          "last_first_initial": "wells h"
-        }
-      },
-      "legacy": {
-        "first_normalized": "h",
-        "first_normalized_without_apostrophe": "h",
-        "middle_normalized_without_apostrophe": "g",
-        "last_normalized": "wells",
         "count_keys": {
           "first": null,
           "last": "wells",
@@ -1932,18 +1368,6 @@
           "last_first_initial": "wells h"
         }
       },
-      "legacy": {
-        "first_normalized": "h",
-        "first_normalized_without_apostrophe": "h g",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "wells",
-        "count_keys": {
-          "first": "hg",
-          "last": "wells",
-          "first_last": "hg wells",
-          "last_first_initial": "wells h"
-        }
-      },
       "decisions": [
         "D4",
         "D6"
@@ -1963,18 +1387,6 @@
         "first": "h",
         "middle": "g",
         "last": "wells",
-        "count_keys": {
-          "first": null,
-          "last": "wells",
-          "first_last": null,
-          "last_first_initial": "wells h"
-        }
-      },
-      "legacy": {
-        "first_normalized": "h",
-        "first_normalized_without_apostrophe": "h",
-        "middle_normalized_without_apostrophe": "g",
-        "last_normalized": "wells",
         "count_keys": {
           "first": null,
           "last": "wells",
@@ -2008,18 +1420,6 @@
           "last_first_initial": "wells h"
         }
       },
-      "legacy": {
-        "first_normalized": "h",
-        "first_normalized_without_apostrophe": "h",
-        "middle_normalized_without_apostrophe": "g",
-        "last_normalized": "wells",
-        "count_keys": {
-          "first": null,
-          "last": "wells",
-          "first_last": null,
-          "last_first_initial": "wells h"
-        }
-      },
       "decisions": [
         "D1",
         "D6"
@@ -2046,18 +1446,6 @@
           "last_first_initial": "wells h"
         }
       },
-      "legacy": {
-        "first_normalized": "hg",
-        "first_normalized_without_apostrophe": "hg",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "wells",
-        "count_keys": {
-          "first": "hg",
-          "last": "wells",
-          "first_last": "hg wells",
-          "last_first_initial": "wells h"
-        }
-      },
       "decisions": [
         "D6"
       ],
@@ -2076,18 +1464,6 @@
         "first": "j",
         "middle": "p",
         "last": "sartre",
-        "count_keys": {
-          "first": null,
-          "last": "sartre",
-          "first_last": null,
-          "last_first_initial": "sartre j"
-        }
-      },
-      "legacy": {
-        "first_normalized": "j",
-        "first_normalized_without_apostrophe": "j",
-        "middle_normalized_without_apostrophe": "p",
-        "last_normalized": "sartre",
         "count_keys": {
           "first": null,
           "last": "sartre",
@@ -2121,18 +1497,6 @@
           "last_first_initial": "sartre j"
         }
       },
-      "legacy": {
-        "first_normalized": "j",
-        "first_normalized_without_apostrophe": "j p",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "sartre",
-        "count_keys": {
-          "first": "jp",
-          "last": "sartre",
-          "first_last": "jp sartre",
-          "last_first_initial": "sartre j"
-        }
-      },
       "decisions": [
         "D4",
         "D6"
@@ -2152,18 +1516,6 @@
         "first": "j",
         "middle": "",
         "last": "doe",
-        "count_keys": {
-          "first": null,
-          "last": "doe",
-          "first_last": null,
-          "last_first_initial": "doe j"
-        }
-      },
-      "legacy": {
-        "first_normalized": "j",
-        "first_normalized_without_apostrophe": "j",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "doe",
         "count_keys": {
           "first": null,
           "last": "doe",
@@ -2196,18 +1548,6 @@
           "last_first_initial": "ou yang q"
         }
       },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "ou yang",
-        "count_keys": {
-          "first": "qi",
-          "last": "ouyang",
-          "first_last": "qi ouyang",
-          "last_first_initial": "ouyang q"
-        }
-      },
       "decisions": [
         "D5",
         "D8"
@@ -2232,18 +1572,6 @@
           "last": "ou yang",
           "first_last": "qi ou yang",
           "last_first_initial": "ou yang q"
-        }
-      },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "ou yang",
-        "count_keys": {
-          "first": "qi",
-          "last": "ouyang",
-          "first_last": "qi ouyang",
-          "last_first_initial": "ouyang q"
         }
       },
       "decisions": [
@@ -2273,18 +1601,6 @@
           "last_first_initial": "ou yang q"
         }
       },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "ou yang",
-        "count_keys": {
-          "first": "qi",
-          "last": "ouyang",
-          "first_last": "qi ouyang",
-          "last_first_initial": "ouyang q"
-        }
-      },
       "decisions": [
         "D5",
         "D8"
@@ -2304,18 +1620,6 @@
         "first": "qi",
         "middle": "",
         "last": "ouyang",
-        "count_keys": {
-          "first": "qi",
-          "last": "ouyang",
-          "first_last": "qi ouyang",
-          "last_first_initial": "ouyang q"
-        }
-      },
-      "legacy": {
-        "first_normalized": "qi",
-        "first_normalized_without_apostrophe": "qi",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "ouyang",
         "count_keys": {
           "first": "qi",
           "last": "ouyang",
@@ -2346,18 +1650,6 @@
           "last_first_initial": "van der berg a"
         }
       },
-      "legacy": {
-        "first_normalized": "anna",
-        "first_normalized_without_apostrophe": "anna",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "van der berg",
-        "count_keys": {
-          "first": "anna",
-          "last": "vanderberg",
-          "first_last": "anna vanderberg",
-          "last_first_initial": "vanderberg a"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2383,18 +1675,6 @@
           "last_first_initial": "van der berg a"
         }
       },
-      "legacy": {
-        "first_normalized": "anna",
-        "first_normalized_without_apostrophe": "anna",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "van der berg",
-        "count_keys": {
-          "first": "anna",
-          "last": "vanderberg",
-          "first_last": "anna vanderberg",
-          "last_first_initial": "vanderberg a"
-        }
-      },
       "decisions": [
         "D4",
         "D5"
@@ -2414,18 +1694,6 @@
         "first": "anna",
         "middle": "",
         "last": "vanderberg",
-        "count_keys": {
-          "first": "anna",
-          "last": "vanderberg",
-          "first_last": "anna vanderberg",
-          "last_first_initial": "vanderberg a"
-        }
-      },
-      "legacy": {
-        "first_normalized": "anna",
-        "first_normalized_without_apostrophe": "anna",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "vanderberg",
         "count_keys": {
           "first": "anna",
           "last": "vanderberg",
@@ -2456,18 +1724,6 @@
           "last_first_initial": "de la cruz m"
         }
       },
-      "legacy": {
-        "first_normalized": "maria",
-        "first_normalized_without_apostrophe": "maria",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "de la cruz",
-        "count_keys": {
-          "first": "maria",
-          "last": "delacruz",
-          "first_last": "maria delacruz",
-          "last_first_initial": "delacruz m"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2493,18 +1749,6 @@
           "last_first_initial": "de la cruz m"
         }
       },
-      "legacy": {
-        "first_normalized": "maria",
-        "first_normalized_without_apostrophe": "maria",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "de la cruz",
-        "count_keys": {
-          "first": "maria",
-          "last": "delacruz",
-          "first_last": "maria delacruz",
-          "last_first_initial": "delacruz m"
-        }
-      },
       "decisions": [
         "D4",
         "D5"
@@ -2524,18 +1768,6 @@
         "first": "maria",
         "middle": "",
         "last": "delacruz",
-        "count_keys": {
-          "first": "maria",
-          "last": "delacruz",
-          "first_last": "maria delacruz",
-          "last_first_initial": "delacruz m"
-        }
-      },
-      "legacy": {
-        "first_normalized": "maria",
-        "first_normalized_without_apostrophe": "maria",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "delacruz",
         "count_keys": {
           "first": "maria",
           "last": "delacruz",
@@ -2566,18 +1798,6 @@
           "last_first_initial": "bin salman m"
         }
       },
-      "legacy": {
-        "first_normalized": "mohammed",
-        "first_normalized_without_apostrophe": "mohammed",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "bin salman",
-        "count_keys": {
-          "first": "mohammed",
-          "last": "binsalman",
-          "first_last": "mohammed binsalman",
-          "last_first_initial": "binsalman m"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2601,18 +1821,6 @@
           "last": "al sayed",
           "first_last": "omar al sayed",
           "last_first_initial": "al sayed o"
-        }
-      },
-      "legacy": {
-        "first_normalized": "omar",
-        "first_normalized_without_apostrophe": "omar",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "al sayed",
-        "count_keys": {
-          "first": "omar",
-          "last": "alsayed",
-          "first_last": "omar alsayed",
-          "last_first_initial": "alsayed o"
         }
       },
       "decisions": [
@@ -2640,18 +1848,6 @@
           "last_first_initial": "de souza a"
         }
       },
-      "legacy": {
-        "first_normalized": "ana",
-        "first_normalized_without_apostrophe": "ana",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "de souza",
-        "count_keys": {
-          "first": "ana",
-          "last": "desouza",
-          "first_last": "ana desouza",
-          "last_first_initial": "desouza a"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2670,18 +1866,6 @@
         "first": "ana",
         "middle": "",
         "last": "desouza",
-        "count_keys": {
-          "first": "ana",
-          "last": "desouza",
-          "first_last": "ana desouza",
-          "last_first_initial": "desouza a"
-        }
-      },
-      "legacy": {
-        "first_normalized": "ana",
-        "first_normalized_without_apostrophe": "ana",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "desouza",
         "count_keys": {
           "first": "ana",
           "last": "desouza",
@@ -2712,18 +1896,6 @@
           "last_first_initial": "la salle r"
         }
       },
-      "legacy": {
-        "first_normalized": "robert",
-        "first_normalized_without_apostrophe": "robert",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "la salle",
-        "count_keys": {
-          "first": "robert",
-          "last": "lasalle",
-          "first_last": "robert lasalle",
-          "last_first_initial": "lasalle r"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2742,18 +1914,6 @@
         "first": "robert",
         "middle": "",
         "last": "lasalle",
-        "count_keys": {
-          "first": "robert",
-          "last": "lasalle",
-          "first_last": "robert lasalle",
-          "last_first_initial": "lasalle r"
-        }
-      },
-      "legacy": {
-        "first_normalized": "robert",
-        "first_normalized_without_apostrophe": "robert",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "lasalle",
         "count_keys": {
           "first": "robert",
           "last": "lasalle",
@@ -2784,18 +1944,6 @@
           "last_first_initial": "smith jr j"
         }
       },
-      "legacy": {
-        "first_normalized": "john",
-        "first_normalized_without_apostrophe": "john",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith jr",
-        "count_keys": {
-          "first": "john",
-          "last": "smithjr",
-          "first_last": "john smithjr",
-          "last_first_initial": "smithjr j"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2821,18 +1969,6 @@
           "last_first_initial": "doe phd j"
         }
       },
-      "legacy": {
-        "first_normalized": "jane",
-        "first_normalized_without_apostrophe": "jane",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "doe phd",
-        "count_keys": {
-          "first": "jane",
-          "last": "doephd",
-          "first_last": "jane doephd",
-          "last_first_initial": "doephd j"
-        }
-      },
       "decisions": [
         "D5"
       ],
@@ -2851,18 +1987,6 @@
         "first": "john",
         "middle": "",
         "last": "watson",
-        "count_keys": {
-          "first": "john",
-          "last": "watson",
-          "first_last": "john watson",
-          "last_first_initial": "watson j"
-        }
-      },
-      "legacy": {
-        "first_normalized": "john",
-        "first_normalized_without_apostrophe": "john",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "watson",
         "count_keys": {
           "first": "john",
           "last": "watson",
@@ -2895,18 +2019,6 @@
           "last_first_initial": "ahmed m"
         }
       },
-      "legacy": {
-        "first_normalized": "md",
-        "first_normalized_without_apostrophe": "md",
-        "middle_normalized_without_apostrophe": "karim",
-        "last_normalized": "ahmed",
-        "count_keys": {
-          "first": "md",
-          "last": "ahmed",
-          "first_last": "md ahmed",
-          "last_first_initial": "ahmed m"
-        }
-      },
       "decisions": [
         "D7"
       ],
@@ -2925,18 +2037,6 @@
         "first": "md",
         "middle": "",
         "last": "rahman",
-        "count_keys": {
-          "first": "md",
-          "last": "rahman",
-          "first_last": "md rahman",
-          "last_first_initial": "rahman m"
-        }
-      },
-      "legacy": {
-        "first_normalized": "md",
-        "first_normalized_without_apostrophe": "md",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "rahman",
         "count_keys": {
           "first": "md",
           "last": "rahman",
@@ -2969,18 +2069,6 @@
           "last_first_initial": "ahmed m"
         }
       },
-      "legacy": {
-        "first_normalized": "md",
-        "first_normalized_without_apostrophe": "md",
-        "middle_normalized_without_apostrophe": "karim",
-        "last_normalized": "ahmed",
-        "count_keys": {
-          "first": "md",
-          "last": "ahmed",
-          "first_last": "md ahmed",
-          "last_first_initial": "ahmed m"
-        }
-      },
       "decisions": [
         "D7"
       ],
@@ -3006,18 +2094,6 @@
           "last_first_initial": null
         }
       },
-      "legacy": {
-        "first_normalized": "",
-        "first_normalized_without_apostrophe": "",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "higgins",
-        "count_keys": {
-          "first": null,
-          "last": "higgins",
-          "first_last": null,
-          "last_first_initial": "higgins"
-        }
-      },
       "decisions": [
         "D7"
       ],
@@ -3036,18 +2112,6 @@
         "first": "jose",
         "middle": "",
         "last": "garcia",
-        "count_keys": {
-          "first": "jose",
-          "last": "garcia",
-          "first_last": "jose garcia",
-          "last_first_initial": "garcia j"
-        }
-      },
-      "legacy": {
-        "first_normalized": "jose",
-        "first_normalized_without_apostrophe": "jose",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "garcia",
         "count_keys": {
           "first": "jose",
           "last": "garcia",
@@ -3078,18 +2142,6 @@
           "last_first_initial": "kowalski l"
         }
       },
-      "legacy": {
-        "first_normalized": "lukasz",
-        "first_normalized_without_apostrophe": "lukasz",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "kowalski",
-        "count_keys": {
-          "first": "lukasz",
-          "last": "kowalski",
-          "first_last": "lukasz kowalski",
-          "last_first_initial": "kowalski l"
-        }
-      },
       "decisions": [],
       "notes": ""
     },
@@ -3106,18 +2158,6 @@
         "first": "anne",
         "middle": "marie",
         "last": "smith",
-        "count_keys": {
-          "first": "anne",
-          "last": "smith",
-          "first_last": "anne smith",
-          "last_first_initial": "smith a"
-        }
-      },
-      "legacy": {
-        "first_normalized": "anne",
-        "first_normalized_without_apostrophe": "anne",
-        "middle_normalized_without_apostrophe": "marie",
-        "last_normalized": "smith",
         "count_keys": {
           "first": "anne",
           "last": "smith",
@@ -3150,18 +2190,6 @@
           "last_first_initial": "picard j"
         }
       },
-      "legacy": {
-        "first_normalized": "jeanluc",
-        "first_normalized_without_apostrophe": "jeanluc",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "picard",
-        "count_keys": {
-          "first": "jeanluc",
-          "last": "picard",
-          "first_last": "jeanluc picard",
-          "last_first_initial": "picard j"
-        }
-      },
       "decisions": [],
       "notes": "Soft hyphen is an invisible format control, not a canonical dash; it is deleted before tokenization."
     },
@@ -3185,18 +2213,6 @@
           "last_first_initial": "picard j"
         }
       },
-      "legacy": {
-        "first_normalized": "jeanluc",
-        "first_normalized_without_apostrophe": "jeanluc",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "picard",
-        "count_keys": {
-          "first": "jeanluc",
-          "last": "picard",
-          "first_last": "jeanluc picard",
-          "last_first_initial": "picard j"
-        }
-      },
       "decisions": [],
       "notes": "Zero-width joiner is deleted as invisible formatting before tokenization."
     },
@@ -3213,18 +2229,6 @@
         "first": "thi",
         "middle": "minh",
         "last": "nguyen",
-        "count_keys": {
-          "first": "thi",
-          "last": "nguyen",
-          "first_last": "thi nguyen",
-          "last_first_initial": "nguyen t"
-        }
-      },
-      "legacy": {
-        "first_normalized": "thi",
-        "first_normalized_without_apostrophe": "thi",
-        "middle_normalized_without_apostrophe": "minh",
-        "last_normalized": "nguyen",
         "count_keys": {
           "first": "thi",
           "last": "nguyen",
@@ -3257,18 +2261,6 @@
           "last_first_initial": "muller h"
         }
       },
-      "legacy": {
-        "first_normalized": "hans",
-        "first_normalized_without_apostrophe": "hans",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "muller",
-        "count_keys": {
-          "first": "hans",
-          "last": "muller",
-          "first_last": "hans muller",
-          "last_first_initial": "muller h"
-        }
-      },
       "decisions": [],
       "notes": ""
     },
@@ -3290,18 +2282,6 @@
           "last": "smith",
           "first_last": null,
           "last_first_initial": null
-        }
-      },
-      "legacy": {
-        "first_normalized": "",
-        "first_normalized_without_apostrophe": "",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": null,
-          "last": "smith",
-          "first_last": null,
-          "last_first_initial": "smith"
         }
       },
       "decisions": [
@@ -3329,18 +2309,6 @@
           "last_first_initial": null
         }
       },
-      "legacy": {
-        "first_normalized": "",
-        "first_normalized_without_apostrophe": "",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": null,
-          "last": "smith",
-          "first_last": null,
-          "last_first_initial": "smith"
-        }
-      },
       "decisions": [
         "D6"
       ],
@@ -3359,18 +2327,6 @@
         "first": "john",
         "middle": "",
         "last": "",
-        "count_keys": {
-          "first": "john",
-          "last": null,
-          "first_last": null,
-          "last_first_initial": null
-        }
-      },
-      "legacy": {
-        "first_normalized": "john",
-        "first_normalized_without_apostrophe": "john",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "",
         "count_keys": {
           "first": "john",
           "last": null,
@@ -3403,18 +2359,6 @@
           "last_first_initial": null
         }
       },
-      "legacy": {
-        "first_normalized": "",
-        "first_normalized_without_apostrophe": "",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
-        "count_keys": {
-          "first": null,
-          "last": "smith",
-          "first_last": null,
-          "last_first_initial": "smith"
-        }
-      },
       "decisions": [
         "D6"
       ],
@@ -3433,18 +2377,6 @@
         "first": "john",
         "middle": "",
         "last": "smith",
-        "count_keys": {
-          "first": "john",
-          "last": "smith",
-          "first_last": "john smith",
-          "last_first_initial": "smith j"
-        }
-      },
-      "legacy": {
-        "first_normalized": "john",
-        "first_normalized_without_apostrophe": "john",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "smith",
         "count_keys": {
           "first": "john",
           "last": "smith",
@@ -3477,18 +2409,6 @@
           "last_first_initial": null
         }
       },
-      "legacy": {
-        "first_normalized": "john",
-        "first_normalized_without_apostrophe": "john",
-        "middle_normalized_without_apostrophe": "",
-        "last_normalized": "",
-        "count_keys": {
-          "first": "john",
-          "last": null,
-          "first_last": null,
-          "last_first_initial": null
-        }
-      },
       "decisions": [
         "D6"
       ],
@@ -3514,18 +2434,6 @@
           "last_first_initial": "brown r"
         }
       },
-      "legacy": {
-        "first_normalized": "robert",
-        "first_normalized_without_apostrophe": "robert",
-        "middle_normalized_without_apostrophe": "james lee",
-        "last_normalized": "brown",
-        "count_keys": {
-          "first": "robert",
-          "last": "brown",
-          "first_last": "robert brown",
-          "last_first_initial": "brown r"
-        }
-      },
       "decisions": [],
       "notes": ""
     },
@@ -3542,18 +2450,6 @@
         "first": "robert",
         "middle": "james lee",
         "last": "brown",
-        "count_keys": {
-          "first": "robert",
-          "last": "brown",
-          "first_last": "robert brown",
-          "last_first_initial": "brown r"
-        }
-      },
-      "legacy": {
-        "first_normalized": "robert",
-        "first_normalized_without_apostrophe": "robert",
-        "middle_normalized_without_apostrophe": "james lee",
-        "last_normalized": "brown",
         "count_keys": {
           "first": "robert",
           "last": "brown",

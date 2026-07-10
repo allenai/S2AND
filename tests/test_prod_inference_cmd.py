@@ -46,6 +46,8 @@ def test_main_single_arrow_emits_marked_json(
             "arrow",
             "--dataset-name",
             "qian",
+            "--model-path",
+            str(tmp_path / "model"),
             "--profile-output-path",
             str(tmp_path / "profile.txt"),
             "--single-write-json",

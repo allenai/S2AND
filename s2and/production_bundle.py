@@ -21,18 +21,19 @@ from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, _selected_feature_indices
 from s2and.production_bundle_contract import (
+    CLUSTERER_CONFIG_SCHEMA_VERSION,
+    PAIRWISE_METADATA_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
     production_manifest_files,
 )
 from s2and.production_model import (
+    _load_pairwise_staging_model,
     load_production_model,
     pairwise_bundle_binding,
 )
 
-PAIRWISE_METADATA_SCHEMA_VERSION = "s2and_pairwise_native_lightgbm_v1"
-CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v1"
 PAIRWISE_FIXTURE_SEED = 921
 PAIRWISE_FIXTURE_ROWS = 8
 
@@ -140,11 +141,7 @@ def _cluster_model_payload(clusterer: Clusterer) -> dict[str, Any]:
 def _clusterer_config_payload(
     clusterer: Clusterer,
     *,
-    bundle_version: str,
-    source_model_version: str,
     nameless_featurizer_info: FeaturizationInfo,
-    main_feature_count: int,
-    nameless_feature_count: int,
 ) -> dict[str, Any]:
     raw_feature_contract = getattr(clusterer, "feature_contract", None)
     if not isinstance(raw_feature_contract, Mapping):
@@ -163,17 +160,6 @@ def _clusterer_config_payload(
         )
     return {
         "batch_size": int(getattr(clusterer, "batch_size", 1_000_000)),
-        "best_params": dict(
-            getattr(
-                clusterer,
-                "best_params",
-                {
-                    "eps": float(clusterer.cluster_model.eps),
-                    "linkage": str(clusterer.cluster_model.linkage),
-                },
-            )
-        ),
-        "bundle_version": str(bundle_version),
         "cluster_model": _cluster_model_payload(clusterer),
         "dont_merge_cluster_seeds": bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         "feature_contract": feature_contract,
@@ -186,13 +172,8 @@ def _clusterer_config_payload(
         "n_iter": int(getattr(clusterer, "n_iter", 25)),
         "n_jobs": 1,
         "nameless_featurizer_info": _featurization_info_payload(nameless_featurizer_info),
-        "pairwise": {
-            "main_feature_count": int(main_feature_count),
-            "nameless_feature_count": int(nameless_feature_count),
-        },
         "random_state": int(getattr(clusterer, "random_state", 42)),
         "schema_version": CLUSTERER_CONFIG_SCHEMA_VERSION,
-        "source_model_version": str(source_model_version),
         "suppress_orcid": bool(getattr(clusterer, "suppress_orcid", False)),
         "use_cache": bool(getattr(clusterer, "use_cache", False)),
         "use_default_constraints_as_supervision": bool(
@@ -202,34 +183,13 @@ def _clusterer_config_payload(
     }
 
 
-def _pairwise_metadata_payload(
-    clusterer: Clusterer,
-    *,
-    source_model_version: str,
-    nameless_featurizer_info: FeaturizationInfo,
-    main_feature_count: int,
-    nameless_feature_count: int,
-) -> dict[str, Any]:
+def _pairwise_metadata_payload() -> dict[str, Any]:
     return {
         "class_labels": [0.0, 1.0],
         "distance_probability_column": "class_0",
-        "main": {
-            **_featurization_info_payload(clusterer.featurizer_info),
-            "model_file": "main.lgb",
-            "selected_feature_count": int(main_feature_count),
-            "selected_feature_indices": list(_selected_feature_indices(clusterer.featurizer_info)),
-        },
         "model_family": "binary_lightgbm_pairwise_distance",
-        "normalization_version": str(clusterer.feature_contract["normalization_version"]),
-        "nameless": {
-            **_featurization_info_payload(nameless_featurizer_info),
-            "model_file": "nameless.lgb",
-            "selected_feature_count": int(nameless_feature_count),
-            "selected_feature_indices": list(_selected_feature_indices(nameless_featurizer_info)),
-        },
         "positive_probability_column": "class_1",
         "schema_version": PAIRWISE_METADATA_SCHEMA_VERSION,
-        "source_model_version": str(source_model_version),
     }
 
 
@@ -294,21 +254,7 @@ def write_production_manifest(
     manifest = {
         "bundle_status": status,
         "bundle_version": str(bundle_version),
-        "default_runtime_contract": (
-            "load this directory once; normal prediction and Rust incremental prediction use artifacts from this bundle"
-            if include_incremental_linker
-            else "pairwise bundle stage; run linker training/finalization before using as the production runtime"
-        ),
-        "description": (
-            f"Native production bundle: v{pairwise_model_version} pairwise model"
-            + (
-                f" plus v{incremental_linker_version} promoted incremental linker."
-                if include_incremental_linker
-                else "."
-            )
-        ),
         "files": files,
-        "format": "native_lightgbm_json",
         "incremental_linker_version": incremental_linker_version if include_incremental_linker else None,
         "pairwise_model_version": str(pairwise_model_version),
         "schema_version": PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
@@ -349,19 +295,9 @@ def _write_pairwise_production_bundle_stage(
     nameless_width = len(_selected_feature_indices(nameless_featurizer_info))
     clusterer_payload = _clusterer_config_payload(
         clusterer,
-        bundle_version=str(bundle_version),
-        source_model_version=source_version,
         nameless_featurizer_info=nameless_featurizer_info,
-        main_feature_count=main_width,
-        nameless_feature_count=nameless_width,
     )
-    pairwise_metadata_payload = _pairwise_metadata_payload(
-        clusterer,
-        source_model_version=source_version,
-        nameless_featurizer_info=nameless_featurizer_info,
-        main_feature_count=main_width,
-        nameless_feature_count=nameless_width,
-    )
+    pairwise_metadata_payload = _pairwise_metadata_payload()
 
     _write_pairwise_model(clusterer.classifier, pairwise_dir / "main.lgb")
     _write_pairwise_model(clusterer.nameless_classifier, pairwise_dir / "nameless.lgb")
@@ -410,17 +346,8 @@ def write_pairwise_production_bundle(
 
     bundle_dir = Path(bundle_dir)
     _validate_named_bundle_version(bundle_dir, str(bundle_version))
-    stale_incremental_paths = [
-        bundle_dir / "incremental_linker",
-        bundle_dir / "reproducibility" / "incremental_linker_training_target.json",
-    ]
-    existing_stale_paths = [path for path in stale_incremental_paths if path.exists()]
-    if existing_stale_paths:
-        joined = ", ".join(str(path) for path in existing_stale_paths)
-        raise ValueError(
-            "Refusing to write a pairwise-only production bundle over existing incremental linker artifacts: "
-            f"{joined}"
-        )
+    if bundle_dir.exists():
+        raise FileExistsError(f"Production bundle output already exists; choose a new directory: {bundle_dir}")
 
     bundle_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{bundle_dir.name}.pairwise-staging-", dir=bundle_dir.parent))
@@ -433,9 +360,9 @@ def write_pairwise_production_bundle(
             pairwise_training_config=pairwise_training_config,
             pairwise_training_summary=pairwise_training_summary,
         )
-        load_production_model(staging_dir, require_incremental_linker=False)
+        _load_pairwise_staging_model(staging_dir)
         _fsync_tree(staging_dir)
-        _publish_immutable_staged_directory(staging_dir, bundle_dir)
+        _publish_staged_bundle(staging_dir, bundle_dir)
     finally:
         if staging_dir.exists():
             shutil.rmtree(staging_dir)
@@ -502,81 +429,15 @@ def _fsync_tree(root: Path) -> None:
                 os.close(descriptor)
 
 
-def _tree_file_hashes(root: Path) -> dict[str, str]:
-    return {
-        path.relative_to(root).as_posix(): _sha256_file(path)
-        for path in sorted((path for path in root.rglob("*") if path.is_file()), key=lambda item: item.as_posix())
-    }
+def _publish_staged_bundle(staging_dir: Path, destination: Path) -> None:
+    """Rename one complete staging directory into a new destination."""
 
-
-def _publish_immutable_staged_directory(staging_dir: Path, destination: Path) -> None:
     lock_path = destination.parent / f".{destination.name}.publish.lock"
     with exclusive_file_lock(lock_path):
         if destination.exists():
-            if not destination.is_dir() or _tree_file_hashes(destination) != _tree_file_hashes(staging_dir):
-                raise FileExistsError(
-                    "Production bundles are immutable; the existing target differs from the staged bundle: "
-                    f"{destination}"
-                )
-            return
+            raise FileExistsError(f"Production bundle output already exists; choose a new directory: {destination}")
         os.replace(staging_dir, destination)
         fsync_directory(destination.parent)
-
-
-def _publish_staged_bundle_in_place(staging_dir: Path, output_bundle_dir: Path) -> None:
-    """Commit a locked pairwise-only -> complete transition with the manifest last."""
-
-    current_manifest_path = output_bundle_dir / "manifest.json"
-    staged_manifest_path = staging_dir / "manifest.json"
-    current_manifest = _read_json(current_manifest_path)
-    current_status = current_manifest.get("bundle_status")
-    if current_status == "complete":
-        if current_manifest_path.read_bytes() != staged_manifest_path.read_bytes():
-            raise FileExistsError(
-                "Production bundles are immutable; the existing complete bundle differs from the staged bundle"
-            )
-        return
-    if current_status != "pairwise_only":
-        raise ValueError(f"Cannot finalize production bundle with bundle_status={current_status!r}")
-
-    staged_linker = staging_dir / "incremental_linker"
-    published_linker = output_bundle_dir / "incremental_linker"
-    if published_linker.exists():
-        if not published_linker.is_dir() or _tree_file_hashes(published_linker) != _tree_file_hashes(staged_linker):
-            raise FileExistsError(
-                "Pairwise-only bundle contains a different incremental_linker; refusing a non-atomic replacement"
-            )
-    else:
-        os.replace(staged_linker, published_linker)
-
-    staged_target = staging_dir / "reproducibility" / "incremental_linker_training_target.json"
-    published_target = output_bundle_dir / "reproducibility" / "incremental_linker_training_target.json"
-    published_target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged_target, published_target)
-
-    # The pairwise-only manifest remains authoritative until every complete-only
-    # file is durable. Replacing this one file is the publication commit point.
-    fsync_directory(published_linker)
-    fsync_directory(published_target.parent)
-    fsync_directory(output_bundle_dir)
-    os.replace(staged_manifest_path, current_manifest_path)
-    fsync_directory(output_bundle_dir)
-
-
-def _publish_staged_bundle(staging_dir: Path, output_bundle_dir: Path, *, allow_pairwise_replacement: bool) -> None:
-    parent = output_bundle_dir.parent
-    lock_path = parent / f".{output_bundle_dir.name}.publish.lock"
-    with exclusive_file_lock(lock_path):
-        if output_bundle_dir.exists():
-            if not allow_pairwise_replacement:
-                raise FileExistsError(
-                    "Production bundles are immutable; choose a new output_bundle_dir instead of replacing "
-                    f"{output_bundle_dir}"
-                )
-            _publish_staged_bundle_in_place(staging_dir, output_bundle_dir)
-            return
-        os.replace(staging_dir, output_bundle_dir)
-        fsync_directory(parent)
 
 
 def finalize_production_bundle(
@@ -597,6 +458,10 @@ def finalize_production_bundle(
     target_json = Path(target_json)
     if not pairwise_bundle_dir.is_dir():
         raise FileNotFoundError(f"Pairwise bundle directory does not exist: {pairwise_bundle_dir}")
+    if output_bundle_dir.exists():
+        raise FileExistsError(
+            f"Production bundle output already exists; finalization requires a new directory: {output_bundle_dir}"
+        )
     if not incremental_linker_artifact_dir.is_dir():
         raise FileNotFoundError(
             f"Incremental linker artifact directory does not exist: {incremental_linker_artifact_dir}"
@@ -620,7 +485,6 @@ def finalize_production_bundle(
 
     output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_bundle_dir.name}.staging-", dir=output_bundle_dir.parent))
-    allow_pairwise_replacement = output_bundle_dir.resolve() == pairwise_bundle_dir.resolve()
     try:
         _copy_pairwise_stage(pairwise_bundle_dir, staging_dir)
         _copy_path(incremental_linker_artifact_dir, staging_dir / "incremental_linker")
@@ -639,11 +503,7 @@ def finalize_production_bundle(
         )
         load_production_model(staging_dir)
         _fsync_tree(staging_dir)
-        _publish_staged_bundle(
-            staging_dir,
-            output_bundle_dir,
-            allow_pairwise_replacement=allow_pairwise_replacement,
-        )
+        _publish_staged_bundle(staging_dir, output_bundle_dir)
     finally:
         if staging_dir.exists():
             shutil.rmtree(staging_dir)

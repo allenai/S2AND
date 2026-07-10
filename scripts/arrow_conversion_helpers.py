@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from s2and.data import NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
 from s2and.incremental_linking.feature_block_arrow import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     write_feature_block_arrow_tables,
@@ -65,20 +64,6 @@ def feature_block_from_anddata(
     include_specter: bool = True,
 ) -> FeatureBlock:
     """Build a `FeatureBlock` view from an existing `ANDData`-like object."""
-
-    # Arrow bundles are contractually canonical: the Rust readers pin the
-    # name-count `last_first_initial` key form to `initial_char`
-    # (s2and_rust/src/raw_arrow_features.rs, rust_featurizer.rs). Building a
-    # bundle from an ANDData that used `legacy_full_first_token` semantics would
-    # silently produce keys Rust reads with the wrong form and no downstream
-    # diagnostic, so fail fast at conversion time.
-    dataset_semantics = getattr(dataset, "name_counts_last_first_initial_semantics", None)
-    if dataset_semantics is not None and dataset_semantics != NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
-        raise ValueError(
-            "Arrow bundles require name_counts_last_first_initial_semantics="
-            f"{NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR!r}, but the source ANDData uses "
-            f"{dataset_semantics!r}. Rebuild the dataset with initial_char semantics before Arrow conversion."
-        )
 
     resolved_signature_ids = tuple(
         str(value) for value in (dataset.signatures.keys() if signature_ids is None else signature_ids)

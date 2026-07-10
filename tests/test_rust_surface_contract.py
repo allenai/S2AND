@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import inspect
 import re
-import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from tests import helpers
 from tests.helpers import import_s2and_rust
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,46 +18,6 @@ SCAN_ROOTS = (
 )
 SKIP_DIR_NAMES = {".git", ".venv", "data", "data-backup", "dist", "scratch", "target", "__pycache__"}
 TEXT_SUFFIXES = {".py", ".rs", ".md"}
-
-
-@pytest.mark.parametrize("probe_succeeds", [True, False])
-def test_site_package_probe_restores_existing_rust_modules(monkeypatch, probe_succeeds: bool) -> None:
-    module_names = ("s2and_rust", "s2and_rust.s2and_rust", "s2and_rust._s2and_rust")
-    originals = {name: ModuleType(name) for name in module_names}
-    for name, module in originals.items():
-        monkeypatch.setitem(sys.modules, name, module)
-
-    probe_module = ModuleType("s2and_rust")
-
-    class ProbeLoader:
-        def exec_module(self, module) -> None:
-            sys.modules["s2and_rust.s2and_rust"] = ModuleType("probe.native")
-            sys.modules["s2and_rust._s2and_rust"] = ModuleType("probe.compat")
-            if not probe_succeeds:
-                raise ImportError("injected site-package probe failure")
-
-            class RustFeaturizer:
-                @classmethod
-                def from_arrow_paths(cls):
-                    return cls()
-
-            module.RustFeaturizer = RustFeaturizer
-
-    spec = SimpleNamespace(loader=ProbeLoader())
-    monkeypatch.setattr(helpers.PathFinder, "find_spec", lambda *_args, **_kwargs: spec)
-    monkeypatch.setattr(helpers.importlib.util, "module_from_spec", lambda _spec: probe_module)
-    monkeypatch.setattr(
-        helpers,
-        "detect_rust_runtime_capabilities",
-        lambda **_kwargs: SimpleNamespace(core_runtime_available=True),
-    )
-
-    available, payload = import_s2and_rust(prefer_site_packages=True)
-
-    assert available is probe_succeeds
-    assert payload is probe_module if probe_succeeds else isinstance(payload, ImportError)
-    for name, original in originals.items():
-        assert sys.modules[name] is original
 
 
 def _iter_surface_files() -> list[Path]:
@@ -123,7 +80,6 @@ def test_raw_planner_direct_constructor_has_no_call_sites() -> None:
 def test_raw_planner_has_no_python_direct_constructor() -> None:
     rust_available, rust_payload = import_s2and_rust(
         required_module_attrs=("RawBlockQueryCandidatePlanner",),
-        prefer_site_packages=True,
     )
     if not rust_available:
         raise pytest.skip.Exception(f"RawBlockQueryCandidatePlanner unavailable: {rust_payload!r}")

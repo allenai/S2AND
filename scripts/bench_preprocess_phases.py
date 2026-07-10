@@ -32,8 +32,6 @@ from typing import Any, TypeVar
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-
 T = TypeVar("T")
 PaperStageInputT = TypeVar("PaperStageInputT")
 PaperStageOutputT = TypeVar("PaperStageOutputT")
@@ -56,9 +54,9 @@ def _paper_id_from_raw_signature(sig: dict[str, Any]) -> str:
     return str(paper_id) if paper_id is not None else ""
 
 
-def load_dataset(*, dataset: str, limit_signatures: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    sig_path = os.path.join(DATA_DIR, dataset, f"{dataset}_signatures.json")
-    paper_path = os.path.join(DATA_DIR, dataset, f"{dataset}_papers.json")
+def load_dataset(*, data_dir: str, dataset: str, limit_signatures: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    sig_path = os.path.join(data_dir, dataset, f"{dataset}_signatures.json")
+    paper_path = os.path.join(data_dir, dataset, f"{dataset}_papers.json")
 
     raw_sigs: dict[str, Any] = _load_json(sig_path)
     raw_papers: dict[str, Any] = _load_json(paper_path)
@@ -282,21 +280,27 @@ def _bench_signatures_preprocess(
     n_jobs: int,
     rounds: int,
     ngram_chunk_size: int,
+    name_counts_index: Any = None,
     show_breakdown: bool = False,
+    configs: list[tuple[str, bool | None]] | None = None,
 ) -> None:
     import s2and.data as data_mod
     from s2and.data import ANDData
     from s2and.mp import UniversalPool
     from s2and.runtime import build_runtime_context
     from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
+    from s2and.text import compute_block
 
     def _make_ds(signatures: dict[str, Any]) -> Any:
         ds = ANDData.__new__(ANDData)
-        ds.runtime_context = build_runtime_context("bench_preprocess_signatures", emit_startup_warning=False)
+        ds.runtime_context = build_runtime_context("bench_preprocess_signatures")
         ds.rust_lifecycle_policy = PYTHON_ONLY_POLICY
         ds.preprocess = True
         ds.signatures = signatures
         ds.papers = papers
+        ds.compute_block_fn = compute_block
+        ds.name_counts_index = name_counts_index
+        ds.name_counts_loaded = name_counts_index is not None
         return ds
 
     def _tqdm_wrapper(orig_tqdm):
@@ -326,7 +330,7 @@ def _bench_signatures_preprocess(
         t0 = time.perf_counter()
         with _patch_attr(data_mod, "_python_signature_ngrams_batch", _timed_batch):
             with _patch_attr(data_mod, "tqdm", _tqdm_wrapper(data_mod.tqdm)):
-                ds.preprocess_signatures(load_name_counts=False)
+                ds.preprocess_signatures()
         work = time.perf_counter() - t0
         if show_breakdown:
             frac = (ngram_time / work * 100) if work > 0 else 0.0
@@ -367,7 +371,7 @@ def _bench_signatures_preprocess(
             with _patch_attr(data_mod, "_python_signature_ngrams_batch", _batch_parallel):
                 with _patch_attr(data_mod, "tqdm", _tqdm_wrapper(data_mod.tqdm)):
                     t1 = time.perf_counter()
-                    ds.preprocess_signatures(load_name_counts=False)
+                    ds.preprocess_signatures()
                     work = time.perf_counter() - t1
 
         if show_breakdown:
@@ -388,12 +392,18 @@ def _bench_signatures_preprocess(
         run_once=run_once,
         n_jobs=n_jobs,
         rounds=rounds,
+        configs=configs,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark preprocessing phases across OS / pool modes.")
     parser.add_argument("--dataset", default="kisti", help="Dataset name (default: kisti)")
+    parser.add_argument(
+        "--data-dir",
+        default=os.path.join(PROJECT_ROOT, "data"),
+        help="Directory containing dataset subdirectories",
+    )
     parser.add_argument("--n-jobs", type=int, default=8, help="Number of workers (default: 8)")
     parser.add_argument("--rounds", type=int, default=1, help="Rounds per config (default: 1)")
     parser.add_argument(
@@ -425,6 +435,21 @@ def main() -> None:
         action="store_true",
         help="Skip signatures preprocessing benchmarking",
     )
+    parser.add_argument(
+        "--skip-paper-benchmark",
+        action="store_true",
+        help="Preprocess papers once serially without benchmarking that phase",
+    )
+    parser.add_argument(
+        "--signature-config",
+        choices=["all", "serial", "threads", "processes"],
+        default="all",
+        help="Signature-preprocessing configuration(s) to benchmark",
+    )
+    parser.add_argument(
+        "--name-counts-index",
+        help="Optional canonical name_counts_index path to include in signature preprocessing",
+    )
     args = parser.parse_args()
 
     os.environ["S2AND_BACKEND"] = args.backend
@@ -433,12 +458,24 @@ def main() -> None:
     print(f"Python:   {sys.version}")
     print(f"Backend:  {args.backend}")
     print(f"Dataset:  {args.dataset}")
+    print(f"Data dir: {args.data_dir}")
     print(f"Workers:  {args.n_jobs}    Rounds: {args.rounds}")
     print(f"Limit:    signatures={args.limit_signatures} (0 = full)")
+    print(f"Counts:   {args.name_counts_index or 'disabled'}")
     print(flush=True)
 
+    name_counts_index = None
+    if args.name_counts_index:
+        from s2and.name_counts_index import NameCountsIndex
+
+        name_counts_index = NameCountsIndex.open(args.name_counts_index)
+
     print(f"Loading dataset '{args.dataset}'...")
-    raw_sigs, raw_papers = load_dataset(dataset=args.dataset, limit_signatures=args.limit_signatures)
+    raw_sigs, raw_papers = load_dataset(
+        data_dir=args.data_dir,
+        dataset=args.dataset,
+        limit_signatures=args.limit_signatures,
+    )
     print(f"  raw: {len(raw_papers):,} papers | {len(raw_sigs):,} signatures")
 
     base_signatures, base_papers = build_namedtuples(
@@ -479,30 +516,41 @@ def main() -> None:
             chunk_size=args.chunk_size_paper1,
         )
 
-    _bench_phase(
-        phase_name="Papers: preprocess_paper_1",
-        run_once=run_paper1,
-        n_jobs=args.n_jobs,
-        rounds=args.rounds,
-        configs=[
-            (f"threads x{args.n_jobs}", True),
-            (f"processes x{args.n_jobs}", False),
-            ("serial", None),
-        ],
-    )
+    if args.skip_paper_benchmark:
+        papers_preprocessed = {key: value for key, value in map(paper1_func, paper_items)}
+    else:
+        _bench_phase(
+            phase_name="Papers: preprocess_paper_1",
+            run_once=run_paper1,
+            n_jobs=args.n_jobs,
+            rounds=args.rounds,
+            configs=[
+                (f"threads x{args.n_jobs}", True),
+                (f"processes x{args.n_jobs}", False),
+                ("serial", None),
+            ],
+        )
 
     if need_papers_preprocessed and papers_preprocessed is None:
         raise RuntimeError("Expected papers_preprocessed to be materialized during serial papers run.")
 
     # --- Signatures ---
     if not args.skip_signatures:
+        signature_configs = {
+            "all": None,
+            "serial": [("serial", None)],
+            "threads": [(f"threads x{args.n_jobs}", True)],
+            "processes": [(f"processes x{args.n_jobs}", False)],
+        }[args.signature_config]
         _bench_signatures_preprocess(
             base_signatures=base_signatures,
             papers=papers_preprocessed or {},
             n_jobs=args.n_jobs,
             rounds=args.rounds,
             ngram_chunk_size=args.signature_ngram_chunk_size,
+            name_counts_index=name_counts_index,
             show_breakdown=args.signature_breakdown,
+            configs=signature_configs,
         )
 
 

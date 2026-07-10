@@ -29,7 +29,6 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 from s2and.arrow_inputs import MissingArrowArtifactError, validate_arrow_prediction_artifacts  # noqa: E402
 
 DEFAULT_ARROW_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525"
-DEFAULT_MODEL_PATH = PROJECT_ROOT / "s2and" / "data" / "production_model_v1.21"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "scratch" / "promoted_incremental_arrow_profile"
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
@@ -78,10 +77,6 @@ class ArrowProfileDataset:
         self.altered_cluster_signatures: list[str] = []
         self.name_tuples = "filtered"
         self.max_seed_cluster_id = 0
-        self.name_counts_last_first_initial_semantics: str | None = None
-
-    def set_name_counts_last_first_initial_semantics(self, semantics: str) -> None:
-        self.name_counts_last_first_initial_semantics = str(semantics)
 
 
 def _resolve_arrow_dataset_root(arrow_root: Path, dataset: str) -> Path:
@@ -144,7 +139,6 @@ def _resolve_arrow_dataset_paths(arrow_root: Path, dataset: str) -> dict[str, st
             paths,
             require_specter=True,
             require_name_counts_index=True,
-            require_batch_indexes=True,
             context=f"promoted incremental Arrow profile dataset {dataset}",
             producer_hint=(
                 "use the canonical s2and_and_big_blocks_linker_dataset_20260525 bundle "
@@ -168,10 +162,11 @@ def _read_signature_rows(signatures_path: Path) -> list[ArrowSignatureRow]:
         "author_first",
         "author_middle",
         "author_last",
-        "author_orcid",
     ]
     with pa.memory_map(str(signatures_path), "r") as source:
-        table = pa.ipc.open_file(source).read_all().select(columns)
+        table = pa.ipc.open_file(source).read_all()
+    columns.extend(name for name in ("author_orcid",) if name in table.column_names)
+    table = table.select(columns)
     rows: list[ArrowSignatureRow] = []
     for row in table.to_pylist():
         rows.append(
@@ -182,7 +177,7 @@ def _read_signature_rows(signatures_path: Path) -> list[ArrowSignatureRow]:
                 author_first=str(row["author_first"] or ""),
                 author_middle=str(row["author_middle"] or ""),
                 author_last=str(row["author_last"] or ""),
-                author_orcid=None if row["author_orcid"] is None else str(row["author_orcid"]),
+                author_orcid=None if row.get("author_orcid") is None else str(row["author_orcid"]),
             )
         )
     return rows
@@ -454,7 +449,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--arrow-root", type=Path, default=DEFAULT_ARROW_ROOT)
     parser.add_argument("--dataset", required=True)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--target-block", default="")
     parser.add_argument("--query-limit", type=int, default=25)
     parser.add_argument("--max-seed-clusters", type=int, default=0)

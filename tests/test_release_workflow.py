@@ -10,10 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verification.verify_production_model_distributions import (
-    LEGACY_PRODUCTION_MODEL_PATHS,
-    verify_production_model_distributions,
-)
+from scripts.verification.verify_production_model_distributions import verify_production_model_distributions
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-rust.yml"
@@ -51,7 +48,6 @@ def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> 
     assert "needs: [detect-versions, s2and-dist, release-smoke, release-tests, probe-rust-release]" in workflow
     assert "needs: [detect-versions, publish-rust]" in workflow
     assert "uv run pytest -q" in workflow
-    assert "load_production_model()" in workflow
     assert "scripts/verification/smoke_installed_incremental_arrow.py" in workflow
     assert "github.event_name == 'pull_request'" in workflow
     assert "needs.detect-versions.outputs.force_build == 'true'" in workflow
@@ -67,12 +63,8 @@ def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> 
         assert "pull_request" not in publish_condition
         assert "github.ref == 'refs/heads/main'" in publish_condition
     assert 'get("name", "").lower() == "force-build"' in workflow
-    assert (
-        "ALLOW_LEGACY_DEFAULT_REJECTION: ${{ github.event_name == 'pull_request' "
-        "&& needs.detect-versions.outputs.force_build == 'true' }}"
-    ) in workflow
-    assert "expected_legacy_rejection" in workflow
-    assert "str(exc) == expected_legacy_rejection" in workflow
+    assert "ALLOW_LEGACY_DEFAULT_REJECTION" not in workflow
+    assert "expected_legacy_rejection" not in workflow
     incremental_smoke = (REPO_ROOT / "scripts/verification/smoke_installed_incremental_arrow.py").read_text(
         encoding="utf-8"
     )
@@ -88,34 +80,51 @@ def test_rust_enabled_ci_cannot_convert_import_failures_to_skips() -> None:
     assert "Rust-enabled tests require a working s2and_rust runtime" in helper_source
 
 
-def test_release_workflow_uses_uv_for_python_commands_and_declared_default() -> None:
+def test_release_workflow_uses_uv_and_has_no_false_default_model() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert re.search(r"^\s+python\s", workflow, flags=re.MULTILINE) is None
     assert "production_model_v1.21" not in workflow
     assert "production_model_v1.21" not in main_workflow
-    assert "default_production_model.json" in workflow
-    assert "default_production_model.json" in main_workflow
+    assert "default_production_model.json" not in workflow
+    assert "default_production_model.json" not in main_workflow
+    assert "production_model_v1.0.pickle" not in workflow
+    assert "production_model_v1.1.pickle" not in workflow
+    assert "production_model_v1.2.pickle" not in workflow
+    assert "production_model_v1.0.pickle" not in main_workflow
+    assert "production_model_v1.1.pickle" not in main_workflow
+    assert "production_model_v1.2.pickle" not in main_workflow
     assert "scripts/verification/verify_production_model_distributions.py" in workflow
 
 
-def _write_distribution_fixture(root: Path, *, extra_wheel: bool, extra_sdist: bool) -> tuple[Path, Path]:
-    data_dir = root / "s2and" / "data"
-    bundle_dir = data_dir / "production_model_v9.9"
-    bundle_dir.mkdir(parents=True)
-    declaration = {
-        "bundle_dir": "production_model_v9.9",
-        "bundle_version": "9.9",
-        "schema_version": "s2and_default_production_model_v1",
-    }
-    (data_dir / "default_production_model.json").write_text(json.dumps(declaration), encoding="utf-8")
-    (bundle_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
-    for path in LEGACY_PRODUCTION_MODEL_PATHS:
-        source_path = root / path
-        source_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.write_bytes(b"hydrated legacy model")
+def test_python_package_data_is_explicit() -> None:
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
+    assert config["tool"]["setuptools"]["include-package-data"] is False
+    package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
+    assert all("production_model" not in pattern for pattern in package_data)
+
+
+def _write_distribution_fixture(
+    root: Path,
+    *,
+    extra_wheel: bool,
+    extra_sdist: bool,
+    declare_model: bool = True,
+) -> tuple[Path, Path]:
+    data_dir = root / "s2and" / "data"
+    data_dir.mkdir(parents=True)
+    if declare_model:
+        bundle_dir = data_dir / "production_model_v9.9"
+        bundle_dir.mkdir()
+        declaration = {
+            "bundle_dir": "production_model_v9.9",
+            "bundle_version": "9.9",
+            "schema_version": "s2and_default_production_model_v1",
+        }
+        (data_dir / "default_production_model.json").write_text(json.dumps(declaration), encoding="utf-8")
+        (bundle_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
     files = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
     dist_dir = root / "dist"
     dist_dir.mkdir()
@@ -140,8 +149,19 @@ def _write_distribution_fixture(root: Path, *, extra_wheel: bool, extra_sdist: b
     return dist_dir, root
 
 
-def test_distribution_verifier_accepts_only_declared_and_legacy_models(tmp_path: Path) -> None:
+def test_distribution_verifier_accepts_only_declared_model(tmp_path: Path) -> None:
     dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
+
+    verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+
+
+def test_distribution_verifier_accepts_no_model_during_cutover(tmp_path: Path) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        declare_model=False,
+    )
 
     verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 

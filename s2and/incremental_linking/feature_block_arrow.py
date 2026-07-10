@@ -1013,21 +1013,26 @@ def write_feature_block_arrow_tables(
     return paths
 
 
-def write_name_counts_arrow(output_dir: str | Path, *, overwrite: bool = False) -> tuple[str, dict[str, int | bool]]:
+def write_name_counts_arrow(
+    output_dir: str | Path,
+    mappings: tuple[Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any]],
+    source_provenance: Mapping[str, Any],
+    *,
+    overwrite: bool = False,
+) -> tuple[str, dict[str, int | bool]]:
     """Publish the global name-count Arrow table as an immutable generation."""
 
     import pyarrow as pa
 
-    from s2and.data import _load_name_counts_artifact, _validated_name_counts_provenance
+    from s2and.name_counts_index import validated_name_counts_provenance
 
     output_root = Path(output_dir)
     logical_output_path = output_root / "name_counts.arrow"
-    counts_payload, raw_source_provenance = _load_name_counts_artifact()
-    source_provenance = _validated_name_counts_provenance(
-        raw_source_provenance,
+    source_provenance = validated_name_counts_provenance(
+        source_provenance,
         context="write_name_counts_arrow",
     )
-    first_dict, last_dict, first_last_dict, last_first_initial_dict = counts_payload
+    first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
     fingerprint = _name_counts_arrow_fingerprint(
         {
             "first": first_dict,
@@ -1535,20 +1540,25 @@ def _exclusive_name_counts_publish_lock(index_dir: Path) -> Iterator[None]:
         yield
 
 
-def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) -> tuple[str, dict[str, int | bool]]:
+def write_name_counts_index(
+    output_dir: str | Path,
+    mappings: tuple[Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any]],
+    source_provenance: Mapping[str, Any],
+    *,
+    overwrite: bool = False,
+) -> tuple[str, dict[str, int | bool]]:
     """Write the global name-count lookup as exact-verified sorted binary indexes."""
 
-    from s2and.data import _load_name_counts_artifact, _validated_name_counts_provenance
+    from s2and.name_counts_index import validated_name_counts_provenance
 
     index_dir = Path(output_dir) / "name_counts_index"
     manifest_path = index_dir / "manifest.json"
 
-    counts, raw_source_provenance = _load_name_counts_artifact()
-    source_provenance = _validated_name_counts_provenance(
-        raw_source_provenance,
+    source_provenance = validated_name_counts_provenance(
+        source_provenance,
         context="write_name_counts_index",
     )
-    first_dict, last_dict, first_last_dict, last_first_initial_dict = counts
+    first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
     fingerprint = _name_counts_arrow_fingerprint(
         {
             "first": first_dict,
@@ -1564,14 +1574,14 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
     ):
         return str(index_dir), {"reused": True}
 
-    mappings = (
+    named_mappings = (
         ("first", first_dict),
         ("last", last_dict),
         ("first_last", first_last_dict),
         ("last_first_initial", last_first_initial_dict),
     )
     index_dir.mkdir(parents=True, exist_ok=True)
-    required_free_bytes = sum(_name_count_index_disk_requirement(mapping) for _kind, mapping in mappings)
+    required_free_bytes = sum(_name_count_index_disk_requirement(mapping) for _kind, mapping in named_mappings)
     free_bytes_at_preflight = shutil.disk_usage(index_dir).free
     if free_bytes_at_preflight < required_free_bytes:
         raise OSError(
@@ -1593,7 +1603,7 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
     generation_dir = generations_dir / generation_name
     tmp_manifest_path = index_dir / f".manifest.{generation_name}.json"
     try:
-        for kind, mapping in mappings:
+        for kind, mapping in named_mappings:
             filename = f"{kind}.bin"
             tmp_file = tmp_generation_dir / filename
             file_metrics = _write_name_count_index_file(
@@ -1772,12 +1782,11 @@ def feature_block_from_arrow_paths(
             "author_middle",
             "author_last",
             "author_suffix",
-            "author_orcid",
         },
     )
     _require_arrow_int64_columns(signatures_table, "signatures", {"author_position"})
     _require_arrow_string_list_columns(signatures_table, "signatures", {"author_affiliations"})
-    for optional_signature_string_column in ("author_block", "author_email"):
+    for optional_signature_string_column in ("author_block", "author_email", "author_orcid"):
         if optional_signature_string_column in signatures_table.column_names:
             _require_arrow_string_columns(signatures_table, "signatures", {optional_signature_string_column})
     if "source_author_ids" in signatures_table.column_names:

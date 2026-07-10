@@ -17,9 +17,9 @@ from s2and.feature_port import (
     get_constraints_matrix_indexed_rust,
 )
 from s2and.featurizer import _single_pair_featurize
-from tests.helpers import attach_arrow_featurizer_bundle, equalish, import_s2and_rust, tiny_name_counts
+from tests.helpers import build_arrow_training_dataset, equalish, import_s2and_rust, tiny_name_counts_index
 
-HAS_RUST, _rust_import_payload = import_s2and_rust(prefer_site_packages=True)
+HAS_RUST, _rust_import_payload = import_s2and_rust()
 _RUST_IMPORT_ERROR = None if HAS_RUST else _rust_import_payload
 print("s2and_rust import OK" if HAS_RUST else f"s2and_rust import FAILED: {_RUST_IMPORT_ERROR}")
 if not HAS_RUST:
@@ -80,7 +80,7 @@ def _load_dataset_from_dir(data_dir, name):
         val_pairs_size=10000,
         test_pairs_size=10000,
         n_jobs=1,
-        load_name_counts=tiny_name_counts(),
+        name_counts_index=tiny_name_counts_index(),
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
@@ -150,7 +150,7 @@ def dataset(tmp_path_factory):
         ds = _attach_fake_specter_embeddings(ds)
         # Rust featurizers build exclusively from Arrow artifacts; spool the
         # dataset to a bundle sharing the same tiny name counts as the Python side.
-        attach_arrow_featurizer_bundle(ds, tmp_path_factory.mktemp("parity_session_bundle"))
+        ds = build_arrow_training_dataset(ds, tmp_path_factory.mktemp("parity_session_bundle"))
     return ds
 
 
@@ -286,14 +286,14 @@ def test_rust_featurizer_supports_string_paper_ids(tmp_path):
         val_pairs_size=10,
         test_pairs_size=10,
         n_jobs=1,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
     )
 
-    attach_arrow_featurizer_bundle(ds, tmp_path, name_counts="empty")
+    ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     features = _featurize_pair_indexed_rust(ds, "s1", "s2")
     assert len(features) > 0
 
@@ -374,13 +374,13 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
         val_pairs_size=10,
         test_pairs_size=10,
         n_jobs=1,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
         use_orcid_id=True,
     )
-    attach_arrow_featurizer_bundle(ds, tmp_path, name_counts="empty")
+    ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     ref_features, _ = _single_pair_featurize(("s1", "s2"), dataset=ds)
     rust_features = _featurize_pair_indexed_rust(ds, "s1", "s2")
     feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
@@ -420,7 +420,7 @@ def test_language_reliability_min_is_pair_order_invariant_in_python_and_rust(tmp
         is_reliable=True,
         language_reliability=0.75,
     )
-    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    dataset = build_arrow_training_dataset(dataset, tmp_path)
     feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
     reliability_index = feature_names.index("language_reliability_min")
 
@@ -462,7 +462,7 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
     _reset_featurizer_env_caches()
     ds_rust = _load_dataset_from_dir(data_dir, "dummy_rust_end_to_end")
     ds_rust = _attach_fake_specter_embeddings(ds_rust)
-    attach_arrow_featurizer_bundle(ds_rust, tmp_path)
+    ds_rust = build_arrow_training_dataset(ds_rust, tmp_path)
     features_rust, labels_rust, _ = featurizer_mod.many_pairs_featurize(
         pairs,
         ds_rust,
@@ -491,7 +491,7 @@ def test_indexed_constraint_rust_ignores_reliable_language_mismatch(tmp_path):
 
     ds.papers[paper_id_1] = ds.papers[paper_id_1]._replace(predicted_language="en", is_reliable=True)
     ds.papers[paper_id_2] = ds.papers[paper_id_2]._replace(predicted_language="fr", is_reliable=True)
-    attach_arrow_featurizer_bundle(ds, tmp_path)
+    ds = build_arrow_training_dataset(ds, tmp_path)
 
     ref_val = ds.get_constraint(s1, s2)
     got_val = _constraint_indexed_rust(ds, s1, s2)
@@ -581,7 +581,7 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
         val_pairs_size=10,
         test_pairs_size=10,
         n_jobs=1,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         random_seed=42,
         name_tuples={("yu", "yi")},
@@ -589,7 +589,7 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     )
 
     assert ds.get_constraint("s1", "s2") is None
-    attach_arrow_featurizer_bundle(ds, tmp_path, name_counts="empty")
+    ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     rust_featurizer = _get_rust_featurizer(ds)
     assert _constraint_indexed_rust(ds, "s1", "s2", featurizer=rust_featurizer) is None
     signature_ids = list(rust_featurizer.signature_ids())

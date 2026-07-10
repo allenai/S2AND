@@ -62,13 +62,20 @@ def _use_rust_featurizer(
 
     With a dataset, this is the dataset-shape decision: Rust featurizers are
     built exclusively from Arrow artifacts, so datasets without
-    ``rust_featurizer_arrow_paths`` use the Python featurizer (or raise when
+    ``arrow_paths`` use the Python featurizer (or raise when
     the Rust backend was requested explicitly). Without a dataset, this is the
     backend-level decision only.
     """
 
     if runtime_context is None:
-        runtime_context = build_runtime_context("pair_featurization")
+        runtime_context = (
+            dataset.runtime_context
+            if dataset is not None
+            else build_runtime_context(
+                "pair_featurization",
+                backend="python",
+            )
+        )
     if dataset is None:
         return stage_uses_rust(runtime_context)
     return dataset_stage_uses_rust(runtime_context, dataset)
@@ -130,12 +137,11 @@ def _ensure_python_pair_signature_ngrams(
     dataset._s2and_python_pair_ngrams_ready = True
     logger.info(
         "Telemetry stage: stage=python_pair_signature_ngrams_materialize seconds=%.3f "
-        "inspected_signatures=%d total_signatures=%d requested_backend=%s resolved_backend=%s run_id=%s",
+        "inspected_signatures=%d total_signatures=%d backend=%s run_id=%s",
         time.perf_counter() - materialize_start,
         inspected_signature_count,
         len(getattr(dataset, "signatures", {})),
-        runtime_context.requested_backend,
-        runtime_context.resolved_backend,
+        runtime_context.backend,
         runtime_context.run_id,
     )
 
@@ -342,14 +348,13 @@ def _log_featurization_backend_decision(
     logger.info(
         "Featurization backend decision: backend=%s pieces=%d n_jobs=%d "
         "use_rust_featurizer=%s rust_module_available=%s "
-        "requested_backend=%s resolved_backend=%s run_id=%s",
+        "runtime_backend=%s run_id=%s",
         backend,
         pieces_of_work_count,
         n_jobs,
         use_rust_featurizer,
         rust_module_available,
-        runtime_context.requested_backend,
-        runtime_context.resolved_backend,
+        runtime_context.backend,
         runtime_context.run_id,
     )
 
@@ -1661,7 +1666,7 @@ def many_pairs_featurize(
     featurize_start = time.perf_counter()
     backend_used = "cached_only"
     if runtime_context is None:
-        runtime_context = build_runtime_context("featurization_run")
+        runtime_context = dataset.runtime_context
     cache_policy = resolve_cache_policy(use_cache)
     signature_pairs = [(str(pair[0]), str(pair[1]), pair[2]) for pair in signature_pairs]
     _ensure_python_pair_signature_ngrams(dataset, signature_pairs, runtime_context)

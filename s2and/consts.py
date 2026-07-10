@@ -125,8 +125,7 @@ class _LazyDataPath(os.PathLike[str]):
 CONFIG: MutableMapping[str, Any] = _LazyConfig()
 
 # Lazily-resolved artifact paths
-NAME_COUNTS_PATH = _LazyDataPath("name_counts.pickle")
-NAME_COUNTS_MANIFEST_PATH = _LazyDataPath("name_counts/manifest.json")
+NAME_COUNTS_INDEX_PATH = _LazyDataPath("name_counts_index")
 
 # feature caching related consts
 CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and"))).resolve()

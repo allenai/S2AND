@@ -143,14 +143,12 @@ def require_rust_featurizer_name_counts_binding_for_clusterer(
 
 def resolve_load_name_counts_policy(
     clusterer: Any,
-    load_name_counts: bool | None | dict[str, Any],
+    load_name_counts: bool | None,
     *,
     context: str,
 ) -> bool:
     """Return the effective name-count load policy for raw scoring."""
 
-    if isinstance(load_name_counts, dict):
-        raise ValueError(f"{context} accepts load_name_counts as a bool or None, not a dict")
     clusterer_requires_name_counts = clusterer_uses_name_count_features(clusterer)
     if load_name_counts is False and clusterer_requires_name_counts:
         raise ValueError(

@@ -34,7 +34,6 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
 DEFAULT_DATA_ROOT = os.path.join("s2and", "data", "s2and_mini")
 DEFAULT_ARROW_DATA_ROOT = os.path.join("s2and", "data")
-DEFAULT_MODEL_PATH = os.path.join("s2and", "data", "production_model_v1.21")
 
 
 def _as_triplet(metrics: dict[str, Any], key: str) -> tuple[float, float, float]:
@@ -111,7 +110,7 @@ def _single_run(
     dataset_name: str,
     n_jobs: int,
     profile_output_path: str,
-    model_path: str = DEFAULT_MODEL_PATH,
+    model_path: str,
     data_root: str = DEFAULT_DATA_ROOT,
     arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
     specter_file: str = "",
@@ -148,7 +147,7 @@ def _single_run(
             fail_if_unavailable=True,
         )
 
-    from s2and.consts import PROJECT_ROOT_PATH
+    from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
     from s2and.eval import cluster_eval
     from s2and.production_model import load_production_model
@@ -181,7 +180,7 @@ def _single_run(
             val_pairs_size=10000,
             test_pairs_size=10000,
             n_jobs=n_jobs,
-            load_name_counts=True,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
             random_seed=42,
             name_tuples="filtered",
@@ -334,7 +333,7 @@ def _run_single_subprocess(
     dataset_name: str,
     n_jobs: int,
     profile_output_path: str,
-    model_path: str = DEFAULT_MODEL_PATH,
+    model_path: str,
     data_root: str = DEFAULT_DATA_ROOT,
     arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
     specter_file: str = "",
@@ -467,8 +466,8 @@ def main() -> None:
     parser.add_argument("--n-jobs", type=int, default=4)
     parser.add_argument(
         "--model-path",
-        default=DEFAULT_MODEL_PATH,
-        help="Model artifact path (relative to project root or absolute).",
+        required=True,
+        help="Complete native production bundle path (relative to project root or absolute).",
     )
     parser.add_argument(
         "--data-root",

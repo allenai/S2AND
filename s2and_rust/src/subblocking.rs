@@ -10,7 +10,8 @@ use crate::constraints::same_prefix_tokens;
 use crate::features::word_ngrams_counter_python_compat;
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::arrow_io::{
-    arrow_column_index, arrow_optional_string_list, ArrowI64Column, ArrowStringColumn,
+    arrow_column_index, arrow_optional_column_index, arrow_optional_string_list, ArrowI64Column,
+    ArrowStringColumn,
 };
 use crate::raw_arrow::paths::extract_path_mapping_string;
 use crate::raw_arrow::readers::{
@@ -91,9 +92,15 @@ pub(crate) fn read_subblocking_signature_rows_from_batches(
             ArrowStringColumn::from_string_array(middle_col.as_ref(), "author_middle")?;
         let affiliations_col =
             batch.column(arrow_column_index(&batch, "author_affiliations", path)?);
-        let orcid_col = batch.column(arrow_column_index(&batch, "author_orcid", path)?);
-        let orcid_values =
-            ArrowStringColumn::from_string_array(orcid_col.as_ref(), "author_orcid")?;
+        let orcid_col =
+            arrow_optional_column_index(&batch, "author_orcid").map(|index| batch.column(index));
+        let orcid_values = match orcid_col.as_ref() {
+            Some(col) => Some(ArrowStringColumn::from_string_array(
+                col.as_ref(),
+                "author_orcid",
+            )?),
+            None => None,
+        };
         let position_col = batch.column(arrow_column_index(&batch, "author_position", path)?);
         let position_values =
             ArrowI64Column::from_i64_array(position_col.as_ref(), "author_position")?;
@@ -130,7 +137,8 @@ pub(crate) fn read_subblocking_signature_rows_from_batches(
                             "author_affiliations",
                         )?,
                         orcid: orcid_values
-                            .optional_owned(row)
+                            .as_ref()
+                            .and_then(|col| col.optional_owned(row))
                             .and_then(|value| normalize_orcid_owned(&value)),
                         position: position_values.optional_value(row, "author_position")?,
                     });
@@ -139,6 +147,42 @@ pub(crate) fn read_subblocking_signature_rows_from_batches(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod optional_orcid_tests {
+    use super::read_subblocking_signature_rows_from_batches;
+    use arrow::array::{new_null_array, ArrayRef, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    #[test]
+    fn subblocking_signatures_without_orcid_column_read_as_none() {
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("signature_id", DataType::Utf8, false),
+            Field::new("paper_id", DataType::Utf8, false),
+            Field::new("author_first", DataType::Utf8, true),
+            Field::new("author_middle", DataType::Utf8, true),
+            Field::new("author_affiliations", list_type.clone(), true),
+            Field::new("author_position", DataType::Int64, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["s1"])),
+            Arc::new(StringArray::from(vec!["p1"])),
+            Arc::new(StringArray::from(vec!["Ada"])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            new_null_array(&list_type, 1),
+            Arc::new(Int64Array::from(vec![0])),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).expect("valid record batch");
+
+        let signatures = read_subblocking_signature_rows_from_batches("<test>", vec![batch], None)
+            .expect("author_orcid is optional");
+
+        assert_eq!(signatures.get("s1").expect("s1 present").orcid, None);
+    }
 }
 
 pub(crate) fn read_subblocking_signature_rows_with_optional_index(

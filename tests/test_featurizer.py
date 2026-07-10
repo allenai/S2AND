@@ -18,7 +18,7 @@ from s2and.featurizer import (
     many_pairs_featurize,
 )
 from s2and.runtime import RuntimeContext
-from tests.helpers import tiny_name_counts
+from tests.helpers import tiny_name_counts_index
 
 _FULL_FEATURES = [
     "name_similarity",
@@ -45,7 +45,7 @@ def _dummy_dataset(
         "tests/dummy/papers.json",
         clusters="tests/dummy/clusters.json",
         name=name,
-        load_name_counts=tiny_name_counts() if load_name_counts else False,
+        name_counts_index=tiny_name_counts_index() if load_name_counts else None,
     )
 
 
@@ -109,11 +109,8 @@ def test_malformed_emails_produce_only_missing_features() -> None:
 def test_empty_python_pair_featurization_does_not_mark_missing_ngrams_ready() -> None:
     runtime_context = RuntimeContext(
         operation="featurization_run",
-        requested_backend="python",
-        resolved_backend="python",
-        use_rust=False,
+        backend="python",
         run_id="run-python-ngrams",
-        source="argument",
     )
     signature = SimpleNamespace(author_info_affiliations_n_grams=None, author_info_coauthor_n_grams=None)
     state = {"materialized": 0}
@@ -142,11 +139,8 @@ def test_empty_python_pair_featurization_does_not_mark_missing_ngrams_ready() ->
 def test_python_pair_featurization_rejects_rust_deferred_signature_fields() -> None:
     runtime_context = RuntimeContext(
         operation="featurization_run",
-        requested_backend="python",
-        resolved_backend="python",
-        use_rust=False,
+        backend="python",
         run_id="run-python-deferred-fields",
-        source="argument",
     )
     dataset = cast(
         ANDData,
@@ -165,11 +159,8 @@ def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch:
     featurizer_info = FeaturizationInfo(features_to_use=["coauthor_similarity"])
     runtime_context = RuntimeContext(
         operation="featurization_run",
-        requested_backend="python",
-        resolved_backend="python",
-        use_rust=False,
+        backend="python",
         run_id="run-delete-training-data",
-        source="argument",
     )
 
     def fake_single_pair_featurize(_pair: tuple[str, str], index: int) -> tuple[np.ndarray, int]:
@@ -202,17 +193,14 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
         SimpleNamespace(
             name="dummy",
             mode="train",
-            rust_featurizer_arrow_paths={"signatures": "signatures.arrow"},
+            arrow_paths={"signatures": "signatures.arrow"},
         ),
     )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",
-        requested_backend="rust",
-        resolved_backend="rust",
-        use_rust=True,
+        backend="rust",
         run_id="run-1",
-        source="default",
     )
 
     state = {"prewarm_called": False, "rss_called": False}
@@ -272,17 +260,14 @@ def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
         SimpleNamespace(
             name="dummy",
             mode="train",
-            rust_featurizer_arrow_paths={"signatures": "signatures.arrow"},
+            arrow_paths={"signatures": "signatures.arrow"},
         ),
     )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",
-        requested_backend="rust",
-        resolved_backend="rust",
-        use_rust=True,
+        backend="rust",
         run_id="run-lazy-load",
-        source="default",
     )
     state = {"prewarm_called": False}
 
@@ -517,17 +502,14 @@ def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch: 
         ANDData,
         SimpleNamespace(
             name="dummy",
-            rust_featurizer_arrow_paths={"signatures": "signatures.arrow"},
+            arrow_paths={"signatures": "signatures.arrow"},
         ),
     )
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     runtime_context = RuntimeContext(
         operation="featurization_run",
-        requested_backend="rust",
-        resolved_backend="rust",
-        use_rust=True,
+        backend="rust",
         run_id="run-raises",
-        source="default",
     )
 
     monkeypatch.setattr(feature_port, "s2and_rust", object())

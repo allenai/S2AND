@@ -62,8 +62,11 @@ Lookup uses two FNV-64 hashes plus exact byte-string verification, so hash
 collisions do not produce false name-count hits.
 
 Do not embed per-signature name-count values in `signatures.arrow`. That path
-has been removed from the runtime direction. Do not build a production request
-path that loads `name_counts.arrow` into Python dicts/lists.
+has been removed from the runtime direction. Rust production scoring and Python
+`ANDData` both open this validated memory-mapped index. Python deduplicates each
+2,048-signature key batch, resolves unique keys in one four-column native call,
+and attaches only the resulting scalar counts. Do not build any runtime path
+that loads `name_counts.arrow` or `name_counts.pickle` into Python dicts/lists.
 
 The legacy direct-file layout with `first.bin`, `last.bin`, `first_last.bin`,
 and `last_first_initial.bin` directly under `name_counts_index/` is accepted
@@ -93,7 +96,7 @@ planning. Do not hand-write the batch-index binary format.
 |---|---|
 | Embedded `name_count_*` columns in `signatures.arrow` | Removed as a preferred/supporting Arrow hot path. Use `name_counts_index/`. |
 | SQLite for name counts | Not better for the current exact static point-lookup workload. Revisit only for ad hoc queries, updates, or transaction requirements. |
-| Pickle | Keep only for legacy compatibility. It is Python-only and not a production cross-language target. |
+| Pickle | Not a runtime name-count format. The generator still publishes a source pickle because the v1 provenance/model contract names its SHA; remove it when that contract is versioned. |
 | JSON | Fine for fixtures and compatibility loaders; not the runtime target for large table-shaped inference data. |
 | Arrow read into Python dict/list before Rust | Defeats the columnar boundary and was measured slower than keeping the hot path in Rust. |
 | MessagePack as universal target | Better than JSON for nested legacy payloads, but it preserves the object shape the Rust path is trying to avoid. |

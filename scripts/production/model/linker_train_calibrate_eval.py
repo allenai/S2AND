@@ -44,13 +44,12 @@ import s2and.incremental_linking.query_adapter as retrieval  # noqa: E402
 from s2and import feature_port  # noqa: E402
 from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_inputs import validate_arrow_prediction_artifacts  # noqa: E402
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
+from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.contracts import (  # noqa: E402
     DEFAULT_RETRIEVAL_TOP_K,
-    INCREMENTAL_LINKING_RUST_CAPABILITIES,
     canonical_json_digest,
     promoted_linker_feature_schema_digest,
 )
@@ -103,7 +102,6 @@ from s2and.incremental_linking_training.query_support import (  # noqa: E402
     year_compatibility,
 )
 from s2and.model import (  # noqa: E402
-    _apply_dataset_name_count_semantics_for_prediction,
     _build_incremental_constraint_backend,
 )
 from s2and.production_bundle import finalize_production_bundle, production_version_from_bundle_dir  # noqa: E402
@@ -115,11 +113,7 @@ os.environ.setdefault("S2AND_BACKEND", "rust")
 
 PACKAGE_DATA_ROOT = REPO_ROOT / "s2and" / "data"
 DEFAULT_SOURCE_BUNDLE_ROOT = PACKAGE_DATA_ROOT / "s2and_and_big_blocks_linker_dataset_20260525"
-DEFAULT_TARGET_JSON = (
-    PACKAGE_DATA_ROOT / "production_model_v1.21" / "reproducibility" / "incremental_linker_training_target.json"
-)
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "scratch" / "joint_safe_link_promoted_official_20260507"
-DEFAULT_PAIRWISE_MODEL_PATH = PACKAGE_DATA_ROOT / "production_model_v1.21"
 DEFAULT_NAME_COUNTS_INDEX_ROOT: Path | None = None
 DEFAULT_TOTAL_RAM_BYTES = 48 * 1024**3
 REQUIRED_TABLE_KEYS = (
@@ -939,7 +933,6 @@ def _arrow_paths_for_dataset(
         paths,
         require_specter=True,
         require_name_counts_index=require_name_counts_index,
-        require_batch_indexes=True,
         context=f"Arrow dataset {dataset_name!r} for linker train/calibrate/eval",
         producer_hint=(
             "include signatures/papers/paper_authors/specter Arrow files, raw-planner batch indexes, "
@@ -1115,7 +1108,6 @@ def _load_minimal_raw_specter_dataset(
     bundle: OfficialBundle,
     dataset_name: str,
     *,
-    clusterer: Any,
     n_jobs: int,
 ) -> ANDData:
     raw_datasets = dict(bundle.assets["raw_metadata"]["datasets"])
@@ -1134,13 +1126,12 @@ def _load_minimal_raw_specter_dataset(
         name=f"joint_safe_link_minimal_raw_specter_{dataset_name}",
         mode="inference",
         specter_embeddings=str(specter_path),
-        load_name_counts=True,
+        name_counts_index=NAME_COUNTS_INDEX_PATH,
         preprocess=True,
         n_jobs=max(1, int(n_jobs)),
         use_orcid_id=False,
         name_tuples="filtered",
     )
-    _apply_dataset_name_count_semantics_for_prediction(clusterer, dataset)
     return dataset
 
 
@@ -1216,12 +1207,11 @@ def _build_minimal_raw_dataset_context(
     dataset = _load_minimal_raw_specter_dataset(
         source_bundle,
         dataset_name,
-        clusterer=clusterer,
         n_jobs=n_jobs,
     )
     runtime_context = build_runtime_context(
         "joint_safe_link_minimal_raw_featureization",
-        emit_startup_warning=False,
+        backend="rust",
     )
     featurizer = feature_port._get_rust_featurizer(  # noqa: SLF001
         dataset,
@@ -1374,7 +1364,7 @@ def _build_arrow_rust_dataset_context(
         pairwise_component_scope="block-local",
         runtime_context=build_runtime_context(
             "joint_safe_link_arrow_rust_featureization",
-            emit_startup_warning=False,
+            backend="rust",
         ),
         arrow_paths=arrow_paths,
         component_members=component_members,
@@ -3551,7 +3541,6 @@ def _train_and_save_prod_artifact(
     save_artifact_to: Path,
     artifact_audit_metadata: Mapping[str, Any] | None,
     holdout_importance_weight: float,
-    required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
 ) -> dict[str, Any]:
     spec = dict(feature_bundle.models["classic"])
     retrieval_top_k = int(spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
@@ -3621,7 +3610,6 @@ def _train_and_save_prod_artifact(
         retrieval_top_k=retrieval_top_k,
         gate_config=logistic_gate_config,
         prediction_fixture_matrix=train_matrix[:5],
-        required_rust_capabilities=required_rust_capabilities,
         audit_metadata=audit_metadata,
     )
     summary = {
@@ -3773,6 +3761,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("--limit-rows must be > 0")
     target = _load_target(args.target_json)
     output_dir = args.output_dir.resolve()
+    production_bundle_dir = (
+        args.save_production_bundle_to.resolve() if args.save_production_bundle_to is not None else None
+    )
+    if production_bundle_dir is not None:
+        if production_bundle_dir.exists():
+            raise SystemExit(f"--save-production-bundle-to must name a new directory: {production_bundle_dir}")
+        if output_dir == production_bundle_dir or output_dir.is_relative_to(production_bundle_dir):
+            raise SystemExit("--output-dir must be outside --save-production-bundle-to")
     output_dir.mkdir(parents=True, exist_ok=True)
     pairwise_model_nan_value = _nan_value_from_policy(str(args.pairwise_model_nan_policy))
     pairwise_aggregate_nan_value = _nan_value_from_policy(str(args.pairwise_aggregate_nan_policy))
@@ -3835,6 +3831,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit("precomputed-promoted does not materialize features")
         if args.limit_rows is not None or args.tables or args.datasets:
             raise SystemExit("precomputed-promoted requires a complete validated feature bundle")
+        # The precomputed table still belongs to one exact pairwise model.
+        # Loading through the staging-only door rejects complete/legacy bundles
+        # before training or artifact publication starts.
+        load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
         feature_bundle, featureization_summaries = _load_precomputed_promoted_feature_bundle(
             bundle_root=args.precomputed_feature_bundle_root,
             target=target,
@@ -3862,15 +3862,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         feature_bundle = _bundle_with_classic_params(feature_bundle, active_params)
 
-    production_bundle_dir = (
-        args.save_production_bundle_to.resolve() if args.save_production_bundle_to is not None else None
-    )
     save_artifact_to = args.save_artifact_to.resolve() if args.save_artifact_to is not None else None
     if production_bundle_dir is not None:
-        bundle_artifact_dir = production_bundle_dir / "incremental_linker"
-        if save_artifact_to is not None and save_artifact_to != bundle_artifact_dir:
-            raise SystemExit("--save-artifact-to must match <save-production-bundle-to>/incremental_linker")
-        save_artifact_to = bundle_artifact_dir
+        if save_artifact_to is None:
+            save_artifact_to = output_dir / "production_incremental_linker"
+        if save_artifact_to == production_bundle_dir or save_artifact_to.is_relative_to(production_bundle_dir):
+            raise SystemExit("--save-artifact-to must be outside --save-production-bundle-to")
     artifact_audit_metadata = (
         _linker_artifact_audit_metadata(
             args=args,
@@ -3963,15 +3960,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-bundle-root", type=Path, default=DEFAULT_SOURCE_BUNDLE_ROOT)
-    parser.add_argument("--target-json", type=Path, default=DEFAULT_TARGET_JSON)
+    parser.add_argument("--target-json", type=Path, required=True, help="Explicit promoted-linker target JSON.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--pairwise-model-path", type=Path, default=DEFAULT_PAIRWISE_MODEL_PATH)
+    parser.add_argument(
+        "--pairwise-model-path",
+        type=Path,
+        required=True,
+        help="Explicit v2 pairwise_only native bundle produced by train_pairwise.py.",
+    )
     parser.add_argument("--save-artifact-to", type=Path, default=None)
     parser.add_argument(
         "--save-production-bundle-to",
         type=Path,
         default=None,
-        help="Finalize a full production_model_vX.Y bundle, writing the linker under incremental_linker/.",
+        help="Publish a complete production_model_vX.Y bundle to a new directory.",
     )
     parser.add_argument(
         "--production-bundle-version",

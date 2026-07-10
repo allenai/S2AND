@@ -364,7 +364,7 @@ def _build_anddata_kwargs(
     random_seed: int,
     n_train_pairs: int,
     n_val_test_size: int,
-    name_counts: dict[str, Any],
+    name_counts_index: Any,
     train_pairs_size_mode: str,
 ) -> dict[str, Any]:
     signatures_path = _resolve_dataset_file(
@@ -413,7 +413,7 @@ def _build_anddata_kwargs(
         "val_pairs_size": n_val_test_size,
         "test_pairs_size": n_val_test_size,
         "n_jobs": n_jobs,
-        "load_name_counts": name_counts,
+        "name_counts_index": name_counts_index,
         "preprocess": PREPROCESS,
         "random_seed": random_seed,
         "name_tuples": "filtered",
@@ -455,8 +455,8 @@ def _single_run(
     import numpy as np
     from hyperopt import hp
 
-    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NORMALIZATION_VERSION
-    from s2and.data import ANDData, _load_name_counts_artifact
+    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
+    from s2and.data import ANDData
     from s2and.eval import cluster_eval
     from s2and.featurizer import FeaturizationInfo, featurize
     from s2and.model import Clusterer, FastCluster, PairwiseModeler
@@ -498,17 +498,11 @@ def _single_run(
         # Arrow ingestion reads name counts in Rust from the name_counts_index
         # sidecar; the Python-side pickle is not needed.
         t0 = time.perf_counter()
-        name_counts: dict[str, Any] | None = None
+        name_counts_index = None
         if ingest != "arrow":
-            counts, provenance = _load_name_counts_artifact()
-            first_dict, last_dict, first_last_dict, last_first_initial_dict = counts
-            name_counts = {
-                "first_dict": first_dict,
-                "last_dict": last_dict,
-                "first_last_dict": first_last_dict,
-                "last_first_initial_dict": last_first_initial_dict,
-                "provenance": provenance,
-            }
+            from s2and.name_counts_index import NameCountsIndex
+
+            name_counts_index = NameCountsIndex.open(NAME_COUNTS_INDEX_PATH)
         stage_timings["name_counts_load_seconds"] = round(time.perf_counter() - t0, 3)
         _snapshot_stage_rss(stage_rss_gb, monitor, "name_counts_load")
 
@@ -538,20 +532,18 @@ def _single_run(
                     dataset_name,
                     expected_normalization_version=NORMALIZATION_VERSION,
                     clusters=clusters_path,
-                    mode="train",
                     block_type=BLOCK_TYPE,
                     train_pairs_size=effective_train_pairs_size,
                     val_pairs_size=N_VAL_TEST_SIZE,
                     test_pairs_size=N_VAL_TEST_SIZE,
                     n_jobs=n_jobs,
-                    load_name_counts=False,
                     preprocess=PREPROCESS,
                     random_seed=random_seed,
                     name_tuples="filtered",
                 )
             else:
-                if name_counts is None:
-                    raise AssertionError("JSON ingest requires Python-side name counts")
+                if name_counts_index is None:
+                    raise AssertionError("JSON ingest requires a Python name-count index")
                 anddata_kwargs = _build_anddata_kwargs(
                     data_dir=DATA_DIR,
                     dataset_name=dataset_name,
@@ -559,7 +551,7 @@ def _single_run(
                     random_seed=random_seed,
                     n_train_pairs=n_train_pairs,
                     n_val_test_size=N_VAL_TEST_SIZE,
-                    name_counts=name_counts,
+                    name_counts_index=name_counts_index,
                     train_pairs_size_mode=train_pairs_size_mode,
                 )
                 anddata = ANDData(**anddata_kwargs)

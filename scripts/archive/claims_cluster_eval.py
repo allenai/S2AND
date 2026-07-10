@@ -25,10 +25,9 @@ os.environ["S2AND_BACKEND"] = "python"
 
 os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
-from s2and.consts import NAME_COUNTS_PATH
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import claims_eval
-from s2and.file_cache import cached_path
 
 DATA_DIR = os.path.join(CONFIG["internal_data_dir"], "claims")
 BLOCK_DATASETS_DIR = os.path.join(DATA_DIR, "block_datasets")
@@ -65,22 +64,6 @@ def main(model_path: str, n_jobs: int = 20, use_constraints: bool = True):
         key=lambda x: os.path.getsize(os.path.join(os.path.join(BLOCK_DATASETS_DIR, x), "claims_signatures.json")),
     )
 
-    logger.info("starting transfer experiment main, loading name counts")
-    with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-        (
-            first_dict,
-            last_dict,
-            first_last_dict,
-            last_first_initial_dict,
-        ) = pickle.load(f)
-    name_counts = {
-        "first_dict": first_dict,
-        "last_dict": last_dict,
-        "first_last_dict": first_last_dict,
-        "last_first_initial_dict": last_first_initial_dict,
-    }
-    logger.info("loaded name counts")
-
     for block_key in tqdm(block_keys):
         results = {}
         block_dir = os.path.join(BLOCK_DATASETS_DIR, block_key)
@@ -93,7 +76,7 @@ def main(model_path: str, n_jobs: int = 20, use_constraints: bool = True):
             block_type="s2",
             name=block_key.replace(" ", "_"),
             n_jobs=n_jobs,
-            load_name_counts=name_counts,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
         )
         logger.info("Dataset loaded")
 

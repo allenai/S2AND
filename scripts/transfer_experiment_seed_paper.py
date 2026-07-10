@@ -30,8 +30,8 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from s2and import feature_port
-from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION
-from s2and.data import ANDData, _load_name_counts_artifact
+from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH
+from s2and.data import ANDData
 from s2and.eval import cluster_eval, facet_eval, pairwise_eval
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
@@ -52,7 +52,7 @@ PREPROCESS = True
 
 
 def _cleanup_rust_featurizers(anddata_list: list[ANDData], stage: str) -> None:
-    rust_datasets = [dataset for dataset in anddata_list if dataset.runtime_context.use_rust]
+    rust_datasets = [dataset for dataset in anddata_list if dataset.runtime_context.backend == "rust"]
     if not rust_datasets:
         return
 
@@ -555,17 +555,7 @@ def main(
     else:
         UNION_DATASETS_TO_TRAIN = {tuple(DATASETS_FOR_UNION)}
 
-    logger.info("starting transfer experiment main, loading name counts")
-    counts, provenance = _load_name_counts_artifact()
-    first_dict, last_dict, first_last_dict, last_first_initial_dict = counts
-    name_counts = {
-        "first_dict": first_dict,
-        "last_dict": last_dict,
-        "first_last_dict": first_last_dict,
-        "last_first_initial_dict": last_first_initial_dict,
-        "provenance": provenance,
-    }
-    logger.info("loaded name counts")
+    logger.info("starting transfer experiment main with binary name-count index")
 
     datasets: dict[str, Any] = {}
     for dataset_name in tqdm(DATASETS_TO_TRAIN, desc="Processing datasets and fitting base models"):
@@ -600,7 +590,7 @@ def main(
             val_pairs_size=N_VAL_TEST_SIZE,
             test_pairs_size=N_VAL_TEST_SIZE,
             n_jobs=N_JOBS,
-            load_name_counts=name_counts,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=PREPROCESS,
             random_seed=random_seed,
         )

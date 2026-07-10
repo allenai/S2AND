@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from s2and.incremental_linking import feature_block_arrow
-from tests.helpers import patch_name_counts_artifact
+from tests.helpers import tiny_name_counts_provenance
 
 
 def _read_index(path: Path) -> dict[str, float]:
@@ -50,7 +50,6 @@ def test_disk_preflight_fails_before_creating_index_temporaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mapping = {"a": 2.0, "b": 3.0}
-    patch_name_counts_artifact(monkeypatch, (mapping, {}, {}, {}))
     monkeypatch.setattr(
         feature_block_arrow.shutil,
         "disk_usage",
@@ -58,7 +57,11 @@ def test_disk_preflight_fails_before_creating_index_temporaries(
     )
 
     with pytest.raises(OSError, match="insufficient free disk"):
-        feature_block_arrow.write_name_counts_index(tmp_path)
+        feature_block_arrow.write_name_counts_index(
+            tmp_path,
+            (mapping, {}, {}, {}),
+            tiny_name_counts_provenance(),
+        )
 
     index_dir = tmp_path / "name_counts_index"
     assert index_dir.is_dir()

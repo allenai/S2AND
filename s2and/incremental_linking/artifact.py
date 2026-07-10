@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import math
 import os
@@ -22,14 +21,12 @@ from s2and.incremental_linking.contracts import (
     ARTIFACT_SCHEMA_VERSION,
     DEFAULT_RETRIEVAL_TOP_K,
     GATE_SURFACE_PROMOTED_LOGISTIC,
-    INCREMENTAL_LINKING_RUST_CAPABILITIES,
     MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER,
     production_contract_digest,
     promoted_linker_feature_schema_digest,
     retrieval_constraint_decision_policy_payload,
     retrieval_stack_contract_digest,
     validate_artifact_contract_metadata,
-    validate_required_rust_capabilities,
 )
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import NumpyLogisticGate, load_logistic_gate_config
@@ -52,7 +49,6 @@ _METADATA_FIELDS = frozenset(
         "prediction_fixture_expected_probabilities",
         "prediction_fixture_matrix",
         "production_contract_digest",
-        "required_rust_capabilities",
         "retrieval_stack_digest",
         "retrieval_top_k",
         "schema_version",
@@ -164,7 +160,6 @@ class IncrementalLinkingArtifactMetadata:
     gate_config: Mapping[str, Any]
     prediction_fixture_matrix: tuple[tuple[float, ...], ...]
     prediction_fixture_expected_probabilities: tuple[float, ...]
-    required_rust_capabilities: tuple[str, ...]
     booster_sha256: str
     lightgbm_version: str
     pairwise_bundle_binding: Mapping[str, Any]
@@ -224,21 +219,6 @@ class IncrementalLinkingArtifactMetadata:
             raise ValueError("prediction_fixture_expected_probabilities must be between 0 and 1")
         object.__setattr__(self, "prediction_fixture_expected_probabilities", fixture_probabilities)
 
-        capabilities = tuple(self.required_rust_capabilities)
-        if not capabilities or not all(
-            isinstance(capability, str) and capability.strip() for capability in capabilities
-        ):
-            raise ValueError("required_rust_capabilities must be a nonempty list of strings")
-        if len(set(capabilities)) != len(capabilities):
-            raise ValueError("required_rust_capabilities must not contain duplicates")
-        missing_required_capabilities = sorted(set(INCREMENTAL_LINKING_RUST_CAPABILITIES) - set(capabilities))
-        if missing_required_capabilities:
-            raise ValueError(
-                "required_rust_capabilities omits current incremental-linking capabilities: "
-                f"{missing_required_capabilities}"
-            )
-        object.__setattr__(self, "required_rust_capabilities", capabilities)
-
         if len(self.booster_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.booster_sha256):
             raise ValueError("Incremental linker artifact booster_sha256 is not a SHA-256")
 
@@ -267,7 +247,6 @@ class IncrementalLinkingArtifactMetadata:
         gate_config: Mapping[str, Any] | None = None,
         prediction_fixture_matrix: Sequence[Sequence[float]],
         prediction_fixture_expected_probabilities: Sequence[float],
-        required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
         booster_sha256: str,
         lightgbm_version: str,
         pairwise_bundle_binding: Mapping[str, Any],
@@ -295,7 +274,6 @@ class IncrementalLinkingArtifactMetadata:
             gate_config=dict(gate_config or {}),
             prediction_fixture_matrix=fixture_matrix,
             prediction_fixture_expected_probabilities=fixture_probabilities,
-            required_rust_capabilities=tuple(str(value) for value in required_rust_capabilities),
             booster_sha256=str(booster_sha256),
             lightgbm_version=str(lightgbm_version),
             pairwise_bundle_binding=dict(pairwise_bundle_binding),
@@ -304,7 +282,7 @@ class IncrementalLinkingArtifactMetadata:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> IncrementalLinkingArtifactMetadata:
-        """Load an exact, strictly typed v2 metadata mapping."""
+        """Load an exact, strictly typed v3 metadata mapping."""
 
         if not isinstance(payload, Mapping):
             raise ValueError("Incremental linker artifact metadata must be a JSON object")
@@ -315,7 +293,7 @@ class IncrementalLinkingArtifactMetadata:
             missing = sorted(_METADATA_FIELDS - observed_fields)
             unknown = sorted(observed_fields - _METADATA_FIELDS)
             raise ValueError(
-                "Incremental linker artifact metadata fields do not match the v2 schema: "
+                "Incremental linker artifact metadata fields do not match the v3 schema: "
                 f"missing={missing} unknown={unknown}"
             )
 
@@ -335,7 +313,6 @@ class IncrementalLinkingArtifactMetadata:
             gate_config=_require_metadata_mapping(payload, "gate_config"),
             prediction_fixture_matrix=fixture_matrix,
             prediction_fixture_expected_probabilities=fixture_probabilities,
-            required_rust_capabilities=_require_metadata_string_list(payload, "required_rust_capabilities"),
             booster_sha256=_require_metadata_string(payload, "booster_sha256"),
             lightgbm_version=_require_metadata_string(payload, "lightgbm_version"),
             pairwise_bundle_binding=_require_metadata_mapping(payload, "pairwise_bundle_binding"),
@@ -357,7 +334,6 @@ class IncrementalLinkingArtifactMetadata:
             "gate_config": _json_compatible_value(self.gate_config),
             "prediction_fixture_matrix": [list(row) for row in self.prediction_fixture_matrix],
             "prediction_fixture_expected_probabilities": list(self.prediction_fixture_expected_probabilities),
-            "required_rust_capabilities": list(self.required_rust_capabilities),
             "booster_sha256": self.booster_sha256,
             "lightgbm_version": self.lightgbm_version,
             "pairwise_bundle_binding": _json_compatible_value(self.pairwise_bundle_binding),
@@ -365,27 +341,10 @@ class IncrementalLinkingArtifactMetadata:
         }
 
 
-def _rust_lightgbm_booster_unavailable_error(found_version: Any = None) -> RuntimeError:
-    from s2and.runtime import min_supported_rust_extension_version_string
-
-    found = "unknown" if found_version is None else str(found_version)
-    minimum = min_supported_rust_extension_version_string()
-    return RuntimeError(
-        "RustLightGBMBooster requires s2and-rust>="
-        f"{minimum}; found {found}. Rebuild the local extension or install the matching s2and-rust package."
-    )
-
-
 def _load_rust_lightgbm_booster(booster_path: Path) -> Any:
-    try:
-        rust_module = importlib.import_module("s2and_rust")
-    except ImportError as exc:
-        raise _rust_lightgbm_booster_unavailable_error() from exc
-    booster_cls = getattr(rust_module, "RustLightGBMBooster", None)
-    if booster_cls is None:
-        raise _rust_lightgbm_booster_unavailable_error(getattr(rust_module, "__version__", None))
+    from s2and.runtime import load_s2and_rust_extension
 
-    return booster_cls(str(booster_path))
+    return load_s2and_rust_extension().RustLightGBMBooster(str(booster_path))
 
 
 @dataclass(frozen=True)
@@ -550,7 +509,6 @@ def save_incremental_linking_artifact(
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
     gate_config: Mapping[str, Any] | None = None,
     prediction_fixture_matrix: Sequence[Sequence[float]] | np.ndarray,
-    required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
     audit_metadata: Mapping[str, Any] | None = None,
 ) -> IncrementalLinkingArtifactMetadata:
     """Write `booster.lgb` and `metadata.json` for a fitted linker model."""
@@ -587,7 +545,6 @@ def save_incremental_linking_artifact(
             gate_config=gate_config,
             prediction_fixture_matrix=fixture_rows,
             prediction_fixture_expected_probabilities=expected_probability_values,
-            required_rust_capabilities=required_rust_capabilities,
             booster_sha256=_sha256_file(booster_path),
             lightgbm_version=lightgbm_version,
             pairwise_bundle_binding=pairwise_bundle_binding,
@@ -598,7 +555,7 @@ def save_incremental_linking_artifact(
             json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        load_incremental_linking_artifact(staging_dir, require_rust_capabilities=False)
+        load_incremental_linking_artifact(staging_dir)
         _fsync_artifact_stage(staging_dir)
         _publish_immutable_artifact(staging_dir, artifact_dir)
         return metadata
@@ -607,15 +564,10 @@ def save_incremental_linking_artifact(
             shutil.rmtree(staging_dir)
 
 
-def load_incremental_linking_artifact(
-    artifact_dir: Path, *, require_rust_capabilities: bool = True
-) -> IncrementalLinkingArtifact:
+def load_incremental_linking_artifact(artifact_dir: Path) -> IncrementalLinkingArtifact:
     """Load and validate an incremental linker artifact.
 
-    Booster scoring always runs through the Rust evaluator, so the Rust
-    extension must be importable. ``require_rust_capabilities=False`` only
-    skips the named runtime-capability validation (e.g. for bundle validation
-    during training/finalization).
+    Booster scoring always runs through the pinned Rust evaluator.
     """
 
     artifact_dir = Path(artifact_dir).resolve(strict=True)
@@ -625,8 +577,6 @@ def load_incremental_linking_artifact(
     observed_booster_sha256 = _sha256_file(booster_path)
     if observed_booster_sha256 != metadata.booster_sha256:
         raise ValueError("Incremental linker artifact booster_sha256 mismatch")
-    if require_rust_capabilities:
-        validate_required_rust_capabilities(metadata.required_rust_capabilities)
     booster = _load_rust_lightgbm_booster(booster_path)
     artifact = IncrementalLinkingArtifact(
         booster=booster,

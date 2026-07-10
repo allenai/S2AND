@@ -35,27 +35,23 @@ Package install:
 uv pip install s2and
 ```
 
-The base install includes `s2and-rust` and the production model files as package
-data. You do not need Git LFS or a separate model download when installing from
-PyPI. The historical `s2and[rust]` extra is retained as a no-op compatibility
-alias; Rust is required either way.
+The base install includes the exactly matched `s2and-rust` runtime. During the
+canonical-v2 cutover, no default production model is packaged; inference callers
+must provide an explicit compatible bundle.
 
 Repo checkout:
 
 ```bash
 git lfs install
-git lfs pull
+git lfs pull --include "tests/fixtures/arrow/pubmed_specter2/**"
 uv venv --python 3.11.13
 # activate the environment, then:
 uv sync --active --extra dev
 uv run --active --no-project maturin develop -m s2and_rust/Cargo.toml
 ```
 
-Source checkouts use Git LFS for versioned model artifacts, including the bundled
-production model directory and legacy production pickle files. Run `git lfs pull`
-after cloning and after switching branches that change model artifacts. Small
-pointer files in `s2and/data/production_model_*` mean the LFS files were not
-hydrated.
+Source checkouts use Git LFS for Arrow test fixtures. Run `git lfs pull` after
+cloning and after switching branches that change those fixtures.
 
 The Rust build step is required for source checkouts unless you are using an
 already-built compatible `s2and-rust` wheel. For OS prerequisites, activation
@@ -63,12 +59,12 @@ commands, WSL notes, and install variants, see [docs/install.md](docs/install.md
 
 ## Download Data or Model
 
-> **Canonical-v2 migration status (2026-07-09):** this branch contains the
+> **Canonical-v2 migration status (2026-07-10):** this branch contains the
 > canonical-v2 code cutover but does not yet contain a compatible production
-> model or canonical count artifacts. The packaged v1.21 bundle and v1.0-v1.2
-> pickles are legacy artifacts and are rejected by this branch. Use the previous
-> published S2AND release for working v1.21 inference until canonical v1.3 is
-> trained, validated, and packaged. See [docs/work_plan.md](docs/work_plan.md).
+> model or canonical count artifacts. No default model is distributed by this
+> branch. Use the previous published S2AND release for working v1.21 inference
+> until canonical v1.3 is trained, validated, and packaged. See
+> [docs/work_plan.md](docs/work_plan.md).
 
 Rust/Arrow dataset download:
 
@@ -76,25 +72,9 @@ Rust/Arrow dataset download:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
 ```
 
-Expected size is about `10.1 GiB`. The currently published release populates
-the Arrow benchmark datasets, legacy shared `name_counts_index/`, legacy
-production model bundle, and the promoted-linker replay bundle under
-`s2and/data/s2and_and_big_blocks_linker_dataset_20260525/`.
-
-The legacy JSON/pickle dataset release is still available at
-`s3://ai2-s2-research-public/s2and-release`, but it is only needed for
-paper-era `ANDData` workflows.
-
-The previous production model bundle is checked into
-`s2and/data/production_model_v1.21/` and remains in the tree as a migration
-input. It is not loadable under canonical-v2. The pending v1.3 bundle will become
-the packaged default only after the release gates pass.
-
-Starting with S2AND `0.50.0`, production releases are native
-`production_model_vX.Y/` directories tracked through Git LFS, not pickle files.
-Release bundles are built with `scripts/production/model/train_pairwise.py`
-followed by `scripts/production/model/train_linker_and_finalize.py`; the final
-bundle includes linker artifacts when production inference needs them.
+Expected size is about `10.1 GiB`; use a narrower S3 prefix when only one
+dataset is needed. The checked-in v1.21 directory remains an explicit historical
+source artifact only. It is not packaged or loadable on this branch.
 
 ## Configuration
 
@@ -111,133 +91,19 @@ More on dataset layout, config, and model-only usage: [docs/data.md](docs/data.m
 
 ## Quick Start
 
-The commands below describe the last published v1.21 workflow and require the
-previous compatible S2AND release. They are retained for operational context but
-do not run on `canonical-v2-migration` until v1.3 replaces the model and artifact
-paths.
-
-Run v1.21 on the released `qian` Arrow bundle:
-
-```bash
-uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-  --use-rust 1 \
-  --input-format arrow \
-  --arrow-data-root s2and/data \
-  --dataset qian \
-  --specter-suffix _specter2.pkl
-```
-
-For a benchmark smoke eval:
-
-```bash
-uv run python scripts/eval_prod_models.py \
-  --dataset full \
-  --use-arrow \
-  --datasets pubmed qian zbmath \
-  --specter-suffixes _specter2.pkl \
-  --seed 42 \
-  --n_jobs 4
-```
-
-When running repo scripts, use `uv run` from the repo root after building the
-Rust extension with `maturin develop`.
+This migration branch has no compatible default production model. Training and
+evaluation remain available below; production inference requires an explicit
+complete canonical bundle once one has passed the release gates.
 
 ## Production Inference Essentials
 
-### Which model to use
+`load_production_model(path)` accepts one explicit complete native bundle. It
+does not discover a default, load pickle models, or accept pairwise-only staging
+directories. Classic `ANDData` prediction is the Python route; explicit
+`*_from_arrow_paths` methods are the Rust route.
 
-| Model artifact | Release line | Repo storage | Included in PyPI install? | Linker artifact | Loader | Embeddings | Usable with current S2AND? |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `production_model_v1.3/` | Pending canonical-v2 release | Not generated yet | No | Must be bundled and jointly validated | Future default loader | Determined by retrain contract | No, pending retrain |
-| `production_model_v1.21/` | Previous release, starting with `0.50.0` | Directory bundle in Git LFS | Temporarily retained | Bundled in `incremental_linker/` | Previous compatible release only | SPECTER2 PRX | No, legacy normalization |
-| `production_model_v1.2.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Temporarily retained | Not bundled | Previous compatible release only | SPECTER2 PRX | No, legacy normalization |
-| `production_model_v1.1.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Temporarily retained | Not bundled | Previous compatible release only | SPECTER1 | No, legacy normalization |
-| `production_model_v1.0.pickle` | Deprecated, pre-`0.50.0` | Pickle in Git LFS | Temporarily retained | Not bundled | Historical fixture only | SPECTER1 | No (required removed reference features) |
-
-Key points:
-
-- No model is currently recommended for inference from this migration branch.
-  v1.21 remains the recommended model only with the previous compatible package.
-  Its pairwise artifacts come from v1.2 and it bundles the promoted Rust
-  incremental linker.
-- Starting with S2AND `0.50.0`, production model releases are directory bundles named `production_model_vX.Y/`; new production releases should not be published as pickle files.
-- Git LFS is only a source-checkout concern. A future canonical release will
-  include only its validated hydrated default model in wheels and sdists.
-- Use directory bundles for workflows that need a linker model. The legacy `v1.0`, `v1.1`, and `v1.2` pickle artifacts contain only the legacy pickled model state and do not bundle `incremental_linker/` artifacts.
-- Reference features have been removed from S2AND entirely; `papers.references` is ignored if present.
-- `v1.0` required reference features and is no longer usable with current S2AND.
-
-Historical minimal input shape for `v1.1`, `v1.2`, and `v1.21`:
-
-```json
-{
-  "paper_id": 12345,
-  "title": "My Paper Title",
-  "abstract": "Optional but useful.",
-  "year": 2023,
-  "venue": "Conference Name",
-  "journal_name": "Journal Name",
-  "authors": [
-    {"position": 0, "author_name": "Jane Smith"},
-    {"position": 1, "author_name": "John Doe"}
-  ]
-}
-```
-
-```json
-{
-  "signature_id": "0",
-  "paper_id": 12345,
-  "author_info": {
-    "position": 0,
-    "block": "j smith",
-    "first": "Jane",
-    "middle": null,
-    "last": "Smith",
-    "suffix": null,
-    "email": null,
-    "affiliations": ["University of Example"]
-  }
-}
-```
-
-Previous-release v1.21 Arrow prediction example (not runnable on this branch):
-
-```python
-import json
-from pathlib import Path
-
-import pyarrow as pa
-
-from s2and.production_model import load_production_model
-
-clusterer = load_production_model("s2and/data/production_model_v1.21")
-dataset_root = Path("s2and/data/qian")
-manifest = json.loads((dataset_root / "manifest.json").read_text())
-
-arrow_paths = {
-    key: str((dataset_root / Path(str(value).replace("\\", "/"))).resolve())
-    for key, value in manifest["paths"].items()
-}
-arrow_paths["specter"] = arrow_paths["specter2"]
-arrow_paths["specter_batch_index"] = arrow_paths["specter2_batch_index"]
-
-with pa.memory_map(arrow_paths["signatures"], "r") as source:
-    signatures = pa.ipc.open_file(source).read_all().to_pydict()
-
-block_dict = {}
-for signature_id, author_block in zip(signatures["signature_id"], signatures["author_block"]):
-    block_dict.setdefault(author_block, []).append(signature_id)
-
-pred_clusters, _ = clusterer.predict_from_arrow_paths(
-    block_dict,
-    arrow_paths,
-)
-```
-
-SPECTER embeddings can be sourced from the Semantic Scholar API. Use `embedding.specter_v2` with `v1.21`/`v1.2` and `embedding.specter_v1` with `v1.1`.
-
-Full inference details, large-block examples, and compatibility notes are in [docs/production_inference.md](docs/production_inference.md).
+Full inference and bundle publication details are in
+[docs/production_inference.md](docs/production_inference.md).
 
 ## Training and Evaluation Essentials
 
@@ -248,6 +114,7 @@ from os.path import join
 
 from hyperopt import hp
 
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
@@ -267,6 +134,7 @@ dataset = ANDData(
     test_pairs_size=10000,
     n_jobs=8,
     name=dataset_name,
+    name_counts_index=NAME_COUNTS_INDEX_PATH,
 )
 
 featurization_info = FeaturizationInfo()
@@ -297,9 +165,12 @@ For evaluation, model serialization, and fuller scripts such as `scripts/transfe
 
 Runtime controls:
 
-- `S2AND_BACKEND=auto` is the default. It uses Rust when capable, otherwise Python for stages that still have Python fallbacks.
-- `S2AND_BACKEND=rust` is strict Rust mode and fails fast on Rust-stage errors.
-- `S2AND_BACKEND=python` selects Python fallback stages where they exist. It does not remove the install-time Rust requirement, and native production model scoring still requires `s2and-rust`.
+- Unset `S2AND_BACKEND` means Python; the only accepted values are `python` and
+  `rust`.
+- Rust mode requires the exactly pinned `s2and-rust==0.60.0` extension and
+  fails explicitly if it is missing or different.
+- Public prediction routes are method-based: `ANDData` methods use Python and
+  `*_from_arrow_paths` methods use Rust.
 
 Cache behavior:
 
@@ -311,7 +182,9 @@ Cache behavior:
 Large blocks:
 
 - `predict(..., batching_threshold=...)` uses subblocking to keep full-block work bounded.
-- `predict_incremental(..., batching_threshold=...)` uses promoted Rust query batching when the Rust backend is active and cluster seeds are available. The Python fallback rejects `batching_threshold`; pass `None` or use the promoted Rust route.
+- `predict_incremental(...)` is the Python `ANDData` route and does not accept
+  query batching. Use `predict_incremental_from_arrow_paths(...,
+  batching_threshold=...)` for promoted Rust query batching.
 - Incremental results still include `phase_b_mode`; current supported routes report `exact`.
 - `total_ram_bytes` is the main memory-control knob for large inference jobs.
 

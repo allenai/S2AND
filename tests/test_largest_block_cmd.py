@@ -15,6 +15,7 @@ def test_run_single_arrow_rejects_python_backend(tmp_path: Path) -> None:
             block_key="a smith",
             n_jobs=1,
             profile_output_path=str(tmp_path / "profile.txt"),
+            model_path=str(tmp_path / "model"),
             input_format="arrow",
         )
 

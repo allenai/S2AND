@@ -42,9 +42,15 @@ The Arrow release stores runtime signatures, papers, paper authors, and SPECTER
 rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
 `embeddings/`, or precomputed `features_corrected/` directories.
 
-The previous production model bundle is checked into this repo under
-`s2and/data/production_model_v1.21/`. Canonical-v2 rejects it; it is retained as
-a migration and historical validation input until v1.3 replaces it.
+Both Arrow/Rust inference and Python `ANDData` consume the shared
+`name_counts_index/`. Python callers pass `NAME_COUNTS_INDEX_PATH` or an open
+`NameCountsIndex` handle; the historical name-count pickle is source-lineage
+material only and is never a runtime loader.
+
+The previous production model source bundle is checked into this repo under
+`s2and/data/production_model_v1.21/`. Canonical-v2 rejects it; it is retained
+only as an explicitly named migration and historical validation input until
+v1.3 replaces it.
 
 ## Previous production model bundle
 
@@ -64,9 +70,11 @@ The previous production model is a native bundle directory:
 See [production_inference.md](production_inference.md) for what each file is
 for.
 
-This bundle and older pickles are temporarily present in package data, but none
-is loadable by canonical-v2. After v1.3 passes the installed-wheel release gate,
-only the declared canonical default should remain in distributions.
+The source bundle is excluded from package data, the obsolete v1.0-v1.2 model
+pickles have been removed, and no default production model declaration is
+distributed during cutover. Evaluation and validation tools must receive an
+explicit model bundle path. After v1.3 passes the installed-wheel release gate,
+that validated bundle can become the declared packaged default.
 
 New production releases must be built as immutable native bundle directories with
 `scripts/production/model/train_pairwise.py` followed by

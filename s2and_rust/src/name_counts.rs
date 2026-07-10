@@ -1,7 +1,10 @@
 use memmap2::Mmap;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedStr;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -56,12 +59,41 @@ const NAME_COUNTS_INDEX_HASH_DOMAIN: &[u8] = b"s2and-name-counts-index-v1\0";
 const NAME_COUNTS_INDEX_HEADER_LEN: usize = 32;
 const NAME_COUNTS_INDEX_RECORD_LEN: usize = 40;
 
+struct NameCountCacheHasher(u64);
+
+impl Default for NameCountCacheHasher {
+    fn default() -> Self {
+        Self(FNV_OFFSET)
+    }
+}
+
+impl Hasher for NameCountCacheHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = fnv64_update(self.0, bytes);
+    }
+}
+
+type NameCountCache<'a> = HashMap<&'a str, f64, BuildHasherDefault<NameCountCacheHasher>>;
+
 pub(crate) struct RawNameCountIndex {
     first: RawNameCountIndexFile,
     last: RawNameCountIndexFile,
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
+    normalization_version: String,
     provenance_binding: Option<NameCountsProvenanceBinding>,
+}
+
+/// Python-facing, immutable handle over the four memory-mapped name-count
+/// indexes. Python validates artifact digests before opening this handle; the
+/// native opener validates the manifest schema and O(1) binary boundaries.
+#[pyclass(frozen)]
+pub(crate) struct NameCountsIndex {
+    index: RawNameCountIndex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +116,31 @@ struct RawNameCountIndexPaths {
 impl RawNameCountIndex {
     pub(crate) fn open(path: &str) -> PyResult<Self> {
         let paths = resolve_name_counts_index_paths(path)?;
+        Self::open_resolved(&paths)
+    }
+
+    /// Open and exhaustively validate every record for direct native artifact
+    /// boundaries that have no prior Python digest verification.
+    pub(crate) fn open_fully_validated(path: &str) -> PyResult<Self> {
+        let paths = resolve_name_counts_index_paths(path)?;
+        let index = Self::open_resolved(&paths)?;
+        index
+            .first
+            .validate_all_records(&paths.first, RawNameCountKind::First)?;
+        index
+            .last
+            .validate_all_records(&paths.last, RawNameCountKind::Last)?;
+        index
+            .first_last
+            .validate_all_records(&paths.first_last, RawNameCountKind::FirstLast)?;
+        index.last_first_initial.validate_all_records(
+            &paths.last_first_initial,
+            RawNameCountKind::LastFirstInitial,
+        )?;
+        Ok(index)
+    }
+
+    fn open_resolved(paths: &RawNameCountIndexPaths) -> PyResult<Self> {
         Ok(Self {
             first: RawNameCountIndexFile::open(&paths.first, RawNameCountKind::First)?,
             last: RawNameCountIndexFile::open(&paths.last, RawNameCountKind::Last)?,
@@ -95,7 +152,8 @@ impl RawNameCountIndex {
                 &paths.last_first_initial,
                 RawNameCountKind::LastFirstInitial,
             )?,
-            provenance_binding: paths.provenance_binding,
+            normalization_version: paths.normalization_version.clone(),
+            provenance_binding: paths.provenance_binding.clone(),
         })
     }
 
@@ -106,6 +164,278 @@ impl RawNameCountIndex {
             RawNameCountKind::FirstLast => self.first_last.get(kind, name),
             RawNameCountKind::LastFirstInitial => self.last_first_initial.get(kind, name),
         }
+    }
+}
+
+fn validate_lookup_column_lengths(lengths: [usize; 4]) -> PyResult<usize> {
+    let row_count = lengths[0];
+    if lengths.iter().any(|length| *length != row_count) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "name-count lookup columns must have equal length: first={} last={} first_last={} last_first_initial={}",
+            lengths[0], lengths[1], lengths[2], lengths[3]
+        )));
+    }
+    Ok(row_count)
+}
+
+fn lookup_name_count_column<S: AsRef<str>>(
+    index: &RawNameCountIndex,
+    kind: RawNameCountKind,
+    keys: &[Option<S>],
+) -> Vec<f64> {
+    lookup_name_count_column_with(keys, |key| index.get(kind, key).unwrap_or(1.0))
+}
+
+fn lookup_unique_name_count_column<S: AsRef<str>>(
+    index: &RawNameCountIndex,
+    kind: RawNameCountKind,
+    keys: &[Option<S>],
+) -> Vec<f64> {
+    lookup_unique_name_count_column_with(keys, |key| index.get(kind, key).unwrap_or(1.0))
+}
+
+fn lookup_unique_name_count_column_with<S, F>(keys: &[Option<S>], mut resolve: F) -> Vec<f64>
+where
+    S: AsRef<str>,
+    F: FnMut(&str) -> f64,
+{
+    keys.iter()
+        .map(|key| match key {
+            None => f64::NAN,
+            Some(key) => resolve(key.as_ref()),
+        })
+        .collect()
+}
+
+fn lookup_name_count_column_with<S, F>(keys: &[Option<S>], mut resolve: F) -> Vec<f64>
+where
+    S: AsRef<str>,
+    F: FnMut(&str) -> f64,
+{
+    // Batch-local borrowed keys avoid both repeated mmap searches and String
+    // copies. The map dies with this column task, so retained memory is
+    // proportional only to unique keys in the current batch.
+    let mut resolved = NameCountCache::default();
+    keys.iter()
+        .map(|key| match key {
+            None => f64::NAN,
+            Some(key) => {
+                let key = key.as_ref();
+                if let Some(value) = resolved.get(key) {
+                    *value
+                } else {
+                    let value = resolve(key);
+                    resolved.insert(key, value);
+                    value
+                }
+            }
+        })
+        .collect()
+}
+
+fn lookup_name_count_columns<S: AsRef<str> + Sync>(
+    index: &RawNameCountIndex,
+    first_keys: &[Option<S>],
+    last_keys: &[Option<S>],
+    first_last_keys: &[Option<S>],
+    last_first_initial_keys: &[Option<S>],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    // Four column tasks are enough to saturate this random mmap lookup. Avoid
+    // per-column parallel iterators: they add scheduling overhead and contend
+    // for the same index pages without exposing more independent work.
+    let ((first, last), (first_last, last_first_initial)) = rayon::join(
+        || {
+            rayon::join(
+                || lookup_name_count_column(index, RawNameCountKind::First, first_keys),
+                || lookup_name_count_column(index, RawNameCountKind::Last, last_keys),
+            )
+        },
+        || {
+            rayon::join(
+                || lookup_name_count_column(index, RawNameCountKind::FirstLast, first_last_keys),
+                || {
+                    lookup_name_count_column(
+                        index,
+                        RawNameCountKind::LastFirstInitial,
+                        last_first_initial_keys,
+                    )
+                },
+            )
+        },
+    );
+    (first, last, first_last, last_first_initial)
+}
+
+fn lookup_unique_name_count_columns<S: AsRef<str> + Sync>(
+    index: &RawNameCountIndex,
+    first_keys: &[Option<S>],
+    last_keys: &[Option<S>],
+    first_last_keys: &[Option<S>],
+    last_first_initial_keys: &[Option<S>],
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let ((first, last), (first_last, last_first_initial)) = rayon::join(
+        || {
+            rayon::join(
+                || lookup_unique_name_count_column(index, RawNameCountKind::First, first_keys),
+                || lookup_unique_name_count_column(index, RawNameCountKind::Last, last_keys),
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    lookup_unique_name_count_column(
+                        index,
+                        RawNameCountKind::FirstLast,
+                        first_last_keys,
+                    )
+                },
+                || {
+                    lookup_unique_name_count_column(
+                        index,
+                        RawNameCountKind::LastFirstInitial,
+                        last_first_initial_keys,
+                    )
+                },
+            )
+        },
+    );
+    (first, last, first_last, last_first_initial)
+}
+
+impl NameCountsIndex {
+    fn lookup_many_impl<'py>(
+        &self,
+        py: Python<'py>,
+        first_keys: Vec<Option<PyBackedStr>>,
+        last_keys: Vec<Option<PyBackedStr>>,
+        first_last_keys: Vec<Option<PyBackedStr>>,
+        last_first_initial_keys: Vec<Option<PyBackedStr>>,
+        keys_are_unique: bool,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+    )> {
+        validate_lookup_column_lengths([
+            first_keys.len(),
+            last_keys.len(),
+            first_last_keys.len(),
+            last_first_initial_keys.len(),
+        ])?;
+        let index = &self.index;
+        // PyBackedStr holds the Python strings without allocating Rust String
+        // copies and is Send + Sync. Borrow the columns into the no-GIL region
+        // so their Python owners are dropped only after the GIL is reacquired.
+        let (first, last, first_last, last_first_initial) = py.allow_threads(|| {
+            if keys_are_unique {
+                lookup_unique_name_count_columns(
+                    index,
+                    &first_keys,
+                    &last_keys,
+                    &first_last_keys,
+                    &last_first_initial_keys,
+                )
+            } else {
+                lookup_name_count_columns(
+                    index,
+                    &first_keys,
+                    &last_keys,
+                    &first_last_keys,
+                    &last_first_initial_keys,
+                )
+            }
+        });
+        use numpy::IntoPyArray;
+        Ok((
+            first.into_pyarray(py),
+            last.into_pyarray(py),
+            first_last.into_pyarray(py),
+            last_first_initial.into_pyarray(py),
+        ))
+    }
+}
+
+#[pymethods]
+impl NameCountsIndex {
+    /// Open a manifest-backed name-count index. Callers at the Python artifact
+    /// boundary must verify file digests before constructing this mmap handle.
+    #[staticmethod]
+    fn open(path: &str) -> PyResult<Self> {
+        Ok(Self {
+            index: RawNameCountIndex::open(path)?,
+        })
+    }
+
+    #[getter]
+    fn normalization_version(&self) -> &str {
+        &self.index.normalization_version
+    }
+
+    /// Return the exact four-field model-binding tuple used by RustFeaturizer.
+    #[getter]
+    fn name_counts_provenance_binding(&self) -> Option<(String, String, String, String)> {
+        self.index.provenance_binding.as_ref().map(|binding| {
+            (
+                binding.generation_id.clone(),
+                binding.pickle_sha256.clone(),
+                binding.source_snapshot_id.clone(),
+                binding.selected_rows_sha256.clone(),
+            )
+        })
+    }
+
+    /// Resolve four aligned optional-key columns into float64 count arrays.
+    ///
+    /// A missing key (`None`) produces NaN. An informative string absent from
+    /// its index produces the historical default count of 1.0.
+    fn lookup_many<'py>(
+        &self,
+        py: Python<'py>,
+        first_keys: Vec<Option<PyBackedStr>>,
+        last_keys: Vec<Option<PyBackedStr>>,
+        first_last_keys: Vec<Option<PyBackedStr>>,
+        last_first_initial_keys: Vec<Option<PyBackedStr>>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+    )> {
+        self.lookup_many_impl(
+            py,
+            first_keys,
+            last_keys,
+            first_last_keys,
+            last_first_initial_keys,
+            false,
+        )
+    }
+
+    /// Internal fast path for Python callers that already deduplicated each
+    /// column. Values and ordering follow `lookup_many`; duplicate inputs are
+    /// accepted but deliberately receive no native caching.
+    fn _lookup_many_unique<'py>(
+        &self,
+        py: Python<'py>,
+        first_keys: Vec<Option<PyBackedStr>>,
+        last_keys: Vec<Option<PyBackedStr>>,
+        first_last_keys: Vec<Option<PyBackedStr>>,
+        last_first_initial_keys: Vec<Option<PyBackedStr>>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray1<f64>>,
+    )> {
+        self.lookup_many_impl(
+            py,
+            first_keys,
+            last_keys,
+            first_last_keys,
+            last_first_initial_keys,
+            true,
+        )
     }
 }
 
@@ -185,7 +515,20 @@ impl RawNameCountIndexFile {
                 path.display()
             )));
         }
-        for index in 0..record_count {
+        Ok(Self {
+            mmap,
+            record_count,
+            blob_offset,
+            blob_len,
+        })
+    }
+
+    /// Exhaustively validate every record and the global hash-pair ordering.
+    /// The Python handle skips this O(N) scan after digest verification;
+    /// direct native Arrow ingestion calls it at its artifact boundary.
+    fn validate_all_records(&self, path: &Path, kind: RawNameCountKind) -> PyResult<()> {
+        let bytes: &[u8] = &self.mmap;
+        for index in 0..self.record_count {
             let record_offset = NAME_COUNTS_INDEX_HEADER_LEN + index * NAME_COUNTS_INDEX_RECORD_LEN;
             let name_offset_raw = read_u64_le_unchecked(bytes, record_offset + 16);
             let name_offset = usize::try_from(name_offset_raw).map_err(|_| {
@@ -206,7 +549,7 @@ impl RawNameCountIndexFile {
                     kind.key()
                 ))
             })?;
-            if name_end > blob_len {
+            if name_end > self.blob_len {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "name-count index file {} record {} for kind {} has name range [{}, {}) outside blob length {}",
                     path.display(),
@@ -214,11 +557,11 @@ impl RawNameCountIndexFile {
                     kind.key(),
                     name_offset,
                     name_end,
-                    blob_len
+                    self.blob_len
                 )));
             }
         }
-        if record_count > 1 {
+        if self.record_count > 1 {
             let read_pair = |index: usize| {
                 let offset = NAME_COUNTS_INDEX_HEADER_LEN + index * NAME_COUNTS_INDEX_RECORD_LEN;
                 (
@@ -228,7 +571,7 @@ impl RawNameCountIndexFile {
             };
             let mut previous_index = 0usize;
             let mut previous_pair = read_pair(0);
-            for index in 1..record_count {
+            for index in 1..self.record_count {
                 let pair = read_pair(index);
                 if pair < previous_pair {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -245,12 +588,14 @@ impl RawNameCountIndexFile {
                 previous_pair = pair;
             }
         }
-        Ok(Self {
-            mmap,
-            record_count,
-            blob_offset,
-            blob_len,
-        })
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn open_fully_validated(path: &Path, kind: RawNameCountKind) -> PyResult<Self> {
+        let index = Self::open(path, kind)?;
+        index.validate_all_records(path, kind)?;
+        Ok(index)
     }
 
     fn record_offset(&self, index: usize) -> usize {
@@ -268,23 +613,27 @@ impl RawNameCountIndexFile {
     fn get(&self, kind: RawNameCountKind, name: &str) -> Option<f64> {
         let name_bytes = name.as_bytes();
         let (hash_1, hash_2) = name_counts_index_hashes(kind, name_bytes);
+        let target_pair = (hash_1, hash_2);
         let mut lower = 0usize;
         let mut upper = self.record_count;
         while lower < upper {
             let middle = lower + (upper - lower) / 2;
-            let (middle_hash_1, middle_hash_2) = self.record_hash_pair(middle);
-            if middle_hash_1 < hash_1 || (middle_hash_1 == hash_1 && middle_hash_2 < hash_2) {
+            if self.record_hash_pair(middle) < target_pair {
                 lower = middle + 1;
             } else {
                 upper = middle;
             }
         }
-
         let mut index = lower;
         while index < self.record_count {
             let (record_hash_1, record_hash_2) = self.record_hash_pair(index);
-            if record_hash_1 != hash_1 || record_hash_2 != hash_2 {
+            let record_pair = (record_hash_1, record_hash_2);
+            if record_pair > target_pair {
                 break;
+            }
+            if record_pair < target_pair {
+                index += 1;
+                continue;
             }
             let offset = self.record_offset(index);
             let name_offset = match usize::try_from(read_u64_le_unchecked(&self.mmap, offset + 16))
@@ -556,11 +905,15 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 }
 
 #[cfg(test)]
-mod normalization_version_tests {
+mod name_counts_tests {
     use super::{
+        lookup_name_count_column, lookup_name_count_column_with,
+        lookup_unique_name_count_column_with, name_counts_index_hashes,
         read_name_counts_index_normalization_version, read_name_counts_provenance_binding,
+        validate_lookup_column_lengths, RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind,
     };
-    use std::io::Write;
+    use std::collections::HashMap;
+    use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // A valid 32-byte name-count index header describing zero records; the
@@ -572,15 +925,20 @@ mod normalization_version_tests {
         bytes
     }
 
-    fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = format!(
-            "s2and_nc_version_{}_{}",
+            "{prefix}_{}_{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let dir = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&dir).expect("create temp index dir");
+        dir
+    }
+
+    fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {
+        let dir = unique_temp_dir("s2and_nc_version");
         for name in ["first", "last", "first_last", "last_first_initial"] {
             let mut file =
                 std::fs::File::create(dir.join(format!("{name}.bin"))).expect("create index file");
@@ -600,6 +958,86 @@ mod normalization_version_tests {
             version_field
         );
         std::fs::write(dir.join("manifest.json"), manifest).expect("write manifest");
+        dir
+    }
+
+    fn write_index_file(path: &std::path::Path, kind: RawNameCountKind, values: &[(&str, f64)]) {
+        let mut records = values
+            .iter()
+            .map(|(name, count)| {
+                let name_bytes = name.as_bytes().to_vec();
+                let hashes = name_counts_index_hashes(kind, &name_bytes);
+                (hashes, name_bytes, *count)
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let blob_offset = 32 + records.len() * 40;
+        let blob_len = records.iter().map(|record| record.1.len()).sum::<usize>();
+        let mut output = Vec::with_capacity(blob_offset + blob_len);
+        output.extend_from_slice(b"S2NCI001");
+        output.extend_from_slice(&(records.len() as u64).to_le_bytes());
+        output.extend_from_slice(&(blob_offset as u64).to_le_bytes());
+        output.extend_from_slice(&(blob_len as u64).to_le_bytes());
+        let mut name_offset = 0usize;
+        for ((hash_1, hash_2), name, count) in &records {
+            output.extend_from_slice(&hash_1.to_le_bytes());
+            output.extend_from_slice(&hash_2.to_le_bytes());
+            output.extend_from_slice(&(name_offset as u64).to_le_bytes());
+            output.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            output.extend_from_slice(&0u32.to_le_bytes());
+            output.extend_from_slice(&count.to_le_bytes());
+            name_offset += name.len();
+        }
+        for (_hashes, name, _count) in records {
+            output.extend_from_slice(&name);
+        }
+        std::fs::write(path, output).expect("write lookup index");
+    }
+
+    fn write_lookup_artifact() -> std::path::PathBuf {
+        let dir = unique_temp_dir("s2and_nc_lookup");
+        write_index_file(
+            &dir.join("first.bin"),
+            RawNameCountKind::First,
+            &[("alice", 7.0), ("élodie", 3.0)],
+        );
+        write_index_file(
+            &dir.join("last.bin"),
+            RawNameCountKind::Last,
+            &[("smith", 11.0)],
+        );
+        write_index_file(
+            &dir.join("first_last.bin"),
+            RawNameCountKind::FirstLast,
+            &[("alice smith", 5.0)],
+        );
+        write_index_file(
+            &dir.join("last_first_initial.bin"),
+            RawNameCountKind::LastFirstInitial,
+            &[("smith a", 9.0)],
+        );
+        let manifest = serde_json::json!({
+            "schema_version": "name_counts_index_v1",
+            "normalization_version": "canonical_v2",
+            "source_provenance": {
+                "schema_version": "name_counts_provenance_v1",
+                "generation_id": "generation-a",
+                "pickle_sha256": "0".repeat(64),
+                "source_snapshot_id": "snapshot-a",
+                "selected_rows_sha256": "1".repeat(64),
+            },
+            "files": {
+                "first": {"path": "first.bin"},
+                "last": {"path": "last.bin"},
+                "first_last": {"path": "first_last.bin"},
+                "last_first_initial": {"path": "last_first_initial.bin"},
+            },
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write lookup manifest");
         dir
     }
 
@@ -654,6 +1092,157 @@ mod normalization_version_tests {
                 .expect_err("invalid digest must fail");
 
         assert!(py_err_message(error).contains("lowercase SHA-256 pickle_sha256"));
+    }
+
+    #[test]
+    fn column_lookup_preserves_missing_unknown_and_exact_utf8_semantics() {
+        let dir = write_lookup_artifact();
+        let index = RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path"))
+            .expect("open lookup index");
+
+        let values = lookup_name_count_column(
+            &index,
+            RawNameCountKind::First,
+            &[
+                Some("alice".to_string()),
+                Some("unknown".to_string()),
+                None,
+                Some("élodie".to_string()),
+                Some("elodie".to_string()),
+            ],
+        );
+
+        drop(index);
+        std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
+        assert_eq!(values[0], 7.0);
+        assert_eq!(values[1], 1.0);
+        assert!(values[2].is_nan());
+        assert_eq!(values[3], 3.0);
+        assert_eq!(values[4], 1.0);
+    }
+
+    #[test]
+    fn column_lookup_deduplicates_repeated_known_unknown_and_utf8_keys() {
+        let utf8_key = "\u{00e9}lodie".to_string();
+        let keys = vec![
+            Some("known".to_string()),
+            Some("known".to_string()),
+            Some("unknown".to_string()),
+            Some("unknown".to_string()),
+            Some(utf8_key.clone()),
+            Some(utf8_key),
+            None,
+        ];
+        let mut calls = HashMap::<String, usize>::new();
+
+        let values = lookup_name_count_column_with(&keys, |key| {
+            *calls.entry(key.to_string()).or_default() += 1;
+            match key {
+                "known" => 7.0,
+                "\u{00e9}lodie" => 3.0,
+                _ => 1.0,
+            }
+        });
+
+        assert_eq!(values[0..6], [7.0, 7.0, 1.0, 1.0, 3.0, 3.0]);
+        assert!(values[6].is_nan());
+        assert_eq!(calls.len(), 3);
+        assert!(calls.values().all(|count| *count == 1));
+    }
+
+    #[test]
+    fn unique_column_lookup_preserves_values_without_redundant_cache() {
+        let utf8_key = "\u{00e9}lodie".to_string();
+        let keys = vec![
+            Some("known".to_string()),
+            Some("known".to_string()),
+            Some("unknown".to_string()),
+            Some("unknown".to_string()),
+            Some(utf8_key.clone()),
+            Some(utf8_key),
+            None,
+        ];
+        let mut calls = Vec::<String>::new();
+
+        let values = lookup_unique_name_count_column_with(&keys, |key| {
+            calls.push(key.to_string());
+            match key {
+                "known" => 7.0,
+                "\u{00e9}lodie" => 3.0,
+                _ => 1.0,
+            }
+        });
+
+        assert_eq!(values[0..6], [7.0, 7.0, 1.0, 1.0, 3.0, 3.0]);
+        assert!(values[6].is_nan());
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.iter().filter(|key| *key == "known").count(), 2);
+        assert_eq!(calls.iter().filter(|key| *key == "unknown").count(), 2);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|key| key.as_str() == "\u{00e9}lodie")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn lookup_columns_reject_misaligned_rows_before_access() {
+        assert_eq!(validate_lookup_column_lengths([2, 2, 2, 2]).unwrap(), 2);
+        let error =
+            validate_lookup_column_lengths([2, 1, 2, 2]).expect_err("misaligned columns must fail");
+        let message = py_err_message(error);
+        assert!(message.contains("must have equal length"), "{message}");
+        assert!(message.contains("first=2 last=1"), "{message}");
+    }
+
+    #[test]
+    fn open_retains_manifest_normalization_and_provenance_binding() {
+        let dir = write_lookup_artifact();
+        let index = RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path"))
+            .expect("open lookup index");
+
+        assert_eq!(index.normalization_version, "canonical_v2");
+        let binding = index
+            .provenance_binding
+            .as_ref()
+            .expect("provenance binding");
+        assert_eq!(binding.generation_id, "generation-a");
+        assert_eq!(binding.pickle_sha256, "0".repeat(64));
+        assert_eq!(binding.source_snapshot_id, "snapshot-a");
+        assert_eq!(binding.selected_rows_sha256, "1".repeat(64));
+        drop(index);
+        std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
+    }
+
+    #[test]
+    fn explicit_full_validation_rejects_corrupt_record_name_range() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open index for corruption");
+        file.seek(SeekFrom::Start((32 + 16) as u64))
+            .expect("seek to first name offset");
+        file.write_all(&u64::MAX.to_le_bytes())
+            .expect("write corrupt name offset");
+        drop(file);
+
+        // The production opener deliberately performs only O(1) structural
+        // checks after Python has verified the immutable file digest.
+        let structurally_valid = RawNameCountIndexFile::open(&path, RawNameCountKind::First)
+            .expect("header remains structurally valid");
+        drop(structurally_valid);
+        let error =
+            match RawNameCountIndexFile::open_fully_validated(&path, RawNameCountKind::First) {
+                Ok(_) => panic!("full corruption validation must reject the invalid record"),
+                Err(error) => error,
+            };
+        let message = py_err_message(error);
+        assert!(message.contains("name range overflows"), "{message}");
+        std::fs::remove_dir_all(&dir).expect("remove corrupt lookup artifact");
     }
 
     #[test]

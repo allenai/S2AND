@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v1"
+PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v2"
 PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION = "pairwise_prediction_fixture_v1"
+PAIRWISE_METADATA_SCHEMA_VERSION = "s2and_pairwise_native_lightgbm_v2"
+CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v2"
 
 PAIRWISE_ONLY_MANIFEST_FILES = {
     "clusterer_config": "clusterer.json",

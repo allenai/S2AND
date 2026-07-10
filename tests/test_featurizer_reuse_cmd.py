@@ -11,5 +11,6 @@ def test_run_reuse_profile_rejects_unknown_input_format() -> None:
             dataset_name="kisti",
             n_jobs=1,
             repeats=1,
+            model_path="model",
             input_format="parquet",
         )

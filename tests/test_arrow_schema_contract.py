@@ -20,7 +20,6 @@ EXPECTED_REQUIRED_COLUMNS = {
         "author_last",
         "author_suffix",
         "author_affiliations",
-        "author_orcid",
         "author_position",
     },
     "specter": {"paper_id", "embedding"},

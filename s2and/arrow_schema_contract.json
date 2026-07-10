@@ -36,7 +36,7 @@
       {"name": "author_last", "datatype": "string", "required": true},
       {"name": "author_suffix", "datatype": "string", "required": true},
       {"name": "author_affiliations", "datatype": "list<string>", "required": true},
-      {"name": "author_orcid", "datatype": "string", "required": true},
+      {"name": "author_orcid", "datatype": "string", "required": false},
       {"name": "author_position", "datatype": "int64", "required": true},
       {"name": "author_block", "datatype": "string", "required": false},
       {"name": "author_email", "datatype": "string", "required": false},

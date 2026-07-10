@@ -29,28 +29,28 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from s2and.arrow_inputs import (
     require_normalization_version,
-    validate_arrow_prediction_artifacts,
+    validate_arrow_training_artifacts,
     verified_arrow_artifact_generation,
 )
-from s2and.data import (
-    NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-    ANDData,
-    _validated_name_counts_provenance,
-)
+from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import (
     _arrow_rows_by_unique_key,
     _read_arrow_ipc_table,
     _require_arrow_columns,
 )
-from s2and.runtime import RUST_FEATURIZER_ARROW_PATHS_ATTR, dataset_stage_uses_rust
+from s2and.name_counts_index import validated_name_counts_provenance
 
 logger = logging.getLogger("s2and")
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _REQUIRED_TABLE_KEYS = ("signatures", "papers", "paper_authors")
 
@@ -221,47 +221,16 @@ def load_specter_tuple_from_arrow(path: str | Path) -> tuple[np.ndarray, list[st
     return matrix, keys
 
 
-def attach_training_arrow_featurizer_paths(
+def _bind_training_arrow_paths(
     dataset: ANDData,
-    arrow_paths: Mapping[str, Any],
-    *,
-    expected_normalization_version: str,
-) -> dict[str, str]:
-    """Validate and attach Arrow paths so featurization uses ``from_arrow_paths``.
+    normalized_paths: Mapping[str, str],
+) -> None:
+    """Bind one already-verified immutable generation to an ``ANDData``."""
 
-    Requires the raw-planner batch indexes and the ``name_counts_index/``
-    sidecar because training featurization loads name counts in Rust.
-    """
-
-    expected_version = require_normalization_version(
-        expected_normalization_version,
-        context="arrow-native training attachment",
-    )
-    semantics = getattr(dataset, "name_counts_last_first_initial_semantics", None)
-    if semantics != NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
-        raise ValueError(
-            "Arrow-backed featurization requires name_counts_last_first_initial_semantics="
-            f"{NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR!r}, got {semantics!r}"
-        )
-    path_keys = {str(key) for key in arrow_paths}
-    normalized = validate_arrow_prediction_artifacts(
-        arrow_paths,
-        require_specter="specter" in path_keys or "specter2" in path_keys,
-        require_name_counts_index=True,
-        require_batch_indexes=True,
-        strict_batch_index_validation=True,
-        expected_normalization_version=expected_version,
-        require_canonical_manifest=True,
-        context="arrow-native training featurization",
-        producer_hint=(
-            "write the training bundle with signatures/papers/paper_authors tables, raw-planner "
-            "batch indexes (write_raw_arrow_batch_lookup_indexes), specter, and the "
-            "name_counts_index sidecar (write_name_counts_index)"
-        ),
-    )
+    normalized = dict(normalized_paths)
     normalized.pop("query_signatures", None)
     index_manifest = json.loads((Path(normalized["name_counts_index"]) / "manifest.json").read_text(encoding="utf-8"))
-    dataset.name_counts_provenance = _validated_name_counts_provenance(
+    dataset.name_counts_provenance = validated_name_counts_provenance(
         index_manifest.get("source_provenance"),
         context="arrow-native training name_counts_index",
     )
@@ -272,25 +241,11 @@ def attach_training_arrow_featurizer_paths(
     from s2and import feature_port
 
     feature_port.evict_rust_featurizer(dataset)
-    setattr(dataset, RUST_FEATURIZER_ARROW_PATHS_ATTR, normalized)
-    setattr(dataset, feature_port.RUST_FEATURIZER_NORMALIZATION_VERSION_ATTR, expected_version)
     verified_generation = verified_arrow_artifact_generation(normalized)
     if verified_generation is None:
-        # Legacy/ad-hoc bundles have no immutable full-digest inventory. Their
-        # cache key must fingerprint the material files on every lookup.
-        if hasattr(dataset, feature_port.RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR):
-            delattr(dataset, feature_port.RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR)
-    else:
-        setattr(
-            dataset,
-            feature_port.RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR,
-            verified_generation,
-        )
-    # Rust production prediction (Clusterer.predict / cluster_eval) resolves
-    # explicit dataset.arrow_paths; an Arrow-ingested training dataset carries
-    # the same artifacts, so expose them for prediction too.
-    dataset.arrow_paths = dict(normalized)
-    return normalized
+        raise RuntimeError("validated Arrow training profile did not retain an artifact generation")
+    dataset.arrow_paths = MappingProxyType(normalized)
+    dataset.arrow_artifact_generation = verified_generation
 
 
 def build_training_anddata_from_arrow(
@@ -299,31 +254,23 @@ def build_training_anddata_from_arrow(
     *,
     expected_normalization_version: str,
     clusters: str | dict | None = None,
-    mode: str = "train",
-    load_name_counts: bool | dict = False,
-    attach_rust_featurizer: bool = True,
-    load_python_specter: bool | None = None,
-    **anddata_kwargs: Any,
+    train_pairs: str | pd.DataFrame | None = None,
+    val_pairs: str | pd.DataFrame | None = None,
+    test_pairs: str | pd.DataFrame | None = None,
+    block_type: str = "s2",
+    train_pairs_size: int = 30_000,
+    val_pairs_size: int = 5_000,
+    test_pairs_size: int = 5_000,
+    random_seed: int = 1111,
+    n_jobs: int = 1,
+    preprocess: bool = True,
+    name_tuples: set[tuple[str, str]] | str | None = "filtered",
 ) -> ANDData:
-    """Build a train-mode ``ANDData`` from Arrow artifacts.
+    """Build a fully initialized Rust-backed train ``ANDData``.
 
-    ``arrow_paths`` must contain at least ``signatures``, ``papers``, and
-    ``paper_authors`` (``specter`` strongly recommended); with
-    ``attach_rust_featurizer=True`` (default) it must also carry the batch
-    indexes and ``name_counts_index`` so featurization can run through
-    ``RustFeaturizer.from_arrow_paths``. Ground-truth ``clusters`` (or fixed
-    train/val/test pairs via ``anddata_kwargs``) come from JSON exactly as in
-    the JSON training path.
-
-    ``load_name_counts`` defaults to False because the Rust featurizer reads
-    name counts from the ``name_counts_index`` sidecar; pass True (or a dict)
-    only if Python-side per-signature name counts are needed (e.g. for the
-    Python reference featurizer).
-
-    ``load_python_specter`` defaults to whether Python featurization will be
-    used for the resolved dataset runtime. Rust-backed datasets read the
-    embedding Arrow table directly; Python-backed datasets need the embeddings
-    loaded into ``dataset.specter_embeddings``.
+    The bundle must include raw-planner indexes and ``name_counts_index``.
+    Python SPECTER and name-count values are never materialized; Rust reads
+    them directly from the one immutable ``dataset.arrow_paths`` mapping.
     """
 
     expected_version = require_normalization_version(
@@ -332,60 +279,47 @@ def build_training_anddata_from_arrow(
     )
     ingest_start = time.perf_counter()
     path_keys = {str(key) for key in arrow_paths}
-    normalized_arrow_paths = validate_arrow_prediction_artifacts(
+    normalized_arrow_paths = validate_arrow_training_artifacts(
         arrow_paths,
         require_specter="specter" in path_keys or "specter2" in path_keys,
-        require_name_counts_index=False,
-        require_batch_indexes=False,
+        require_name_counts_index=True,
         expected_normalization_version=expected_version,
-        require_canonical_manifest=True,
         context="arrow-native training ingestion",
-        producer_hint="include signatures, papers, paper_authors, and optional specter/specter2 Arrow tables",
+        producer_hint=(
+            "include signatures, papers, paper_authors, raw-planner batch indexes, "
+            "name_counts_index, and model-required specter"
+        ),
     )
     signatures = load_signatures_dict_from_arrow(normalized_arrow_paths["signatures"])
     papers = load_papers_dict_from_arrow(normalized_arrow_paths["papers"], normalized_arrow_paths["paper_authors"])
-    specter = (
-        load_specter_tuple_from_arrow(normalized_arrow_paths["specter"])
-        if (load_python_specter is True and normalized_arrow_paths.get("specter"))
-        else None
-    )
 
     dataset = ANDData(
         signatures=signatures,
         papers=papers,
         name=name,
-        mode=mode,
+        mode="train",
         clusters=clusters,
-        specter_embeddings=specter,
-        load_name_counts=load_name_counts,
-        rust_arrow_featurization=attach_rust_featurizer,
-        **anddata_kwargs,
+        specter_embeddings=None,
+        name_counts_index=None,
+        rust_arrow_featurization=True,
+        train_pairs=train_pairs,
+        val_pairs=val_pairs,
+        test_pairs=test_pairs,
+        block_type=block_type,
+        train_pairs_size=train_pairs_size,
+        val_pairs_size=val_pairs_size,
+        test_pairs_size=test_pairs_size,
+        random_seed=random_seed,
+        n_jobs=n_jobs,
+        preprocess=preprocess,
+        name_tuples=name_tuples,
     )
-    if attach_rust_featurizer:
-        attach_training_arrow_featurizer_paths(
-            dataset,
-            normalized_arrow_paths,
-            expected_normalization_version=expected_version,
-        )
-    if load_python_specter is None:
-        rust_featurization_active = bool(
-            attach_rust_featurizer and dataset_stage_uses_rust(dataset.runtime_context, dataset)
-        )
-        load_python_specter = not rust_featurization_active
-    if load_python_specter and specter is None and normalized_arrow_paths.get("specter"):
-        specter = load_specter_tuple_from_arrow(normalized_arrow_paths["specter"])
-        loaded_specter = ANDData.maybe_load_specter(specter)
-        needed_keys = set(dataset.papers.keys())
-        dataset.specter_embeddings = {
-            key: value for key, value in (loaded_specter or {}).items() if str(key) in needed_keys
-        }
+    _bind_training_arrow_paths(dataset, normalized_arrow_paths)
     logger.debug(
-        "Telemetry stage: stage=arrow_training_ingest seconds=%.3f signatures=%d papers=%d specter=%s "
-        "python_specter_loaded=%s",
+        "Telemetry stage: stage=arrow_training_ingest seconds=%.3f signatures=%d papers=%d specter=%s",
         time.perf_counter() - ingest_start,
         len(signatures),
         len(papers),
         "yes" if normalized_arrow_paths.get("specter") else "no",
-        "yes" if specter is not None else "no",
     )
     return dataset

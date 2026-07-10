@@ -21,9 +21,9 @@
   and reference surface.
 - Promoted query-disallow resolution is request-global and deterministic:
   require-forced decisions first, then descending initial score, then signature
-  ID. Component-aware packing and bounded replay preserve outcomes across input
-  permutations and batch/window sizes. Outcome telemetry is invariant; physical
-  batch telemetry may vary with the RAM plan.
+  ID. Component-aware packing and complete single-query rescoring preserve
+  outcomes across input permutations and batch/window sizes. Outcome telemetry
+  is invariant; physical batch telemetry may vary with the RAM plan.
 - Promoted RAM limits are refreshed after planner, featurizer, and scorer
   allocations. Oversized work is discarded and re-planned before scoring. The
   native LightGBM path consumes contiguous float32 features and uses budgeted
@@ -79,15 +79,22 @@
   production bundles; those v1.3 bundle-schema decisions require owner
   approval. Canonical tuple regeneration is metadata-last and fail-closed, but
   true crash-atomic replacement would also require a generation-pointer layout.
-  Explicit caller-supplied `ANDData(load_name_counts={...})` remains a mutable
-  test/training seam and is rejected by production raw scoring; replacing that
-  public seam with a verified immutable handle requires separate API approval.
+  Python `ANDData` now accepts a validated `name_counts_index` path or shared
+  immutable `NameCountsIndex` handle. The caller-owned dictionary seam, legacy
+  pickle loader, and process-wide Python count dictionaries are removed.
+  Preprocessing resolves counts in bounded native batches and retains only four
+  scalar values per signature. The v1 `pickle_sha256` provenance field remains
+  source-lineage metadata until the model contract is versioned; runtime never
+  opens that pickle.
 - Local code-now performance gates stayed inside the requested envelope. The
   specialized float32 scorer improved throughput by 26.8-34.9% while removing
-  roughly 74% of per-call RSS; retained model RSS rose 7.0-7.39%. Read-only
-  million-entry name-count views cost 4.06% lookup throughput and only 40 bytes
-  per view. Deterministic ORCID JSON publication improved 300k-record
-  throughput by 713% and reduced incremental peak RSS by 13.5%.
+  roughly 74% of per-call RSS; retained model RSS rose 7.0-7.39%. On all 40,383
+  KISTI signatures, mmap-index count materialization kept Python signature
+  preprocessing within the gate (median +7.1%, best-run +9.0%) while replacing
+  3.390 GiB retained / 3.885 GiB peak historical dictionaries with a 0.52 MB
+  native open and 197.4 MB lookup-benchmark peak. Exact count-output digests
+  match. Deterministic ORCID JSON publication improved 300k-record throughput
+  by 713% and reduced incremental peak RSS by 13.5%.
 
 ## 0.51.1
 

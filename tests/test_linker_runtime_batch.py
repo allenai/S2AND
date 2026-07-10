@@ -18,7 +18,6 @@ from tests.linker_row_feature_reference import build_promoted_non_pairwise_row_f
 
 _HAS_RUST_RETRIEVER, _RUST_RETRIEVER_PAYLOAD = import_s2and_rust(
     required_module_attrs=("RustHybridCentroidRetriever",),
-    prefer_site_packages=True,
 )
 if not _HAS_RUST_RETRIEVER:
     raise pytest.skip.Exception(

@@ -14,26 +14,30 @@ Compare mode uses legacy JSON/ANDData paths for reference parity only.
 
 Usage:
     # Legacy JSON/ANDData reference compare:
-    uv run python scripts/rust_suite.py largest-block --mode compare
+    uv run python scripts/rust_suite.py largest-block --mode compare \
+        --model-path scratch/production_model_vX.Y
 
     # Specify dataset and block manually:
     uv run python scripts/rust_suite.py largest-block --mode compare \
-        --dataset aminer --block "j wang"
+        --model-path scratch/production_model_vX.Y --dataset aminer --block "j wang"
 
     # Production-style Arrow/Rust single backend run:
     uv run python scripts/rust_suite.py largest-block --mode single \
+        --model-path scratch/production_model_vX.Y \
         --backend rust --input-format arrow --dataset aminer --block "j wang"
 
     # Limit block size (use first N signatures from the block):
     uv run python scripts/rust_suite.py largest-block --mode compare \
-        --max-block-size 1000
+        --model-path scratch/production_model_vX.Y --max-block-size 1000
 
     # Add block-level quality metrics (requires clusters.json):
     uv run python scripts/rust_suite.py largest-block --mode compare \
+        --model-path scratch/production_model_vX.Y \
         --dataset aminer --block "j wang" --quality-check
 
     # Sample constraint parity (python vs rust constraints on the same dataset instance):
     uv run python scripts/rust_suite.py largest-block --mode compare \
+        --model-path scratch/production_model_vX.Y \
         --dataset aminer --block "j wang" --constraint-sample 50000 --constraint-sample-seed 43
 """
 
@@ -78,7 +82,6 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("largest_block")
 DATA_DIR = PROJECT_ROOT / "s2and" / "data"
-DEFAULT_MODEL_PATH = str(DATA_DIR / "production_model_v1.21")
 DEFAULT_ARROW_DATA_ROOT = str(DATA_DIR)
 DEFAULT_SPECTER_SUFFIX = "_specter2.pkl"
 DEFAULT_ARROW_TOTAL_RAM_BYTES = 1_000_000_000_000
@@ -308,7 +311,7 @@ def _run_single(
     block_key: str,
     n_jobs: int,
     profile_output_path: str,
-    model_path: str = DEFAULT_MODEL_PATH,
+    model_path: str,
     data_root: str = str(DATA_DIR),
     max_block_size: int = 0,
     run_label: str = "",
@@ -347,6 +350,7 @@ def _run_single(
     os.environ["S2AND_BACKEND"] = backend
 
     import s2and.model as model_module
+    from s2and.consts import NAME_COUNTS_INDEX_PATH
     from s2and.data import ANDData
     from s2and.production_model import load_production_model
 
@@ -391,7 +395,7 @@ def _run_single(
             val_pairs_size=10000,
             test_pairs_size=10000,
             n_jobs=n_jobs,
-            load_name_counts=True,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
             random_seed=42,
             name_tuples="filtered",
@@ -1176,8 +1180,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--model-path",
-        default=DEFAULT_MODEL_PATH,
-        help="Path to production model artifact.",
+        required=True,
+        help="Path to a complete native production bundle.",
     )
     parser.add_argument(
         "--data-root",

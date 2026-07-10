@@ -76,56 +76,41 @@ jobs:
           python-version: '3.11'
 
       - name: Hydrate CI LFS artifacts
-        run: git lfs pull --include="s2and/data/production_model_v*.pickle,s2and/data/production_model_v*/**,tests/fixtures/arrow/pubmed_specter2/**"
+        run: git lfs pull --include="tests/fixtures/arrow/pubmed_specter2/**"
 
       - name: Verify hydrated CI LFS artifacts
         run: |
           uv run --no-project python - <<'PY'
-          import json
           from pathlib import Path
 
           pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
-          declaration_path = Path("s2and/data/default_production_model.json")
-          declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
-          default_dir = Path("s2and/data") / declaration["bundle_dir"]
           required_paths = [
-              Path("s2and/data/production_model_v1.0.pickle"),
-              Path("s2and/data/production_model_v1.1.pickle"),
-              Path("s2and/data/production_model_v1.2.pickle"),
-              declaration_path,
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/signatures.arrow"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/papers.arrow"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/paper_authors.arrow"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/specter2.arrow"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/signatures.signatures_batch_index.bin"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/papers.papers_batch_index.bin"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/paper_authors.paper_authors_batch_index.bin"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/specter2.specter_batch_index.bin"),
+              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/manifest.json"),
+              Path(
+                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
+                  "generations/pubmed-specter2/first.bin"
+              ),
+              Path(
+                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
+                  "generations/pubmed-specter2/last.bin"
+              ),
+              Path(
+                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
+                  "generations/pubmed-specter2/first_last.bin"
+              ),
+              Path(
+                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
+                  "generations/pubmed-specter2/last_first_initial.bin"
+              ),
           ]
-          required_paths.extend(
-              sorted(path for path in default_dir.rglob("*") if path.is_file())
-          )
-          required_paths.extend(
-              [
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/signatures.arrow"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/papers.arrow"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/paper_authors.arrow"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/specter2.arrow"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/signatures.signatures_batch_index.bin"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/papers.papers_batch_index.bin"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/paper_authors.paper_authors_batch_index.bin"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/specter2.specter_batch_index.bin"),
-                  Path("tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/manifest.json"),
-                  Path(
-                      "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                      "generations/pubmed-specter2/first.bin"
-                  ),
-                  Path(
-                      "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                      "generations/pubmed-specter2/last.bin"
-                  ),
-                  Path(
-                      "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                      "generations/pubmed-specter2/first_last.bin"
-                  ),
-                  Path(
-                      "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                      "generations/pubmed-specter2/last_first_initial.bin"
-                  ),
-              ]
-          )
 
           failures = []
           for path in required_paths:

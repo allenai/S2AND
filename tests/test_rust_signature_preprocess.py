@@ -4,16 +4,12 @@ from contextlib import contextmanager
 from itertools import combinations
 
 import numpy as np
-import pytest
 
 from s2and import feature_port
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo, _single_pair_featurize
 from s2and.subblocking import make_subblocks
-from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, equalish, tiny_name_counts
-
-if not feature_port.rust_featurizer_available():
-    raise pytest.skip.Exception("s2and_rust featurizer API is unavailable", allow_module_level=True)
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, equalish, tiny_name_counts_index
 
 
 @contextmanager
@@ -120,7 +116,7 @@ def _short_coauthor_dataset(name: str, backend: str) -> ANDData:
             clusters={},
             name=name,
             mode="inference",
-            load_name_counts=tiny_name_counts(),
+            name_counts_index=tiny_name_counts_index(),
             preprocess=True,
             n_jobs=1,
         )
@@ -141,10 +137,10 @@ def test_signature_preprocess_json_dataset_rust_backend_uses_python_signature_fi
 
 def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fields(tmp_path):
     with _temporary_env("S2AND_BACKEND", "python"):
-        dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python", load_name_counts=True)
+        dataset_python = build_dummy_dataset("dummy_signature_preprocess_materialize_python", name_counts_index=True)
     with _temporary_env("S2AND_BACKEND", "rust"):
-        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust", load_name_counts=True)
-    attach_arrow_featurizer_bundle(dataset_rust, tmp_path)
+        dataset_rust = build_dummy_dataset("dummy_signature_preprocess_materialize_rust", name_counts_index=True)
+    dataset_rust = build_arrow_training_dataset(dataset_rust, tmp_path)
 
     signature_ids = list(dataset_python.signatures.keys())
     pairs = _sample_pairs(signature_ids, limit=8)
@@ -208,7 +204,7 @@ def test_short_coauthor_tokens_match_python_and_rust_featurizers(tmp_path):
     assert python_features[coauthor_similarity_idx] == 1.0
 
     dataset_rust = _short_coauthor_dataset("short_coauthor_rust", "rust")
-    attach_arrow_featurizer_bundle(dataset_rust, tmp_path)
+    dataset_rust = build_arrow_training_dataset(dataset_rust, tmp_path)
     rust_featurizer = feature_port._get_rust_featurizer(dataset_rust)  # noqa: SLF001
     rust_signature_id_to_index = {
         str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())

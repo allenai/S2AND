@@ -11,15 +11,14 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
-from s2and.production_model import load_production_model
-from scripts.production.counts.generate_name_counts import publish_name_counts
-from tests.helpers import import_s2and_rust, tiny_name_counts_tuple
+from s2and.production_model import _load_pairwise_staging_model, load_production_model
+from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
     required_module_attrs=("RustLightGBMBooster",),
-    prefer_site_packages=True,
 )
 _HAS_RUST_LIGHTGBM = bool(
     _HAS_RUST_LIGHTGBM
@@ -265,21 +264,14 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
 @requires_rust_lightgbm
 def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    bundle_dir = tmp_path / "production_model_v9.8"
+    pairwise_bundle_dir = tmp_path / "pairwise_stage" / "production_model_v9.8"
+    bundle_dir = tmp_path / "final" / "production_model_v9.8"
     canonical_data_dir = tmp_path / "canonical_data"
-    publish_name_counts(
+    write_name_counts_index(
+        canonical_data_dir,
         tiny_name_counts_tuple(),
-        output_dir=canonical_data_dir,
-        source_snapshot_id="tiny-cli-fixture",
-        source_kind="fixture:test",
-        query_digest="1" * 64,
-        row_metrics={
-            "source_row_count": 1,
-            "selected_row_count": 1,
-            "selected_rows_sha256": "2" * 64,
-            "rejected_row_count": 0,
-        },
-        overwrite=False,
+        tiny_name_counts_provenance(),
+        overwrite=True,
     )
     path_config = tmp_path / "path_config.json"
     path_config.write_text(
@@ -294,7 +286,7 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
             "--production-version",
             "9.8",
             "--output-dir",
-            str(bundle_dir),
+            str(pairwise_bundle_dir),
             "--data-dir",
             "tests",
             "--datasets",
@@ -318,16 +310,14 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
         env_overrides=cli_env,
     )
 
-    pairwise_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+    pairwise_manifest = json.loads((pairwise_bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert pairwise_manifest["bundle_status"] == "pairwise_only"
-    with pytest.raises(FileNotFoundError, match="pairwise-only"):
-        load_production_model(bundle_dir)
-    assert load_production_model(bundle_dir, require_incremental_linker=False).production_model_bundle_status == (
-        "pairwise_only"
-    )
+    with pytest.raises(ValueError, match="Expected a complete"):
+        load_production_model(pairwise_bundle_dir)
+    assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"
 
     feature_root = tmp_path / "tiny_linker_feature_bundle"
-    target_path = bundle_dir / "reproducibility" / "incremental_linker_training_target.json"
+    target_path = tmp_path / "incremental_linker_training_target.json"
     _write_tiny_promoted_feature_bundle(feature_root, target_path)
 
     _run_cli(
@@ -340,7 +330,7 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
             "--target-json",
             str(target_path),
             "--pairwise-model-path",
-            str(bundle_dir),
+            str(pairwise_bundle_dir),
             "--save-production-bundle-to",
             str(bundle_dir),
             "--production-bundle-version",
@@ -360,6 +350,9 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
     final_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert final_manifest["bundle_status"] == "complete"
     assert final_manifest["bundle_version"] == "9.8"
+    assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"
+    assert not (pairwise_bundle_dir / "incremental_linker").exists()
+    assert (tmp_path / "linker_run" / "production_incremental_linker" / "metadata.json").is_file()
 
     clusterer = load_production_model(bundle_dir)
     assert clusterer.production_model_bundle_status == "complete"

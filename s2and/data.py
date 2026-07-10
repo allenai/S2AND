@@ -1,16 +1,13 @@
-import hashlib
 import json
 import logging
 import os
 import pickle
 import platform
-import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from functools import partial, reduce
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
@@ -23,11 +20,15 @@ from s2and.consts import (
     _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
     LARGE_DISTANCE,
-    NAME_COUNTS_MANIFEST_PATH,
     NORMALIZATION_VERSION,
     NUMPY_NAN,
 )
 from s2and.mp import UniversalPool
+from s2and.name_counts_index import (
+    NameCountsIndex,
+    readonly_name_counts_provenance,
+    validated_name_counts_provenance,
+)
 from s2and.name_tuple_artifact import load_name_tuple_artifact, load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
@@ -62,27 +63,9 @@ logger = logging.getLogger("s2and")
 CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 _PAIR_LABEL_MAP: dict[str | int, int] = {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
 
-# Cache for large, immutable resources loaded across instances
-_NameCountMappings = tuple[
-    Mapping[str, int],
-    Mapping[str, int],
-    Mapping[str, int],
-    Mapping[str, int],
-]
-_MutableNameCountMappings = tuple[
-    dict[str, int],
-    dict[str, int],
-    dict[str, int],
-    dict[str, int],
-]
-_NAME_COUNTS_CACHE: _NameCountMappings | None = None
-_NAME_COUNTS_PROVENANCE_CACHE: Mapping[str, Any] | None = None
-_NAME_COUNTS_CACHE_LOCK = threading.Lock()
 SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
-# canonical_v2 retired the "legacy_full_first_token" last_first_initial semantics
-# (D8: initial-char only); the knob remains so artifact contracts stay explicit.
+# Canonical artifacts use ``<last> <first initial>`` for this count key.
 NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR = "initial_char"
-NameCountsLastFirstInitialSemantics = Literal["initial_char"]
 PairSamplingMode = Literal[
     "within_block_random",
     "within_block_balanced_classes",
@@ -113,233 +96,6 @@ def _pair_sampling_uses_blocks(mode: PairSamplingMode) -> bool:
     return mode != "global_balanced_classes"
 
 
-def _resolve_pair_sampling_mode(
-    *,
-    pair_sampling_mode: PairSamplingMode | str | None,
-    pair_sampling_block: bool | None,
-    pair_sampling_balanced_classes: bool | None,
-    pair_sampling_balanced_homonym_synonym: bool | None,
-) -> PairSamplingMode:
-    """Resolve canonical pair-sampling mode from current or legacy constructor args."""
-
-    legacy_values = (
-        pair_sampling_block,
-        pair_sampling_balanced_classes,
-        pair_sampling_balanced_homonym_synonym,
-    )
-    if pair_sampling_mode is not None:
-        if any(value is not None for value in legacy_values):
-            raise ValueError("Set either pair_sampling_mode or legacy pair_sampling_* flags, not both")
-        return _validate_pair_sampling_mode(str(pair_sampling_mode))
-
-    block = True if pair_sampling_block is None else bool(pair_sampling_block)
-    balanced_classes = False if pair_sampling_balanced_classes is None else bool(pair_sampling_balanced_classes)
-    balanced_homonym_synonym = (
-        False if pair_sampling_balanced_homonym_synonym is None else bool(pair_sampling_balanced_homonym_synonym)
-    )
-
-    if balanced_homonym_synonym:
-        if not block:
-            raise ValueError("pair_sampling_balanced_homonym_synonym requires pair_sampling_block=True")
-        return "within_block_balanced_homonym_synonym"
-    if balanced_classes:
-        return "within_block_balanced_classes" if block else "global_balanced_classes"
-    if block:
-        return "within_block_random"
-    raise ValueError(
-        "Legacy pair_sampling_block=False with pair_sampling_balanced_classes=False is unsupported; "
-        "pass pair_sampling_mode='global_balanced_classes' or use within-block sampling."
-    )
-
-
-def _sha256_file(path: Path) -> str:
-    for attempt in range(1, 4):
-        before = path.stat()
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            while chunk := source.read(1024 * 1024):
-                digest.update(chunk)
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
-            return digest.hexdigest()
-        logger.warning(
-            "Name-count pickle changed during checksum attempt=%d/3 path=%s",
-            attempt,
-            path,
-        )
-    raise RuntimeError(f"name-count pickle changed during all 3 checksum attempts: {path}")
-
-
-def _require_lowercase_sha256(value: Any, *, context: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"{context} requires a lowercase hexadecimal SHA-256")
-    return value
-
-
-def _readonly_provenance_value(value: Any) -> Any:
-    """Recursively freeze the small verified provenance payload."""
-
-    if isinstance(value, MappingProxyType):
-        return value
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _readonly_provenance_value(item) for key, item in value.items()})
-    if isinstance(value, list | tuple):
-        return tuple(_readonly_provenance_value(item) for item in value)
-    return value
-
-
-def _readonly_name_counts_provenance(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    frozen = _readonly_provenance_value(value)
-    if not isinstance(frozen, Mapping):  # pragma: no cover - helper invariant
-        raise TypeError("name-count provenance must remain a mapping")
-    return frozen
-
-
-def _name_counts_declared_path(root: Path, raw_path: Any, *, field: str) -> Path:
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise ValueError(f"name-count manifest {field} must be a non-empty relative path")
-    path = (root / raw_path).resolve()
-    try:
-        path.relative_to(root.resolve())
-    except ValueError as exc:
-        raise ValueError(f"name-count manifest {field} escapes its artifact root: {path}") from exc
-    return path
-
-
-def _read_name_counts_artifact(
-    manifest_path: str | Path,
-) -> tuple[_MutableNameCountMappings, dict[str, Any]]:
-    """Verify provenance and checksum before unpickling one immutable generation."""
-
-    resolved_manifest = Path(manifest_path).resolve()
-    manifest = json.loads(resolved_manifest.read_text(encoding="utf-8"))
-    if not isinstance(manifest, Mapping) or manifest.get("schema_version") != "name_counts_manifest_v1":
-        raise ValueError(f"unsupported name-count manifest: {resolved_manifest}")
-    if manifest.get("normalization_version") != NORMALIZATION_VERSION:
-        raise ValueError(
-            f"name-count manifest normalization_version={manifest.get('normalization_version')!r}; "
-            f"expected {NORMALIZATION_VERSION!r}"
-        )
-    generation_id = manifest.get("generation_id")
-    source_snapshot_id = manifest.get("source_snapshot_id")
-    if not isinstance(generation_id, str) or not generation_id:
-        raise ValueError("name-count manifest requires generation_id")
-    if not isinstance(source_snapshot_id, str) or not source_snapshot_id:
-        raise ValueError("name-count manifest requires source_snapshot_id")
-    files = manifest.get("files")
-    if not isinstance(files, Mapping):
-        raise ValueError("name-count manifest requires files mapping")
-    root = resolved_manifest.parent
-    pickle_path = _name_counts_declared_path(root, files.get("pickle"), field="files.pickle")
-    provenance_path = _name_counts_declared_path(root, files.get("provenance"), field="files.provenance")
-    expected_provenance_sha256 = _require_lowercase_sha256(
-        manifest.get("provenance_sha256"),
-        context="name-count manifest provenance_sha256",
-    )
-    expected_provenance_bytes = manifest.get("provenance_byte_count")
-    if not isinstance(expected_provenance_bytes, int) or expected_provenance_bytes < 1:
-        raise ValueError("name-count manifest requires a positive provenance_byte_count")
-    if provenance_path.stat().st_size != expected_provenance_bytes:
-        raise ValueError("name-count provenance byte count mismatch")
-    observed_provenance_sha256 = _sha256_file(provenance_path)
-    if observed_provenance_sha256 != expected_provenance_sha256:
-        raise ValueError(
-            "name-count provenance SHA-256 mismatch: "
-            f"expected={expected_provenance_sha256} observed={observed_provenance_sha256}"
-        )
-    metadata = json.loads(provenance_path.read_text(encoding="utf-8"))
-    if not isinstance(metadata, Mapping) or metadata.get("schema_version") != "name_counts_provenance_v1":
-        raise ValueError(f"unsupported name-count provenance: {provenance_path}")
-    metadata = _validated_name_counts_provenance(metadata, context=str(provenance_path))
-    for field, expected in (
-        ("normalization_version", NORMALIZATION_VERSION),
-        ("generation_id", generation_id),
-        ("source_snapshot_id", source_snapshot_id),
-    ):
-        if metadata.get(field) != expected:
-            raise ValueError(
-                f"name-count provenance {field} mismatch: metadata={metadata.get(field)!r} expected={expected!r}"
-            )
-    expected_sha256 = _require_lowercase_sha256(
-        manifest.get("pickle_sha256"),
-        context="name-count manifest pickle_sha256",
-    )
-    if metadata.get("pickle_sha256") != expected_sha256:
-        raise ValueError("name-count manifest/provenance pickle_sha256 mismatch")
-    if metadata.get("pickle_byte_count") != pickle_path.stat().st_size:
-        raise ValueError("name-count provenance pickle_byte_count mismatch")
-    observed_sha256 = _sha256_file(pickle_path)
-    if observed_sha256 != expected_sha256:
-        raise ValueError(f"name-count pickle SHA-256 mismatch: expected={expected_sha256} observed={observed_sha256}")
-    with pickle_path.open("rb") as source:
-        payload = pickle.load(source)
-    if not isinstance(payload, tuple) or len(payload) != 4 or not all(isinstance(value, dict) for value in payload):
-        raise TypeError("name-count pickle must contain exactly four dictionaries")
-    counts = cast(_MutableNameCountMappings, payload)
-    cardinalities = metadata.get("cardinalities")
-    expected_cardinalities = dict(
-        zip(
-            ("first", "last", "first_last", "last_first_initial"),
-            (len(mapping) for mapping in counts),
-            strict=True,
-        )
-    )
-    if cardinalities != expected_cardinalities:
-        raise ValueError(
-            f"name-count provenance cardinalities mismatch: metadata={cardinalities!r} "
-            f"observed={expected_cardinalities!r}"
-        )
-    return counts, dict(metadata)
-
-
-def _load_name_counts_artifact() -> tuple[_NameCountMappings, Mapping[str, Any]]:
-    """Load and cache the verified canonical name-count generation."""
-
-    global _NAME_COUNTS_CACHE, _NAME_COUNTS_PROVENANCE_CACHE
-    if _NAME_COUNTS_CACHE is not None and _NAME_COUNTS_PROVENANCE_CACHE is not None:
-        return _NAME_COUNTS_CACHE, _NAME_COUNTS_PROVENANCE_CACHE
-    with _NAME_COUNTS_CACHE_LOCK:
-        if _NAME_COUNTS_CACHE is None or _NAME_COUNTS_PROVENANCE_CACHE is None:
-            loaded_counts, loaded_provenance = _read_name_counts_artifact(Path(os.fspath(NAME_COUNTS_MANIFEST_PATH)))
-            first, last, first_last, last_first_initial = loaded_counts
-            _NAME_COUNTS_CACHE = (
-                MappingProxyType(first),
-                MappingProxyType(last),
-                MappingProxyType(first_last),
-                MappingProxyType(last_first_initial),
-            )
-            _NAME_COUNTS_PROVENANCE_CACHE = _readonly_name_counts_provenance(loaded_provenance)
-    return _NAME_COUNTS_CACHE, _NAME_COUNTS_PROVENANCE_CACHE
-
-
-def _validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or value.get("schema_version") != "name_counts_provenance_v1":
-        raise ValueError(f"{context} requires name_counts_provenance_v1 provenance")
-    if value.get("normalization_version") != NORMALIZATION_VERSION:
-        raise ValueError(
-            f"{context} normalization_version={value.get('normalization_version')!r}; "
-            f"expected {NORMALIZATION_VERSION!r}"
-        )
-    for field in ("generation_id", "source_snapshot_id", "source_kind"):
-        if not isinstance(value.get(field), str) or not value[field]:
-            raise ValueError(f"{context} provenance requires {field}")
-    for field in ("pickle_sha256", "source_query_sha256", "selected_rows_sha256"):
-        _require_lowercase_sha256(
-            value.get(field),
-            context=f"{context} provenance {field}",
-        )
-    selected_row_count = value.get("selected_row_count")
-    if not isinstance(selected_row_count, int) or selected_row_count < 0:
-        raise ValueError(f"{context} provenance requires a nonnegative selected_row_count")
-    if value.get("source_row_count") != selected_row_count:
-        raise ValueError(f"{context} provenance selected_row_count/source_row_count mismatch")
-    return dict(value)
-
-
 def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
     """Load one canonical artifact under the strict adjacent-sidecar contract."""
 
@@ -348,45 +104,13 @@ def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
     return set(load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / filename).pairs)
 
 
-def _resolve_name_counts_last_first_initial_semantics(
-    value: str | None,
-    *,
-    default: NameCountsLastFirstInitialSemantics = NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-    strict: bool = True,
-) -> NameCountsLastFirstInitialSemantics:
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized == NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
-        return cast(NameCountsLastFirstInitialSemantics, normalized)
-    if strict:
-        raise ValueError(
-            "name_counts_last_first_initial_semantics must be "
-            f"{NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR!r} (canonical_v2 retired "
-            f"'legacy_full_first_token'); got {value!r}"
-        )
-    return default
-
-
 def _signature_preprocess_backend_decision(runtime_context: RuntimeContext) -> bool:
     use_rust_backend = stage_uses_rust(runtime_context)
     if not use_rust_backend:
         return False
+    from s2and import feature_port
 
-    rust_module_available = False
-    try:
-        from s2and import feature_port
-
-        rust_module_available = feature_port.rust_featurizer_available()
-    except Exception:
-        rust_module_available = False
-
-    if not rust_module_available:
-        raise RuntimeError(
-            "Rust backend requested for ingest_preprocess but s2and_rust extension is unavailable "
-            f"(run_id={runtime_context.run_id})"
-        )
-
+    feature_port._require_rust_runtime()  # noqa: SLF001
     return True
 
 
@@ -544,13 +268,14 @@ class ANDData:
         train_pairs_size: number of training pairs for learning the linkage function
         val_pairs_size: number of validation pairs for fine-tuning the linkage function parameters
         test_pairs_size: number of test pairs for evaluating the linkage function
-        pair_sampling_mode: strategy for sampling training/eval pairs. Legacy
-            pair_sampling_block/pair_sampling_balanced_classes/pair_sampling_balanced_homonym_synonym
-            flags are still accepted when pair_sampling_mode is not provided.
+        pair_sampling_mode: strategy for sampling training/eval pairs.
         all_test_pairs_flag: With blocking, for the linkage function evaluation task, should the test
             contain all possible pairs from test blocks, or the given number of pairs (test_pairs_size)
         random_seed: random seed
-        load_name_counts: Whether or not to load name counts
+        name_counts_index: Manifest-backed binary name-count index, or ``None``
+            to leave Python-side name-count features unmaterialized. A path is
+            verified and opened once per immutable manifest generation; an
+            already-open ``NameCountsIndex`` handle can be shared explicitly.
         n_jobs: number of cpus to use
         preprocess: whether to preprocess the data (normalization, etc)
         name_tuples: Canonical first-name aliases. ``None`` and ``"filtered"``
@@ -558,10 +283,6 @@ class ANDData:
             set to disable aliases, or a set of pairs; pair order is ignored.
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
-        name_counts_last_first_initial_semantics: semantics for constructing the
-            `last_first_initial` lookup key in `name_counts`. Only "initial_char"
-            (`<last> <first[0]>`) is accepted; the "legacy_full_first_token"
-            semantics was retired by the canonical_v2 cutover (D8).
         rust_arrow_featurization: set by s2and.arrow_training when this dataset's Rust
             featurizer is built from Arrow IPC artifacts; defers paper preprocessing and
             signature n-gram/field materialization to the Rust Arrow readers
@@ -595,23 +316,22 @@ class ANDData:
         train_pairs_size: int = 30000,
         val_pairs_size: int = 5000,
         test_pairs_size: int = 5000,
-        pair_sampling_block: bool | None = None,
-        pair_sampling_balanced_classes: bool | None = None,
-        pair_sampling_balanced_homonym_synonym: bool | None = None,
+        pair_sampling_mode: PairSamplingMode = "within_block_random",
         all_test_pairs_flag: bool = False,
         random_seed: int = 1111,
-        load_name_counts: bool | dict = True,
+        name_counts_index: str | os.PathLike[str] | NameCountsIndex | None = None,
         n_jobs: int = 1,
         preprocess: bool = True,
         name_tuples: set[tuple[str, str]] | str | None = "filtered",
         use_orcid_id: bool = True,
-        name_counts_last_first_initial_semantics: NameCountsLastFirstInitialSemantics | None = None,
         compute_block_fn: Callable[[str], str] = compute_block,
-        pair_sampling_mode: PairSamplingMode | None = None,
         rust_arrow_featurization: bool = False,
     ):
         init_start = time.perf_counter()
-        self.runtime_context = build_runtime_context("dataset_build")
+        self.runtime_context = build_runtime_context(
+            "dataset_build",
+            backend="rust" if rust_arrow_featurization else "python",
+        )
         self.original_signatures_path = signatures if isinstance(signatures, str) else None
         self.original_papers_path = papers if isinstance(papers, str) else None
         self.signatures_path = self.original_signatures_path
@@ -626,20 +346,16 @@ class ANDData:
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
         # Explicit Arrow prediction artifacts; populated by s2and.arrow_training
         # when the dataset is built from an Arrow bundle.
-        self.arrow_paths: dict[str, Any] | None = None
+        self.arrow_paths: Mapping[str, str] | None = None
+        self.arrow_artifact_generation: str | None = None
         self.compute_block_fn = compute_block_fn
         self.rust_lifecycle_policy = build_rust_lifecycle_policy(
-            backend=self.runtime_context.resolved_backend,
+            backend=self.runtime_context.backend,
             mode=mode,
             preprocess=preprocess,
             arrow_featurization=rust_arrow_featurization,
         )
-        pair_sampling_mode = _resolve_pair_sampling_mode(
-            pair_sampling_mode=pair_sampling_mode,
-            pair_sampling_block=pair_sampling_block,
-            pair_sampling_balanced_classes=pair_sampling_balanced_classes,
-            pair_sampling_balanced_homonym_synonym=pair_sampling_balanced_homonym_synonym,
-        )
+        pair_sampling_mode = _validate_pair_sampling_mode(pair_sampling_mode)
 
         if mode == "train":
             if train_blocks is not None and block_type != "original":
@@ -757,11 +473,6 @@ class ANDData:
 
         self.name = name
         self.mode = mode
-        self.name_counts_last_first_initial_semantics = _resolve_name_counts_last_first_initial_semantics(
-            name_counts_last_first_initial_semantics,
-            default=NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-            strict=True,
-        )
         logger.info("loading clusters")
         self.clusters: dict | None = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
@@ -848,36 +559,19 @@ class ANDData:
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
-        name_counts_loaded = False
         self.normalization_version = NORMALIZATION_VERSION
         self._name_counts_provenance: Mapping[str, Any] | None = None
-        if isinstance(load_name_counts, dict):
-            self.name_counts_provenance = _validated_name_counts_provenance(
-                load_name_counts.get("provenance"),
-                context="ANDData load_name_counts mapping",
+        self.name_counts_index: NameCountsIndex | None = None
+        if name_counts_index is not None:
+            logger.info("opening name-count index (generation-cached)")
+            self.name_counts_index = (
+                name_counts_index
+                if isinstance(name_counts_index, NameCountsIndex)
+                else NameCountsIndex.open(name_counts_index)
             )
-            self.first_dict = load_name_counts["first_dict"]
-            self.last_dict = load_name_counts["last_dict"]
-            self.first_last_dict = load_name_counts["first_last_dict"]
-            self.last_first_initial_dict = load_name_counts["last_first_initial_dict"]
-            name_counts_loaded = True
-        elif load_name_counts:
-            logger.info("loading name counts (cached)")
-            counts, provenance = _load_name_counts_artifact()
-            (
-                first_dict,
-                last_dict,
-                first_last_dict,
-                last_first_initial_dict,
-            ) = counts
-            self.name_counts_provenance = provenance
-            self.first_dict = first_dict
-            self.last_dict = last_dict
-            self.first_last_dict = first_last_dict
-            self.last_first_initial_dict = last_first_initial_dict
-            name_counts_loaded = True
-            logger.info("loaded name counts")
-        self.name_counts_loaded = bool(name_counts_loaded)
+            self.name_counts_provenance = self.name_counts_index.source_provenance
+            logger.info("opened name-count index")
+        self.name_counts_loaded = self.name_counts_index is not None
 
         self.n_jobs = resolve_n_jobs(n_jobs)
         self.signature_to_block = self.get_signatures_to_block()
@@ -917,7 +611,7 @@ class ANDData:
 
         preprocess_signatures_stage_start = time.perf_counter()
         logger.info("preprocessing signatures")
-        self.preprocess_signatures(name_counts_loaded)
+        self.preprocess_signatures()
         logger.info("preprocessed signatures")
         logger.debug(
             "Telemetry stage: stage=anddata_preprocess_signatures seconds=%.3f signatures=%d",
@@ -940,32 +634,10 @@ class ANDData:
         if value is None:
             self._name_counts_provenance = None
             return
-        validated = _validated_name_counts_provenance(value, context="ANDData.name_counts_provenance")
-        self._name_counts_provenance = _readonly_name_counts_provenance(validated)
+        validated = validated_name_counts_provenance(value, context="ANDData.name_counts_provenance")
+        self._name_counts_provenance = readonly_name_counts_provenance(validated)
 
-    @property
-    def pair_sampling_block(self) -> bool:
-        """Return whether pair sampling uses blocks."""
-
-        return _pair_sampling_uses_blocks(self.pair_sampling_mode)
-
-    @property
-    def pair_sampling_balanced_classes(self) -> bool:
-        """Return whether pair sampling balances positive and negative labels."""
-
-        return self.pair_sampling_mode in {
-            "within_block_balanced_classes",
-            "within_block_balanced_homonym_synonym",
-            "global_balanced_classes",
-        }
-
-    @property
-    def pair_sampling_balanced_homonym_synonym(self) -> bool:
-        """Return whether pair sampling also balances homonym/synonym cases."""
-
-        return self.pair_sampling_mode == "within_block_balanced_homonym_synonym"
-
-    def _compute_signature_name_counts(
+    def _signature_name_count_keys(
         self,
         signature: Signature,
         *,
@@ -973,7 +645,7 @@ class ANDData:
         middle_raw: str,
         first_without_apostrophe: str | None,
         last_normalized: str | None,
-    ) -> NameCounts:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         # canonical_v2 count keys (D6/D8): keys are the canonical fields after missing
         # and informativeness gating. A missing/uninformative component means no lookup
         # (NaN feature), never a sentinel count; a present key that is absent from the
@@ -991,25 +663,44 @@ class ANDData:
         last_key = keys["last"]
         first_last_key = keys["first_last"]
         last_first_initial_key = keys["last_first_initial"]
-        return NameCounts(
-            first=(self.first_dict.get(first_key, 1) if first_key is not None else np.nan),
-            last=(self.last_dict.get(last_key, 1) if last_key is not None else np.nan),
-            first_last=(self.first_last_dict.get(first_last_key, 1) if first_last_key is not None else np.nan),
-            last_first_initial=(
-                self.last_first_initial_dict.get(last_first_initial_key, 1)
-                if last_first_initial_key is not None
-                else np.nan
-            ),
+        return (
+            first_key,
+            last_key,
+            first_last_key,
+            last_first_initial_key,
         )
 
-    def preprocess_signatures(self, load_name_counts: bool):
+    def _compute_signature_name_counts(
+        self,
+        signature: Signature,
+        *,
+        first_raw: str,
+        middle_raw: str,
+        first_without_apostrophe: str | None,
+        last_normalized: str | None,
+    ) -> NameCounts:
+        """Resolve one signature through the binary index for targeted refreshes."""
+
+        if self.name_counts_index is None:
+            return NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
+        keys = self._signature_name_count_keys(
+            signature,
+            first_raw=first_raw,
+            middle_raw=middle_raw,
+            first_without_apostrophe=first_without_apostrophe,
+            last_normalized=last_normalized,
+        )
+        columns = self.name_counts_index.lookup_many(
+            [keys[0]],
+            [keys[1]],
+            [keys[2]],
+            [keys[3]],
+        )
+        return NameCounts(*(float(column[0]) for column in columns))
+
+    def preprocess_signatures(self) -> None:
         """
         Preprocess the signatures, doing lots of normalization and feature creation
-
-        Parameters
-        ----------
-        load_name_counts: bool
-            whether name counts were loaded (mostly just here so we can not load them when running tests)
 
         Returns
         -------
@@ -1024,14 +715,12 @@ class ANDData:
         logger.info(
             "Signature preprocessing backend decision: backend=%s use_rust_featurizer=%s rust_module_available=%s "
             "defer_signature_ngrams_to_rust=%s defer_signature_fields_to_rust=%s "
-            "requested_backend=%s resolved_backend=%s run_id=%s",
+            "run_id=%s",
             "rust" if use_rust_backend else "python",
             use_rust_featurizer,
             rust_module_available,
             defer_signature_ngrams_to_rust,
             defer_signature_fields_to_rust,
-            runtime_context.requested_backend,
-            runtime_context.resolved_backend,
             runtime_context.run_id,
         )
 
@@ -1068,8 +757,8 @@ class ANDData:
 
                     affiliations: list[str] = signature.author_info_affiliations
                     full_name = signature.author_info_full_name
-                    counts = signature.author_info_name_counts
                     normalized_orcid = signature.author_info_orcid
+                    count_keys: tuple[str | None, str | None, str | None, str | None] | None = None
                     coauthor_text = ""
                     affiliation_text = ""
 
@@ -1113,16 +802,15 @@ class ANDData:
                                     normalize_affiliations=False,
                                 )
 
-                        if load_name_counts:
-                            counts = self._compute_signature_name_counts(
+                        count_keys = None
+                        if self.name_counts_index is not None:
+                            count_keys = self._signature_name_count_keys(
                                 signature,
                                 first_raw=first_raw,
                                 middle_raw=middle_raw,
                                 first_without_apostrophe=stored_first_without_apostrophe,
                                 last_normalized=stored_last_normalized,
                             )
-                        else:
-                            counts = NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
 
                         if not defer_signature_fields_to_rust:
                             full_name = _assemble_full_name(
@@ -1149,7 +837,7 @@ class ANDData:
                             "coauthor_blocks": coauthor_blocks,
                             "affiliations": affiliations,
                             "full_name": full_name,
-                            "counts": counts,
+                            "count_keys": count_keys,
                             "normalized_orcid": normalized_orcid,
                             "coauthor_text": coauthor_text,
                             "affiliation_text": affiliation_text,
@@ -1167,6 +855,32 @@ class ANDData:
                         batch_coauthor_texts,
                         batch_affiliation_texts,
                     )
+
+                batch_name_counts: list[NameCounts] = []
+                if self.preprocess:
+                    if self.name_counts_index is None:
+                        batch_name_counts = [
+                            NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
+                            for _row in batch_rows
+                        ]
+                    else:
+                        key_rows = [row["count_keys"] for row in batch_rows]
+                        if any(keys is None for keys in key_rows):  # pragma: no cover - construction invariant
+                            raise RuntimeError("name-count index batch is missing canonical keys")
+                        first_keys = [keys[0] for keys in key_rows]
+                        last_keys = [keys[1] for keys in key_rows]
+                        first_last_keys = [keys[2] for keys in key_rows]
+                        last_first_initial_keys = [keys[3] for keys in key_rows]
+                        count_columns = self.name_counts_index.lookup_many(
+                            first_keys,
+                            last_keys,
+                            first_last_keys,
+                            last_first_initial_keys,
+                        )
+                        batch_name_counts = [
+                            NameCounts(*(float(column[index]) for column in count_columns))
+                            for index in range(len(batch_rows))
+                        ]
 
                 for idx, row in enumerate(batch_rows):
                     replace_kwargs = {
@@ -1188,77 +902,13 @@ class ANDData:
                                 "author_info_coauthor_n_grams": (
                                     None if defer_signature_ngrams_to_rust else batch_coauthor_ngrams[idx]
                                 ),
-                                "author_info_name_counts": row["counts"],
+                                "author_info_name_counts": batch_name_counts[idx],
                                 "author_info_orcid": row["normalized_orcid"],
                             }
                         )
                     self.signatures[row["signature_id"]] = row["signature"]._replace(**replace_kwargs)
 
                 progress_bar.update(len(batch_signature_ids))
-
-    def _refresh_signature_name_counts(self) -> int:
-        if not self.name_counts_loaded:
-            return 0
-        updated = 0
-        for signature_id, signature in self.signatures.items():
-            refreshed_counts = self._compute_signature_name_counts(
-                signature,
-                first_raw=signature.author_info_first or "",
-                middle_raw=signature.author_info_middle or "",
-                first_without_apostrophe=signature.author_info_first_normalized_without_apostrophe,
-                last_normalized=signature.author_info_last_normalized,
-            )
-            if signature.author_info_name_counts == refreshed_counts:
-                continue
-            self.signatures[signature_id] = signature._replace(author_info_name_counts=refreshed_counts)
-            updated += 1
-        return updated
-
-    def set_name_counts_last_first_initial_semantics(self, semantics: str) -> bool:
-        resolved = _resolve_name_counts_last_first_initial_semantics(
-            semantics,
-            default=NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-            strict=True,
-        )
-        if resolved == self.name_counts_last_first_initial_semantics:
-            return False
-        previous = self.name_counts_last_first_initial_semantics
-        self.name_counts_last_first_initial_semantics = resolved
-        signatures_updated = self._refresh_signature_name_counts()
-        try:
-            from s2and import feature_port
-        except ImportError:
-            logger.info(
-                "Skipping Rust featurizer eviction while updating name-count semantics "
-                "(dataset=%s mode=%s run_id=%s old=%s new=%s): feature_port unavailable",
-                self.name,
-                self.mode,
-                self.runtime_context.run_id,
-                previous,
-                resolved,
-            )
-        else:
-            try:
-                feature_port.evict_rust_featurizer(self)
-            except (RuntimeError, AttributeError):
-                logger.exception(
-                    "Failed to evict Rust featurizer cache during name-count semantics refresh "
-                    "(dataset=%s mode=%s run_id=%s old=%s new=%s)",
-                    self.name,
-                    self.mode,
-                    self.runtime_context.run_id,
-                    previous,
-                    resolved,
-                )
-                raise
-        logger.info(
-            "Updated name-count semantics for last_first_initial old=%s new=%s signatures_updated=%d mode=%s",
-            previous,
-            resolved,
-            signatures_updated,
-            self.mode,
-        )
-        return True
 
     def materialize_signature_ngrams_python(self, batch_size: int = SIGNATURE_PREPROCESS_BATCH_SIZE) -> None:
         """
@@ -1876,7 +1526,7 @@ class ANDData:
             and isinstance(val_signatures, dict)
             and isinstance(test_signatures, dict)
         )
-        use_block_sampling = self.pair_sampling_block
+        use_block_sampling = _pair_sampling_uses_blocks(self.pair_sampling_mode)
         train_signature_ids = (
             [] if use_block_sampling else [sig for signatures in train_signatures.values() for sig in signatures]
         )

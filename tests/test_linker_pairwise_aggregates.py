@@ -7,7 +7,7 @@ import pytest
 
 from s2and import feature_port, memory_budget
 from s2and.incremental_linking import linker_pairwise
-from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, import_s2and_rust
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
 
 HAS_LINKER_ARRAY_FEATURE_AGG_RUST, LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR = import_s2and_rust(
     required_method="linker_pair_index_arrays_and_aggregate_stats"
@@ -310,7 +310,7 @@ def test_combined_array_feature_wrapper_passes_result_arrays_through() -> None:
 
 
 def test_linker_pairwise_aggregates_use_memory_chunk_plan(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = build_dummy_dataset("dummy_linker_pairwise_fake", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_linker_pairwise_fake", name_counts_index=True)
     candidate_batch = _candidate_batch_from_index_arrays(
         left_signature_indices=[0, 0, 0, 1, 2],
         right_signature_indices=[1, 2, 3, 3, 3],
@@ -453,7 +453,7 @@ def test_pairwise_aggregate_feature_matrix_uses_per_feature_valid_counts() -> No
 
 
 def test_candidate_batch_aggregates_accept_index_arrays(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = build_dummy_dataset("dummy_linker_pairwise_indexed_fake", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_linker_pairwise_indexed_fake", name_counts_index=True)
     candidate_batch = _candidate_batch_from_index_arrays(
         left_signature_indices=[0, 0, 1],
         right_signature_indices=[1, 2, 2],
@@ -517,7 +517,7 @@ def test_candidate_batch_aggregates_accept_index_arrays(monkeypatch: pytest.Monk
 
 
 def test_candidate_batch_aggregates_use_array_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = build_dummy_dataset("dummy_linker_candidate_batch_fake", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_linker_candidate_batch_fake", name_counts_index=True)
     candidate_batch = linker_pairwise.build_candidate_batch_from_members(
         [0, 1],
         [np.asarray([1, 2], dtype=np.uint32), np.asarray([3], dtype=np.uint32)],
@@ -588,7 +588,7 @@ def test_candidate_batch_aggregates_use_array_api(monkeypatch: pytest.MonkeyPatc
 
 
 def test_candidate_batch_aggregates_trust_rust_aggregate_stats(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = build_dummy_dataset("dummy_linker_candidate_batch_rust_aggregate_authority", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_linker_candidate_batch_rust_aggregate_authority", name_counts_index=True)
     candidate_batch = _candidate_batch_from_index_arrays(
         left_signature_indices=[0],
         right_signature_indices=[1],
@@ -682,8 +682,8 @@ def test_localize_row_indices_handles_ungrouped_chunks() -> None:
     reason=f"s2and_rust linker array feature aggregate API unavailable: {LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR}",
 )
 def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) -> None:
-    dataset = build_dummy_dataset("dummy_linker_candidate_batch_real", load_name_counts=True)
-    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    dataset = build_dummy_dataset("dummy_linker_candidate_batch_real", name_counts_index=True)
+    dataset = build_arrow_training_dataset(dataset, tmp_path)
     pairs = [("0", "1"), ("0", "2"), ("3", "4"), ("0", "3"), ("1", "4")]
     row_indices = [0, 0, 1, 1, 1]
     feature_names = ("first_names_equal", "affiliation_overlap", "title_overlap_words")
@@ -745,7 +745,7 @@ def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) ->
     reason=f"s2and_rust linker array feature aggregate API unavailable: {LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR}",
 )
 def test_dense_and_sparse_signature_index_layouts_produce_identical_features(tmp_path) -> None:
-    dataset = build_dummy_dataset("dummy_linker_signature_index_layouts", load_name_counts=True)
+    dataset = build_dummy_dataset("dummy_linker_signature_index_layouts", name_counts_index=True)
     template_signature = next(iter(dataset.signatures.values()))
     template_paper = dataset.papers[str(template_signature.paper_id)]
     next_paper_id = max(int(paper_id) for paper_id in dataset.papers) + 1
@@ -759,7 +759,7 @@ def test_dense_and_sparse_signature_index_layouts_produce_identical_features(tmp
             paper_id=paper_id,
         )
 
-    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    dataset = build_arrow_training_dataset(dataset, tmp_path)
     rust_featurizer = feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
     signature_count = len(rust_featurizer.signature_ids())
     target_pair = (0, signature_count - 1)

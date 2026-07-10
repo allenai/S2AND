@@ -1,28 +1,27 @@
 # mypy: ignore-errors
 """
-This script demonstrates how to use the checked-in production S2AND model bundle for clustering.
+This script demonstrates how to use a complete native S2AND model bundle for clustering.
 
-The production-oriented path uses Arrow inputs and calls
-`Clusterer.predict_from_arrow_paths(...)`. JSON/ANDData input remains available
-for legacy fixtures and subblocking knob examples.
+The Rust path uses Arrow inputs and calls
+`Clusterer.predict_from_arrow_paths(...)`. JSON/ANDData input calls
+`Clusterer.predict(...)` through Python.
 You can also point `--data-root` to `tests` and run `--dataset qian`.
 
 Examples:
-  # Arrow release + Rust backend
+  # Arrow release + explicit Rust API
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --input-format arrow --use-rust 1 --dataset qian --arrow-data-root s2and/data
+      --model-path path/to/complete-production-bundle \
+      --input-format arrow --dataset qian --arrow-data-root s2and/data
 
-  # Bundled JSON fixture + Rust backend
+  # Bundled JSON fixture + explicit Python API
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --input-format json --use-rust 1 --dataset qian --data-root tests --load-name-counts 0
+      --model-path path/to/complete-production-bundle \
+      --input-format json --dataset qian --data-root tests --load-name-counts 0
 
   # Show subblocking + memory budget knobs (for large blocks)
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --use-rust 1 --dataset qian --batching-threshold 5000 --desired-memory-use 25000000
-
-  # Warm Rust featurizer before prediction
-  uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
-      --use-rust 1 --dataset qian --warm-rust-featurizer-before-predict 1
+      --model-path path/to/complete-production-bundle \
+      --input-format json --dataset qian --batching-threshold 5000 --desired-memory-use 25000000
 """
 
 import argparse
@@ -33,12 +32,6 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-
-
-def _apply_backend_flag(use_rust: int | None) -> None:
-    if use_rust is None:
-        return
-    os.environ["S2AND_BACKEND"] = "rust" if use_rust else "python"
 
 
 def _resolve_root(project_root: str, maybe_relative: str) -> str:
@@ -65,7 +58,6 @@ def _select_input_route(
     specter_suffix: str,
     batching_threshold: int | None,
     desired_memory_use: int | None,
-    warm_rust_featurizer_before_predict: int,
     resolve_arrow_dataset_paths,
 ) -> tuple[str, dict[str, str] | None]:
     """Resolve tutorial input routing without loading models or ANDData."""
@@ -88,8 +80,6 @@ def _select_input_route(
     if input_format == "arrow":
         if batching_threshold is not None or desired_memory_use is not None:
             raise ValueError("--batching-threshold and --desired-memory-use are JSON/ANDData tutorial knobs")
-        if warm_rust_featurizer_before_predict:
-            raise ValueError("--warm-rust-featurizer-before-predict is only valid for JSON/ANDData input")
         if arrow_paths is None:
             raise RuntimeError("Arrow input selected without resolved Arrow paths")
     return input_format, arrow_paths
@@ -156,13 +146,6 @@ def _cluster_eval_with_predict_options(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--use-rust",
-        type=int,
-        choices=[0, 1],
-        default=None,
-        help="Set 1 to force Rust path, 0 to force Python path (default: env settings).",
-    )
-    parser.add_argument(
         "--dataset",
         type=str,
         default=None,
@@ -228,13 +211,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--warm-rust-featurizer-before-predict",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help="Set 1 to warm Rust featurizer once per dataset before running prediction.",
-    )
-    parser.add_argument(
         "--batching-threshold",
         type=int,
         default=None,
@@ -262,19 +238,16 @@ def main() -> None:
     parser.add_argument(
         "--model-path",
         type=str,
-        default=os.path.join("s2and", "data", "production_model_v1.21"),
-        help="Production model bundle directory or legacy pickle path, relative to repo root or absolute.",
+        required=True,
+        help="Complete native production model bundle directory, relative to repo root or absolute.",
     )
     args = parser.parse_args()
 
     if args.desired_memory_use is not None and args.batching_threshold is None:
         raise ValueError("--desired-memory-use requires --batching-threshold")
 
-    _apply_backend_flag(args.use_rust)
-
-    from s2and.consts import FEATURIZER_VERSION, PROJECT_ROOT_PATH
+    from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
-    from s2and.feature_port import warm_rust_featurizer
     from s2and.featurizer import FeaturizationInfo
     from s2and.production_model import load_production_model
     from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
@@ -332,7 +305,7 @@ def main() -> None:
     )
     _ = (featurization_info, nameless_featurization_info)
 
-    # this defaults to the checked-in native production bundle; override via --model-path if needed
+    # The public loader accepts only an explicitly selected complete native bundle.
     model_path = _resolve_root(PROJECT_ROOT_PATH, args.model_path)
     clusterer = load_production_model(model_path)
     clusterer.use_cache = use_cache
@@ -340,9 +313,8 @@ def main() -> None:
 
     print(
         "Config: "
-        f"backend={os.environ.get('S2AND_BACKEND', 'auto')}, "
+        f"runtime_context_default={os.environ.get('S2AND_BACKEND', 'python')}, "
         f"split={args.split}, n_jobs={n_jobs}, use_cache={int(use_cache)}, "
-        f"warm_rust_featurizer={args.warm_rust_featurizer_before_predict}, "
         f"batching_threshold={args.batching_threshold}, "
         f"desired_memory_use={args.desired_memory_use}, "
         f"load_name_counts={args.load_name_counts}, "
@@ -361,7 +333,6 @@ def main() -> None:
             specter_suffix=args.specter_suffix,
             batching_threshold=args.batching_threshold,
             desired_memory_use=args.desired_memory_use,
-            warm_rust_featurizer_before_predict=args.warm_rust_featurizer_before_predict,
             resolve_arrow_dataset_paths=resolve_arrow_dataset_paths,
         )
 
@@ -376,7 +347,7 @@ def main() -> None:
                 split=args.split,
                 total_ram_bytes=int(args.arrow_total_ram_bytes),
             )
-            print(f"[{dataset_name}] Arrow predict_from_arrow_paths")
+            print(f"[{dataset_name}] Arrow predict_from_arrow_paths (Rust)")
             print(cluster_metrics)
             cluster_metrics_all.append(cluster_metrics)
             continue
@@ -411,23 +382,14 @@ def main() -> None:
             val_pairs_size=10000,
             test_pairs_size=10000,
             n_jobs=n_jobs,
-            load_name_counts=bool(args.load_name_counts),
+            name_counts_index=NAME_COUNTS_INDEX_PATH if args.load_name_counts else None,
             preprocess=True,
             random_seed=random_seed,
             name_tuples="filtered",
             use_orcid_id=True,
         )
 
-        if args.warm_rust_featurizer_before_predict:
-            if anddata.runtime_context.resolved_backend == "rust":
-                warm_rust_featurizer(anddata)
-                print(f"[{dataset_name}] Warmed Rust featurizer")
-            else:
-                print(
-                    f"[{dataset_name}] Skipping warm_rust_featurizer: "
-                    f"resolved backend is {anddata.runtime_context.resolved_backend}"
-                )
-
+        print(f"[{dataset_name}] ANDData predict (Python)")
         cluster_metrics, _b3_metrics_per_signature = _cluster_eval_with_predict_options(
             anddata,
             clusterer,

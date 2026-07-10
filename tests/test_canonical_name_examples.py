@@ -2,9 +2,7 @@
 
 This test module enforces ``tests/fixtures/canonical_name_examples.json``, the
 step-1 artifact of ``docs/normalization_migration_blocked.md``, in four
-layers (post-cutover: the live pipeline IS canonical_v2, so the live-path
-layers assert the fixture's ``canonical`` values; the fixture's ``legacy``
-values remain as the historical record of pre-cutover behavior):
+layers. The live pipeline and the fixture both use canonical_v2:
 
 - Canonical contract: the fixture's ``canonical`` values are asserted against
   ``s2and.text.canonicalize_name_parts`` and
@@ -30,30 +28,21 @@ import itertools
 import json
 import math
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
-import s2and.text as s2and_text
-from s2and.data import (
-    NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-    ANDData,
-    Signature,
-)
-from s2and.text import same_prefix_tokens
+from s2and.data import ANDData, Signature
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+from s2and.name_counts_index import NameCountsIndex
+from s2and.text import canonical_name_count_keys, canonicalize_name_parts, same_prefix_tokens
+from tests.helpers import tiny_name_counts_provenance
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "canonical_name_examples.json"
 FIXTURE = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 CASES = FIXTURE["cases"]
 CASE_PARAMS = [pytest.param(case, id=case["id"]) for case in CASES]
 CASES_BY_ID = {case["id"]: case for case in CASES}
-
-CANONICALIZE_NAME_PARTS = cast(Any, getattr(s2and_text, "canonicalize_name_parts", None))
-CANONICAL_NAME_COUNT_KEYS = cast(Any, getattr(s2and_text, "canonical_name_count_keys", None))
-needs_canonical_api = pytest.mark.skipif(
-    CANONICALIZE_NAME_PARTS is None or CANONICAL_NAME_COUNT_KEYS is None,
-    reason="canonical normalizer not implemented yet (migration step 2)",
-)
 
 
 def _skeleton_signature(author_info_last: str | None) -> Signature:
@@ -93,8 +82,27 @@ def _skeleton_signature(author_info_last: str | None) -> Signature:
 _COUNT_SENTINELS = {"first": 7.0, "last": 11.0, "first_last": 13.0, "last_first_initial": 17.0}
 
 
-def _live_canonical_name_counts(case):
-    """Run the real ANDData count path with dicts seeded at the fixture's keys.
+@pytest.fixture(scope="module")
+def canonical_name_counts_index(tmp_path_factory) -> NameCountsIndex:
+    mappings = []
+    for key_name in ("first", "last", "first_last", "last_first_initial"):
+        mappings.append(
+            {
+                keys[key_name]: _COUNT_SENTINELS[key_name]
+                for case in CASES
+                if (keys := case["canonical"]["count_keys"])[key_name] is not None
+            }
+        )
+    path, _metrics = write_name_counts_index(
+        tmp_path_factory.mktemp("canonical-name-counts"),
+        tuple(mappings),
+        tiny_name_counts_provenance(),
+    )
+    return NameCountsIndex.open(path)
+
+
+def _live_canonical_name_counts(case, index: NameCountsIndex):
+    """Run the real ANDData count path with an index seeded at the fixture's keys.
 
     Each dict maps only the fixture's expected canonical key (when non-None) to
     a sentinel value, so if ``_compute_signature_name_counts`` ever builds a
@@ -104,17 +112,8 @@ def _live_canonical_name_counts(case):
     the canonical fields itself, exercising the full live path.
     """
     raw = case["input"]
-    keys = case["canonical"]["count_keys"]
     dataset = ANDData.__new__(ANDData)
-    dataset.first_dict = {} if keys["first"] is None else {keys["first"]: _COUNT_SENTINELS["first"]}
-    dataset.last_dict = {} if keys["last"] is None else {keys["last"]: _COUNT_SENTINELS["last"]}
-    dataset.first_last_dict = {} if keys["first_last"] is None else {keys["first_last"]: _COUNT_SENTINELS["first_last"]}
-    dataset.last_first_initial_dict = (
-        {}
-        if keys["last_first_initial"] is None
-        else {keys["last_first_initial"]: _COUNT_SENTINELS["last_first_initial"]}
-    )
-    dataset.name_counts_last_first_initial_semantics = NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
+    dataset.name_counts_index = index
     return dataset._compute_signature_name_counts(
         _skeleton_signature(raw["last"]),
         first_raw=raw["first"],
@@ -125,8 +124,8 @@ def _live_canonical_name_counts(case):
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
-def test_canonical_count_keys_via_live_anddata_path(case):
-    counts = _live_canonical_name_counts(case)
+def test_canonical_count_keys_via_live_anddata_path(case, canonical_name_counts_index):
+    counts = _live_canonical_name_counts(case, canonical_name_counts_index)
     keys = case["canonical"]["count_keys"]
     for name, count_value in [
         ("first", counts.first),
@@ -207,19 +206,17 @@ def test_canonical_values_are_in_normalized_form(case):
             assert key_value != "", f"count key {key_name} must be null instead of empty"
 
 
-@needs_canonical_api
 @pytest.mark.parametrize("case", CASE_PARAMS)
 def test_canonical_fields(case):
     raw = case["input"]
     expected = case["canonical"]
-    parts = CANONICALIZE_NAME_PARTS(raw["first"], raw["middle"], raw["last"])
+    parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
     assert (parts.first, parts.middle, parts.last) == (expected["first"], expected["middle"], expected["last"])
 
 
-@needs_canonical_api
 @pytest.mark.parametrize("case", CASE_PARAMS)
 def test_canonical_count_keys(case):
     raw = case["input"]
     expected = case["canonical"]["count_keys"]
-    parts = CANONICALIZE_NAME_PARTS(raw["first"], raw["middle"], raw["last"])
-    assert CANONICAL_NAME_COUNT_KEYS(parts) == expected
+    parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
+    assert canonical_name_count_keys(parts) == expected

@@ -270,7 +270,7 @@ def test_sorted_subblock_merge_candidates_matches_legacy_many_keys() -> None:
     )
 
 
-def test_arrow_graph_subblocking_fallback_loads_arrow_evidence_and_packs_components(tmp_path) -> None:
+def test_arrow_graph_subblocking_fallback_accepts_missing_orcid_and_packs_components(tmp_path) -> None:
     pa = pytest.importorskip("pyarrow")
 
     signatures_path = tmp_path / "signatures.arrow"
@@ -292,7 +292,6 @@ def test_arrow_graph_subblocking_fallback_loads_arrow_evidence_and_packs_compone
                         ["Department of Robotics, Other University"],
                     ]
                 ),
-                "author_orcid": pa.array([None, None, None, None], type=pa.string()),
                 "author_position": pa.array([0, 0, 0, 0], type=pa.int64()),
             }
         ),

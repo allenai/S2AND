@@ -52,7 +52,7 @@ def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
         },
         name="empty_normalized_affiliations",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         n_jobs=1,
     )
@@ -74,7 +74,7 @@ def test_name_tuples_none_uses_canonical_artifact(monkeypatch: pytest.MonkeyPatc
         papers={},
         name="canonical_name_tuple_default",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
         name_tuples=None,
     )
@@ -89,7 +89,7 @@ def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:
         papers={},
         name="canonical_custom_name_tuples",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
         name_tuples={("william", "bill")},
     )
@@ -154,7 +154,7 @@ def test_signature_full_name_uses_only_canonical_fields() -> None:
         },
         name="canonical_full_name",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         n_jobs=1,
         name_tuples=set(),
@@ -172,12 +172,9 @@ def test_anddata_passes_arrow_featurization_to_rust_lifecycle(monkeypatch: pytes
     monkeypatch.setattr(
         data_module,
         "build_runtime_context",
-        lambda _operation: SimpleNamespace(
-            requested_backend="auto",
-            resolved_backend="rust",
-            use_rust=False,
+        lambda _operation, **_kwargs: SimpleNamespace(
+            backend="rust",
             run_id="test-run",
-            source="default",
         ),
     )
 
@@ -218,7 +215,7 @@ def test_anddata_passes_arrow_featurization_to_rust_lifecycle(monkeypatch: pytes
         },
         name="rust_lifecycle_capability",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
         name_tuples=set(),
         rust_arrow_featurization=True,
@@ -237,7 +234,7 @@ class TestData(unittest.TestCase):
             {},
             clusters="tests/qian/clusters.json",
             name="qian",
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
         self.dummy_dataset = ANDData(
@@ -246,7 +243,7 @@ class TestData(unittest.TestCase):
             {},
             clusters="tests/dummy/clusters.json",
             name="dummy",
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
 
@@ -382,7 +379,7 @@ class TestData(unittest.TestCase):
                 mode="train",
                 unit_of_data_split="blocks",
                 pair_sampling_mode="global_balanced_classes",
-                load_name_counts=False,
+                name_counts_index=None,
                 preprocess=False,
             )
 
@@ -394,7 +391,7 @@ class TestData(unittest.TestCase):
                 mode="train",
                 clusters={},
                 train_pairs=cast(Any, []),
-                load_name_counts=False,
+                name_counts_index=None,
                 preprocess=False,
             )
 
@@ -407,7 +404,7 @@ class TestData(unittest.TestCase):
                 clusters=None,
                 train_pairs=None,
                 train_blocks=None,
-                load_name_counts=False,
+                name_counts_index=None,
                 preprocess=False,
             )
 
@@ -419,7 +416,7 @@ class TestData(unittest.TestCase):
                 mode="train",
                 train_blocks=[],
                 train_pairs=cast(Any, []),
-                load_name_counts=False,
+                name_counts_index=None,
                 preprocess=False,
             )
 
@@ -431,23 +428,21 @@ class TestData(unittest.TestCase):
                 mode="train",
                 train_blocks=[],
                 clusters=None,
-                load_name_counts=False,
+                name_counts_index=None,
                 preprocess=False,
             )
 
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
+        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", name_counts_index=None, preprocess=False)
         assert dataset.signature_to_cluster_id is None
 
-        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", load_name_counts=False, preprocess=False)
-        assert dataset.pair_sampling_block
-        assert not dataset.pair_sampling_balanced_classes
-        assert not dataset.pair_sampling_balanced_homonym_synonym
+        dataset = ANDData(signatures={}, papers={}, name="", mode="inference", name_counts_index=None, preprocess=False)
+        assert dataset.pair_sampling_mode == "within_block_random"
         assert dataset.all_test_pairs_flag
         assert dataset.block_type == "s2"
 
         with pytest.raises(ValueError):
             dataset = ANDData(
-                signatures={}, papers={}, clusters={}, name="", mode="dummy", load_name_counts=False, preprocess=False
+                signatures={}, papers={}, clusters={}, name="", mode="dummy", name_counts_index=None, preprocess=False
             )
 
     def test_construct_cluster_to_signatures(self):
@@ -463,7 +458,7 @@ class TestData(unittest.TestCase):
             "tests/dummy/papers.json",
             clusters="tests/dummy/clusters.json",
             name="dummy_single",
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=True,
             n_jobs=1,
         )
@@ -473,7 +468,7 @@ class TestData(unittest.TestCase):
             "tests/dummy/papers.json",
             clusters="tests/dummy/clusters.json",
             name="dummy_multi",
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=True,
             n_jobs=2,
         )
@@ -501,20 +496,20 @@ class TestData(unittest.TestCase):
                 ), f"Title ngrams mismatch for paper {paper_id}"
 
 
-def test_compute_signature_name_counts_uses_single_character_initial():
-    load_name_counts = {
-        "first_dict": {},
-        "last_dict": {"smith": 11},
-        "first_last_dict": {},
-        "last_first_initial_dict": {"smith m": 17},
-        "provenance": tiny_name_counts_provenance(),
-    }
+def test_compute_signature_name_counts_uses_single_character_initial(tmp_path):
+    from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        ({}, {"smith": 11}, {}, {"smith m": 17}),
+        tiny_name_counts_provenance(),
+    )
     dataset = ANDData(
         "tests/dummy/signatures.json",
         "tests/dummy/papers.json",
         name="dummy_name_counts_initial",
         mode="inference",
-        load_name_counts=load_name_counts,
+        name_counts_index=index_path,
         preprocess=False,
     )
     signature = next(iter(dataset.signatures.values()))._replace(
@@ -546,7 +541,7 @@ def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):
         mode="inference",
         cluster_seeds={"1": {"2": "require"}},
         altered_cluster_signatures=str(altered_path),
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 
@@ -562,22 +557,7 @@ def test_pair_sampling_invalid_mode_raises_value_error():
             name="invalid_pair_sampling_mode",
             mode="train",
             pair_sampling_mode="global_unbalanced",  # type: ignore[arg-type]
-            load_name_counts=False,
-            preprocess=False,
-        )
-
-
-def test_pair_sampling_rejects_mixed_canonical_and_legacy_flags():
-    with pytest.raises(ValueError, match="Set either pair_sampling_mode or legacy"):
-        ANDData(
-            signatures={},
-            papers={},
-            clusters={},
-            name="mixed_pair_sampling",
-            mode="train",
-            pair_sampling_mode="within_block_random",
-            pair_sampling_block=True,
-            load_name_counts=False,
+            name_counts_index=None,
             preprocess=False,
         )
 
@@ -589,7 +569,7 @@ def test_inference_dataset_with_clusters_initializes_signature_to_cluster_id():
         clusters={},
         name="inference_with_clusters_signature_mapping",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 
@@ -619,7 +599,7 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
         train_pairs=train_pairs_df,
         val_pairs=val_pairs_df,
         test_pairs=test_pairs_df,
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
     )
 

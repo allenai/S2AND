@@ -294,7 +294,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         row_metrics=row_metrics,
         overwrite=bool(args.overwrite),
     )
-    print(json.dumps({"result": metadata}, indent=2, sort_keys=True))
+    from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+
+    index_path, index_metrics = write_name_counts_index(
+        args.output_dir,
+        mappings,
+        metadata,
+        overwrite=bool(args.overwrite),
+    )
+    print(
+        json.dumps(
+            {"result": metadata, "name_counts_index": index_path, "name_counts_index_metrics": index_metrics},
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

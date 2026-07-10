@@ -42,13 +42,6 @@ Runtime install:
 uv pip install s2and
 ```
 
-The historical extra remains as a no-op compatibility alias, but Rust is no
-longer optional:
-
-```bash
-uv pip install "s2and[rust]"
-```
-
 ## Repo checkout
 
 Create and activate a Python 3.11 environment:

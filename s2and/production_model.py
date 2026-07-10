@@ -1,9 +1,8 @@
-"""Production model bundle loading for packaged S2AND prediction artifacts."""
+"""Load explicit complete S2AND production bundles."""
 
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import math
 from collections.abc import Mapping
@@ -14,7 +13,6 @@ import lightgbm as lgb
 import numpy as np
 
 from s2and.consts import (
-    _PACKAGE_DATA_DIR,
     FEATURIZER_VERSION,
     NORMALIZATION_VERSION,
     NORMALIZATION_VERSION_LEGACY_COMPAT,
@@ -32,26 +30,21 @@ from s2and.model import (
 )
 from s2and.name_count_binding import NameCountsBinding
 from s2and.production_bundle_contract import (
+    CLUSTERER_CONFIG_SCHEMA_VERSION,
+    PAIRWISE_METADATA_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
     production_manifest_files,
 )
-from s2and.serialization import load_pickle_with_verified_label_encoder_compat
+from s2and.runtime import load_s2and_rust_extension
 from s2and.thread_config import resolve_n_jobs
 
-DEFAULT_PRODUCTION_MODEL_DECLARATION_SCHEMA_VERSION = "s2and_default_production_model_v1"
-DEFAULT_PRODUCTION_MODEL_DECLARATION_PATH = Path(_PACKAGE_DATA_DIR) / "default_production_model.json"
-PUBLISHED_PRODUCTION_MODEL_RUNTIME_CLUSTER_EPS = 0.65
-_RUNTIME_CLUSTER_EPS_OVERRIDE_VERSIONS = frozenset({"1.2", "1.21"})
-_PRODUCTION_MODEL_PATH_PREFIX = "production_model_v"
 _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
 _CLUSTERER_CONFIG_FIELDS = frozenset(
     {
         "batch_size",
-        "best_params",
-        "bundle_version",
         "cluster_model",
         "dont_merge_cluster_seeds",
         "feature_contract",
@@ -62,10 +55,8 @@ _CLUSTERER_CONFIG_FIELDS = frozenset(
         "n_iter",
         "n_jobs",
         "nameless_featurizer_info",
-        "pairwise",
         "random_state",
         "schema_version",
-        "source_model_version",
         "suppress_orcid",
         "use_cache",
         "use_default_constraints_as_supervision",
@@ -74,56 +65,11 @@ _CLUSTERER_CONFIG_FIELDS = frozenset(
 )
 
 
-def _load_default_production_model_dir() -> Path:
-    declaration = _read_json(DEFAULT_PRODUCTION_MODEL_DECLARATION_PATH)
-    if declaration.get("schema_version") != DEFAULT_PRODUCTION_MODEL_DECLARATION_SCHEMA_VERSION:
-        raise ValueError(
-            "Unsupported default production model declaration schema_version=" f"{declaration.get('schema_version')!r}"
-        )
-    directory = declaration.get("bundle_dir")
-    if (
-        not isinstance(directory, str)
-        or not directory.startswith("production_model_v")
-        or "/" in directory
-        or "\\" in directory
-    ):
-        raise ValueError(f"Invalid default production model bundle_dir={directory!r}")
-    declared_version = str(declaration.get("bundle_version", ""))
-    if (
-        not declared_version
-        or ".." in declared_version
-        or any(not (character.isalnum() or character in ".-_") for character in declared_version)
-    ):
-        raise ValueError(f"Invalid default production model bundle_version={declared_version!r}")
-    if directory != f"production_model_v{declared_version}":
-        raise ValueError("Default production model declaration bundle_dir and bundle_version disagree")
-    return Path(_PACKAGE_DATA_DIR) / directory
-
-
 def _load_rust_lightgbm_booster(model_path: str) -> Any:
-    try:
-        rust_module = importlib.import_module("s2and_rust")
-    except ImportError as exc:
-        from s2and.runtime import min_supported_rust_extension_version_string
-
-        minimum = min_supported_rust_extension_version_string()
-        raise RuntimeError(
-            "RustLightGBMBooster requires s2and-rust>="
-            f"{minimum}; the Rust extension is not importable. Rebuild the local extension or install the "
-            "matching s2and-rust package."
-        ) from exc
+    rust_module = load_s2and_rust_extension()
     booster_cls = getattr(rust_module, "RustLightGBMBooster", None)
     if booster_cls is None:
-        from s2and.runtime import min_supported_rust_extension_version_string
-
-        minimum = min_supported_rust_extension_version_string()
-        found = getattr(rust_module, "__version__", None)
-        found_version = "unknown" if found is None else str(found)
-        raise RuntimeError(
-            "RustLightGBMBooster requires s2and-rust>="
-            f"{minimum}; found {found_version}. Rebuild the local extension or install the matching "
-            "s2and-rust package."
-        )
+        raise RuntimeError("The pinned s2and-rust extension does not expose RustLightGBMBooster")
 
     return booster_cls(model_path)
 
@@ -309,9 +255,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-DEFAULT_PRODUCTION_MODEL_DIR = _load_default_production_model_dir()
-
-
 def _validated_bundle_path(bundle_dir: Path, raw_relpath: Any, *, field: str) -> tuple[str, Path]:
     if not isinstance(raw_relpath, str) or not raw_relpath:
         raise ValueError(f"Production model bundle {field} must be a nonempty relative POSIX path")
@@ -349,10 +292,6 @@ def _runtime_files_on_disk(bundle_dir: Path, *, complete: bool) -> set[str]:
                 files.add(resolved.relative_to(root).as_posix())
             except ValueError as exc:
                 raise ValueError(f"Production model runtime file escapes bundle root: {path}") from exc
-    if not complete:
-        # Same-path finalization may have installed this complete-only file
-        # while the pairwise-only manifest remains the commit authority.
-        files.discard("reproducibility/incremental_linker_training_target.json")
     return files
 
 
@@ -361,6 +300,21 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
     manifest = _read_json(manifest_path)
     if manifest.get("schema_version") != PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION:
         raise ValueError(f"Unsupported production model bundle schema_version={manifest.get('schema_version')!r}")
+    expected_manifest_fields = {
+        "bundle_status",
+        "bundle_version",
+        "files",
+        "incremental_linker_version",
+        "pairwise_model_version",
+        "schema_version",
+        "sha256",
+    }
+    if set(manifest) != expected_manifest_fields:
+        raise ValueError(
+            "Production model manifest field mismatch: "
+            f"missing={sorted(expected_manifest_fields - set(manifest))} "
+            f"extra={sorted(set(manifest) - expected_manifest_fields)}"
+        )
     status = manifest.get("bundle_status")
     if status not in {"pairwise_only", "complete"}:
         raise ValueError(f"Unsupported production model bundle_status={status!r}")
@@ -462,8 +416,8 @@ def _require_finite_number(value: Any, *, field: str) -> float:
     return number
 
 
-def _validate_clusterer_config(manifest: Mapping[str, Any], payload: dict[str, Any]) -> None:
-    if payload.get("schema_version") != "s2and_clusterer_config_v1":
+def _validate_clusterer_config(payload: dict[str, Any]) -> None:
+    if payload.get("schema_version") != CLUSTERER_CONFIG_SCHEMA_VERSION:
         raise ValueError(f"Unsupported clusterer config schema_version={payload.get('schema_version')!r}")
     if set(payload) != _CLUSTERER_CONFIG_FIELDS:
         raise ValueError(
@@ -471,11 +425,6 @@ def _validate_clusterer_config(manifest: Mapping[str, Any], payload: dict[str, A
             f"missing={sorted(_CLUSTERER_CONFIG_FIELDS - set(payload))} "
             f"extra={sorted(set(payload) - _CLUSTERER_CONFIG_FIELDS)}"
         )
-    if str(payload["bundle_version"]) != str(manifest["bundle_version"]):
-        raise ValueError("Production clusterer and manifest bundle_version disagree")
-    if str(payload["source_model_version"]) != str(manifest["pairwise_model_version"]):
-        raise ValueError("Production clusterer and manifest pairwise model version disagree")
-
     cluster_model = payload.get("cluster_model")
     if not isinstance(cluster_model, dict) or set(cluster_model) != {
         "eps",
@@ -502,13 +451,6 @@ def _validate_clusterer_config(manifest: Mapping[str, Any], payload: dict[str, A
         "weighted",
     }:
         raise ValueError(f"Unsupported production cluster_model linkage={cluster_model['linkage']!r}")
-
-    best_params = payload.get("best_params")
-    if not isinstance(best_params, dict) or set(best_params) != {"eps", "linkage"}:
-        raise ValueError("Production best_params must contain exactly eps and linkage")
-    best_eps = _require_finite_number(best_params["eps"], field="best_params.eps")
-    if best_eps != eps or str(best_params["linkage"]) != str(cluster_model["linkage"]):
-        raise ValueError("Production best_params contradict cluster_model configuration")
 
     hybrid_weight = _require_finite_number(
         payload["incremental_mean_min_hybrid_weight"],
@@ -544,12 +486,9 @@ def _validate_clusterer_config(manifest: Mapping[str, Any], payload: dict[str, A
 def _validate_pairwise_metadata(
     bundle_dir: Path,
     manifest: Mapping[str, Any],
-    clusterer_config: Mapping[str, Any],
-    featurizer_info: FeaturizationInfo,
-    nameless_featurizer_info: FeaturizationInfo,
-) -> dict[str, Any]:
+) -> None:
     metadata = _read_json(bundle_dir / str(manifest["files"]["pairwise_metadata"]))
-    if metadata.get("schema_version") != "s2and_pairwise_native_lightgbm_v1":
+    if metadata.get("schema_version") != PAIRWISE_METADATA_SCHEMA_VERSION:
         raise ValueError(f"Unsupported pairwise metadata schema_version={metadata.get('schema_version')!r}")
     if metadata.get("model_family") != "binary_lightgbm_pairwise_distance":
         raise ValueError(f"Unsupported pairwise model_family={metadata.get('model_family')!r}")
@@ -560,49 +499,19 @@ def _validate_pairwise_metadata(
         or metadata.get("positive_probability_column") != "class_1"
     ):
         raise ValueError("Pairwise metadata probability-column contract is invalid")
-    if str(metadata.get("source_model_version")) != str(clusterer_config["source_model_version"]):
-        raise ValueError("Pairwise metadata and clusterer source_model_version disagree")
-    feature_contract = clusterer_config["feature_contract"]
-    if metadata.get("normalization_version") != feature_contract.get("normalization_version"):
-        raise ValueError("Pairwise metadata and clusterer normalization_version disagree")
-
-    pairwise_config = clusterer_config["pairwise"]
-    if not isinstance(pairwise_config, Mapping) or set(pairwise_config) != {
-        "main_feature_count",
-        "nameless_feature_count",
-    }:
-        raise ValueError("Production clusterer pairwise config is invalid")
-    for field in ("main_feature_count", "nameless_feature_count"):
-        value = pairwise_config[field]
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError(f"Production clusterer pairwise {field} must be a positive integer")
-    for name, info, count_key, model_key, expected_filename in (
-        ("main", featurizer_info, "main_feature_count", "pairwise_main_model", "main.lgb"),
-        (
-            "nameless",
-            nameless_featurizer_info,
-            "nameless_feature_count",
-            "pairwise_nameless_model",
-            "nameless.lgb",
-        ),
-    ):
-        section = metadata.get(name)
-        if not isinstance(section, Mapping):
-            raise ValueError(f"Pairwise metadata {name} section must be an object")
-        expected_indices = list(_selected_feature_indices(info))
-        declared_count = int(pairwise_config[count_key])
-        if section.get("features_to_use") != [str(value) for value in info.features_to_use]:
-            raise ValueError(f"Pairwise metadata {name} ordered features contradict clusterer.json")
-        if int(section.get("featurizer_version", -1)) != int(info.featurizer_version):
-            raise ValueError(f"Pairwise metadata {name} featurizer_version contradicts clusterer.json")
-        if section.get("selected_feature_indices") != expected_indices:
-            raise ValueError(f"Pairwise metadata {name} selected_feature_indices contradict clusterer.json")
-        if int(section.get("selected_feature_count", -1)) != declared_count or declared_count != len(expected_indices):
-            raise ValueError(f"Pairwise metadata {name} feature count contradicts clusterer.json")
-        manifest_model_filename = Path(str(manifest["files"][model_key])).name
-        if section.get("model_file") != expected_filename or manifest_model_filename != expected_filename:
-            raise ValueError(f"Pairwise metadata {name} model_file contradicts manifest")
-    return metadata
+    expected_metadata_fields = {
+        "class_labels",
+        "distance_probability_column",
+        "model_family",
+        "positive_probability_column",
+        "schema_version",
+    }
+    if set(metadata) != expected_metadata_fields:
+        raise ValueError(
+            "Pairwise metadata field mismatch: "
+            f"missing={sorted(expected_metadata_fields - set(metadata))} "
+            f"extra={sorted(set(metadata) - expected_metadata_fields)}"
+        )
 
 
 def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
@@ -611,21 +520,26 @@ def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
     root = Path(bundle_dir)
     manifest = _validate_manifest(root)
     clusterer_config = _read_json(root / str(manifest["files"]["clusterer_config"]))
-    _validate_clusterer_config(manifest, clusterer_config)
+    _validate_clusterer_config(clusterer_config)
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
-    pairwise_metadata = _validate_pairwise_metadata(
+    _validate_pairwise_metadata(
         root,
         manifest,
-        clusterer_config,
-        featurizer_info,
-        nameless_info,
     )
     feature_contract = dict(clusterer_config["feature_contract"])
     ordered_feature_contract = {
         "feature_contract": feature_contract,
-        "main": dict(pairwise_metadata["main"]),
-        "nameless": dict(pairwise_metadata["nameless"]),
+        "main": {
+            "features_to_use": list(featurizer_info.features_to_use),
+            "featurizer_version": int(featurizer_info.featurizer_version),
+            "selected_feature_indices": list(_selected_feature_indices(featurizer_info)),
+        },
+        "nameless": {
+            "features_to_use": list(nameless_info.features_to_use),
+            "featurizer_version": int(nameless_info.featurizer_version),
+            "selected_feature_indices": list(_selected_feature_indices(nameless_info)),
+        },
     }
     return {
         "normalization_version": str(feature_contract["normalization_version"]),
@@ -669,72 +583,17 @@ def _validate_incremental_linker_metadata(linker_dir: Path) -> IncrementalLinkin
         raise FileNotFoundError(f"Incremental linker metadata is missing: {metadata_path}")
     if not booster_path.exists():
         raise FileNotFoundError(f"Incremental linker booster is missing: {booster_path}")
-    return load_incremental_linking_artifact(linker_dir, require_rust_capabilities=False)
-
-
-def _production_model_path_version(path: Path) -> str | None:
-    name = path.name.removesuffix(".pickle")
-    if not name.startswith(_PRODUCTION_MODEL_PATH_PREFIX):
-        return None
-    version = name.removeprefix(_PRODUCTION_MODEL_PATH_PREFIX)
-    return version or None
-
-
-def _production_runtime_cluster_eps(
-    model_path: Path,
-    *,
-    manifest: Mapping[str, Any] | None = None,
-    clusterer_config: Mapping[str, Any] | None = None,
-) -> float | None:
-    versions: set[str] = set()
-    path_version = _production_model_path_version(model_path)
-    if path_version is not None:
-        versions.add(path_version)
-    for payload, keys in (
-        (manifest, ("bundle_version", "pairwise_model_version")),
-        (clusterer_config, ("bundle_version", "source_model_version")),
-    ):
-        if payload is None:
-            continue
-        for key in keys:
-            value = payload.get(key)
-            if value is not None:
-                versions.add(str(value))
-    if versions.isdisjoint(_RUNTIME_CLUSTER_EPS_OVERRIDE_VERSIONS):
-        return None
-    return PUBLISHED_PRODUCTION_MODEL_RUNTIME_CLUSTER_EPS
-
-
-def _apply_production_runtime_cluster_eps(clusterer: Clusterer, eps: float | None) -> Clusterer:
-    if eps is None:
-        return clusterer
-    if not isinstance(clusterer.cluster_model, FastCluster):
-        raise TypeError(
-            "Published production runtime cluster eps override requires "
-            f"FastCluster, got {type(clusterer.cluster_model)!r}"
-        )
-    best_params = getattr(clusterer, "best_params", None)
-    clusterer.best_params = dict(best_params or {})
-    clusterer.best_params["eps"] = float(eps)
-    clusterer.set_params({"eps": float(eps)})
-    return clusterer
+    return load_incremental_linking_artifact(linker_dir)
 
 
 def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Mapping[str, Any]) -> None:
-    """Fail fast when a bundle's normalization policy differs from this package's.
-
-    An absent feature_contract["normalization_version"] means the bundle predates the
-    normalization contract and implies "legacy_compat". Unlike the featurizer-version
-    warning, a mismatch here is a hard error: normalization changes the name fields
-    and count keys every feature consumes, and the rollback path is redeploying the
-    matching package + artifact set (docs/normalization_migration_blocked.md, OD4).
-    """
+    """Require the one normalization contract implemented by this package."""
 
     bundle_version = feature_contract.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
     if bundle_version not in VALID_NORMALIZATION_VERSIONS:
         raise ValueError(
-            f"Production bundle {bundle_dir} has invalid feature_contract['normalization_version'] "
-            f"{bundle_version!r}; expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
+            f"Production bundle {bundle_dir} has invalid normalization_version {bundle_version!r}; "
+            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
         )
     if bundle_version != NORMALIZATION_VERSION:
         raise ValueError(
@@ -745,18 +604,11 @@ def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Ma
         )
 
 
-def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool = True) -> Clusterer:
-    manifest = _validate_manifest(bundle_dir)
+def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Clusterer:
     clusterer_config = _read_json(bundle_dir / str(manifest["files"]["clusterer_config"]))
-    _validate_clusterer_config(manifest, clusterer_config)
+    _validate_clusterer_config(clusterer_config)
     feature_contract = clusterer_config["feature_contract"]
     _require_bundle_normalization_version(bundle_dir, feature_contract)
-    runtime_cluster_eps = _production_runtime_cluster_eps(
-        bundle_dir,
-        manifest=manifest,
-        clusterer_config=clusterer_config,
-    )
-
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
     NameCountsBinding.from_feature_contract(
@@ -774,18 +626,23 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
     _validate_pairwise_metadata(
         bundle_dir,
         manifest,
-        clusterer_config,
-        featurizer_info,
-        nameless_featurizer_info,
     )
     classifier = NativeLightGBMBinaryClassifier(
         bundle_dir / str(manifest["files"]["pairwise_main_model"]),
-        n_features=int(clusterer_config["pairwise"]["main_feature_count"]),
     )
     nameless_classifier = NativeLightGBMBinaryClassifier(
         bundle_dir / str(manifest["files"]["pairwise_nameless_model"]),
-        n_features=int(clusterer_config["pairwise"]["nameless_feature_count"]),
     )
+    for name, model, info in (
+        ("main", classifier, featurizer_info),
+        ("nameless", nameless_classifier, nameless_featurizer_info),
+    ):
+        expected_count = len(_selected_feature_indices(info))
+        if model.n_features_in_ != expected_count:
+            raise ValueError(
+                f"Production {name} booster feature count {model.n_features_in_} contradicts "
+                f"the clusterer featurizer count {expected_count}"
+            )
     _validate_pairwise_fixture(
         classifier,
         bundle_dir / str(manifest["files"]["pairwise_main_fixture"]),
@@ -818,7 +675,10 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
         suppress_orcid=bool(clusterer_config["suppress_orcid"]),
     )
     clusterer.feature_contract = dict(feature_contract)
-    clusterer.best_params = dict(clusterer_config["best_params"])
+    clusterer.best_params = {
+        "eps": float(cluster_model_config["eps"]),
+        "linkage": str(cluster_model_config["linkage"]),
+    }
     clusterer.incremental_precluster_broadcast_mode = cast(
         IncrementalBroadcastMode,
         _config_choice(
@@ -837,12 +697,7 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
     )
     clusterer.incremental_mean_min_hybrid_weight = float(clusterer_config["incremental_mean_min_hybrid_weight"])
     incremental_linker_relpath = manifest["files"].get("incremental_linker_dir")
-    if incremental_linker_relpath is None:
-        if require_incremental_linker:
-            raise FileNotFoundError(
-                f"Production model bundle is pairwise-only and has no incremental_linker: {bundle_dir}"
-            )
-    else:
+    if incremental_linker_relpath is not None:
         incremental_linker_dir = bundle_dir / str(incremental_linker_relpath)
         incremental_linker_artifact = _validate_incremental_linker_metadata(incremental_linker_dir)
         expected_binding = pairwise_bundle_binding(bundle_dir)
@@ -853,31 +708,34 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
     clusterer.production_model_bundle_dir = bundle_dir
     clusterer.production_model_bundle_version = str(manifest["bundle_version"])
     clusterer.production_model_bundle_status = str(manifest.get("bundle_status", "complete"))
-    return _apply_production_runtime_cluster_eps(clusterer, runtime_cluster_eps)
+    return clusterer
 
 
-def load_production_model(path: str | Path | None = None, *, require_incremental_linker: bool = True) -> Clusterer:
-    """Load the production model from a native bundle directory.
+def _load_pairwise_staging_model(path: str | Path) -> Clusterer:
+    """Load an internal pairwise-only bundle used during training/finalization."""
 
-    Legacy pickle paths are accepted so older local scripts can migrate by
-    changing only the imported loader first. New production defaults should pass
-    the v1.21 bundle directory.
-    Set ``require_incremental_linker=False`` only for training/finalization
-    code that intentionally consumes a pairwise-only bundle stage.
-    """
+    bundle_dir = Path(path).resolve()
+    if not bundle_dir.is_dir():
+        raise ValueError(f"Pairwise staging model must be a native bundle directory: {bundle_dir}")
+    manifest = _validate_manifest(bundle_dir)
+    if manifest["bundle_status"] != "pairwise_only":
+        raise ValueError(
+            f"Expected a pairwise_only production model bundle, got {manifest['bundle_status']!r}: {bundle_dir}"
+        )
+    return _load_bundle_clusterer(bundle_dir, manifest)
 
-    model_path = (Path(path) if path is not None else DEFAULT_PRODUCTION_MODEL_DIR).resolve()
-    if model_path.is_dir():
-        return _load_bundle_clusterer(model_path, require_incremental_linker=require_incremental_linker)
-    loaded = load_pickle_with_verified_label_encoder_compat(str(model_path))
-    clusterer = loaded.get("clusterer") if isinstance(loaded, dict) else loaded
-    if not isinstance(clusterer, Clusterer):
-        raise TypeError(f"Expected a Clusterer in production model artifact, got {type(clusterer)!r}")
-    _require_bundle_normalization_version(model_path, getattr(clusterer, "feature_contract", None) or {})
-    versions = {"featurizer_info": int(clusterer.featurizer_info.featurizer_version)}
-    nameless_info = getattr(clusterer, "nameless_featurizer_info", None)
-    if nameless_info is not None:
-        versions["nameless_featurizer_info"] = int(nameless_info.featurizer_version)
-    _require_featurizer_version_match(model_path, versions)
-    runtime_cluster_eps = _production_runtime_cluster_eps(model_path)
-    return _apply_production_runtime_cluster_eps(clusterer, runtime_cluster_eps)
+
+def load_production_model(path: str | Path | None = None) -> Clusterer:
+    """Load a complete native production model bundle."""
+
+    if path is None:
+        raise ValueError("No default production model is declared; pass a complete native bundle path")
+    bundle_dir = Path(path).resolve()
+    if not bundle_dir.is_dir():
+        raise ValueError(f"Production model must be a complete native bundle directory: {bundle_dir}")
+    manifest = _validate_manifest(bundle_dir)
+    if manifest["bundle_status"] != "complete":
+        raise ValueError(
+            f"Expected a complete production model bundle, got {manifest['bundle_status']!r}: {bundle_dir}"
+        )
+    return _load_bundle_clusterer(bundle_dir, manifest)

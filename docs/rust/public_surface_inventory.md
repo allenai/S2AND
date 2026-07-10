@@ -1,33 +1,35 @@
 # Rust Public Surface Inventory
 
-Status date: 2026-05-28
+Status date: 2026-07-10
 
 This inventory records the current Python-visible `s2and_rust` surface before
 module splitting or API deletion. It is intentionally about ownership and
 cleanup risk, not a user-facing API promise.
 
+Python callers target exactly `s2and-rust==0.60.0`. Maintained calls are
+direct: the Python runtime checks the extension version once when Rust is
+requested and does not probe individual methods or constants.
+
 ## Module Exports
 
 | Export | Owner / caller | Status |
 |---|---|---|
-| `RustFeaturizer` | `s2and/feature_port.py`, `s2and/rust_calls.py`, production Arrow paths, parity tests | Core class. Production Rust inference should enter through `from_arrow_paths`; non-Arrow constructors are compatibility/training/parity. |
+| `RustFeaturizer` | `s2and/feature_port.py`, `s2and/rust_calls.py`, Arrow training/prediction, parity tests | Core class. Maintained Python Rust routes enter through `from_arrow_paths`. |
 | `RustHybridCentroidRetriever` | `s2and/incremental_linking/retrieval.py`, raw Arrow planners, training query-support code | Core retrieval class. Production runtime should prefer `top_k_hybrid_centroid_pair_plan(...)`. |
 | `RawBlockQueryCandidatePlanner` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py` | Canonical production raw Arrow planner. |
-| `raw_arrow_labeled_candidate_plan(...)` | `scripts/production/model/linker_train_calibrate_eval.py` | Training/materialization replay surface, not request-time inference. |
+| `raw_arrow_labeled_candidate_plan(...)` | `scripts/production/model/linker_train_calibrate_eval.py` | Training/materialization surface, not request-time inference. |
 | `promoted_linker_non_pairwise_features(...)` | `s2and/incremental_linking/row_features.py` | Production promoted-linker row feature builder. |
 | `make_subblocks_with_telemetry_arrow_native_graph(...)` | `s2and/subblocking.py` | Arrow-native graph subblocking helper used by large-block prediction. |
-| `get_build_info(...)` | `s2and/runtime.py`, `scripts/_rust_suite/common.py`, capability tests | Diagnostics and ABI metadata. |
+| `get_build_info(...)` | `scripts/_rust_suite/common.py`, Rust-suite tests | Build diagnostics for benchmark and verification reports; not a runtime gate. |
 | `RustLightGBMBooster` | `s2and/production_model.py` (`NativeLightGBMBinaryClassifier`), `s2and/incremental_linking/artifact.py` (`IncrementalLinkingArtifact`), parity tests | Pure-Rust `.lgb` text-model scorer for binary numerical-split boosters; the production scoring path for pairwise and linker models. Raw scores are bit-exact vs Python `lightgbm` (`tests/test_rust_lightgbm_booster_parity.py`); rejects categorical/linear/multiclass models at load. Python `lgb.Booster` remains only as the lazily-loaded `booster_` surface for bundle writing and SHAP. |
 
-## Module Constants and ABI Markers
+## Module Constants
 
 | Export | Owner / caller | Status |
 |---|---|---|
-| `RETRIEVAL_FEATURE_ORDER` | `s2and/incremental_linking_training/retrieval_policy.py`, retrieval parity tests | Retrieval feature ordering contract mirrored from Rust into Python fallback policy code. |
-| `DEFAULT_HYBRID_CENTROID_POLICY_NAME`, `DEFAULT_HYBRID_CENTROID_WEIGHTS`, `DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS`, `DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS` | `s2and/incremental_linking_training/retrieval_policy.py`, promoted-linker training and retrieval tests | Frozen retrieval policy constants; update Python fallback defaults and tests together with Rust. |
+| `RETRIEVAL_FEATURE_ORDER` | `s2and/incremental_linking_training/retrieval_policy.py`, retrieval parity tests | Retrieval feature ordering contract mirrored into Python training/reference policy code. |
+| `DEFAULT_HYBRID_CENTROID_POLICY_NAME`, `DEFAULT_HYBRID_CENTROID_WEIGHTS`, `DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS`, `DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS` | `s2and/incremental_linking_training/retrieval_policy.py`, promoted-linker training and retrieval tests | Frozen retrieval policy constants; update Python training/reference defaults and tests together with Rust. |
 | `RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE`, `RETRIEVAL_YEAR_SCORE_DECAY_YEARS`, `RETRIEVAL_YEAR_SCORE_RANGE_GAP`, `RETRIEVAL_YEAR_SCORE_RANGE_PENALTY`, `RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP` | `s2and/incremental_linking_training/query_support.py`, retrieval parity tests | Training/query-support scoring constants. |
-| `INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS` | `s2and/runtime.py`, capability tests | Pair-plan ABI marker; `row_orcid_match` is required before enabling `incremental_linking_pair_plan_v1`. |
-| `RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS` | `s2and/runtime.py`, capability tests | Raw query-signature planner ABI marker; capability gating requires `from_query_signatures`, `plan_query_signatures`, and `build_telemetry`. |
 
 ## `RustFeaturizer`
 
@@ -41,9 +43,9 @@ cleanup risk, not a user-facing API promise.
 | `get_constraints_block_upper_triangle_indexed(...)` | `model.py`, Arrow parity script | Maintained blockwise constraint API. |
 | `linker_pair_index_arrays_constraint_labels(...)` | promoted linker training/materialization and runtime tests | Maintained promoted incremental constraint-label API. |
 | `linker_pair_distance_accumulators(...)` | promoted incremental runtime and tests | Maintained promoted incremental aggregate API. |
-| `featurize_pairs_matrix_indexed(...)` | `s2and/featurizer.py`, capability probes | Canonical pairwise matrix API for Python Rust batching. |
+| `featurize_pairs_matrix_indexed(...)` | `s2and/featurizer.py` | Canonical pairwise matrix API for Python Rust batching. |
 | `linker_pair_index_arrays_and_aggregate_stats(...)` | `s2and/incremental_linking/linker_pairwise.py` | Canonical promoted linker pair-feature plus aggregate API. |
-| `linker_pair_index_arrays_and_aggregate_stats(..., emit_matrix=False)` | `s2and/incremental_linking/linker_pairwise.py`, capability probes | Canonical aggregate-only mode; preserves the no-matrix fast path without a second PyO3 method. |
+| `linker_pair_index_arrays_and_aggregate_stats(..., emit_matrix=False)` | `s2and/incremental_linking/linker_pairwise.py` | Canonical aggregate-only mode; preserves the no-matrix fast path without a second PyO3 method. |
 | `featurize_block_upper_triangle_matrix_indexed(...)` | blockwise full predict | Maintained blockwise feature API. |
 
 ## Retrieval Classes
@@ -53,26 +55,23 @@ cleanup risk, not a user-facing API promise.
 | `RustHybridCentroidRetriever.__new__(...)` | raw Arrow planners, training query support, tests | Maintained constructor. |
 | `top_k_hybrid_centroid_pair_plan(...)` | `s2and/incremental_linking/retrieval.py`, raw Arrow planners | Canonical runtime retrieval output. |
 | `top_k_experimental_weighted_hybrid_centroid_subset(...)` | `s2and/incremental_linking_training/query_support.py`, tests | Training/query-support scoring surface. |
-| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; promoted auto-query windows use the separate auto constructor without a temporary empty sidecar. |
+| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; automatically selected promoted query windows use the separate constructor without a temporary empty sidecar. |
 
 ## Python Wrapper Ownership
 
 | Wrapper | Owner / caller | Status |
 |---|---|---|
-| `feature_port.build_rust_featurizer_from_arrow_paths(...)` | strict full predict, subblocked predict, raw Arrow scoring, arrow-native training (`s2and/arrow_training.py`) | Production constructor wrapper and the training featurizer door for Arrow-ingested train datasets. |
-| `feature_port.build_rust_featurizer(...)`, `_get_rust_featurizer(...)`, `warm_rust_featurizer(...)` | Arrow-backed datasets with `rust_featurizer_arrow_paths` | Dataset-scoped dispatcher; classic `ANDData`/JSON datasets use Python featurization. |
+| `feature_port.build_rust_featurizer_from_arrow_paths(...)` | strict full predict, subblocked predict, raw Arrow scoring, fixed Rust training (`s2and/arrow_training.py`) | Direct wrapper for the pinned native Arrow constructor. |
+| `feature_port.build_rust_featurizer(...)`, `_get_rust_featurizer(...)`, `warm_rust_featurizer(...)` | Rust-training datasets with immutable `arrow_paths` | Dataset-scoped dispatcher; classic `ANDData`/JSON datasets use Python featurization. |
 | `rust_calls.get_constraints_matrix_indexed_rust(...)` and `get_constraints_block_upper_triangle_indexed_rust(...)` | full predict and parity | Maintained constraint wrappers. |
 | `rust_calls.build_linker_pair_features_and_aggregate_stats_arrays_rust(...)` | promoted incremental pairwise scoring | Maintained canonical array wrapper. |
 | `rust_calls.build_linker_pair_aggregate_stats_arrays_rust(...)` | promoted incremental aggregate-only path | Thin Python wrapper over `linker_pair_index_arrays_and_aggregate_stats(..., emit_matrix=False)`. |
-| `runtime.detect_rust_runtime_capabilities(...)` markers | backend selection and tests | Update markers before deleting any method they probe. |
 
-## Build Info ABI
+## Build Information
 
 | Key | Owner / caller | Status |
 |---|---|---|
-| `crate_version`, `profile`, `debug_assertions`, `opt_level`, `target` | `scripts/_rust_suite/common.py`, capability tests | Diagnostics and version/capability reporting. |
-| `incremental_linking_pair_plan_supported_kwargs`, `incremental_linking_pair_plan_row_signals` | `s2and/runtime.py`, capability tests | Runtime gate for current pair-plan ABI. |
-| `raw_arrow_query_signature_planner_methods` | `s2and/runtime.py`, capability tests | Runtime gate for current raw query-signature planner ABI. |
+| `crate_version`, `profile`, `debug_assertions`, `opt_level`, `target` | `scripts/_rust_suite/common.py`, Rust-suite tests | Diagnostic report fields. Runtime compatibility is the exact package-version check, not these fields. |
 
 ## Cleanup Notes
 
@@ -96,8 +95,7 @@ cleanup risk, not a user-facing API promise.
   parity tests moved to indexed constraint matrices.
 - Status 2026-05-25: direct retriever debug APIs
   `top_k_hybrid_centroid(...)` and `chooser_feature_rows_subset(...)` were
-  removed after capability probes and tests moved to the canonical pair-plan
-  route.
+  removed after callers and tests moved to the canonical pair-plan route.
 - Status 2026-05-26: Python wrappers
   `feature_port.featurize_pair_rust(...)` and
   `feature_port.build_pair_feature_matrix_rust(...)` were removed. Rust pair
@@ -139,9 +137,9 @@ cleanup risk, not a user-facing API promise.
   full-table graph loader.
 - Status 2026-05-27: the single-pair Rust constraint API was removed from the
   maintained surface. Constraint parity is owned by indexed matrix APIs.
-- Status 2026-05-27: raw query-signature planner support is capability-gated
-  by `raw_arrow_query_signature_planner_v1`; `query_signatures.arrow` is
-  request-local planner input, not a generic scoring artifact sidecar.
+- Status 2026-05-27: the pinned extension directly provides raw
+  query-signature planning; `query_signatures.arrow` is request-local planner
+  input, not a generic scoring artifact sidecar.
 - Status 2026-05-28: callable PyO3 exports, module constants, and
-  `get_build_info()` ABI markers were rechecked against the local
+  `get_build_info()` diagnostics were rechecked against the local
   `s2and_rust` module.

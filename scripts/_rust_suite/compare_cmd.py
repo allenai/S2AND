@@ -141,7 +141,7 @@ def _collect_rust_package_info(require_non_dev_rust: bool, require_rust_release:
 
 
 def _run_single(args: argparse.Namespace) -> dict[str, Any]:
-    from s2and.consts import PROJECT_ROOT_PATH
+    from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
     from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 
@@ -184,7 +184,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             val_pairs_size=1000,
             test_pairs_size=1000,
             n_jobs=args.n_jobs,
-            load_name_counts=True,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
             random_seed=42,
             name_tuples="filtered",

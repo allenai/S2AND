@@ -64,11 +64,7 @@ from s2and.incremental_linking.retrieval import (
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
 from s2and.model_pairwise import predict_pairwise_class0
-from s2and.runtime import (
-    RUST_CAPABILITY_RAW_ARROW_QUERY_SIGNATURE_PLANNER_V1,
-    build_runtime_context,
-    detect_rust_runtime_capabilities,
-)
+from s2and.runtime import build_runtime_context
 from s2and.thread_config import resolve_n_jobs
 
 LinkAction = Literal["link", "abstain"]
@@ -164,51 +160,11 @@ class LinkOrAbstainProductionResult(LinkOrAbstainRetrievedCandidatesResult):
     decision_row_signals: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class _QueryDecisionReplay:
-    """Bounded per-query rows retained for global disallow re-decision."""
-
-    feature_matrix: LinkerFeatureMatrix
-    row_signals: dict[str, Any] | None
-    probabilities: np.ndarray
-    estimated_bytes: int
-
-
 def _ordered_group_indices(query_indices: np.ndarray) -> tuple[np.ndarray, ...]:
     groups_by_query: dict[Any, list[int]] = {}
     for row_index, query_index in enumerate(query_indices.tolist()):
         groups_by_query.setdefault(query_index, []).append(row_index)
     return tuple(np.asarray(indices, dtype=np.int64) for indices in groups_by_query.values())
-
-
-def _query_row_indices_by_query_index(candidate_batch: LinkerCandidateBatch) -> dict[int, np.ndarray]:
-    """Index candidate rows once for callers retaining a bounded query replay."""
-
-    if candidate_batch.row_query_signature_indices is None:
-        raise ValueError("query row indexing requires row_query_signature_indices")
-    query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
-    if len(query_indices) == 0:
-        return {}
-    starts = np.concatenate(
-        (
-            np.asarray([0], dtype=np.int64),
-            np.flatnonzero(query_indices[1:] != query_indices[:-1]).astype(np.int64, copy=False) + 1,
-        )
-    )
-    ends = np.concatenate((starts[1:], np.asarray([len(query_indices)], dtype=np.int64)))
-    group_query_indices = query_indices[starts]
-    if len(np.unique(group_query_indices)) == len(group_query_indices):
-        return {
-            int(query_index): np.arange(int(start), int(end), dtype=np.int64)
-            for query_index, start, end in zip(group_query_indices, starts, ends, strict=True)
-        }
-
-    # Noncontiguous rows are legal at this private boundary. Preserve them with
-    # the slower general path instead of relying on the production grouping.
-    rows_by_query: dict[int, list[int]] = {}
-    for row_index, query_index in enumerate(query_indices.tolist()):
-        rows_by_query.setdefault(int(query_index), []).append(row_index)
-    return {query_index: np.asarray(row_indices, dtype=np.int64) for query_index, row_indices in rows_by_query.items()}
 
 
 def _best_row_for_group(
@@ -757,118 +713,6 @@ def _predict_incremental_link_or_abstain_compact(
         decisions=tuple(decisions),
         decision_telemetry=decision_telemetry,
     )
-
-
-def _build_query_decision_replay(
-    result: LinkOrAbstainProductionResult,
-    *,
-    query_signature_index: int,
-    row_indices: np.ndarray | None = None,
-) -> _QueryDecisionReplay:
-    """Copy only one query's compact decision rows for bounded later replay."""
-
-    candidate_batch = result.feature_matrix.candidate_batch
-    if candidate_batch.row_query_signature_indices is None:
-        raise ValueError("query decision replay requires row_query_signature_indices")
-    query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
-    if row_indices is None:
-        resolved_row_indices = np.flatnonzero(query_indices == int(query_signature_index)).astype(
-            np.int64,
-            copy=False,
-        )
-    else:
-        resolved_row_indices = np.asarray(row_indices, dtype=np.int64)
-        if resolved_row_indices.ndim != 1:
-            raise ValueError(f"query decision replay row_indices must be 1D, got {resolved_row_indices.shape}")
-        if len(resolved_row_indices) and (
-            int(resolved_row_indices.min()) < 0 or int(resolved_row_indices.max()) >= candidate_batch.row_count
-        ):
-            raise ValueError("query decision replay row_indices are outside candidate row bounds")
-        if len(resolved_row_indices) and bool(
-            np.any(query_indices[resolved_row_indices] != int(query_signature_index))
-        ):
-            raise ValueError("query decision replay row_indices include a different query")
-    if len(resolved_row_indices) == 0:
-        raise ValueError(f"query decision replay has no candidate rows: query_signature_index={query_signature_index}")
-    feature_matrix = _subset_feature_matrix_for_rows(result.feature_matrix, resolved_row_indices)
-    row_signals = _subset_row_signals(
-        result.decision_row_signals,
-        resolved_row_indices,
-        candidate_batch.row_count,
-    )
-    probabilities = np.asarray(result.compact_result.probabilities, dtype=np.float64)[resolved_row_indices]
-    estimated_bytes = int(np.asarray(feature_matrix.matrix).nbytes) + int(probabilities.nbytes)
-    subset_batch = feature_matrix.candidate_batch
-    for values in (
-        subset_batch.row_query_signature_indices,
-        subset_batch.retrieval_scores,
-        subset_batch.retrieval_ranks,
-    ):
-        if values is not None:
-            estimated_bytes += int(np.asarray(values).nbytes)
-    if subset_batch.row_component_keys is not None:
-        estimated_bytes += sum(64 + len(str(value).encode("utf-8")) for value in subset_batch.row_component_keys)
-    for values in (row_signals or {}).values():
-        array = np.asarray(values)
-        estimated_bytes += int(array.nbytes)
-        if array.dtype == object:
-            estimated_bytes += 64 * int(array.size)
-    return _QueryDecisionReplay(
-        feature_matrix=feature_matrix,
-        row_signals=row_signals,
-        probabilities=probabilities,
-        estimated_bytes=estimated_bytes,
-    )
-
-
-def _redecide_query_from_replay(
-    artifact: IncrementalLinkingArtifact,
-    replay: _QueryDecisionReplay,
-    *,
-    excluded_components: set[str],
-) -> tuple[LinkOrAbstainDecision, dict[str, int]]:
-    """Re-run one compact gate decision without retrieval or featurization."""
-
-    component_keys = replay.feature_matrix.candidate_batch.row_component_keys
-    if component_keys is None:
-        raise ValueError("query decision replay requires row_component_keys")
-    excluded_rows = np.asarray(
-        [str(component_key) in excluded_components for component_key in component_keys],
-        dtype=bool,
-    )
-    candidate_batch = replay.feature_matrix.candidate_batch
-    query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
-    query_signature_index = int(query_indices[0])
-    constraint_requires = _constraint_require_signal(replay.row_signals, candidate_batch.row_count)
-    _raise_if_require_rows_excluded(
-        excluded_rows=np.flatnonzero(excluded_rows),
-        constraint_requires=constraint_requires,
-        component_keys=component_keys,
-        query_signature_index=query_signature_index,
-    )
-    allowed_rows = np.flatnonzero(~excluded_rows).astype(np.int64, copy=False)
-    decision = _decide_query_rows(
-        allowed_rows,
-        query_signature_index=query_signature_index,
-        fast_path=None,
-        gate=_artifact_logistic_gate(artifact),
-        feature_matrix=replay.feature_matrix,
-        probabilities=replay.probabilities,
-        row_signals=replay.row_signals,
-        orcid_matches=_orcid_match_signal(replay.row_signals, candidate_batch.row_count),
-        constraint_requires=constraint_requires,
-        constraint_vetoes=_constraint_disallow_veto_signal(replay.row_signals, candidate_batch.row_count),
-        component_keys=component_keys,
-        candidate_batch=candidate_batch,
-    )
-    telemetry = {
-        "cluster_seed_disallow_excluded_row_count": int(excluded_rows.sum()),
-        "cluster_seed_disallow_excluded_query_count": int(bool(np.any(excluded_rows))),
-        "cluster_seed_disallow_same_batch_conflict_count": 0,
-        "cluster_seed_disallow_same_batch_reassigned_link_count": 0,
-        "cluster_seed_disallow_same_batch_demoted_abstain_count": 0,
-    }
-    return decision, telemetry
 
 
 def _resolve_same_batch_disallow_conflicts(
@@ -1803,7 +1647,10 @@ def _predict_incremental_link_or_abstain_production_private(
         raise ValueError(
             "queries and query_signature_ids must have equal length: " f"{len(queries)} != {len(query_signature_ids)}"
         )
-    resolved_runtime_context = runtime_context or build_runtime_context("incremental_link_or_abstain_private")
+    resolved_runtime_context = runtime_context or build_runtime_context(
+        "incremental_link_or_abstain_private",
+        backend="rust",
+    )
     partial_supervision_dict = {
         (str(left), str(right)): value for (left, right), value in (partial_supervision or {}).items()
     }
@@ -1943,7 +1790,8 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
             "queries and query_signature_ids must have equal length: " f"{len(queries)} != {len(query_signature_ids)}"
         )
     resolved_runtime_context = runtime_context or build_runtime_context(
-        "incremental_link_or_abstain_from_retrieval_private"
+        "incremental_link_or_abstain_from_retrieval_private",
+        backend="rust",
     )
     partial_supervision_dict = {
         (str(left), str(right)): value for (left, right), value in (partial_supervision or {}).items()
@@ -2175,17 +2023,6 @@ def _strip_raw_query_signature_sidecar(arrow_paths: Mapping[str, Any]) -> dict[s
     scoring_paths = normalize_arrow_paths(arrow_paths)
     scoring_paths.pop("query_signatures", None)
     return scoring_paths
-
-
-def _require_raw_arrow_query_signature_planner_capability(rust_module: Any, *, context: str) -> None:
-    capabilities = detect_rust_runtime_capabilities(extension_module=rust_module)
-    if not capabilities.core_runtime_available:
-        return
-    if RUST_CAPABILITY_RAW_ARROW_QUERY_SIGNATURE_PLANNER_V1 not in capabilities.named_capabilities:
-        raise RuntimeError(
-            f"{context} requires Rust capability {RUST_CAPABILITY_RAW_ARROW_QUERY_SIGNATURE_PLANNER_V1}; "
-            "rebuild the Rust extension"
-        )
 
 
 def _identity_seed_setup(
@@ -2511,14 +2348,17 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
     n_jobs: int | None = None,
     total_ram_bytes: int | None = None,
     max_exemplars: int = 4,
-    load_name_counts: bool | None | dict[str, Any] = None,
+    load_name_counts: bool | None = None,
     name_tuples: set[tuple[str, str]] | str | None = "filtered",
     orcid_enabled: bool | None = None,
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Plan retrieval and score raw Arrow IPC inputs through Rust without `ANDData`."""
 
-    resolved_runtime_context = runtime_context or build_runtime_context("incremental_link_or_abstain_raw_arrow")
+    resolved_runtime_context = runtime_context or build_runtime_context(
+        "incremental_link_or_abstain_raw_arrow",
+        backend="rust",
+    )
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
     top_k_resolved = int(artifact.metadata.retrieval_top_k if top_k is None else top_k)
     arrow_path_payload = validate_arrow_prediction_artifacts(
@@ -2526,7 +2366,6 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         require_specter=clusterer_uses_embedding_features(clusterer),
         require_name_counts_index=clusterer_uses_name_count_features(clusterer),
         require_cluster_seeds=True,
-        require_batch_indexes=True,
         context="Raw Arrow scoring",
         producer_hint=(
             "include raw Arrow tables, raw-planner batch indexes, and cluster_seeds.arrow before raw Arrow scoring"
@@ -2549,18 +2388,7 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
     )
     stage_start = time.perf_counter()
     rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
-    _require_raw_arrow_query_signature_planner_capability(rust_module, context="raw Arrow scoring")
-    raw_planner_cls = getattr(rust_module, "RawBlockQueryCandidatePlanner", None)
-    if raw_planner_cls is None:
-        raise RuntimeError(
-            "raw Arrow scoring requires s2and_rust.RawBlockQueryCandidatePlanner; rebuild the Rust extension"
-        )
-    from_query_signatures = getattr(raw_planner_cls, "from_query_signatures", None)
-    if not callable(from_query_signatures):
-        raise RuntimeError(
-            "raw Arrow scoring requires RawBlockQueryCandidatePlanner.from_query_signatures; rebuild the Rust extension"
-        )
-    raw_planner = from_query_signatures(
+    raw_planner = rust_module.RawBlockQueryCandidatePlanner.from_query_signatures(
         arrow_path_payload,
         top_k=top_k_resolved,
         orcid_enabled=resolved_orcid_enabled,
@@ -2652,7 +2480,10 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
 ) -> LinkOrAbstainProductionResult:
     """Shared raw Arrow scoring implementation."""
 
-    resolved_runtime_context = runtime_context or build_runtime_context("incremental_link_or_abstain_raw_arrow")
+    resolved_runtime_context = runtime_context or build_runtime_context(
+        "incremental_link_or_abstain_raw_arrow",
+        backend="rust",
+    )
     n_jobs_resolved = resolve_n_jobs(getattr(clusterer, "n_jobs", 1) if n_jobs is None else n_jobs)
     top_k_resolved = int(artifact.metadata.retrieval_top_k if top_k is None else top_k)
     arrow_path_payload = _strip_raw_query_signature_sidecar(arrow_paths)

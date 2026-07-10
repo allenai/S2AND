@@ -11,7 +11,7 @@ from s2and.consts import LARGE_DISTANCE
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
-from tests.helpers import tiny_name_counts
+from tests.helpers import tiny_name_counts_index
 
 
 class TestClusterer(unittest.TestCase):
@@ -25,7 +25,7 @@ class TestClusterer(unittest.TestCase):
             clusters="tests/dummy/clusters.json",
             cluster_seeds="tests/dummy/cluster_seeds.json",
             name="dummy",
-            load_name_counts=tiny_name_counts(),
+            name_counts_index=tiny_name_counts_index(),
         )
         features_to_use = [
             "year_diff",
@@ -162,9 +162,7 @@ class TestClusterer(unittest.TestCase):
         block = {
             "a sattar": ["0", "1", "2", "3", "4", "5", "6", "7", "8"],
         }
-        prediction_full, _ = self.dummy_clusterer.predict(
-            block, self.dummy_dataset, batching_threshold=None, backend="python"
-        )
+        prediction_full, _ = self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=None)
         # all go together
         self.assertEqual(prediction_full["a sattar_1"], block["a sattar"])
 
@@ -176,11 +174,9 @@ class TestClusterer(unittest.TestCase):
         # small explicit prior fixture rather than crossing that artifact
         # boundary.
         with patch("s2and.subblocking._resolved_orcid_prefix_counts", return_value={}):
-            prediction_full, _ = self.dummy_clusterer.predict(
-                block, self.dummy_dataset, batching_threshold=7, backend="python"
-            )
+            prediction_full, _ = self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=7)
             prediction_subblock_1, _ = self.dummy_clusterer.predict(
-                {"a sattar|subblock=ab": ["0", "1", "2"]}, self.dummy_dataset, backend="python"
+                {"a sattar|subblock=ab": ["0", "1", "2"]}, self.dummy_dataset
             )
             self.assertTrue(
                 set(prediction_full["a sattar|subblock=ab_1"]).issubset(
@@ -189,8 +185,8 @@ class TestClusterer(unittest.TestCase):
             )
 
             # stricter batching - just making sure it doesn't break
-            self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=2, backend="python")
-            self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=1, backend="python")
+            self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=2)
+            self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=1)
 
     def test_fused_path_equivalence(self):
         """The fused cluster-and-free path (dists=None) must produce

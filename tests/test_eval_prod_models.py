@@ -12,14 +12,14 @@ import pytest
 
 import scripts.eval_prod_models as eval_prod_models
 from s2and.incremental_linking.feature_block import write_name_counts_index
-from tests.helpers import import_s2and_rust, patch_tiny_name_counts_loader
+from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
 
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 
-requires_canonical_production_bundle = pytest.mark.skip(
+requires_canonical_source_bundle = pytest.mark.skip(
     reason=(
-        "packaged production bundle/pickle predates canonical_v2 and now fails fast at load; "
-        "unskip after the v1.3 retrain ships a canonical bundle "
+        "the explicitly named v1.21 source bundle predates canonical_v2 and fails fast at load; "
+        "unskip after a canonical source bundle is available "
         "(docs/normalization_migration_blocked.md, cutover readiness checklist item 4)"
     )
 )
@@ -56,6 +56,16 @@ def _touch_eval_batch_indexes(dataset_root: Path, *, specter_stem: str = "specte
         f"{specter_stem}.specter_batch_index.bin",
     ):
         (dataset_root / index_name).touch()
+
+
+def _bypass_arrow_artifact_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import s2and.arrow_inputs as arrow_inputs
+
+    monkeypatch.setattr(
+        arrow_inputs,
+        "validate_arrow_prediction_artifacts",
+        lambda paths, **_kwargs: dict(paths),
+    )
 
 
 def test_first_missing_arrow_dataset_error_reports_failing_pair(monkeypatch) -> None:
@@ -327,7 +337,7 @@ def _read_minimal_incremental_signatures(signatures_path: Path) -> dict[str, Any
             author_info_first=row["author_first"],
             author_info_first_normalized_without_apostrophe=row["author_first"],
             author_info_last=row["author_last"],
-            author_info_orcid=row["author_orcid"],
+            author_info_orcid=row.get("author_orcid"),
         )
     return signatures
 
@@ -348,20 +358,18 @@ class _ArrowIncrementalFixtureDataset:
         self.name_tuples = "filtered"
         self.max_seed_cluster_id = 0
         self.name = "pubmed_specter2_arrow_incremental_fixture"
-        self.name_counts_last_first_initial_semantics: str | None = None
-
-    def set_name_counts_last_first_initial_semantics(self, semantics: str) -> None:
-        self.name_counts_last_first_initial_semantics = semantics
 
 
 def test_resolve_arrow_dataset_paths_includes_name_counts_index_from_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _bypass_arrow_artifact_validation(monkeypatch)
     dataset_root = tmp_path / "arrow" / "dummy"
     dataset_root.mkdir(parents=True)
-    patch_tiny_name_counts_loader(monkeypatch)
-    name_counts_index, _metrics = write_name_counts_index(tmp_path)
+    name_counts_index, _metrics = write_name_counts_index(
+        tmp_path, tiny_name_counts_tuple(), tiny_name_counts_provenance()
+    )
     for filename in (
         "signatures.arrow",
         "papers.arrow",
@@ -385,10 +393,12 @@ def test_resolve_arrow_dataset_paths_supports_nested_datasets_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _bypass_arrow_artifact_validation(monkeypatch)
     dataset_root = tmp_path / "arrow" / "datasets" / "dummy"
     dataset_root.mkdir(parents=True)
-    patch_tiny_name_counts_loader(monkeypatch)
-    name_counts_index, _metrics = write_name_counts_index(tmp_path / "arrow")
+    name_counts_index, _metrics = write_name_counts_index(
+        tmp_path / "arrow", tiny_name_counts_tuple(), tiny_name_counts_provenance()
+    )
     for filename in (
         "signatures.arrow",
         "papers.arrow",
@@ -413,10 +423,12 @@ def test_resolve_arrow_dataset_paths_supports_release_parent_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _bypass_arrow_artifact_validation(monkeypatch)
     dataset_root = tmp_path / "arrow" / "release_parent" / "datasets" / "dummy"
     dataset_root.mkdir(parents=True)
-    patch_tiny_name_counts_loader(monkeypatch)
-    name_counts_index, _metrics = write_name_counts_index(tmp_path / "arrow" / "release_parent")
+    name_counts_index, _metrics = write_name_counts_index(
+        tmp_path / "arrow" / "release_parent", tiny_name_counts_tuple(), tiny_name_counts_provenance()
+    )
     for filename in (
         "signatures.arrow",
         "papers.arrow",
@@ -497,11 +509,11 @@ def test_resolve_arrow_dataset_paths_supports_repo_relative_manifest_name_counts
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _bypass_arrow_artifact_validation(monkeypatch)
     dataset_root = tmp_path / "arrow" / "dummy"
     dataset_root.mkdir(parents=True)
     index_root = tmp_path / "repo" / "s2and" / "data" / "name_counts_index"
-    patch_tiny_name_counts_loader(monkeypatch)
-    write_name_counts_index(index_root.parent)
+    write_name_counts_index(index_root.parent, tiny_name_counts_tuple(), tiny_name_counts_provenance())
     for filename in (
         "signatures.arrow",
         "papers.arrow",
@@ -557,13 +569,16 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
     )
 
     assert captured["block_dict"] == {"block": ["s1"]}
-    assert captured["kwargs"]["load_name_counts"] is True
+    assert "load_name_counts" not in captured["kwargs"]
     assert captured["arrow_paths"]["name_counts_index"] == "name_counts_index"
     assert captured["arrow_paths"]["signatures_batch_index"] == "signatures.signatures_batch_index.bin"
     assert "clusters" not in captured["arrow_paths"]
 
 
-def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     import s2and.data as data_module
     import s2and.production_model as production_model
 
@@ -596,6 +611,8 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytes
         "load_production_model",
         lambda model_path: SimpleNamespace(model_path=model_path),
     )
+    model_path = tmp_path / "explicit-model"
+    model_path.mkdir()
     monkeypatch.setattr(eval_prod_models.os.path, "exists", lambda _path: True)
     monkeypatch.setattr(
         sys,
@@ -608,6 +625,8 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytes
             "pubmed",
             "--specter-suffixes",
             "_specter2.pkl",
+            "--specter2-model-path",
+            str(model_path),
             "--use-arrow",
             "--arrow-data-root",
             "arrow-root",
@@ -625,6 +644,29 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(monkeypatch: pytes
     }
     assert captured["kwargs"]["n_jobs"] == 1
     assert captured["kwargs"]["random_seed"] == 42
+    assert captured["clusterer"].model_path == model_path
+
+
+def test_eval_main_requires_explicit_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_prod_models.py", "--dataset", "mini", "--specter-suffixes", "_specter2.pkl"],
+    )
+
+    with pytest.raises(ValueError, match="requires an explicit model path"):
+        eval_prod_models.main()
+
+
+def test_eval_main_rejects_explicit_model_path_with_train(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_prod_models.py", "--train", "--specter2-model-path", "unused-model"],
+    )
+
+    with pytest.raises(ValueError, match="cannot be combined with --train"):
+        eval_prod_models.main()
 
 
 def test_eval_main_use_arrow_rejects_train(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -646,12 +688,11 @@ def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
         eval_prod_models.construct_cluster_to_signatures({"s1": "c1"}, {"block": ["s1", "s2"]})
 
 
-@requires_canonical_production_bundle
+@requires_canonical_source_bundle
 @pytest.mark.requires_lfs
 def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
     rust_available, rust_payload = import_s2and_rust(
         required_module_attrs=("RustLightGBMBooster",),
-        prefer_site_packages=True,
     )
     if not rust_available:
         raise pytest.skip.Exception(f"RustLightGBMBooster unavailable: {rust_payload!r}")
@@ -700,7 +741,7 @@ def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
     assert cluster_metrics["B3 (P, R, F1)"] == pytest.approx((1.0, 0.9, 0.948), abs=5e-4)
 
 
-@requires_canonical_production_bundle
+@requires_canonical_source_bundle
 @pytest.mark.requires_lfs
 def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
     monkeypatch: pytest.MonkeyPatch,

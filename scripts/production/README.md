@@ -11,7 +11,7 @@ Examples below use `X.Y` as the target production bundle version.
 ```powershell
 uv run python scripts/production/model/train_pairwise.py `
   --production-version X.Y `
-  --output-dir s2and/data/production_model_vX.Y `
+  --output-dir scratch/pairwise_stage/production_model_vX.Y `
   --run-full
 ```
 
@@ -40,15 +40,19 @@ runtime production model until the linker is added.
 ```powershell
 uv run python scripts/production/model/train_linker_and_finalize.py `
   --production-bundle-version X.Y `
-  --target-json s2and/data/production_model_vX.Y/reproducibility/incremental_linker_training_target.json `
-  --pairwise-model-path s2and/data/production_model_vX.Y `
+  --target-json scratch/production_linker_vX.Y/incremental_linker_training_target.json `
+  --pairwise-model-path scratch/pairwise_stage/production_model_vX.Y `
   --save-production-bundle-to s2and/data/production_model_vX.Y `
   --linker-artifact-version vX.Y `
   --output-dir scratch/production_linker_vX.Y `
   --run-full
 ```
 
-This writes:
+The destination must not exist. The command trains the linker under
+`scratch/production_linker_vX.Y/production_incremental_linker/`, assembles and
+validates a complete sibling staging directory, then publishes the bundle with
+one directory rename. The pairwise stage remains unchanged. The final bundle
+contains:
 
 ```text
 production_model_vX.Y/
@@ -67,6 +71,9 @@ from s2and.production_model import load_production_model
 
 clusterer = load_production_model("s2and/data/production_model_vX.Y")
 ```
+
+There is no implicit default model. Runtime callers must pass the complete
+bundle path; pairwise-only stages are accepted only by internal training code.
 
 ## Arrow Release Validation
 
@@ -90,9 +97,11 @@ The `counts/` scripts document production count artifacts:
 - `counts/generate_name_counts.py` writes a provenance-bound immutable
   `name_counts` generation and publishes its pointer manifest last. It requires
   an explicit source snapshot, verifies selected-row content, and supports
-  bounded fixture runs before any authorized warehouse run. Package-cached maps
-  are shared read-only views with no million-key copy; models compare the exact
-  generation/source binding before feature work.
+  bounded fixture runs before any authorized warehouse run. The writer emits
+  `name_counts_index/` directly from the resident generated mappings. Python
+  and Rust runtime paths share that verified mmap index; neither unpickles nor
+  retains the full dictionaries. Models compare the exact generation/source
+  binding before feature work.
 - `counts/generate_orcid_name_prefix_counts.py` writes canonical unordered
   ORCID prefix pairs into an immutable generation and publishes
   `first_k_letter_counts_from_orcid.manifest.json` last. The runtime accepts

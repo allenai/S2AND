@@ -1,6 +1,6 @@
 # Canonical-v2 Normalization Migration
 
-Status date: 2026-07-09
+Status date: 2026-07-10
 
 ## Status
 
@@ -9,9 +9,10 @@ The single-mode `canonical_v2` **code cutover has landed** on
 the v1.3 retrain. Code, models, name counts, ORCID prefix counts, name tuples,
 Arrow datasets, and benchmark names must be validated as one release unit.
 
-The current branch deliberately rejects the packaged legacy v1.21 bundle and
-v1.0-v1.2 pickles. Therefore no compatible default production model exists on
-this branch yet. This is a migration state, not a releasable package state.
+The v1.0-v1.2 pickles have been removed. The v1.21 bundle remains only as an
+explicit historical source/parity artifact; it is not packaged or loadable by
+canonical-v2. No production model or default declaration is distributed during
+the cutover. This is a migration state, not a releasable package state.
 
 The active engineering remediation ledger is
 [work_plan.md](work_plan.md). It includes provenance, cross-artifact binding,
@@ -21,10 +22,14 @@ when they do not directly alter normalization.
 
 ## Cutover Readiness Checklist
 
-1. **Pending:** regenerate canonical `name_counts.pickle` on internal
-   infrastructure with required source/version/checksum provenance.
-2. **Pending:** serialize and validate canonical `name_counts_index/` from that
-   exact verified pickle.
+1. **Pending:** regenerate canonical name-count mappings once on internal
+   infrastructure with required source/version/checksum provenance. The v1
+   publisher records the source pickle identity for model-lineage compatibility
+   and writes `name_counts_index/` directly from the resident mappings, without
+   reloading the pickle.
+2. **Pending:** validate the canonical `name_counts_index/` cardinalities,
+   digests, exact lookup parity, Python preprocessing latency, and peak RSS.
+   Python and Rust runtime paths consume only this index.
 3. **Runtime validation complete; generation and bundle binding pending:**
    regenerate the canonical versioned ORCID prefix-count generation and publish
    `first_k_letter_counts_from_orcid.manifest.json`. Runtime loading is lazy but
@@ -145,12 +150,12 @@ The release validator must compare, not merely parse, normalization and
 generation contracts across:
 
 - each Arrow dataset manifest and batch index;
-- `name_counts.pickle` and `name_counts_index/`;
+- the name-count source identity and `name_counts_index/`;
 - ORCID prefix counts;
 - canonical name tuples;
 - pairwise main/nameless boosters and feature contract;
 - promoted incremental linker and replay target;
-- top-level production bundle/default-model descriptor.
+- the explicit complete production bundle manifest.
 
 ## Benchmark Name Re-export
 
@@ -200,8 +205,8 @@ The release flow must:
 2. validate full checksums, containment, schemas, cross-artifact contracts, and
    strict Arrow batch-index fingerprints;
 3. clean-install the exact Python and Rust wheels in an empty `uv` environment;
-4. load the declared default bundle and run real embedded pairwise/incremental
-   fixtures;
+4. load the explicit complete candidate bundle and run real embedded
+   pairwise/incremental fixtures;
 5. publish Rust first and publish Python only after the exact Rust version is
    installable;
 6. promote only the already-validated release unit.

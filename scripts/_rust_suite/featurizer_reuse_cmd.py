@@ -39,7 +39,13 @@ def _build_data_paths(project_root: str, dataset_name: str, data_root: str = DEF
     }
 
 
-def _build_train_dataset(dataset_name: str, n_jobs: int, paths: dict[str, str], anddata_cls: Any) -> Any:
+def _build_train_dataset(
+    dataset_name: str,
+    n_jobs: int,
+    paths: dict[str, str],
+    anddata_cls: Any,
+    name_counts_index: Any,
+) -> Any:
     return anddata_cls(
         signatures=paths["signatures"],
         papers=paths["papers"],
@@ -55,7 +61,7 @@ def _build_train_dataset(dataset_name: str, n_jobs: int, paths: dict[str, str], 
         val_pairs_size=10000,
         test_pairs_size=10000,
         n_jobs=n_jobs,
-        load_name_counts=True,
+        name_counts_index=name_counts_index,
         preprocess=True,
         random_seed=42,
         name_tuples="filtered",
@@ -153,6 +159,7 @@ def _run_arrow_reuse_profile(
     dataset_name: str,
     n_jobs: int,
     repeats: int,
+    model_path: str,
     require_rust_release: bool,
     arrow_data_root: str,
     specter_suffix: str,
@@ -163,9 +170,9 @@ def _run_arrow_reuse_profile(
     from s2and.production_model import load_production_model
     from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
 
-    model_path = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", "production_model_v1.21")
+    resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     resolved_arrow_root = _resolve_path(PROJECT_ROOT_PATH, arrow_data_root)
-    clusterer = load_production_model(model_path)
+    clusterer = load_production_model(resolved_model_path)
     clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
@@ -213,6 +220,7 @@ def _run_arrow_reuse_profile(
         input_format="arrow",
     )
     result["arrow_data_root"] = resolved_arrow_root
+    result["model_path"] = resolved_model_path
     result["specter_suffix"] = specter_suffix
     return result
 
@@ -222,12 +230,13 @@ def _run_json_reuse_profile(
     dataset_name: str,
     n_jobs: int,
     repeats: int,
+    model_path: str,
     require_rust_release: bool,
     json_data_root: str,
 ) -> dict[str, Any]:
     rust_extension_identity = _prepare_rust_backend(n_jobs, require_rust_release)
 
-    from s2and.consts import PROJECT_ROOT_PATH
+    from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
     from s2and.eval import cluster_eval
     from s2and.feature_port import _rust_featurizer_build_count, clear_rust_featurizer_cache
@@ -238,14 +247,14 @@ def _run_json_reuse_profile(
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing {key} path for dataset '{dataset_name}': {path}")
 
-    model_path = os.path.join(PROJECT_ROOT_PATH, "s2and", "data", "production_model_v1.21")
-    clusterer = load_production_model(model_path)
+    resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
+    clusterer = load_production_model(resolved_model_path)
     clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
     clear_rust_featurizer_cache()
     same_object_iterations: list[dict[str, Any]] = []
-    same_object_dataset = _build_train_dataset(dataset_name, n_jobs, paths, ANDData)
+    same_object_dataset = _build_train_dataset(dataset_name, n_jobs, paths, ANDData, NAME_COUNTS_INDEX_PATH)
     with RSSMonitor(interval_seconds=0.05) as same_monitor:
         for iteration in range(1, repeats + 1):
             prediction_seconds, metrics = _run_cluster_eval(same_object_dataset, clusterer, cluster_eval)
@@ -257,7 +266,7 @@ def _run_json_reuse_profile(
     reinstantiated_iterations: list[dict[str, Any]] = []
     with RSSMonitor(interval_seconds=0.05) as reinstantiated_monitor:
         for iteration in range(1, repeats + 1):
-            dataset = _build_train_dataset(dataset_name, n_jobs, paths, ANDData)
+            dataset = _build_train_dataset(dataset_name, n_jobs, paths, ANDData, NAME_COUNTS_INDEX_PATH)
             prediction_seconds, metrics = _run_cluster_eval(dataset, clusterer, cluster_eval)
             iteration_result = _iteration_metrics(iteration, prediction_seconds, metrics)
             iteration_result["featurizer_build_count"] = int(_rust_featurizer_build_count(dataset))
@@ -275,6 +284,7 @@ def _run_json_reuse_profile(
         input_format="json",
     )
     result["json_data_root"] = _resolve_path(PROJECT_ROOT_PATH, json_data_root)
+    result["model_path"] = resolved_model_path
     return result
 
 
@@ -283,6 +293,7 @@ def run_reuse_profile(
     dataset_name: str,
     n_jobs: int,
     repeats: int,
+    model_path: str,
     require_rust_release: bool = False,
     input_format: str = "arrow",
     arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
@@ -296,6 +307,7 @@ def run_reuse_profile(
             dataset_name=dataset_name,
             n_jobs=n_jobs,
             repeats=repeats,
+            model_path=model_path,
             require_rust_release=require_rust_release,
             arrow_data_root=arrow_data_root,
             specter_suffix=specter_suffix,
@@ -305,6 +317,7 @@ def run_reuse_profile(
             dataset_name=dataset_name,
             n_jobs=n_jobs,
             repeats=repeats,
+            model_path=model_path,
             require_rust_release=require_rust_release,
             json_data_root=json_data_root,
         )
@@ -323,6 +336,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--require-rust-release", type=int, choices=[0, 1], default=0)
     parser.add_argument("--input-format", choices=["arrow", "json"], default="arrow")
+    parser.add_argument("--model-path", required=True, help="Complete native production bundle path.")
     parser.add_argument(
         "--arrow-data-root",
         default=DEFAULT_ARROW_DATA_ROOT,
@@ -346,6 +360,7 @@ def main() -> None:
         dataset_name=args.dataset_name,
         n_jobs=args.n_jobs,
         repeats=args.repeats,
+        model_path=args.model_path,
         require_rust_release=bool(args.require_rust_release),
         input_format=args.input_format,
         arrow_data_root=args.arrow_data_root,

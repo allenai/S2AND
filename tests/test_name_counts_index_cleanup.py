@@ -9,7 +9,7 @@ from s2and.incremental_linking.feature_block import (
     cleanup_stale_name_counts_generations,
     write_name_counts_index,
 )
-from tests.helpers import patch_name_counts_artifact
+from tests.helpers import tiny_name_counts_provenance
 
 
 def _write_generation(index_dir: Path, generation_name: str) -> None:
@@ -21,13 +21,11 @@ def _write_generation(index_dir: Path, generation_name: str) -> None:
 
 
 def test_write_name_counts_index_does_not_delete_previous_published_generation(tmp_path, monkeypatch) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
-    )
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    provenance = tiny_name_counts_provenance()
 
-    index_path, _first_metrics = write_name_counts_index(tmp_path, overwrite=True)
-    _index_path, _second_metrics = write_name_counts_index(tmp_path, overwrite=True)
+    index_path, _first_metrics = write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
+    _index_path, _second_metrics = write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
 
     generations = [path for path in (Path(index_path) / "generations").iterdir() if path.is_dir()]
     assert len(generations) == 2
@@ -35,10 +33,8 @@ def test_write_name_counts_index_does_not_delete_previous_published_generation(t
 
 
 def test_write_name_counts_index_keeps_manifest_absent_when_marker_write_fails(tmp_path, monkeypatch) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
-    )
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    provenance = tiny_name_counts_provenance()
     original_open = Path.open
 
     def fail_published_marker(path: Path, *args, **kwargs):
@@ -49,7 +45,7 @@ def test_write_name_counts_index_keeps_manifest_absent_when_marker_write_fails(t
     monkeypatch.setattr(Path, "open", fail_published_marker)
 
     try:
-        write_name_counts_index(tmp_path, overwrite=True)
+        write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
     except OSError as exc:
         assert "marker write failed" in str(exc)
     else:  # pragma: no cover - assertion guard

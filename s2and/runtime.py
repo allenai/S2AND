@@ -1,484 +1,100 @@
 from __future__ import annotations
 
 import importlib
-import logging
 import os
-import re
-import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-logger = logging.getLogger("s2and")
-
 Backend = Literal["python", "rust"]
-RequestedBackend = Literal["python", "rust", "auto"]
-RuntimeSource = Literal["S2AND_BACKEND", "argument", "default"]
-
-_STARTUP_WARNING_EMITTED = False
-_STARTUP_WARNING_LOCK = threading.Lock()
-
-MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 60, 0)
-_CORE_REQUIRED_FEATURIZER_MARKERS = (
-    "from_arrow_paths",
-    "signature_ids",
-    "get_constraints_matrix_indexed",
-    "featurize_pairs_matrix_indexed",
-    "update_signature_name_counts",
-)
-_FEATURIZER_API_SCORE_MARKERS = tuple(
-    marker
-    for marker in _CORE_REQUIRED_FEATURIZER_MARKERS
-    if marker
-    in {
-        "from_arrow_paths",
-        "signature_ids",
-        "featurize_pairs_matrix_indexed",
-        "update_signature_name_counts",
-    }
-)
-RUST_CAPABILITY_HYBRID_CENTROID_RETRIEVER_V1 = "hybrid_centroid_retriever_v1"
-RUST_CAPABILITY_INDEXED_PAIR_ARRAY_FEATURIZATION_V1 = "indexed_pair_array_featurization_v1"
-RUST_CAPABILITY_INCREMENTAL_LINKING_PAIR_PLAN_V1 = "incremental_linking_pair_plan_v1"
-RUST_CAPABILITY_INCREMENTAL_LINKING_CONSTRAINT_ARRAYS_V1 = "incremental_linking_constraint_arrays_v1"
-RUST_CAPABILITY_RAW_ARROW_QUERY_SIGNATURE_PLANNER_V1 = "raw_arrow_query_signature_planner_v1"
-_REQUIRED_INCREMENTAL_PAIR_PLAN_ROW_SIGNALS = ("row_orcid_match",)
-_REQUIRED_INCREMENTAL_PAIR_PLAN_KWARGS = ("query_candidate_component_keys_by_signature_id",)
-_REQUIRED_RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS = (
-    "from_query_signatures",
-    "from_auto_queries",
-    "plan_query_signatures",
-    "build_telemetry",
-)
-# Attribute holding validated Arrow IPC paths for RustFeaturizer.from_arrow_paths;
-# attached by s2and.arrow_training. Datasets without it featurize in Python.
-RUST_FEATURIZER_ARROW_PATHS_ATTR = "rust_featurizer_arrow_paths"
-
-
-@dataclass(frozen=True)
-class RustRuntimeCapabilities:
-    extension_importable: bool
-    core_runtime_available: bool
-    reason: str
-    named_capabilities: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class BackendResolution:
-    requested_backend: RequestedBackend | None
-    resolved_backend: Backend
-    source: RuntimeSource
-    capability_reason: str
+REQUIRED_RUST_EXTENSION_VERSION = "0.60.0"
 
 
 @dataclass(frozen=True)
 class RuntimeContext:
+    """Backend choice and trace identifier shared by one operation."""
+
     operation: str
-    requested_backend: RequestedBackend | None
-    resolved_backend: Backend
-    use_rust: bool
+    backend: Backend
     run_id: str
-    source: RuntimeSource
-
-    def stage_backend(self) -> Backend:
-        return "rust" if self.use_rust else "python"
 
 
-def _parse_semver_prefix(raw_version: str | None) -> tuple[int, int, int] | None:
-    if not raw_version:
-        return None
-    match = re.match(r"^\s*(\d+)\.(\d+)\.(\d+)", str(raw_version))
-    if match is None:
-        return None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+def load_s2and_rust_extension(*, import_module: Callable[[str], Any] | None = None) -> Any:
+    """Import the one supported Rust extension version or raise explicitly."""
 
-
-def _module_version_tuple(module: Any) -> tuple[int, int, int] | None:
-    return _parse_semver_prefix(getattr(module, "__version__", None))
-
-
-def _version_tuple_to_string(version: tuple[int, int, int]) -> str:
-    return ".".join(str(part) for part in version)
-
-
-def min_supported_rust_extension_version_string() -> str:
-    """Return the minimum supported Rust extension version as a semver string."""
-
-    return _version_tuple_to_string(MIN_SUPPORTED_RUST_EXTENSION_VERSION)
-
-
-def _rust_featurizer_api_score(module: Any) -> int:
-    rust_featurizer_cls = getattr(module, "RustFeaturizer", None)
-    if rust_featurizer_cls is None:
-        return -1
-    return sum(1 for marker in _FEATURIZER_API_SCORE_MARKERS if hasattr(rust_featurizer_cls, marker))
-
-
-def _rust_build_info(module: Any) -> Mapping[str, Any]:
-    get_build_info = getattr(module, "get_build_info", None)
-    if not callable(get_build_info):
-        return {}
-    build_info = get_build_info()
-    return build_info if isinstance(build_info, Mapping) else {}
-
-
-def _build_info_sequence_contains_all(module: Any, key: str, required: tuple[str, ...]) -> bool:
-    values = _rust_build_info(module).get(key)
-    if values is None:
-        return False
-    if isinstance(values, str):
-        available = {values}
-    else:
-        try:
-            available = {str(value) for value in values}
-        except TypeError:
-            return False
-    return all(value in available for value in required)
-
-
-def _has_current_incremental_pair_plan_abi(module: Any) -> bool:
-    if not _build_info_sequence_contains_all(
-        module,
-        "incremental_linking_pair_plan_supported_kwargs",
-        _REQUIRED_INCREMENTAL_PAIR_PLAN_KWARGS,
-    ):
-        return False
-    return _build_info_sequence_contains_all(
-        module,
-        "incremental_linking_pair_plan_row_signals",
-        _REQUIRED_INCREMENTAL_PAIR_PLAN_ROW_SIGNALS,
-    )
-
-
-def _has_current_raw_arrow_query_signature_planner_abi(module: Any) -> bool:
-    raw_planner_cls = getattr(module, "RawBlockQueryCandidatePlanner", None)
-    if raw_planner_cls is None or not callable(getattr(raw_planner_cls, "from_query_signatures", None)):
-        return False
-    return _build_info_sequence_contains_all(
-        module,
-        "raw_arrow_query_signature_planner_methods",
-        _REQUIRED_RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS,
-    )
-
-
-def _detect_named_rust_capabilities(module: Any) -> tuple[str, ...]:
-    capabilities: list[str] = []
-    rust_featurizer_cls = getattr(module, "RustFeaturizer", None)
-    rust_retriever_cls = getattr(module, "RustHybridCentroidRetriever", None)
-    if rust_retriever_cls is not None and callable(
-        getattr(rust_retriever_cls, "top_k_hybrid_centroid_pair_plan", None)
-    ):
-        capabilities.append(RUST_CAPABILITY_HYBRID_CENTROID_RETRIEVER_V1)
-    if rust_featurizer_cls is not None and callable(
-        getattr(rust_featurizer_cls, "linker_pair_index_arrays_and_aggregate_stats", None)
-    ):
-        capabilities.append(RUST_CAPABILITY_INDEXED_PAIR_ARRAY_FEATURIZATION_V1)
-    if (
-        rust_retriever_cls is not None
-        and callable(getattr(rust_retriever_cls, "top_k_hybrid_centroid_pair_plan", None))
-        and _has_current_incremental_pair_plan_abi(module)
-    ):
-        capabilities.append(RUST_CAPABILITY_INCREMENTAL_LINKING_PAIR_PLAN_V1)
-    if (
-        rust_featurizer_cls is not None
-        and callable(getattr(rust_featurizer_cls, "linker_pair_index_arrays_constraint_labels", None))
-        and callable(getattr(rust_featurizer_cls, "linker_pair_distance_accumulators", None))
-    ):
-        capabilities.append(RUST_CAPABILITY_INCREMENTAL_LINKING_CONSTRAINT_ARRAYS_V1)
-    if _has_current_raw_arrow_query_signature_planner_abi(module):
-        capabilities.append(RUST_CAPABILITY_RAW_ARROW_QUERY_SIGNATURE_PLANNER_V1)
-    return tuple(capabilities)
-
-
-def _is_missing_s2and_rust_native_module(exc: ModuleNotFoundError) -> bool:
-    """Return whether an import failure means the optional Rust extension is absent."""
-
-    missing_name = exc.name or ""
-    return missing_name == "s2and_rust" or (
-        missing_name.startswith("s2and_rust.") and missing_name.endswith("._s2and_rust")
-    )
-
-
-def load_s2and_rust_extension(*, import_module: Callable[[str], Any] | None = None) -> Any | None:
     importer = import_module or importlib.import_module
     try:
         module = importer("s2and_rust")
     except ModuleNotFoundError as exc:
-        if not _is_missing_s2and_rust_native_module(exc):
+        if not (exc.name or "").startswith("s2and_rust"):
             raise
-        return None
-
-    shim_score = _rust_featurizer_api_score(module)
-
-    # Workspace runs can resolve `s2and_rust` to a pure-Python shim while the compiled
-    # extension lives in a submodule. Prefer the versioned native module when scores tie.
-    candidate_module: Any | None = None
-    try:
-        candidate_module = importer("s2and_rust._s2and_rust")
-    except ModuleNotFoundError as exc:
-        if not _is_missing_s2and_rust_native_module(exc):
-            raise
-        candidate_module = None
-
-    candidate_score = _rust_featurizer_api_score(candidate_module) if candidate_module is not None else -1
-    if candidate_module is not None and candidate_score >= 0:
-        if candidate_score > shim_score:
-            return candidate_module
-        if candidate_score == shim_score:
-            shim_version = _module_version_tuple(module)
-            candidate_version = _module_version_tuple(candidate_module)
-            if candidate_version is not None and shim_version is None:
-                return candidate_module
-            if candidate_version is not None and shim_version is not None and candidate_version > shim_version:
-                return candidate_module
-
-    if shim_score >= 0:
-        return module
-    return None
-
-
-def detect_rust_runtime_capabilities(
-    extension_module: Any | None = None,
-    *,
-    import_module: Callable[[str], Any] | None = None,
-) -> RustRuntimeCapabilities:
-    module = (
-        extension_module if extension_module is not None else load_s2and_rust_extension(import_module=import_module)
-    )
-    if module is None:
-        return RustRuntimeCapabilities(
-            extension_importable=False,
-            core_runtime_available=False,
-            reason="rust_extension_unavailable",
-            named_capabilities=(),
-        )
-
-    rust_featurizer_cls = getattr(module, "RustFeaturizer", None)
-    if rust_featurizer_cls is None:
-        return RustRuntimeCapabilities(
-            extension_importable=True,
-            core_runtime_available=False,
-            reason="rust_featurizer_missing",
-            named_capabilities=_detect_named_rust_capabilities(module),
-        )
-
-    missing_markers = [
-        marker for marker in _CORE_REQUIRED_FEATURIZER_MARKERS if not hasattr(rust_featurizer_cls, marker)
-    ]
-    core_runtime_available = len(missing_markers) == 0
-
-    if not core_runtime_available:
-        reason = "rust_core_missing_markers:" + ",".join(missing_markers)
-    else:
-        version_tuple = _module_version_tuple(module)
-        if version_tuple is None:
-            core_runtime_available = False
-            reason = f"rust_version_unparseable:{getattr(module, '__version__', None)!r}"
-        elif version_tuple < MIN_SUPPORTED_RUST_EXTENSION_VERSION:
-            core_runtime_available = False
-            reason = (
-                "rust_version_below_minimum:"
-                f"{_version_tuple_to_string(version_tuple)}<"
-                f"{_version_tuple_to_string(MIN_SUPPORTED_RUST_EXTENSION_VERSION)}"
-            )
-        else:
-            reason = "rust_core_available"
-
-    return RustRuntimeCapabilities(
-        extension_importable=True,
-        core_runtime_available=core_runtime_available,
-        reason=reason,
-        named_capabilities=_detect_named_rust_capabilities(module),
-    )
-
-
-def _normalize_backend_value(value: str) -> str:
-    return value.strip().lower()
-
-
-def _emit_startup_runtime_warning_once(resolution: BackendResolution) -> None:
-    global _STARTUP_WARNING_EMITTED
-    with _STARTUP_WARNING_LOCK:
-        if _STARTUP_WARNING_EMITTED:
-            return
-        _STARTUP_WARNING_EMITTED = True
-
-    logger.warning(
-        "Runtime backend resolved at startup: resolved_backend=%s source=%s requested_backend=%s capability_reason=%s",
-        resolution.resolved_backend,
-        resolution.source,
-        resolution.requested_backend,
-        resolution.capability_reason,
-    )
-
-
-def _auto_backend_capability_probe() -> tuple[bool, str]:
-    capabilities = detect_rust_runtime_capabilities()
-    return capabilities.core_runtime_available, capabilities.reason
-
-
-def _resolve_auto_backend(
-    *,
-    requested_backend: RequestedBackend | None,
-    source: RuntimeSource,
-) -> BackendResolution:
-    rust_core_available, capability_reason = _auto_backend_capability_probe()
-    resolved_backend: Backend = "rust" if rust_core_available else "python"
-    return BackendResolution(
-        requested_backend=requested_backend,
-        resolved_backend=resolved_backend,
-        source=source,
-        capability_reason=capability_reason,
-    )
-
-
-def _resolve_explicit_rust_backend(*, source: RuntimeSource) -> BackendResolution:
-    capabilities = detect_rust_runtime_capabilities()
-    if not capabilities.core_runtime_available:
-        min_version = min_supported_rust_extension_version_string()
-        request_label = "backend='rust'" if source == "argument" else "S2AND_BACKEND='rust'"
         raise RuntimeError(
-            f"{request_label} requested but Rust runtime is unavailable or unsupported "
-            f"(reason={capabilities.reason}). Install/upgrade s2and_rust (>= {min_version}) "
-            "or use backend='python'/'auto'."
+            f"Rust was requested, but s2and-rust=={REQUIRED_RUST_EXTENSION_VERSION} is not importable"
+        ) from exc
+
+    found_version = getattr(module, "__version__", None)
+    if found_version != REQUIRED_RUST_EXTENSION_VERSION:
+        raise RuntimeError(
+            "Rust was requested, but the installed extension version does not match the pinned dependency: "
+            f"required={REQUIRED_RUST_EXTENSION_VERSION!r} found={found_version!r}"
         )
-    return BackendResolution(
-        requested_backend="rust",
-        resolved_backend="rust",
-        source=source,
-        capability_reason=capabilities.reason,
-    )
+    return module
 
 
-def resolve_backend(*, emit_startup_warning: bool = True) -> BackendResolution:
-    return resolve_backend_for_request(backend=None, emit_startup_warning=emit_startup_warning)
+def _normalize_backend_value(value: str, *, label: str) -> Backend:
+    normalized = value.strip().lower()
+    if normalized not in {"python", "rust"}:
+        raise ValueError(f"Invalid {label}={value!r}; expected 'python' or 'rust'")
+    return normalized  # type: ignore[return-value]
 
 
-def resolve_backend_for_request(
-    *,
-    backend: RequestedBackend | None = None,
-    emit_startup_warning: bool = True,
-) -> BackendResolution:
+def _resolve_backend(backend: Backend | None) -> Backend:
     if backend is not None:
-        requested = _normalize_backend_value(backend)
-        if requested not in {"python", "rust", "auto"}:
-            raise ValueError(f"Invalid backend={backend!r}; expected 'python', 'rust', or 'auto'")
-        if requested == "auto":
-            resolution = _resolve_auto_backend(
-                requested_backend="auto",
-                source="argument",
-            )
-        elif requested == "rust":
-            resolution = _resolve_explicit_rust_backend(source="argument")
-        else:
-            resolution = BackendResolution(
-                requested_backend="python",
-                resolved_backend="python",
-                source="argument",
-                capability_reason="explicit_python",
-            )
-        if emit_startup_warning:
-            _emit_startup_runtime_warning_once(resolution)
-        return resolution
+        requested = _normalize_backend_value(backend, label="backend")
+    else:
+        requested_raw = os.environ.get("S2AND_BACKEND")
+        if requested_raw is None:
+            return "python"
+        requested = _normalize_backend_value(requested_raw, label="S2AND_BACKEND")
 
-    requested_raw = os.environ.get("S2AND_BACKEND")
-    if requested_raw is not None:
-        requested = _normalize_backend_value(requested_raw)
-        if requested not in {"python", "rust", "auto"}:
-            raise ValueError(f"Invalid S2AND_BACKEND={requested_raw!r}; expected 'python', 'rust', or 'auto'")
-        if requested == "auto":
-            resolution = _resolve_auto_backend(
-                requested_backend="auto",
-                source="S2AND_BACKEND",
-            )
-        elif requested == "rust":
-            resolution = _resolve_explicit_rust_backend(source="S2AND_BACKEND")
-        else:
-            resolution = BackendResolution(
-                requested_backend="python",
-                resolved_backend="python",
-                source="S2AND_BACKEND",
-                capability_reason="explicit_python",
-            )
-        if emit_startup_warning:
-            _emit_startup_runtime_warning_once(resolution)
-        return resolution
-
-    resolution = _resolve_auto_backend(
-        requested_backend=None,
-        source="default",
-    )
-    if emit_startup_warning:
-        _emit_startup_runtime_warning_once(resolution)
-    return resolution
+    if requested == "rust":
+        load_s2and_rust_extension()
+    return requested
 
 
 def build_runtime_context(
     operation: str,
     *,
-    backend: RequestedBackend | None = None,
+    backend: Backend | None = None,
     run_id: str | None = None,
-    emit_startup_warning: bool = True,
 ) -> RuntimeContext:
-    resolution = resolve_backend_for_request(backend=backend, emit_startup_warning=emit_startup_warning)
+    """Build a runtime context for one explicitly routed operation."""
+
     if not operation:
         raise ValueError("operation must be a non-empty string")
-    resolved_backend = resolution.resolved_backend
-    effective_run_id = run_id or f"{operation}-{uuid.uuid4().hex[:12]}"
+    resolved_backend = _resolve_backend(backend)
     return RuntimeContext(
         operation=operation,
-        requested_backend=resolution.requested_backend,
-        resolved_backend=resolved_backend,
-        use_rust=resolved_backend == "rust",
-        run_id=effective_run_id,
-        source=resolution.source,
+        backend=resolved_backend,
+        run_id=run_id or f"{operation}-{uuid.uuid4().hex[:12]}",
     )
 
 
 def stage_uses_rust(runtime_context: RuntimeContext) -> bool:
-    """Returns whether Rust is enabled for the current runtime context."""
-    return bool(runtime_context.use_rust)
+    """Return whether this explicitly resolved context uses Rust."""
+
+    return runtime_context.backend == "rust"
 
 
 def dataset_stage_uses_rust(runtime_context: RuntimeContext, dataset: Any) -> bool:
-    """Returns whether Rust featurization applies to this dataset.
-
-    Rust featurizers are built exclusively from Arrow IPC artifacts
-    (``RustFeaturizer.from_arrow_paths``), so a Rust-resolved backend only
-    engages for datasets carrying validated Arrow featurizer paths (attached
-    by ``s2and.arrow_training``). Explicitly requesting the Rust backend for
-    a dataset without them is an error; an auto-resolved backend degrades to
-    the Python featurizer with a one-time log per dataset.
-    """
+    """Require Arrow paths whenever a dataset operation explicitly uses Rust."""
 
     if not stage_uses_rust(runtime_context):
         return False
-    if getattr(dataset, RUST_FEATURIZER_ARROW_PATHS_ATTR, None):
+    if getattr(dataset, "arrow_paths", None):
         return True
-    if runtime_context.requested_backend == "rust":
-        request_label = "backend='rust'" if runtime_context.source == "argument" else "S2AND_BACKEND='rust'"
-        raise RuntimeError(
-            f"{request_label} requested for {runtime_context.operation!r}, but the dataset has no Arrow "
-            "featurizer artifacts. Build the dataset through s2and.arrow_training (or attach validated "
-            f"paths via {RUST_FEATURIZER_ARROW_PATHS_ATTR!r}), or use backend='python'/'auto'."
-        )
-    if not getattr(dataset, "_s2and_python_featurizer_degrade_logged", False):
-        try:
-            dataset._s2and_python_featurizer_degrade_logged = True
-        except AttributeError:
-            pass
-        logger.info(
-            "Rust backend resolved but dataset=%s has no Arrow featurizer artifacts; "
-            "using the Python featurizer (op=%s run=%s)",
-            getattr(dataset, "name", "<unnamed>"),
-            runtime_context.operation,
-            runtime_context.run_id,
-        )
-    return False
-
-
-def reset_runtime_warning_state_for_tests() -> None:
-    global _STARTUP_WARNING_EMITTED
-    with _STARTUP_WARNING_LOCK:
-        _STARTUP_WARNING_EMITTED = False
+    raise RuntimeError(
+        f"Rust was requested for {runtime_context.operation!r}, but the dataset has no Arrow artifacts. "
+        "Build it with the Rust-training Arrow constructor or use backend='python'."
+    )

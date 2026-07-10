@@ -13,7 +13,7 @@ import scripts._rust_suite.compare_cmd as compare_cmd
 def test_collect_rust_package_info_loads_lazy_extension(monkeypatch) -> None:
     from s2and import feature_port
 
-    current_version = runtime.min_supported_rust_extension_version_string()
+    current_version = runtime.REQUIRED_RUST_EXTENSION_VERSION
     fake_module = SimpleNamespace(__version__=current_version, __name__="s2and_rust", __file__="native.pyd")
     monkeypatch.setattr(feature_port, "s2and_rust", None)
     monkeypatch.setattr(feature_port, "_ensure_s2and_rust_loaded", lambda: fake_module)
@@ -82,5 +82,5 @@ def test_run_single_loads_name_counts_for_name_count_features(monkeypatch, tmp_p
         )
     )
 
-    assert captured_anddata_kwargs["load_name_counts"] is True
+    assert str(captured_anddata_kwargs["name_counts_index"]).endswith("name_counts_index")
     assert "name_counts" in result["feature_names"]

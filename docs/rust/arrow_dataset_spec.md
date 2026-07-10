@@ -1,11 +1,13 @@
 # Arrow Dataset Specification
 
-Status date: 2026-05-27
+Status date: 2026-07-10
 
 This document defines the Arrow artifact contract for engineers assembling
-datasets for the direct Rust S2AND inference path. These artifacts are used by
-`Clusterer.predict(...)`, `Clusterer.predict_from_arrow_paths(...)`, and the
-promoted phase of `Clusterer.predict_incremental(...)`.
+datasets for direct Rust S2AND routes. These artifacts are used by
+`Clusterer.predict_from_arrow_paths(...)`,
+`Clusterer.predict_incremental_from_arrow_paths(...)`, and
+`build_training_anddata_from_arrow(...)`. Classic `Clusterer.predict(...)` and
+`Clusterer.predict_incremental(...)` operate on `ANDData` through Python.
 
 Production Arrow is a raw runtime input contract, not a serialized
 `ANDData(preprocess=True)` cache. The goal is feature parity with the current
@@ -125,12 +127,11 @@ The machine-readable column contract lives at
 `s2and/arrow_schema_contract.json`. It is a parity guard for producer/consumer
 drift; runtime readers still enforce their local validation rules directly.
 
-The Python API may also pass explicit paths through `dataset.arrow_paths`,
-`dataset.feature_block_arrow_paths`, or `dataset.rust_arrow_paths`. Production
-Rust routes treat those mappings as authoritative: they do not infer sibling
-`<data_root>_arrow/<dataset>` directories, and they do not auto-declare optional
-sidecars merely because files are present on disk. In that case the path mapping
-should use these keys:
+The explicit `*_from_arrow_paths` APIs receive this mapping directly. The fixed
+Rust-training constructor stores the validated mapping once as the immutable
+`dataset.arrow_paths` authority. Rust routes do not infer sibling
+`<data_root>_arrow/<dataset>` directories or declare optional sidecars merely
+because files are present on disk. The mapping uses these keys:
 
 | Key | Meaning |
 |---|---|
@@ -249,12 +250,13 @@ do not change results.
 Rows must provide the source values needed for the local Rust runtime to produce
 the same feature view that S2AND would expose after normal preprocessing:
 
-- `preprocess=True`
-- `use_orcid_id=True`
 - `block_type="s2"`
 - `name_tuples="filtered"`
-- `name_counts_last_first_initial_semantics="initial_char"`
 - `name_counts_index/` available when the selected model uses name-count features
+
+`author_orcid` is optional. If the column is absent, every signature is treated
+as having no ORCID evidence; all non-ORCID features and constraints remain
+available. Name-count artifacts always use the canonical initial-character key.
 
 Use the script-only `FeatureBlock` conversion writer as the reference
 implementation for Arrow physical layout and for benchmark/replay bundles whose
@@ -291,7 +293,8 @@ Important parity details:
 
 ### `signatures.arrow`
 
-One row per signature. Required columns:
+One row per signature. Columns marked optional in the meaning text may be
+omitted; when present, they must have the listed type.
 
 | Column | Arrow type | Nulls | Meaning |
 |---|---:|---:|---|
@@ -302,7 +305,7 @@ One row per signature. Required columns:
 | `author_last` | `string` | yes | Source author last-name field used as runtime preprocessing input |
 | `author_suffix` | `string` | yes | Source author suffix field used as runtime preprocessing input |
 | `author_affiliations` | `list<string>` | yes | Author affiliations; prefer empty list over null |
-| `author_orcid` | `string` | yes | ORCID value used by S2AND |
+| `author_orcid` | `string` | yes | Optional column containing ORCID evidence when available |
 | `author_position` | `int64` | yes | Author position on the paper |
 | `author_block` | `string` | yes | S2 block key, needed for block reconstruction/eval |
 | `author_email` | `string` | yes | Author email |
@@ -439,8 +442,8 @@ runtime, S2AND maps these signature ids through the seed assignments to identify
 the claimed seed components that need altered-profile pre-splitting.
 `signature_id` values must be unique.
 
-`altered_cluster_signatures.txt` with one signature id per line is still
-supported by the Python runtime only through legacy ANDData/training inputs.
+`altered_cluster_signatures.txt` with one signature id per line is supported
+only by classic ANDData/training inputs.
 Production Arrow path mappings must point at the Arrow table.
 
 ### `<dataset>_clusters.json`
@@ -472,7 +475,7 @@ Manifest expectations from this spec:
    manifests via the `name_counts_index` path key when the selected model uses
    name-count features.
 2. Keep `name_counts.arrow` only for generation, inspection, and parity
-   debugging — it is not a runtime fallback for `name_counts_index/`.
+   debugging; runtime scoring reads `name_counts_index/`.
 3. Do not build a request-time pipeline that loads `name_counts.arrow` into
    Python dicts/lists. That defeats the purpose of this contract.
 
@@ -704,7 +707,6 @@ uv run python scripts/convert_to_arrow.py validate `
 ```
 
 ```powershell
-$env:S2AND_BACKEND='rust'
 uv run python scripts/eval_prod_models.py `
   --dataset full `
   --use-arrow `
@@ -722,7 +724,7 @@ uv run python scripts/convert_to_arrow.py validate \
   --require-embeddings \
   --require-name-counts-index
 
-S2AND_BACKEND=rust uv run python scripts/eval_prod_models.py \
+uv run python scripts/eval_prod_models.py \
   --dataset full \
   --use-arrow \
   --datasets qian \

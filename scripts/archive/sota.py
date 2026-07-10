@@ -11,7 +11,6 @@ os.environ["OMP_NUM_THREADS"] = "8"
 import argparse
 import copy
 import logging
-import pickle
 
 import numpy as np
 import pandas as pd
@@ -25,11 +24,10 @@ os.environ["S2AND_CACHE"] = os.path.join(CONFIG["main_data_dir"], ".feature_cach
 from hyperopt import hp
 from sklearn.cluster import DBSCAN
 
-from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
+from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import cluster_eval, pairwise_eval
 from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.file_cache import cached_path
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 search_space = {
@@ -190,21 +188,6 @@ def main(
         NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints
         NAN_VALUE = np.nan
 
-    with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-        (
-            first_dict,
-            last_dict,
-            first_last_dict,
-            last_first_initial_dict,
-        ) = pickle.load(f)
-    name_counts = {
-        "first_dict": first_dict,
-        "last_dict": last_dict,
-        "first_last_dict": first_last_dict,
-        "last_first_initial_dict": last_first_initial_dict,
-    }
-    logger.info("loaded name counts")
-
     datasets: dict[str, Any] = {}
 
     for dataset_name in tqdm(DATASET_NAMES, desc="Processing datasets and fitting base models"):
@@ -293,7 +276,7 @@ def main(
             val_pairs_size=N_VAL_TEST_SIZE,
             test_pairs_size=N_VAL_TEST_SIZE,
             n_jobs=N_JOBS,
-            load_name_counts=name_counts,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=PREPROCESS,
             random_seed=random_seed,
             train_blocks=train_blocks,

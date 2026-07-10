@@ -9,10 +9,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from s2and.consts import NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.incremental_linking_training.name_counts import LoadNameCountsMode, resolve_load_name_counts
 from s2and.model import _ensure_lightgbm_fitted
-from s2and.production_model import load_production_model
+from s2and.production_model import _load_pairwise_staging_model
 from s2and.thread_config import resolve_n_jobs
 
 
@@ -176,7 +177,11 @@ def load_giant_block_dataset(
             val_pairs_size=1000,
             test_pairs_size=1000,
             n_jobs=int(n_jobs),
-            load_name_counts=resolve_load_name_counts(load_name_counts=load_name_counts, clusterer=clusterer),
+            name_counts_index=(
+                NAME_COUNTS_INDEX_PATH
+                if resolve_load_name_counts(load_name_counts=load_name_counts, clusterer=clusterer)
+                else None
+            ),
             preprocess=True,
             random_seed=int(meta.get("random_seed", 0) if isinstance(meta, dict) else 0),
             name_tuples="filtered",
@@ -201,7 +206,7 @@ def load_giant_block_dataset(
 def load_clusterer(model_path: Path, *, n_jobs: int) -> Any:
     """Load the production clusterer and prepare it for inference."""
 
-    clusterer = load_production_model(model_path, require_incremental_linker=False)
+    clusterer = _load_pairwise_staging_model(model_path)
     _ensure_lightgbm_fitted(clusterer.classifier)
     _ensure_lightgbm_fitted(clusterer.nameless_classifier)
     clusterer.use_cache = False

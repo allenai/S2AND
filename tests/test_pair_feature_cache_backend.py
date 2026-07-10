@@ -67,7 +67,7 @@ def test_many_pairs_featurize_reuses_persisted_pair_feature_cache(
 ) -> None:
     monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(featurizer_mod, "CACHE_ROOT", tmp_path)
-    dataset = build_dummy_dataset("pair_feature_cache_roundtrip", load_name_counts=True)
+    dataset = build_dummy_dataset("pair_feature_cache_roundtrip", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = [("0", "1", 0.0), ("0", "2", 0.0)]
     original_single_pair_featurize = featurizer_mod._single_pair_featurize
@@ -117,7 +117,7 @@ def test_many_pairs_featurize_with_use_cache_false_does_not_write_pair_feature_c
 ) -> None:
     monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(featurizer_mod, "CACHE_ROOT", tmp_path)
-    dataset = build_dummy_dataset("pair_feature_cache_disabled", load_name_counts=True)
+    dataset = build_dummy_dataset("pair_feature_cache_disabled", name_counts_index=True)
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
     pairs = [("0", "1", 0.0)]
 

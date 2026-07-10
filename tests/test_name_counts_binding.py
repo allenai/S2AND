@@ -14,7 +14,7 @@ from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
 from s2and.runtime import build_runtime_context
-from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, tiny_name_counts_provenance
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, tiny_name_counts_provenance
 
 
 class _ConstantClassifier:
@@ -90,7 +90,7 @@ def test_python_prediction_accepts_exact_name_count_binding() -> None:
     dataset = build_dummy_dataset(
         "name-count-binding-python-match",
         mode="inference",
-        load_name_counts=True,
+        name_counts_index=True,
     )
 
     clusters, dists = clusterer.predict_helper(
@@ -110,7 +110,7 @@ def test_python_prediction_rejects_mismatched_name_count_binding_before_features
     dataset = build_dummy_dataset(
         "name-count-binding-python-mismatch",
         mode="inference",
-        load_name_counts=True,
+        name_counts_index=True,
     )
     assert dataset.name_counts_provenance is not None
     dataset.name_counts_provenance = {
@@ -256,15 +256,13 @@ def test_prebuilt_rust_featurizer_distance_boundary_rejects_mismatch_before_feat
 
 
 def test_arrow_built_rust_featurizer_retains_verified_name_count_binding(tmp_path: Path) -> None:
-    if not feature_port.rust_featurizer_available():
-        pytest.skip("s2and_rust extension is unavailable")
     provenance = tiny_name_counts_provenance()
     dataset = build_dummy_dataset(
         "name-count-binding-real-rust-featurizer",
         mode="inference",
-        load_name_counts=True,
+        name_counts_index=True,
     )
-    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    dataset = build_arrow_training_dataset(dataset, tmp_path)
 
     rust_featurizer = feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
 

@@ -30,7 +30,7 @@ from s2and.incremental_linking.runtime import (
     _raw_candidate_plan_seed_setup,
     subset_raw_candidate_plan_for_query_ids,
 )
-from tests.helpers import build_cluster_summary, build_query_features, patch_name_counts_artifact
+from tests.helpers import build_cluster_summary, build_query_features, tiny_name_counts_provenance
 
 pa = pytest.importorskip("pyarrow")
 s2and_rust = pytest.importorskip("s2and_rust", reason="s2and_rust is unavailable")
@@ -232,16 +232,13 @@ def _assert_raw_candidate_plans_equal(left: dict[str, Any], right: dict[str, Any
 
 
 def _write_tiny_name_counts_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-    patch_name_counts_artifact(
-        monkeypatch,
-        (
-            {"alice": 10.0, "bob": 30.0},
-            {"wang": 20.0, "jones": 40.0},
-            {"alice wang": 5.0, "bob jones": 6.0},
-            {"wang a": 8.0, "jones b": 9.0},
-        ),
+    mappings = (
+        {"alice": 10.0, "bob": 30.0},
+        {"wang": 20.0, "jones": 40.0},
+        {"alice wang": 5.0, "bob jones": 6.0},
+        {"wang a": 8.0, "jones b": 9.0},
     )
-    index_path, _metrics = write_name_counts_index(tmp_path)
+    index_path, _metrics = write_name_counts_index(tmp_path, mappings, tiny_name_counts_provenance())
     return index_path
 
 

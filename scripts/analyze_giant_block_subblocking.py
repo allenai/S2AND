@@ -290,7 +290,7 @@ def load_dataset(dataset_root: Path, n_jobs: int, random_seed: int) -> ANDData:
         val_pairs_size=1000,
         test_pairs_size=1000,
         n_jobs=int(n_jobs),
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=True,
         random_seed=int(random_seed),
         name_tuples="filtered",

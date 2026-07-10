@@ -48,14 +48,13 @@ from s2and.incremental_linking.runtime import (
     compute_candidate_batch_pairwise_model_and_aggregate_stats as _pairwise_model_stats_impl,
 )
 from s2and.model_pairwise import predict_pairwise_class0
-from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, import_s2and_rust
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
 from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
 
 runtime_module: Any = runtime_module
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
     required_module_attrs=("RustLightGBMBooster",),
-    prefer_site_packages=True,
 )
 _HAS_RUST_LIGHTGBM = bool(
     _HAS_RUST_LIGHTGBM
@@ -1223,10 +1222,8 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    if not runtime_module.feature_port.rust_featurizer_available():
-        raise pytest.skip.Exception("s2and_rust core runtime is unavailable")
-    dataset = build_dummy_dataset("dummy_linker_rust_distance_accumulator_parity", load_name_counts=True)
-    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    dataset = build_dummy_dataset("dummy_linker_rust_distance_accumulator_parity", name_counts_index=True)
+    dataset = build_arrow_training_dataset(dataset, tmp_path)
     rust_featurizer = runtime_module.feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
     if not hasattr(rust_featurizer, "linker_pair_distance_accumulators"):
         raise pytest.skip.Exception("linker_pair_distance_accumulators is unavailable")

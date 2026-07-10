@@ -14,14 +14,11 @@ from typing import Any
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
     require_name_counts_index_artifact,
-    validate_arrow_prediction_artifacts,
+    validate_arrow_publication_artifacts,
 )
 
 ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
-ROOT_HELPER_FILES = (
-    "LICENSE.txt",
-    "default_production_model.json",
-)
+ROOT_HELPER_FILES = ("LICENSE.txt",)
 DECLARED_DIRECTORY_KEYS = frozenset({"name_counts_index"})
 
 
@@ -179,12 +176,10 @@ def _validate_dataset_manifest(
         str(key): str(_manifest_path(path_value, manifest_path.parent)) for key, path_value in paths.items()
     }
     try:
-        validate_arrow_prediction_artifacts(
+        validate_arrow_publication_artifacts(
             resolved_paths,
             require_specter=True,
             require_name_counts_index=require_name_counts_index,
-            require_batch_indexes=True,
-            strict_batch_index_validation=True,
             context=label,
         )
     except MissingArrowArtifactError as exc:

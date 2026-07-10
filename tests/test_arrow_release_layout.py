@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from s2and.arrow_inputs import require_name_counts_index_artifact
+from s2and.arrow_inputs import _build_arrow_artifact_generation, require_name_counts_index_artifact
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
 from scripts.verification.validate_local_arrow_release import validate_release_root
 
@@ -32,7 +33,6 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
         entry["dataset"]: entry for entry in root_manifest.get("dataset_manifests", []) if isinstance(entry, dict)
     }
     dataset_entry = dataset_entries[dataset_name]
-    default_model = json.loads((release_root / "default_production_model.json").read_text(encoding="utf-8"))
     assert dataset_entry["manifest_sha256"] == hashlib.sha256(dataset_manifest_path.read_bytes()).hexdigest()
     assert dataset_entry["manifest_size_bytes"] == dataset_manifest_path.stat().st_size
     assert root_manifest["audit"]["dataset_count"] == 1
@@ -40,8 +40,6 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
     required_paths = [
         release_root / "manifest.json",
         release_root / "LICENSE.txt",
-        release_root / "default_production_model.json",
-        release_root / default_model["bundle_dir"] / "manifest.json",
         release_root / "name_counts_index" / "manifest.json",
         release_root / dataset_name / "manifest.json",
         release_root / dataset_name / "signatures.arrow",
@@ -97,15 +95,6 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
     pa = pytest.importorskip("pyarrow")
     release_root = tmp_path / "release"
 
-    _touch_json(
-        release_root / "default_production_model.json",
-        {
-            "schema_version": "s2and_default_production_model_v1",
-            "bundle_dir": "production_model_test",
-            "bundle_version": "test",
-        },
-    )
-    _touch_json(release_root / "production_model_test" / "manifest.json", {"bundle_version": "test"})
     name_counts_index = release_root / "name_counts_index"
     for file_name in ("first.bin", "last.bin", "first_last.bin", "last_first_initial.bin"):
         _touch_file(name_counts_index / file_name)
@@ -169,6 +158,7 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
         key_column="paper_id",
     )
     dataset_manifest = {
+        "normalization_version": NORMALIZATION_VERSION,
         "signature_count": 1,
         "paper_count": 1,
         "paths": {
@@ -183,6 +173,8 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
             "specter_batch_index": "specter2.specter_batch_index.bin",
         },
     }
+    generation_paths = {key: str((dataset_root / value).resolve()) for key, value in dataset_manifest["paths"].items()}
+    dataset_manifest["artifact_generation"] = _build_arrow_artifact_generation(generation_paths, dataset_root)
     _touch_json(dataset_root / "manifest.json", dataset_manifest)
     _write_root_manifest(release_root, dataset_name)
     return release_root, dataset_name
@@ -205,7 +197,7 @@ def test_docs_work_plan_arrow_release_layout_required_files(tmp_path: Path) -> N
         "dataset_manifest_count": 1,
         "replay_dataset_manifest_count": 0,
         "name_counts_index": str(release_root.resolve() / "name_counts_index"),
-        "default_model_manifest": str(release_root.resolve() / "production_model_test" / "manifest.json"),
+        "default_model_manifest": None,
         "network_access": False,
     }
 

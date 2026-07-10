@@ -54,7 +54,7 @@ from s2and.incremental_linking.runtime import (
 )
 from s2and.model import Clusterer
 from scripts.arrow_conversion_helpers import feature_block_from_anddata, write_feature_block_arrow_from_anddata
-from tests.helpers import patch_name_counts_artifact
+from tests.helpers import tiny_name_counts_provenance, write_test_arrow_artifact_manifest
 
 
 def _raw_test_clusterer(
@@ -237,7 +237,7 @@ def _tiny_anddata() -> ANDData:
         },
         name="tiny_feature_block",
         mode="inference",
-        load_name_counts=False,
+        name_counts_index=None,
         preprocess=False,
         name_tuples=set(),
     )
@@ -431,15 +431,8 @@ def _write_feature_block_arrow_paths(tmp_path: Path) -> dict[str, str]:
 
 
 def _with_fake_batch_indexes(arrow_paths: dict[str, str], tmp_path: Path) -> dict[str, str]:
-    indexed = dict(arrow_paths)
-    for key in ("signatures", "papers", "paper_authors"):
-        index_path = tmp_path / f"{key}.{key}_batch_index.bin"
-        index_path.touch()
-        indexed[f"{key}_batch_index"] = str(index_path)
-    if "specter" in indexed:
-        index_path = tmp_path / "specter.specter_batch_index.bin"
-        index_path.touch()
-        indexed["specter_batch_index"] = str(index_path)
+    indexed, _metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, tmp_path)
+    write_test_arrow_artifact_manifest(tmp_path, indexed)
     return indexed
 
 
@@ -535,22 +528,6 @@ def test_feature_block_from_anddata_rejects_signature_missing_paper() -> None:
     del dataset.papers["p1"]
 
     with pytest.raises(ValueError, match="missing signature paper_id"):
-        feature_block_from_anddata(
-            dataset,
-            signature_ids=["q", "s1"],
-            query_signature_ids=["q"],
-        )
-
-
-def test_feature_block_from_anddata_rejects_legacy_name_count_semantics() -> None:
-    # Arrow bundles are contractually initial_char; the retired
-    # legacy_full_first_token semantics would silently mis-key
-    # last_first_initial lookups in Rust, so conversion must fail fast even if
-    # the attribute is forced onto a dataset out-of-band.
-    dataset = _tiny_anddata()
-    dataset.name_counts_last_first_initial_semantics = "legacy_full_first_token"
-
-    with pytest.raises(ValueError, match="initial_char"):
         feature_block_from_anddata(
             dataset,
             signature_ids=["q", "s1"],
@@ -787,6 +764,20 @@ def test_feature_block_from_arrow_paths_reads_cluster_seed_disallows(tmp_path: P
     feature_block = feature_block_from_arrow_paths(arrow_paths, raw_candidate_plan=_raw_plan())
 
     assert feature_block.cluster_seeds_disallow == (("q", "s2"),)
+
+
+def test_feature_block_from_arrow_paths_accepts_missing_orcid_column(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    arrow_paths = _write_feature_block_arrow_paths(tmp_path)
+    signatures_path = Path(arrow_paths["signatures"])
+    with pa.memory_map(str(signatures_path), "r") as source:
+        signatures = pa.ipc.open_file(source).read_all().drop(["author_orcid"])
+        signatures = pa.Table.from_pylist(signatures.to_pylist(), schema=signatures.schema)
+    write_arrow_ipc_table(signatures, signatures_path)
+
+    feature_block = feature_block_from_arrow_paths(arrow_paths, raw_candidate_plan=_raw_plan())
+
+    assert all(signature.author_orcid is None for signature in feature_block.signatures)
 
 
 def test_feature_block_from_arrow_paths_filters_one_sided_disallow_pair(tmp_path: Path) -> None:
@@ -1315,13 +1306,11 @@ def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -
 
 def test_write_name_artifacts_arrow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pa = pytest.importorskip("pyarrow")
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
-    )
+    mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
+    provenance = tiny_name_counts_provenance()
 
-    counts_path, counts_metrics = write_name_counts_arrow(tmp_path)
-    index_path, index_metrics = write_name_counts_index(tmp_path)
+    counts_path, counts_metrics = write_name_counts_arrow(tmp_path, mappings, provenance)
+    index_path, index_metrics = write_name_counts_index(tmp_path, mappings, provenance)
 
     assert counts_metrics == {
         "reused": False,
@@ -1346,28 +1335,22 @@ def test_write_name_artifacts_arrow(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert manifest["exact_string_verification"] is True
     assert manifest["files"]["first"]["path"].startswith("generations/")
     assert {"kind": "first", "name": "ada", "count": 3.0} in counts
-    assert write_name_counts_arrow(tmp_path)[1] == {"reused": True}
-    assert write_name_counts_index(tmp_path)[1] == {"reused": True}
+    assert write_name_counts_arrow(tmp_path, mappings, provenance)[1] == {"reused": True}
+    assert write_name_counts_index(tmp_path, mappings, provenance)[1] == {"reused": True}
 
 
 def test_write_name_counts_arrow_manifest_failure_preserves_previous_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
-        generation_id="first-generation",
-    )
-    first_path, _metrics = write_name_counts_arrow(tmp_path)
+    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
+    first_provenance = {**tiny_name_counts_provenance(), "generation_id": "first-generation"}
+    first_path, _metrics = write_name_counts_arrow(tmp_path, first_mappings, first_provenance)
     manifest_path = tmp_path / "name_counts.arrow.manifest.json"
     first_manifest = manifest_path.read_bytes()
 
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"grace": 4}, {"hopper": 6}, {"grace hopper": 3}, {"hopper g": 8}),
-        generation_id="second-generation",
-    )
+    second_mappings = ({"grace": 4}, {"hopper": 6}, {"grace hopper": 3}, {"hopper g": 8})
+    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "second-generation"}
     original_replace = Path.replace
 
     def fail_manifest_replace(path: Path, target: str | Path) -> Path:
@@ -1377,7 +1360,7 @@ def test_write_name_counts_arrow_manifest_failure_preserves_previous_generation(
 
     monkeypatch.setattr(Path, "replace", fail_manifest_replace)
     with pytest.raises(OSError, match="injected manifest publication failure"):
-        write_name_counts_arrow(tmp_path, overwrite=True)
+        write_name_counts_arrow(tmp_path, second_mappings, second_provenance, overwrite=True)
 
     assert manifest_path.read_bytes() == first_manifest
     assert Path(first_path).is_file()
@@ -1387,23 +1370,18 @@ def test_write_name_counts_index_rebuilds_fingerprintless_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
-    )
-    index_path, _metrics = write_name_counts_index(tmp_path)
+    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
+    first_provenance = tiny_name_counts_provenance()
+    index_path, _metrics = write_name_counts_index(tmp_path, first_mappings, first_provenance)
     manifest_path = Path(index_path) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     original_fingerprint = manifest.pop("fingerprint")
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
 
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"grace": 11}, {"hopper": 13}, {"grace hopper": 17}, {"hopper g": 19}),
-        generation_id="test-grace-hopper",
-    )
+    second_mappings = ({"grace": 11}, {"hopper": 13}, {"grace hopper": 17}, {"hopper g": 19})
+    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "test-grace-hopper"}
 
-    _index_path, metrics = write_name_counts_index(tmp_path, overwrite=False)
+    _index_path, metrics = write_name_counts_index(tmp_path, second_mappings, second_provenance, overwrite=False)
 
     rebuilt_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert metrics["reused"] is False
@@ -1414,17 +1392,15 @@ def test_write_name_counts_index_rebuilds_manifest_with_missing_schema_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
-    )
-    index_path, _metrics = write_name_counts_index(tmp_path)
+    mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
+    provenance = tiny_name_counts_provenance()
+    index_path, _metrics = write_name_counts_index(tmp_path, mappings, provenance)
     manifest_path = Path(index_path) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest.pop("schema_version")
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
 
-    _index_path, metrics = write_name_counts_index(tmp_path, overwrite=False)
+    _index_path, metrics = write_name_counts_index(tmp_path, mappings, provenance, overwrite=False)
 
     rebuilt_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert metrics["reused"] is False
@@ -1435,11 +1411,9 @@ def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
-    )
-    index_path, _metrics = write_name_counts_index(tmp_path)
+    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
+    first_provenance = tiny_name_counts_provenance()
+    index_path, _metrics = write_name_counts_index(tmp_path, first_mappings, first_provenance)
     manifest_path = Path(index_path) / "manifest.json"
     original_manifest = manifest_path.read_text(encoding="utf-8")
     original_first_path = Path(index_path) / json.loads(original_manifest)["files"]["first"]["path"]
@@ -1452,14 +1426,11 @@ def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
         return real_write_file(path, kind, mapping, **kwargs)
 
     monkeypatch.setattr(feature_block_arrow_module, "_write_name_count_index_file", fail_after_first_file)
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19}),
-        generation_id="test-alan-turing",
-    )
+    second_mappings = ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19})
+    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "test-alan-turing"}
 
     with pytest.raises(RuntimeError, match="simulated index write failure"):
-        write_name_counts_index(tmp_path, overwrite=True)
+        write_name_counts_index(tmp_path, second_mappings, second_provenance, overwrite=True)
 
     assert manifest_path.read_text(encoding="utf-8") == original_manifest
     assert original_first_path.exists()
@@ -1469,11 +1440,9 @@ def test_write_name_counts_index_published_marker_failure_keeps_previous_manifes
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
-    )
-    index_path, _metrics = write_name_counts_index(tmp_path)
+    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
+    first_provenance = tiny_name_counts_provenance()
+    index_path, _metrics = write_name_counts_index(tmp_path, first_mappings, first_provenance)
     manifest_path = Path(index_path) / "manifest.json"
     original_manifest = manifest_path.read_text(encoding="utf-8")
     original_first_path = Path(index_path) / json.loads(original_manifest)["files"]["first"]["path"]
@@ -1486,14 +1455,11 @@ def test_write_name_counts_index_published_marker_failure_keeps_previous_manifes
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", fail_published_write)
-    patch_name_counts_artifact(
-        monkeypatch,
-        ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19}),
-        generation_id="test-alan-turing",
-    )
+    second_mappings = ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19})
+    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "test-alan-turing"}
 
     with pytest.raises(RuntimeError, match="simulated published marker failure"):
-        write_name_counts_index(tmp_path, overwrite=True)
+        write_name_counts_index(tmp_path, second_mappings, second_provenance, overwrite=True)
 
     assert manifest_path.read_text(encoding="utf-8") == original_manifest
     assert original_first_path.exists()

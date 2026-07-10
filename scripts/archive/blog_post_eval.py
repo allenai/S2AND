@@ -26,18 +26,16 @@ os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_
 import argparse
 import json
 import logging
-import pickle
 
 import numpy as np
 import pandas as pd
 from hyperopt import hp
 from tqdm import tqdm
 
-from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_PATH
+from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
 from s2and.eval import claims_eval
 from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.file_cache import cached_path
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
 logger = logging.getLogger("s2and")
@@ -272,22 +270,6 @@ def main(
     # let's only keep the first ~130 for speed purposes
     block_keys = block_keys[:130]
 
-    logger.info("starting transfer experiment main, loading name counts")
-    with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-        (
-            first_dict,
-            last_dict,
-            first_last_dict,
-            last_first_initial_dict,
-        ) = pickle.load(f)
-    name_counts = {
-        "first_dict": first_dict,
-        "last_dict": last_dict,
-        "first_last_dict": first_last_dict,
-        "last_first_initial_dict": last_first_initial_dict,
-    }
-    logger.info("loaded name counts")
-
     results_dict = {}
     for block_key in tqdm(block_keys):
         results = {}
@@ -301,7 +283,7 @@ def main(
             block_type="s2",
             name=block_key.replace(" ", "_"),
             n_jobs=n_jobs,
-            load_name_counts=name_counts,
+            name_counts_index=NAME_COUNTS_INDEX_PATH,
         )
         logger.info("Dataset loaded")
 

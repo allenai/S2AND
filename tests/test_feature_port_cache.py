@@ -8,10 +8,9 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-import s2and.arrow_inputs as arrow_inputs
 import s2and.feature_port as feature_port
 import s2and.runtime as runtime
-from s2and.arrow_inputs import MissingArrowArtifactError
+from s2and.arrow_inputs import validate_arrow_training_artifacts
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import write_name_counts_index
@@ -398,7 +397,7 @@ def test_validated_arrow_generation_ignores_unconsumed_python_rows_and_rekeys_ge
 
 
 def test_update_rust_cluster_seeds_reuses_cached_featurizer_without_default_version_bump():
-    from s2and.rust_calls import update_rust_cluster_seeds
+    from s2and.feature_port import update_rust_cluster_seeds
 
     dataset = DummyDataset("direct_seed_update_dataset", mode="train")
     dataset._cluster_seeds_version = 1
@@ -414,7 +413,7 @@ def test_update_rust_cluster_seeds_reuses_cached_featurizer_without_default_vers
 
 
 def test_update_rust_cluster_seeds_allows_explicit_version_bump():
-    from s2and.rust_calls import update_rust_cluster_seeds
+    from s2and.feature_port import update_rust_cluster_seeds
 
     dataset = DummyDataset("explicit_seed_update_bump_dataset", mode="train")
     dataset._cluster_seeds_version = 1
@@ -430,7 +429,7 @@ def test_update_rust_cluster_seeds_allows_explicit_version_bump():
 
 
 def test_update_rust_cluster_seeds_blocks_cache_prune_until_promotion():
-    from s2and.rust_calls import update_rust_cluster_seeds
+    from s2and.feature_port import update_rust_cluster_seeds
 
     dataset = DummyDataset("seed_update_promotion_race_dataset", mode="train")
     dataset._cluster_seeds_version = 1
@@ -486,7 +485,7 @@ def test_update_rust_cluster_seeds_blocks_cache_prune_until_promotion():
 
 
 def test_update_rust_cluster_seeds_leaves_version_unchanged_on_ffi_failure():
-    from s2and.rust_calls import update_rust_cluster_seeds
+    from s2and.feature_port import update_rust_cluster_seeds
 
     dataset = DummyDataset("failed_seed_update_dataset", mode="train")
     dataset._cluster_seeds_version = 1
@@ -505,8 +504,7 @@ def test_update_rust_cluster_seeds_leaves_version_unchanged_on_ffi_failure():
 
 
 def test_update_rust_cluster_seeds_rolls_back_featurizer_on_promotion_failure(monkeypatch):
-    from s2and import rust_calls
-    from s2and.rust_calls import update_rust_cluster_seeds
+    from s2and.feature_port import update_rust_cluster_seeds
 
     dataset = DummyDataset("promotion_failure_seed_update_dataset", mode="train")
     dataset._cluster_seeds_version = 1
@@ -518,7 +516,7 @@ def test_update_rust_cluster_seeds_rolls_back_featurizer_on_promotion_failure(mo
         del _dataset, _featurizer, target_seed_version
         raise RuntimeError("promotion failed")
 
-    monkeypatch.setattr(rust_calls, "_promote_rust_featurizer_cluster_seed_version", fail_promote)
+    monkeypatch.setattr(feature_port, "_promote_cached_rust_featurizer_cluster_seed_version", fail_promote)
 
     with pytest.raises(RuntimeError, match="promotion failed"):
         update_rust_cluster_seeds(dataset, bump_version=True)
@@ -542,29 +540,7 @@ def test_rust_featurizer_cache_rejects_invalid_cluster_seed_version():
     assert _cache_size() == 1
 
 
-def test_build_rust_featurizer_from_arrow_paths_rejects_none_path(monkeypatch):
-    class ArrowRustFeaturizer(DummyRustFeaturizer):
-        @classmethod
-        def from_arrow_paths(cls, *_args, **_kwargs):
-            raise AssertionError("from_arrow_paths should not be called for invalid paths")
-
-    class ArrowRustModule:
-        __version__ = runtime.REQUIRED_RUST_EXTENSION_VERSION
-        RustFeaturizer = ArrowRustFeaturizer
-
-    monkeypatch.setattr(feature_port, "s2and_rust", ArrowRustModule)
-
-    with pytest.raises(ValueError, match="papers.*None"):
-        feature_port.build_rust_featurizer_from_arrow_paths(
-            {
-                "signatures": "signatures.arrow",
-                "papers": None,
-            },
-            expected_normalization_version=NORMALIZATION_VERSION,
-        )
-
-
-def test_build_rust_featurizer_from_arrow_paths_requires_index_for_name_counts(monkeypatch, tmp_path):
+def test_build_rust_featurizer_from_arrow_paths_accepts_validated_inputs(monkeypatch, tmp_path):
     calls: list[dict[str, Any]] = []
 
     class ArrowRustFeaturizer(DummyRustFeaturizer):
@@ -591,21 +567,20 @@ def test_build_rust_featurizer_from_arrow_paths_requires_index_for_name_counts(m
     for key in ("signatures_batch_index", "papers_batch_index", "paper_authors_batch_index"):
         Path(paths[key]).touch()
 
-    with pytest.raises(MissingArrowArtifactError) as exc_info:
-        feature_port.build_rust_featurizer_from_arrow_paths(
-            paths,
-            expected_normalization_version=NORMALIZATION_VERSION,
-            load_name_counts=True,
-        )
-    assert exc_info.value.missing_keys == ("name_counts_index",)
-
     index_path, _metrics = write_name_counts_index(
         tmp_path / "name_counts_index", tiny_name_counts_tuple(), tiny_name_counts_provenance()
     )
-    write_test_arrow_artifact_manifest(tmp_path, {**paths, "name_counts_index": index_path})
-    monkeypatch.setattr(arrow_inputs, "_validate_batch_indexes_once", lambda _paths: None)
+    complete_paths = {**paths, "name_counts_index": index_path}
+    write_test_arrow_artifact_manifest(tmp_path, complete_paths)
+    monkeypatch.setattr("s2and.arrow_inputs._validate_batch_indexes", lambda _paths: None)
+    validated_paths = validate_arrow_training_artifacts(
+        complete_paths,
+        require_specter=False,
+        require_name_counts_index=True,
+        expected_normalization_version=NORMALIZATION_VERSION,
+    )
     result = feature_port.build_rust_featurizer_from_arrow_paths(
-        {**paths, "name_counts_index": index_path},
+        validated_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         load_name_counts=True,
     )
@@ -613,75 +588,9 @@ def test_build_rust_featurizer_from_arrow_paths_requires_index_for_name_counts(m
     assert result.dataset_name == "arrow"
     assert calls == [
         {
-            "paths": {**paths, "name_counts_index": index_path},
+            "paths": complete_paths,
         }
     ]
-
-
-def test_build_rust_featurizer_from_arrow_paths_requires_batch_indexes_by_default(monkeypatch, tmp_path):
-    class ArrowRustFeaturizer(DummyRustFeaturizer):
-        @classmethod
-        def from_arrow_paths(cls, *_args, **_kwargs):
-            return cls("arrow")
-
-    class ArrowRustModule:
-        __version__ = runtime.REQUIRED_RUST_EXTENSION_VERSION
-        RustFeaturizer = ArrowRustFeaturizer
-
-    monkeypatch.setattr(feature_port, "s2and_rust", ArrowRustModule)
-    paths = {
-        "signatures": str(tmp_path / "signatures.arrow"),
-        "papers": str(tmp_path / "papers.arrow"),
-        "paper_authors": str(tmp_path / "paper_authors.arrow"),
-    }
-    for path in paths.values():
-        Path(path).touch()
-
-    with pytest.raises(ValueError, match="signatures_batch_index"):
-        feature_port.build_rust_featurizer_from_arrow_paths(
-            paths,
-            expected_normalization_version=NORMALIZATION_VERSION,
-        )
-
-    with pytest.raises(ValueError, match="missing_papers.arrow"):
-        feature_port.build_rust_featurizer_from_arrow_paths(
-            {
-                **paths,
-                "papers": str(tmp_path / "missing_papers.arrow"),
-                "signatures_batch_index": str(tmp_path / "signatures.index"),
-                "papers_batch_index": str(tmp_path / "papers.index"),
-                "paper_authors_batch_index": str(tmp_path / "paper_authors.index"),
-            },
-            expected_normalization_version=NORMALIZATION_VERSION,
-        )
-
-    with pytest.raises(ValueError, match="name_pairs"):
-        feature_port.build_rust_featurizer_from_arrow_paths(
-            {
-                **paths,
-                "name_pairs": str(tmp_path / "missing_name_pairs.arrow"),
-                "signatures_batch_index": str(tmp_path / "signatures.index"),
-                "papers_batch_index": str(tmp_path / "papers.index"),
-                "paper_authors_batch_index": str(tmp_path / "paper_authors.index"),
-            },
-            expected_normalization_version=NORMALIZATION_VERSION,
-        )
-
-    index_paths = {
-        "signatures_batch_index": str(tmp_path / "signatures.index"),
-        "papers_batch_index": str(tmp_path / "papers.index"),
-        "paper_authors_batch_index": str(tmp_path / "paper_authors.index"),
-    }
-    for path in index_paths.values():
-        Path(path).touch()
-    write_test_arrow_artifact_manifest(tmp_path, {**paths, **index_paths})
-
-    monkeypatch.setattr(arrow_inputs, "_validate_batch_indexes_once", lambda _paths: None)
-    result = feature_port.build_rust_featurizer_from_arrow_paths(
-        {**paths, **index_paths},
-        expected_normalization_version=NORMALIZATION_VERSION,
-    )
-    assert result.dataset_name == "arrow"
 
 
 def test_concurrent_builds_for_distinct_datasets_do_not_serialize(monkeypatch):

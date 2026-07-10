@@ -542,11 +542,10 @@ def _run_single(
                     incremental_dont_use_cluster_seeds=False,
                 )
                 rust_val = get_constraints_matrix_indexed_rust(
-                    anddata,
                     [(signature_index[str(sig_a)], signature_index[str(sig_b)])],
+                    featurizer=rust_featurizer,
                     dont_merge_cluster_seeds=dont_merge,
                     incremental_dont_use_cluster_seeds=False,
-                    featurizer=rust_featurizer,
                 )[0]
 
                 if py_val is not None:

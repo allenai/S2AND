@@ -24,20 +24,17 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
     compute_rss_growth_fraction,
 )
 
+from s2and.arrow_inputs import ValidatedArrowInputs  # noqa: E402
+
 BUILD_PATH_CHOICES = ("from_arrow_paths",)
 DEFAULT_ARROW_DATA_ROOT = os.path.join("s2and", "data")
 DEFAULT_ARROW_SPECTER_SUFFIX = "_specter2.pkl"
 
 
 def _import_rust_module() -> Any:
-    try:
-        import s2and_rust
-    except Exception as exc:  # pragma: no cover - environment dependent
-        raise RuntimeError(f"Failed to import s2and_rust: {exc}") from exc
-    rust_featurizer = getattr(s2and_rust, "RustFeaturizer", None)
-    if rust_featurizer is None:
-        raise RuntimeError("s2and_rust.RustFeaturizer is unavailable")
-    return s2and_rust
+    from s2and.runtime import load_s2and_rust_extension
+
+    return load_s2and_rust_extension()
 
 
 def _resolve_path(maybe_relative_path: str) -> str:
@@ -47,7 +44,7 @@ def _resolve_path(maybe_relative_path: str) -> str:
     return str(_PROJECT_ROOT / candidate)
 
 
-def _arrow_dataset_paths(dataset_name: str, arrow_data_root: str, specter_suffix: str) -> dict[str, str]:
+def _arrow_dataset_paths(dataset_name: str, arrow_data_root: str, specter_suffix: str) -> ValidatedArrowInputs:
     from scripts.eval_prod_models import resolve_arrow_dataset_paths
 
     return resolve_arrow_dataset_paths(_resolve_path(arrow_data_root), dataset_name.strip().lower(), specter_suffix)
@@ -55,7 +52,7 @@ def _arrow_dataset_paths(dataset_name: str, arrow_data_root: str, specter_suffix
 
 def _build_from_arrow_paths(
     *,
-    paths: dict[str, str],
+    paths: ValidatedArrowInputs,
     preprocess: bool,
     num_threads: int,
 ) -> Any:

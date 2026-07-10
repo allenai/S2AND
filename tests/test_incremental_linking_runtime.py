@@ -30,6 +30,7 @@ from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     LinkerRetrievalBatch,
+    RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_candidate_plan,
 )
 from s2and.incremental_linking.runtime import (
@@ -53,16 +54,10 @@ from tests.promoted_linking_helpers import build_tiny_promoted_booster, syntheti
 
 runtime_module: Any = runtime_module
 
-_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
-    required_module_attrs=("RustLightGBMBooster",),
-)
-_HAS_RUST_LIGHTGBM = bool(
-    _HAS_RUST_LIGHTGBM
-    and hasattr(getattr(_RUST_LIGHTGBM_PAYLOAD, "RustLightGBMBooster", object), "predict_proba_positive_f32")
-)
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
 requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
-    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+    reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
 )
 
 
@@ -616,10 +611,12 @@ def test_raw_arrow_runtime_rejects_mismatched_query_view_length_before_featurize
             _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
             arrow_paths={"signatures": tmp_path / "signatures.arrow"},
             query_signature_ids=["q"],
-            raw_candidate_plan=_minimal_raw_candidate_plan(
-                query_signature_ids=["q"],
-                left_signature_ids=["q"],
-                query_views=[],
+            raw_plan_bundle=RawArrowPlanBundle.from_mapping(
+                _minimal_raw_candidate_plan(
+                    query_signature_ids=["q"],
+                    left_signature_ids=["q"],
+                    query_views=[],
+                )
             ),
             rust_featurizer=None,
         )
@@ -649,10 +646,12 @@ def test_raw_arrow_runtime_rejects_unknown_query_view_before_featurizer(
             _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0)),
             arrow_paths={"signatures": tmp_path / "signatures.arrow"},
             query_signature_ids=["q"],
-            raw_candidate_plan=_minimal_raw_candidate_plan(
-                query_signature_ids=["q"],
-                left_signature_ids=["q"],
-                query_views=["typo"],
+            raw_plan_bundle=RawArrowPlanBundle.from_mapping(
+                _minimal_raw_candidate_plan(
+                    query_signature_ids=["q"],
+                    left_signature_ids=["q"],
+                    query_views=["typo"],
+                )
             ),
             rust_featurizer=None,
         )
@@ -794,7 +793,6 @@ def test_fused_pairwise_model_and_aggregates_preserve_existing_distance_semantic
     calls: list[dict[str, Any]] = []
 
     def fake_build_arrays(
-        _dataset,
         left_signature_indices,
         _right_signature_indices,
         row_indices,
@@ -805,12 +803,8 @@ def test_fused_pairwise_model_and_aggregates_preserve_existing_distance_semantic
         num_threads,
         nan_value,
         aggregate_nan_value,
-        runtime_context=None,
-        use_cache=False,
         featurizer=None,
     ):
-        assert runtime_context is None
-        assert use_cache is False
         assert featurizer is not None
         calls.append(
             {
@@ -911,7 +905,6 @@ def test_fused_pairwise_model_uses_configurable_nan_policies(monkeypatch) -> Non
     calls: list[tuple[float, float]] = []
 
     def fake_build_arrays(
-        _dataset,
         left_signature_indices,
         _right_signature_indices,
         row_indices,
@@ -922,11 +915,9 @@ def test_fused_pairwise_model_uses_configurable_nan_policies(monkeypatch) -> Non
         num_threads,
         nan_value,
         aggregate_nan_value,
-        runtime_context=None,
-        use_cache=False,
         featurizer=None,
     ):
-        del _right_signature_indices, runtime_context, use_cache, featurizer
+        del _right_signature_indices, featurizer
         assert num_threads == 1
         calls.append((float(nan_value), float(aggregate_nan_value)))
         offsets = np.asarray(left_signature_indices, dtype=np.int64)
@@ -1033,7 +1024,6 @@ def test_fused_pairwise_model_preserves_true_hard_disallow_distances(monkeypatch
     )
 
     def fake_build_arrays(
-        _dataset,
         left_signature_indices,
         _right_signature_indices,
         row_indices,
@@ -1044,12 +1034,8 @@ def test_fused_pairwise_model_preserves_true_hard_disallow_distances(monkeypatch
         num_threads,
         nan_value,
         aggregate_nan_value,
-        runtime_context=None,
-        use_cache=False,
         featurizer=None,
     ):
-        assert runtime_context is None
-        assert use_cache is False
         assert featurizer is not None
         assert num_threads == 2
         assert np.isnan(float(nan_value))
@@ -1133,7 +1119,6 @@ def test_fused_pairwise_model_resolves_negative_n_jobs(monkeypatch: pytest.Monke
             return None
 
     def fake_build_arrays(
-        _dataset,
         _left_signature_indices,
         _right_signature_indices,
         _row_indices,
@@ -1157,7 +1142,6 @@ def test_fused_pairwise_model_resolves_negative_n_jobs(monkeypatch: pytest.Monke
         )
 
     def fake_distance_accumulators(
-        _dataset,
         _row_indices,
         row_count,
         model_distances,
@@ -1197,42 +1181,6 @@ def test_fused_pairwise_model_resolves_negative_n_jobs(monkeypatch: pytest.Monke
     assert seen_threads == [5, 5]
 
 
-def test_fused_pairwise_model_requires_rust_distance_accumulator(monkeypatch: pytest.MonkeyPatch) -> None:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.asarray([0], dtype=np.uint32),
-        right_signature_indices=np.asarray([1], dtype=np.uint32),
-        pair_row_indices=np.asarray([0], dtype=np.uint32),
-    )
-
-    def fake_build_arrays(*_args, matrix_indices, aggregate_indices, **_kwargs):
-        matrix = np.zeros((1, len(matrix_indices)), dtype=np.float64)
-        matrix[:, tuple(matrix_indices).index(0)] = 0.2
-        return (
-            matrix,
-            np.asarray([1], dtype=np.uint32),
-            np.ones((1, len(aggregate_indices)), dtype=np.uint64),
-            np.zeros((1, len(aggregate_indices)), dtype=np.float64),
-            np.zeros((1, len(aggregate_indices)), dtype=np.float64),
-            np.zeros((1, len(aggregate_indices)), dtype=np.float64),
-        )
-
-    monkeypatch.setattr(
-        runtime_module.feature_port,
-        "build_linker_pair_features_and_aggregate_stats_arrays_rust",
-        fake_build_arrays,
-    )
-
-    with pytest.raises(RuntimeError, match="linker_pair_distance_accumulators is required"):
-        compute_candidate_batch_pairwise_model_and_aggregate_stats(
-            SimpleNamespace(),
-            candidate_batch,
-            classifier=FirstColumnDistanceClassifier(),
-            featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-            featurizer=object(),
-        )
-
-
 def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1240,9 +1188,6 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
     dataset = build_dummy_dataset("dummy_linker_rust_distance_accumulator_parity", name_counts_index=True)
     dataset = build_arrow_training_dataset(dataset, tmp_path)
     rust_featurizer = runtime_module.feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
-    if not hasattr(rust_featurizer, "linker_pair_distance_accumulators"):
-        raise pytest.skip.Exception("linker_pair_distance_accumulators is unavailable")
-
     signature_count = len(rust_featurizer.signature_ids())
     pair_count = 4096
     row_count = 257
@@ -1259,7 +1204,6 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
         pair_row_indices=row_indices,
     )
     labels = runtime_module.feature_port.get_constraint_labels_index_arrays_rust(
-        dataset,
         left_indices,
         right_indices,
         featurizer=rust_featurizer,

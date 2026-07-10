@@ -1,7 +1,6 @@
 import contextlib
 import functools
 import gc
-import json
 import logging
 import os
 import platform
@@ -9,8 +8,9 @@ import sqlite3
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
 import numpy as np
@@ -44,9 +44,29 @@ logger = logging.getLogger("s2and")
 
 TupleOfArrays = tuple[np.ndarray, np.ndarray, np.ndarray | None]
 
-# Environment configuration caches (read once per process for consistency)
-CACHED_FEATURES: dict[str, dict[str, Any]] = {}
-_CACHED_FEATURES_LOCK = threading.Lock()
+# This order defines persisted model columns and is shared by training,
+# evaluation, and linker aggregation.
+DEFAULT_FEATURE_GROUPS: tuple[str, ...] = (
+    "name_similarity",
+    "affiliation_similarity",
+    "email_similarity",
+    "coauthor_similarity",
+    "venue_similarity",
+    "year_diff",
+    "title_similarity",
+    "misc_features",
+    "name_counts",
+    "embedding_similarity",
+    "journal_similarity",
+    "advanced_name_similarity",
+)
+NAME_DEPENDENT_FEATURE_GROUPS: frozenset[str] = frozenset(
+    {"name_similarity", "advanced_name_similarity", "name_counts"}
+)
+DEFAULT_NAMELESS_FEATURE_GROUPS: tuple[str, ...] = tuple(
+    feature_group for feature_group in DEFAULT_FEATURE_GROUPS if feature_group not in NAME_DEPENDENT_FEATURE_GROUPS
+)
+
 global_dataset: ANDData | None = None
 global_runtime_context: RuntimeContext | None = None
 _RUST_BATCH_CALIBRATION_LOCK = threading.Lock()
@@ -402,23 +422,6 @@ class RustBatchExecutionResult:
     rust_batch_adaptive_halvings: int
 
 
-@dataclass(frozen=True, slots=True)
-class CachePolicy:
-    """Resolved internal cache decisions for a public ``use_cache`` value."""
-
-    pair_feature_cache_enabled: bool
-
-    @property
-    def requires_full_feature_rows(self) -> bool:
-        return self.pair_feature_cache_enabled
-
-
-def resolve_cache_policy(use_cache: bool) -> CachePolicy:
-    """Resolve the public cache flag into the internal cache policy."""
-    enabled = bool(use_cache)
-    return CachePolicy(pair_feature_cache_enabled=enabled)
-
-
 def _scatter_feature_row_from_source(
     *,
     feature_output: np.ndarray,
@@ -535,14 +538,12 @@ def _scatter_chunk_to_output(
 
 def _cache_feature_output(
     *,
-    cached_features: dict[str, Any],
+    new_features: dict[str, np.ndarray],
     cache_key: str,
     feature_output: np.ndarray | list[int | float],
 ) -> None:
     # Preserve cache value immutability and avoid aliasing when worker buffers are reused.
-    feature_output_cached = np.asarray(feature_output, dtype=np.float64).copy()
-    cached_features["features"][cache_key] = feature_output_cached
-    cached_features["__new_features__"][cache_key] = feature_output_cached
+    new_features[cache_key] = np.asarray(feature_output, dtype=np.float64).copy()
 
 
 def _write_feature_row(
@@ -551,7 +552,7 @@ def _write_feature_row(
     output_index: int,
     signature_pairs: list[tuple[str, str, int | float]],
     featurizer_info: "FeaturizationInfo",
-    cached_features: dict[str, Any],
+    new_features: dict[str, np.ndarray],
     use_cache: bool,
     scatter_context: ScatterContext,
     source_is_full: bool,
@@ -559,7 +560,7 @@ def _write_feature_row(
     if use_cache:
         cache_key = featurizer_info.feature_cache_key(signature_pairs[output_index])
         _cache_feature_output(
-            cached_features=cached_features,
+            new_features=new_features,
             cache_key=cache_key,
             feature_output=feature_output,
         )
@@ -573,15 +574,14 @@ def _write_feature_row(
 
 
 # ── constants for cache writes ───────────────────────────
-INCREMENTAL_WRITE_THRESHOLD = 1000
 PAIR_FEATURE_CACHE_DB_FILENAME = "pair_features.sqlite3"
 PAIR_FEATURE_CACHE_SCHEMA_VERSION = 1
+PAIR_FEATURE_CACHE_READ_BATCH_SIZE = 900
 PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES = 3
 PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS = 30.0
 PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS = 0.1
 _FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION = "schema_version"
 _FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT = "feature_count"
-_FEATURE_CACHE_METADATA_KEY_FEATURES_TO_USE_JSON = "features_to_use_json"
 
 
 def _signature_id_to_index_or_raise(signature_id_to_index: dict[Any, int], signature_id: Any) -> int:
@@ -615,20 +615,7 @@ class FeaturizationInfo:
         featurizer_version: int = FEATURIZER_VERSION,
     ):
         if features_to_use is None:
-            features_to_use = [
-                "name_similarity",
-                "affiliation_similarity",
-                "email_similarity",
-                "coauthor_similarity",
-                "venue_similarity",
-                "year_diff",
-                "title_similarity",
-                "misc_features",
-                "name_counts",
-                "embedding_similarity",
-                "journal_similarity",
-                "advanced_name_similarity",
-            ]
+            features_to_use = list(DEFAULT_FEATURE_GROUPS)
         self.features_to_use = list(features_to_use)
 
         self.feature_group_to_index = {
@@ -684,8 +671,7 @@ class FeaturizationInfo:
             [
                 ",".join(constraints)
                 for feature_category, constraints in lightgbm_monotone_constraints.items()
-                if feature_category in features_to_use
-                and feature_category not in {"advanced_name_similarity", "name_similarity", "name_counts"}
+                if feature_category in features_to_use and feature_category not in NAME_DEPENDENT_FEATURE_GROUPS
             ]
         )
 
@@ -847,20 +833,13 @@ class FeaturizationInfo:
             PAIR_FEATURE_CACHE_DB_FILENAME,
         )
 
-    def cache_storage_key(self, dataset_name: str) -> str:
-        """Return the canonical in-memory cache key for a dataset cache."""
-        return self.cache_db_path(dataset_name)
-
-    def _fresh_cache_payload(self) -> dict[str, Any]:
-        return {
-            "features": {},
-            "features_to_use": list(self.features_to_use),
-            "__new_features__": {},
-        }
-
     @staticmethod
     def _sqlite_feature_blob(feature_output: np.ndarray | list[int | float]) -> sqlite3.Binary:
         feature_array = np.asarray(feature_output, dtype=np.float64)
+        if feature_array.shape != (NUM_FEATURES,):
+            raise ValueError(
+                "Pair-feature cache entry has unexpected shape " f"expected=({NUM_FEATURES},) got={feature_array.shape}"
+            )
         return sqlite3.Binary(feature_array.tobytes(order="C"))
 
     @staticmethod
@@ -899,78 +878,83 @@ class FeaturizationInfo:
             """
         )
 
-    def _load_sqlite_cache(self, db_path: str) -> dict[str, Any]:
-        cached_features = self._fresh_cache_payload()
+    @staticmethod
+    def _validate_pair_feature_cache_metadata(metadata_rows: Mapping[str, str], db_path: str) -> None:
+        required_keys = {
+            _FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION,
+            _FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT,
+        }
+        missing_keys = sorted(required_keys - metadata_rows.keys())
+        if missing_keys:
+            raise RuntimeError(f"Pair-feature cache is missing required metadata path={db_path} keys={missing_keys}")
+
+        schema_version_raw = metadata_rows[_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION]
+        try:
+            schema_version = int(schema_version_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid pair-feature cache schema version path={db_path} value={schema_version_raw!r}"
+            ) from exc
+        if schema_version != int(PAIR_FEATURE_CACHE_SCHEMA_VERSION):
+            raise RuntimeError(
+                "Unsupported pair-feature cache schema version "
+                f"path={db_path} expected={PAIR_FEATURE_CACHE_SCHEMA_VERSION} got={schema_version}"
+            )
+
+        feature_count_raw = metadata_rows[_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT]
+        try:
+            feature_count = int(feature_count_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid pair-feature cache feature count path={db_path} value={feature_count_raw!r}"
+            ) from exc
+        if feature_count != int(NUM_FEATURES):
+            raise RuntimeError(
+                "Unsupported pair-feature cache feature count "
+                f"path={db_path} expected={NUM_FEATURES} got={feature_count}"
+            )
+
+    def _load_sqlite_cache(self, db_path: str, cache_keys: Iterable[str]) -> dict[str, np.ndarray]:
+        cached_features: dict[str, np.ndarray] = {}
         with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
             self._initialize_pair_feature_cache_schema(connection)
             metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
-            schema_version_raw = metadata_rows.get(_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION)
-            if schema_version_raw is not None and int(schema_version_raw) != int(PAIR_FEATURE_CACHE_SCHEMA_VERSION):
-                raise RuntimeError(
-                    "Unsupported pair-feature cache schema version "
-                    f"path={db_path} expected={PAIR_FEATURE_CACHE_SCHEMA_VERSION} got={schema_version_raw}"
+            self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
+            cache_key_iterator = (str(cache_key) for cache_key in cache_keys)
+            while key_batch := tuple(islice(cache_key_iterator, PAIR_FEATURE_CACHE_READ_BATCH_SIZE)):
+                placeholders = ",".join("?" for _ in key_batch)
+                rows = connection.execute(
+                    f"SELECT cache_key, feature_blob FROM pair_features WHERE cache_key IN ({placeholders})",
+                    key_batch,
                 )
-            stored_features_to_use_json = metadata_rows.get(_FEATURE_CACHE_METADATA_KEY_FEATURES_TO_USE_JSON)
-            if stored_features_to_use_json is not None:
-                try:
-                    stored_features_to_use = json.loads(stored_features_to_use_json)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"Invalid pair-feature cache features_to_use metadata at {db_path}: {exc.msg}"
-                    ) from exc
-                if isinstance(stored_features_to_use, list) and all(
-                    isinstance(value, str) for value in stored_features_to_use
-                ):
-                    cached_features["features_to_use"] = list(stored_features_to_use)
-            for cache_key, feature_blob in connection.execute("SELECT cache_key, feature_blob FROM pair_features"):
-                cached_features["features"][str(cache_key)] = self._decode_sqlite_feature_blob(feature_blob)
-        cached_features["__cache_backend__"] = "sqlite"
-        cached_features["__cache_db_path__"] = db_path
+                for cache_key, feature_blob in rows:
+                    try:
+                        cached_features[str(cache_key)] = self._decode_sqlite_feature_blob(feature_blob)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"Invalid pair-feature cache entry path={db_path} key={cache_key!r}: {exc}"
+                        ) from exc
         return cached_features
 
-    def load_cache(self, dataset_name: str) -> dict[str, Any]:
-        """Load the persisted pair-feature cache for a dataset."""
+    def load_cache(self, dataset_name: str, cache_keys: Iterable[str]) -> dict[str, np.ndarray]:
+        """Load only requested rows from a dataset's persisted pair-feature cache."""
         db_path = self.cache_db_path(dataset_name)
         if os.path.exists(db_path):
-            return self._load_sqlite_cache(db_path)
-        cached_features = self._fresh_cache_payload()
-        cached_features["__cache_backend__"] = "empty"
-        return cached_features
+            return self._load_sqlite_cache(db_path, cache_keys)
+        return {}
 
-    def write_cache(self, cached_features: dict, dataset_name: str, incremental: bool = False):
-        """
-        Writes the cached features to the SQLite-backed features cache
-
-        Parameters
-        ----------
-        cached_features: Dict
-            the features, keyed by signature pair
-        dataset_name: str
-            the name of the dataset
-        incremental: bool
-            if True, only write new features from __new_features__ key
-
-        Returns
-        -------
-        nothing, writes the cache database
-        """
+    def write_cache(
+        self,
+        features: Mapping[str, np.ndarray | list[int | float]],
+        dataset_name: str,
+    ) -> None:
+        """Upsert newly computed pair features into the SQLite cache."""
+        if not features:
+            return
         cache_dir = self.cache_directory(dataset_name)
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
         db_path = self.cache_db_path(dataset_name)
-        full_features = cached_features.get("features", {})
-        if not isinstance(full_features, dict):
-            raise ValueError("cached_features['features'] must be a dictionary")
-        new_features = cached_features.get("__new_features__", {})
-        if not isinstance(new_features, dict):
-            raise ValueError("cached_features['__new_features__'] must be a dictionary")
-
-        replace_existing_rows = not incremental
-        features_to_persist = new_features if incremental else full_features
-        if len(features_to_persist) <= 0:
-            return
-
-        features_to_use_json = json.dumps(cached_features.get("features_to_use", []), separators=(",", ":"))
         for attempt in range(PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES):
             try:
                 with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
@@ -990,15 +974,6 @@ class FeaturizationInfo:
                             """,
                             (_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT, str(NUM_FEATURES)),
                         )
-                        connection.execute(
-                            """
-                            INSERT OR REPLACE INTO cache_metadata(key, value)
-                            VALUES (?, ?)
-                            """,
-                            (_FEATURE_CACHE_METADATA_KEY_FEATURES_TO_USE_JSON, features_to_use_json),
-                        )
-                        if replace_existing_rows:
-                            connection.execute("DELETE FROM pair_features")
                         connection.executemany(
                             """
                             INSERT INTO pair_features(cache_key, feature_blob)
@@ -1010,12 +985,9 @@ class FeaturizationInfo:
                                     str(cache_key),
                                     self._sqlite_feature_blob(feature_output),
                                 )
-                                for cache_key, feature_output in features_to_persist.items()
+                                for cache_key, feature_output in features.items()
                             ),
                         )
-                cached_features["__new_features__"] = {}
-                cached_features["__cache_backend__"] = "sqlite"
-                cached_features["__cache_db_path__"] = db_path
                 return
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc).lower() and attempt < PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES - 1:
@@ -1028,7 +1000,7 @@ class FeaturizationInfo:
                     continue
                 logger.error(
                     "Pair-feature cache write failed after %d attempts path=%s error=%s",
-                    PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES,
+                    attempt + 1,
                     db_path,
                     exc,
                 )
@@ -1279,7 +1251,7 @@ def _execute_python_featurization_phase(
     signature_pairs: list[tuple[str, str, int | float]],
     featurizer_info: FeaturizationInfo,
     scatter_context: ScatterContext,
-    cached_features: dict[str, Any],
+    new_features: dict[str, np.ndarray],
 ) -> tuple[str, int]:
     new_features_count = 0
     if n_jobs > 1:
@@ -1305,7 +1277,7 @@ def _execute_python_featurization_phase(
                         output_index=int(index),
                         signature_pairs=signature_pairs,
                         featurizer_info=featurizer_info,
-                        cached_features=cached_features,
+                        new_features=new_features,
                         use_cache=use_cache,
                         scatter_context=scatter_context,
                         source_is_full=True,
@@ -1326,7 +1298,7 @@ def _execute_python_featurization_phase(
             output_index=int(result[1]),
             signature_pairs=signature_pairs,
             featurizer_info=featurizer_info,
-            cached_features=cached_features,
+            new_features=new_features,
             use_cache=use_cache,
             scatter_context=scatter_context,
             source_is_full=True,
@@ -1342,7 +1314,7 @@ def _execute_rust_batch_featurization_phase(
     featurizer_info: FeaturizationInfo,
     runtime_context: RuntimeContext,
     n_jobs: int,
-    cache_policy: CachePolicy,
+    use_cache: bool,
     total_ram_bytes: int | None,
     rust_batch_total_ram_for_stage: int | None,
     rust_batch_rss_before_bytes: int,
@@ -1357,7 +1329,7 @@ def _execute_rust_batch_featurization_phase(
     features: np.ndarray,
     nameless_features: np.ndarray | None,
     coauthor_similarity_values: np.ndarray | None,
-    cached_features: dict[str, Any],
+    new_features: dict[str, np.ndarray],
 ) -> RustBatchExecutionResult:
     if len(pieces_of_work) <= 0:
         raise ValueError("Rust batch execution requires non-empty pieces_of_work")
@@ -1400,13 +1372,8 @@ def _execute_rust_batch_featurization_phase(
         dataset,
         runtime_context=runtime_context,
     )
-    if not hasattr(rust_featurizer, "featurize_pairs_matrix_indexed") or not hasattr(rust_featurizer, "signature_ids"):
-        raise RuntimeError(
-            "Rust batch pair featurization requires featurize_pairs_matrix_indexed and signature_ids; "
-            "rebuild/install a supported s2and-rust extension."
-        )
     rust_selected_indices: list[int] | None = None
-    if not cache_policy.requires_full_feature_rows and len(indices_needed_for_compute) > 0:
+    if not use_cache and len(indices_needed_for_compute) > 0:
         rust_selected_indices = indices_needed_for_compute
     signature_id_to_index: dict[Any, int] = {}
     rust_signature_ids = rust_featurizer.signature_ids()
@@ -1563,15 +1530,15 @@ def _execute_rust_batch_featurization_phase(
                 rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
                 chunk_indices = [index for _, index in chunk_work]
 
-                if cache_policy.pair_feature_cache_enabled:
+                if use_cache:
                     for row_offset, index in enumerate(chunk_indices):
                         new_features_count += _write_feature_row(
                             feature_output=rust_features_chunk[row_offset],
                             output_index=int(index),
                             signature_pairs=signature_pairs,
                             featurizer_info=featurizer_info,
-                            cached_features=cached_features,
-                            use_cache=cache_policy.pair_feature_cache_enabled,
+                            new_features=new_features,
+                            use_cache=use_cache,
                             scatter_context=rust_scatter_context,
                             source_is_full=rust_chunk_is_full,
                         )
@@ -1667,7 +1634,7 @@ def many_pairs_featurize(
     backend_used = "cached_only"
     if runtime_context is None:
         runtime_context = dataset.runtime_context
-    cache_policy = resolve_cache_policy(use_cache)
+    use_cache = bool(use_cache)
     signature_pairs = [(str(pair[0]), str(pair[1]), pair[2]) for pair in signature_pairs]
     _ensure_python_pair_signature_ngrams(dataset, signature_pairs, runtime_context)
 
@@ -1676,7 +1643,8 @@ def many_pairs_featurize(
     global_dataset = dataset
     global_runtime_context = runtime_context
 
-    cached_features: dict[str, Any] = {"features": {}}
+    cached_features: dict[str, np.ndarray] = {}
+    new_features: dict[str, np.ndarray] = {}
     cache_changed = False
     new_features_count = 0
     did_rust_batch = False
@@ -1718,26 +1686,20 @@ def many_pairs_featurize(
         if rss_now > rust_batch_rss_peak_bytes:
             rust_batch_rss_peak_bytes = rss_now
 
-    if cache_policy.pair_feature_cache_enabled:
+    if use_cache:
         logger.info("Loading cache...")
-        if not os.path.exists(featurizer_info.cache_directory(dataset.name)):
-            os.makedirs(featurizer_info.cache_directory(dataset.name))
-        cache_storage_key = featurizer_info.cache_storage_key(dataset.name)
-        if os.path.exists(featurizer_info.cache_db_path(dataset.name)):
-            with _CACHED_FEATURES_LOCK:
-                in_memory = CACHED_FEATURES.get(cache_storage_key)
-            if in_memory is not None:
-                cached_features = in_memory
-            else:
-                cached_features = featurizer_info.load_cache(dataset.name)
-                logger.info("Cache loaded with %d keys", len(cached_features["features"]))
-        else:
-            logger.info("Cache initiated.")
-            cached_features = featurizer_info._fresh_cache_payload()
-
-        # Initialize buffer for new features if not already present
-        if "__new_features__" not in cached_features:
-            cached_features["__new_features__"] = {}
+        requested_cache_keys = {
+            cache_key
+            for pair in signature_pairs
+            if pair[2] >= 0
+            for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1]))
+        }
+        cached_features = featurizer_info.load_cache(dataset.name, requested_cache_keys)
+        logger.info(
+            "Cache loaded with %d requested hits out of %d lookup keys",
+            len(cached_features),
+            len(requested_cache_keys),
+        )
 
     indices_to_use_set: set[int] = set()
     for feature_name in featurizer_info.features_to_use:
@@ -1799,10 +1761,10 @@ def many_pairs_featurize(
         if pair[2] < 0:
             continue
 
-        if cache_policy.pair_feature_cache_enabled:
+        if use_cache:
             cached_vector = None
             for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1])):
-                cached_vector = cached_features["features"].get(cache_key)
+                cached_vector = cached_features.get(cache_key)
                 if cached_vector is not None:
                     break
             if cached_vector is not None:
@@ -1844,7 +1806,7 @@ def many_pairs_featurize(
                     featurizer_info=featurizer_info,
                     runtime_context=runtime_context,
                     n_jobs=n_jobs,
-                    cache_policy=cache_policy,
+                    use_cache=use_cache,
                     total_ram_bytes=total_ram_bytes,
                     rust_batch_total_ram_for_stage=rust_batch_total_ram_for_stage,
                     rust_batch_rss_before_bytes=rust_batch_rss_before_bytes,
@@ -1859,7 +1821,7 @@ def many_pairs_featurize(
                     features=features,
                     nameless_features=nameless_features,
                     coauthor_similarity_values=coauthor_similarity_values,
-                    cached_features=cached_features,
+                    new_features=new_features,
                 )
                 rust_batch_plan = rust_batch_result.rust_batch_plan
                 rust_batch_total_ram_for_stage = rust_batch_result.rust_batch_total_ram_for_stage
@@ -1888,11 +1850,11 @@ def many_pairs_featurize(
                 pieces_of_work=pieces_of_work,
                 n_jobs=n_jobs,
                 chunk_size=chunk_size,
-                use_cache=cache_policy.pair_feature_cache_enabled,
+                use_cache=use_cache,
                 signature_pairs=signature_pairs,
                 featurizer_info=featurizer_info,
                 scatter_context=default_scatter_context,
-                cached_features=cached_features,
+                new_features=new_features,
             )
             new_features_count += int(python_new_features)
         _sample_rust_batch_rss_peak()
@@ -1900,39 +1862,10 @@ def many_pairs_featurize(
     else:
         logger.info("Featurization backend decision: skipped compute (all pairs were cached or pre-labeled)")
 
-    if cache_policy.pair_feature_cache_enabled and cache_changed:
-        # Only do incremental writes if we have enough new features to justify the overhead
-        new_features_in_buffer = len(cached_features.get("__new_features__", {}))
-
-        if new_features_in_buffer >= INCREMENTAL_WRITE_THRESHOLD:
-            logger.info(
-                "Collected %d new features in this run; writing incrementally during final cache flush",
-                new_features_in_buffer,
-            )
-        else:
-            logger.info("Only %d new features - will write at end", new_features_in_buffer)
-    _sample_rust_batch_rss_peak()
-
-    if (
-        cache_policy.pair_feature_cache_enabled
-        and cache_changed
-        and len(cached_features.get("__new_features__", {})) > 0
-    ):
-        # Always write any remaining new features at the end.
-        # Have to do this before subselecting features.
-        new_features_in_buffer = len(cached_features["__new_features__"])
-        logger.info("Writing final %d new features to cache", new_features_in_buffer)
-        featurizer_info.write_cache(cached_features, dataset.name, incremental=True)
-        logger.info("Cache written with %d total keys.", len(cached_features["features"]))
-    _sample_rust_batch_rss_peak()
-
-    if cache_policy.pair_feature_cache_enabled:
-        logger.info("Writing to in memory cache")
-        # use the variable from above, to be sure we are using the same path
-        cache_path = featurizer_info.cache_storage_key(dataset.name)
-        with _CACHED_FEATURES_LOCK:
-            CACHED_FEATURES[cache_path] = cached_features
-        logger.info("In memory cache written")
+    if use_cache and cache_changed and new_features:
+        logger.info("Writing %d new features to cache", len(new_features))
+        featurizer_info.write_cache(new_features, dataset.name)
+        logger.info("Cache write completed")
     _sample_rust_batch_rss_peak()
 
     if delete_training_data:

@@ -961,7 +961,6 @@ def convert_service_json_to_arrow(
     n_jobs: int,
     overwrite: bool,
     skip_name_counts_index: bool,
-    overwrite_name_counts_index: bool = False,
     copy_source_json: bool = False,
     validate: bool = True,
 ) -> dict[str, Any]:
@@ -1129,7 +1128,6 @@ def convert_runtime_dataset_to_arrow(
     n_jobs: int,
     overwrite: bool,
     skip_name_counts_index: bool,
-    overwrite_name_counts_index: bool = False,
     include_empty_cluster_seeds: bool = False,
     selected_embedding: str | None = None,
     validate: bool = True,
@@ -1549,7 +1547,7 @@ def validate_arrow_dataset_manifest(
         require_name_counts_index_artifact(
             paths["name_counts_index"],
             context="convert_to_arrow dataset validation",
-            producer_hint="rerun scripts/convert_to_arrow.py name-counts-index or rebuild the release bundle",
+            producer_hint="run scripts/production/counts/generate_name_counts.py or rebuild the release bundle",
         )
         metrics["name_counts_index_present"] = True
 
@@ -1646,7 +1644,6 @@ def _run_service_json(args: argparse.Namespace) -> None:
         n_jobs=int(args.n_jobs),
         overwrite=bool(args.overwrite),
         skip_name_counts_index=bool(args.skip_name_counts_index),
-        overwrite_name_counts_index=bool(args.overwrite_name_counts_index),
         copy_source_json=bool(args.copy_source_json),
         validate=not bool(args.skip_validation),
     )
@@ -1678,11 +1675,9 @@ def _run_benchmark(args: argparse.Namespace) -> None:
     )
     if not dataset_names:
         raise ValueError(f"No benchmark datasets found under {args.source_root}")
-    name_counts_index_overwritten = False
     reports = []
     for dataset_name in dataset_names:
         start = time.perf_counter()
-        overwrite_name_counts_index = bool(args.overwrite_name_counts_index) and not name_counts_index_overwritten
         report = convert_runtime_dataset_to_arrow(
             sources=benchmark_dataset_sources(args.source_root, dataset_name),
             output_dir=output_root / dataset_name,
@@ -1691,12 +1686,9 @@ def _run_benchmark(args: argparse.Namespace) -> None:
             n_jobs=int(args.n_jobs),
             overwrite=bool(args.overwrite),
             skip_name_counts_index=bool(args.skip_name_counts_index),
-            overwrite_name_counts_index=overwrite_name_counts_index,
             selected_embedding=None,
             validate=not bool(args.skip_validation),
         )
-        if overwrite_name_counts_index:
-            name_counts_index_overwritten = True
         report["total_seconds"] = time.perf_counter() - start
         reports.append(report)
         print(json.dumps({"dataset": dataset_name, "total_seconds": report["total_seconds"]}, sort_keys=True))
@@ -1715,11 +1707,9 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
     )
     if not dataset_names:
         raise ValueError(f"No linker replay datasets found under {args.raw_root}")
-    name_counts_index_overwritten = False
     reports = []
     for dataset_name in dataset_names:
         start = time.perf_counter()
-        overwrite_name_counts_index = bool(args.overwrite_name_counts_index) and not name_counts_index_overwritten
         report = convert_runtime_dataset_to_arrow(
             sources=linker_replay_dataset_sources(args.raw_root, args.embeddings_root, dataset_name),
             output_dir=datasets_root / dataset_name,
@@ -1728,19 +1718,16 @@ def _run_linker_replay(args: argparse.Namespace) -> None:
             n_jobs=int(args.n_jobs),
             overwrite=bool(args.overwrite),
             skip_name_counts_index=bool(args.skip_name_counts_index),
-            overwrite_name_counts_index=overwrite_name_counts_index,
             selected_embedding="specter2",
             validate=not bool(args.skip_validation),
         )
-        if overwrite_name_counts_index:
-            name_counts_index_overwritten = True
         report["total_seconds"] = time.perf_counter() - start
         reports.append(report)
         print(json.dumps({"dataset": dataset_name, "total_seconds": report["total_seconds"]}, sort_keys=True))
     print(json.dumps({"datasets": [report["dataset"] for report in reports]}, indent=2, sort_keys=True))
 
 
-def _run_name_counts_index(args: argparse.Namespace) -> None:
+def _run_validate_name_counts_index(args: argparse.Namespace) -> None:
     index_path = require_name_counts_index_artifact(
         args.output_root / "name_counts_index",
         context="name-count index validation",
@@ -1790,11 +1777,6 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser, *, default_n_jobs:
     parser.add_argument("--name-counts-index-root", type=Path, default=None)
     parser.add_argument("--n-jobs", type=int, default=default_n_jobs)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument(
-        "--overwrite-name-counts-index",
-        action="store_true",
-        help="Rebuild the shared name-counts index once before reusing it for all converted datasets.",
-    )
     parser.add_argument("--skip-name-counts-index", action="store_true")
     parser.add_argument("--skip-validation", action="store_true")
 
@@ -1842,11 +1824,10 @@ def _build_parser() -> argparse.ArgumentParser:
     linker_replay.set_defaults(func=_run_linker_replay)
 
     name_counts = subparsers.add_parser(
-        "name-counts-index", help="Generate the shared manifest-backed name-count index."
+        "validate-name-counts-index", help="Validate the shared manifest-backed name-count index."
     )
     name_counts.add_argument("--output-root", type=Path, required=True)
-    name_counts.add_argument("--overwrite", action="store_true")
-    name_counts.set_defaults(func=_run_name_counts_index)
+    name_counts.set_defaults(func=_run_validate_name_counts_index)
 
     validate = subparsers.add_parser("validate", help="Validate one generated Arrow dataset manifest.")
     validate.add_argument("--dataset-dir", type=Path, required=True)

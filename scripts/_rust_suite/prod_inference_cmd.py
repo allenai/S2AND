@@ -199,7 +199,7 @@ def _single_run(
         profiler = cProfile.Profile()
         prediction_start = time.perf_counter()
         profiler.enable()
-        cluster_metrics, _ = cluster_eval(anddata, clusterer, split="test", use_s2_clusters=False)
+        cluster_metrics, _ = cluster_eval(anddata, clusterer, split="test")
         profiler.disable()
         prediction_seconds = time.perf_counter() - prediction_start
     total_seconds = time.perf_counter() - total_start

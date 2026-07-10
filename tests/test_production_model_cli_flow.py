@@ -17,16 +17,10 @@ from s2and.incremental_linking_training.classic import load_bundle
 from s2and.production_model import _load_pairwise_staging_model, load_production_model
 from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
 
-_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
-    required_module_attrs=("RustLightGBMBooster",),
-)
-_HAS_RUST_LIGHTGBM = bool(
-    _HAS_RUST_LIGHTGBM
-    and hasattr(getattr(_RUST_LIGHTGBM_PAYLOAD, "RustLightGBMBooster", object), "predict_proba_positive_f32")
-)
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
 requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
-    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+    reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
 )
 
 

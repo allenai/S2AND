@@ -10,10 +10,10 @@ from typing import Any
 
 import numpy as np
 
-import s2and_rust
 from s2and.data import ANDData
 from s2and.incremental_linking.gate_buckets import QueryView, normalize_query_views
 from s2and.incremental_linking.retrieval import LinkerRetrievalBatch
+from s2and.runtime import load_s2and_rust_extension
 from s2and.subblocking import signature_affiliation_feature_keys, signature_name_parts_for_subblocking
 from s2and.text import (
     canonicalize_name_parts,
@@ -28,6 +28,8 @@ from s2and.text import (
 from s2and.text import (
     normalize_orcid as normalize_orcid_text,
 )
+
+s2and_rust = load_s2and_rust_extension()
 
 EMPTY_STRING_SET: frozenset[str] = frozenset()
 PAIRWISE_NAME_COUNT_FEATURE_NAMES: tuple[str, ...] = (
@@ -642,7 +644,7 @@ def build_rust_hybrid_centroid_retriever(
 
     summaries = list(candidate_summaries)
     return RustHybridCentroidRetrieverHandle(
-        retriever=s2and_rust.RustHybridCentroidRetriever(  # type: ignore[unresolved-attribute]
+        retriever=s2and_rust.RustHybridCentroidRetriever(
             summaries,
             include_exemplars=bool(include_exemplars),
         ),

@@ -54,7 +54,6 @@ def _constraint_indexed_rust(dataset, sig_id_1: str, sig_id_2: str, **kwargs):
         rust_featurizer = _get_rust_featurizer(dataset)
     signature_id_to_index = {str(sig_id): index for index, sig_id in enumerate(rust_featurizer.signature_ids())}
     return get_constraints_matrix_indexed_rust(
-        dataset,
         [(signature_id_to_index[str(sig_id_1)], signature_id_to_index[str(sig_id_2)])],
         featurizer=rust_featurizer,
         **kwargs,
@@ -504,7 +503,6 @@ def test_indexed_constraint_rust_ignores_reliable_language_mismatch(tmp_path):
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
 
     got_indexed = get_constraints_matrix_indexed_rust(
-        ds,
         [(signature_index[s1], signature_index[s2])],
         featurizer=rust_featurizer,
     )
@@ -595,7 +593,6 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     signature_ids = list(rust_featurizer.signature_ids())
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
     indexed_values = get_constraints_matrix_indexed_rust(
-        ds,
         [(signature_index["s1"], signature_index["s2"])],
         featurizer=rust_featurizer,
     )
@@ -609,7 +606,7 @@ def test_get_constraints_matrix_indexed_rust_parity(dataset, constraint_pairs):
     indexed_pairs = [(signature_index[s1], signature_index[s2]) for s1, s2 in constraint_pairs]
 
     expected = [dataset.get_constraint(s1, s2) for s1, s2 in constraint_pairs]
-    indexed_values = get_constraints_matrix_indexed_rust(dataset, indexed_pairs, featurizer=rust_featurizer)
+    indexed_values = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer)
     assert len(indexed_values) == len(expected)
     for pair, ref_val, indexed_val in zip(
         constraint_pairs,
@@ -624,9 +621,6 @@ def test_get_constraints_matrix_indexed_rust_parity(dataset, constraint_pairs):
 
 def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(dataset, constraint_pairs):
     rust_featurizer = _get_rust_featurizer(dataset)
-    if not hasattr(rust_featurizer, "linker_pair_index_arrays_constraint_labels"):
-        raise pytest.skip.Exception("linker_pair_index_arrays_constraint_labels is unavailable")
-
     signature_ids = list(rust_featurizer.signature_ids())
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
     base_pairs = list(constraint_pairs)
@@ -639,13 +633,12 @@ def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(d
     left_indices = np.asarray([left for left, _right in indexed_pairs], dtype=np.uint32)
     right_indices = np.asarray([right for _left, right in indexed_pairs], dtype=np.uint32)
 
-    expected_values = get_constraints_matrix_indexed_rust(dataset, indexed_pairs, featurizer=rust_featurizer)
+    expected_values = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer)
     expected_labels = np.asarray(
         [np.nan if value is None else float(value - LARGE_INTEGER) for value in expected_values],
         dtype=np.float64,
     )
     got_labels = get_constraint_labels_index_arrays_rust(
-        dataset,
         left_indices,
         right_indices,
         featurizer=rust_featurizer,
@@ -657,9 +650,6 @@ def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(d
 
 def test_linker_pair_distance_accumulators_match_python_large(dataset):
     rust_featurizer = _get_rust_featurizer(dataset)
-    if not hasattr(rust_featurizer, "linker_pair_distance_accumulators"):
-        raise pytest.skip.Exception("linker_pair_distance_accumulators is unavailable")
-
     rng = np.random.default_rng(20260509)
     row_count = 503
     pair_count = 12000
@@ -687,7 +677,6 @@ def test_linker_pair_distance_accumulators_match_python_large(dataset):
             expected_top[row].sort()
 
     counts, sums, mins, top, hard_disallow = build_linker_pair_distance_accumulators_rust(
-        dataset,
         row_indices,
         row_count,
         model_distances,
@@ -718,7 +707,6 @@ def test_get_constraints_matrix_indexed_rust_flag_parity(dataset, constraint_pai
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
     indexed_pairs = [(signature_index[s1], signature_index[s2]) for s1, s2 in constraint_pairs]
     got_indexed = get_constraints_matrix_indexed_rust(
-        dataset,
         indexed_pairs,
         featurizer=rust_featurizer,
         **constraint_kwargs,

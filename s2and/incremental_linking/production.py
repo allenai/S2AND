@@ -18,21 +18,22 @@ import s2and.incremental_linking.artifact as artifact_module
 import s2and.incremental_linking.query_adapter as query_adapter_module
 import s2and.incremental_linking.runtime as runtime_module
 from s2and import feature_port, memory_budget
-from s2and.arrow_inputs import require_feature_contract_normalization_version, validate_arrow_prediction_artifacts
+from s2and.arrow_inputs import (
+    ValidatedArrowInputs,
+    require_feature_contract_normalization_version,
+)
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import (
     cluster_seed_disallows_from_arrow_paths,
-    feature_block_signature_order_from_raw_candidate_plan,
     read_cluster_seeds_arrow,
     temporary_arrow_paths_with_cluster_seeds,
 )
 from s2and.incremental_linking.policy import (
-    clusterer_uses_embedding_features,
     clusterer_uses_name_count_features,
     request_cluster_seed_disallow_parts,
-    require_arrow_name_counts_index_for_clusterer,
     require_dataset_name_counts_binding_for_clusterer,
 )
+from s2and.incremental_linking.retrieval import RawArrowPlanBundle
 from s2and.runtime import RuntimeContext
 
 logger = logging.getLogger("s2and")
@@ -1000,7 +1001,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     block_signatures: list[str],
     dataset: ANDData,
     *,
-    arrow_paths: Mapping[str, Any],
+    arrow_paths: ValidatedArrowInputs,
     artifact_dir: Path,
     artifact: artifact_module.IncrementalLinkingArtifact | None = None,
     prevent_new_incompatibilities: bool,
@@ -1019,19 +1020,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             f"loaded={artifact.artifact_dir} requested={artifact_dir}"
         )
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
-    clusterer_requires_specter = clusterer_uses_embedding_features(clusterer)
-    clusterer_requires_name_counts = clusterer_uses_name_count_features(clusterer)
-    base_arrow_path_payload = validate_arrow_prediction_artifacts(
-        arrow_paths,
-        require_specter=clusterer_requires_specter,
-        require_name_counts_index=clusterer_requires_name_counts,
-        require_cluster_seeds=False,
-        context="Promoted incremental Arrow input",
-        producer_hint=(
-            "include valid base Arrow tables and any declared seed sidecars before promoted incremental " "seed setup"
-        ),
-    )
-    require_arrow_name_counts_index_for_clusterer(clusterer, base_arrow_path_payload, context="Raw Arrow scoring")
+    base_arrow_path_payload = arrow_paths
     if hasattr(dataset, "name_counts_provenance"):
         require_dataset_name_counts_binding_for_clusterer(
             clusterer,
@@ -1138,7 +1127,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     )
     arrow_path_context: AbstractContextManager[Mapping[str, Any]]
     if seed_arrow_reused_source:
-        arrow_path_context = nullcontext(dict(base_arrow_path_payload))
+        arrow_path_context = nullcontext(base_arrow_path_payload)
     else:
         arrow_path_context = temporary_arrow_paths_with_cluster_seeds(
             base_arrow_path_payload,
@@ -1146,13 +1135,12 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             prefix="s2and_arrow_incremental_cluster_seeds_",
             cluster_seeds_disallow=request_disallows,
         )
-    with arrow_path_context as arrow_path_payload:
+    with arrow_path_context as request_arrow_paths:
+        arrow_path_payload: ValidatedArrowInputs = base_arrow_path_payload
         if unassigned_signature_ids:
-            arrow_path_payload = validate_arrow_prediction_artifacts(
-                arrow_path_payload,
-                require_specter=clusterer_requires_specter,
-                require_name_counts_index=clusterer_requires_name_counts,
-                require_cluster_seeds=True,
+            arrow_path_payload = base_arrow_path_payload.with_request_sidecars(
+                request_arrow_paths,
+                required_keys=("cluster_seeds",),
                 context="Promoted incremental Arrow scoring",
                 producer_hint=(
                     "include raw Arrow tables, raw-planner batch indexes, and the request-local "
@@ -1289,9 +1277,9 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 )
                 raw_window_memory_replan_count += 1
                 continue
+            raw_plan_bundle = RawArrowPlanBundle.from_mapping(raw_candidate_plan)
             raw_window_featurizer_start = time.perf_counter()
-            signature_order = feature_block_signature_order_from_raw_candidate_plan(raw_candidate_plan)
-            signature_ids = signature_order.signature_ids
+            signature_ids = raw_plan_bundle.signature_order.signature_ids
             raw_window_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
                 arrow_path_payload,
                 expected_normalization_version=expected_normalization_version,
@@ -1307,7 +1295,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             refreshed_batch_size = _refreshed_window_batch_size(query_batch_plan_window)
             if any(len(planned_batch) > refreshed_batch_size for planned_batch in query_batch_plan_window):
                 del raw_window_featurizer
-                del raw_candidate_plan
+                del raw_plan_bundle
                 _prepend_resized_windows(
                     query_batch_plan_window,
                     safe_batch_size=refreshed_batch_size,
@@ -1335,7 +1323,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                     remaining_query_batches.extend(query_batch_queue)
                     query_batch_queue.clear()
                     del raw_window_featurizer
-                    del raw_candidate_plan
+                    del raw_plan_bundle
                     _prepend_resized_windows(
                         remaining_query_batches,
                         safe_batch_size=len(query_batch),
@@ -1360,10 +1348,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 } or None
                 raw_window_subset_start = time.perf_counter()
                 if len(query_batch) == len(query_plan_window):
-                    batch_raw_candidate_plan = raw_candidate_plan
+                    batch_raw_plan_bundle = raw_plan_bundle
                 else:
-                    batch_raw_candidate_plan = runtime_module.subset_raw_candidate_plan_for_query_ids(
-                        raw_candidate_plan,
+                    batch_raw_plan_bundle = runtime_module.subset_raw_plan_bundle_for_query_ids(
+                        raw_plan_bundle,
                         query_batch,
                         zero_plan_timings=True,
                     )
@@ -1380,7 +1368,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                     runtime_context=runtime_context,
                     n_jobs=clusterer.n_jobs,
                     total_ram_bytes=resolved_total_ram_bytes,
-                    raw_candidate_plan=batch_raw_candidate_plan,
+                    raw_plan_bundle=batch_raw_plan_bundle,
                     rust_featurizer=raw_window_featurizer,
                     raw_arrow_featurizer_source="window",
                     partial_supervision_seed_signature_to_component=cluster_seeds_require,
@@ -1408,10 +1396,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 batch_telemetries.append(dict(result.telemetry))
                 batch_sizes.append(len(query_batch))
                 del result
-                del batch_raw_candidate_plan
+                del batch_raw_plan_bundle
             if not window_replanned:
                 del raw_window_featurizer
-                del raw_candidate_plan
+                del raw_plan_bundle
 
         global_disallow_telemetry: dict[str, int | float | str] = {}
         if query_disallow_partners:
@@ -1446,16 +1434,15 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 if raw_request_planner is None:
                     raise RuntimeError("reusable raw Arrow planner was not initialized")
                 plan_started = time.perf_counter()
-                raw_rescore_plan = raw_request_planner.plan([signature_id])
+                raw_rescore_bundle = RawArrowPlanBundle.from_mapping(raw_request_planner.plan([signature_id]))
                 raw_window_planner_plan_call_count += 1
                 raw_window_planner_batch_plan_count += 1
                 raw_window_planner_plan_seconds += time.perf_counter() - plan_started
-                signature_order = feature_block_signature_order_from_raw_candidate_plan(raw_rescore_plan)
                 featurizer_started = time.perf_counter()
                 rescore_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
                     arrow_path_payload,
                     expected_normalization_version=expected_normalization_version,
-                    signature_ids=signature_order.signature_ids,
+                    signature_ids=raw_rescore_bundle.signature_order.signature_ids,
                     name_tuples=name_tuples,
                     load_name_counts=clusterer_uses_name_count_features(clusterer),
                     preprocess=True,
@@ -1463,7 +1450,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 )
                 raw_window_featurizer_seconds += time.perf_counter() - featurizer_started
                 raw_window_featurizer_count += 1
-                raw_window_featurizer_signature_count += len(signature_order.signature_ids)
+                raw_window_featurizer_signature_count += len(raw_rescore_bundle.signature_order.signature_ids)
                 _, final_limits = _memory_safe_promoted_query_batch(
                     [signature_id],
                     orcid_fanout_by_query=orcid_fanout_by_query,
@@ -1485,7 +1472,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                     runtime_context=runtime_context,
                     n_jobs=clusterer.n_jobs,
                     total_ram_bytes=resolved_total_ram_bytes,
-                    raw_candidate_plan=raw_rescore_plan,
+                    raw_plan_bundle=raw_rescore_bundle,
                     rust_featurizer=rescore_featurizer,
                     raw_arrow_featurizer_source="window",
                     partial_supervision_seed_signature_to_component=cluster_seeds_require,

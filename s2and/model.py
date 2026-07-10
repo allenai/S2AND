@@ -24,7 +24,6 @@ from s2and import memory_budget
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
     normalize_arrow_paths,
-    require_arrow_artifacts,
     validate_arrow_prediction_artifacts,
 )
 from s2and.consts import (
@@ -44,8 +43,9 @@ from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_featurizer,
     build_rust_featurizer_from_arrow_paths,
+    update_rust_cluster_seeds,
 )
-from s2and.featurizer import FeaturizationInfo, many_pairs_featurize, resolve_cache_policy
+from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.incremental_linking.feature_block import (
     cluster_seed_disallows_path_from_arrow_paths,
     normalize_cluster_seed_disallow_pairs,
@@ -70,7 +70,8 @@ from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
 from s2and.incremental_linking.production import predict_incremental_promoted_linker_from_arrow_paths
-from s2and.model_pairwise import FastCluster, PairwiseModeler, VotingClassifier, intify, predict_pairwise_class0
+from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
+from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_counts_index import validated_name_counts_provenance
 from s2and.runtime import (
     RuntimeContext,
@@ -82,16 +83,13 @@ from s2and.rust_calls import (
     build_block_upper_triangle_feature_matrix_indexed_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
-    update_rust_cluster_seeds,
 )
 from s2and.subblocking import (
     GraphSubblockingConfig,
-    _make_subblocks_with_telemetry_arrow_rust,
     cluster_with_specter,
     make_arrow_graph_subblocking_cluster_fn,
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks,
-    rust_arrow_subblocking_available,
 )
 from s2and.text import (
     canonical_name_tuple_pair,
@@ -121,10 +119,6 @@ _CLUSTER_SEED_DISALLOWS_ARROW_CACHE: OrderedDict[
     tuple[tuple[str, str], ...],
 ] = OrderedDict()
 _CLUSTER_SEEDS_ARROW_CACHE_LOCK = threading.Lock()
-
-# Keep canonical pickle import paths stable after splitting module internals.
-for _export in (FastCluster, PairwiseModeler, VotingClassifier, intify):
-    _export.__module__ = __name__
 
 
 @dataclass(frozen=True)
@@ -2020,13 +2014,11 @@ def _resolve_constraint_labels_batch(
                 raise RuntimeError("Indexed constraint API requested without signature index lookup")
             indexed_pairs = [(signature_index_by_id[s1], signature_index_by_id[s2]) for s1, s2 in unresolved_pairs]
             return get_constraints_matrix_indexed_rust(
-                dataset,
                 indexed_pairs,
                 dont_merge_cluster_seeds=constraint_policy.dont_merge_cluster_seeds,
                 incremental_dont_use_cluster_seeds=constraint_policy.incremental_dont_use_cluster_seeds,
                 num_threads=num_threads,
                 featurizer=rust_featurizer,
-                runtime_context=runtime_context,
                 suppress_orcid=constraint_policy.suppress_orcid,
             )
 
@@ -2175,21 +2167,17 @@ class _RustFeaturizerSignatureRuleMetadata:
         return self.first
 
 
-def _cluster_seeds_require_from_rust_featurizer(rust_featurizer: object) -> dict[str, int | str]:
-    method = getattr(rust_featurizer, "cluster_seeds_require", None)
-    if not callable(method):
-        return {}
-    return {str(signature_id): str(component_id) for signature_id, component_id in method()}
+def _cluster_seeds_require_from_rust_featurizer(rust_featurizer: Any) -> dict[str, int | str]:
+    return {
+        str(signature_id): str(component_id) for signature_id, component_id in rust_featurizer.cluster_seeds_require()
+    }
 
 
 def _signature_rule_metadata_from_rust_featurizer(
-    rust_featurizer: object,
+    rust_featurizer: Any,
 ) -> dict[str, _RustFeaturizerSignatureRuleMetadata]:
-    method = getattr(rust_featurizer, "signature_rule_metadata", None)
-    if not callable(method):
-        return {}
     metadata: dict[str, _RustFeaturizerSignatureRuleMetadata] = {}
-    for signature_id, first, orcid in method():
+    for signature_id, first, orcid in rust_featurizer.signature_rule_metadata():
         first_value = "" if first is None else str(first)
         metadata[str(signature_id)] = _RustFeaturizerSignatureRuleMetadata(
             first=first_value,
@@ -2654,7 +2642,7 @@ class Clusterer:
         if not stage_uses_rust(runtime_context):
             raise ValueError("Rust chunk helper is only valid when runtime_context resolves to rust backend")
 
-        cache_policy = resolve_cache_policy(self.use_cache)
+        use_cache = bool(self.use_cache)
         constraint_backend = _build_incremental_constraint_backend(
             dataset,
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
@@ -2670,12 +2658,10 @@ class Clusterer:
         used_fused_path = False
         use_fused_block_api = bool(
             self.use_default_constraints_as_supervision
-            and not cache_policy.pair_feature_cache_enabled
+            and not use_cache
             and constraint_api_mode == "indexed"
             and rust_featurizer is not None
             and signature_index_by_id is not None
-            and hasattr(rust_featurizer, "get_constraints_block_upper_triangle_indexed")
-            and hasattr(rust_featurizer, "featurize_block_upper_triangle_matrix_indexed")
         )
 
         for block_key, signatures in block_dict.items():
@@ -2695,7 +2681,6 @@ class Clusterer:
                     constraint_start = time.perf_counter()
                     try:
                         local_i, local_j, values = get_constraints_block_upper_triangle_indexed_rust(
-                            dataset,
                             block_signature_indices,
                             start_offset=offset,
                             max_pairs=chunk_pair_count,
@@ -2703,7 +2688,6 @@ class Clusterer:
                             incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                             num_threads=self.n_jobs,
                             featurizer=rust_featurizer,
-                            runtime_context=runtime_context,
                             suppress_orcid=constraint_backend.suppress_orcid,
                         )
                     except (RuntimeError, ValueError) as exc:
@@ -2821,9 +2805,9 @@ class Clusterer:
         batch_label: int | str,
         total_ram_bytes: int | None = None,
     ) -> tuple[np.ndarray, float]:
-        cache_policy = resolve_cache_policy(self.use_cache)
+        use_cache = bool(self.use_cache)
         if chunk.block_signature_indices is not None and chunk.pair_ids is None:
-            if cache_policy.pair_feature_cache_enabled:
+            if use_cache:
                 raise RuntimeError("Fused Rust chunk path does not support use_cache=True")
             try:
                 rust_featurizer = _get_rust_featurizer(
@@ -2832,14 +2816,12 @@ class Clusterer:
                 )
                 selected_indices = _selected_feature_indices(self.featurizer_info)
                 batch_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-                    dataset,
                     chunk.block_signature_indices,
                     start_offset=int(chunk.start_offset),
                     max_pairs=int(len(chunk.labels)),
                     selected_indices=selected_indices,
                     num_threads=self.n_jobs,
                     nan_value=np.nan,
-                    runtime_context=runtime_context,
                     featurizer=rust_featurizer,
                 )
                 batch_labels = np.asarray(chunk.labels, dtype=np.float64)
@@ -2847,14 +2829,12 @@ class Clusterer:
                 if self.nameless_classifier is not None and self.nameless_featurizer_info is not None:
                     nameless_selected_indices = _selected_feature_indices(self.nameless_featurizer_info)
                     batch_nameless_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-                        dataset,
                         chunk.block_signature_indices,
                         start_offset=int(chunk.start_offset),
                         max_pairs=int(len(chunk.labels)),
                         selected_indices=nameless_selected_indices,
                         num_threads=self.n_jobs,
                         nan_value=np.nan,
-                        runtime_context=runtime_context,
                         featurizer=rust_featurizer,
                     )
             except Exception as exc:
@@ -2873,7 +2853,7 @@ class Clusterer:
                 dataset,
                 self.featurizer_info,
                 self.n_jobs,
-                use_cache=cache_policy.pair_feature_cache_enabled,
+                use_cache=use_cache,
                 chunk_size=DEFAULT_CHUNK_SIZE,
                 nameless_featurizer_info=self.nameless_featurizer_info,
                 runtime_context=runtime_context,
@@ -3350,7 +3330,6 @@ class Clusterer:
                 if self.use_default_constraints_as_supervision:
                     stage_start = time.perf_counter()
                     local_i, local_j, constraint_values = get_constraints_block_upper_triangle_indexed_rust(
-                        None,
                         block_signature_indices,
                         start_offset=offset,
                         max_pairs=chunk_pair_count,
@@ -3358,7 +3337,6 @@ class Clusterer:
                         incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                         num_threads=self.n_jobs,
                         featurizer=rust_featurizer,
-                        runtime_context=runtime_context,
                         suppress_orcid=getattr(self, "suppress_orcid", False),
                     )
                     constraint_seconds += time.perf_counter() - stage_start
@@ -3405,14 +3383,12 @@ class Clusterer:
 
                 stage_start = time.perf_counter()
                 batch_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-                    None,
                     block_signature_indices,
                     start_offset=offset,
                     max_pairs=chunk_pair_count,
                     selected_indices=selected_indices,
                     num_threads=self.n_jobs,
                     nan_value=np.nan,
-                    runtime_context=runtime_context,
                     featurizer=rust_featurizer,
                 )
                 feature_matrix_seconds += time.perf_counter() - stage_start
@@ -3420,14 +3396,12 @@ class Clusterer:
                 if nameless_selected_indices is not None:
                     stage_start = time.perf_counter()
                     batch_nameless_features = build_block_upper_triangle_feature_matrix_indexed_rust(
-                        None,
                         block_signature_indices,
                         start_offset=offset,
                         max_pairs=chunk_pair_count,
                         selected_indices=nameless_selected_indices,
                         num_threads=self.n_jobs,
                         nan_value=np.nan,
-                        runtime_context=runtime_context,
                         featurizer=rust_featurizer,
                     )
                     nameless_feature_matrix_seconds += time.perf_counter() - stage_start
@@ -3941,90 +3915,21 @@ class Clusterer:
         *,
         batching_threshold: int,
         specter_cluster_fn: Callable[..., dict[str, list[str]]] | None = None,
-        subblocking_arrow_paths: Mapping[str, Any] | None = None,
-        use_rust_subblocking: bool = False,
     ) -> dict[str, list[str]]:
         block_dict_subblocked: dict[str, list[str]] = {}
-        rust_native_graph_telemetry_records: list[dict[str, Any]] = []
-        use_rust_arrow_subblocking = subblocking_arrow_paths is not None and use_rust_subblocking
         for block_key in sorted(block_dict):
             block_signatures = block_dict[block_key]
             if len(block_signatures) > batching_threshold:
                 kwargs: dict[str, Any] = {"maximum_size": batching_threshold}
-                if specter_cluster_fn is not None and not use_rust_arrow_subblocking:
+                if specter_cluster_fn is not None:
                     kwargs["specter_cluster_fn"] = specter_cluster_fn
-                if use_rust_arrow_subblocking:
-                    if subblocking_arrow_paths is None:
-                        raise RuntimeError("Rust Arrow subblocking requires Arrow subblocking artifacts")
-                    arrow_subblocking_paths = require_arrow_artifacts(
-                        subblocking_arrow_paths,
-                        required_keys=("signatures", "signatures_batch_index"),
-                        context="Arrow subblocking",
-                        producer_hint=(
-                            "include signatures.arrow and signatures.signatures_batch_index.bin in the Arrow "
-                            "bundle; Rust production subblocking does not fall back to ANDData partitioning "
-                            "when Arrow subblocking artifacts are incomplete"
-                        ),
-                    )
-                    if not rust_arrow_subblocking_available():
-                        raise RuntimeError(
-                            "Rust Arrow subblocking requires an s2and_rust extension with "
-                            "make_subblocks_with_telemetry_arrow_native_graph"
-                        )
-                    kwargs["graph_subblocking_config"] = self._subblocking_graph_config()
-                    kwargs["graph_subblocking_random_seed"] = int(getattr(self, "random_state", 0) or 0)
-                    kwargs["use_orcid_subblocking"] = False
-                    subblocks, telemetry = _make_subblocks_with_telemetry_arrow_rust(
-                        arrow_subblocking_paths,
-                        block_signatures,
-                        **kwargs,
-                    )
-                    rust_native_graph_telemetry_records.append(dict(telemetry))
-                else:
-                    subblocks = make_subblocks(block_signatures, dataset, **kwargs)
+                subblocks = make_subblocks(block_signatures, dataset, **kwargs)
                 for subblock_key in sorted(subblocks):
                     subblock_signatures = subblocks[subblock_key]
                     block_dict_subblocked[f"{block_key}|subblock={subblock_key}"] = subblock_signatures
                     assert len(subblock_signatures) <= batching_threshold, "Subblock is too big for some reason!"
             else:
                 block_dict_subblocked[block_key] = block_signatures
-        if rust_native_graph_telemetry_records:
-            fallback_stats = [
-                dict(stat)
-                for record in rust_native_graph_telemetry_records
-                for stat in record.get("graph_fallback_stats", []) or []
-            ]
-            load_metrics: dict[str, int] = {}
-            for record in rust_native_graph_telemetry_records:
-                for key, value in dict(record.get("graph_fallback_load_metrics", {}) or {}).items():
-                    load_metrics[str(key)] = int(load_metrics.get(str(key), 0)) + int(value)
-            self._last_rust_arrow_graph_subblocking_telemetry = {
-                "enabled": 1,
-                "mode": "graph",
-                "source": "arrow",
-                "native_rust": 1,
-                "candidate_signature_count": int(
-                    sum(
-                        int(record.get("input_signature_count", 0) or 0)
-                        for record in rust_native_graph_telemetry_records
-                    )
-                ),
-                "arrow_load_seconds": float(
-                    sum(
-                        float(record.get("graph_fallback_load_seconds", 0.0) or 0.0)
-                        for record in rust_native_graph_telemetry_records
-                    )
-                ),
-                "arrow_load_metrics": load_metrics,
-                "fallback_invocation_count": int(len(fallback_stats)),
-                "fallback_stats": fallback_stats,
-                "legacy_fallback_invocation_count": 0,
-                "graph_prepare_failed": 0,
-                "graph_prepare_error": None,
-                "graph_fallback_errors": [],
-            }
-        else:
-            self._last_rust_arrow_graph_subblocking_telemetry = None
         return block_dict_subblocked
 
     def _subblocking_graph_config(self) -> GraphSubblockingConfig:
@@ -4260,8 +4165,6 @@ class Clusterer:
             dataset,
             batching_threshold=batching_threshold,
             specter_cluster_fn=specter_cluster_fn,
-            subblocking_arrow_paths=None,
-            use_rust_subblocking=False,
         )
         (
             block_dict_multiple_letter_first_names,
@@ -5386,7 +5289,6 @@ class Clusterer:
         block_signatures: list[str],
         dataset: ANDData,
         prevent_new_incompatibilities: bool = True,
-        batching_threshold: int | None = None,
         partial_supervision: dict[tuple[str, str], int | float] | None = None,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
@@ -5420,9 +5322,6 @@ class Clusterer:
             if a claimed cluster has D Jones and David Jones, s2and would have split that cluster into two,
             and then s2and might add Donald Jones to the D Jones cluster, and once remerged, the resulting
             final cluster would have D Jones, David Jones, and Donald Jones.
-        batching_threshold: int
-            Unsupported for the classic ANDData API. Use
-            ``predict_incremental_from_arrow_paths`` for batched Rust prediction.
         partial_supervision: Dict
             the dictionary of partial supervision provided with this dataset/these blocks
         total_ram_bytes: Optional[int]
@@ -5438,8 +5337,6 @@ class Clusterer:
                 "Clusterer.predict_incremental operates on ANDData through Python; "
                 "use predict_incremental_from_arrow_paths for Rust"
             )
-        if batching_threshold is not None:
-            raise ValueError("batching_threshold is only supported by predict_incremental_from_arrow_paths")
         require_dataset_name_counts_binding_for_clusterer(
             self,
             dataset,

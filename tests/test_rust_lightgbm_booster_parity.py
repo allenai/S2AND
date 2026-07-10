@@ -33,13 +33,7 @@ HAS_RUST, s2and_rust = import_s2and_rust()
 if not HAS_RUST:
     raise pytest.skip.Exception("s2and_rust extension is unavailable", allow_module_level=True)
 assert s2and_rust is not None and not isinstance(s2and_rust, Exception)
-_rust_lightgbm_booster_cls = getattr(s2and_rust, "RustLightGBMBooster", None)
-if _rust_lightgbm_booster_cls is None:
-    raise pytest.skip.Exception(
-        "s2and_rust binary predates RustLightGBMBooster; rebuild with maturin develop",
-        allow_module_level=True,
-    )
-RustLightGBMBooster: Any = _rust_lightgbm_booster_cls
+RustLightGBMBooster: Any = s2and_rust.RustLightGBMBooster
 
 SOURCE_BUNDLE_DIR = Path(__file__).resolve().parents[1] / "s2and" / "data" / "production_model_v1.21"
 SOURCE_BUNDLE_BOOSTER_RELPATHS = [

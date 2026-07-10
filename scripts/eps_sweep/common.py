@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from s2and.arrow_inputs import MissingArrowArtifactError, validate_arrow_prediction_artifacts
+from s2and.arrow_inputs import MissingArrowArtifactError, ValidatedArrowInputs, validate_arrow_prediction_artifacts
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LINKER_BUNDLE_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260513"
@@ -68,7 +68,7 @@ def arrow_dataset_dir(arrow_root: Path, dataset: str) -> Path:
     raise FileNotFoundError(f"No Arrow manifest found for dataset={dataset!r}; checked {formatted}")
 
 
-def load_arrow_paths(arrow_root: Path, dataset: str) -> dict[str, str]:
+def load_arrow_paths(arrow_root: Path, dataset: str) -> ValidatedArrowInputs:
     """Load and validate an Arrow dataset's manifest path mapping."""
 
     dataset_dir = arrow_dataset_dir(arrow_root.resolve(), dataset)

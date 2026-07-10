@@ -28,20 +28,6 @@ LANGUAGE_FEATURE_NAMES = {
     "same_language",
     "language_reliability_min",
 }
-FEATURES_TO_USE = [
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-]
 
 
 def _load_dataset_inputs(
@@ -115,8 +101,6 @@ def _collect_rust_package_info(require_non_dev_rust: bool, require_rust_release:
     from s2and import feature_port
 
     module = feature_port._ensure_s2and_rust_loaded()  # noqa: SLF001
-    if module is None:
-        raise RuntimeError("Rust run requested but s2and_rust extension is unavailable")
 
     version = str(getattr(module, "__version__", "unknown"))
     module_name = str(getattr(module, "__name__", "unknown"))
@@ -143,7 +127,7 @@ def _collect_rust_package_info(require_non_dev_rust: bool, require_rust_release:
 def _run_single(args: argparse.Namespace) -> dict[str, Any]:
     from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
-    from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
+    from s2and.featurizer import DEFAULT_FEATURE_GROUPS, FeaturizationInfo, many_pairs_featurize
 
     _set_backend_env(
         args.backend,
@@ -194,7 +178,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
 
         signature_ids = list(dataset.signatures.keys())
         pairs = _make_pairs(signature_ids, args.pair_count, args.seed)
-        featurizer_info = FeaturizationInfo(features_to_use=FEATURES_TO_USE)
+        featurizer_info = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
         featurize_start = time.perf_counter()
         features, _labels, _nameless_features = many_pairs_featurize(
             pairs,

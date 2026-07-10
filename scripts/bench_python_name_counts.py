@@ -74,7 +74,9 @@ def main() -> int:
     if signature_count == 0:
         raise ValueError("benchmark selected zero signatures")
 
-    import s2and_rust
+    from s2and.runtime import load_s2and_rust_extension
+
+    s2and_rust = load_s2and_rust_extension()
 
     rss_before_open = _rss()
     open_start = time.perf_counter()

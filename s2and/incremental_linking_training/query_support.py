@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 
-import s2and_rust
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import (
     ClusterSummary,
@@ -19,22 +18,17 @@ from s2and.incremental_linking.query_adapter import (
     build_rust_hybrid_centroid_retriever,
 )
 from s2and.incremental_linking.row_features import GENERIC_FAMILY_MIN_COUNT, GENERIC_FAMILY_MIN_RATIO
+from s2and.runtime import load_s2and_rust_extension
 from s2and.subblocking import make_subblocks_with_telemetry
 from s2and.text import normalize_text
 
+s2and_rust = load_s2and_rust_extension()
+
 DEFAULT_CHOOSER_CACHE_MAX_TOP_K = 25
-_MIDDLE_INITIAL_CONFLICT_SCORE = float(
-    s2and_rust.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE  # type: ignore[unresolved-attribute]
-)
-_YEAR_SCORE_DECAY_YEARS = float(
-    s2and_rust.RETRIEVAL_YEAR_SCORE_DECAY_YEARS  # type: ignore[unresolved-attribute]
-)
-_YEAR_SCORE_RANGE_GAP = int(
-    s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP  # type: ignore[unresolved-attribute]
-)
-_YEAR_SCORE_RANGE_PENALTY = float(
-    s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY  # type: ignore[unresolved-attribute]
-)
+_MIDDLE_INITIAL_CONFLICT_SCORE = float(s2and_rust.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE)
+_YEAR_SCORE_DECAY_YEARS = float(s2and_rust.RETRIEVAL_YEAR_SCORE_DECAY_YEARS)
+_YEAR_SCORE_RANGE_GAP = int(s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP)
+_YEAR_SCORE_RANGE_PENALTY = float(s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY)
 
 
 @dataclass(frozen=True)

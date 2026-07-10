@@ -14,7 +14,7 @@ from typing import Any
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
 from s2and.name_counts_index import NameCountsIndex
-from s2and.runtime import REQUIRED_RUST_EXTENSION_VERSION, load_s2and_rust_extension
+from s2and.runtime import load_s2and_rust_extension
 
 
 def write_test_arrow_artifact_manifest(bundle_dir: Any, paths: dict[str, str]) -> Path:
@@ -177,30 +177,12 @@ def equalish(a: float, b: float, rel_tol: float = 0.0, abs_tol: float = 1e-6) ->
     return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
 
 
-def import_s2and_rust(
-    *,
-    required_method: str | None = None,
-    required_module_attrs: tuple[str, ...] = (),
-) -> tuple[bool, Any | Exception | None]:
+def import_s2and_rust() -> tuple[bool, Any | Exception | None]:
     require_rust = os.environ.get("S2AND_TEST_REQUIRE_RUST", "").strip().lower() in {"1", "true", "yes", "on"}
-
-    def _has_required_api(module: Any) -> bool:
-        for attr_name in required_module_attrs:
-            if not hasattr(module, attr_name):
-                return False
-        rust_featurizer = getattr(module, "RustFeaturizer", None)
-        if rust_featurizer is None:
-            return False
-        method_name = required_method or "from_arrow_paths"
-        if not hasattr(rust_featurizer, method_name):
-            return False
-        return getattr(module, "__version__", None) == REQUIRED_RUST_EXTENSION_VERSION
 
     try:
         s2and_rust = load_s2and_rust_extension()
-        if _has_required_api(s2and_rust):
-            return True, s2and_rust
-        raise AttributeError("s2and_rust imported, but required Rust runtime API is unavailable")
+        return True, s2and_rust
     except Exception as err:
         if require_rust:
             raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from err

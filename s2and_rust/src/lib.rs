@@ -426,7 +426,29 @@ mod tests {
             1
         );
         let error = retrieval_rank_from_zero_based_offset(u16::MAX as usize, "test").unwrap_err();
-        assert!(error.contains("retrieval_ranks are stored as uint16"));
+        assert!(matches!(error, RetrievalError::Overflow(_)));
+        assert!(error
+            .to_string()
+            .contains("retrieval_ranks are stored as uint16"));
+    }
+
+    #[test]
+    fn retrieval_errors_map_by_variant_instead_of_message_text() {
+        prepare_python_for_test();
+        Python::with_gil(|py| {
+            assert!(retrieval_error_to_py(RetrievalError::InvalidValue(
+                "missing-looking message".to_string()
+            ))
+            .is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(retrieval_error_to_py(RetrievalError::MissingKey(
+                "value-looking message".to_string()
+            ))
+            .is_instance_of::<pyo3::exceptions::PyKeyError>(py));
+            assert!(retrieval_error_to_py(RetrievalError::Overflow(
+                "arbitrary message".to_string()
+            ))
+            .is_instance_of::<pyo3::exceptions::PyOverflowError>(py));
+        });
     }
 
     #[test]
@@ -810,7 +832,10 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(err.contains("raw Arrow summary year is outside the supported i32 range"));
+        assert!(matches!(err, RetrievalError::InvalidValue(_)));
+        assert!(err
+            .to_string()
+            .contains("raw Arrow summary year is outside the supported i32 range"));
     }
 
     #[test]

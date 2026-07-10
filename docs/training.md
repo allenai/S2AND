@@ -141,6 +141,5 @@ pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), 
 
 ## Reference scripts
 
-- `scripts/transfer_experiment_seed_paper.py`: fuller transfer and evaluation workflow
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: released-model inference example
 - `scripts/README.md`: script catalog

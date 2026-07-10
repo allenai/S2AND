@@ -193,6 +193,7 @@ def _numeric_report(left: np.ndarray, right: np.ndarray, *, atol: float, rtol: f
 
 
 def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
+    from s2and.arrow_inputs import validate_arrow_prediction_artifacts
     from s2and.consts import NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import build_rust_featurizer_from_arrow_paths, clear_rust_featurizer_cache
@@ -240,7 +241,13 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
     anddata_seconds = time.perf_counter() - started
 
     pairs = _sample_pairs(selected_signature_ids, pair_count=int(args.pair_count), seed=int(args.seed))
-    paths = _resolve_manifest_paths(arrow_dir, embedding=str(args.embedding))
+    paths = validate_arrow_prediction_artifacts(
+        _resolve_manifest_paths(arrow_dir, embedding=str(args.embedding)),
+        require_specter=True,
+        require_name_counts_index=True,
+        expected_normalization_version=NORMALIZATION_VERSION,
+        context="existing Arrow/ANDData feature parity",
+    )
 
     clear_rust_featurizer_cache()
     started = time.perf_counter()

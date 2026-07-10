@@ -40,13 +40,10 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
     if str(extra_path) not in sys.path:
         sys.path.insert(0, str(extra_path))
 
-import s2and.incremental_linking.query_adapter as retrieval  # noqa: E402
-import s2and_rust  # noqa: E402
 from s2and import feature_port  # noqa: E402
 from s2and import text as s2and_text  # noqa: E402
-from s2and.arrow_inputs import validate_arrow_prediction_artifacts  # noqa: E402
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION  # noqa: E402
-from s2and.data import ANDData  # noqa: E402
+from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts  # noqa: E402
+from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.contracts import (  # noqa: E402
@@ -60,7 +57,6 @@ from s2and.incremental_linking.feature_block import (  # noqa: E402
 )
 from s2and.incremental_linking.gate_buckets import first_name_bucket_from_token_view  # noqa: E402
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch  # noqa: E402
-from s2and.incremental_linking.query_adapter import name_count_rarity_features  # noqa: E402
 from s2and.incremental_linking.retrieval import RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS  # noqa: E402
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features  # noqa: E402
 from s2and.incremental_linking.runtime import compute_candidate_batch_pairwise_model_and_aggregate_stats  # noqa: E402
@@ -80,7 +76,6 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
     _fit_promoted_logistic_gate,
     _load_classic_stratified_eval_rows,
     _promoted_stratified_gate_spec,
-    _query_first_token,
     _read_classic_holdout_identity_sets,
     _read_csv,
     _resolve_classic_monotone_constraints,
@@ -90,19 +85,6 @@ from s2and.incremental_linking_training.classic import (  # noqa: E402
     run_classic,
 )
 from s2and.incremental_linking_training.data_loading import load_clusterer  # noqa: E402
-from s2and.incremental_linking_training.query_support import (  # noqa: E402
-    DEFAULT_CHOOSER_CACHE_MAX_TOP_K,
-    build_cluster_profile,
-    build_labeled_retrieval_subblock_index,
-    build_rust_hybrid_centroid_retriever,
-    counter_query_overlap,
-    rank_top_summaries_rust_hybrid_centroid,
-    specter_exemplar_similarity,
-    year_compatibility,
-)
-from s2and.model import (  # noqa: E402
-    _build_incremental_constraint_backend,
-)
 from s2and.production_bundle import finalize_production_bundle, production_version_from_bundle_dir  # noqa: E402
 from s2and.production_model import pairwise_bundle_binding  # noqa: E402
 from s2and.runtime import build_runtime_context  # noqa: E402
@@ -124,41 +106,6 @@ REQUIRED_TABLE_KEYS = (
 PRECOMPUTED_PROMOTED_BUNDLE_SCHEMA_VERSION = "precomputed_promoted_feature_bundle_v1"
 
 
-@dataclass(frozen=True)
-class ComponentMembers:
-    """Candidate component members in both raw-id and Rust-index forms."""
-
-    signature_ids: tuple[str, ...]
-    signature_id_set: frozenset[str]
-    signature_indices: np.ndarray
-
-
-@dataclass
-class MinimalRawDatasetContext:
-    """Loaded raw dataset state shared across all linker row tables for one dataset."""
-
-    dataset_name: str
-    row_component_scope: str
-    pairwise_component_scope: str
-    dataset: ANDData
-    runtime_context: Any
-    constraint_backend: Any
-    featurizer: Any
-    signature_id_to_index: dict[str, int]
-    component_details: dict[str, ComponentMembers]
-    component_indices: dict[str, np.ndarray]
-    pairwise_component_details: dict[str, ComponentMembers]
-    pairwise_component_indices: dict[str, np.ndarray]
-    component_keys_by_block: dict[str, tuple[str, ...]]
-    feature_cache: dict[str, retrieval.QueryFeatures]
-    paper_author_name_cache: dict[str, frozenset[str]]
-    full_summary_cache: dict[str, retrieval.ClusterSummary]
-    residual_summary_cache: dict[tuple[str, str], retrieval.ClusterSummary]
-    rust_hybrid_centroid_retriever: Any
-    retrieval_subblock_index: dict[str, Any]
-    max_block_component_size: int
-
-
 @dataclass
 class ArrowRustDatasetContext:
     """Arrow-only dataset state shared across linker row tables for one dataset."""
@@ -167,7 +114,7 @@ class ArrowRustDatasetContext:
     row_component_scope: str
     pairwise_component_scope: str
     runtime_context: Any
-    arrow_paths: dict[str, str]
+    arrow_paths: ValidatedArrowInputs
     component_members: dict[str, tuple[str, ...]]
     cluster_seeds_require: dict[str, str]
     cluster_seeds_disallow: frozenset[tuple[str, str]]
@@ -176,7 +123,7 @@ class ArrowRustDatasetContext:
 
 
 @dataclass
-class MinimalRawPendingShard:
+class ArrowRustPendingShard:
     """One table/dataset slice that still needs feature materialization."""
 
     table_key: str
@@ -187,36 +134,18 @@ class MinimalRawPendingShard:
 
 
 @dataclass
-class MinimalRawTablePlan:
+class ArrowRustTablePlan:
     """Materialization state for one output feature table."""
 
     table_key: str
     labels_path: Path
     output_path: Path
     labels: pd.DataFrame
-    required_output_columns: list[str]
-    partial_dir: Path
     partial_paths: list[Path]
     dataset_summaries: list[dict[str, Any]]
     label_filtering_summary: dict[str, Any]
     structural_cleaning_summary: dict[str, Any]
     started: float
-
-
-@dataclass(frozen=True)
-class FusedDistanceStats:
-    """Distance-summary adapter for `_fill_row_signal`."""
-
-    count: int
-    min_distance: float
-    mean_distance: float
-    top3_mean_distance: float
-    top5_mean_distance: float
-
-    def topk_mean_distance(self, top_k: int) -> float:
-        if int(top_k) <= 3:
-            return float(self.top3_mean_distance)
-        return float(self.top5_mean_distance)
 
 
 @dataclass(frozen=True)
@@ -576,159 +505,6 @@ def _selected_row_positions(labels: pd.DataFrame, datasets: set[str] | None, lim
     return positions.astype(np.int64, copy=False)
 
 
-def _read_selected_rows(
-    *,
-    labels_path: Path,
-    corrected_path: Path,
-    datasets: set[str] | None,
-    limit_rows: int | None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    labels = pd.read_parquet(labels_path)
-    corrected = pd.read_parquet(corrected_path)
-    if len(labels) != len(corrected):
-        raise ValueError(f"labels/corrected row count mismatch: {labels_path} {len(labels)} != {len(corrected)}")
-    positions = _selected_row_positions(labels, datasets, limit_rows)
-    labels = labels.iloc[positions].reset_index(drop=True)
-    corrected = corrected.iloc[positions].reset_index(drop=True)
-    for column in ("dataset", "query_group_id", "candidate_component_key", "retrieval_rank", "label"):
-        if column not in corrected.columns:
-            continue
-        left = labels[column].astype(str).to_numpy()
-        right = corrected[column].astype(str).to_numpy()
-        if not np.array_equal(left, right):
-            raise ValueError(f"labels/corrected identity mismatch for {column!r} in {labels_path.name}")
-    return labels, corrected
-
-
-def _load_raw_signature_blocks(bundle: OfficialBundle, dataset_name: str) -> dict[str, str]:
-    raw_datasets = dict(bundle.assets["raw_metadata"]["datasets"])
-    if dataset_name not in raw_datasets:
-        raise KeyError(f"Minimal raw metadata is missing dataset {dataset_name!r}")
-    raw_spec = dict(raw_datasets[dataset_name])
-    signatures_path = _resolve_path(bundle, str(raw_spec["signatures_path"]))
-    signatures = json.loads(signatures_path.read_text(encoding="utf-8"))
-    return {
-        str(signature_id): str((signature.get("author_info") or {}).get("block", ""))
-        for signature_id, signature in signatures.items()
-    }
-
-
-def _minimal_raw_component_membership_summary(
-    bundle: OfficialBundle,
-    dataset_name: str,
-    *,
-    cache: dict[str, pd.DataFrame],
-) -> pd.DataFrame:
-    if dataset_name in cache:
-        return cache[dataset_name]
-    member_datasets = dict(bundle.assets["candidate_members"]["datasets"])
-    if dataset_name not in member_datasets:
-        raise KeyError(f"Candidate member metadata is missing dataset {dataset_name!r}")
-    path = _resolve_path(bundle, str(member_datasets[dataset_name]))
-    members = pd.read_parquet(path)
-    required = {"candidate_component_key", "member_index", "signature_id"}
-    missing = sorted(required - set(members.columns))
-    if missing:
-        raise ValueError(f"candidate member table {path} is missing columns: {missing}")
-    component_keys = members["candidate_component_key"].astype(str)
-    signature_to_block: dict[str, str] = {}
-    if component_keys.str.contains("::", regex=False).any():
-        signature_to_block = _load_raw_signature_blocks(bundle, dataset_name)
-
-    rows: list[dict[str, Any]] = []
-    for component_key, group in members.groupby("candidate_component_key", sort=False):
-        member_ids = tuple(str(value) for value in group.sort_values("member_index")["signature_id"].astype(str))
-        member_ids = _block_local_member_ids_from_signature_blocks(str(component_key), member_ids, signature_to_block)
-        rows.append(
-            {
-                "candidate_component_key": str(component_key),
-                "_component_member_count": int(len(member_ids)),
-                "_component_single_member_signature_id": member_ids[0] if len(member_ids) == 1 else None,
-            }
-        )
-    summary = pd.DataFrame(rows)
-    cache[dataset_name] = summary
-    return summary
-
-
-def _clean_minimal_raw_structural_rows(
-    *,
-    source_bundle: OfficialBundle,
-    table_key: str,
-    rows: pd.DataFrame,
-    component_membership_cache: dict[str, pd.DataFrame],
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Remove candidate rows with no non-query member under the block-local contract."""
-
-    required = {"dataset", "query_group_id", "query_signature_id", "candidate_component_key", "label"}
-    missing = sorted(required - set(rows.columns))
-    if missing:
-        raise ValueError(f"{table_key}: minimal raw structural cleaning missing columns: {missing}")
-    started = time.perf_counter()
-    keep_mask = np.ones(len(rows), dtype=bool)
-    labels = pd.to_numeric(rows["label"], errors="coerce").fillna(0).astype(np.int8)
-    query_ids_before = set(rows["query_group_id"].astype(str))
-    positive_query_ids_before = set(rows.loc[labels == 1, "query_group_id"].astype(str))
-    dataset_summaries: list[dict[str, Any]] = []
-
-    for dataset_name, dataset_rows in rows.groupby(rows["dataset"].astype(str), sort=False):
-        membership = _minimal_raw_component_membership_summary(
-            source_bundle,
-            str(dataset_name),
-            cache=component_membership_cache,
-        )
-        local = dataset_rows[["candidate_component_key", "query_signature_id", "label"]].copy()
-        local["candidate_component_key"] = local["candidate_component_key"].astype(str)
-        local["query_signature_id"] = local["query_signature_id"].astype(str)
-        local["_global_index"] = dataset_rows.index.to_numpy(dtype=np.int64)
-        local = local.merge(membership, on="candidate_component_key", how="left", validate="many_to_one")
-        if local["_component_member_count"].isna().any():
-            missing_keys = sorted(
-                set(local.loc[local["_component_member_count"].isna(), "candidate_component_key"].astype(str))
-            )
-            raise KeyError(
-                f"{table_key} {dataset_name}: candidate components missing member metadata: {missing_keys[:10]}"
-            )
-        local_label = pd.to_numeric(local["label"], errors="coerce").fillna(0).astype(np.int8)
-        drop = (local["_component_member_count"].astype(np.int64) == 1) & local[
-            "_component_single_member_signature_id"
-        ].astype(str).eq(local["query_signature_id"].astype(str))
-        drop_indices = local.loc[drop, "_global_index"].to_numpy(dtype=np.int64, copy=False)
-        keep_mask[drop_indices] = False
-        dataset_summaries.append(
-            {
-                "dataset": str(dataset_name),
-                "rows_before": int(len(dataset_rows)),
-                "rows_removed": int(drop.sum()),
-                "positive_rows_removed": int((drop & (local_label == 1)).sum()),
-                "negative_rows_removed": int((drop & (local_label == 0)).sum()),
-            }
-        )
-
-    cleaned = rows.loc[keep_mask].reset_index(drop=True)
-    cleaned_labels = pd.to_numeric(cleaned["label"], errors="coerce").fillna(0).astype(np.int8)
-    query_ids_after = set(cleaned["query_group_id"].astype(str))
-    positive_query_ids_after = set(cleaned.loc[cleaned_labels == 1, "query_group_id"].astype(str))
-    summary = {
-        "table_key": table_key,
-        "policy": "drop_candidate_rows_with_no_non_query_block_local_members",
-        "rows_before": int(len(rows)),
-        "rows_after": int(len(cleaned)),
-        "rows_removed": int(len(rows) - len(cleaned)),
-        "positive_rows_removed": int((labels[~keep_mask] == 1).sum()),
-        "negative_rows_removed": int((labels[~keep_mask] == 0).sum()),
-        "queries_before": int(len(query_ids_before)),
-        "queries_after": int(len(query_ids_after)),
-        "queries_removed": int(len(query_ids_before - query_ids_after)),
-        "positive_queries_before": int(len(positive_query_ids_before)),
-        "positive_queries_after": int(len(positive_query_ids_after)),
-        "positive_queries_changed_or_removed": int(len(positive_query_ids_before - positive_query_ids_after)),
-        "datasets": dataset_summaries,
-        "seconds": round(float(time.perf_counter() - started), 3),
-    }
-    return cleaned, summary
-
-
 def _clean_arrow_rust_structural_rows(
     *,
     source_bundle: OfficialBundle,
@@ -809,37 +585,6 @@ def _clean_arrow_rust_structural_rows(
     return cleaned, summary
 
 
-def _component_members_by_key(path: Path, signature_id_to_index: Mapping[str, int]) -> dict[str, np.ndarray]:
-    members = pd.read_parquet(path)
-    required = {"candidate_component_key", "member_index", "signature_id"}
-    missing = sorted(required - set(members.columns))
-    if missing:
-        raise ValueError(f"candidate member table {path} is missing columns: {missing}")
-    out: dict[str, np.ndarray] = {}
-    for component_key, group in members.groupby("candidate_component_key", sort=False):
-        member_ids = group.sort_values("member_index")["signature_id"].astype(str)
-        member_indices: list[int] = []
-        for signature_id in member_ids:
-            try:
-                member_indices.append(int(signature_id_to_index[str(signature_id)]))
-            except KeyError as exc:
-                raise KeyError(f"component member signature_id missing from Rust featurizer: {signature_id}") from exc
-        out[str(component_key)] = np.asarray(member_indices, dtype=np.uint32)
-    return out
-
-
-def _block_local_member_ids(
-    dataset: ANDData,
-    component_key: str,
-    member_ids: tuple[str, ...],
-) -> tuple[str, ...]:
-    return _block_local_member_ids_from_signature_blocks(
-        component_key,
-        member_ids,
-        getattr(dataset, "signature_to_block", {}) or {},
-    )
-
-
 def _block_local_member_ids_from_signature_blocks(
     component_key: str,
     member_ids: tuple[str, ...],
@@ -852,35 +597,6 @@ def _block_local_member_ids_from_signature_blocks(
         signature_id for signature_id in member_ids if str(signature_to_block.get(str(signature_id), "")) == block_key
     )
     return filtered or member_ids
-
-
-def _component_member_details_by_key(
-    path: Path,
-    signature_id_to_index: Mapping[str, int],
-    *,
-    dataset: ANDData,
-) -> dict[str, ComponentMembers]:
-    members = pd.read_parquet(path)
-    required = {"candidate_component_key", "member_index", "signature_id"}
-    missing = sorted(required - set(members.columns))
-    if missing:
-        raise ValueError(f"candidate member table {path} is missing columns: {missing}")
-    out: dict[str, ComponentMembers] = {}
-    for component_key, group in members.groupby("candidate_component_key", sort=False):
-        member_ids = tuple(str(value) for value in group.sort_values("member_index")["signature_id"].astype(str))
-        member_ids = _block_local_member_ids(dataset, str(component_key), member_ids)
-        member_indices: list[int] = []
-        for signature_id in member_ids:
-            try:
-                member_indices.append(int(signature_id_to_index[str(signature_id)]))
-            except KeyError as exc:
-                raise KeyError(f"component member signature_id missing from Rust featurizer: {signature_id}") from exc
-        out[str(component_key)] = ComponentMembers(
-            signature_ids=member_ids,
-            signature_id_set=frozenset(member_ids),
-            signature_indices=np.asarray(member_indices, dtype=np.uint32),
-        )
-    return out
 
 
 def _signature_id_to_index(featurizer: Any) -> dict[str, int]:
@@ -907,7 +623,7 @@ def _arrow_paths_for_dataset(
     *,
     name_counts_index_root: Path | None = None,
     require_name_counts_index: bool = True,
-) -> dict[str, str]:
+) -> ValidatedArrowInputs:
     dataset_dir = (bundle.root / "datasets" / str(dataset_name)).resolve()
     manifest_path = dataset_dir / "manifest.json"
     if not manifest_path.exists():
@@ -1045,278 +761,6 @@ def _arrow_component_membership_summary(
     summary = pd.DataFrame(rows)
     cache[dataset_name] = summary
     return summary
-
-
-def _candidate_batch_from_rows(
-    rows: pd.DataFrame,
-    component_members: Mapping[str, np.ndarray],
-    signature_id_to_index: Mapping[str, int],
-    *,
-    row_group_ids: Sequence[int] | None = None,
-) -> LinkerCandidateBatch:
-    query_indices = np.empty(len(rows), dtype=np.uint32)
-    member_arrays: list[np.ndarray] = []
-    for row_offset, row in enumerate(rows.itertuples(index=False)):
-        row_any = cast(Any, row)
-        query_signature_id = str(row_any.query_signature_id)
-        component_key = str(row_any.candidate_component_key)
-        try:
-            query_index = int(signature_id_to_index[query_signature_id])
-        except KeyError as exc:
-            raise KeyError(f"query_signature_id missing from Rust featurizer: {query_signature_id}") from exc
-        try:
-            members = component_members[component_key]
-        except KeyError as exc:
-            raise KeyError(f"candidate_component_key missing from members table: {component_key}") from exc
-        query_indices[row_offset] = query_index
-        active_members = members[members != query_index]
-        member_arrays.append(np.ascontiguousarray(active_members, dtype=np.uint32))
-
-    pair_count = int(sum(len(members) for members in member_arrays))
-    left = np.empty(pair_count, dtype=np.uint32)
-    right = np.empty(pair_count, dtype=np.uint32)
-    owner_rows = np.empty(pair_count, dtype=np.uint32)
-    offset = 0
-    for row_offset, members in enumerate(member_arrays):
-        stop = offset + len(members)
-        left[offset:stop] = query_indices[row_offset]
-        right[offset:stop] = members
-        owner_rows[offset:stop] = row_offset
-        offset = stop
-
-    return LinkerCandidateBatch(
-        row_count=len(rows),
-        left_signature_indices=left,
-        right_signature_indices=right,
-        pair_row_indices=owner_rows,
-        row_query_signature_indices=(
-            np.asarray(row_group_ids, dtype=np.uint32) if row_group_ids is not None else query_indices
-        ),
-        row_component_keys=tuple(rows["candidate_component_key"].astype(str).tolist()),
-        labels=rows["label"].to_numpy(dtype=np.int8, copy=False) if "label" in rows.columns else None,
-        retrieval_scores=(
-            rows["retrieval_score"].to_numpy(dtype=np.float32, copy=False)
-            if "retrieval_score" in rows.columns
-            else None
-        ),
-        retrieval_ranks=rows["retrieval_rank"].to_numpy(copy=False) if "retrieval_rank" in rows.columns else None,
-    )
-
-
-def _load_minimal_raw_specter_dataset(
-    bundle: OfficialBundle,
-    dataset_name: str,
-    *,
-    n_jobs: int,
-) -> ANDData:
-    raw_datasets = dict(bundle.assets["raw_metadata"]["datasets"])
-    embedding_datasets = dict(bundle.assets.get("embeddings", {}).get("datasets", {}))
-    if dataset_name not in raw_datasets:
-        raise KeyError(f"Minimal raw metadata is missing dataset {dataset_name!r}")
-    if dataset_name not in embedding_datasets:
-        raise KeyError(f"Minimal SPECTER2 embeddings are missing dataset {dataset_name!r}")
-    raw_spec = dict(raw_datasets[dataset_name])
-    signatures_path = _resolve_path(bundle, str(raw_spec["signatures_path"]))
-    papers_path = _resolve_path(bundle, str(raw_spec["papers_path"]))
-    specter_path = _resolve_path(bundle, str(embedding_datasets[dataset_name]))
-    dataset = ANDData(
-        str(signatures_path),
-        str(papers_path),
-        name=f"joint_safe_link_minimal_raw_specter_{dataset_name}",
-        mode="inference",
-        specter_embeddings=str(specter_path),
-        name_counts_index=NAME_COUNTS_INDEX_PATH,
-        preprocess=True,
-        n_jobs=max(1, int(n_jobs)),
-        use_orcid_id=False,
-        name_tuples="filtered",
-    )
-    return dataset
-
-
-def _build_full_retrieval_summary_cache(
-    *,
-    dataset: ANDData,
-    component_details: Mapping[str, ComponentMembers],
-    feature_cache: dict[str, retrieval.QueryFeatures],
-    paper_author_name_cache: dict[str, frozenset[str]],
-    max_exemplars: int,
-) -> dict[str, retrieval.ClusterSummary]:
-    summaries: dict[str, retrieval.ClusterSummary] = {}
-    for component_key, details in component_details.items():
-        summaries[str(component_key)] = _build_summary_for_members(
-            dataset=dataset,
-            component_key=str(component_key),
-            candidate_cluster_id=None,
-            signature_ids=details.signature_ids,
-            feature_cache=feature_cache,
-            paper_author_name_cache=paper_author_name_cache,
-            max_exemplars=max_exemplars,
-        )
-    return summaries
-
-
-def _component_block_key(
-    dataset: ANDData,
-    component_key: str,
-    details: ComponentMembers,
-) -> str:
-    if "::" in str(component_key):
-        return str(component_key).split("::", 1)[0]
-    signature_to_block = getattr(dataset, "signature_to_block", {}) or {}
-    for signature_id in details.signature_ids:
-        block_key = str(signature_to_block.get(str(signature_id), ""))
-        if block_key:
-            return block_key
-    return str(component_key)
-
-
-def _build_retrieval_subblock_index_for_components(
-    *,
-    dataset: ANDData,
-    component_details: Mapping[str, ComponentMembers],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, tuple[str, ...]]]:
-    block_to_component_keys: dict[str, list[str]] = {}
-    component_signatures: dict[str, list[str]] = {}
-    for component_key, details in component_details.items():
-        key = str(component_key)
-        block_key = _component_block_key(dataset, key, details)
-        block_to_component_keys.setdefault(block_key, []).append(key)
-        component_signatures[key] = list(details.signature_ids)
-    index, diagnostics = build_labeled_retrieval_subblock_index(
-        dataset=dataset,
-        block_to_component_keys=block_to_component_keys,
-        component_signatures=component_signatures,
-    )
-    component_keys_by_block = {
-        block_key: tuple(component_keys) for block_key, component_keys in block_to_component_keys.items()
-    }
-    return index, diagnostics, component_keys_by_block
-
-
-def _build_minimal_raw_dataset_context(
-    *,
-    source_bundle: OfficialBundle,
-    dataset_name: str,
-    clusterer: Any,
-    n_jobs: int,
-    max_exemplars: int,
-) -> MinimalRawDatasetContext:
-    started = time.perf_counter()
-    dataset = _load_minimal_raw_specter_dataset(
-        source_bundle,
-        dataset_name,
-        n_jobs=n_jobs,
-    )
-    runtime_context = build_runtime_context(
-        "joint_safe_link_minimal_raw_featureization",
-        backend="rust",
-    )
-    featurizer = feature_port._get_rust_featurizer(  # noqa: SLF001
-        dataset,
-        runtime_context=runtime_context,
-    )
-    constraint_backend = _build_incremental_constraint_backend(
-        dataset,
-        use_default_constraints_as_supervision=bool(clusterer.use_default_constraints_as_supervision),
-        runtime_context=runtime_context,
-        suppress_orcid=True,
-    )
-    signature_id_to_index = _signature_id_to_index(featurizer)
-    member_path = _resolve_path(
-        source_bundle,
-        str(source_bundle.assets["candidate_members"]["datasets"][dataset_name]),
-    )
-    row_component_scope = "block-local"
-    pairwise_component_scope = "block-local"
-    component_details = _component_member_details_by_key(
-        member_path,
-        signature_id_to_index,
-        dataset=dataset,
-    )
-    component_indices = {
-        component_key: details.signature_indices for component_key, details in component_details.items()
-    }
-    pairwise_component_details = component_details
-    pairwise_component_indices = component_indices
-    feature_cache: dict[str, retrieval.QueryFeatures] = {}
-    paper_author_name_cache: dict[str, frozenset[str]] = {}
-    retrieval_subblock_index, retrieval_subblock_index_diagnostics, component_keys_by_block = (
-        _build_retrieval_subblock_index_for_components(
-            dataset=dataset,
-            component_details=component_details,
-        )
-    )
-    summary_started = time.perf_counter()
-    full_summary_cache = _build_full_retrieval_summary_cache(
-        dataset=dataset,
-        component_details=component_details,
-        feature_cache=feature_cache,
-        paper_author_name_cache=paper_author_name_cache,
-        max_exemplars=max_exemplars,
-    )
-    rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(
-        list(full_summary_cache.values()),
-        include_exemplars=True,
-    )
-    max_block_component_size = max((summary.size for summary in full_summary_cache.values()), default=0)
-    summary_seconds = float(time.perf_counter() - summary_started)
-    print(
-        json.dumps(
-            {
-                "event": "minimal_raw_dataset_context_ready",
-                "dataset": dataset_name,
-                "components": int(len(component_details)),
-                "specter_embeddings": int(len(dataset.specter_embeddings or {})),
-                "retrieval_policy": s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
-                "component_scope": "block-local",
-                "row_component_scope": row_component_scope,
-                "pairwise_component_scope": pairwise_component_scope,
-                "retrieval_subblock_index": retrieval_subblock_index_diagnostics,
-                "retrieval_summary_build_seconds": round(summary_seconds, 3),
-                "seconds": round(float(time.perf_counter() - started), 3),
-            }
-        ),
-        flush=True,
-    )
-    return MinimalRawDatasetContext(
-        dataset_name=dataset_name,
-        row_component_scope=row_component_scope,
-        pairwise_component_scope=pairwise_component_scope,
-        dataset=dataset,
-        runtime_context=runtime_context,
-        constraint_backend=constraint_backend,
-        featurizer=featurizer,
-        signature_id_to_index=signature_id_to_index,
-        component_details=component_details,
-        component_indices=component_indices,
-        pairwise_component_details=pairwise_component_details,
-        pairwise_component_indices=pairwise_component_indices,
-        component_keys_by_block=component_keys_by_block,
-        feature_cache=feature_cache,
-        paper_author_name_cache=paper_author_name_cache,
-        full_summary_cache=full_summary_cache,
-        residual_summary_cache={},
-        rust_hybrid_centroid_retriever=rust_hybrid_centroid_retriever,
-        retrieval_subblock_index=retrieval_subblock_index,
-        max_block_component_size=int(max_block_component_size),
-    )
-
-
-def _release_minimal_raw_dataset_context(context: MinimalRawDatasetContext) -> None:
-    context.feature_cache.clear()
-    context.paper_author_name_cache.clear()
-    context.full_summary_cache.clear()
-    context.residual_summary_cache.clear()
-    context.retrieval_subblock_index.clear()
-    context.component_details.clear()
-    context.component_indices.clear()
-    context.component_keys_by_block.clear()
-    context.pairwise_component_details.clear()
-    context.pairwise_component_indices.clear()
-    context.signature_id_to_index.clear()
-    feature_port.clear_rust_featurizer_cache()
-    gc.collect()
 
 
 def _build_arrow_rust_dataset_context(
@@ -1512,27 +956,23 @@ def _resolve_arrow_rust_pair_labels(
     constraints_enabled = bool(getattr(clusterer, "use_default_constraints_as_supervision", True)) and pair_count > 0
     if constraints_enabled:
         labels = get_constraint_labels_index_arrays_rust(
-            None,
             batch.left_signature_indices,
             batch.right_signature_indices,
             dont_merge_cluster_seeds=True,
             incremental_dont_use_cluster_seeds=False,
             num_threads=max(1, int(n_jobs)),
             featurizer=featurizer,
-            runtime_context=None,
             suppress_orcid=True,
         )
     seed_bypass_indices = np.flatnonzero(pair_seed_bypass) if constraints_enabled else np.asarray([], dtype=np.int64)
     if len(seed_bypass_indices):
         labels[seed_bypass_indices] = get_constraint_labels_index_arrays_rust(
-            None,
             batch.left_signature_indices[seed_bypass_indices],
             batch.right_signature_indices[seed_bypass_indices],
             dont_merge_cluster_seeds=True,
             incremental_dont_use_cluster_seeds=True,
             num_threads=max(1, int(n_jobs)),
             featurizer=featurizer,
-            runtime_context=None,
             suppress_orcid=True,
         )
     disallow_ignored = 0
@@ -1554,30 +994,15 @@ def _resolve_arrow_rust_pair_labels(
     }
 
 
-def _assert_pairwise_model_is_raw_bundle_compatible(clusterer: Any, model_path: Path) -> None:
+def _assert_pairwise_model_supports_arrow_materialization(clusterer: Any, model_path: Path) -> None:
     for attr_name in ("featurizer_info", "nameless_featurizer_info"):
         featurizer_info = getattr(clusterer, attr_name, None)
         features_to_use = tuple(str(value) for value in getattr(featurizer_info, "features_to_use", ()) or ())
         if "reference_features" in features_to_use:
             raise ValueError(
                 f"Pairwise model {model_path} uses reference_features in {attr_name}; "
-                "the minimal raw bundle intentionally does not store reference papers."
+                "Arrow feature materialization does not support reference features."
             )
-
-
-def _component_id_parts(component_key: str, candidate_cluster_id: str | None = None) -> tuple[str, str]:
-    if "::" in component_key:
-        block_key, cluster_id = component_key.split("::", 1)
-        return block_key, cluster_id
-    cluster_id = str(candidate_cluster_id or component_key)
-    if "_" in component_key:
-        return component_key.split("_", 1)[0], cluster_id
-    return component_key, cluster_id
-
-
-def _finite_distance(value: float, *, empty_value: float = 1.0) -> float:
-    value = float(value)
-    return value if math.isfinite(value) else float(empty_value)
 
 
 def _nan_value_from_policy(policy: str) -> float:
@@ -1594,61 +1019,6 @@ def _feature_nan_policy_summary(args: argparse.Namespace) -> dict[str, str]:
         "pairwise_aggregate_nan_policy": str(args.pairwise_aggregate_nan_policy),
         "row_nan_policy": str(args.row_nan_policy),
     }
-
-
-def _score_candidate_summaries_with_frozen_rust_policy(
-    *,
-    query: retrieval.QueryFeatures,
-    summaries: Mapping[str, retrieval.ClusterSummary],
-    retriever: Any,
-    n_jobs: int,
-) -> dict[str, float]:
-    """Score one query's candidate rows with the frozen Rust retrieval policy."""
-
-    component_keys = [str(component_key) for component_key in summaries]
-    if not component_keys:
-        return {}
-    override_summary: retrieval.ClusterSummary | None = None
-    overridden_component_keys: list[str] = []
-    summary_by_component = getattr(retriever, "summary_by_component", {})
-    for component_key in component_keys:
-        base_summary = summary_by_component.get(component_key)
-        if base_summary is None:
-            raise KeyError(f"Unknown component_key for frozen Rust retrieval: {component_key}")
-        current_summary = summaries[component_key]
-        if current_summary is not base_summary:
-            overridden_component_keys.append(component_key)
-            override_summary = current_summary
-    if len(overridden_component_keys) > 1:
-        raise ValueError(
-            "Frozen Rust retrieval scoring supports at most one residual summary per query group; "
-            f"got {overridden_component_keys}"
-        )
-    ranked = rank_top_summaries_rust_hybrid_centroid(
-        query=query,
-        retriever=retriever,
-        component_keys=component_keys,
-        override_summary=override_summary,
-        num_threads=max(1, int(n_jobs)),
-    )
-    return {str(summary.component_key): round(float(score), 6) for score, summary in ranked}
-
-
-def _current_retrieval_ranks_from_scores(
-    retrieval_scores: Mapping[str, float],
-    stored_retrieval_ranks: Mapping[str, int],
-) -> dict[str, int]:
-    """Return rank order induced by recomputed retrieval scores over the frozen candidate set."""
-
-    ordered = sorted(
-        retrieval_scores,
-        key=lambda component_key: (
-            -float(retrieval_scores[str(component_key)]),
-            int(stored_retrieval_ranks[str(component_key)]),
-            str(component_key),
-        ),
-    )
-    return {str(component_key): rank for rank, component_key in enumerate(ordered, start=1)}
 
 
 def _truthy_row_value(value: Any) -> bool:
@@ -1685,45 +1055,16 @@ def _row_label_is_positive(row: Any) -> bool:
         return str(value).strip() == "1"
 
 
-def _dataset_has_cluster_seed_constraints(dataset: ANDData) -> bool:
-    return bool(getattr(dataset, "cluster_seeds_require", None)) or bool(
-        getattr(dataset, "cluster_seeds_disallow", None)
-    )
-
-
-def _signature_has_seed_constraint(dataset: ANDData, signature_id: str) -> bool:
-    signature_id = str(signature_id)
-    require = getattr(dataset, "cluster_seeds_require", {}) or {}
-    if signature_id in require:
-        return True
-    disallow = getattr(dataset, "cluster_seeds_disallow", set()) or set()
-    return any(str(left) == signature_id or str(right) == signature_id for left, right in disallow)
-
-
-def _seed_constrained_signature_ids(dataset: ANDData) -> frozenset[str]:
-    signature_ids = {str(signature_id) for signature_id in (getattr(dataset, "cluster_seeds_require", {}) or {})}
-    for left, right in getattr(dataset, "cluster_seeds_disallow", set()) or set():
-        signature_ids.add(str(left))
-        signature_ids.add(str(right))
-    return frozenset(signature_ids)
-
-
 def _row_allows_seed_constraint_bypass(
-    dataset: ANDData,
     row: Any,
     *,
-    seed_constraint_signature_ids: frozenset[str] | None = None,
+    seed_constraint_signature_ids: frozenset[str],
 ) -> bool:
     if _truthy_row_value(getattr(row, "query_in_seed_before_holdout", None)):
         return True
     query_signature_id = getattr(row, "query_signature_id", None)
-    if query_signature_id is not None:
-        if seed_constraint_signature_ids is None:
-            has_seed_constraint = _signature_has_seed_constraint(dataset, str(query_signature_id))
-        else:
-            has_seed_constraint = str(query_signature_id) in seed_constraint_signature_ids
-        if has_seed_constraint:
-            return True
+    if query_signature_id is not None and str(query_signature_id) in seed_constraint_signature_ids:
+        return True
     split = _row_text_value(row, "split")
     source = _row_text_value(row, "source")
     source_key = _row_text_value(row, "source_key")
@@ -1740,20 +1081,6 @@ def _row_allows_seed_constraint_bypass(
         or "self" in support_type
         or "self" in source_kind
         or "self" in supervision_type
-    )
-
-
-def _has_query_seed_connection(
-    dataset: ANDData,
-    *,
-    query_signature_id: str,
-    candidate_signature_ids: Sequence[str],
-) -> bool:
-    return _has_query_seed_connection_from_maps(
-        getattr(dataset, "cluster_seeds_require", {}) or {},
-        getattr(dataset, "cluster_seeds_disallow", set()) or set(),
-        query_signature_id=query_signature_id,
-        candidate_signature_ids=candidate_signature_ids,
     )
 
 
@@ -1801,7 +1128,6 @@ def _arrow_row_seed_bypass_mask(
             if str(signature_id) != query_signature_id
         ]
         if _row_allows_seed_constraint_bypass(
-            cast(Any, None),
             row_any,
             seed_constraint_signature_ids=seed_constrained_signature_ids,
         ) and _has_query_seed_connection_from_maps(
@@ -1818,101 +1144,6 @@ def _constraint_label_is_disallow(label: float) -> bool:
     if math.isnan(float(label)):
         return False
     return float(label) + float(LARGE_INTEGER) >= float(LARGE_DISTANCE)
-
-
-def _resolve_candidate_batch_pair_labels(
-    *,
-    clusterer: Any,
-    dataset: ANDData,
-    batch: LinkerCandidateBatch,
-    index_to_signature_id: Mapping[int, str],
-    runtime_context: Any,
-    constraint_backend: Any,
-    chunk_size: int,
-    pair_seed_bypass: np.ndarray | None = None,
-    pair_ignore_disallow: np.ndarray | None = None,
-) -> tuple[np.ndarray, dict[str, int | float]]:
-    pair_count = int(batch.pair_count)
-    labels = np.full(pair_count, np.nan, dtype=np.float64)
-    chunk_size = max(1, int(chunk_size))
-    started = time.perf_counter()
-    batch_calls = 0
-
-    if pair_seed_bypass is None:
-        pair_seed_bypass = np.zeros(pair_count, dtype=bool)
-    else:
-        pair_seed_bypass = np.asarray(pair_seed_bypass, dtype=bool)
-    if pair_ignore_disallow is None:
-        pair_ignore_disallow = np.zeros(pair_count, dtype=bool)
-    else:
-        pair_ignore_disallow = np.asarray(pair_ignore_disallow, dtype=bool)
-    if len(pair_seed_bypass) != pair_count:
-        raise ValueError(f"pair_seed_bypass length {len(pair_seed_bypass)} != pair_count {pair_count}")
-    if len(pair_ignore_disallow) != pair_count:
-        raise ValueError(f"pair_ignore_disallow length {len(pair_ignore_disallow)} != pair_count {pair_count}")
-
-    for start in range(0, pair_count, chunk_size):
-        stop = min(pair_count, start + chunk_size)
-        pairs = [
-            (
-                index_to_signature_id[int(left_index)],
-                index_to_signature_id[int(right_index)],
-            )
-            for left_index, right_index in zip(
-                batch.left_signature_indices[start:stop],
-                batch.right_signature_indices[start:stop],
-                strict=True,
-            )
-        ]
-        chunk_labels, _telemetry = clusterer._resolve_constraint_batch(  # noqa: SLF001
-            dataset,
-            pairs,
-            partial_supervision={},
-            runtime_context=runtime_context,
-            incremental_dont_use_cluster_seeds=False,
-            constraint_backend=constraint_backend,
-        )
-        labels[start:stop] = np.asarray(chunk_labels, dtype=np.float64)
-        batch_calls += 1
-
-    seed_bypass_indices = np.flatnonzero(pair_seed_bypass)
-    seed_bypass_batch_calls = 0
-    for start in range(0, len(seed_bypass_indices), chunk_size):
-        stop = min(len(seed_bypass_indices), start + chunk_size)
-        chunk_indices = seed_bypass_indices[start:stop]
-        pairs = [
-            (
-                index_to_signature_id[int(batch.left_signature_indices[int(index)])],
-                index_to_signature_id[int(batch.right_signature_indices[int(index)])],
-            )
-            for index in chunk_indices
-        ]
-        chunk_labels, _telemetry = clusterer._resolve_constraint_batch(  # noqa: SLF001
-            dataset,
-            pairs,
-            partial_supervision={},
-            runtime_context=runtime_context,
-            incremental_dont_use_cluster_seeds=True,
-            constraint_backend=constraint_backend,
-        )
-        labels[chunk_indices] = np.asarray(chunk_labels, dtype=np.float64)
-        seed_bypass_batch_calls += 1
-
-    disallow_ignored = np.zeros(pair_count, dtype=bool)
-    if np.any(pair_ignore_disallow):
-        disallow_ignored = pair_ignore_disallow & np.asarray(
-            [_constraint_label_is_disallow(float(label)) for label in labels],
-            dtype=bool,
-        )
-        labels[disallow_ignored] = np.nan
-    return labels, {
-        "constraint_pair_count": pair_count,
-        "constraint_batch_calls": int(batch_calls),
-        "constraint_seed_bypass_pair_count": int(len(seed_bypass_indices)),
-        "constraint_seed_bypass_batch_calls": int(seed_bypass_batch_calls),
-        "constraint_disallow_ignored_pair_count": int(disallow_ignored.sum()),
-        "constraint_seconds": round(float(time.perf_counter() - started), 3),
-    }
 
 
 def _parquet_row_count_and_columns(path: Path) -> tuple[int, set[str]]:
@@ -2150,160 +1381,6 @@ def _copy_bundle_support_files(
     return payload
 
 
-def _build_summary_for_members(
-    *,
-    dataset: ANDData,
-    component_key: str,
-    candidate_cluster_id: str | None,
-    signature_ids: Sequence[str],
-    feature_cache: dict[str, retrieval.QueryFeatures],
-    paper_author_name_cache: dict[str, frozenset[str]] | None,
-    max_exemplars: int,
-) -> retrieval.ClusterSummary:
-    block_key, cluster_id = _component_id_parts(component_key, candidate_cluster_id)
-    return retrieval.build_cluster_summary(
-        dataset=dataset,
-        block_key=block_key,
-        cluster_id=cluster_id,
-        component_key=component_key,
-        signature_ids=[str(signature_id) for signature_id in signature_ids],
-        max_exemplars=max_exemplars,
-        feature_cache=feature_cache,
-        paper_author_name_cache=paper_author_name_cache,
-        orcid_enabled=False,
-    )
-
-
-def _initialize_row_signal_arrays(row_count: int, rows: pd.DataFrame) -> dict[str, Any]:
-    float_signal_names = (
-        "retrieval_score",
-        "retrieval_rank",
-        "cluster_size",
-        "named_signature_count",
-        "candidate_year_min",
-        "candidate_year_max",
-        "candidate_year_range_missing",
-        "query_year",
-        "query_year_missing",
-        "query_has_affiliations",
-        "query_has_coauthors",
-        "query_has_specter",
-        "query_has_name_counts",
-        "candidate_has_affiliations",
-        "candidate_has_coauthors",
-        "candidate_has_specter_exemplars",
-        "candidate_has_name_counts",
-        "candidate_cluster_max_paper_author_count",
-        "paper_author_list_max_jaccard",
-        "paper_author_list_max_containment",
-        "paper_author_list_max_overlap_count",
-        "local_author_window10_jaccard_max",
-        "local_author_window10_overlap_count_max",
-        "best_author_count_log_absdiff",
-        "affiliation_overlap",
-        "coauthor_overlap",
-        "year_compatibility",
-        "specter_exemplar_similarity",
-        "min_distance",
-        "mean_distance",
-        "top3_mean_distance",
-        "top5_mean_distance",
-        "pair_count",
-        "last_name_count_min_rarity",
-        "candidate_last_name_count_min_rarity",
-        "last_first_name_count_min_rarity",
-    )
-    signals: dict[str, Any] = {name: np.full(row_count, np.nan, dtype=np.float32) for name in float_signal_names}
-    signals["candidate_component_key"] = rows["candidate_component_key"].astype(str).to_numpy(dtype=object)
-    signals["query_view"] = rows["query_view"].astype(str).to_numpy(dtype=object)
-    signals["dominant_first_name"] = np.empty(row_count, dtype=object)
-    signals["query_first_token"] = np.empty(row_count, dtype=object)
-    signals["first_name_bucket"] = np.empty(row_count, dtype=object)
-    signals["family_id"] = np.empty(row_count, dtype=object)
-    return signals
-
-
-def _fill_row_signal(
-    *,
-    row_signals: dict[str, Any],
-    local_index: int,
-    component_key: str,
-    query: retrieval.QueryFeatures,
-    summary: retrieval.ClusterSummary,
-    stats: Any,
-    retrieval_rank: int,
-    retrieval_score: float,
-    query_first_token_for_prefix: str,
-) -> None:
-    profile = build_cluster_profile(summary)
-    rarity = name_count_rarity_features(query, summary)
-    query_year_missing = query.year is None
-    candidate_year_missing = summary.year_min is None or summary.year_max is None
-
-    row_signals["retrieval_score"][local_index] = float(retrieval_score)
-    row_signals["retrieval_rank"][local_index] = float(retrieval_rank)
-    row_signals["cluster_size"][local_index] = float(summary.size)
-    row_signals["named_signature_count"][local_index] = float(profile.family_named_count)
-    row_signals["dominant_first_name"][local_index] = str(profile.dominant_first_name or "")
-    row_signals["family_id"][local_index] = str(profile.family_id or component_key)
-    row_signals["candidate_year_min"][local_index] = float(summary.year_min or 0)
-    row_signals["candidate_year_max"][local_index] = float(summary.year_max or 0)
-    row_signals["candidate_year_range_missing"][local_index] = float(candidate_year_missing)
-    query_first_token = str(query_first_token_for_prefix or query.first or "")
-    row_signals["query_first_token"][local_index] = query_first_token
-    row_signals["first_name_bucket"][local_index] = first_name_bucket_from_token_view(
-        query_first_token,
-        row_signals["query_view"][local_index],
-    )
-    row_signals["query_year"][local_index] = float(query.year or 0)
-    row_signals["query_year_missing"][local_index] = float(query_year_missing)
-    row_signals["query_has_affiliations"][local_index] = float(query.has_affiliations)
-    row_signals["query_has_coauthors"][local_index] = float(query.has_coauthors)
-    row_signals["query_has_specter"][local_index] = float(
-        bool(getattr(query, "has_specter", False)) and getattr(query, "specter", None) is not None
-    )
-    row_signals["query_has_name_counts"][local_index] = float(getattr(query, "name_counts", None) is not None)
-    row_signals["candidate_has_affiliations"][local_index] = float(
-        bool(summary.affiliation_counts) and summary.size > 0
-    )
-    row_signals["candidate_has_coauthors"][local_index] = float(bool(summary.coauthor_counts) and summary.size > 0)
-    row_signals["candidate_has_specter_exemplars"][local_index] = float(
-        bool(getattr(summary, "exemplar_vectors", ()) or ())
-    )
-    row_signals["candidate_has_name_counts"][local_index] = float(
-        bool(getattr(summary, "name_counts_values", ()) or ())
-    )
-    row_signals["candidate_cluster_max_paper_author_count"][local_index] = float(
-        getattr(summary, "max_paper_author_count", 0)
-    )
-    for signal_name, value in retrieval.raw_paper_evidence_features(query, summary).items():
-        row_signals[signal_name][local_index] = float(value)
-    row_signals["affiliation_overlap"][local_index] = round(
-        float(counter_query_overlap(query.affiliation_terms, summary.affiliation_counts, summary.size)),
-        6,
-    )
-    row_signals["coauthor_overlap"][local_index] = round(
-        float(counter_query_overlap(query.coauthor_blocks, summary.coauthor_counts, summary.size)),
-        6,
-    )
-    row_signals["year_compatibility"][local_index] = round(float(year_compatibility(query.year, summary)), 6)
-    row_signals["specter_exemplar_similarity"][local_index] = round(
-        float(specter_exemplar_similarity(query, summary)),
-        6,
-    )
-    row_signals["min_distance"][local_index] = round(_finite_distance(stats.min_distance), 6)
-    row_signals["mean_distance"][local_index] = round(_finite_distance(stats.mean_distance), 6)
-    row_signals["top3_mean_distance"][local_index] = round(_finite_distance(stats.topk_mean_distance(3)), 6)
-    row_signals["top5_mean_distance"][local_index] = round(_finite_distance(stats.topk_mean_distance(5)), 6)
-    row_signals["pair_count"][local_index] = float(stats.count)
-    for signal_name in (
-        "last_name_count_min_rarity",
-        "candidate_last_name_count_min_rarity",
-        "last_first_name_count_min_rarity",
-    ):
-        row_signals[signal_name][local_index] = float(rarity.get(signal_name, 0.0) or 0.0)
-
-
 def _validate_row_signals(row_signals: Mapping[str, Any]) -> None:
     missing: dict[str, int] = {}
     for name, values in row_signals.items():
@@ -2314,7 +1391,7 @@ def _validate_row_signals(row_signals: Mapping[str, Any]) -> None:
         if missing_count:
             missing[name] = missing_count
     if missing:
-        raise ValueError(f"Raw feature materialization left unfilled row signals: {missing}")
+        raise ValueError(f"Arrow feature materialization left unfilled row signals: {missing}")
 
 
 def _bool_row_signal(row_signals: Mapping[str, Any], name: str, row_count: int) -> np.ndarray:
@@ -2469,28 +1546,10 @@ def _apply_row_nan_policy(
     }
 
 
-def _query_first_token_for_prefix(group: pd.DataFrame, base_query: retrieval.QueryFeatures) -> str:
-    if "query_author" in group.columns:
-        for value in group["query_author"].tolist():
-            token = _query_first_token(value)
-            if token:
-                return token
-    first = getattr(base_query, "first", None)
-    if first:
-        return str(first)
-    if "query_first_token" in group.columns:
-        for value in group["query_first_token"].tolist():
-            if value is not None and not (isinstance(value, float) and math.isnan(value)):
-                token = str(value).strip()
-                if token:
-                    return token
-    return ""
-
-
 def _pairwise_feature_values(pairwise_stats: Any) -> dict[str, np.ndarray]:
     pairwise_columns = tuple(pairwise_stats.aggregate_feature_columns)
     if pairwise_columns != PROMOTED_PAIRWISE_COLUMNS:
-        raise ValueError("Rust pairwise aggregate column order mismatch in minimal raw materialization")
+        raise ValueError("Rust pairwise aggregate column order mismatch in Arrow materialization")
     pairwise_matrix = pairwise_stats.feature_matrix().astype(np.float32, copy=False)
     return {
         column: np.asarray(pairwise_matrix[:, column_index], dtype=np.float32)
@@ -2498,7 +1557,7 @@ def _pairwise_feature_values(pairwise_stats: Any) -> dict[str, np.ndarray]:
     }
 
 
-def _assemble_minimal_raw_feature_values(
+def _assemble_promoted_feature_values(
     *,
     target_features: Sequence[str],
     non_pairwise_features: Mapping[str, Any],
@@ -2513,271 +1572,6 @@ def _assemble_minimal_raw_feature_values(
         else:
             feature_values[column] = np.asarray(non_pairwise_features[column], dtype=np.float32)
     return feature_values
-
-
-def _materialize_minimal_raw_dataset_rows(
-    *,
-    context: MinimalRawDatasetContext,
-    rows: pd.DataFrame,
-    target_features: Sequence[str],
-    clusterer: Any,
-    n_jobs: int,
-    total_ram_bytes: int,
-    pair_batch_size: int,
-    query_batch_pair_limit: int,
-    max_exemplars: int,
-    max_top_k: int,
-    pairwise_model_nan_value: float,
-    pairwise_aggregate_nan_value: float,
-    row_nan_policy: str,
-) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    started = time.perf_counter()
-    dataset_name = context.dataset_name
-    dataset = context.dataset
-    runtime_context = context.runtime_context
-    constraint_backend = context.constraint_backend
-    featurizer = context.featurizer
-    signature_id_to_index = context.signature_id_to_index
-    component_details = context.component_details
-    component_indices = context.component_indices
-    feature_cache = context.feature_cache
-    full_summary_cache = context.full_summary_cache
-    residual_summary_cache = context.residual_summary_cache
-
-    dataset_rows = rows.reset_index(drop=True).copy()
-    row_count = len(dataset_rows)
-    row_signals = _initialize_row_signal_arrays(row_count, dataset_rows)
-    group_codes = tuple(
-        int(value) for value in pd.factorize(dataset_rows["query_group_id"].astype(str), sort=False)[0].tolist()
-    )
-    row_seed_bypass = np.zeros(row_count, dtype=bool)
-    row_ignore_disallow = np.zeros(row_count, dtype=bool)
-    seed_constraint_signature_ids = (
-        _seed_constrained_signature_ids(dataset) if _dataset_has_cluster_seed_constraints(dataset) else frozenset()
-    )
-    batch = _candidate_batch_from_rows(
-        dataset_rows,
-        component_indices,
-        signature_id_to_index,
-        row_group_ids=group_codes,
-    )
-
-    component_cluster_ids = (
-        dataset_rows[["candidate_component_key", "candidate_cluster_id"]]
-        .drop_duplicates("candidate_component_key")
-        .set_index("candidate_component_key")["candidate_cluster_id"]
-        .astype(str)
-        .to_dict()
-    )
-
-    def summary_for(component_key: str, query_signature_id: str | None) -> tuple[retrieval.ClusterSummary, list[str]]:
-        details = component_details[str(component_key)]
-        member_ids = list(details.signature_ids)
-        if query_signature_id is not None and str(query_signature_id) in details.signature_id_set:
-            cache_key = (str(component_key), str(query_signature_id))
-            summary = residual_summary_cache.get(cache_key)
-            active_member_ids = [signature_id for signature_id in member_ids if signature_id != str(query_signature_id)]
-            if summary is None:
-                summary = _build_summary_for_members(
-                    dataset=dataset,
-                    component_key=str(component_key),
-                    candidate_cluster_id=component_cluster_ids.get(str(component_key)),
-                    signature_ids=active_member_ids,
-                    feature_cache=feature_cache,
-                    paper_author_name_cache=context.paper_author_name_cache,
-                    max_exemplars=max_exemplars,
-                )
-                residual_summary_cache[cache_key] = summary
-            return summary, active_member_ids
-
-        summary = full_summary_cache.get(str(component_key))
-        if summary is None:
-            summary = _build_summary_for_members(
-                dataset=dataset,
-                component_key=str(component_key),
-                candidate_cluster_id=component_cluster_ids.get(str(component_key)),
-                signature_ids=member_ids,
-                feature_cache=feature_cache,
-                paper_author_name_cache=context.paper_author_name_cache,
-                max_exemplars=max_exemplars,
-            )
-            full_summary_cache[str(component_key)] = summary
-        return summary, member_ids
-
-    contexts: list[dict[str, Any]] = []
-
-    for query_group_id, group in dataset_rows.groupby(dataset_rows["query_group_id"].astype(str), sort=False):
-        query_signature_ids = set(group["query_signature_id"].astype(str))
-        query_views = set(group["query_view"].astype(str))
-        if len(query_signature_ids) != 1 or len(query_views) != 1:
-            raise ValueError(f"{dataset_name}: query group {query_group_id!r} is not a single query/view")
-        query_signature_id = next(iter(query_signature_ids))
-        query_view = next(iter(query_views))
-        base_query = retrieval.extract_query_features(
-            dataset,
-            query_signature_id,
-            feature_cache=feature_cache,
-            paper_author_name_cache=context.paper_author_name_cache,
-            orcid_enabled=False,
-        )
-        query_first_token_for_prefix = _query_first_token_for_prefix(group, base_query)
-        query = retrieval.mask_query_features(base_query, query_view, orcid_enabled=False)
-        sorted_group = group.sort_values(["retrieval_rank", "candidate_component_key"], kind="stable")
-        summaries: dict[str, retrieval.ClusterSummary] = {}
-        retrieval_ranks: dict[str, int] = {}
-        rows_by_component: dict[str, list[int]] = {}
-        for row in sorted_group.itertuples():
-            row_any = cast(Any, row)
-            row_index = int(row_any.Index)
-            component_key = str(row_any.candidate_component_key)
-            summary, _active_member_ids = summary_for(component_key, query_signature_id)
-            summaries[component_key] = summary
-            retrieval_ranks[component_key] = int(row_any.retrieval_rank)
-            rows_by_component.setdefault(component_key, []).append(row_index)
-            if _row_label_is_positive(row):
-                row_ignore_disallow[row_index] = True
-            if (
-                seed_constraint_signature_ids
-                and _row_allows_seed_constraint_bypass(
-                    dataset,
-                    row,
-                    seed_constraint_signature_ids=seed_constraint_signature_ids,
-                )
-                and _has_query_seed_connection(
-                    dataset,
-                    query_signature_id=str(query_signature_id),
-                    candidate_signature_ids=_active_member_ids,
-                )
-            ):
-                row_seed_bypass[row_index] = True
-        retrieval_scores = _score_candidate_summaries_with_frozen_rust_policy(
-            query=query,
-            summaries=summaries,
-            retriever=context.rust_hybrid_centroid_retriever,
-            n_jobs=n_jobs,
-        )
-        current_retrieval_ranks = _current_retrieval_ranks_from_scores(retrieval_scores, retrieval_ranks)
-        contexts.append(
-            {
-                "query": query,
-                "query_first_token_for_prefix": query_first_token_for_prefix,
-                "retrieval_scores": retrieval_scores,
-                "retrieval_ranks": current_retrieval_ranks,
-                "summaries": summaries,
-                "rows_by_component": rows_by_component,
-            }
-        )
-
-    index_to_signature_id = {int(index): str(signature_id) for signature_id, index in signature_id_to_index.items()}
-    constraint_chunk_size = max(1, min(int(pair_batch_size), int(query_batch_pair_limit)))
-    pair_labels, constraint_summary = _resolve_candidate_batch_pair_labels(
-        clusterer=clusterer,
-        dataset=dataset,
-        batch=batch,
-        index_to_signature_id=index_to_signature_id,
-        runtime_context=runtime_context,
-        constraint_backend=constraint_backend,
-        chunk_size=constraint_chunk_size,
-        pair_seed_bypass=row_seed_bypass[batch.pair_row_indices],
-        pair_ignore_disallow=row_seed_bypass[batch.pair_row_indices] | row_ignore_disallow[batch.pair_row_indices],
-    )
-    fused_pairwise_started = time.perf_counter()
-    fused_pairwise = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        dataset,
-        batch,
-        classifier=clusterer.classifier,
-        featurizer_info=clusterer.featurizer_info,
-        nameless_classifier=clusterer.nameless_classifier,
-        nameless_featurizer_info=clusterer.nameless_featurizer_info,
-        pair_labels=pair_labels,
-        n_jobs=max(1, int(n_jobs)),
-        total_ram_bytes=int(total_ram_bytes),
-        pairwise_model_nan_value=float(pairwise_model_nan_value),
-        pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
-        runtime_context=runtime_context,
-        featurizer=featurizer,
-    )
-    fused_pairwise_seconds = float(time.perf_counter() - fused_pairwise_started)
-    for query_context in contexts:
-        query = query_context["query"]
-        query_first_token_for_prefix = query_context["query_first_token_for_prefix"]
-        retrieval_scores = query_context["retrieval_scores"]
-        retrieval_ranks = query_context["retrieval_ranks"]
-        summaries = query_context["summaries"]
-        rows_by_component = query_context["rows_by_component"]
-        for component_key, local_indices in rows_by_component.items():
-            for local_index in local_indices:
-                stats = FusedDistanceStats(
-                    count=int(fused_pairwise.row_signals["pair_count"][local_index]),
-                    min_distance=float(fused_pairwise.row_signals["min_distance"][local_index]),
-                    mean_distance=float(fused_pairwise.row_signals["mean_distance"][local_index]),
-                    top3_mean_distance=float(fused_pairwise.row_signals["top3_mean_distance"][local_index]),
-                    top5_mean_distance=float(fused_pairwise.row_signals["top5_mean_distance"][local_index]),
-                )
-                _fill_row_signal(
-                    row_signals=row_signals,
-                    local_index=int(local_index),
-                    component_key=str(component_key),
-                    query=query,
-                    summary=summaries[str(component_key)],
-                    stats=stats,
-                    retrieval_rank=int(retrieval_ranks[str(component_key)]),
-                    retrieval_score=float(retrieval_scores[str(component_key)]),
-                    query_first_token_for_prefix=str(query_first_token_for_prefix),
-                )
-    _validate_row_signals(row_signals)
-
-    non_pairwise_started = time.perf_counter()
-    non_pairwise_features = build_promoted_non_pairwise_row_features(batch, row_signals)
-    non_pairwise_features, row_nan_summary = _apply_row_nan_policy(
-        non_pairwise_features,
-        row_signals,
-        batch,
-        row_nan_policy=str(row_nan_policy),
-    )
-    non_pairwise_seconds = float(time.perf_counter() - non_pairwise_started)
-    feature_values = _assemble_minimal_raw_feature_values(
-        target_features=target_features,
-        non_pairwise_features=non_pairwise_features,
-        pairwise_stats=fused_pairwise.pairwise_stats,
-    )
-    summary = {
-        "dataset": dataset_name,
-        "rows": int(row_count),
-        "rust_pairwise_aggregate_pairs": int(batch.pair_count),
-        "separate_rust_pairwise_aggregate_pairs": 0,
-        "fused_pairwise_pairs": int(batch.pair_count),
-        "pair_operation_count": int(batch.pair_count),
-        "pairwise_model_pairs": int(batch.pair_count),
-        "component_count": int(dataset_rows["candidate_component_key"].astype(str).nunique()),
-        "query_group_count": int(dataset_rows["query_group_id"].astype(str).nunique()),
-        "component_scope": "block-local",
-        "row_component_scope": context.row_component_scope,
-        "pairwise_component_scope": context.pairwise_component_scope,
-        "full_summary_cache_size": int(len(full_summary_cache)),
-        "residual_summary_cache_size": int(len(residual_summary_cache)),
-        "retrieval_policy": s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
-        "retrieval_max_block_component_size": int(context.max_block_component_size),
-        "specter_embeddings": int(len(dataset.specter_embeddings or {})),
-        "pairwise_model_nan_value": "nan"
-        if math.isnan(float(pairwise_model_nan_value))
-        else float(pairwise_model_nan_value),
-        "pairwise_aggregate_nan_value": (
-            "nan" if math.isnan(float(pairwise_aggregate_nan_value)) else float(pairwise_aggregate_nan_value)
-        ),
-        **row_nan_summary,
-        **constraint_summary,
-        "fused_pairwise_seconds": round(fused_pairwise_seconds, 3),
-        "pairwise_model_seconds": round(fused_pairwise_seconds, 3),
-        "pairwise_model_featurize_seconds": round(float(fused_pairwise.telemetry["feature_seconds"]), 3),
-        "pairwise_model_predict_seconds": round(float(fused_pairwise.telemetry["predict_seconds"]), 3),
-        "non_pairwise_formula_seconds": round(non_pairwise_seconds, 3),
-        "rust_pairwise_aggregate_seconds": 0.0,
-        "seconds": round(float(time.perf_counter() - started), 3),
-    }
-    del pair_labels, fused_pairwise
-    gc.collect()
-    return feature_values, summary
 
 
 def _materialize_arrow_rust_dataset_rows(
@@ -2801,12 +1595,7 @@ def _materialize_arrow_rust_dataset_rows(
         int(value) for value in pd.factorize(dataset_rows["query_group_id"].astype(str), sort=False)[0].tolist()
     )
     rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
-    plan_fn = getattr(rust_module, "raw_arrow_labeled_candidate_plan", None)
-    if not callable(plan_fn):
-        raise RuntimeError(
-            "s2and_rust.raw_arrow_labeled_candidate_plan is required for --feature-mode arrow-rust; "
-            "rebuild/install the current s2and-rust extension."
-        )
+    plan_fn = rust_module.raw_arrow_labeled_candidate_plan
     plan_started = time.perf_counter()
     retrieval_ranks = as_retrieval_rank_uint16_1d(
         "retrieval_rank",
@@ -2896,7 +1685,7 @@ def _materialize_arrow_rust_dataset_rows(
         row_nan_policy=str(row_nan_policy),
     )
     non_pairwise_seconds = float(time.perf_counter() - non_pairwise_started)
-    feature_values = _assemble_minimal_raw_feature_values(
+    feature_values = _assemble_promoted_feature_values(
         target_features=target_features,
         non_pairwise_features=non_pairwise_features,
         pairwise_stats=fused_pairwise.pairwise_stats,
@@ -2917,7 +1706,7 @@ def _materialize_arrow_rust_dataset_rows(
         "pairwise_component_scope": context.pairwise_component_scope,
         "full_summary_cache_size": 0,
         "residual_summary_cache_size": 0,
-        "retrieval_policy": s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
+        "retrieval_policy": rust_module.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
         "retrieval_max_block_component_size": int(context.max_block_component_size),
         "specter_embeddings": int(raw_plan_telemetry.get("specter_count", 0) or 0),
         "pairwise_model_nan_value": "nan"
@@ -2948,13 +1737,13 @@ def _safe_dataset_filename(dataset_name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(dataset_name))
 
 
-def _write_minimal_raw_partial(
+def _write_arrow_rust_partial(
     *,
-    shard: MinimalRawPendingShard,
+    shard: ArrowRustPendingShard,
     dataset_features: Mapping[str, np.ndarray],
     target_features: Sequence[str],
 ) -> None:
-    _write_minimal_raw_partial_frame(
+    _write_arrow_rust_partial_frame(
         rows=shard.rows,
         row_positions=shard.row_positions,
         partial_path=shard.partial_path,
@@ -2963,7 +1752,7 @@ def _write_minimal_raw_partial(
     )
 
 
-def _write_minimal_raw_partial_frame(
+def _write_arrow_rust_partial_frame(
     *,
     rows: pd.DataFrame,
     row_positions: np.ndarray,
@@ -2979,12 +1768,11 @@ def _write_minimal_raw_partial_frame(
     del feature_frame, partial_output
 
 
-def _finalize_minimal_raw_table_plan(
+def _finalize_arrow_rust_table_plan(
     *,
-    plan: MinimalRawTablePlan,
+    plan: ArrowRustTablePlan,
     target_features: Sequence[str],
     source_bundle: OfficialBundle,
-    mode_label: str = "arrow-rust",
 ) -> dict[str, Any]:
     parts = [pd.read_parquet(path) for path in plan.partial_paths]
     output = pd.concat(parts, axis=0, ignore_index=True)
@@ -3005,24 +1793,23 @@ def _finalize_minimal_raw_table_plan(
         "label_filtering": plan.label_filtering_summary,
         "structural_cleaning": plan.structural_cleaning_summary,
         "seconds": round(float(time.perf_counter() - plan.started), 3),
-        "mode": mode_label,
+        "mode": "arrow-rust",
     }
 
 
-def _finalize_minimal_raw_bundle_metadata(
+def _finalize_arrow_rust_bundle_metadata(
     *,
     source_bundle: OfficialBundle,
     output_bundle_root: Path,
     target: Mapping[str, Any],
     selected_keys: Sequence[str],
     stamp_precomputed_metadata: bool,
-    source_mode: str = "arrow-rust",
 ) -> OfficialBundle:
     payload = json.loads((output_bundle_root / "bundle.json").read_text(encoding="utf-8"))
     feature_count = int(target["feature_count"])
     tree_count = int(target["params"]["n_estimators"])
     payload["bundle_name"] = (
-        f"{payload['bundle_name']}_minimal_raw_block_local_promoted_{feature_count}_{tree_count}trees"
+        f"{payload['bundle_name']}_arrow_rust_block_local_promoted_{feature_count}_{tree_count}trees"
     )
     assets = payload.setdefault("assets", {})
     if not isinstance(assets, dict):
@@ -3069,12 +1856,12 @@ def _finalize_minimal_raw_bundle_metadata(
         _stamp_precomputed_promoted_bundle_metadata(
             output_bundle_root=output_bundle_root,
             target=target,
-            source_mode=source_mode,
+            source_mode="arrow-rust",
         )
     return _bundle_with_promoted_target(load_bundle(output_bundle_root), target)
 
 
-def _materialize_minimal_raw_feature_bundle(
+def _materialize_arrow_rust_feature_bundle(
     *,
     source_bundle: OfficialBundle,
     output_bundle_root: Path,
@@ -3085,15 +1872,11 @@ def _materialize_minimal_raw_feature_bundle(
     table_keys: Sequence[str] | None,
     datasets: set[str] | None,
     limit_rows: int | None,
-    pair_batch_size: int,
-    query_batch_pair_limit: int,
     max_exemplars: int,
-    max_top_k: int,
     reuse_existing_features: bool,
     pairwise_model_nan_value: float,
     pairwise_aggregate_nan_value: float,
     row_nan_policy: str,
-    feature_mode: str = "arrow-rust",
     name_counts_index_root: Path | None = None,
 ) -> tuple[OfficialBundle, list[dict[str, Any]]]:
     _copy_bundle_support_files(
@@ -3107,13 +1890,12 @@ def _materialize_minimal_raw_feature_bundle(
         for table_key in _source_featureless_table_keys(source_bundle)
         if table_key_set is None or table_key in table_key_set
     ]
-    mode_label = str(feature_mode)
     materialized_keys: list[str] = []
     summaries: list[dict[str, Any]] = []
     target_features = tuple(str(feature) for feature in target["features"])
-    table_plans: dict[str, MinimalRawTablePlan] = {}
+    table_plans: dict[str, ArrowRustTablePlan] = {}
     table_plan_order: list[str] = []
-    pending_by_dataset: dict[str, list[MinimalRawPendingShard]] = {}
+    pending_by_dataset: dict[str, list[ArrowRustPendingShard]] = {}
     component_membership_cache: dict[str, pd.DataFrame] = {}
 
     def append_empty_selection_summary(
@@ -3131,13 +1913,13 @@ def _materialize_minimal_raw_feature_bundle(
             "rows": 0,
             "datasets": [],
             "seconds": 0.0,
-            "mode": mode_label,
+            "mode": "arrow-rust",
             "skipped": "empty_selection",
             "label_filtering": label_filtering_summary,
             "structural_cleaning": structural_cleaning_summary,
         }
         summaries.append(summary)
-        print(json.dumps({"event": "minimal_raw_table_featureization_skipped", **summary}), flush=True)
+        print(json.dumps({"event": "arrow_rust_table_featureization_skipped", **summary}), flush=True)
 
     for table_key in selected_keys:
         labels_path = _asset_file(source_bundle, "featureless_rows", table_key)
@@ -3146,7 +1928,7 @@ def _materialize_minimal_raw_feature_bundle(
         print(
             json.dumps(
                 {
-                    "event": "minimal_raw_table_featureization_start",
+                    "event": "arrow_rust_table_featureization_start",
                     "table_key": table_key,
                     "output_path": str(output_path),
                 }
@@ -3158,7 +1940,7 @@ def _materialize_minimal_raw_feature_bundle(
         labels = labels.iloc[positions].reset_index(drop=True)
         labels, label_filtering_summary = _drop_unlabeled_singleton_orcid_rows(
             labels,
-            context=f"{mode_label}:{table_key}",
+            context=f"arrow-rust:{table_key}",
         )
         if labels.empty:
             append_empty_selection_summary(
@@ -3174,21 +1956,13 @@ def _materialize_minimal_raw_feature_bundle(
                 },
             )
             continue
-        if mode_label == "arrow-rust":
-            labels, structural_cleaning_summary = _clean_arrow_rust_structural_rows(
-                source_bundle=source_bundle,
-                table_key=table_key,
-                rows=labels,
-                component_membership_cache=component_membership_cache,
-                name_counts_index_root=name_counts_index_root,
-            )
-        else:
-            labels, structural_cleaning_summary = _clean_minimal_raw_structural_rows(
-                source_bundle=source_bundle,
-                table_key=table_key,
-                rows=labels,
-                component_membership_cache=component_membership_cache,
-            )
+        labels, structural_cleaning_summary = _clean_arrow_rust_structural_rows(
+            source_bundle=source_bundle,
+            table_key=table_key,
+            rows=labels,
+            component_membership_cache=component_membership_cache,
+            name_counts_index_root=name_counts_index_root,
+        )
         required_output_columns = _required_materialized_output_columns(labels, target_features)
         if labels.empty:
             append_empty_selection_summary(
@@ -3213,27 +1987,25 @@ def _materialize_minimal_raw_feature_bundle(
                 "rows": int(row_count),
                 "datasets": [],
                 "seconds": 0.0,
-                "mode": mode_label,
+                "mode": "arrow-rust",
                 "reused": True,
                 "label_filtering": label_filtering_summary,
                 "structural_cleaning": structural_cleaning_summary,
             }
             summaries.append(summary)
             materialized_keys.append(table_key)
-            print(json.dumps({"event": "minimal_raw_table_featureization_done", **summary}), flush=True)
+            print(json.dumps({"event": "arrow_rust_table_featureization_done", **summary}), flush=True)
             continue
 
         partial_dir = output_path.parent / "_partial" / output_path.stem
         if partial_dir.exists() and not reuse_existing_features:
             shutil.rmtree(partial_dir)
         partial_dir.mkdir(parents=True, exist_ok=True)
-        plan = MinimalRawTablePlan(
+        plan = ArrowRustTablePlan(
             table_key=table_key,
             labels_path=labels_path,
             output_path=output_path,
             labels=labels,
-            required_output_columns=required_output_columns,
-            partial_dir=partial_dir,
             partial_paths=[],
             dataset_summaries=[],
             label_filtering_summary=label_filtering_summary,
@@ -3259,7 +2031,7 @@ def _materialize_minimal_raw_feature_bundle(
                         "dataset": dataset_name,
                         "rows": int(row_count),
                         "seconds": 0.0,
-                        "mode": mode_label,
+                        "mode": "arrow-rust",
                         "reused": True,
                     }
                 )
@@ -3267,7 +2039,7 @@ def _materialize_minimal_raw_feature_bundle(
                 print(
                     json.dumps(
                         {
-                            "event": "minimal_raw_dataset_featureization_reused",
+                            "event": "arrow_rust_dataset_featureization_reused",
                             "table_key": table_key,
                             "dataset": dataset_name,
                             "rows": int(row_count),
@@ -3278,7 +2050,7 @@ def _materialize_minimal_raw_feature_bundle(
                 )
                 continue
             pending_by_dataset.setdefault(dataset_name, []).append(
-                MinimalRawPendingShard(
+                ArrowRustPendingShard(
                     table_key=table_key,
                     dataset_name=dataset_name,
                     rows=dataset_rows.reset_index(drop=True),
@@ -3291,8 +2063,8 @@ def _materialize_minimal_raw_feature_bundle(
         print(
             json.dumps(
                 {
-                    "event": "minimal_raw_dataset_context_start",
-                    "mode": mode_label,
+                    "event": "arrow_rust_dataset_context_start",
+                    "mode": "arrow-rust",
                     "dataset": dataset_name,
                     "shards": len(shards),
                     "rows": int(sum(len(shard.rows) for shard in shards)),
@@ -3301,27 +2073,18 @@ def _materialize_minimal_raw_feature_bundle(
             ),
             flush=True,
         )
-        if mode_label == "arrow-rust":
-            context = _build_arrow_rust_dataset_context(
-                source_bundle=source_bundle,
-                dataset_name=dataset_name,
-                name_counts_index_root=name_counts_index_root,
-            )
-        else:
-            context = _build_minimal_raw_dataset_context(
-                source_bundle=source_bundle,
-                dataset_name=dataset_name,
-                clusterer=clusterer,
-                n_jobs=n_jobs,
-                max_exemplars=max_exemplars,
-            )
+        context = _build_arrow_rust_dataset_context(
+            source_bundle=source_bundle,
+            dataset_name=dataset_name,
+            name_counts_index_root=name_counts_index_root,
+        )
         try:
             for shard in shards:
                 print(
                     json.dumps(
                         {
-                            "event": "minimal_raw_dataset_featureization_start",
-                            "mode": mode_label,
+                            "event": "arrow_rust_dataset_featureization_start",
+                            "mode": "arrow-rust",
                             "table_key": shard.table_key,
                             "dataset": shard.dataset_name,
                             "rows": int(len(shard.rows)),
@@ -3329,36 +2092,19 @@ def _materialize_minimal_raw_feature_bundle(
                     ),
                     flush=True,
                 )
-                if mode_label == "arrow-rust":
-                    dataset_features, dataset_summary = _materialize_arrow_rust_dataset_rows(
-                        context=cast(ArrowRustDatasetContext, context),
-                        rows=shard.rows,
-                        target_features=target_features,
-                        clusterer=clusterer,
-                        n_jobs=n_jobs,
-                        total_ram_bytes=total_ram_bytes,
-                        max_exemplars=max_exemplars,
-                        pairwise_model_nan_value=float(pairwise_model_nan_value),
-                        pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
-                        row_nan_policy=str(row_nan_policy),
-                    )
-                else:
-                    dataset_features, dataset_summary = _materialize_minimal_raw_dataset_rows(
-                        context=cast(MinimalRawDatasetContext, context),
-                        rows=shard.rows,
-                        target_features=target_features,
-                        clusterer=clusterer,
-                        n_jobs=n_jobs,
-                        total_ram_bytes=total_ram_bytes,
-                        pair_batch_size=pair_batch_size,
-                        query_batch_pair_limit=query_batch_pair_limit,
-                        max_exemplars=max_exemplars,
-                        max_top_k=max_top_k,
-                        pairwise_model_nan_value=float(pairwise_model_nan_value),
-                        pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
-                        row_nan_policy=str(row_nan_policy),
-                    )
-                _write_minimal_raw_partial(
+                dataset_features, dataset_summary = _materialize_arrow_rust_dataset_rows(
+                    context=context,
+                    rows=shard.rows,
+                    target_features=target_features,
+                    clusterer=clusterer,
+                    n_jobs=n_jobs,
+                    total_ram_bytes=total_ram_bytes,
+                    max_exemplars=max_exemplars,
+                    pairwise_model_nan_value=float(pairwise_model_nan_value),
+                    pairwise_aggregate_nan_value=float(pairwise_aggregate_nan_value),
+                    row_nan_policy=str(row_nan_policy),
+                )
+                _write_arrow_rust_partial(
                     shard=shard,
                     dataset_features=dataset_features,
                     target_features=target_features,
@@ -3369,8 +2115,8 @@ def _materialize_minimal_raw_feature_bundle(
                 print(
                     json.dumps(
                         {
-                            "event": "minimal_raw_dataset_featureization_done",
-                            "mode": mode_label,
+                            "event": "arrow_rust_dataset_featureization_done",
+                            "mode": "arrow-rust",
                             "table_key": shard.table_key,
                             "partial_path": str(shard.partial_path),
                             **dataset_summary,
@@ -3381,31 +2127,26 @@ def _materialize_minimal_raw_feature_bundle(
                 del dataset_features
                 gc.collect()
         finally:
-            if mode_label == "arrow-rust":
-                _release_arrow_rust_dataset_context(cast(ArrowRustDatasetContext, context))
-            else:
-                _release_minimal_raw_dataset_context(cast(MinimalRawDatasetContext, context))
+            _release_arrow_rust_dataset_context(context)
             del context
 
     for table_key in table_plan_order:
-        summary = _finalize_minimal_raw_table_plan(
+        summary = _finalize_arrow_rust_table_plan(
             plan=table_plans[table_key],
             target_features=target_features,
             source_bundle=source_bundle,
-            mode_label=mode_label,
         )
         summaries.append(summary)
-        print(json.dumps({"event": "minimal_raw_table_featureization_done", **summary}), flush=True)
+        print(json.dumps({"event": "arrow_rust_table_featureization_done", **summary}), flush=True)
 
     _write_json(output_bundle_root / "featureization_summary.json", summaries)
     return (
-        _finalize_minimal_raw_bundle_metadata(
+        _finalize_arrow_rust_bundle_metadata(
             source_bundle=source_bundle,
             output_bundle_root=output_bundle_root,
             target=target,
             selected_keys=materialized_keys,
             stamp_precomputed_metadata=table_keys is None and datasets is None and limit_rows is None,
-            source_mode=mode_label,
         ),
         summaries,
     )
@@ -3780,10 +2521,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         source_bundle = load_bundle(args.source_bundle_root)
         clusterer = load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
         clusterer.use_cache = False
-        _assert_pairwise_model_is_raw_bundle_compatible(clusterer, args.pairwise_model_path)
-        pair_batch_size = int(args.pair_batch_size) if args.pair_batch_size is not None else int(clusterer.batch_size)
+        _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
         feature_bundle_root = output_dir / f"{str(args.feature_mode).replace('-', '_')}_feature_bundle"
-        feature_bundle, featureization_summaries = _materialize_minimal_raw_feature_bundle(
+        feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(
             source_bundle=source_bundle,
             output_bundle_root=feature_bundle_root,
             target=target,
@@ -3793,15 +2533,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             table_keys=_parse_tables(args.tables),
             datasets=_parse_datasets(args.datasets),
             limit_rows=args.limit_rows,
-            pair_batch_size=pair_batch_size,
-            query_batch_pair_limit=int(args.query_batch_pair_limit),
             max_exemplars=int(args.max_exemplars),
-            max_top_k=int(args.max_top_k),
             reuse_existing_features=bool(args.reuse_existing_features),
             pairwise_model_nan_value=pairwise_model_nan_value,
             pairwise_aggregate_nan_value=pairwise_aggregate_nan_value,
             row_nan_policy=str(args.row_nan_policy),
-            feature_mode=str(args.feature_mode),
             name_counts_index_root=(
                 Path(args.arrow_name_counts_index_root) if args.arrow_name_counts_index_root is not None else None
             ),
@@ -4040,7 +2776,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=NAN_POLICY_CHOICES,
         default="preserve",
         help=(
-            "Missing-value policy for pairwise model feature matrices in minimal raw materialization. "
+            "Missing-value policy for pairwise model feature matrices in Arrow materialization. "
             "The production default preserves NaNs for the pairwise distance model internals."
         ),
     )
@@ -4061,10 +2797,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-jobs", type=int, default=20)
     parser.add_argument("--total-ram-bytes", type=int, default=DEFAULT_TOTAL_RAM_BYTES)
-    parser.add_argument("--pair-batch-size", type=int, default=None)
-    parser.add_argument("--query-batch-pair-limit", type=int, default=200_000)
     parser.add_argument("--max-exemplars", type=int, default=4)
-    parser.add_argument("--max-top-k", type=int, default=DEFAULT_CHOOSER_CACHE_MAX_TOP_K)
     parser.add_argument(
         "--tables", nargs="*", help="Optional table keys to materialize in feature rematerialization modes."
     )

@@ -597,7 +597,7 @@ def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_constrain
     monkeypatch.setattr(
         model_module,
         "get_constraints_block_upper_triangle_indexed_rust",
-        lambda _dataset, _block_signature_indices, *, max_pairs, **_kwargs: (
+        lambda _block_signature_indices, *, max_pairs, **_kwargs: (
             _IndexValuesThatShouldNotBeConverted(),
             _IndexValuesThatShouldNotBeConverted(),
             [None] * int(max_pairs),
@@ -630,7 +630,7 @@ def test_make_distance_matrices_from_rust_featurizer_checks_fastcluster_constrai
     monkeypatch.setattr(
         model_module,
         "get_constraints_block_upper_triangle_indexed_rust",
-        lambda _dataset, _block_signature_indices, *, max_pairs, **_kwargs: (
+        lambda _block_signature_indices, *, max_pairs, **_kwargs: (
             [],
             [],
             [None] * (int(max_pairs) - 1),

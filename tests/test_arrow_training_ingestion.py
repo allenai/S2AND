@@ -35,7 +35,12 @@ from s2and.arrow_training import (  # noqa: E402
 )
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
-from s2and.featurizer import FeaturizationInfo, featurize  # noqa: E402
+from s2and.featurizer import (  # noqa: E402
+    DEFAULT_FEATURE_GROUPS,
+    DEFAULT_NAMELESS_FEATURE_GROUPS,
+    FeaturizationInfo,
+    featurize,
+)
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table  # noqa: E402
 from s2and.incremental_linking.feature_block_arrow import (  # noqa: E402
     write_name_counts_index,
@@ -58,25 +63,6 @@ if not HAS_RUST:
     )
 
 DUMMY_DIR = Path(__file__).resolve().parent / "dummy"
-
-# Mirrors scripts/production/model/train_pairwise.py FEATURES_TO_USE.
-PRODUCTION_FEATURES = (
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-)
-NAMELESS_FEATURES = tuple(
-    name for name in PRODUCTION_FEATURES if name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-)
 
 
 def _write_minimal_signatures_table(path: Path, signature_ids: list[str | None]) -> None:
@@ -472,11 +458,11 @@ def test_featurize_end_to_end_with_fixed_pairs(
     )
 
     featurizer_info = FeaturizationInfo(
-        features_to_use=list(PRODUCTION_FEATURES),
+        features_to_use=list(DEFAULT_FEATURE_GROUPS),
         featurizer_version=FEATURIZER_VERSION,
     )
     nameless_info = FeaturizationInfo(
-        features_to_use=list(NAMELESS_FEATURES),
+        features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         featurizer_version=FEATURIZER_VERSION,
     )
 

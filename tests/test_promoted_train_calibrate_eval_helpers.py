@@ -930,7 +930,7 @@ def test_build_classic_classifier_uses_configured_thread_count(monkeypatch: pyte
     assert classifier.get_params()["n_jobs"] == 8
 
 
-def test_minimal_raw_materialization_skips_tables_empty_after_dataset_filter(
+def test_arrow_rust_materialization_skips_tables_empty_after_dataset_filter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -992,25 +992,20 @@ def test_minimal_raw_materialization_skips_tables_empty_after_dataset_filter(
         "_output_table_relpath",
         lambda _table_key, labels_path: Path("features_corrected") / labels_path.name,
     )
-    monkeypatch.setattr(
-        replay,
-        "_clean_minimal_raw_structural_rows",
-        lambda **kwargs: (kwargs["rows"], {"rows_before": len(kwargs["rows"]), "rows_after": len(kwargs["rows"])}),
-    )
     monkeypatch.setattr(replay, "_required_materialized_output_columns", lambda _labels, _target_features: ["dataset"])
 
     def fail_build_context(**_kwargs) -> None:
         raise AssertionError("empty selected tables should not build dataset contexts")
 
-    monkeypatch.setattr(replay, "_build_minimal_raw_dataset_context", fail_build_context)
+    monkeypatch.setattr(replay, "_build_arrow_rust_dataset_context", fail_build_context)
 
     def fake_finalize(**kwargs):
         captured["selected_keys"] = list(kwargs["selected_keys"])
         return kwargs["source_bundle"]
 
-    monkeypatch.setattr(replay, "_finalize_minimal_raw_bundle_metadata", fake_finalize)
+    monkeypatch.setattr(replay, "_finalize_arrow_rust_bundle_metadata", fake_finalize)
 
-    _feature_bundle, summaries = replay._materialize_minimal_raw_feature_bundle(
+    _feature_bundle, summaries = replay._materialize_arrow_rust_feature_bundle(
         source_bundle=source_bundle,
         output_bundle_root=tmp_path / "output",
         target={"features": ["feature_a"]},
@@ -1020,10 +1015,7 @@ def test_minimal_raw_materialization_skips_tables_empty_after_dataset_filter(
         table_keys=None,
         datasets={"qian"},
         limit_rows=50,
-        pair_batch_size=100,
-        query_batch_pair_limit=100,
         max_exemplars=1,
-        max_top_k=1,
         reuse_existing_features=False,
         pairwise_model_nan_value=float("nan"),
         pairwise_aggregate_nan_value=0.0,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -12,21 +12,11 @@ from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from tests.helpers import build_dummy_dataset
 
 
-@pytest.fixture(autouse=True)
-def _clear_pair_feature_cache_state() -> Iterator[None]:
-    with featurizer_mod._CACHED_FEATURES_LOCK:
-        featurizer_mod.CACHED_FEATURES.clear()
-    yield
-    with featurizer_mod._CACHED_FEATURES_LOCK:
-        featurizer_mod.CACHED_FEATURES.clear()
-
-
 def _patch_pair_cache_paths(featurizer_info: FeaturizationInfo, cache_dir: Path) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_db_path = cache_dir / featurizer_mod.PAIR_FEATURE_CACHE_DB_FILENAME
     featurizer_info.cache_directory = lambda _dataset_name: str(cache_dir)  # type: ignore[method-assign]
     featurizer_info.cache_db_path = lambda _dataset_name: str(cache_db_path)  # type: ignore[method-assign]
-    featurizer_info.cache_storage_key = lambda _dataset_name: str(cache_db_path)  # type: ignore[method-assign]
     return cache_db_path
 
 
@@ -34,16 +24,68 @@ def test_write_cache_persists_to_sqlite_and_load_cache_round_trips(tmp_path: Pat
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
     cache_db_path = _patch_pair_cache_paths(featurizer_info, tmp_path / "pair_cache")
     feature_vector = np.arange(featurizer_mod.NUM_FEATURES, dtype=np.float64)
-    cached_features = featurizer_info._fresh_cache_payload()
-    cached_features["features"]["a___b"] = feature_vector
-    cached_features["__new_features__"]["a___b"] = feature_vector
+    featurizer_info.write_cache({"a___b": feature_vector}, "dataset")
 
-    featurizer_info.write_cache(cached_features, "dataset", incremental=True)
-
-    loaded = featurizer_info.load_cache("dataset")
-    np.testing.assert_array_equal(loaded["features"]["a___b"], feature_vector)
+    loaded = featurizer_info.load_cache("dataset", ["a___b"])
+    np.testing.assert_array_equal(loaded["a___b"], feature_vector)
     assert cache_db_path.exists()
-    assert loaded["__cache_backend__"] == "sqlite"
+    with sqlite3.connect(cache_db_path) as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM cache_metadata"))
+    assert metadata == {
+        "feature_count": str(featurizer_mod.NUM_FEATURES),
+        "schema_version": str(featurizer_mod.PAIR_FEATURE_CACHE_SCHEMA_VERSION),
+    }
+
+
+def test_load_cache_reads_only_requested_rows(tmp_path: Path) -> None:
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    _patch_pair_cache_paths(featurizer_info, tmp_path / "pair_cache")
+    features = {
+        "a___b": np.zeros(featurizer_mod.NUM_FEATURES, dtype=np.float64),
+        "c___d": np.ones(featurizer_mod.NUM_FEATURES, dtype=np.float64),
+    }
+    featurizer_info.write_cache(features, "dataset")
+
+    loaded = featurizer_info.load_cache("dataset", ["c___d", "missing___pair"])
+
+    assert set(loaded) == {"c___d"}
+    np.testing.assert_array_equal(loaded["c___d"], features["c___d"])
+
+
+def test_write_cache_rejects_feature_vector_with_wrong_shape(tmp_path: Path) -> None:
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    _patch_pair_cache_paths(featurizer_info, tmp_path / "pair_cache")
+
+    with pytest.raises(ValueError, match="unexpected shape"):
+        featurizer_info.write_cache({"a___b": np.zeros(1, dtype=np.float64)}, "dataset")
+
+
+def test_load_cache_rejects_incompatible_feature_count_metadata(tmp_path: Path) -> None:
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    cache_db_path = _patch_pair_cache_paths(featurizer_info, tmp_path / "pair_cache")
+    feature_vector = np.zeros(featurizer_mod.NUM_FEATURES, dtype=np.float64)
+    featurizer_info.write_cache({"a___b": feature_vector}, "dataset")
+    with sqlite3.connect(cache_db_path) as connection:
+        connection.execute(
+            "UPDATE cache_metadata SET value = ? WHERE key = ?",
+            (str(featurizer_mod.NUM_FEATURES + 1), "feature_count"),
+        )
+
+    with pytest.raises(RuntimeError, match="Unsupported pair-feature cache feature count"):
+        featurizer_info.load_cache("dataset", ["a___b"])
+
+
+@pytest.mark.parametrize("metadata_key", ["schema_version", "feature_count"])
+def test_load_cache_rejects_missing_required_metadata(tmp_path: Path, metadata_key: str) -> None:
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    cache_db_path = _patch_pair_cache_paths(featurizer_info, tmp_path / metadata_key)
+    feature_vector = np.zeros(featurizer_mod.NUM_FEATURES, dtype=np.float64)
+    featurizer_info.write_cache({"a___b": feature_vector}, "dataset")
+    with sqlite3.connect(cache_db_path) as connection:
+        connection.execute("DELETE FROM cache_metadata WHERE key = ?", (metadata_key,))
+
+    with pytest.raises(RuntimeError, match=rf"missing required metadata.*{metadata_key}"):
+        featurizer_info.load_cache("dataset", ["a___b"])
 
 
 def test_load_cache_ignores_unrecognized_json_cache_files(tmp_path: Path) -> None:
@@ -56,9 +98,8 @@ def test_load_cache_ignores_unrecognized_json_cache_files(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    loaded = featurizer_info.load_cache("dataset")
-    assert loaded["__cache_backend__"] == "empty"
-    assert loaded["features"] == {}
+    loaded = featurizer_info.load_cache("dataset", ["legacy___pair"])
+    assert loaded == {}
     assert not cache_db_path.exists()
 
 
@@ -91,9 +132,6 @@ def test_many_pairs_featurize_reuses_persisted_pair_feature_cache(
     first_run_call_count = int(call_count["count"])
     assert first_run_call_count == len(pairs)
     assert Path(featurizer_info.cache_db_path(dataset.name)).exists()
-
-    with featurizer_mod._CACHED_FEATURES_LOCK:
-        featurizer_mod.CACHED_FEATURES.clear()
 
     many_pairs_featurize(
         pairs,

@@ -28,16 +28,10 @@ from s2and.incremental_linking.logistic_gate import load_logistic_gate_config, l
 from tests.helpers import import_s2and_rust
 from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
 
-_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
-    required_module_attrs=("RustLightGBMBooster",),
-)
-_HAS_RUST_LIGHTGBM = bool(
-    _HAS_RUST_LIGHTGBM
-    and hasattr(getattr(_RUST_LIGHTGBM_PAYLOAD, "RustLightGBMBooster", object), "predict_proba_positive_f32")
-)
+_HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust()
 requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
-    reason=f"RustLightGBMBooster unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
+    reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
 )
 
 

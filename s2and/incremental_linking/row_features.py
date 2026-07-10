@@ -8,9 +8,11 @@ from typing import Any
 
 import numpy as np
 
-import s2and_rust
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
+from s2and.runtime import load_s2and_rust_extension
+
+s2and_rust = load_s2and_rust_extension()
 
 logger = logging.getLogger("s2and")
 
@@ -158,9 +160,7 @@ def build_promoted_non_pairwise_row_features_with_telemetry(
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     """Build promoted non-`pw_*` linker features and return Rust row-formula telemetry."""
 
-    result = s2and_rust.promoted_linker_non_pairwise_features(  # type: ignore[unresolved-attribute]
-        _rust_payload(candidate_batch, row_signals)
-    )
+    result = s2and_rust.promoted_linker_non_pairwise_features(_rust_payload(candidate_batch, row_signals))
     if not isinstance(result, Mapping):
         raise RuntimeError("Rust promoted row-feature result must be a mapping")
     telemetry = _coerce_promoted_row_feature_telemetry(result)

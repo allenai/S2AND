@@ -187,24 +187,22 @@ def _constraint_report(
     incumbent_indices = _block_signature_indices(incumbent_featurizer, signature_ids)
     arrow_indices = _block_signature_indices(arrow_featurizer, signature_ids)
     inc_left, inc_right, inc_values = get_constraints_block_upper_triangle_indexed_rust(
-        None,
         incumbent_indices,
+        featurizer=incumbent_featurizer,
         start_offset=0,
         max_pairs=None,
         dont_merge_cluster_seeds=True,
         incremental_dont_use_cluster_seeds=False,
         num_threads=n_jobs,
-        featurizer=incumbent_featurizer,
     )
     arrow_left, arrow_right, arrow_values = get_constraints_block_upper_triangle_indexed_rust(
-        None,
         arrow_indices,
+        featurizer=arrow_featurizer,
         start_offset=0,
         max_pairs=None,
         dont_merge_cluster_seeds=True,
         incremental_dont_use_cluster_seeds=False,
         num_threads=n_jobs,
-        featurizer=arrow_featurizer,
     )
     value_mismatch_count = 0
     if len(inc_values) == len(arrow_values):
@@ -302,6 +300,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
 
+    from s2and.arrow_inputs import validate_arrow_prediction_artifacts
     from s2and.consts import NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import (
@@ -395,6 +394,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     clusterer.n_jobs = int(args.n_jobs)
     clusterer.use_cache = False
     timings["load_model_seconds"] = time.perf_counter() - start
+    arrow_paths = validate_arrow_prediction_artifacts(
+        arrow_paths,
+        require_specter=not args.no_specter,
+        require_name_counts_index=True,
+        expected_normalization_version=NORMALIZATION_VERSION,
+        context="full prediction Arrow parity",
+    )
 
     block_dict = {block_name: selected_signature_ids}
     clear_rust_featurizer_cache()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from collections.abc import Sequence
 from typing import Any
 
@@ -277,45 +276,6 @@ class FastCluster(TransformerMixin, BaseEstimator):
         self.input_as_observation_matrix = input_as_observation_matrix
         self.labels_ = None
 
-    # ---- new: robust get_params ----
-    def get_params(self, deep=True):
-        """
-        Return params but gracefully handle the case where an instance
-        (e.g., loaded from an old pickle) is missing attributes.
-        """
-        params = {}
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            # prefer the runtime attribute if present, otherwise the __init__ default
-            if hasattr(self, name):
-                params[name] = getattr(self, name)
-            else:
-                params[name] = param.default if param.default is not inspect.Parameter.empty else None
-
-        if deep:
-            # sklearn convention: include nested estimator params with __ separator
-            for key, val in list(params.items()):
-                if hasattr(val, "get_params"):
-                    for subk, subv in val.get_params(deep=True).items():
-                        params[f"{key}__{subk}"] = subv
-        return params
-
-    # ---- new: ensure defaults after unpickling ----
-    def __setstate__(self, state):
-        """
-        Called on unpickle. Populate any missing ctor attrs with their defaults.
-        """
-        self.__dict__.update(state)
-        sig = inspect.signature(self.__class__.__init__)
-        for name, param in sig.parameters.items():
-            if name == "self":
-                continue
-            if not hasattr(self, name):
-                default = param.default if param.default is not inspect.Parameter.empty else None
-                setattr(self, name, default)
-
     def fit(self, X: np.ndarray) -> FastCluster:
         """
         Fit the estimator on input data. The results are stored in self.labels_.
@@ -373,108 +333,3 @@ class FastCluster(TransformerMixin, BaseEstimator):
 
     def transform(self, X: np.ndarray):
         raise NotImplementedError("FastCluster has no inductive mode. Use 'fit' or 'fit_transform' instead.")
-
-
-class VotingClassifier:
-    """
-    Stripped-down version of VotingClassifier that uses prefit estimators
-
-    Parameters
-    ----------
-    estimators: List[sklearn classifier]
-        A list of sklearn classifiers that support predict_proba.
-    voting: string
-        Type of voting.
-        Defaults to "hard", can also be "soft".
-        "soft" means "take the highest average probability class" and
-        "hard" means "take the class that the plurality of the models pick"
-    weights: List or np.array
-        Weights for each estimator.
-    """
-
-    def __init__(self, estimators, voting="soft", weights=None):
-        self.estimators = estimators
-        self.voting = voting
-        self.weights = weights
-
-    def fit(self, X, y, sample_weight=None):
-        raise NotImplementedError
-
-    def predict(self, X):
-        """
-        Predict class labels for X.
-
-        Parameters
-        ----------
-        X: {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        predictions : array-like, shape = [n_samples]
-            Predicted class labels.
-        """
-        if self.voting == "soft":
-            predictions = np.argmax(self.predict_proba(X), axis=1)
-        elif self.voting == "hard":
-            predictions = np.apply_along_axis(
-                lambda x: np.argmax(np.bincount(x, weights=self.weights)),
-                axis=1,
-                arr=self._predict(X).astype("int"),
-            )
-        else:
-            raise ValueError("Voting type must be one of 'soft' or 'hard'")
-        return predictions
-
-    def _collect_probas(self, X):
-        """Collect results from clf.predict calls."""
-        return np.asarray([clf.predict_proba(_validated_classifier_features(clf, X)) for clf in self.estimators])
-
-    def predict_proba(self, X):
-        """
-        Compute probabilities of possible outcomes for samples in X.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        ----------
-        avg : array-like, shape = [n_samples, n_classes]
-            Weighted average probability for each class per sample.
-        """
-        if self.voting == "hard":
-            raise AttributeError(f"predict_proba is not available when voting={self.voting!r}")
-        avg = np.average(self._collect_probas(X), axis=0, weights=self.weights)
-        return avg
-
-    def transform(self, X):
-        """
-        Return class labels or probabilities for X for each estimator.
-
-        Parameters
-        ----------
-        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
-            Training vectors, where n_samples is the number of samples and
-            n_features is the number of features.
-
-        Returns
-        -------
-        If `voting='soft'`:
-          array-like = [n_classifiers, n_samples, n_classes]
-            Class probabilities calculated by each classifier.
-        If `voting='hard'`:
-          array-like = [n_samples, n_classifiers]
-            Class labels predicted by each classifier.
-        """
-        if self.voting == "soft":
-            return self._collect_probas(X)
-        else:
-            return self._predict(X)
-
-    def _predict(self, X):
-        """Collect results from clf.predict calls."""
-        return np.asarray([clf.predict(_validated_classifier_features(clf, X)) for clf in self.estimators]).T

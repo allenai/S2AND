@@ -17,7 +17,7 @@ use crate::{
     build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
     hash_string_values, prefilter_affiliation_text, py_len, query_terms_from_values,
     raw_arrow_year_mean, term_set_from_normalized_text, validate_row_signal_year, vector_norm_f32,
-    RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
+    RetrievalError, RetrievalQueryData, RetrievalSummaryData, RETRIEVAL_MEGA_AUTHOR_THRESHOLD,
 };
 pub(crate) fn build_raw_arrow_feature(
     signature: &RawArrowSignature,
@@ -263,19 +263,19 @@ pub(crate) fn euclidean_distance_f32(left: &[f32], right: &[f32]) -> f64 {
 pub(crate) fn validate_raw_arrow_specter_dimensions(
     component_key: &str,
     vectors: &[&[f32]],
-) -> Result<(), String> {
+) -> Result<(), RetrievalError> {
     let Some(first) = vectors.first() else {
         return Ok(());
     };
     let expected_dim = first.len();
     for vector in vectors.iter().skip(1) {
         if vector.len() != expected_dim {
-            return Err(format!(
+            return Err(RetrievalError::InvalidValue(format!(
                 "component_key '{}' has mixed SPECTER dimensions: expected {}, got {}",
                 component_key,
                 expected_dim,
                 vector.len()
-            ));
+            )));
         }
     }
     Ok(())
@@ -360,7 +360,7 @@ pub(crate) fn build_raw_arrow_summary(
     signature_ids: &[String],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     max_exemplars: usize,
-) -> Result<RetrievalSummaryData, String> {
+) -> Result<RetrievalSummaryData, RetrievalError> {
     let mut first_name_counts: HashMap<String, usize> = HashMap::new();
     let mut middle_initial_counts: HashMap<u64, usize> = HashMap::new();
     let mut coauthor_counts: HashMap<u64, usize> = HashMap::new();
@@ -375,10 +375,10 @@ pub(crate) fn build_raw_arrow_summary(
 
     for signature_id in signature_ids {
         let feature = features_by_signature_id.get(signature_id).ok_or_else(|| {
-            format!(
+            RetrievalError::MissingKey(format!(
                 "cluster seed signature_id '{}' is missing from computed raw Arrow features",
                 signature_id
-            )
+            ))
         })?;
         if py_len(&feature.query.first) > 1 {
             *first_name_counts

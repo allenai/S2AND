@@ -8,6 +8,7 @@ import pytest
 
 import s2and.feature_port as feature_port
 import s2and.runtime as runtime
+from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
@@ -61,18 +62,17 @@ def _touch_arrow_bundle(tmp_path: Path) -> dict[str, str]:
 
 
 def test_arrow_production_builder_calls_only_arrow_constructor(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     paths = _touch_arrow_bundle(tmp_path)
-    monkeypatch.setattr(
-        feature_port,
-        "validate_arrow_prediction_artifacts",
-        lambda paths_arg, **_kwargs: dict(paths_arg),
+    validated_paths = ValidatedArrowInputs(
+        paths=paths,
+        generation_id="test-generation",
+        normalization_version=NORMALIZATION_VERSION,
     )
 
     featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-        paths,
+        validated_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=[1, "2"],
         name_tuples={("ada", "a")},

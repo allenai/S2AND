@@ -34,6 +34,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
+from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.incremental_linking_training.classic import _drop_unlabeled_singleton_orcid_rows
 from scripts.eps_sweep.common import (
     DEFAULT_ARROW_ROOT,
@@ -261,7 +262,7 @@ def _optional_str(value: Any) -> str | None:
 
 def _read_arrow_signatures_for_planning(
     args: argparse.Namespace,
-    arrow_paths: Mapping[str, str],
+    arrow_paths: ValidatedArrowInputs,
     target_signature_ids: set[str],
 ) -> ArrowPlanningState:
     """Read Arrow signature metadata needed for target-bearing base blocks."""
@@ -695,7 +696,11 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
     return payload["dist"]
 
 
-def _build_arrow_featurizer(clusterer: Any, arrow_paths: Mapping[str, str], signature_ids: Sequence[str]) -> Any:
+def _build_arrow_featurizer(
+    clusterer: Any,
+    arrow_paths: ValidatedArrowInputs,
+    signature_ids: Sequence[str],
+) -> Any:
     """Build a Rust featurizer from Arrow paths for the requested signatures."""
 
     from s2and.arrow_inputs import require_feature_contract_normalization_version
@@ -720,7 +725,7 @@ def _ensure_distance_caches(
     clusterer: Any,
     selected_subblocks: dict[str, list[str]],
     cache_dir: Path,
-    arrow_paths: Mapping[str, str],
+    arrow_paths: ValidatedArrowInputs,
 ) -> list[dict[str, Any]]:
     """Ensure Arrow/Rust distance caches exist for selected subblocks."""
 

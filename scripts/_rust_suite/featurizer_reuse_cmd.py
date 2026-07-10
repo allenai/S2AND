@@ -71,7 +71,7 @@ def _build_train_dataset(
 
 def _run_cluster_eval(dataset: Any, clusterer: Any, cluster_eval_fn: Any) -> tuple[float, dict[str, Any]]:
     start = time.perf_counter()
-    cluster_metrics, _ = cluster_eval_fn(dataset, clusterer, split="test", use_s2_clusters=False)
+    cluster_metrics, _ = cluster_eval_fn(dataset, clusterer, split="test")
     return time.perf_counter() - start, cluster_metrics
 
 

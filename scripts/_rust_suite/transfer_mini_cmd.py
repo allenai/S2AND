@@ -458,33 +458,24 @@ def _single_run(
     from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.eval import cluster_eval
-    from s2and.featurizer import FeaturizationInfo, featurize
+    from s2and.featurizer import (
+        DEFAULT_FEATURE_GROUPS,
+        DEFAULT_NAMELESS_FEATURE_GROUPS,
+        FeaturizationInfo,
+        featurize,
+    )
     from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
     DATA_DIR = data_dir or _resolve_data_dir()
     N_VAL_TEST_SIZE = 10000
 
-    FEATURES_TO_USE = [
-        "name_similarity",
-        "affiliation_similarity",
-        "email_similarity",
-        "coauthor_similarity",
-        "venue_similarity",
-        "year_diff",
-        "title_similarity",
-        "misc_features",
-        "name_counts",
-        "embedding_similarity",
-        "journal_similarity",
-        "advanced_name_similarity",
-    ]
-    NAMELESS_FEATURES_TO_USE = [
-        f for f in FEATURES_TO_USE if f not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-    ]
-
-    FEATURIZER_INFO = FeaturizationInfo(features_to_use=FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION)
+    FEATURIZER_INFO = FeaturizationInfo(
+        features_to_use=list(DEFAULT_FEATURE_GROUPS),
+        featurizer_version=FEATURIZER_VERSION,
+    )
     NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
-        features_to_use=NAMELESS_FEATURES_TO_USE, featurizer_version=FEATURIZER_VERSION
+        features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
+        featurizer_version=FEATURIZER_VERSION,
     )
     MONOTONE_CONSTRAINTS = FEATURIZER_INFO.lightgbm_monotone_constraints
     NAMELESS_MONOTONE_CONSTRAINTS = NAMELESS_FEATURIZER_INFO.lightgbm_monotone_constraints

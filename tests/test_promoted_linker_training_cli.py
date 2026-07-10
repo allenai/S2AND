@@ -50,6 +50,7 @@ def test_promoted_training_requires_explicit_artifacts_and_defaults_to_arrow_rus
         parser.parse_args([])
     parser_defaults = vars(parser.parse_args(list(REQUIRED_TRAINING_ARGS)))
     feature_mode_action = next(action for action in parser._actions if action.dest == "feature_mode")  # noqa: SLF001
+    parser_destinations = {action.dest for action in parser._actions}  # noqa: SLF001
 
     assert parser_defaults["feature_mode"] == "arrow-rust"
     assert feature_mode_action.choices == ("arrow-rust", "precomputed-promoted")
@@ -61,13 +62,7 @@ def test_promoted_training_requires_explicit_artifacts_and_defaults_to_arrow_rus
     assert parser_defaults["hyperopt"] is False
     assert parser_defaults["hyperopt_evals"] is None
     assert parser_defaults["hyperopt_metric"] == "weighted_average_error"
-
-
-def test_minimal_raw_rust_is_not_public_feature_mode() -> None:
-    parser = promoted_train.build_parser()
-
-    with pytest.raises(SystemExit):
-        parser.parse_args([*REQUIRED_TRAINING_ARGS, "--feature-mode", "minimal-raw-rust"])
+    assert {"pair_batch_size", "query_batch_pair_limit", "max_top_k"}.isdisjoint(parser_destinations)
 
 
 def test_negative_limit_rows_is_rejected() -> None:
@@ -216,13 +211,12 @@ def test_finalized_arrow_materialization_bundle_creates_corrected_feature_asset_
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "bundle.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    bundle = promoted_train._finalize_minimal_raw_bundle_metadata(  # noqa: SLF001
+    bundle = promoted_train._finalize_arrow_rust_bundle_metadata(  # noqa: SLF001
         source_bundle=promoted_train.load_bundle(source_root),
         output_bundle_root=output_root,
         target={"feature_count": 1, "features": ["f0"], "params": {"n_estimators": 10}, "metrics": {}},
         selected_keys=["train_path"],
         stamp_precomputed_metadata=False,
-        source_mode="arrow-rust",
     )
 
     assert bundle.assets["corrected_feature_rows"]["root"] == "features_corrected"
@@ -296,9 +290,9 @@ def test_materialization_selects_source_tables_from_featureless_assets(
         captured["selected_keys"] = list(kwargs["selected_keys"])
         return kwargs["source_bundle"]
 
-    monkeypatch.setattr(promoted_train, "_finalize_minimal_raw_bundle_metadata", fake_finalize)
+    monkeypatch.setattr(promoted_train, "_finalize_arrow_rust_bundle_metadata", fake_finalize)
 
-    promoted_train._materialize_minimal_raw_feature_bundle(
+    promoted_train._materialize_arrow_rust_feature_bundle(
         source_bundle=source_bundle,
         output_bundle_root=tmp_path / "output",
         target={"features": ["f0"]},
@@ -308,10 +302,7 @@ def test_materialization_selects_source_tables_from_featureless_assets(
         table_keys=None,
         datasets=None,
         limit_rows=None,
-        pair_batch_size=100,
-        query_batch_pair_limit=100,
         max_exemplars=1,
-        max_top_k=1,
         reuse_existing_features=False,
         pairwise_model_nan_value=float("nan"),
         pairwise_aggregate_nan_value=0.0,
@@ -834,10 +825,10 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "load_bundle", lambda _path: bundle)
     monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: SimpleNamespace(batch_size=10))
-    monkeypatch.setattr(promoted_train, "_assert_pairwise_model_is_raw_bundle_compatible", lambda *_args: None)  # noqa: SLF001
+    monkeypatch.setattr(promoted_train, "_assert_pairwise_model_supports_arrow_materialization", lambda *_args: None)  # noqa: SLF001
     monkeypatch.setattr(
         promoted_train,
-        "_materialize_minimal_raw_feature_bundle",
+        "_materialize_arrow_rust_feature_bundle",
         lambda **_kwargs: (bundle, [{"mode": "arrow-rust"}]),
     )
     monkeypatch.setattr(promoted_train, "_run_classic_hyperopt", fake_hyperopt)  # noqa: SLF001

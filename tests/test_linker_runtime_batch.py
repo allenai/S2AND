@@ -5,7 +5,6 @@ from collections import Counter
 import numpy as np
 import pytest
 
-import s2and_rust
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking.query_adapter import mask_query_features
 from s2and.incremental_linking.retrieval import build_linker_retrieval_batch_rust
@@ -13,15 +12,11 @@ from s2and.incremental_linking.row_features import (
     build_promoted_non_pairwise_row_features,
     build_promoted_non_pairwise_row_features_with_telemetry,
 )
+from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import build_cluster_summary, build_query_features
 from tests.linker_row_feature_reference import build_promoted_non_pairwise_row_features_python_reference
 
-
-def test_rust_retrieval_public_exports_are_available() -> None:
-    assert s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME == "h_wang_any_input_v2"
-    assert hasattr(s2and_rust, "RustHybridCentroidRetriever")
-    assert not hasattr(s2and_rust, "RustNameCompatibleSubblockSelector")
-    assert not hasattr(s2and_rust, "DEFAULT_HYBRID_CENTROID_WEIGHTS")
+s2and_rust = load_s2and_rust_extension()
 
 
 def test_pair_plan_rejects_values_above_uint16_rank_limit() -> None:
@@ -254,15 +249,15 @@ def test_retrieval_batch_rejects_duplicate_query_signature_indices_for_per_query
         )
 
 
-def test_rust_retrieval_batch_rejects_stale_pair_plan_schema() -> None:
-    class StaleRetriever:
+def test_rust_retrieval_batch_rejects_missing_pair_plan_contract_keys() -> None:
+    class ContractBreakingRetriever:
         def top_k_hybrid_centroid_pair_plan(self, *args, **kwargs):
             del args, kwargs
             return {"row_count": 0}
 
-    with pytest.raises(RuntimeError, match="stale pair-plan schema.*row_orcid_match"):
+    with pytest.raises(RuntimeError, match="violated its result contract.*row_orcid_match"):
         build_linker_retrieval_batch_rust(
-            retriever=StaleRetriever(),
+            retriever=ContractBreakingRetriever(),
             queries=[],
             query_signature_indices=np.asarray([], dtype=np.uint32),
             component_member_indices_by_key={},
@@ -303,14 +298,14 @@ def test_rust_retrieval_batch_rejects_missing_consumed_row_signal_key() -> None:
         "specter_centroid_similarity": np.asarray([], dtype=np.float32),
     }
 
-    class StaleRetriever:
+    class ContractBreakingRetriever:
         def top_k_hybrid_centroid_pair_plan(self, *args, **kwargs):
             del args, kwargs
             return dict(empty_plan)
 
-    with pytest.raises(RuntimeError, match="stale pair-plan schema.*specter_exemplar_similarity"):
+    with pytest.raises(RuntimeError, match="violated its result contract.*specter_exemplar_similarity"):
         build_linker_retrieval_batch_rust(
-            retriever=StaleRetriever(),
+            retriever=ContractBreakingRetriever(),
             queries=[],
             query_signature_indices=np.asarray([], dtype=np.uint32),
             component_member_indices_by_key={},

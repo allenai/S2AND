@@ -62,7 +62,7 @@ def _validate_name_counts_index(path: Path, errors: list[str], *, label: str) ->
         require_name_counts_index_artifact(
             path,
             context=label,
-            producer_hint="run scripts/convert_to_arrow.py name-counts-index or refresh the release checkout",
+            producer_hint="run scripts/production/counts/generate_name_counts.py or refresh the release checkout",
         )
     except (OSError, TypeError, ValueError) as exc:
         _record_error(errors, str(exc))

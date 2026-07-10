@@ -207,12 +207,6 @@ def collect_rust_extension_identity(
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
-    if s2and_rust is None:
-        message = "s2and_rust native extension is unavailable"
-        if fail_if_unavailable or require_release:
-            raise RuntimeError(message)
-        return {"available": False, "error_type": "MissingNativeExtension", "error": message}
-
     module_path_raw = getattr(s2and_rust, "__file__", None)
     if module_path_raw is None:
         message = "s2and_rust.__file__ is unavailable"
@@ -227,15 +221,13 @@ def collect_rust_extension_identity(
             raise RuntimeError(message)
         return {"available": False, "error_type": "MissingBinary", "error": message}
 
-    build_info: dict[str, Any] | None = None
-    get_build_info = getattr(s2and_rust, "get_build_info", None)
-    if callable(get_build_info):
-        raw_build_info = get_build_info()
-        if isinstance(raw_build_info, dict):
-            build_info = {str(key): value for key, value in raw_build_info.items()}
+    raw_build_info = s2and_rust.get_build_info()
+    if not isinstance(raw_build_info, dict):
+        raise RuntimeError("s2and_rust.get_build_info() returned a non-dict result")
+    build_info = {str(key): value for key, value in raw_build_info.items()}
 
     debug_assertions: bool | None = None
-    if isinstance(build_info, dict) and "debug_assertions" in build_info:
+    if "debug_assertions" in build_info:
         debug_assertions = bool(build_info["debug_assertions"])
 
     if require_release and debug_assertions is not False:

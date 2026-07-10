@@ -29,15 +29,14 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from s2and.arrow_inputs import (
+    ValidatedArrowInputs,
     require_normalization_version,
     validate_arrow_training_artifacts,
-    verified_arrow_artifact_generation,
 )
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import (
@@ -223,12 +222,11 @@ def load_specter_tuple_from_arrow(path: str | Path) -> tuple[np.ndarray, list[st
 
 def _bind_training_arrow_paths(
     dataset: ANDData,
-    normalized_paths: Mapping[str, str],
+    normalized_paths: ValidatedArrowInputs,
 ) -> None:
     """Bind one already-verified immutable generation to an ``ANDData``."""
 
-    normalized = dict(normalized_paths)
-    normalized.pop("query_signatures", None)
+    normalized = normalized_paths.without("query_signatures")
     index_manifest = json.loads((Path(normalized["name_counts_index"]) / "manifest.json").read_text(encoding="utf-8"))
     dataset.name_counts_provenance = validated_name_counts_provenance(
         index_manifest.get("source_provenance"),
@@ -241,11 +239,8 @@ def _bind_training_arrow_paths(
     from s2and import feature_port
 
     feature_port.evict_rust_featurizer(dataset)
-    verified_generation = verified_arrow_artifact_generation(normalized)
-    if verified_generation is None:
-        raise RuntimeError("validated Arrow training profile did not retain an artifact generation")
-    dataset.arrow_paths = MappingProxyType(normalized)
-    dataset.arrow_artifact_generation = verified_generation
+    dataset.arrow_paths = normalized
+    dataset.arrow_artifact_generation = normalized.generation_id
 
 
 def build_training_anddata_from_arrow(

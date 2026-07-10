@@ -1,27 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from s2and.consts import PROJECT_ROOT_PATH
-
-
-def _load_compare_module():
-    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
-    spec = importlib.util.spec_from_file_location("rust_suite", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from scripts import rust_suite
+from scripts._rust_suite import compare_cmd
 
 
 def test_language_feature_indices_detect_expected_columns():
-    module = _load_compare_module()
     feature_names = [
         "f0",
         "english_count",
@@ -29,12 +18,11 @@ def test_language_feature_indices_detect_expected_columns():
         "language_reliability_min",
         "f4",
     ]
-    indices = module._language_feature_indices(feature_names)
+    indices = compare_cmd._language_feature_indices(feature_names)
     assert indices == [1, 2, 3]
 
 
 def test_feature_parity_rejects_any_language_mismatch():
-    module = _load_compare_module()
     feature_names = [
         "first_names_equal",
         "english_count",
@@ -53,7 +41,7 @@ def test_feature_parity_rejects_any_language_mismatch():
     rust_features = python_features.copy()
     rust_features[0, 2] = 0.0
 
-    parity = module._compute_feature_parity(
+    parity = compare_cmd._compute_feature_parity(
         python_features,
         rust_features,
         feature_names,
@@ -67,12 +55,11 @@ def test_feature_parity_rejects_any_language_mismatch():
 
 
 def test_feature_parity_fails_on_non_language_mismatch():
-    module = _load_compare_module()
     feature_names = ["first_names_equal", "english_count", "year_diff"]
     python_features = np.array([[1.0, 2.0, 3.0]], dtype=np.float64)
     rust_features = np.array([[1.0, 2.0, 3.5]], dtype=np.float64)
 
-    parity = module._compute_feature_parity(
+    parity = compare_cmd._compute_feature_parity(
         python_features,
         rust_features,
         feature_names,
@@ -85,8 +72,7 @@ def test_feature_parity_fails_on_non_language_mismatch():
 
 
 def test_feature_parity_requires_exact_discrete_values() -> None:
-    module = _load_compare_module()
-    parity = module._compute_feature_parity(
+    parity = compare_cmd._compute_feature_parity(
         np.asarray([[1.0]], dtype=np.float64),
         np.asarray([[1.0 + 1e-7]], dtype=np.float64),
         ["english_count"],
@@ -98,7 +84,6 @@ def test_feature_parity_requires_exact_discrete_values() -> None:
 
 
 def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
-    module = _load_compare_module()
     dataset = "mini"
     dataset_dir = tmp_path / "data" / dataset
     dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -119,7 +104,7 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
     with (dataset_dir / f"{dataset}_papers.json").open("w", encoding="utf-8") as f:
         json.dump(papers, f)
 
-    signatures_input, papers_input, tmpdir = module._load_dataset_inputs(
+    signatures_input, papers_input, tmpdir = compare_cmd._load_dataset_inputs(
         dataset,
         limit=2,
         project_root=str(tmp_path),
@@ -144,7 +129,6 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
 
 
 def test_rust_suite_requires_subcommand():
-    module = _load_compare_module()
     with pytest.raises(SystemExit) as exc_info:
-        module.main([])
+        rust_suite.main([])
     assert exc_info.value.code not in (0, None)

@@ -30,7 +30,12 @@ os.environ.setdefault("S2AND_BACKEND", "rust")
 
 from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
-from s2and.featurizer import FeaturizationInfo, featurize  # noqa: E402
+from s2and.featurizer import (  # noqa: E402
+    DEFAULT_FEATURE_GROUPS,
+    DEFAULT_NAMELESS_FEATURE_GROUPS,
+    FeaturizationInfo,
+    featurize,
+)
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
 from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
 
@@ -46,26 +51,6 @@ DEFAULT_VAL_TEST_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_CHUNK_SIZE = 100
-
-FEATURES_TO_USE = (
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-)
-NAMELESS_FEATURES_TO_USE = tuple(
-    feature_name
-    for feature_name in FEATURES_TO_USE
-    if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-)
 
 
 def _search_space() -> dict[str, Any]:
@@ -133,12 +118,12 @@ def _training_config(args: argparse.Namespace, dataset_names: list[str]) -> dict
         "block_type": DEFAULT_BLOCK_TYPE,
         "chunk_size": int(args.chunk_size),
         "data_dir": str(Path(args.data_dir)),
-        "features_to_use": list(FEATURES_TO_USE),
+        "features_to_use": list(DEFAULT_FEATURE_GROUPS),
         "featurizer_version": int(FEATURIZER_VERSION),
         "include_augmented": bool(args.include_augmented),
         "n_iter": int(args.n_iter),
         "n_jobs": int(args.n_jobs),
-        "nameless_features_to_use": list(NAMELESS_FEATURES_TO_USE),
+        "nameless_features_to_use": list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         "production_version": str(args.production_version),
         "source_dataset_names": dataset_names,
         "specter_suffix": str(args.specter_suffix),
@@ -159,9 +144,12 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
 
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir or data_dir / f"production_model_v{args.production_version}")
-    featurizer_info = FeaturizationInfo(features_to_use=list(FEATURES_TO_USE), featurizer_version=FEATURIZER_VERSION)
+    featurizer_info = FeaturizationInfo(
+        features_to_use=list(DEFAULT_FEATURE_GROUPS),
+        featurizer_version=FEATURIZER_VERSION,
+    )
     nameless_featurizer_info = FeaturizationInfo(
-        features_to_use=list(NAMELESS_FEATURES_TO_USE),
+        features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         featurizer_version=FEATURIZER_VERSION,
     )
     if args.negative_one_for_nan:

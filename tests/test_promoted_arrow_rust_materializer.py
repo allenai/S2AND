@@ -1,64 +1,31 @@
+"""Tests for promoted Arrow/Rust feature materialization."""
+
 from __future__ import annotations
 
 import json
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
-import s2and.incremental_linking.query_adapter as retrieval
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking_training.classic import OfficialBundle
-from s2and.incremental_linking_training.query_support import build_rust_hybrid_centroid_retriever
 from scripts.production.model import linker_train_calibrate_eval as promoted_train
 from scripts.production.model.linker_train_calibrate_eval import (
     _apply_row_nan_policy,
     _arrow_paths_for_dataset,
     _arrow_row_seed_bypass_mask,
-    _clean_minimal_raw_structural_rows,
-    _component_member_details_by_key,
-    _has_query_seed_connection,
+    _clean_arrow_rust_structural_rows,
     _load_target,
-    _query_first_token_for_prefix,
     _resolve_arrow_rust_pair_labels,
-    _resolve_candidate_batch_pair_labels,
-    _row_allows_seed_constraint_bypass,
     _row_label_is_positive,
-    _score_candidate_summaries_with_frozen_rust_policy,
-    _write_minimal_raw_partial_frame,
+    _write_arrow_rust_partial_frame,
 )
-from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
-
-
-class _ConstraintClusterer:
-    def __init__(self) -> None:
-        self.calls: list[tuple[tuple[tuple[str, str], ...], bool]] = []
-
-    def _resolve_constraint_batch(
-        self,
-        _dataset,
-        pairs,
-        *,
-        partial_supervision,
-        runtime_context,
-        incremental_dont_use_cluster_seeds,
-        constraint_backend,
-    ):
-        assert partial_supervision == {}
-        assert runtime_context is None
-        assert constraint_backend is None
-        self.calls.append(
-            (
-                tuple((str(left), str(right)) for left, right in pairs),
-                bool(incremental_dont_use_cluster_seeds),
-            )
-        )
-        return [-90_000.0 for _pair in pairs], {}
+from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
 def _validate_resolved_arrow_path_keys(
@@ -246,7 +213,7 @@ def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None
     assert summary["semantic_nan_total"] > 0
 
 
-def test_minimal_raw_partial_writer_reuses_label_columns_as_features(tmp_path) -> None:
+def test_arrow_rust_partial_writer_reuses_label_columns_as_features(tmp_path) -> None:
     rows = pd.DataFrame(
         {
             "retrieval_rank": [1.0, 2.0],
@@ -256,7 +223,7 @@ def test_minimal_raw_partial_writer_reuses_label_columns_as_features(tmp_path) -
     )
     partial_path = tmp_path / "partial.parquet"
 
-    _write_minimal_raw_partial_frame(
+    _write_arrow_rust_partial_frame(
         rows=rows,
         row_positions=np.asarray([7, 8], dtype=np.int64),
         partial_path=partial_path,
@@ -324,70 +291,12 @@ def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:
     assert np.isnan(adjusted["strong_positive_anchor_score"]).all()
 
 
-def test_minimal_raw_constraint_resolution_bypasses_seed_constraints_and_ignores_disallow() -> None:
-    clusterer = _ConstraintClusterer()
-    batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.asarray([0, 0, 0], dtype=np.uint32),
-        right_signature_indices=np.asarray([1, 2, 3], dtype=np.uint32),
-        pair_row_indices=np.asarray([0, 0, 0], dtype=np.uint32),
-    )
-
-    labels, summary = _resolve_candidate_batch_pair_labels(
-        clusterer=clusterer,
-        dataset=cast(Any, SimpleNamespace()),
-        batch=batch,
-        index_to_signature_id={0: "q", 1: "a", 2: "b", 3: "c"},
-        runtime_context=None,
-        constraint_backend=None,
-        chunk_size=2,
-        pair_seed_bypass=np.asarray([False, True, True]),
-        pair_ignore_disallow=np.asarray([False, True, False]),
-    )
-
-    assert clusterer.calls == [
-        ((("q", "a"), ("q", "b")), False),
-        ((("q", "c"),), False),
-        ((("q", "b"), ("q", "c")), True),
-    ]
-    assert labels[0] == pytest.approx(-90_000.0)
-    assert np.isnan(labels[1])
-    assert labels[2] == pytest.approx(-90_000.0)
-    assert summary["constraint_pair_count"] == 3
-    assert summary["constraint_batch_calls"] == 2
-    assert summary["constraint_seed_bypass_pair_count"] == 2
-    assert summary["constraint_seed_bypass_batch_calls"] == 1
-    assert summary["constraint_disallow_ignored_pair_count"] == 1
-
-
-def test_minimal_raw_component_members_default_to_block_local_component_keys(tmp_path) -> None:
-    members_path = tmp_path / "members.parquet"
-    pd.DataFrame(
-        [
-            {"candidate_component_key": "m muller::284283", "member_index": 0, "signature_id": "a"},
-            {"candidate_component_key": "m muller::284283", "member_index": 1, "signature_id": "b"},
-            {"candidate_component_key": "m muller::284283", "member_index": 2, "signature_id": "c"},
-            {"candidate_component_key": "other::1", "member_index": 0, "signature_id": "d"},
-        ]
-    ).to_parquet(members_path, index=False)
-    dataset = SimpleNamespace(signature_to_block={"a": "g muller", "b": "m muller", "c": "m muller", "d": "x"})
-
-    details = _component_member_details_by_key(
-        members_path,
-        {"a": 0, "b": 1, "c": 2, "d": 3},
-        dataset=cast(Any, dataset),
-    )
-
-    assert details["m muller::284283"].signature_ids == ("b", "c")
-    assert details["m muller::284283"].signature_indices.tolist() == [1, 2]
-    assert details["other::1"].signature_ids == ("d",)
-
-
-def test_minimal_raw_structural_cleaning_drops_self_only_candidates(tmp_path) -> None:
+def test_arrow_rust_structural_cleaning_drops_self_only_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     components_dir = tmp_path / "components"
-    raw_dir = tmp_path / "raw" / "toy"
     components_dir.mkdir()
-    raw_dir.mkdir(parents=True)
     pd.DataFrame(
         [
             {"candidate_component_key": "toy block::self", "member_index": 0, "signature_id": "q1"},
@@ -397,29 +306,11 @@ def test_minimal_raw_structural_cleaning_drops_self_only_candidates(tmp_path) ->
             {"candidate_component_key": "plain_self", "member_index": 0, "signature_id": "q3"},
         ]
     ).to_parquet(components_dir / "toy_members.parquet", index=False)
-    signatures = {
-        signature_id: {
-            "signature_id": signature_id,
-            "paper_id": index,
-            "author_info": {"block": "toy block"},
-        }
-        for index, signature_id in enumerate(("q1", "n1", "q2", "n2", "q3"), start=1)
-    }
-    (raw_dir / "signatures.json").write_text(json.dumps(signatures), encoding="utf-8")
-    (raw_dir / "papers.json").write_text("{}", encoding="utf-8")
     bundle = OfficialBundle(
         root=tmp_path,
         bundle_name="toy",
         assets={
             "candidate_members": {"datasets": {"toy": "components/toy_members.parquet"}},
-            "raw_metadata": {
-                "datasets": {
-                    "toy": {
-                        "signatures_path": "raw/toy/signatures.json",
-                        "papers_path": "raw/toy/papers.json",
-                    }
-                }
-            },
         },
         models={},
         expected_metrics={},
@@ -457,11 +348,24 @@ def test_minimal_raw_structural_cleaning_drops_self_only_candidates(tmp_path) ->
         ]
     )
 
-    cleaned, summary = _clean_minimal_raw_structural_rows(
+    monkeypatch.setattr(
+        promoted_train,
+        "_load_arrow_signature_blocks",
+        lambda *_args, **_kwargs: {
+            "q1": "toy block",
+            "n1": "toy block",
+            "q2": "toy block",
+            "n2": "toy block",
+            "q3": "toy block",
+        },
+    )
+
+    cleaned, summary = _clean_arrow_rust_structural_rows(
         source_bundle=bundle,
         table_key="train_path",
         rows=rows,
         component_membership_cache={},
+        name_counts_index_root=None,
     )
 
     assert cleaned["candidate_component_key"].tolist() == ["toy block::with_neighbor", "toy block::other"]
@@ -472,55 +376,11 @@ def test_minimal_raw_structural_cleaning_drops_self_only_candidates(tmp_path) ->
     assert summary["positive_queries_changed_or_removed"] == 1
 
 
-def test_minimal_raw_positive_label_marks_training_disallow_ignore() -> None:
+def test_arrow_rust_positive_label_marks_training_disallow_ignore() -> None:
     assert _row_label_is_positive(SimpleNamespace(label=1))
     assert _row_label_is_positive(SimpleNamespace(label=1.0))
     assert not _row_label_is_positive(SimpleNamespace(label=0))
     assert not _row_label_is_positive(SimpleNamespace(label=np.nan))
-
-
-def test_minimal_raw_seed_bypass_detects_seeded_query_component() -> None:
-    dataset = SimpleNamespace(
-        cluster_seeds_require={"q": "seed_cluster", "m1": "seed_cluster", "other": "different"},
-        cluster_seeds_disallow=set(),
-    )
-    row = SimpleNamespace(
-        query_signature_id="q",
-        split="train",
-        source="",
-        source_key="",
-        source_kind="training",
-        support_type="",
-        supervision_type="",
-        query_in_seed_before_holdout=0,
-    )
-
-    assert _row_allows_seed_constraint_bypass(
-        cast(Any, dataset),
-        row,
-        seed_constraint_signature_ids=frozenset({"q", "m1", "other"}),
-    )
-    assert _has_query_seed_connection(cast(Any, dataset), query_signature_id="q", candidate_signature_ids=["m1"])
-    assert not _has_query_seed_connection(cast(Any, dataset), query_signature_id="q", candidate_signature_ids=["other"])
-
-
-def test_minimal_raw_seed_bypass_keeps_loo_marker_without_query_seed_flag() -> None:
-    dataset = SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow={("q", "m1")})
-    row = SimpleNamespace(
-        query_signature_id="q",
-        split="eval_loo",
-        source="",
-        source_key="s2and_eval",
-        source_kind="public_test",
-        support_type="",
-        supervision_type="",
-        query_in_seed_before_holdout=0,
-    )
-
-    assert _row_allows_seed_constraint_bypass(
-        cast(Any, dataset), row, seed_constraint_signature_ids=frozenset({"q", "m1"})
-    )
-    assert _has_query_seed_connection(cast(Any, dataset), query_signature_id="q", candidate_signature_ids=["m1"])
 
 
 def test_arrow_rust_row_seed_bypass_uses_manifest_seed_constraints() -> None:
@@ -558,7 +418,6 @@ def test_arrow_rust_pair_label_resolution_applies_seed_bypass_and_disallow_ignor
     calls: list[dict[str, Any]] = []
 
     def fake_constraints(
-        _dataset: Any,
         left: np.ndarray,
         right: np.ndarray,
         *,
@@ -566,13 +425,11 @@ def test_arrow_rust_pair_label_resolution_applies_seed_bypass_and_disallow_ignor
         incremental_dont_use_cluster_seeds: bool,
         num_threads: int,
         featurizer: Any,
-        runtime_context: Any,
         suppress_orcid: bool,
     ) -> np.ndarray:
         assert dont_merge_cluster_seeds is True
         assert num_threads == 2
         assert featurizer == "featurizer"
-        assert runtime_context is None
         assert suppress_orcid is True
         calls.append(
             {
@@ -772,71 +629,3 @@ def test_arrow_paths_alias_specter2_manifest_keys(
     assert paths["specter"] == str((dataset_dir / "specter2.arrow").resolve())
     assert paths["specter_batch_index"] == str((dataset_dir / "specter2.specter_batch_index.bin").resolve())
     assert paths["name_counts_index"] == str(Path(manifest_index).resolve())
-
-
-def test_minimal_raw_query_first_prefix_uses_full_author_before_masked_view() -> None:
-    group = pd.DataFrame(
-        [
-            {
-                "query_author": "Jianping Wang",
-                "query_first_token": "j",
-            }
-        ]
-    )
-
-    assert _query_first_token_for_prefix(group, cast(Any, SimpleNamespace(first="j"))) == "jianping"
-
-
-def test_minimal_raw_retrieval_score_uses_frozen_rust_policy() -> None:
-    rust_available, rust_payload = import_s2and_rust(
-        required_module_attrs=("RustHybridCentroidRetriever",),
-    )
-    if not rust_available:
-        raise pytest.skip.Exception(f"RustHybridCentroidRetriever unavailable: {rust_payload!r}")
-    query = retrieval.QueryFeatures(
-        first="john",
-        middle="",
-        first_initial="j",
-        middle_initials=frozenset(),
-        coauthor_blocks=frozenset(),
-        affiliation_terms=frozenset(),
-        venue_terms=frozenset(),
-        year=None,
-        orcid=None,
-        specter=np.asarray([1.0, 0.0], dtype=np.float32),
-        has_specter=True,
-        has_coauthors=False,
-        has_affiliations=False,
-        has_full_first=True,
-        has_middle=False,
-    )
-    summary = retrieval.ClusterSummary(
-        component_key="c1",
-        cluster_id="c1",
-        block_key="c",
-        size=1,
-        first_name_counts=Counter({"john": 1}),
-        middle_initial_counts=Counter(),
-        coauthor_counts=Counter(),
-        affiliation_counts=Counter(),
-        venue_counts=Counter(),
-        year_values=[],
-        year_min=None,
-        year_max=None,
-        year_mean=None,
-        orcid_values=frozenset(),
-        specter_centroid=np.asarray([0.0, 1.0], dtype=np.float32),
-        exemplar_vectors=[np.asarray([1.0, 0.0], dtype=np.float32)],
-        title_counts=Counter(),
-        name_counts_values=(),
-    )
-    retriever = build_rust_hybrid_centroid_retriever([summary], include_exemplars=True)
-
-    scores = _score_candidate_summaries_with_frozen_rust_policy(
-        query=query,
-        summaries={"c1": summary},
-        retriever=retriever,
-        n_jobs=1,
-    )
-
-    assert scores["c1"] == pytest.approx(0.620239, abs=1e-6)

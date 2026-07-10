@@ -66,12 +66,7 @@ _CLUSTERER_CONFIG_FIELDS = frozenset(
 
 
 def _load_rust_lightgbm_booster(model_path: str) -> Any:
-    rust_module = load_s2and_rust_extension()
-    booster_cls = getattr(rust_module, "RustLightGBMBooster", None)
-    if booster_cls is None:
-        raise RuntimeError("The pinned s2and-rust extension does not expose RustLightGBMBooster")
-
-    return booster_cls(model_path)
+    return load_s2and_rust_extension().RustLightGBMBooster(model_path)
 
 
 def _lightgbm_text_feature_count(model_path: Path) -> int:

@@ -208,7 +208,6 @@ def test_fused_constraint_fallback_resumes_at_failed_offset(monkeypatch):
         return backend
 
     def fake_constraints(
-        _dataset,
         _block_signature_indices,
         *,
         start_offset,
@@ -510,7 +509,7 @@ def test_make_subblocks_handles_specter_edge_case_without_unbound_local(monkeypa
     assert output == {"ab|middle=cd": ["s1"]}
 
 
-def test_clusterer_predict_disables_incremental_batch_threshold_for_python_subblocks(monkeypatch):
+def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incremental(monkeypatch):
     class Signature:
         def __init__(self, first_name):
             self.author_info_first_normalized_without_apostrophe = first_name
@@ -556,10 +555,10 @@ def test_clusterer_predict_disables_incremental_batch_threshold_for_python_subbl
             predicted[f"cluster_{block_key}"] = list(signatures)
         return predicted, None
 
-    captured = {"batching_threshold": None}
+    captured_kwargs = {}
 
     def fake_predict_incremental(self, block_signatures, dataset, *args, **kwargs):
-        captured["batching_threshold"] = kwargs.get("batching_threshold")
+        captured_kwargs.update(kwargs)
         return {
             "clusters": {"merged": list(dataset.cluster_seeds_require.keys()) + list(block_signatures)},
             "phase_b_mode": "exact",
@@ -576,7 +575,7 @@ def test_clusterer_predict_disables_incremental_batch_threshold_for_python_subbl
         batching_threshold=2,
     )
 
-    assert captured["batching_threshold"] is None
+    assert "batching_threshold" not in captured_kwargs
 
 
 def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):

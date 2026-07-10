@@ -59,7 +59,7 @@ def test_execute_python_featurization_phase_explicit_pool_mode(monkeypatch, plat
         signature_pairs=[],
         featurizer_info=FeaturizationInfo(features_to_use=[]),
         scatter_context=scatter_context,
-        cached_features={},
+        new_features={},
     )
 
     assert backend == "python_parallel"

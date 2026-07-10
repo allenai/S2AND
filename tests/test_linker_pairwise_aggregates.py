@@ -9,9 +9,7 @@ from s2and import feature_port, memory_budget
 from s2and.incremental_linking import linker_pairwise
 from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, import_s2and_rust
 
-HAS_LINKER_ARRAY_FEATURE_AGG_RUST, LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR = import_s2and_rust(
-    required_method="linker_pair_index_arrays_and_aggregate_stats"
-)
+HAS_RUST, RUST_IMPORT_ERROR = import_s2and_rust()
 
 
 def _mock_chunk_plan(chunk_pairs: int, total_pairs: int) -> memory_budget.RustBatchChunkPlan:
@@ -144,7 +142,6 @@ def test_combined_array_feature_wrapper_passes_separate_nan_policies() -> None:
 
     matrix, counts, valid_counts, sums, mins, maxs = (
         feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-            cast(Any, object()),
             np.asarray([0, 1], dtype=np.uint32),
             np.asarray([1, 2], dtype=np.uint32),
             np.asarray([0, 0], dtype=np.uint32),
@@ -196,7 +193,6 @@ def test_aggregate_only_wrapper_passes_separate_nan_policy() -> None:
             )
 
     feature_port.build_linker_pair_aggregate_stats_arrays_rust(
-        cast(Any, object()),
         np.asarray([0, 1], dtype=np.uint32),
         np.asarray([1, 2], dtype=np.uint32),
         np.asarray([0, 0], dtype=np.uint32),
@@ -214,7 +210,7 @@ def test_aggregate_only_wrapper_passes_separate_nan_policy() -> None:
     assert calls[0][2] is False
 
 
-def test_combined_array_feature_wrapper_rejects_outdated_aggregate_contract() -> None:
+def test_combined_array_feature_wrapper_requires_exact_six_array_result() -> None:
     class FakeRustFeaturizer:
         def linker_pair_index_arrays_and_aggregate_stats(self, *args):
             del args
@@ -226,28 +222,8 @@ def test_combined_array_feature_wrapper_rejects_outdated_aggregate_contract() ->
                 np.zeros((1, 1), dtype=np.float64),
             )
 
-    with pytest.raises(RuntimeError, match="outdated aggregate contract"):
+    with pytest.raises(RuntimeError, match="violated its six-array result contract"):
         feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-            cast(Any, object()),
-            np.asarray([0], dtype=np.uint32),
-            np.asarray([1], dtype=np.uint32),
-            np.asarray([0], dtype=np.uint32),
-            1,
-            matrix_indices=[0],
-            aggregate_indices=[0],
-            featurizer=FakeRustFeaturizer(),
-        )
-
-
-def test_combined_array_feature_wrapper_rejects_non_tuple_aggregate_contract() -> None:
-    class FakeRustFeaturizer:
-        def linker_pair_index_arrays_and_aggregate_stats(self, *args):
-            del args
-            return object()
-
-    with pytest.raises(RuntimeError, match="outdated aggregate contract"):
-        feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-            cast(Any, object()),
             np.asarray([0], dtype=np.uint32),
             np.asarray([1], dtype=np.uint32),
             np.asarray([0], dtype=np.uint32),
@@ -266,7 +242,6 @@ def test_combined_array_feature_wrapper_raises_rust_errors() -> None:
 
     with pytest.raises(ValueError, match="bad rows"):
         feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-            cast(Any, object()),
             np.asarray([0], dtype=np.uint32),
             np.asarray([1], dtype=np.uint32),
             np.asarray([0], dtype=np.uint32),
@@ -292,7 +267,6 @@ def test_combined_array_feature_wrapper_passes_result_arrays_through() -> None:
 
     matrix, counts, valid_counts, sums, mins, maxs = (
         feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-            cast(Any, object()),
             np.asarray([0], dtype=np.uint32),
             np.asarray([1], dtype=np.uint32),
             np.asarray([0], dtype=np.uint32),
@@ -678,8 +652,8 @@ def test_localize_row_indices_handles_ungrouped_chunks() -> None:
 
 
 @pytest.mark.skipif(
-    not HAS_LINKER_ARRAY_FEATURE_AGG_RUST,
-    reason=f"s2and_rust linker array feature aggregate API unavailable: {LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR}",
+    not HAS_RUST,
+    reason=f"s2and_rust unavailable: {RUST_IMPORT_ERROR}",
 )
 def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) -> None:
     dataset = build_dummy_dataset("dummy_linker_candidate_batch_real", name_counts_index=True)
@@ -703,7 +677,6 @@ def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) ->
     )
 
     matrix, *_ = feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-        dataset,
         candidate_batch.left_signature_indices,
         candidate_batch.right_signature_indices,
         candidate_batch.pair_row_indices,
@@ -741,8 +714,8 @@ def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) ->
 
 
 @pytest.mark.skipif(
-    not HAS_LINKER_ARRAY_FEATURE_AGG_RUST,
-    reason=f"s2and_rust linker array feature aggregate API unavailable: {LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR}",
+    not HAS_RUST,
+    reason=f"s2and_rust unavailable: {RUST_IMPORT_ERROR}",
 )
 def test_dense_and_sparse_signature_index_layouts_produce_identical_features(tmp_path) -> None:
     dataset = build_dummy_dataset("dummy_linker_signature_index_layouts", name_counts_index=True)

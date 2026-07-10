@@ -53,18 +53,18 @@ The SQLite database stores:
 
 - one row per cached pair
 - the full `NUM_FEATURES` feature vector as a float64 blob
-- cache metadata such as schema version and `features_to_use`
+- required schema-version and feature-width metadata
 
 Operational behavior:
 
-- ordinary writes are incremental, so write cost scales with newly computed rows instead of the
-  total cache size
+- writes upsert only rows computed by the current call, so write cost scales with newly computed
+  rows instead of the total cache size
 - the cache is only consulted when `use_cache=True`
 - if `use_cache=False`, pair features are computed and returned normally but are not read from or
   written to the persistent cache
-- once loaded, the cache payload is memoized in process memory so repeated calls in the same
-  process do not re-read SQLite; large cache-enabled runs can therefore still consume substantial
-  RAM
+- each call reads only its requested pair keys from SQLite; persisted rows are not copied into a
+  process-global mirror, so memory scales with requested hits and newly computed rows rather than
+  the total cache size
 
 ## Rust Featurizer Caches
 
@@ -86,17 +86,14 @@ Current implications:
 - `evict_rust_featurizer(dataset)` evicts one dataset and
   `clear_rust_featurizer_cache()` clears the process cache
 - published Arrow/count artifacts are immutable content-addressed generations
-- the cache key binds the exact normalized path set, full artifact-generation
-  inventory, non-seed settings, and seed version
-- filesystem change watches invalidate a cached generation before reuse;
-  same-size rewrites and restored mtimes do not preserve a stale cache hit
+- the cache key binds the exact normalized path set, validated generation ID,
+  non-seed settings, and seed version
+- raw Arrow mappings are checksummed and batch-index validated at the public
+  boundary; internal builders receive the resulting immutable
+  `ValidatedArrowInputs` value instead of consulting process-global validation
+  caches or rechecking the same generation
 - request-local sidecars are deliberately excluded from the immutable
-  generation and are consumed separately under the request boundary
-
-The verified-generation hot-cache check is fixed request/build overhead, not a
-pair-loop operation. The current local benchmark is 12.76 microseconds per hit
-(78.4k checks/s), including the exact material binding and mutation watch, with
-no retained duplicate artifact payload.
+  generation and are validated separately under the request boundary
 
 ## Interaction with Rust Batch Featurization
 

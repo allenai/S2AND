@@ -10,7 +10,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-import s2and_rust
+import s2and.incremental_linking.retrieval as retrieval_module
 from s2and.incremental_linking.feature_block import (
     feature_block_signature_order_from_raw_candidate_plan,
     write_arrow_batch_lookup_index,
@@ -25,13 +25,18 @@ from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_candidate_plan,
+    build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.runtime import (
     _merge_raw_arrow_planner_build_telemetry,
     _raw_candidate_plan_seed_setup,
     subset_raw_candidate_plan_for_query_ids,
+    subset_raw_plan_bundle_for_query_ids,
 )
+from s2and.runtime import load_s2and_rust_extension
 from tests.helpers import build_cluster_summary, build_query_features, tiny_name_counts_provenance
+
+s2and_rust = load_s2and_rust_extension()
 
 pa = pytest.importorskip("pyarrow")
 
@@ -434,6 +439,25 @@ def test_rust_retriever_named_signature_count_keeps_integer_precision() -> None:
     )
 
     assert int(plan["row_named_signature_counts"][0]) == 16_777_218
+
+
+def test_rust_retriever_reports_missing_component_members_as_key_error() -> None:
+    query = build_query_features(first="alice", has_full_first=True)
+    summary = build_cluster_summary(
+        component_key="c_missing",
+        size=1,
+        first_name_counts=Counter({"alice": 1}),
+    )
+    retriever = s2and_rust.RustHybridCentroidRetriever([summary], include_exemplars=False)
+
+    with pytest.raises(KeyError, match="Missing component members"):
+        retriever.top_k_hybrid_centroid_pair_plan(
+            [query],
+            np.asarray([0], dtype=np.uint32),
+            {},
+            1,
+            num_threads=1,
+        )
 
 
 def test_raw_arrow_candidate_plan_matches_existing_rust_retriever(tmp_path: Path) -> None:
@@ -1816,6 +1840,105 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
     assert bundle.pair_count == raw_plan["pair_count"]
     assert bundle.signature_order.signature_ids == ("q1", "s1", "s2")
     assert bundle.signature_order.query_signature_ids == ("q1",)
+
+
+def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_plan = _minimal_raw_candidate_plan(
+        row_count=1,
+        pair_count=1,
+        retrieval_scores=np.asarray([0.25], dtype=np.float32),
+        retrieval_ranks=np.asarray([1], dtype=np.uint16),
+        left_signature_ids=["q0"],
+        right_signature_ids=["s0"],
+        row_query_first_tokens=np.asarray(["Alice"], dtype=object),
+        row_component_sizes=np.asarray([3.0], dtype=np.float32),
+    )
+    bundle = RawArrowPlanBundle.from_mapping(raw_plan)
+
+    owned_arrays = (
+        bundle.row_query_offsets,
+        bundle.pair_row_indices,
+        bundle.retrieval_scores,
+        bundle.retrieval_ranks,
+        *bundle.row_signals.values(),
+    )
+    assert all(array.flags.owndata and not array.flags.writeable for array in owned_arrays)
+
+    raw_plan["query_signature_ids"][0] = "changed-query"
+    raw_plan["query_views"][0] = "initial_only"
+    raw_plan["query_authors"][0] = "Changed Author"
+    raw_plan["row_query_signature_indices"][0] = 99
+    raw_plan["row_component_keys"][0] = "changed-component"
+    raw_plan["retrieval_scores"][0] = 9.0
+    raw_plan["retrieval_ranks"][0] = 9
+    raw_plan["pair_row_indices"][0] = 99
+    raw_plan["left_signature_ids"][0] = "changed-query"
+    raw_plan["right_signature_ids"][0] = "changed-signature"
+    raw_plan["row_query_first_tokens"][0] = "Z"
+    raw_plan["row_component_sizes"][0] = 99.0
+
+    def unexpected_conversion(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(f"internal bridge repeated raw-plan conversion: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr(retrieval_module, "_required_raw_plan_value", unexpected_conversion)
+    monkeypatch.setattr(retrieval_module, "_raw_plan_array", unexpected_conversion)
+    monkeypatch.setattr(retrieval_module, "_raw_plan_retrieval_ranks", unexpected_conversion)
+
+    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
+        bundle,
+        signature_id_to_index={"q0": 7, "s0": 11},
+    )
+
+    candidate_batch = retrieval_batch.candidate_batch
+    assert cast(Any, candidate_batch.row_query_signature_indices).tolist() == [7]
+    assert candidate_batch.left_signature_indices.tolist() == [7]
+    assert candidate_batch.right_signature_indices.tolist() == [11]
+    assert candidate_batch.pair_row_indices.tolist() == [0]
+    assert candidate_batch.row_component_keys == ("c0",)
+    assert cast(Any, candidate_batch.retrieval_scores).tolist() == pytest.approx([0.25])
+    assert cast(Any, candidate_batch.retrieval_ranks).tolist() == [1]
+    assert retrieval_batch.row_signals["query_view"].tolist() == ["full"]
+    assert retrieval_batch.row_signals["query_author"].tolist() == ["Alice"]
+    assert retrieval_batch.row_signals["first_name_bucket"].tolist() == ["multi_letter_first"]
+    assert retrieval_batch.row_signals["cluster_size"].tolist() == pytest.approx([3.0])
+
+
+def test_raw_arrow_plan_bundle_owns_plan_used_by_subset_consumer() -> None:
+    raw_plan = _minimal_raw_candidate_plan(
+        row_count=1,
+        pair_count=1,
+        retrieval_scores=np.asarray([0.25], dtype=np.float32),
+        retrieval_ranks=np.asarray([1], dtype=np.uint16),
+        left_signature_ids=["q0"],
+        right_signature_ids=["s0"],
+        component_members={"c0": ["s0"]},
+        telemetry={"seed_signature_count": 1, "timings": {"total_secs": 0.5}},
+    )
+    bundle = RawArrowPlanBundle.from_mapping(raw_plan)
+
+    raw_plan["query_signature_ids"][0] = "changed-query"
+    raw_plan["row_query_signature_indices"][0] = 99
+    raw_plan["row_component_keys"][0] = "changed-component"
+    raw_plan["pair_row_indices"][0] = 99
+    raw_plan["left_signature_ids"][0] = "changed-query"
+    raw_plan["right_signature_ids"][0] = "changed-signature"
+    raw_plan["component_members"]["c0"][0] = "changed-signature"
+    raw_plan["telemetry"]["seed_signature_count"] = 99
+    raw_plan["telemetry"]["timings"]["total_secs"] = 99.0
+
+    subset_bundle = subset_raw_plan_bundle_for_query_ids(bundle, ["q0"])
+
+    assert subset_bundle.query_signature_ids == ("q0",)
+    assert subset_bundle.plan["row_component_keys"] == ("c0",)
+    assert subset_bundle.plan["left_signature_ids"] == ("q0",)
+    assert subset_bundle.plan["right_signature_ids"] == ("s0",)
+    assert subset_bundle.plan["component_members"]["c0"] == ("s0",)
+    assert subset_bundle.plan["telemetry"]["seed_signature_count"] == 1
+    assert subset_bundle.plan["telemetry"]["timings"]["total_secs"] == pytest.approx(0.5)
+
+    mutable_plan = subset_bundle.to_mutable_mapping()
+    mutable_plan["component_members"]["c0"][0] = "mutated-copy"
+    assert subset_bundle.plan["component_members"]["c0"] == ("s0",)
 
 
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:

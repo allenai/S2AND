@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
-from s2and.arrow_inputs import MissingArrowArtifactError
+from s2and.arrow_inputs import MissingArrowArtifactError, ValidatedArrowInputs
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData, NameCounts
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
@@ -42,6 +43,7 @@ from s2and.incremental_linking.feature_block_arrow import feature_block_from_arr
 from s2and.incremental_linking.features import LinkerFeatureMatrix
 from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
+    RawArrowPlanBundle,
     build_linker_retrieval_batch_from_raw_candidate_plan,
 )
 from s2and.incremental_linking.runtime import (
@@ -306,6 +308,14 @@ def _raw_plan() -> dict[str, Any]:
         "telemetry": {"timings": {}},
     }
     return plan
+
+
+def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
+    return ValidatedArrowInputs(
+        paths={},
+        generation_id="test-generation",
+        normalization_version=NORMALIZATION_VERSION,
+    )
 
 
 def _feature_block_for_plan(
@@ -1812,7 +1822,8 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     assert "raw_arrow_retrieval_seconds" in result.telemetry
     retrieval_paths_without_query_request = dict(captured["retrieval_paths"])
     retrieval_paths_without_query_request.pop("query_signatures")
-    assert retrieval_paths_without_query_request == captured["featurizer_paths"]
+    assert isinstance(captured["featurizer_paths"], ValidatedArrowInputs)
+    assert retrieval_paths_without_query_request == dict(captured["featurizer_paths"])
 
 
 def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:
@@ -1828,9 +1839,9 @@ def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:
         _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
             _raw_test_clusterer(),
             _raw_test_artifact(),
-            arrow_paths={},
+            arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["q"],
-            raw_candidate_plan=raw_plan,
+            raw_plan_bundle=RawArrowPlanBundle.from_mapping(raw_plan),
             rust_featurizer=FakeFeaturizer(),
             runtime_context=SimpleNamespace(operation="raw-arrow-test", run_id="raw-arrow-test"),
         )
@@ -1968,9 +1979,9 @@ def test_raw_arrow_partial_supervision_require_unknown_seed_rejected() -> None:
         _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
             _raw_test_clusterer(),
             _raw_test_artifact(),
-            arrow_paths={},
+            arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["q"],
-            raw_candidate_plan=raw_plan,
+            raw_plan_bundle=RawArrowPlanBundle.from_mapping(raw_plan),
             rust_featurizer=FakeFeaturizer(),
             partial_supervision={("q", "s1"): 0},
         )
@@ -1991,56 +2002,10 @@ def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(
         _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
             _raw_test_clusterer(),
             _raw_test_artifact(),
-            arrow_paths={},
+            arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["q"],
-            raw_candidate_plan=_raw_plan(),
+            raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
             rust_featurizer=None,
-        )
-
-
-def test_raw_arrow_scoring_requires_planner_build_telemetry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class FakePlanner:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
-
-        @classmethod
-        def from_query_signatures(cls, *_args: Any, **_kwargs: Any) -> FakePlanner:
-            return cls()
-
-        def plan_query_signatures(self) -> dict[str, Any]:
-            return _raw_plan()
-
-        def plan(self, _query_signature_ids: list[str], **_kwargs: Any) -> dict[str, Any]:
-            return _raw_plan()
-
-    class FakeRustModule:
-        RawBlockQueryCandidatePlanner = FakePlanner
-
-    def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("stale raw planner should fail before featurizer construction")
-
-    monkeypatch.setattr(
-        "s2and.incremental_linking.runtime.require_arrow_name_counts_index_for_clusterer",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr("s2and.incremental_linking.runtime.feature_port._require_rust_runtime", lambda: FakeRustModule)
-    monkeypatch.setattr(
-        "s2and.incremental_linking.runtime.feature_port.build_rust_featurizer_from_arrow_paths",
-        fail_build_rust_featurizer_from_arrow_paths,
-    )
-
-    with pytest.raises(RuntimeError, match="RawBlockQueryCandidatePlanner.build_telemetry"):
-        predict_incremental_link_or_abstain_from_raw_arrow_paths(
-            _raw_test_clusterer(),
-            _raw_test_artifact(),
-            arrow_paths=_with_query_signatures(
-                _with_fake_batch_indexes(_write_feature_block_arrow_paths(tmp_path), tmp_path),
-                tmp_path,
-            ),
-            top_k=2,
-            n_jobs=1,
-            load_name_counts=False,
-            name_tuples=set(),
         )
 
 
@@ -2094,9 +2059,9 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
     result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         _raw_test_clusterer(),
         _raw_test_artifact(),
-        arrow_paths={},
+        arrow_paths=_validated_empty_arrow_inputs(),
         query_signature_ids=["q"],
-        raw_candidate_plan=_raw_plan(),
+        raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
         rust_featurizer=FakeFeaturizer(),
         top_k=2,
         n_jobs=1,
@@ -2244,9 +2209,9 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
     result = _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         _raw_test_clusterer(),
         _raw_test_artifact(),
-        arrow_paths={},
+        arrow_paths=_validated_empty_arrow_inputs(),
         query_signature_ids=["q"],
-        raw_candidate_plan=_raw_plan(),
+        raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
         rust_featurizer=fake_featurizer,
         top_k=2,
         n_jobs=1,
@@ -2270,9 +2235,9 @@ def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids() ->
         _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
             _raw_test_clusterer(),
             _raw_test_artifact(),
-            arrow_paths={},
+            arrow_paths=_validated_empty_arrow_inputs(),
             query_signature_ids=["s1"],
-            raw_candidate_plan=_raw_plan(),
+            raw_plan_bundle=RawArrowPlanBundle.from_mapping(_raw_plan()),
             rust_featurizer=FakeFeaturizer(),
             top_k=2,
             n_jobs=1,

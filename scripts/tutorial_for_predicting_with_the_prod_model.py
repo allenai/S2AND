@@ -33,6 +33,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from s2and.arrow_inputs import ValidatedArrowInputs  # noqa: E402
+
 
 def _resolve_root(project_root: str, maybe_relative: str) -> str:
     return maybe_relative if os.path.isabs(maybe_relative) else os.path.join(project_root, maybe_relative)
@@ -59,7 +61,7 @@ def _select_input_route(
     batching_threshold: int | None,
     desired_memory_use: int | None,
     resolve_arrow_dataset_paths,
-) -> tuple[str, dict[str, str] | None]:
+) -> tuple[str, ValidatedArrowInputs | None]:
     """Resolve tutorial input routing without loading models or ANDData."""
 
     input_format = requested_input_format
@@ -248,7 +250,7 @@ def main() -> None:
 
     from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
-    from s2and.featurizer import FeaturizationInfo
+    from s2and.featurizer import DEFAULT_FEATURE_GROUPS, DEFAULT_NAMELESS_FEATURE_GROUPS, FeaturizationInfo
     from s2and.production_model import load_production_model
     from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
 
@@ -274,34 +276,17 @@ def main() -> None:
     if args.dataset is not None:
         datasets = [args.dataset]
 
-    features_to_use = [
-        "name_similarity",
-        "affiliation_similarity",
-        "email_similarity",
-        "coauthor_similarity",
-        "venue_similarity",
-        "year_diff",
-        "title_similarity",
-        "misc_features",
-        "name_counts",
-        "embedding_similarity",
-        "journal_similarity",
-        "advanced_name_similarity",
-    ]
-
     # we also have this special second "nameless" model that doesn't use any name-based features
     # it helps to improve clustering performance by preventing model overreliance on names
-    nameless_features_to_use = [
-        feature_name
-        for feature_name in features_to_use
-        if feature_name not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-    ]
-
     # we store all the information about the features in this convenient wrapper
     # note: we don't need these objects in this script, but they are useful for documentation purposes
-    featurization_info = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
+    featurization_info = FeaturizationInfo(
+        features_to_use=list(DEFAULT_FEATURE_GROUPS),
+        featurizer_version=FEATURIZER_VERSION,
+    )
     nameless_featurization_info = FeaturizationInfo(
-        features_to_use=nameless_features_to_use, featurizer_version=FEATURIZER_VERSION
+        features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
+        featurizer_version=FEATURIZER_VERSION,
     )
     _ = (featurization_info, nameless_featurization_info)
 

@@ -64,5 +64,6 @@ Arrow validation, Rust ingest, and `ANDData` compatibility code paths. The
 current lightweight regression command is:
 
 ```powershell
-uv run pytest -q tests/test_rust_surface_contract.py tests/test_rust_capabilities.py tests/test_arrow_inputs.py
+uv run --no-sync pytest -q tests/test_feature_port_parity.py tests/test_arrow_inputs.py
+uv run --no-sync python scripts/verification/smoke_installed_rust_api.py
 ```

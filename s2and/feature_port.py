@@ -10,8 +10,8 @@ from typing import Any, cast
 import numpy as np
 
 from s2and.arrow_inputs import (
+    ValidatedArrowInputs,
     require_normalization_version,
-    validate_arrow_prediction_artifacts,
 )
 from s2and.consts import CLUSTER_SEEDS_LOOKUP
 from s2and.data import ANDData
@@ -25,7 +25,6 @@ from s2and.rust_calls import (
     get_constraint_labels_index_arrays_rust,
     get_constraints_block_upper_triangle_indexed_rust,
     get_constraints_matrix_indexed_rust,
-    update_rust_cluster_seeds,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -375,6 +374,37 @@ def _promote_cached_rust_featurizer_cluster_seed_version(
     return promoted
 
 
+def update_rust_cluster_seeds(
+    dataset: ANDData,
+    runtime_context: Any | None = None,
+    *,
+    bump_version: bool = False,
+) -> None:
+    """Sync current Python cluster seeds into the cached Rust featurizer."""
+
+    with _rust_cluster_seed_update_lock(dataset):
+        featurizer = _get_cached_rust_featurizer_for_cluster_seed_update(
+            dataset,
+            runtime_context=runtime_context,
+        )
+        current_seed_version = _cluster_seeds_version_for_cache(dataset)
+        target_seed_version = current_seed_version + 1 if bump_version else current_seed_version
+        previous_require = dict(featurizer.cluster_seeds_require())
+        previous_disallow = {tuple(pair) for pair in featurizer.cluster_seeds_disallow()}
+        featurizer.update_cluster_seeds(dataset.cluster_seeds_require, dataset.cluster_seeds_disallow)
+        try:
+            _promote_cached_rust_featurizer_cluster_seed_version(
+                dataset,
+                featurizer,
+                target_seed_version=target_seed_version,
+            )
+        except Exception:
+            featurizer.update_cluster_seeds(previous_require, previous_disallow)
+            raise
+        if bump_version:
+            dataset._cluster_seeds_version = target_seed_version
+
+
 def _rust_featurizer_build_count_key(
     cache_key: _RustFeaturizerCacheKey | None,
 ) -> _RustFeaturizerBuildCountKey:
@@ -414,17 +444,8 @@ def _rust_featurizer_build_count(
         return 0 if counts is None else int(counts.get(build_count_key, 0))
 
 
-def _rust_featurizer_method(method_name: str, purpose: str) -> Any:
-    rust_module = _require_rust_runtime()
-    rust_featurizer_cls = getattr(rust_module, "RustFeaturizer", None)
-    method = None if rust_featurizer_cls is None else getattr(rust_featurizer_cls, method_name, None)
-    if not callable(method):
-        raise RuntimeError(f"RustFeaturizer.{method_name} is required for {purpose}")
-    return method
-
-
 def build_rust_featurizer_from_arrow_paths(
-    paths: Mapping[str, Any],
+    paths: ValidatedArrowInputs,
     *,
     expected_normalization_version: str,
     signature_ids: Sequence[Any] | None = None,
@@ -437,23 +458,19 @@ def build_rust_featurizer_from_arrow_paths(
 ) -> Any:
     """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths."""
 
-    method = _rust_featurizer_method("from_arrow_paths", "raw Arrow scoring")
+    method = _require_rust_runtime().RustFeaturizer.from_arrow_paths
     expected_version = require_normalization_version(
         expected_normalization_version,
         context="RustFeaturizer.from_arrow_paths",
     )
-    path_keys = {str(key) for key in paths}
-    normalized_paths = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter="specter" in path_keys or "specter2" in path_keys,
-        require_name_counts_index=bool(load_name_counts),
-        expected_normalization_version=expected_version,
-        context="RustFeaturizer.from_arrow_paths production build",
-        producer_hint=(
-            "include signatures, papers, paper_authors, raw-planner batch indexes, model-required specter, "
-            "model-required name_counts_index, and any declared optional sidecars in the Arrow bundle"
-        ),
-    )
+    if not isinstance(paths, ValidatedArrowInputs):
+        raise TypeError("build_rust_featurizer_from_arrow_paths requires ValidatedArrowInputs")
+    if paths.normalization_version != expected_version:
+        raise ValueError(
+            "RustFeaturizer.from_arrow_paths normalization_version mismatch: "
+            f"artifact={paths.normalization_version!r} expected={expected_version!r}"
+        )
+    normalized_paths = dict(paths)
     normalized_paths.pop("query_signatures", None)
     normalized_paths.pop("manifest", None)
     resolved_name_tuples = name_tuples

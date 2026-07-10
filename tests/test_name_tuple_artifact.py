@@ -19,9 +19,7 @@ from s2and.name_tuple_artifact import (
 from scripts.production import generate_canonical_name_tuples
 from tests.helpers import import_s2and_rust
 
-HAS_RUST_IDENTITY, RUST_MODULE = import_s2and_rust(
-    required_module_attrs=("read_name_tuple_artifact_identity",),
-)
+HAS_RUST_IDENTITY, RUST_MODULE = import_s2and_rust()
 
 
 def _write_artifact(

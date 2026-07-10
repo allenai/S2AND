@@ -479,10 +479,12 @@ def test_make_subblocks_orcid_repair_skips_oversized_connected_component_without
 
 
 def _require_rust_arrow_subblocking():
-    rust_module = pytest.importorskip("s2and_rust")
-    if not hasattr(rust_module, "make_subblocks_with_telemetry_arrow_native_graph"):
-        raise pytest.skip.Exception("s2and_rust.make_subblocks_with_telemetry_arrow_native_graph is unavailable")
-    return rust_module
+    from tests.helpers import import_s2and_rust
+
+    has_rust, rust_payload = import_s2and_rust()
+    if not has_rust:
+        raise pytest.skip.Exception(f"s2and_rust is unavailable: {rust_payload!r}")
+    return rust_payload
 
 
 def _write_signatures_arrow(

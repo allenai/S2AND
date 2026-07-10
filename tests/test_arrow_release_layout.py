@@ -8,8 +8,13 @@ import pytest
 
 from s2and.arrow_inputs import _build_arrow_artifact_generation, require_name_counts_index_artifact
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
+from s2and.incremental_linking.feature_block import (
+    write_arrow_batch_lookup_index,
+    write_arrow_ipc_table,
+    write_name_counts_index,
+)
 from scripts.verification.validate_local_arrow_release import validate_release_root
+from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
 def _touch_json(path: Path, payload: dict | None = None) -> None:
@@ -95,20 +100,11 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
     pa = pytest.importorskip("pyarrow")
     release_root = tmp_path / "release"
 
-    name_counts_index = release_root / "name_counts_index"
-    for file_name in ("first.bin", "last.bin", "first_last.bin", "last_first_initial.bin"):
-        _touch_file(name_counts_index / file_name)
-    _touch_json(
-        name_counts_index / "manifest.json",
-        {
-            "schema_version": "name_counts_index_v1",
-            "files": {
-                "first": {"path": "first.bin"},
-                "last": {"path": "last.bin"},
-                "first_last": {"path": "first_last.bin"},
-                "last_first_initial": {"path": "last_first_initial.bin"},
-            },
-        },
+    write_name_counts_index(
+        release_root,
+        tiny_name_counts_tuple(),
+        tiny_name_counts_provenance(),
+        overwrite=True,
     )
 
     for file_path in (release_root / "LICENSE.txt",):

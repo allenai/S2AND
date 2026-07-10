@@ -28,7 +28,11 @@ from s2and.consts import (
 )
 from s2and.model import _resolve_clusterer_normalization_version
 from s2and.production_model import _require_bundle_normalization_version
-from tests.helpers import tiny_name_counts_provenance
+from tests.helpers import (
+    tiny_name_counts_provenance,
+    write_minimal_arrow_prediction_bundle,
+    write_test_arrow_artifact_manifest,
+)
 
 
 def _write_minimal_name_counts_index(root: Path, *, normalization_version: str | None) -> Path:
@@ -73,21 +77,12 @@ def test_invalid_manifest_token_fails_artifact_validation(tmp_path):
         require_name_counts_index_artifact(index_dir, context="test", producer_hint="test")
 
 
-def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path, monkeypatch):
-    from s2and import arrow_inputs
-
-    monkeypatch.setattr(arrow_inputs, "required_filtered_read_batch_index_keys", lambda _paths: ())
-    monkeypatch.setattr(arrow_inputs, "_validate_arrow_bundle_manifest", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(arrow_inputs, "_validate_batch_indexes_once", lambda _paths: None)
+def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path):
+    paths = write_minimal_arrow_prediction_bundle(tmp_path)
     index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT)
-    for key in ("signatures", "papers", "paper_authors"):
-        (tmp_path / f"{key}.arrow").write_bytes(b"")
-    paths = {
-        "signatures": str(tmp_path / "signatures.arrow"),
-        "papers": str(tmp_path / "papers.arrow"),
-        "paper_authors": str(tmp_path / "paper_authors.arrow"),
-        "name_counts_index": str(index_dir),
-    }
+    paths["name_counts_index"] = str(index_dir)
+    manifest_path = write_test_arrow_artifact_manifest(tmp_path, paths)
+
     with pytest.raises(MissingArrowArtifactError, match="normalization_version mismatch"):
         validate_arrow_prediction_artifacts(
             paths,
@@ -95,13 +90,17 @@ def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path,
             require_name_counts_index=True,
             expected_normalization_version=NORMALIZATION_VERSION_CANONICAL_V2,
         )
-    # Matching expectation passes.
-    validate_arrow_prediction_artifacts(
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["normalization_version"] = NORMALIZATION_VERSION_LEGACY_COMPAT
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    validated = validate_arrow_prediction_artifacts(
         paths,
         require_specter=False,
         require_name_counts_index=True,
         expected_normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT,
     )
+    assert validated.normalization_version == NORMALIZATION_VERSION_LEGACY_COMPAT
 
 
 class _ContractOnly:

@@ -169,7 +169,6 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fi
 
         python_constraint = dataset_python.get_constraint(s1, s2)
         rust_constraint = feature_port.get_constraints_matrix_indexed_rust(
-            dataset_rust,
             [(rust_signature_id_to_index[str(s1)], rust_signature_id_to_index[str(s2)])],
             featurizer=rust_featurizer,
         )[0]

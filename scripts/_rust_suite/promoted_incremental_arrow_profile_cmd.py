@@ -9,8 +9,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 # When this file is executed directly, ensure `scripts/` is importable so
 # `import _rust_suite.*` works.
@@ -26,7 +25,11 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
     get_result_markers,
 )
 
-from s2and.arrow_inputs import MissingArrowArtifactError, validate_arrow_prediction_artifacts  # noqa: E402
+from s2and.arrow_inputs import (  # noqa: E402
+    MissingArrowArtifactError,
+    ValidatedArrowInputs,
+    validate_arrow_prediction_artifacts,
+)
 
 DEFAULT_ARROW_ROOT = PROJECT_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "scratch" / "promoted_incremental_arrow_profile"
@@ -57,28 +60,6 @@ class ProfileWorkload:
         return [*self.seed_signature_to_cluster.keys(), *self.query_signature_ids]
 
 
-class ArrowProfileDataset:
-    """Minimal dataset shape required by promoted Arrow incremental prediction."""
-
-    def __init__(
-        self,
-        *,
-        name: str,
-        arrow_paths: dict[str, str],
-        signatures: dict[str, Any],
-        cluster_seeds_path: Path,
-    ) -> None:
-        self.name = str(name)
-        self.arrow_paths = {str(key): str(value) for key, value in arrow_paths.items() if key != "clusters"}
-        self.arrow_paths["cluster_seeds"] = str(cluster_seeds_path)
-        self.signatures = signatures
-        self.cluster_seeds_require: dict[str, str] = {}
-        self.cluster_seeds_disallow: set[tuple[str, str]] = set()
-        self.altered_cluster_signatures: list[str] = []
-        self.name_tuples = "filtered"
-        self.max_seed_cluster_id = 0
-
-
 def _resolve_arrow_dataset_root(arrow_root: Path, dataset: str) -> Path:
     candidates = [
         arrow_root / dataset,
@@ -100,7 +81,7 @@ def _resolve_manifest_path(dataset_root: Path, value: Any) -> str:
     return str(candidates[0])
 
 
-def _resolve_arrow_dataset_paths(arrow_root: Path, dataset: str) -> dict[str, str]:
+def _resolve_arrow_dataset_paths(arrow_root: Path, dataset: str) -> ValidatedArrowInputs:
     dataset_root = _resolve_arrow_dataset_root(arrow_root, dataset)
     manifest_path = dataset_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -147,8 +128,6 @@ def _resolve_arrow_dataset_paths(arrow_root: Path, dataset: str) -> dict[str, st
         )
     except MissingArrowArtifactError as exc:
         raise FileNotFoundError(str(exc)) from exc
-    if "clusters" in paths:
-        validated["clusters"] = paths["clusters"]
     return validated
 
 
@@ -181,22 +160,6 @@ def _read_signature_rows(signatures_path: Path) -> list[ArrowSignatureRow]:
             )
         )
     return rows
-
-
-def _signature_namespaces(rows: list[ArrowSignatureRow]) -> dict[str, Any]:
-    return {
-        row.signature_id: SimpleNamespace(
-            signature_id=row.signature_id,
-            paper_id=row.paper_id,
-            author_info_first=row.author_first,
-            author_info_middle=row.author_middle,
-            author_info_last=row.author_last,
-            author_info_first_normalized_without_apostrophe=row.author_first,
-            author_info_last_normalized=row.author_last,
-            author_info_orcid=row.author_orcid,
-        )
-        for row in rows
-    }
 
 
 def _block_dict(rows: list[ArrowSignatureRow]) -> dict[str, list[str]]:
@@ -370,8 +333,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         query_limit=int(args.query_limit),
         max_seed_clusters=int(args.max_seed_clusters),
     )
-    signatures = _signature_namespaces(signature_rows)
-
     from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
     from s2and.production_model import load_production_model
 
@@ -388,23 +349,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for run_index in range(int(args.runs)):
             cluster_seeds_path = output_dir / f"cluster_seeds_{run_file_prefix}_run_{run_index}.arrow"
             write_cluster_seeds_arrow(cluster_seeds_path, workload.seed_signature_to_cluster)
-            dataset = ArrowProfileDataset(
-                name=f"{args.dataset}_arrow_promoted_profile",
-                arrow_paths=arrow_paths,
-                signatures=signatures,
-                cluster_seeds_path=cluster_seeds_path,
+            request_arrow_paths = arrow_paths.with_request_sidecars(
+                {"cluster_seeds": cluster_seeds_path},
+                required_keys=("cluster_seeds",),
+                context=f"promoted incremental Arrow profile run {run_index}",
+                producer_hint="write the selected workload seeds as cluster_seeds.arrow",
             )
             with ProcessTreeRSSMonitor() as monitor:
                 start = time.perf_counter()
-                result = cast(
-                    dict[str, Any],
-                    clusterer.predict_incremental(
-                        workload.block_signatures,
-                        cast(Any, dataset),
-                        prevent_new_incompatibilities=False,
-                        batching_threshold=None if args.batching_threshold <= 0 else int(args.batching_threshold),
-                        total_ram_bytes=None if args.total_ram_bytes <= 0 else int(args.total_ram_bytes),
-                    ),
+                result = clusterer.predict_incremental_from_arrow_paths(
+                    workload.block_signatures,
+                    request_arrow_paths,
+                    prevent_new_incompatibilities=False,
+                    batching_threshold=None if args.batching_threshold <= 0 else int(args.batching_threshold),
+                    total_ram_bytes=None if args.total_ram_bytes <= 0 else int(args.total_ram_bytes),
                 )
                 elapsed = time.perf_counter() - start
             telemetry = dict(result.get("incremental_linker_telemetry", {}))

@@ -179,7 +179,38 @@ pub(crate) struct RetrievalPairPlanQueryResult {
     pub(crate) right_signature_indices_by_row: Vec<Vec<u32>>,
 }
 
-pub(crate) fn year_signal_value(year: Option<i64>, field_name: &str) -> Result<(i32, u8), String> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RetrievalError {
+    InvalidValue(String),
+    MissingKey(String),
+    Overflow(String),
+}
+
+impl std::fmt::Display for RetrievalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::InvalidValue(message) | Self::MissingKey(message) | Self::Overflow(message) => {
+                message
+            }
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for RetrievalError {}
+
+pub(crate) fn retrieval_error_to_py(error: RetrievalError) -> PyErr {
+    match error {
+        RetrievalError::InvalidValue(message) => pyo3::exceptions::PyValueError::new_err(message),
+        RetrievalError::MissingKey(message) => pyo3::exceptions::PyKeyError::new_err(message),
+        RetrievalError::Overflow(message) => pyo3::exceptions::PyOverflowError::new_err(message),
+    }
+}
+
+pub(crate) fn year_signal_value(
+    year: Option<i64>,
+    field_name: &str,
+) -> Result<(i32, u8), RetrievalError> {
     let Some(value) = year else {
         return Ok((i32::MIN, 1));
     };
@@ -187,13 +218,16 @@ pub(crate) fn year_signal_value(year: Option<i64>, field_name: &str) -> Result<(
     Ok((converted, 0))
 }
 
-pub(crate) fn validate_row_signal_year(year: i64, field_name: &str) -> Result<i32, String> {
-    let converted = i32::try_from(year)
-        .map_err(|_| format!("{field_name} is outside the supported i32 range: {year}"))?;
+pub(crate) fn validate_row_signal_year(year: i64, field_name: &str) -> Result<i32, RetrievalError> {
+    let converted = i32::try_from(year).map_err(|_| {
+        RetrievalError::InvalidValue(format!(
+            "{field_name} is outside the supported i32 range: {year}"
+        ))
+    })?;
     if converted == i32::MIN {
-        return Err(format!(
+        return Err(RetrievalError::InvalidValue(format!(
             "{field_name} uses reserved missing-year sentinel value: {year}"
-        ));
+        )));
     }
     Ok(converted)
 }
@@ -208,29 +242,17 @@ pub(crate) fn raw_arrow_year_mean(years: &[i64]) -> Option<f64> {
 
 pub(crate) fn row_named_signature_count(
     first_name_counts: &[(String, u64)],
-) -> Result<u32, String> {
+) -> Result<u32, RetrievalError> {
     let total = first_name_counts
         .iter()
         .try_fold(0u64, |current, (_first_name, count)| {
-            current
-                .checked_add(*count)
-                .ok_or_else(|| "named_signature_count exceeds the supported u64 range".to_string())
+            current.checked_add(*count).ok_or_else(|| {
+                RetrievalError::Overflow(
+                    "named_signature_count exceeds the supported u64 range".to_string(),
+                )
+            })
         })?;
     Ok(total.min(u32::MAX as u64) as u32)
-}
-
-pub(crate) fn retrieval_value_error_message(message: &str) -> bool {
-    message.contains("outside the supported i32 range")
-        || message.contains("reserved missing-year sentinel value")
-        || message.contains("named_signature_count")
-}
-
-pub(crate) fn retrieval_string_error_to_py(message: String) -> PyErr {
-    if retrieval_value_error_message(&message) {
-        pyo3::exceptions::PyValueError::new_err(message)
-    } else {
-        pyo3::exceptions::PyKeyError::new_err(message)
-    }
 }
 
 pub(crate) struct RetrievalCandidateSelection {
@@ -490,7 +512,7 @@ impl RustHybridCentroidRetriever {
         selector: Option<&RustNameCompatibleSubblockSelector>,
         global_backfill_count: usize,
         allow_global_orcid_override: bool,
-    ) -> Result<RetrievalPairPlanQueryResult, String> {
+    ) -> Result<RetrievalPairPlanQueryResult, RetrievalError> {
         let selection = self.candidate_indices_for_pair_plan_query(
             current_query,
             base_candidate_indices,
@@ -523,10 +545,10 @@ impl RustHybridCentroidRetriever {
         for (rank_offset, (summary_index, score)) in scored.iter().enumerate() {
             let summary = &self.summaries[*summary_index];
             let Some(member_indices) = component_member_indices.get(&summary.component_key) else {
-                return Err(format!(
+                return Err(RetrievalError::MissingKey(format!(
                     "Missing component members for retrieved component_key: {}",
                     summary.component_key
-                ));
+                )));
             };
             let chooser_features = chooser_summary_features(current_query, summary);
             let mut dominant_first_name = "";
@@ -1490,8 +1512,8 @@ impl RustHybridCentroidRetriever {
         let mut right_signature_indices = Vec::<u32>::new();
         let mut pair_row_indices = Vec::<u32>::new();
 
-        let query_results: Vec<Result<RetrievalPairPlanQueryResult, String>> =
-            py.allow_threads(|| {
+        let query_results: Vec<Result<RetrievalPairPlanQueryResult, RetrievalError>> = py
+            .allow_threads(|| {
                 let compute = || {
                     query_data
                         .par_iter()
@@ -1526,7 +1548,7 @@ impl RustHybridCentroidRetriever {
             });
 
         for query_result in query_results {
-            let mut query_result = query_result.map_err(retrieval_string_error_to_py)?;
+            let mut query_result = query_result.map_err(retrieval_error_to_py)?;
             let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
                 pyo3::exceptions::PyOverflowError::new_err(
                     "retrieved candidate row count exceeds u32",
@@ -1745,14 +1767,14 @@ pub(crate) fn validate_retrieval_rank_top_k(top_k: usize) -> PyResult<()> {
 pub(crate) fn retrieval_rank_from_zero_based_offset(
     rank_offset: usize,
     context: &str,
-) -> Result<u16, String> {
-    let one_based_rank = rank_offset
-        .checked_add(1)
-        .ok_or_else(|| format!("{context} retrieval rank overflowed usize"))?;
+) -> Result<u16, RetrievalError> {
+    let one_based_rank = rank_offset.checked_add(1).ok_or_else(|| {
+        RetrievalError::Overflow(format!("{context} retrieval rank overflowed usize"))
+    })?;
     u16::try_from(one_based_rank).map_err(|_| {
-        format!(
+        RetrievalError::Overflow(format!(
             "{context} produced retrieval rank {one_based_rank}, but retrieval_ranks are stored as uint16 and support ranks in [1, {}]",
             u16::MAX
-        )
+        ))
     })
 }

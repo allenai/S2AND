@@ -150,18 +150,18 @@ maximum component size, edge-build seconds, and total fallback seconds.
 
 Incremental prediction has two supported routes:
 
-- **Promoted Rust linker.** Used when the resolved backend is Rust, the Rust extension exposes the required
-  promoted-incremental capabilities, and seed inputs are available, either as an `ANDData` seed map or a
-  `cluster_seeds` entry in `dataset.arrow_paths`. When complete Arrow artifacts are also available, retrieval and
-  scoring run directly against the Arrow tables. Otherwise the runtime builds the Rust featurizer from Python state.
-- **Python fallback helper.** Used when the backend resolves to Python, the Rust extension lacks the required
-  capabilities, or no seed inputs are provided. This path covers partition coverage but does not implement batched
-  incremental routing.
+- **Promoted Rust linker.** `Clusterer.predict_incremental_from_arrow_paths` requires a Rust runtime context and a
+  validated Arrow artifact bundle. Retrieval and scoring run directly against those Arrow tables using the pinned
+  native ABI.
+- **Python helper.** `Clusterer.predict_incremental` operates on `ANDData` with a Python runtime context. It covers
+  partition coverage but does not implement batched incremental routing.
 
-`batching_threshold` controls two things. For full-block prediction it caps subblock size. For promoted Rust
-incremental prediction it caps the number of unassigned query signatures per linker batch. The standalone Python
-incremental fallback rejects `batching_threshold` with a `ValueError`; pass `batching_threshold=None` on that path or
-use the Rust backend with seed inputs.
+The APIs do not inspect native capabilities or fall back between implementations. A missing or mismatched pinned
+Rust extension is an error on the Arrow route.
+
+`batching_threshold` has two separate entry points. On full-block `Clusterer.predict`, it caps subblock size. On
+`Clusterer.predict_incremental_from_arrow_paths`, it caps the number of unassigned query signatures per linker batch.
+The standalone Python `Clusterer.predict_incremental` API does not take a batching parameter.
 
 See [production_inference.md](production_inference.md#large-blocks-and-incremental-inference) for the full
 caller-facing contract.

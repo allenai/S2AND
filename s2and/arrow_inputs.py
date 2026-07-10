@@ -5,11 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import threading
-from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from s2and.consts import NORMALIZATION_VERSION_LEGACY_COMPAT, VALID_NORMALIZATION_VERSIONS
@@ -31,6 +30,71 @@ class _VerifiedArrowArtifactGeneration:
 
     generation_id: str
     normalization_version: str | None
+
+
+@dataclass(frozen=True)
+class ValidatedArrowInputs(Mapping[str, str]):
+    """Immutable, integrity-checked Arrow paths for one artifact generation."""
+
+    paths: Mapping[str, str]
+    generation_id: str
+    normalization_version: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paths", MappingProxyType(dict(self.paths)))
+
+    def __getitem__(self, key: str) -> str:
+        return self.paths[key]
+
+    def __iter__(self):
+        return iter(self.paths)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def without(self, *keys: str) -> ValidatedArrowInputs:
+        """Return this verified generation without request-local path entries."""
+
+        removed = set(keys)
+        return ValidatedArrowInputs(
+            paths={key: value for key, value in self.paths.items() if key not in removed},
+            generation_id=self.generation_id,
+            normalization_version=self.normalization_version,
+        )
+
+    def with_request_sidecars(
+        self,
+        sidecars: Mapping[str, Any],
+        *,
+        required_keys: Sequence[str] = (),
+        context: str,
+        producer_hint: str,
+    ) -> ValidatedArrowInputs:
+        """Validate request-local sidecars while retaining the verified base generation."""
+
+        requested = {str(key): value for key, value in sidecars.items() if key in _ARROW_REQUEST_SIDECAR_KEYS}
+        required = tuple(str(key) for key in required_keys)
+        unsupported_required = sorted(set(required) - _ARROW_REQUEST_SIDECAR_KEYS)
+        if unsupported_required:
+            raise ValueError(f"request sidecar keys are unsupported: {unsupported_required}")
+        normalized, invalid_paths = _normalize_arrow_path_values(requested)
+        invalid_paths.update(_missing_or_wrong_kind_artifacts(normalized, tuple(normalized)))
+        missing_keys = tuple(key for key in required if key not in normalized)
+        if missing_keys or invalid_paths:
+            raise MissingArrowArtifactError(
+                context=context,
+                required_keys=required,
+                missing_keys=missing_keys,
+                missing_files=invalid_paths,
+                producer_hint=producer_hint,
+            )
+        paths = dict(self.paths)
+        paths.update(normalized)
+        return ValidatedArrowInputs(
+            paths=paths,
+            generation_id=self.generation_id,
+            normalization_version=self.normalization_version,
+        )
 
 
 RAW_PLANNER_ARROW_BATCH_INDEX_CONTRACTS = (
@@ -78,18 +142,14 @@ _ARROW_IMMUTABLE_ARTIFACT_FILE_KEYS = frozenset(
     }
 )
 _ARROW_IMMUTABLE_BATCH_INDEX_KEYS = frozenset(RAW_PLANNER_ARROW_BATCH_INDEX_KEYS.values())
-_STRICT_BATCH_INDEX_VALIDATION_CACHE_MAX_ENTRIES = 128
-_STRICT_BATCH_INDEX_VALIDATION_CACHE: OrderedDict[tuple[Any, ...], None] = OrderedDict()
-_STRICT_BATCH_INDEX_VALIDATION_CACHE_LOCK = threading.Lock()
-_NAME_COUNTS_INDEX_VALIDATION_CACHE: OrderedDict[tuple[Any, ...], None] = OrderedDict()
-_NAME_COUNTS_INDEX_VALIDATION_CACHE_LOCK = threading.Lock()
-_ArrowArtifactMaterialBinding = tuple[tuple[str, str], ...]
-_ArrowArtifactGenerationCacheKey = tuple[str, _ArrowArtifactMaterialBinding]
-_ARROW_ARTIFACT_GENERATION_CACHE: OrderedDict[
-    _ArrowArtifactGenerationCacheKey,
-    _VerifiedArrowArtifactGeneration,
-] = OrderedDict()
-_ARROW_ARTIFACT_GENERATION_CACHE_LOCK = threading.Lock()
+_SPECTER_PATH_KEYS = frozenset(
+    {
+        "specter",
+        "specter_batch_index",
+        "specter2",
+        "specter2_batch_index",
+    }
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -166,7 +226,7 @@ def _validate_arrow_bundle_manifest(
     context: str,
     required_keys: Sequence[str],
     producer_hint: str,
-) -> None:
+) -> _VerifiedArrowArtifactGeneration:
     manifest_path = _arrow_artifact_manifest_path(paths)
     verified = _verified_arrow_artifact_manifest(paths)
     if verified is None:
@@ -202,38 +262,17 @@ def _validate_arrow_bundle_manifest(
             missing_files={},
             producer_hint=producer_hint,
         )
-
-
-def _arrow_artifact_material_binding(paths: Mapping[str, str]) -> _ArrowArtifactMaterialBinding:
-    """Return the exact supplied material-key/path set authorized by one cache entry."""
-
-    return tuple(
-        sorted(
-            (
-                str(key),
-                str(os.fspath(paths[key])),
-            )
-            for key in paths
-            if key in _ARROW_IMMUTABLE_ARTIFACT_FILE_KEYS or key in _ARROW_IMMUTABLE_BATCH_INDEX_KEYS
-        )
-    )
+    return verified
 
 
 def _verified_arrow_artifact_manifest(
     paths: Mapping[str, str],
 ) -> _VerifiedArrowArtifactGeneration | None:
-    """Verify one exact immutable generation once per process."""
+    """Verify one exact immutable generation."""
 
     manifest_path = _arrow_artifact_manifest_path(paths)
     if manifest_path is None:
         return None
-    material_binding = _arrow_artifact_material_binding(paths)
-    manifest_cache_key = (str(manifest_path), material_binding)
-    with _ARROW_ARTIFACT_GENERATION_CACHE_LOCK:
-        cached = _ARROW_ARTIFACT_GENERATION_CACHE.get(manifest_cache_key)
-        if cached is not None:
-            _ARROW_ARTIFACT_GENERATION_CACHE.move_to_end(manifest_cache_key)
-            return cached
     if not manifest_path.is_file():
         return None
     try:
@@ -321,21 +360,17 @@ def _verified_arrow_artifact_manifest(
     if manifest_path.read_bytes() != manifest_bytes:
         raise RuntimeError(f"Arrow artifact manifest changed during verification: {manifest_path}")
 
-    verified = _VerifiedArrowArtifactGeneration(
+    return _VerifiedArrowArtifactGeneration(
         generation_id=computed_generation_id,
         normalization_version=None if normalization_version is None else str(normalization_version),
     )
-    with _ARROW_ARTIFACT_GENERATION_CACHE_LOCK:
-        _ARROW_ARTIFACT_GENERATION_CACHE[manifest_cache_key] = verified
-        _ARROW_ARTIFACT_GENERATION_CACHE.move_to_end(manifest_cache_key)
-        while len(_ARROW_ARTIFACT_GENERATION_CACHE) > _STRICT_BATCH_INDEX_VALIDATION_CACHE_MAX_ENTRIES:
-            _ARROW_ARTIFACT_GENERATION_CACHE.popitem(last=False)
-    return verified
 
 
 def verified_arrow_artifact_generation(paths: Mapping[str, str]) -> str | None:
-    """Return the generation ID after one full exact-path integrity check."""
+    """Return the retained generation ID or verify a raw path mapping."""
 
+    if isinstance(paths, ValidatedArrowInputs):
+        return paths.generation_id
     verified = _verified_arrow_artifact_manifest(paths)
     return None if verified is None else verified.generation_id
 
@@ -366,7 +401,6 @@ def _name_counts_index_error(path: Path) -> str | None:
         int(manifest_stat_before.st_ctime_ns),
     ):
         return f"{manifest_path} (manifest changed while reading)"
-    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     schema_version = manifest.get("schema_version")
     if schema_version != NAME_COUNTS_INDEX_SCHEMA_VERSION:
         return (
@@ -436,12 +470,6 @@ def _name_counts_index_error(path: Path) -> str | None:
         for resolved, _expected_sha256, _expected_bytes in verified_files
         for file_stat in (resolved.stat(),)
     )
-    cache_key = (str(path.resolve()), manifest_sha256, manifest_stat_token, material_stat_tokens)
-    with _NAME_COUNTS_INDEX_VALIDATION_CACHE_LOCK:
-        if cache_key in _NAME_COUNTS_INDEX_VALIDATION_CACHE:
-            _NAME_COUNTS_INDEX_VALIDATION_CACHE.move_to_end(cache_key)
-            return None
-
     for resolved, expected_sha256, expected_bytes in verified_files:
         if not strict_integrity:
             continue
@@ -476,11 +504,6 @@ def _name_counts_index_error(path: Path) -> str | None:
     )
     if final_material_stat_tokens != material_stat_tokens:
         return f"{manifest_path} (name-count index files changed during verification)"
-    with _NAME_COUNTS_INDEX_VALIDATION_CACHE_LOCK:
-        _NAME_COUNTS_INDEX_VALIDATION_CACHE[cache_key] = None
-        _NAME_COUNTS_INDEX_VALIDATION_CACHE.move_to_end(cache_key)
-        while len(_NAME_COUNTS_INDEX_VALIDATION_CACHE) > _STRICT_BATCH_INDEX_VALIDATION_CACHE_MAX_ENTRIES:
-            _NAME_COUNTS_INDEX_VALIDATION_CACHE.popitem(last=False)
     return None
 
 
@@ -500,6 +523,32 @@ def read_name_counts_index_normalization_version(path: Any) -> str:
             f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
         )
     return str(value)
+
+
+def _require_name_counts_index_normalization(
+    paths: Mapping[str, str],
+    *,
+    expected_normalization_version: str | None,
+    context: str,
+    required_keys: Sequence[str],
+    producer_hint: str,
+) -> None:
+    if expected_normalization_version is None or "name_counts_index" not in paths:
+        return
+    artifact_version = read_name_counts_index_normalization_version(paths["name_counts_index"])
+    if artifact_version != expected_normalization_version:
+        raise MissingArrowArtifactError(
+            context=context,
+            required_keys=required_keys,
+            missing_keys=(),
+            missing_files={
+                "name_counts_index": (
+                    f"normalization_version mismatch: artifact is {artifact_version!r} but the model "
+                    f"feature contract requires {expected_normalization_version!r}"
+                )
+            },
+            producer_hint=producer_hint,
+        )
 
 
 def require_normalization_version(value: Any, *, context: str) -> str:
@@ -684,25 +733,8 @@ def require_filtered_arrow_batch_indexes(
         )
 
 
-def _strict_batch_index_validation_key(paths: Mapping[str, str]) -> tuple[Any, ...]:
-    verified_generation = verified_arrow_artifact_generation(paths)
-    if verified_generation is None:  # pragma: no cover - fixed profiles require it first
-        raise RuntimeError("strict Arrow batch-index validation requires a verified artifact generation")
-    return (
-        "verified_arrow_artifact_generation",
-        verified_generation,
-        _arrow_artifact_material_binding(paths),
-    )
-
-
-def _validate_batch_indexes_once(paths: Mapping[str, str]) -> None:
-    """Strictly validate one immutable Arrow generation once per process."""
-
-    cache_key = _strict_batch_index_validation_key(paths)
-    with _STRICT_BATCH_INDEX_VALIDATION_CACHE_LOCK:
-        if cache_key in _STRICT_BATCH_INDEX_VALIDATION_CACHE:
-            _STRICT_BATCH_INDEX_VALIDATION_CACHE.move_to_end(cache_key)
-            return
+def _validate_batch_indexes(paths: Mapping[str, str]) -> None:
+    """Strictly validate the batch indexes for one immutable Arrow generation."""
 
     # Local import avoids a module cycle: feature_block_arrow consumes the
     # canonical path helpers defined in this module.
@@ -716,11 +748,6 @@ def _validate_batch_indexes_once(paths: Mapping[str, str]) -> None:
             paths[contract.index_key],
             key_column=contract.key_column,
         )
-    with _STRICT_BATCH_INDEX_VALIDATION_CACHE_LOCK:
-        _STRICT_BATCH_INDEX_VALIDATION_CACHE[cache_key] = None
-        _STRICT_BATCH_INDEX_VALIDATION_CACHE.move_to_end(cache_key)
-        while len(_STRICT_BATCH_INDEX_VALIDATION_CACHE) > _STRICT_BATCH_INDEX_VALIDATION_CACHE_MAX_ENTRIES:
-            _STRICT_BATCH_INDEX_VALIDATION_CACHE.popitem(last=False)
 
 
 def require_arrow_artifacts(
@@ -754,10 +781,11 @@ def _validate_complete_arrow_artifacts(
     require_specter: bool,
     require_name_counts_index: bool,
     require_cluster_seeds: bool = False,
+    required_request_sidecars: Sequence[str] = (),
     expected_normalization_version: str | None = None,
     context: str,
     producer_hint: str,
-) -> dict[str, str]:
+) -> ValidatedArrowInputs:
     """Apply the shared complete-bundle contract used by the fixed profiles."""
 
     required = {"signatures", "papers", "paper_authors"}
@@ -767,6 +795,71 @@ def _validate_complete_arrow_artifacts(
         required.add("name_counts_index")
     if require_cluster_seeds:
         required.add("cluster_seeds")
+    unsupported_request_sidecars = sorted(set(required_request_sidecars) - _ARROW_REQUEST_SIDECAR_KEYS)
+    if unsupported_request_sidecars:
+        raise ValueError(f"required request sidecar keys are unsupported: {unsupported_request_sidecars}")
+    required.update(str(key) for key in required_request_sidecars)
+
+    if isinstance(arrow_paths, ValidatedArrowInputs):
+        profiled_paths = arrow_paths
+        if require_specter:
+            canonical_paths = dict(arrow_paths)
+            if "specter" not in canonical_paths and "specter2" in canonical_paths:
+                canonical_paths["specter"] = canonical_paths["specter2"]
+            if "specter_batch_index" not in canonical_paths and "specter2_batch_index" in canonical_paths:
+                canonical_paths["specter_batch_index"] = canonical_paths["specter2_batch_index"]
+            canonical_paths.pop("specter2", None)
+            canonical_paths.pop("specter2_batch_index", None)
+            if canonical_paths != dict(arrow_paths):
+                profiled_paths = ValidatedArrowInputs(
+                    paths=canonical_paths,
+                    generation_id=arrow_paths.generation_id,
+                    normalization_version=arrow_paths.normalization_version,
+                )
+        elif _SPECTER_PATH_KEYS.intersection(arrow_paths):
+            profiled_paths = arrow_paths.without(*_SPECTER_PATH_KEYS)
+
+        invalid_profile_keys = sorted(UNSUPPORTED_ARROW_NAME_ALIAS_KEYS.intersection(profiled_paths))
+        if "name_counts" in profiled_paths:
+            invalid_profile_keys.append("name_counts")
+        if "name_counts_index_dir" in profiled_paths:
+            invalid_profile_keys.append("name_counts_index_dir")
+        if invalid_profile_keys:
+            raise MissingArrowArtifactError(
+                context=context,
+                required_keys=sorted(required),
+                missing_keys=(),
+                missing_files={key: "unsupported Arrow input profile key" for key in invalid_profile_keys},
+                producer_hint=producer_hint,
+            )
+
+        required.update(required_filtered_read_batch_index_keys(profiled_paths))
+        missing_keys = sorted(key for key in required if key not in profiled_paths)
+        if missing_keys:
+            raise MissingArrowArtifactError(
+                context=context,
+                required_keys=sorted(required),
+                missing_keys=missing_keys,
+                missing_files={},
+                producer_hint=producer_hint,
+            )
+        if (
+            expected_normalization_version is not None
+            and profiled_paths.normalization_version != expected_normalization_version
+        ):
+            raise MissingArrowArtifactError(
+                context=context,
+                required_keys=sorted(required),
+                missing_keys=(),
+                missing_files={
+                    "manifest": (
+                        f"normalization_version mismatch: artifact is {profiled_paths.normalization_version!r} "
+                        f"but the model feature contract requires {expected_normalization_version!r}"
+                    )
+                },
+                producer_hint=producer_hint,
+            )
+        return profiled_paths
 
     missing_keys = sorted(key for key in required if key not in arrow_paths)
     normalized, invalid_paths = _normalize_arrow_path_values(arrow_paths)
@@ -814,7 +907,7 @@ def _validate_complete_arrow_artifacts(
     required_or_declared_keys = {
         key
         for key in normalized
-        if key in required or key.endswith("_batch_index") or key in DECLARED_ARROW_SIDECAR_KEYS
+        if key in required or key.endswith("_batch_index") or key in _ARROW_REQUEST_SIDECAR_KEYS
     }
     missing_files = _missing_or_wrong_kind_artifacts(normalized, required_or_declared_keys)
     missing_files.update(invalid_paths)
@@ -826,32 +919,28 @@ def _validate_complete_arrow_artifacts(
             missing_files=missing_files,
             producer_hint=producer_hint,
         )
-    _validate_arrow_bundle_manifest(
+    verified = _validate_arrow_bundle_manifest(
         normalized,
         expected_normalization_version=expected_normalization_version,
         context=context,
         required_keys=sorted(required),
         producer_hint=producer_hint,
     )
-    if expected_normalization_version is not None and "name_counts_index" in normalized:
-        artifact_version = read_name_counts_index_normalization_version(normalized["name_counts_index"])
-        if artifact_version != expected_normalization_version:
-            raise MissingArrowArtifactError(
-                context=context,
-                required_keys=sorted(required),
-                missing_keys=(),
-                missing_files={
-                    "name_counts_index": (
-                        f"normalization_version mismatch: artifact is {artifact_version!r} but the model "
-                        f"feature contract requires {expected_normalization_version!r}; regenerate the "
-                        "artifact bundle and model as one release unit "
-                        "(docs/normalization_migration_blocked.md)"
-                    )
-                },
-                producer_hint=producer_hint,
-            )
-    _validate_batch_indexes_once(normalized)
-    return normalized
+    if verified.normalization_version is None:  # pragma: no cover - manifest validation rejects this
+        raise RuntimeError("validated Arrow artifact generation is missing normalization_version")
+    _require_name_counts_index_normalization(
+        normalized,
+        expected_normalization_version=verified.normalization_version,
+        context=context,
+        required_keys=sorted(required),
+        producer_hint=producer_hint,
+    )
+    _validate_batch_indexes(normalized)
+    return ValidatedArrowInputs(
+        paths=normalized,
+        generation_id=verified.generation_id,
+        normalization_version=verified.normalization_version,
+    )
 
 
 def validate_arrow_training_artifacts(
@@ -862,7 +951,7 @@ def validate_arrow_training_artifacts(
     expected_normalization_version: str,
     context: str = "Arrow training ingest",
     producer_hint: str = "generate a complete training bundle with scripts/convert_to_arrow.py",
-) -> dict[str, str]:
+) -> ValidatedArrowInputs:
     """Validate the fixed canonical Arrow training-ingest profile."""
 
     return _validate_complete_arrow_artifacts(
@@ -881,13 +970,14 @@ def validate_arrow_prediction_artifacts(
     require_specter: bool,
     require_name_counts_index: bool,
     require_cluster_seeds: bool = False,
+    required_request_sidecars: Sequence[str] = (),
     expected_normalization_version: str | None = None,
     context: str = "Canonical Arrow prediction",
     producer_hint: str = (
         "generate a complete Arrow bundle with scripts/convert_to_arrow.py or use the published "
         "s2and-release-arrow bundle"
     ),
-) -> dict[str, str]:
+) -> ValidatedArrowInputs:
     """Validate the fixed canonical prediction profile."""
 
     return _validate_complete_arrow_artifacts(
@@ -895,6 +985,7 @@ def validate_arrow_prediction_artifacts(
         require_specter=require_specter,
         require_name_counts_index=require_name_counts_index,
         require_cluster_seeds=require_cluster_seeds,
+        required_request_sidecars=required_request_sidecars,
         expected_normalization_version=expected_normalization_version,
         context=context,
         producer_hint=producer_hint,
@@ -909,7 +1000,7 @@ def validate_arrow_publication_artifacts(
     expected_normalization_version: str | None = None,
     context: str = "Arrow publication integrity",
     producer_hint: str = "publish a complete immutable Arrow bundle with all batch indexes",
-) -> dict[str, str]:
+) -> ValidatedArrowInputs:
     """Validate the fixed publication/integrity profile."""
 
     return _validate_complete_arrow_artifacts(

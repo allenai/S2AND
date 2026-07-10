@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from s2and.model import FastCluster, VotingClassifier
+from s2and.model import FastCluster
 
 
 def test_fastcluster_invalid_linkage_raises_value_error():
@@ -33,7 +33,12 @@ def test_fastcluster_transform_raises_not_implemented_error():
         clusterer.transform(np.array([0.1, 0.2, 0.3]))
 
 
-def test_voting_classifier_invalid_voting_type_raises_value_error():
-    classifier = VotingClassifier(estimators=[], voting="invalid")
-    with pytest.raises(ValueError, match="Voting type must be one of"):
-        classifier.predict(np.array([[0.0], [1.0]]))
+def test_fastcluster_uses_sklearn_parameter_introspection() -> None:
+    clusterer = FastCluster(linkage="complete", eps=0.25, preserve_input=False)
+
+    assert clusterer.get_params() == {
+        "eps": 0.25,
+        "input_as_observation_matrix": False,
+        "linkage": "complete",
+        "preserve_input": False,
+    }

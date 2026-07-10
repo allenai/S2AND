@@ -13,8 +13,7 @@ import numpy as np
 
 from s2and import feature_port, memory_budget
 from s2and.arrow_inputs import (
-    normalize_arrow_paths,
-    require_arrow_artifacts,
+    ValidatedArrowInputs,
     require_feature_contract_normalization_version,
     validate_arrow_prediction_artifacts,
 )
@@ -27,7 +26,6 @@ from s2and.incremental_linking.feature_block import (
     read_incremental_query_signatures_arrow,
 )
 from s2and.incremental_linking.features import LinkerFeatureMatrix, assemble_linker_feature_matrix
-from s2and.incremental_linking.gate_buckets import validate_query_view
 from s2and.incremental_linking.linker_pairwise import (
     PROMOTED_PAIRWISE_AGG_BASE_FEATURE_NAMES,
     PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS,
@@ -58,9 +56,8 @@ from s2and.incremental_linking.retrieval import (
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
     _query_author_for_retrieval_row_signal,
-    build_linker_retrieval_batch_from_raw_candidate_plan,
+    build_linker_retrieval_batch_from_raw_plan_bundle,
     build_linker_retrieval_batch_rust,
-    validate_raw_candidate_plan_schema,
 )
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
 from s2and.model_pairwise import predict_pairwise_class0
@@ -937,29 +934,20 @@ def _distance_row_signals(
 
 def _accumulate_pairwise_distance_chunk(
     *,
-    dataset: ANDData | None,
     row_indices: np.ndarray,
     row_count: int,
     model_distances: np.ndarray,
     labels: np.ndarray,
     n_jobs: int,
-    runtime_context: Any | None,
-    featurizer: Any | None,
+    featurizer: Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
-    if featurizer is not None and not callable(getattr(featurizer, "linker_pair_distance_accumulators", None)):
-        raise RuntimeError(
-            "RustFeaturizer.linker_pair_distance_accumulators is required for promoted linker distance "
-            "aggregation; rebuild/install the current s2and-rust extension."
-        )
     return feature_port.build_linker_pair_distance_accumulators_rust(
-        dataset,
         row_indices,
         int(row_count),
         model_distances,
+        featurizer=featurizer,
         pair_labels=labels,
         num_threads=resolve_n_jobs(n_jobs),
-        runtime_context=runtime_context,
-        featurizer=featurizer,
     )
 
 
@@ -1077,13 +1065,11 @@ def compute_candidate_batch_pairwise_model_and_aggregate_stats(
         )
         predict_seconds += time.perf_counter() - predict_start
         distance_accumulators = _accumulate_pairwise_distance_chunk(
-            dataset=dataset,
             row_indices=chunk.local_row_indices,
             row_count=len(chunk.global_row_indices),
             model_distances=model_distances,
             labels=labels_chunk,
             n_jobs=n_jobs,
-            runtime_context=runtime_context,
             featurizer=featurizer,
         )
         chunk_counts, chunk_sums, chunk_mins, chunk_top_distances, chunk_hard_disallow_count = distance_accumulators
@@ -1351,7 +1337,6 @@ def _candidate_pair_ids(
 
 def _resolve_candidate_batch_pair_labels_rust(
     *,
-    dataset: ANDData | None,
     candidate_batch: LinkerCandidateBatch,
     signature_ids_by_index: Sequence[Any],
     partial_supervision: Mapping[tuple[str, str], int | float],
@@ -1359,28 +1344,19 @@ def _resolve_candidate_batch_pair_labels_rust(
     dont_merge_cluster_seeds: bool,
     suppress_orcid: bool,
     n_jobs: int,
-    runtime_context: Any | None,
     featurizer: Any | None,
 ) -> tuple[np.ndarray, Any]:
     pair_count = int(candidate_batch.pair_count)
     start_seconds = time.perf_counter()
     labels = np.full(pair_count, np.nan, dtype=np.float64)
     if use_default_constraints_as_supervision:
-        method = None if featurizer is None else getattr(featurizer, "linker_pair_index_arrays_constraint_labels", None)
-        if featurizer is not None and not callable(method):
-            raise RuntimeError(
-                "RustFeaturizer.linker_pair_index_arrays_constraint_labels is required for promoted linker "
-                "constraint resolution; rebuild/install the current s2and-rust extension."
-            )
         labels = feature_port.get_constraint_labels_index_arrays_rust(
-            dataset,
             candidate_batch.left_signature_indices,
             candidate_batch.right_signature_indices,
+            featurizer=featurizer,
             dont_merge_cluster_seeds=dont_merge_cluster_seeds,
             incremental_dont_use_cluster_seeds=False,
             num_threads=resolve_n_jobs(n_jobs),
-            runtime_context=runtime_context,
-            featurizer=featurizer,
             suppress_orcid=suppress_orcid,
         )
 
@@ -1870,7 +1846,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
 
     constraint_featurizer = getattr(constraint_backend, "rust_featurizer", None) or featurizer
     pair_labels, constraint_telemetry = _resolve_candidate_batch_pair_labels_rust(
-        dataset=dataset,
         candidate_batch=candidate_batch,
         signature_ids_by_index=signature_ids_by_index,
         partial_supervision=partial_supervision_dict,
@@ -1878,7 +1853,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         dont_merge_cluster_seeds=bool(getattr(clusterer, "dont_merge_cluster_seeds", True)),
         suppress_orcid=bool(getattr(clusterer, "suppress_orcid", False)),
         n_jobs=n_jobs_resolved,
-        runtime_context=resolved_runtime_context,
         featurizer=constraint_featurizer,
     )
     if pair_labels.shape != (candidate_batch.pair_count,):
@@ -1996,19 +1970,11 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     )
 
 
-def _raw_plan_query_views(raw_candidate_plan: Mapping[str, Any], query_count: int) -> tuple[str, ...]:
-    raw_views = raw_candidate_plan["query_views"]
-    views = tuple(validate_query_view(value) for value in raw_views)
-    if len(views) != int(query_count):
-        raise ValueError(f"raw candidate plan query_views length must match query count: {len(views)} != {query_count}")
-    return views
-
-
 def _validate_raw_plan_query_signature_ids(
-    raw_candidate_plan: Mapping[str, Any],
+    raw_plan_bundle: RawArrowPlanBundle,
     expected_query_signature_ids: Sequence[str],
 ) -> None:
-    plan_query_ids = tuple(str(signature_id) for signature_id in raw_candidate_plan["query_signature_ids"])
+    plan_query_ids = raw_plan_bundle.query_signature_ids
     expected_query_ids = tuple(str(signature_id) for signature_id in expected_query_signature_ids)
     if plan_query_ids != expected_query_ids:
         raise ValueError(
@@ -2017,12 +1983,10 @@ def _validate_raw_plan_query_signature_ids(
         )
 
 
-def _strip_raw_query_signature_sidecar(arrow_paths: Mapping[str, Any]) -> dict[str, str]:
+def _strip_raw_query_signature_sidecar(arrow_paths: ValidatedArrowInputs) -> ValidatedArrowInputs:
     """Return scoring Arrow paths without request-local raw-planner inputs."""
 
-    scoring_paths = normalize_arrow_paths(arrow_paths)
-    scoring_paths.pop("query_signatures", None)
-    return scoring_paths
+    return arrow_paths.without("query_signatures")
 
 
 def _identity_seed_setup(
@@ -2151,13 +2115,13 @@ def _zero_raw_plan_timings(telemetry: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def subset_raw_candidate_plan_for_query_ids(
-    raw_candidate_plan: Mapping[str, Any],
+def subset_raw_plan_bundle_for_query_ids(
+    raw_plan_bundle: RawArrowPlanBundle,
     query_signature_ids: Sequence[Any],
     *,
     zero_plan_timings: bool = False,
-) -> dict[str, Any]:
-    """Return a raw candidate plan restricted to a query-id subset.
+) -> RawArrowPlanBundle:
+    """Return a validated raw plan bundle restricted to a query-id subset.
 
     The raw Arrow planner is query-separable: candidate rows and pair rows for
     each query depend on the shared seed table, not on other queries in the same
@@ -2166,7 +2130,7 @@ def subset_raw_candidate_plan_for_query_ids(
     raw-plan contract.
     """
 
-    validate_raw_candidate_plan_schema(raw_candidate_plan)
+    raw_candidate_plan = raw_plan_bundle.plan
     requested_query_ids = tuple(str(signature_id) for signature_id in query_signature_ids)
     plan_query_ids = tuple(str(signature_id) for signature_id in raw_candidate_plan["query_signature_ids"])
 
@@ -2252,7 +2216,7 @@ def subset_raw_candidate_plan_for_query_ids(
             out["telemetry"]["query_signature_count"] = int(len(requested_query_ids))
             if len(plan_query_ids) != len(requested_query_ids):
                 out["telemetry"]["window_plan_reused"] = 1
-        return out
+        return RawArrowPlanBundle.from_mapping(out)
 
     row_mask = np.isin(row_query_offsets, old_query_offsets)
     old_row_indices = np.flatnonzero(row_mask)
@@ -2297,7 +2261,23 @@ def subset_raw_candidate_plan_for_query_ids(
         out["telemetry"]["query_signature_count"] = int(len(requested_query_ids))
         if len(plan_query_ids) != len(requested_query_ids):
             out["telemetry"]["window_plan_reused"] = 1
-    return out
+    return RawArrowPlanBundle.from_mapping(out)
+
+
+def subset_raw_candidate_plan_for_query_ids(
+    raw_candidate_plan: Mapping[str, Any],
+    query_signature_ids: Sequence[Any],
+    *,
+    zero_plan_timings: bool = False,
+) -> dict[str, Any]:
+    """Validate and subset a raw candidate plan at the public mapping boundary."""
+
+    bundle = subset_raw_plan_bundle_for_query_ids(
+        RawArrowPlanBundle.from_mapping(raw_candidate_plan),
+        query_signature_ids,
+        zero_plan_timings=zero_plan_timings,
+    )
+    return bundle.to_mutable_mapping()
 
 
 def _raw_candidate_plan_seed_setup(
@@ -2366,21 +2346,13 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         require_specter=clusterer_uses_embedding_features(clusterer),
         require_name_counts_index=clusterer_uses_name_count_features(clusterer),
         require_cluster_seeds=True,
+        required_request_sidecars=("query_signatures",),
         context="Raw Arrow scoring",
         producer_hint=(
             "include raw Arrow tables, raw-planner batch indexes, and cluster_seeds.arrow before raw Arrow scoring"
         ),
     )
     require_arrow_name_counts_index_for_clusterer(clusterer, arrow_path_payload, context="Raw Arrow scoring")
-    require_arrow_artifacts(
-        arrow_path_payload,
-        required_keys=("query_signatures",),
-        context="Raw Arrow scoring",
-        producer_hint=(
-            "include query_signatures.arrow with raw Arrow tables, raw-planner batch indexes, "
-            "and cluster_seeds.arrow before raw Arrow scoring"
-        ),
-    )
     query_request_rows = read_incremental_query_signatures_arrow(Path(arrow_path_payload["query_signatures"]))
     query_signature_id_strings = tuple(row.signature_id for row in query_request_rows)
     resolved_orcid_enabled = (
@@ -2395,30 +2367,17 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         num_threads=n_jobs_resolved,
         max_exemplars=int(max_exemplars),
     )
-    plan_query_signatures = getattr(raw_planner, "plan_query_signatures", None)
-    if not callable(plan_query_signatures):
-        raise RuntimeError(
-            "raw Arrow scoring requires RawBlockQueryCandidatePlanner.plan_query_signatures; "
-            "rebuild the Rust extension"
-        )
-    raw_candidate_plan_mapping = plan_query_signatures()
+    raw_candidate_plan_mapping = raw_planner.plan_query_signatures()
     if not isinstance(raw_candidate_plan_mapping, MutableMapping):
         raise RuntimeError(
-            "RawBlockQueryCandidatePlanner.plan_query_signatures returned a non-mutable raw candidate plan; "
-            "rebuild the Rust extension"
+            "RawBlockQueryCandidatePlanner.plan_query_signatures violated its mutable-mapping result contract"
         )
-    build_telemetry = getattr(raw_planner, "build_telemetry", None)
-    if not callable(build_telemetry):
-        raise RuntimeError(
-            "raw Arrow scoring requires RawBlockQueryCandidatePlanner.build_telemetry; rebuild the Rust extension"
-        )
-    _merge_raw_arrow_planner_build_telemetry(raw_candidate_plan_mapping, build_telemetry())
+    _merge_raw_arrow_planner_build_telemetry(raw_candidate_plan_mapping, raw_planner.build_telemetry())
     raw_arrow_retrieval_seconds = time.perf_counter() - stage_start
 
     scoring_arrow_paths = _strip_raw_query_signature_sidecar(arrow_path_payload)
     raw_plan_bundle = RawArrowPlanBundle.from_mapping(raw_candidate_plan_mapping)
-    _validate_raw_plan_query_signature_ids(raw_plan_bundle.plan, query_signature_id_strings)
-    _raw_plan_query_views(raw_plan_bundle.plan, len(query_signature_id_strings))
+    _validate_raw_plan_query_signature_ids(raw_plan_bundle, query_signature_id_strings)
     resolved_load_name_counts = _resolve_load_name_counts_policy(
         clusterer,
         load_name_counts,
@@ -2444,7 +2403,7 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         artifact,
         arrow_paths=scoring_arrow_paths,
         query_signature_ids=query_signature_id_strings,
-        raw_candidate_plan=raw_candidate_plan_mapping,
+        raw_plan_bundle=raw_plan_bundle,
         rust_featurizer=rust_featurizer,
         raw_arrow_featurizer_source="request",
         raw_arrow_featurizer_seconds=raw_arrow_featurizer_seconds,
@@ -2462,9 +2421,9 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     clusterer: Any,
     artifact: IncrementalLinkingArtifact,
     *,
-    arrow_paths: Mapping[str, Any],
+    arrow_paths: ValidatedArrowInputs,
     query_signature_ids: Sequence[Any],
-    raw_candidate_plan: Mapping[str, Any],
+    raw_plan_bundle: RawArrowPlanBundle,
     rust_featurizer: Any,
     raw_arrow_featurizer_source: Literal["request", "window"] = "window",
     raw_arrow_featurizer_seconds: float = 0.0,
@@ -2489,9 +2448,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     arrow_path_payload = _strip_raw_query_signature_sidecar(arrow_paths)
     require_arrow_name_counts_index_for_clusterer(clusterer, arrow_path_payload, context="raw Arrow scoring")
     query_signature_id_strings = tuple(str(signature_id) for signature_id in query_signature_ids)
-    raw_plan_bundle = RawArrowPlanBundle.from_mapping(raw_candidate_plan)
-    _validate_raw_plan_query_signature_ids(raw_plan_bundle.plan, query_signature_id_strings)
-    _raw_plan_query_views(raw_plan_bundle.plan, len(query_signature_id_strings))
+    _validate_raw_plan_query_signature_ids(raw_plan_bundle, query_signature_id_strings)
     if rust_featurizer is None:
         raise ValueError("preplanned raw Arrow scoring requires rust_featurizer built for the same raw_candidate_plan")
     if raw_arrow_featurizer_source not in {"request", "window"}:
@@ -2505,8 +2462,8 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         raw_arrow_signature_count if raw_arrow_featurizer_reused else len(signature_order.signature_ids)
     )
 
-    retrieval_batch = build_linker_retrieval_batch_from_raw_candidate_plan(
-        raw_plan_bundle.plan,
+    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
+        raw_plan_bundle,
         signature_id_to_index=featurizer_signature_id_to_index,
     )
     stage_start = time.perf_counter()

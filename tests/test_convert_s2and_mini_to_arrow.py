@@ -133,85 +133,15 @@ def test_linker_replay_parser_requires_explicit_dataset_selection(tmp_path: Path
     assert excinfo.value.code == 2
 
 
-def test_benchmark_main_overwrite_name_counts_index_rebuilds_shared_index_once(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    calls: list[dict[str, Any]] = []
+def test_name_counts_subcommand_is_validation_only(tmp_path: Path) -> None:
+    parser = convert_to_arrow._build_parser()
 
-    def fake_convert_runtime_dataset_to_arrow(**kwargs: Any) -> dict[str, Any]:
-        calls.append(kwargs)
-        return {"dataset": kwargs["sources"].dataset}
+    args = parser.parse_args(["validate-name-counts-index", "--output-root", str(tmp_path)])
 
-    monkeypatch.setattr(
-        convert_to_arrow, "benchmark_dataset_sources", lambda _source_root, dataset: _fake_sources(tmp_path, dataset)
-    )
-    monkeypatch.setattr(convert_to_arrow, "convert_runtime_dataset_to_arrow", fake_convert_runtime_dataset_to_arrow)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "convert_to_arrow.py",
-            "benchmark",
-            "--source-root",
-            str(tmp_path / "source"),
-            "--output-root",
-            str(tmp_path / "out"),
-            "--name-counts-index-root",
-            str(tmp_path / "index"),
-            "--datasets",
-            "first",
-            "second",
-            "--n-jobs",
-            "1",
-            "--overwrite",
-            "--overwrite-name-counts-index",
-        ],
-    )
-
-    convert_to_arrow.main()
-
-    assert [call["overwrite_name_counts_index"] for call in calls] == [True, False]
-
-
-def test_benchmark_main_overwrite_does_not_force_name_counts_index_rebuild(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    calls: list[dict[str, Any]] = []
-
-    def fake_convert_runtime_dataset_to_arrow(**kwargs: Any) -> dict[str, Any]:
-        calls.append(kwargs)
-        return {"dataset": kwargs["sources"].dataset}
-
-    monkeypatch.setattr(
-        convert_to_arrow, "benchmark_dataset_sources", lambda _source_root, dataset: _fake_sources(tmp_path, dataset)
-    )
-    monkeypatch.setattr(convert_to_arrow, "convert_runtime_dataset_to_arrow", fake_convert_runtime_dataset_to_arrow)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "convert_to_arrow.py",
-            "benchmark",
-            "--source-root",
-            str(tmp_path / "source"),
-            "--output-root",
-            str(tmp_path / "out"),
-            "--name-counts-index-root",
-            str(tmp_path / "index"),
-            "--datasets",
-            "first",
-            "second",
-            "--n-jobs",
-            "1",
-            "--overwrite",
-        ],
-    )
-
-    convert_to_arrow.main()
-
-    assert [call["overwrite_name_counts_index"] for call in calls] == [False, False]
+    assert args.func is convert_to_arrow._run_validate_name_counts_index
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["name-counts-index", "--output-root", str(tmp_path)])
+    assert excinfo.value.code == 2
 
 
 def test_benchmark_main_run_full_discovers_datasets_only_when_explicit(

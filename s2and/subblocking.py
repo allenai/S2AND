@@ -1866,21 +1866,6 @@ def _sorted_subblock_merge_candidates(
     return sorted(candidates, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
 
-def _rust_arrow_native_graph_subblocking_callable():
-    from s2and.runtime import load_s2and_rust_extension
-
-    rust_module = load_s2and_rust_extension()
-    return (
-        None if rust_module is None else getattr(rust_module, "make_subblocks_with_telemetry_arrow_native_graph", None)
-    )
-
-
-def rust_arrow_subblocking_available() -> bool:
-    """Return whether the loaded Rust extension can run Arrow-backed subblocking."""
-
-    return callable(_rust_arrow_native_graph_subblocking_callable())
-
-
 def _make_subblocks_with_telemetry_arrow_rust(
     arrow_paths: Mapping[str, Any],
     signature_ids,
@@ -1892,15 +1877,10 @@ def _make_subblocks_with_telemetry_arrow_rust(
 ):
     """Run native Rust graph subblocking with signature rows loaded from Arrow."""
 
-    first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
-    rust_make_subblocks = _rust_arrow_native_graph_subblocking_callable()
-    if not callable(rust_make_subblocks):
-        raise RuntimeError(
-            "Rust Arrow subblocking requires an s2and_rust extension with "
-            "make_subblocks_with_telemetry_arrow_native_graph; rebuild with "
-            "`uv run maturin develop -m s2and_rust/Cargo.toml`."
-        )
+    from s2and.runtime import load_s2and_rust_extension
 
+    first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
+    rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
     subblocks, telemetry = rust_make_subblocks(
         dict(arrow_paths),
         [str(signature_id) for signature_id in signature_ids],

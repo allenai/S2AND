@@ -99,31 +99,32 @@ fn build_retriever_from_raw_arrow_components(
     max_exemplars: usize,
     num_threads: Option<usize>,
 ) -> PyResult<RustHybridCentroidRetriever> {
-    let summary_results: Vec<Result<RetrievalSummaryData, String>> = py.allow_threads(|| {
-        let compute = || {
-            component_order
-                .par_iter()
-                .map(|component_key| {
-                    let members = members_by_component.get(component_key).ok_or_else(|| {
-                        format!(
-                            "component_key '{}' disappeared while building summaries",
-                            component_key
+    let summary_results: Vec<Result<RetrievalSummaryData, RetrievalError>> =
+        py.allow_threads(|| {
+            let compute = || {
+                component_order
+                    .par_iter()
+                    .map(|component_key| {
+                        let members = members_by_component.get(component_key).ok_or_else(|| {
+                            RetrievalError::MissingKey(format!(
+                                "component_key '{}' disappeared while building summaries",
+                                component_key
+                            ))
+                        })?;
+                        build_raw_arrow_summary(
+                            component_key,
+                            members,
+                            features_by_signature_id,
+                            max_exemplars,
                         )
-                    })?;
-                    build_raw_arrow_summary(
-                        component_key,
-                        members,
-                        features_by_signature_id,
-                        max_exemplars,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        install_with_optional_rayon_pool(num_threads, compute)
-    });
+                    })
+                    .collect::<Vec<_>>()
+            };
+            install_with_optional_rayon_pool(num_threads, compute)
+        });
     let mut summaries = Vec::<RetrievalSummaryData>::with_capacity(summary_results.len());
     for result in summary_results {
-        summaries.push(result.map_err(retrieval_string_error_to_py)?);
+        summaries.push(result.map_err(retrieval_error_to_py)?);
     }
     let mut component_index_by_key = HashMap::with_capacity(summaries.len());
     let mut coauthor_cluster_df = HashMap::new();
@@ -1138,15 +1139,16 @@ impl RawBlockQueryCandidatePlanner {
             )?;
 
         let retrieval_start = Instant::now();
-        let query_results: Vec<Result<RetrievalPairPlanQueryResult, String>> =
-            py.allow_threads(|| {
+        let query_results: Vec<Result<RetrievalPairPlanQueryResult, RetrievalError>> = py
+            .allow_threads(|| {
                 let compute = || {
                     queries
                         .par_iter()
                         .enumerate()
                         .map(|(query_offset, current_query)| {
-                            let query_index = u32::try_from(query_offset)
-                                .map_err(|_| "query index exceeds u32".to_string())?;
+                            let query_index = u32::try_from(query_offset).map_err(|_| {
+                                RetrievalError::Overflow("query index exceeds u32".to_string())
+                            })?;
                             let excluded_candidate_indices = excluded_candidate_indices_by_query
                                 .as_ref()
                                 .and_then(|values| values[query_offset].as_ref());
@@ -1213,7 +1215,7 @@ impl RawBlockQueryCandidatePlanner {
         let mut author_signals_by_query_signature_id =
             HashMap::<String, RawArrowAuthorSignalData>::new();
         for query_result in query_results {
-            let mut query_result = query_result.map_err(retrieval_string_error_to_py)?;
+            let mut query_result = query_result.map_err(retrieval_error_to_py)?;
             let base_row_index = u32::try_from(row_component_keys.len()).map_err(|_| {
                 pyo3::exceptions::PyOverflowError::new_err(
                     "retrieved candidate row count exceeds u32",
@@ -1882,7 +1884,7 @@ fn raw_arrow_component_summary_for_members(
         features_by_signature_id,
         max_exemplars,
     )
-    .map_err(retrieval_string_error_to_py)
+    .map_err(retrieval_error_to_py)
 }
 
 fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
@@ -2204,7 +2206,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                 rank_offset,
                 "raw_arrow_labeled_candidate_plan",
             )
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(retrieval_error_to_py)?;
         }
     }
 
@@ -2402,17 +2404,16 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         }
         let (candidate_year_min, candidate_year_min_missing) =
             year_signal_value(summary.year_min, "candidate year_min")
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(retrieval_error_to_py)?;
         let (candidate_year_max, candidate_year_max_missing) =
             year_signal_value(summary.year_max, "candidate year_max")
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let (query_year, query_year_missing) = year_signal_value(query.year, "query year")
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(retrieval_error_to_py)?;
+        let (query_year, query_year_missing) =
+            year_signal_value(query.year, "query year").map_err(retrieval_error_to_py)?;
         row_query_authors.push(query_feature.query_author.clone());
         row_component_sizes.push(summary.size.min(u32::MAX as usize) as u32);
         row_named_signature_counts.push(
-            row_named_signature_count(&summary.first_name_counts)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?,
+            row_named_signature_count(&summary.first_name_counts).map_err(retrieval_error_to_py)?,
         );
         row_dominant_first_names.push(dominant_first_name.to_string());
         row_candidate_year_min.push(candidate_year_min);

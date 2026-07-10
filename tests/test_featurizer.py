@@ -11,6 +11,9 @@ import s2and.memory_budget as memory_budget
 from s2and.consts import LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import (
+    DEFAULT_FEATURE_GROUPS,
+    DEFAULT_NAMELESS_FEATURE_GROUPS,
+    NAME_DEPENDENT_FEATURE_GROUPS,
     NUM_FEATURES,
     FeaturizationInfo,
     _ensure_python_pair_signature_ngrams,
@@ -61,6 +64,22 @@ def test_default_features_are_instance_isolated() -> None:
     second = FeaturizationInfo()
     assert "name_similarity" in second.features_to_use
     assert first.features_to_use is not second.features_to_use
+
+
+def test_default_and_nameless_feature_group_policy_is_canonical() -> None:
+    assert tuple(FeaturizationInfo().features_to_use) == DEFAULT_FEATURE_GROUPS
+    assert NAME_DEPENDENT_FEATURE_GROUPS == frozenset({"name_similarity", "advanced_name_similarity", "name_counts"})
+    assert DEFAULT_NAMELESS_FEATURE_GROUPS == (
+        "affiliation_similarity",
+        "email_similarity",
+        "coauthor_similarity",
+        "venue_similarity",
+        "year_diff",
+        "title_similarity",
+        "misc_features",
+        "embedding_similarity",
+        "journal_similarity",
+    )
 
 
 def test_featurization_info_rejects_unknown_feature_groups() -> None:

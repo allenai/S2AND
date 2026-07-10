@@ -10,31 +10,17 @@ from typing import Any
 
 import numpy as np
 
-from s2and import feature_port, memory_budget, rust_calls
+from s2and import feature_port, memory_budget
 from s2and.data import ANDData
-from s2and.featurizer import FeaturizationInfo
+from s2and.featurizer import DEFAULT_FEATURE_GROUPS, FeaturizationInfo
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d, as_uint32_1d
 from s2and.thread_config import resolve_n_jobs
 
-PROD_PAIRWISE_FEATURE_GROUPS: tuple[str, ...] = (
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-)
-PAIRWISE_INFO = FeaturizationInfo(features_to_use=list(PROD_PAIRWISE_FEATURE_GROUPS))
+PAIRWISE_INFO = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
 PROD_PAIRWISE_FEATURE_NAMES: tuple[str, ...] = tuple(PAIRWISE_INFO.get_feature_names())
 PROD_PAIRWISE_FEATURE_INDICES: tuple[int, ...] = tuple(
     feature_index
-    for feature_group in PROD_PAIRWISE_FEATURE_GROUPS
+    for feature_group in DEFAULT_FEATURE_GROUPS
     for feature_index in PAIRWISE_INFO.feature_group_to_index[feature_group]
 )
 PROMOTED_PAIRWISE_AGG_FEATURE_COLUMNS: tuple[str, ...] = tuple(
@@ -352,7 +338,11 @@ def resolve_linker_pairwise_featurizer(
 ) -> Any:
     """Return the Rust featurizer used for linker pairwise array APIs."""
 
-    return rust_calls._resolve_featurizer(dataset, featurizer, runtime_context)  # noqa: SLF001
+    if featurizer is not None:
+        return featurizer
+    if dataset is None:
+        raise ValueError("dataset is required when featurizer is not provided")
+    return feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context)  # noqa: SLF001
 
 
 def iter_candidate_batch_pair_feature_chunks_rust(
@@ -398,18 +388,16 @@ def iter_candidate_batch_pair_feature_chunks_rust(
         feature_start = time.perf_counter()
         pair_features, counts, valid_counts, sums, mins, maxs = (
             feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-                dataset,
                 candidate_batch.left_signature_indices[start:stop],
                 candidate_batch.right_signature_indices[start:stop],
                 local_row_indices,
                 len(global_rows),
+                featurizer=featurizer,
                 matrix_indices=list(resolved_matrix_indices),
                 aggregate_indices=list(resolved_aggregate_indices),
                 num_threads=resolve_n_jobs(n_jobs),
                 nan_value=float(nan_value),
                 aggregate_nan_value=aggregate_nan_value,
-                runtime_context=runtime_context,
-                featurizer=featurizer,
             )
         )
         feature_seconds = time.perf_counter() - feature_start
@@ -477,17 +465,15 @@ def compute_candidate_batch_pairwise_aggregate_stats_rust(
         global_rows, local_row_indices = _localize_row_indices(row_chunk)
         chunk_counts, chunk_valid_counts, chunk_sums, chunk_mins, chunk_maxs = (
             feature_port.build_linker_pair_aggregate_stats_arrays_rust(
-                dataset,
                 candidate_batch.left_signature_indices[start:stop],
                 candidate_batch.right_signature_indices[start:stop],
                 local_row_indices,
                 len(global_rows),
+                featurizer=featurizer,
                 aggregate_indices=list(aggregate_indices),
                 num_threads=resolve_n_jobs(n_jobs),
                 nan_value=float(nan_value),
                 aggregate_nan_value=aggregate_nan_value,
-                runtime_context=runtime_context,
-                featurizer=featurizer,
             )
         )
         chunk_count += 1

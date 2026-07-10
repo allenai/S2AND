@@ -159,7 +159,7 @@ clusterer = Clusterer(
 clusterer.fit(dataset)
 ```
 
-For evaluation, model serialization, and fuller scripts such as `scripts/transfer_experiment_seed_paper.py`, see [docs/training.md](docs/training.md).
+For evaluation and model serialization guidance, see [docs/training.md](docs/training.md).
 
 ## Runtime and Scaling
 

@@ -139,6 +139,8 @@ from typing import Any, cast
 
 import numpy as np
 
+from s2and.arrow_inputs import ValidatedArrowInputs
+
 TRAIN_MODE_ANDDATA_CURRENT = "anddata-current"
 TRAIN_MODE_ANDDATA_PYTHON = "anddata-python"
 TRAIN_MODE_JSON_RUST = "json-rust"
@@ -467,7 +469,11 @@ def resolve_arrow_dataset_root(arrow_root: str, dataset_name: str) -> str:
     raise FileNotFoundError(f"Missing Arrow manifest for dataset {dataset_name!r}; checked {formatted}")
 
 
-def resolve_arrow_dataset_paths(arrow_root: str, dataset_name: str, specter_suffix: str) -> dict[str, str]:
+def resolve_arrow_dataset_paths(
+    arrow_root: str,
+    dataset_name: str,
+    specter_suffix: str,
+) -> ValidatedArrowInputs:
     from s2and.arrow_inputs import MissingArrowArtifactError, validate_arrow_prediction_artifacts
     from s2and.incremental_linking.feature_block import RAW_PLANNER_ARROW_BATCH_INDEX_KEYS
 
@@ -665,7 +671,7 @@ def construct_cluster_to_signatures(
 
 
 def cluster_eval_arrow(
-    arrow_paths: dict[str, str],
+    arrow_paths: ValidatedArrowInputs,
     clusterer,
     *,
     random_seed: int,
@@ -691,7 +697,7 @@ def cluster_eval_arrow(
         raise ValueError("Split must be one of: train, val, test")
     signature_to_cluster_id = read_signature_to_cluster_id(arrow_paths["clusters"])
     cluster_to_signatures = construct_cluster_to_signatures(signature_to_cluster_id, block_dict)
-    predict_arrow_paths = {key: value for key, value in arrow_paths.items() if key != "clusters"}
+    predict_arrow_paths = arrow_paths.without("clusters")
     pred_clusters, _ = clusterer.predict_from_arrow_paths(
         block_dict,
         predict_arrow_paths,
@@ -906,9 +912,12 @@ def arrow_training_feature_splits(
     Any,
 ]:
     from s2and import feature_port
+    from s2and.arrow_inputs import ValidatedArrowInputs
     from s2and.consts import NORMALIZATION_VERSION
 
-    predict_arrow_paths = {str(key): value for key, value in arrow_paths.items() if key != "clusters"}
+    if not isinstance(arrow_paths, ValidatedArrowInputs):
+        raise TypeError("arrow_training_feature_splits requires validated Arrow inputs")
+    predict_arrow_paths = arrow_paths.without("clusters")
     rust_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
         predict_arrow_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
@@ -1087,32 +1096,15 @@ def apply_fixed_cluster_eps(clusterer: Any, fixed_cluster_eps: float | None) -> 
     return clusterer
 
 
-# feature categories
-features_to_use = [
-    "name_similarity",
-    "affiliation_similarity",
-    "email_similarity",
-    "coauthor_similarity",
-    "venue_similarity",
-    "year_diff",
-    "title_similarity",
-    "misc_features",
-    "name_counts",
-    "embedding_similarity",
-    "journal_similarity",
-    "advanced_name_similarity",
-]
-
-# nameless model: no name-based features (prevents model overreliance on names)
-nameless_features_to_use = [
-    f for f in features_to_use if f not in {"name_similarity", "advanced_name_similarity", "name_counts"}
-]
-
-
 def main() -> None:
     from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, PROJECT_ROOT_PATH
     from s2and.eval import cluster_eval
-    from s2and.featurizer import FeaturizationInfo, featurize
+    from s2and.featurizer import (
+        DEFAULT_FEATURE_GROUPS,
+        DEFAULT_NAMELESS_FEATURE_GROUPS,
+        FeaturizationInfo,
+        featurize,
+    )
     from s2and.production_model import load_production_model
 
     args = _build_parser().parse_args()
@@ -1192,9 +1184,12 @@ def main() -> None:
         print(f"Arrow data root: {arrow_data_root}")
     print()
 
-    featurization_info = FeaturizationInfo(features_to_use=features_to_use, featurizer_version=FEATURIZER_VERSION)
+    featurization_info = FeaturizationInfo(
+        features_to_use=list(DEFAULT_FEATURE_GROUPS),
+        featurizer_version=FEATURIZER_VERSION,
+    )
     nameless_featurization_info = FeaturizationInfo(
-        features_to_use=nameless_features_to_use,
+        features_to_use=list(DEFAULT_NAMELESS_FEATURE_GROUPS),
         featurizer_version=FEATURIZER_VERSION,
     )
 
@@ -1354,7 +1349,6 @@ def main() -> None:
                         evaluation_anddata,
                         clusterer,
                         split="test",
-                        use_s2_clusters=False,
                     )
                 print(cluster_metrics)
                 cluster_metrics_all.append(cluster_metrics)

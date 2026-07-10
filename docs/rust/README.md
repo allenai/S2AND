@@ -12,7 +12,7 @@ for the Rust integration.
 | File | Purpose |
 |---|---|
 | [baselines.md](baselines.md) | Gate operator guide: canonical gate commands, artifact conventions, and promotion policy. Start here when verifying Rust behavior or promoting a new baseline. |
-| [runtime.md](runtime.md) | Runtime contract: backend resolution (`python`/`rust`/`auto`), stage defaults, failure semantics, verification gates, and key capability gates (incl. training-mode deferred paper preprocessing). |
+| [runtime.md](runtime.md) | Runtime contract: explicit Python/Rust routes, exact native-version loading, failure semantics, Arrow validation, and verification commands. |
 | [inference_architecture.md](inference_architecture.md) | Current Rust inference boundary, before/after table, name-count decision, and remaining Python-heavy paths. |
 | [public_surface_inventory.md](public_surface_inventory.md) | Python-visible Rust/PyO3 surface inventory used to plan API cleanup and module splitting. |
 | [artifact_formats.md](artifact_formats.md) | Current artifact-format choices and rejected alternatives. |

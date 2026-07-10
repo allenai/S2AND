@@ -240,12 +240,9 @@ class NameCountsIndex:
                 manifest.get("source_provenance"),
                 context=f"{manifest_path} source_provenance",
             )
-            import s2and_rust
+            from s2and.runtime import load_s2and_rust_extension
 
-            native_class = getattr(s2and_rust, "NameCountsIndex", None)
-            if native_class is None:
-                raise RuntimeError("s2and-rust does not expose the required NameCountsIndex API")
-            native = native_class.open(resolved_path)
+            native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
             if manifest_path.read_bytes() != manifest_bytes:
                 raise RuntimeError(f"name-count index manifest changed while opening: {manifest_path}")
             opened = cls(

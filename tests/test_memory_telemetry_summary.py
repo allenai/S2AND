@@ -1,24 +1,11 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-from pathlib import Path
 
-from s2and.consts import PROJECT_ROOT_PATH
-
-
-def _load_rust_suite_module():
-    module_path = Path(PROJECT_ROOT_PATH) / "scripts" / "rust_suite.py"
-    spec = importlib.util.spec_from_file_location("rust_suite", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from scripts._rust_suite import summarize_memory_telemetry_cmd
 
 
 def test_summarize_memory_telemetry_writes_json(tmp_path):
-    module = _load_rust_suite_module()
     log_path = tmp_path / "memory_telemetry.jsonl"
     log_path.write_text(
         "\n".join(
@@ -48,7 +35,7 @@ def test_summarize_memory_telemetry_writes_json(tmp_path):
     )
     output_path = tmp_path / "summary.json"
 
-    rc = module.main(["summarize-memory-telemetry", str(log_path), "--write-json", str(output_path)])
+    rc = summarize_memory_telemetry_cmd.main([str(log_path), "--write-json", str(output_path)])
     assert int(rc) == 0
     blob = json.loads(output_path.read_text(encoding="utf-8"))
     assert int(blob["schema_version"]) == 1
@@ -71,7 +58,6 @@ def test_summarize_memory_telemetry_writes_json(tmp_path):
 
 
 def test_summarize_memory_telemetry_returns_nonzero_when_no_samples(tmp_path):
-    module = _load_rust_suite_module()
     log_path = tmp_path / "empty.jsonl"
     log_path.write_text(
         json.dumps({"schema_version": 1, "event": "memory_telemetry", "stage": "unrelated"}) + "\n",
@@ -79,7 +65,7 @@ def test_summarize_memory_telemetry_returns_nonzero_when_no_samples(tmp_path):
     )
     output_path = tmp_path / "summary.json"
 
-    rc = module.main(["summarize-memory-telemetry", str(log_path), "--write-json", str(output_path)])
+    rc = summarize_memory_telemetry_cmd.main([str(log_path), "--write-json", str(output_path)])
     assert int(rc) != 0
     blob = json.loads(output_path.read_text(encoding="utf-8"))
     assert int(blob["stages"]["phase_a_seed_distances"]["samples"]) == 0

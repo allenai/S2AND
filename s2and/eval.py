@@ -56,7 +56,6 @@ def cluster_eval(
     dataset: "ANDData",
     clusterer: "Clusterer",
     split: str = "test",
-    use_s2_clusters: bool = False,
 ) -> tuple[dict[str, tuple], dict[str, tuple[float, float, float]]]:
     """
     Performs clusterwise evaluation.
@@ -90,7 +89,7 @@ def cluster_eval(
     cluster_to_signatures = dataset.construct_cluster_to_signatures(block_dict)
 
     # predict
-    pred_clusters, _ = clusterer.predict(block_dict, dataset, use_s2_clusters=use_s2_clusters)
+    pred_clusters, _ = clusterer.predict(block_dict, dataset)
 
     # get metrics
     (

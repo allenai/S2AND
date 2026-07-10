@@ -73,7 +73,7 @@ def _iter_estimators(clf):
     """
     if hasattr(clf, "estimators") and clf.estimators:
         ests = clf.estimators
-        if isinstance(ests[0], tuple):  # e.g., VotingClassifier: [('rf', rf), ...]
+        if isinstance(ests[0], tuple):  # e.g., named estimators: [('rf', rf), ...]
             return [e for _, e in ests]
         return list(ests)  # already a list of estimators
     return None

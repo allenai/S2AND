@@ -17,7 +17,7 @@ from s2and.runtime import build_runtime_context
 from tests.helpers import build_arrow_training_dataset, import_s2and_rust
 
 _ORCID = "0000-0000-0000-0001"
-_HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust(required_method="from_arrow_paths")
+_HAS_RUST, _RUST_IMPORT_PAYLOAD = import_s2and_rust()
 
 
 def _signature(
@@ -117,12 +117,10 @@ def test_get_constraint_suppress_orcid_rust_parity(tmp_path) -> None:
     indexed_pairs = [(signature_index["same_a"], signature_index["same_b"])]
 
     assert get_constraints_matrix_indexed_rust(
-        dataset,
         indexed_pairs,
         featurizer=rust_featurizer,
     ) == [dataset.get_constraint("same_a", "same_b")]
     assert get_constraints_matrix_indexed_rust(
-        dataset,
         indexed_pairs,
         featurizer=rust_featurizer,
         suppress_orcid=True,
@@ -139,19 +137,16 @@ def test_cached_rust_featurizer_respects_suppress_orcid_per_call(tmp_path) -> No
     indexed_pairs = [(signature_index["same_a"], signature_index["same_b"])]
 
     default_values = get_constraints_matrix_indexed_rust(
-        dataset,
         indexed_pairs,
         featurizer=rust_featurizer,
         suppress_orcid=False,
     )
     suppressed_values = get_constraints_matrix_indexed_rust(
-        dataset,
         indexed_pairs,
         featurizer=rust_featurizer,
         suppress_orcid=True,
     )
     default_values_again = get_constraints_matrix_indexed_rust(
-        dataset,
         indexed_pairs,
         featurizer=rust_featurizer,
         suppress_orcid=False,

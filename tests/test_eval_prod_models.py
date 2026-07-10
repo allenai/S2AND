@@ -11,6 +11,8 @@ from typing import Any, cast
 import pytest
 
 import scripts.eval_prod_models as eval_prod_models
+from s2and.arrow_inputs import ValidatedArrowInputs
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block import write_name_counts_index
 from tests.helpers import import_s2and_rust, tiny_name_counts_provenance, tiny_name_counts_tuple
 
@@ -552,15 +554,19 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
     )
     monkeypatch.setattr(eval_prod_models, "read_signature_to_cluster_id", lambda _path: {"s1": "truth"})
 
-    arrow_paths = {
-        "signatures": "signatures.arrow",
-        "papers": "papers.arrow",
-        "paper_authors": "paper_authors.arrow",
-        "specter": "specter.arrow",
-        "clusters": "clusters.json",
-        "name_counts_index": "name_counts_index",
-        "signatures_batch_index": "signatures.signatures_batch_index.bin",
-    }
+    arrow_paths = ValidatedArrowInputs(
+        paths={
+            "signatures": "signatures.arrow",
+            "papers": "papers.arrow",
+            "paper_authors": "paper_authors.arrow",
+            "specter": "specter.arrow",
+            "clusters": "clusters.json",
+            "name_counts_index": "name_counts_index",
+            "signatures_batch_index": "signatures.signatures_batch_index.bin",
+        },
+        generation_id="test-generation",
+        normalization_version=NORMALIZATION_VERSION,
+    )
     eval_prod_models.cluster_eval_arrow(
         arrow_paths,
         SimpleNamespace(predict_from_arrow_paths=FakeClusterer().predict_from_arrow_paths),
@@ -691,11 +697,9 @@ def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:
 @requires_canonical_source_bundle
 @pytest.mark.requires_lfs
 def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
-    rust_available, rust_payload = import_s2and_rust(
-        required_module_attrs=("RustLightGBMBooster",),
-    )
+    rust_available, rust_payload = import_s2and_rust()
     if not rust_available:
-        raise pytest.skip.Exception(f"RustLightGBMBooster unavailable: {rust_payload!r}")
+        raise pytest.skip.Exception(f"s2and_rust unavailable: {rust_payload!r}")
 
     from s2and.production_model import load_production_model
 
@@ -814,7 +818,6 @@ def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
                 list(block_signatures),
                 cast(Any, dataset),
                 prevent_new_incompatibilities=False,
-                batching_threshold=None,
                 total_ram_bytes=1_000_000_000_000,
             ),
         )

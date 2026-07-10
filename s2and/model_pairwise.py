@@ -56,7 +56,7 @@ def _validated_classifier_features(
 
     import pandas as pd
 
-    return pd.DataFrame(values, columns=fitted_names, copy=False)
+    return pd.DataFrame(values, columns=list(fitted_names), copy=False)
 
 
 def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:

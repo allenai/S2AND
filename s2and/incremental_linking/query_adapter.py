@@ -642,7 +642,7 @@ def build_rust_hybrid_centroid_retriever(
 
     summaries = list(candidate_summaries)
     return RustHybridCentroidRetrieverHandle(
-        retriever=s2and_rust.RustHybridCentroidRetriever(
+        retriever=s2and_rust.RustHybridCentroidRetriever(  # type: ignore[unresolved-attribute]
             summaries,
             include_exemplars=bool(include_exemplars),
         ),

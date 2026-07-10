@@ -158,7 +158,9 @@ def build_promoted_non_pairwise_row_features_with_telemetry(
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     """Build promoted non-`pw_*` linker features and return Rust row-formula telemetry."""
 
-    result = s2and_rust.promoted_linker_non_pairwise_features(_rust_payload(candidate_batch, row_signals))
+    result = s2and_rust.promoted_linker_non_pairwise_features(  # type: ignore[unresolved-attribute]
+        _rust_payload(candidate_batch, row_signals)
+    )
     if not isinstance(result, Mapping):
         raise RuntimeError("Rust promoted row-feature result must be a mapping")
     telemetry = _coerce_promoted_row_feature_telemetry(result)

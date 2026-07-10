@@ -23,6 +23,18 @@ from s2and.subblocking import make_subblocks_with_telemetry
 from s2and.text import normalize_text
 
 DEFAULT_CHOOSER_CACHE_MAX_TOP_K = 25
+_MIDDLE_INITIAL_CONFLICT_SCORE = float(
+    s2and_rust.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE  # type: ignore[unresolved-attribute]
+)
+_YEAR_SCORE_DECAY_YEARS = float(
+    s2and_rust.RETRIEVAL_YEAR_SCORE_DECAY_YEARS  # type: ignore[unresolved-attribute]
+)
+_YEAR_SCORE_RANGE_GAP = int(
+    s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP  # type: ignore[unresolved-attribute]
+)
+_YEAR_SCORE_RANGE_PENALTY = float(
+    s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY  # type: ignore[unresolved-attribute]
+)
 
 
 @dataclass(frozen=True)
@@ -189,7 +201,7 @@ def middle_initial_compatibility(query: QueryFeatures, summary: ClusterSummary) 
             sum(float(summary.middle_initial_counts[value]) / float(summary.size) for value in overlap)
             / float(len(query.middle_initials))
         )
-    return s2and_rust.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
+    return _MIDDLE_INITIAL_CONFLICT_SCORE
 
 
 def year_compatibility(query_year: int | None, summary: ClusterSummary) -> float:
@@ -198,13 +210,13 @@ def year_compatibility(query_year: int | None, summary: ClusterSummary) -> float
     if query_year is None or summary.year_mean is None:
         return 0.0
     distance = abs(float(query_year) - float(summary.year_mean))
-    score = max(0.0, 1.0 - (distance / s2and_rust.RETRIEVAL_YEAR_SCORE_DECAY_YEARS))
+    score = max(0.0, 1.0 - (distance / _YEAR_SCORE_DECAY_YEARS))
     if summary.year_min is not None and summary.year_max is not None:
         if (
-            query_year < int(summary.year_min) - s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP
-            or query_year > int(summary.year_max) + s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP
+            query_year < int(summary.year_min) - _YEAR_SCORE_RANGE_GAP
+            or query_year > int(summary.year_max) + _YEAR_SCORE_RANGE_GAP
         ):
-            score -= s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY
+            score -= _YEAR_SCORE_RANGE_PENALTY
     return float(score)
 
 

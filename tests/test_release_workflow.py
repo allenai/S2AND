@@ -78,6 +78,10 @@ def test_rust_enabled_ci_cannot_convert_import_failures_to_skips() -> None:
     assert "S2AND_TEST_REQUIRE_RUST" in main_workflow
     assert "S2AND_TEST_REQUIRE_RUST" in helper_source
     assert "Rust-enabled tests require a working s2and_rust runtime" in helper_source
+    guardrail_paths = re.findall(r"pytest -q (tests/[^\s]+\.py)", main_workflow)
+    assert guardrail_paths
+    for relative_path in guardrail_paths:
+        assert (REPO_ROOT / relative_path).is_file(), relative_path
 
 
 def test_release_workflow_uses_uv_and_has_no_false_default_model() -> None:

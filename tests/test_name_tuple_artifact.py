@@ -20,7 +20,7 @@ from scripts.production import generate_canonical_name_tuples
 from tests.helpers import import_s2and_rust
 
 HAS_RUST_IDENTITY, RUST_MODULE = import_s2and_rust(
-    required_method="read_name_tuple_artifact_identity",
+    required_module_attrs=("read_name_tuple_artifact_identity",),
 )
 
 

@@ -47,7 +47,6 @@ def repo_root() -> Path:
 REPO = repo_root()
 LANES = ["py-only", "rust-enabled"]
 RUST_PARITY_TESTS = [
-    "tests/test_incremental_linking_default_artifact.py",
     "tests/test_feature_port_parity.py",
     "tests/test_rust_signature_preprocess.py",
     "tests/test_rust_batch_chunking.py",

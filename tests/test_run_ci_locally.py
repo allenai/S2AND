@@ -84,3 +84,10 @@ def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch)
     ]
     assert calls[-1][1] is not None
     assert "S2AND_BACKEND" not in calls[-1][1]
+
+
+def test_rust_parity_test_paths_exist() -> None:
+    run_ci = _load_run_ci_locally()
+
+    for relative_path in run_ci.RUST_PARITY_TESTS:
+        assert (run_ci.REPO / relative_path).is_file(), relative_path

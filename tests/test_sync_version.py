@@ -45,7 +45,7 @@ def _write_version_fixture(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "s2and" / "runtime.py").write_text(
-        "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 49, 0)\n",
+        'REQUIRED_RUST_EXTENSION_VERSION = "0.49.0"\n',
         encoding="utf-8",
     )
     (root / "README.md").write_text("echo 0.49.0 > VERSION\n", encoding="utf-8")
@@ -111,7 +111,7 @@ def test_sync_version_updates_rust_manifests_runtime_guard_and_lockfiles(tmp_pat
     assert '"s2and-rust==0.50.0"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.50.0"' in (tmp_path / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8")
-    assert "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 50, 0)" in (tmp_path / "s2and" / "runtime.py").read_text(
+    assert 'REQUIRED_RUST_EXTENSION_VERSION = "0.50.0"' in (tmp_path / "s2and" / "runtime.py").read_text(
         encoding="utf-8"
     )
     assert "echo 0.50.0 > VERSION" in (tmp_path / "README.md").read_text(encoding="utf-8")
@@ -129,8 +129,8 @@ def test_sync_version_rejects_ambiguous_targets(tmp_path: Path) -> None:
     (tmp_path / "s2and" / "runtime.py").write_text(
         "\n".join(
             [
-                "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 50, 0)",
-                "MIN_SUPPORTED_RUST_EXTENSION_VERSION = (0, 50, 0)",
+                'REQUIRED_RUST_EXTENSION_VERSION = "0.50.0"',
+                'REQUIRED_RUST_EXTENSION_VERSION = "0.50.0"',
                 "",
             ]
         ),

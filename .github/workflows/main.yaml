@@ -183,10 +183,6 @@ jobs:
         if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync python scripts/verification/smoke_installed_rust_api.py
 
-      - name: "Rust artifact guardrail: default incremental linker"
-        if: matrix.lane == 'rust-enabled'
-        run: uv run --no-sync pytest -q tests/test_incremental_linking_default_artifact.py
-
       - name: "Rust parity guardrail: feature parity"
         if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync pytest -q tests/test_feature_port_parity.py

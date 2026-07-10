@@ -11,9 +11,14 @@ from typing import Any, cast
 
 import numpy as np
 
-from s2and.arrow_inputs import validate_arrow_prediction_artifacts
+from s2and.arrow_inputs import (
+    require_normalization_version,
+    validate_arrow_prediction_artifacts,
+    verified_arrow_artifact_generation,
+)
 from s2and.consts import CLUSTER_SEEDS_LOOKUP
 from s2and.data import ANDData
+from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import (
     detect_rust_runtime_capabilities,
     load_s2and_rust_extension,
@@ -109,13 +114,12 @@ _RUST_FEATURIZER_BUILD_COUNTS: "weakref.WeakKeyDictionary[ANDData, dict[_RustFea
     weakref.WeakKeyDictionary()
 )
 _RUST_FEATURIZER_CACHE_EPOCHS: "weakref.WeakKeyDictionary[ANDData, int]" = weakref.WeakKeyDictionary()
-_RUST_FEATURIZER_NON_SEED_FINGERPRINTS: "weakref.WeakKeyDictionary[Any, _RustFeaturizerNonSeedFingerprint]" = (
-    weakref.WeakKeyDictionary()
-)
 _RUST_CLUSTER_SEED_UPDATE_LOCKS: "weakref.WeakKeyDictionary[ANDData, Any]" = weakref.WeakKeyDictionary()
 _RUST_BUILD_ERROR = "s2and_rust extension not built. Build with: maturin develop -m s2and_rust/Cargo.toml"
 RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES = 3
 RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS = 0.01
+RUST_FEATURIZER_NORMALIZATION_VERSION_ATTR = "rust_featurizer_normalization_version"
+RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR = "rust_featurizer_artifact_generation"
 
 
 def _require_rust_runtime() -> Any:
@@ -208,6 +212,11 @@ def _collection_fingerprint(value: Any) -> _CollectionFingerprint:
             (_bounded_repr(sample_key), _collection_value_token(sample_value))
             for sample_key, sample_value in value.items()
         ]
+    elif isinstance(value, frozenset):
+        # Frozenset caches its own hash after the first call. Arrow attachment
+        # freezes name aliases, making repeat cache validation O(1) while
+        # preventing undetectable in-place mutation.
+        return _CollectionFingerprint(object_id=id(value), length=int(length), digest=hash(value))
     elif isinstance(value, set):
         tokens = [(_bounded_repr(sample_value), 0) for sample_value in value]
     return _CollectionFingerprint(object_id=id(value), length=int(length), digest=_fingerprint_token_digest(tokens))
@@ -219,6 +228,22 @@ def _path_stat_token(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return (int(stat.st_size), int(stat.st_mtime_ns))
+
+
+def _path_content_token(path: Path) -> tuple[int, int, str] | None:
+    for _attempt in range(3):
+        try:
+            before = path.stat()
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            after = path.stat()
+        except OSError:
+            return None
+        if (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
+            return int(after.st_size), int(after.st_mtime_ns), digest.hexdigest()
+    return int(after.st_size), int(after.st_mtime_ns), f"unstable:{time.monotonic_ns()}"
 
 
 def _name_counts_index_fingerprint(
@@ -238,7 +263,7 @@ def _name_counts_index_fingerprint(
     manifest_digest = hashlib.blake2b(manifest_text.encode("utf-8"), digest_size=8).hexdigest()
     manifest_fingerprint = manifest.get("fingerprint") if isinstance(manifest, Mapping) else None
     files = manifest.get("files") if isinstance(manifest, Mapping) else None
-    file_tokens: list[tuple[str, str | None, tuple[int, int] | None]] = []
+    file_tokens: list[tuple[str, str | None, tuple[int, int, str] | None]] = []
     if isinstance(files, Mapping):
         for file_key, file_entry in sorted(files.items(), key=lambda item: str(item[0])):
             if not isinstance(file_entry, Mapping):
@@ -251,7 +276,7 @@ def _name_counts_index_fingerprint(
             child_path = Path(path_value)
             if not child_path.is_absolute():
                 child_path = path / child_path
-            file_tokens.append((str(file_key), path_value, _path_stat_token(child_path)))
+            file_tokens.append((str(file_key), path_value, _path_content_token(child_path)))
 
     return (
         field_name,
@@ -265,7 +290,12 @@ def _name_counts_index_fingerprint(
     )
 
 
-def _source_path_fingerprint(field_name: str, value: Any) -> _SourcePathFingerprint:
+def _source_path_fingerprint(
+    field_name: str,
+    value: Any,
+    *,
+    hash_content: bool = False,
+) -> _SourcePathFingerprint:
     if value is None:
         return (field_name, None, None, None)
     path_text = str(value)
@@ -276,10 +306,32 @@ def _source_path_fingerprint(field_name: str, value: Any) -> _SourcePathFingerpr
         return (field_name, path_text, None, None)
     if field_name.endswith(".name_counts_index") and path.is_dir():
         return _name_counts_index_fingerprint(field_name, path_text, path)
+    if hash_content:
+        return (field_name, path_text, _path_content_token(path))
     return (field_name, path_text, int(stat.st_size), int(stat.st_mtime_ns))
 
 
 def _rust_featurizer_source_paths(dataset: Any) -> tuple[_SourcePathFingerprint, ...]:
+    arrow_paths = getattr(dataset, "rust_featurizer_arrow_paths", None)
+    validated_generation = getattr(dataset, RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR, None)
+    if validated_generation is not None:
+        if not isinstance(arrow_paths, Mapping):
+            raise ValueError("validated Arrow generation requires rust_featurizer_arrow_paths")
+        observed_generation = verified_arrow_artifact_generation(
+            {str(key): str(value) for key, value in arrow_paths.items()}
+        )
+        if observed_generation != str(validated_generation):
+            raise ValueError("rust_featurizer_artifact_generation is not backed by the supplied immutable manifest")
+        return (("validated_arrow_generation", str(validated_generation)),)
+    if isinstance(arrow_paths, Mapping) and arrow_paths:
+        return tuple(
+            _source_path_fingerprint(
+                f"rust_featurizer_arrow_paths.{key}",
+                value,
+                hash_content=True,
+            )
+            for key, value in sorted(arrow_paths.items(), key=lambda item: str(item[0]))
+        )
     source_paths = [
         _source_path_fingerprint(field_name, getattr(dataset, field_name, None))
         for field_name in (
@@ -292,47 +344,35 @@ def _rust_featurizer_source_paths(dataset: Any) -> tuple[_SourcePathFingerprint,
             "specter_embeddings_path",
         )
     ]
-    # Arrow featurizer artifacts are the material inputs of from_arrow_paths builds.
-    arrow_paths = getattr(dataset, "rust_featurizer_arrow_paths", None)
-    if isinstance(arrow_paths, Mapping):
-        source_paths.extend(
-            _source_path_fingerprint(f"rust_featurizer_arrow_paths.{key}", value)
-            for key, value in sorted(arrow_paths.items(), key=lambda item: str(item[0]))
-        )
     return tuple(source_paths)
 
 
 def _rust_featurizer_non_seed_fingerprint(dataset: Any) -> _RustFeaturizerNonSeedFingerprint:
+    arrow_paths = getattr(dataset, "rust_featurizer_arrow_paths", None)
+    arrow_backed = isinstance(arrow_paths, Mapping) and bool(arrow_paths)
+    empty = _CollectionFingerprint(object_id=0, length=0)
     return _RustFeaturizerNonSeedFingerprint(
         preprocess=bool(getattr(dataset, "preprocess", False)),
         n_jobs=resolve_n_jobs(getattr(dataset, "n_jobs", 1)),
         source_paths=_rust_featurizer_source_paths(dataset),
-        signatures=_collection_fingerprint(getattr(dataset, "signatures", None)),
-        papers=_collection_fingerprint(getattr(dataset, "papers", None)),
-        specter_embeddings=_collection_fingerprint(getattr(dataset, "specter_embeddings", None)),
+        # from_arrow_paths does not consume the Python object graph. Excluding
+        # it avoids rescanning duplicate training dictionaries on every cache
+        # lookup and prevents irrelevant Python mutations from rebuilding the
+        # native featurizer.
+        signatures=empty if arrow_backed else _collection_fingerprint(getattr(dataset, "signatures", None)),
+        papers=empty if arrow_backed else _collection_fingerprint(getattr(dataset, "papers", None)),
+        specter_embeddings=(
+            empty if arrow_backed else _collection_fingerprint(getattr(dataset, "specter_embeddings", None))
+        ),
         name_tuples=_collection_fingerprint(getattr(dataset, "name_tuples", None)),
     )
 
 
 def _cached_rust_featurizer_non_seed_fingerprint(dataset: Any) -> _RustFeaturizerNonSeedFingerprint:
-    try:
-        with _RUST_FEATURIZER_CACHE_LOCK:
-            cached = _RUST_FEATURIZER_NON_SEED_FINGERPRINTS.get(dataset)
-    except TypeError:
-        return _rust_featurizer_non_seed_fingerprint(dataset)
-    if cached is not None:
-        return cached
-
-    computed = _rust_featurizer_non_seed_fingerprint(dataset)
-    try:
-        with _RUST_FEATURIZER_CACHE_LOCK:
-            cached = _RUST_FEATURIZER_NON_SEED_FINGERPRINTS.get(dataset)
-            if cached is not None:
-                return cached
-            _RUST_FEATURIZER_NON_SEED_FINGERPRINTS[dataset] = computed
-    except TypeError:
-        return computed
-    return computed
+    # Material state must be observed on every lookup. Arrow-backed datasets
+    # use immutable paths and frozen name aliases, so this remains a small,
+    # constant-memory boundary check rather than a scan of their Python rows.
+    return _rust_featurizer_non_seed_fingerprint(dataset)
 
 
 def _rust_featurizer_cache_key(
@@ -519,6 +559,7 @@ def _rust_featurizer_method(method_name: str, purpose: str) -> Any:
 def build_rust_featurizer_from_arrow_paths(
     paths: Mapping[str, Any],
     *,
+    expected_normalization_version: str,
     signature_ids: Sequence[Any] | None = None,
     name_tuples: Any = "filtered",
     load_name_counts: bool = False,
@@ -530,12 +571,19 @@ def build_rust_featurizer_from_arrow_paths(
     """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths."""
 
     method = _rust_featurizer_method("from_arrow_paths", "raw Arrow scoring")
+    expected_version = require_normalization_version(
+        expected_normalization_version,
+        context="RustFeaturizer.from_arrow_paths",
+    )
     path_keys = {str(key) for key in paths}
     normalized_paths = validate_arrow_prediction_artifacts(
         paths,
         require_specter="specter" in path_keys or "specter2" in path_keys,
         require_name_counts_index=bool(load_name_counts),
         require_batch_indexes=True,
+        strict_batch_index_validation=True,
+        expected_normalization_version=expected_version,
+        require_canonical_manifest=True,
         context="RustFeaturizer.from_arrow_paths production build",
         producer_hint=(
             "include signatures, papers, paper_authors, raw-planner batch indexes, model-required specter, "
@@ -543,10 +591,16 @@ def build_rust_featurizer_from_arrow_paths(
         ),
     )
     normalized_paths.pop("query_signatures", None)
+    normalized_paths.pop("manifest", None)
+    resolved_name_tuples = name_tuples
+    if name_tuples is None or name_tuples == "filtered":
+        # Package data is immutable for the process lifetime. Reuse only the
+        # frozen validated artifact so repeated Arrow requests do not rehash it.
+        resolved_name_tuples = load_packaged_name_tuple_artifact().pairs
     return method(
         normalized_paths,
         None if signature_ids is None else [str(value) for value in signature_ids],
-        name_tuples,
+        resolved_name_tuples,
         bool(preprocess),
         float(cluster_seed_require_value),
         float(cluster_seed_disallow_value),
@@ -578,6 +632,10 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
     ffi_start = time.perf_counter()
     featurizer = build_rust_featurizer_from_arrow_paths(
         arrow_paths,
+        expected_normalization_version=require_normalization_version(
+            getattr(dataset, RUST_FEATURIZER_NORMALIZATION_VERSION_ATTR, None),
+            context="Arrow-backed training featurizer",
+        ),
         signature_ids=None,
         name_tuples=getattr(dataset, "name_tuples", "filtered"),
         load_name_counts=True,
@@ -939,8 +997,6 @@ def evict_rust_featurizer(dataset: ANDData) -> bool:
                 inflight_build.event.set()
         if dataset in _RUST_FEATURIZER_BUILD_COUNTS:
             del _RUST_FEATURIZER_BUILD_COUNTS[dataset]
-        if dataset in _RUST_FEATURIZER_NON_SEED_FINGERPRINTS:
-            del _RUST_FEATURIZER_NON_SEED_FINGERPRINTS[dataset]
         return removed
 
 
@@ -960,7 +1016,6 @@ def clear_rust_featurizer_cache() -> int:
         _RUST_FEATURIZER_CACHE.clear()
         _RUST_FEATURIZER_INFLIGHT_BUILDS.clear()
         _RUST_FEATURIZER_BUILD_COUNTS.clear()
-        _RUST_FEATURIZER_NON_SEED_FINGERPRINTS.clear()
         return count
 
 

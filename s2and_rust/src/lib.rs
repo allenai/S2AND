@@ -38,8 +38,8 @@ use features::*;
 pub(crate) use ingest_dataset::*;
 use language_detection::LanguageDetectorCompat;
 use name_counts::{
-    read_name_counts_index_normalization_version, NameCountsData, RawNameCountKind,
-    RawNameCountMaps,
+    read_name_counts_index_normalization_version, NameCountsData, NameCountsProvenanceBinding,
+    RawNameCountKind, RawNameCountMaps,
 };
 use orcid::{normalize_orcid_compact_owned, normalize_orcid_owned};
 use pair_indexing::upper_triangle_pairs_for_range;
@@ -69,7 +69,7 @@ pub(crate) use rust_featurizer::RustFeaturizer;
 use subblocking::*;
 use text_compat::{
     canonical_name_count_keys_compat, canonicalize_name_parts_compat, compute_block_compat,
-    ensure_unidecode_for_text, normalize_text_compat_from_map,
+    ensure_unidecode_for_text, normalize_text_compat_from_map, normalize_title_compat_from_map,
 };
 
 fn py_len(s: &str) -> usize {
@@ -520,6 +520,35 @@ mod tests {
     }
 
     #[test]
+    fn sorted_subblock_merge_candidates_orcid_counts_are_order_independent() {
+        let counts = HashMap::from([("wei".to_string(), HashMap::from([("li".to_string(), 7.0)]))]);
+        let mut forward = OrderedSubblocks::default();
+        forward.insert("a|middle=wei".to_string(), vec!["s1".to_string()]);
+        forward.insert("a|middle=li".to_string(), vec!["s2".to_string()]);
+        let mut reverse = OrderedSubblocks::default();
+        reverse.insert("a|middle=li".to_string(), vec!["s2".to_string()]);
+        reverse.insert("a|middle=wei".to_string(), vec!["s1".to_string()]);
+
+        let forward_candidates =
+            sorted_subblock_merge_candidates(&forward, 3, &counts).expect("forward candidates");
+        let reverse_candidates =
+            sorted_subblock_merge_candidates(&reverse, 3, &counts).expect("reverse candidates");
+
+        assert_eq!(forward_candidates[0].1, 7.0);
+        assert_eq!(reverse_candidates[0].1, 7.0);
+        assert_eq!(
+            HashSet::from([
+                forward_candidates[0].0 .0.clone(),
+                forward_candidates[0].0 .1.clone()
+            ]),
+            HashSet::from([
+                reverse_candidates[0].0 .0.clone(),
+                reverse_candidates[0].0 .1.clone()
+            ])
+        );
+    }
+
+    #[test]
     fn orcid_subblocking_skips_oversized_connected_component_without_partial_merge() {
         let mut output = OrderedSubblocks::default();
         output.insert("a".to_string(), vec!["s1".to_string()]);
@@ -694,6 +723,16 @@ mod tests {
     }
 
     #[test]
+    fn normalize_title_compat_preserves_identifying_digits() {
+        let unidecode_char_map = HashMap::new();
+
+        assert_eq!(
+            normalize_title_compat_from_map("Part 1: Co3O4 in 2025", &unidecode_char_map),
+            "part 1 co3o4 in 2025"
+        );
+    }
+
+    #[test]
     fn normalize_text_compat_missing_mapping_does_not_panic() {
         let unidecode_char_map = HashMap::new();
         assert_eq!(
@@ -722,7 +761,7 @@ mod tests {
     fn stage_papers_normalize_title_and_authors_without_full_preprocess() {
         let input = StagePaperInput {
             paper_id: "p1".to_string(),
-            raw_title: "Some Title".to_string(),
+            raw_title: "Part 1: Co3O4".to_string(),
             raw_venue: "My Venue".to_string(),
             raw_journal: "My Journal".to_string(),
             raw_authors: vec![(0, "ALICE-1".to_string()), (1, "Bob O'Neil".to_string())],
@@ -747,6 +786,13 @@ mod tests {
             vec![(0, "alice".to_string()), (1, "bob o neil".to_string())]
         );
         assert!(paper.title_words.is_some());
+        assert!(paper
+            .title_words
+            .as_ref()
+            .expect("title words")
+            .entries
+            .iter()
+            .any(|(hash, _count)| *hash == fnv64(b"1")));
         assert!(paper.title_chars.is_none());
         assert!(paper.venue_ngrams.is_none());
         assert!(paper.journal_ngrams.is_none());
@@ -902,6 +948,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         read_name_counts_index_normalization_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(read_name_tuple_artifact_identity, m)?)?;
     promoted_linker::add_to_module(m)?;
     lightgbm_booster::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(

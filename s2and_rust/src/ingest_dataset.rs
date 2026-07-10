@@ -55,13 +55,10 @@ pub(crate) fn insert_name_tuple_alias(
     a: String,
     b: String,
 ) {
-    // Directed insert to match the Python reference, which stores name tuples as a
-    // `set[tuple[str, str]]` keyed on the curated (a, b) order (see
-    // `_load_name_tuples_from_file` in s2and/data.py). The shipped
-    // `s2and_name_tuples_canonical.txt` lists both directions explicitly for every
-    // pair, so directed insertion still yields both lookups while staying faithful
-    // to any asymmetric tuples a caller might supply.
-    map.entry(a).or_insert_with(HashSet::new).insert(b);
+    map.entry(a.clone())
+        .or_insert_with(HashSet::new)
+        .insert(b.clone());
+    map.entry(b).or_insert_with(HashSet::new).insert(a);
 }
 
 pub(crate) fn extract_name_tuples_map(
@@ -306,8 +303,7 @@ pub(crate) fn preprocess_stage_papers(
     paper_inputs
         .par_iter()
         .map(|paper_input| {
-            let title =
-                normalize_text_compat_from_map(&paper_input.raw_title, false, unidecode_char_map);
+            let title = normalize_title_compat_from_map(&paper_input.raw_title, unidecode_char_map);
             let venue = if preprocess {
                 normalize_text_compat_from_map(&paper_input.raw_venue, false, unidecode_char_map)
             } else {
@@ -328,8 +324,9 @@ pub(crate) fn preprocess_stage_papers(
                     )
                 })
                 .collect::<Vec<_>>();
-            let title_words =
-                counter_data_from_usize_map(word_ngrams_counter_python_compat(&title, stop_words));
+            let title_words = counter_data_from_usize_map(word_ngrams_counter_python_compat(
+                &title, stop_words, false,
+            ));
             let title_chars = if preprocess {
                 counter_data_from_usize_map(char_ngrams_counter_python_compat(
                     &title,
@@ -543,15 +540,17 @@ pub(crate) fn extract_name_tuples_argument(
         return load_name_tuples_from_text_path(py, None);
     };
     if obj.is_none() {
-        return Ok(HashMap::new());
+        return load_name_tuples_from_text_path(py, None);
     }
     if let Ok(value) = obj.extract::<String>() {
         let normalized = value.trim().to_ascii_lowercase();
-        if normalized.is_empty() || normalized == "none" {
-            return Ok(HashMap::new());
-        }
         if normalized == "filtered" {
             return load_name_tuples_from_text_path(py, None);
+        }
+        if normalized.is_empty() || normalized == "none" {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "disable name tuples with an explicit empty set; string 'none' and empty paths are invalid",
+            ));
         }
         return load_name_tuples_from_text_path(py, Some(value.as_str()));
     }
@@ -676,6 +675,408 @@ pub(crate) fn default_name_tuples_path(py: Python<'_>) -> PyResult<String> {
     path_obj.call_method0("as_posix")?.extract()
 }
 
+const NAME_TUPLE_ARTIFACT_SCHEMA_VERSION: &str = "s2and_name_tuples_v1";
+const NAME_TUPLE_ARTIFACT_VERSION: u64 = 1;
+const NAME_TUPLE_NORMALIZATION_VERSION: &str = "canonical_v2";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NameTupleArtifactIdentity {
+    schema_version: String,
+    artifact_version: u64,
+    normalization_version: String,
+    data_filename: String,
+    data_sha256: String,
+    data_size_bytes: u64,
+    directed_pair_count: u64,
+    unordered_pair_count: u64,
+    source_filename: String,
+    source_sha256: String,
+    source_size_bytes: u64,
+}
+
+fn name_tuple_value_error(metadata_path: &Path, message: impl AsRef<str>) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!(
+        "invalid name-tuple metadata {}: {}",
+        metadata_path.display(),
+        message.as_ref()
+    ))
+}
+
+fn required_name_tuple_object<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    metadata_path: &Path,
+) -> PyResult<&'a serde_json::Map<String, serde_json::Value>> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            name_tuple_value_error(metadata_path, format!("requires object field {field:?}"))
+        })
+}
+
+fn required_name_tuple_string(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    metadata_path: &Path,
+) -> PyResult<String> {
+    let string = value
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            name_tuple_value_error(
+                metadata_path,
+                format!("requires nonempty string field {field:?}"),
+            )
+        })?;
+    Ok(string.to_string())
+}
+
+fn required_name_tuple_u64(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    metadata_path: &Path,
+) -> PyResult<u64> {
+    value.and_then(serde_json::Value::as_u64).ok_or_else(|| {
+        name_tuple_value_error(
+            metadata_path,
+            format!("requires nonnegative integer field {field:?}"),
+        )
+    })
+}
+
+fn required_name_tuple_sha256(
+    value: Option<&serde_json::Value>,
+    field: &str,
+    metadata_path: &Path,
+) -> PyResult<String> {
+    let digest = required_name_tuple_string(value, field, metadata_path)?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(name_tuple_value_error(
+            metadata_path,
+            format!("requires lowercase SHA-256 field {field:?}"),
+        ));
+    }
+    Ok(digest)
+}
+
+fn python_sha256_hex(py: Python<'_>, payload: &[u8]) -> PyResult<String> {
+    use pyo3::types::PyBytes;
+
+    py.import("hashlib")?
+        .call_method1("sha256", (PyBytes::new(py, payload),))?
+        .call_method0("hexdigest")?
+        .extract()
+}
+
+fn validated_name_tuple_artifact(
+    py: Python<'_>,
+    effective_path: &Path,
+) -> PyResult<(HashMap<String, HashSet<String>>, NameTupleArtifactIdentity)> {
+    if !effective_path.is_file() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "name tuples path does not exist: {}",
+            effective_path.display()
+        )));
+    }
+    let metadata_path = effective_path.with_file_name(format!(
+        "{}.meta.json",
+        effective_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "name tuples path has a non-UTF-8 filename: {}",
+                    effective_path.display()
+                ))
+            })?
+    ));
+    if !metadata_path.is_file() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "name tuple metadata does not exist: {}",
+            metadata_path.display()
+        )));
+    }
+
+    let metadata_bytes = fs::read(&metadata_path).map_err(|err| {
+        pyo3::exceptions::PyIOError::new_err(format!(
+            "failed to read name tuple metadata {}: {}",
+            metadata_path.display(),
+            err
+        ))
+    })?;
+    let data_bytes = fs::read(effective_path).map_err(|err| {
+        pyo3::exceptions::PyIOError::new_err(format!(
+            "failed to read name tuples path {}: {}",
+            effective_path.display(),
+            err
+        ))
+    })?;
+    let metadata_after = fs::read(&metadata_path).map_err(|err| {
+        pyo3::exceptions::PyIOError::new_err(format!(
+            "failed to re-read name tuple metadata {}: {}",
+            metadata_path.display(),
+            err
+        ))
+    })?;
+    if metadata_bytes != metadata_after {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "name tuple metadata changed while loading: {}",
+            metadata_path.display()
+        )));
+    }
+
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes)
+        .map_err(|err| name_tuple_value_error(&metadata_path, format!("invalid JSON: {err}")))?;
+    let root = metadata
+        .as_object()
+        .ok_or_else(|| name_tuple_value_error(&metadata_path, "expected a JSON object"))?;
+    let schema_version =
+        required_name_tuple_string(root.get("schema_version"), "schema_version", &metadata_path)?;
+    if schema_version != NAME_TUPLE_ARTIFACT_SCHEMA_VERSION {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "unsupported schema_version={schema_version:?}; expected {NAME_TUPLE_ARTIFACT_SCHEMA_VERSION:?}"
+            ),
+        ));
+    }
+    let artifact_version = required_name_tuple_u64(
+        root.get("artifact_version"),
+        "artifact_version",
+        &metadata_path,
+    )?;
+    if artifact_version != NAME_TUPLE_ARTIFACT_VERSION {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "unsupported artifact_version={artifact_version}; expected {NAME_TUPLE_ARTIFACT_VERSION}"
+            ),
+        ));
+    }
+    let normalization_version = required_name_tuple_string(
+        root.get("normalization_version"),
+        "normalization_version",
+        &metadata_path,
+    )?;
+    if normalization_version != NAME_TUPLE_NORMALIZATION_VERSION {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "normalization_version={normalization_version:?}; expected {NAME_TUPLE_NORMALIZATION_VERSION:?}"
+            ),
+        ));
+    }
+    required_name_tuple_string(root.get("generated_at"), "generated_at", &metadata_path)?;
+
+    let source = required_name_tuple_object(&metadata, "source", &metadata_path)?;
+    let source_filename =
+        required_name_tuple_string(source.get("filename"), "source.filename", &metadata_path)?;
+    let source_sha256 =
+        required_name_tuple_sha256(source.get("sha256"), "source.sha256", &metadata_path)?;
+    let source_size_bytes = required_name_tuple_u64(
+        source.get("size_bytes"),
+        "source.size_bytes",
+        &metadata_path,
+    )?;
+
+    let data = required_name_tuple_object(&metadata, "data", &metadata_path)?;
+    let data_filename =
+        required_name_tuple_string(data.get("filename"), "data.filename", &metadata_path)?;
+    let actual_filename = effective_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "name tuples path has a non-UTF-8 filename: {}",
+                effective_path.display()
+            ))
+        })?;
+    if data_filename != actual_filename {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!("binds data.filename={data_filename:?}, expected {actual_filename:?}"),
+        ));
+    }
+    let data_sha256 =
+        required_name_tuple_sha256(data.get("sha256"), "data.sha256", &metadata_path)?;
+    let data_size_bytes =
+        required_name_tuple_u64(data.get("size_bytes"), "data.size_bytes", &metadata_path)?;
+    if data_size_bytes != data_bytes.len() as u64 {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "data size mismatch: metadata={data_size_bytes} actual={}",
+                data_bytes.len()
+            ),
+        ));
+    }
+    let actual_sha256 = python_sha256_hex(py, &data_bytes)?;
+    if data_sha256 != actual_sha256 {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!("data SHA-256 mismatch: metadata={data_sha256} actual={actual_sha256}"),
+        ));
+    }
+    let directed_pair_count = required_name_tuple_u64(
+        data.get("directed_pair_count"),
+        "data.directed_pair_count",
+        &metadata_path,
+    )?;
+    let unordered_pair_count = required_name_tuple_u64(
+        data.get("unordered_pair_count"),
+        "data.unordered_pair_count",
+        &metadata_path,
+    )?;
+
+    let expected_semantics = serde_json::json!({
+        "encoding": "utf-8",
+        "line_format": "name_a,name_b",
+        "row_order": "lexicographic_by_fields_unique",
+        "directionality": "symmetric_directed_rows",
+        "runtime_pair_semantics": "unordered",
+        "canonicalizer": "canonicalize_name_text",
+        "drop_identity": true,
+        "drop_prefix_compatible": true,
+    });
+    if root.get("semantics") != Some(&expected_semantics) {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!("unsupported semantics; expected {expected_semantics}"),
+        ));
+    }
+    let generation_counts =
+        required_name_tuple_object(&metadata, "generation_counts", &metadata_path)?;
+    for field in [
+        "input_pair_count",
+        "dropped_identity",
+        "dropped_prefix_compatible",
+        "dropped_empty",
+    ] {
+        required_name_tuple_u64(
+            generation_counts.get(field),
+            &format!("generation_counts.{field}"),
+            &metadata_path,
+        )?;
+    }
+
+    let text = std::str::from_utf8(&data_bytes).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "name tuple artifact is not valid UTF-8: {}",
+            effective_path.display()
+        ))
+    })?;
+    let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut previous: Option<(&str, &str)> = None;
+    let mut actual_directed_pair_count = 0usize;
+    for (line_index, line) in text.lines().enumerate() {
+        let mut fields = line.split(',');
+        let first_a = fields.next().unwrap_or_default();
+        let first_b = fields.next().unwrap_or_default();
+        if first_a.is_empty() || first_b.is_empty() || fields.next().is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid name tuple at {}:{}: expected two nonempty fields",
+                effective_path.display(),
+                line_index + 1
+            )));
+        }
+        let pair = (first_a, first_b);
+        if previous.is_some_and(|prior| pair <= prior) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid name tuple ordering at {}:{}: rows must be unique and sorted by fields",
+                effective_path.display(),
+                line_index + 1
+            )));
+        }
+        previous = Some(pair);
+        if crate::text_compat::canonicalize_name_text_compat(first_a, None) != first_a
+            || crate::text_compat::canonicalize_name_text_compat(first_b, None) != first_b
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid noncanonical name tuple at {}:{}",
+                effective_path.display(),
+                line_index + 1
+            )));
+        }
+        if first_a == first_b {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid identity name tuple at {}:{}",
+                effective_path.display(),
+                line_index + 1
+            )));
+        }
+        if same_prefix_tokens(first_a, first_b) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid prefix-compatible name tuple at {}:{}",
+                effective_path.display(),
+                line_index + 1
+            )));
+        }
+        // The artifact contract requires both directions as distinct sorted
+        // rows, so retain the directional representation while validating.
+        // Once reverse completeness is proven below, this is already the
+        // symmetric runtime map and needs no second relation allocation.
+        aliases
+            .entry(first_a.to_string())
+            .or_default()
+            .insert(first_b.to_string());
+        actual_directed_pair_count += 1;
+    }
+    if actual_directed_pair_count as u64 != directed_pair_count {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "directed_pair_count mismatch: metadata={directed_pair_count} actual={}",
+                actual_directed_pair_count
+            ),
+        ));
+    }
+    for (first_a, aliases_for_first) in &aliases {
+        for first_b in aliases_for_first {
+            if !aliases
+                .get(first_b)
+                .is_some_and(|reverse_aliases| reverse_aliases.contains(first_a))
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "name tuple artifact {} is missing reverse row {:?},{:?}",
+                    effective_path.display(),
+                    first_b,
+                    first_a
+                )));
+            }
+        }
+    }
+    if actual_directed_pair_count % 2 != 0
+        || (actual_directed_pair_count / 2) as u64 != unordered_pair_count
+    {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "unordered_pair_count mismatch: metadata={unordered_pair_count} actual={}",
+                actual_directed_pair_count / 2
+            ),
+        ));
+    }
+    let identity = NameTupleArtifactIdentity {
+        schema_version,
+        artifact_version,
+        normalization_version,
+        data_filename,
+        data_sha256,
+        data_size_bytes,
+        directed_pair_count,
+        unordered_pair_count,
+        source_filename,
+        source_sha256,
+        source_size_bytes,
+    };
+    Ok((aliases, identity))
+}
+
 pub(crate) fn load_name_tuples_from_text_path(
     py: Python<'_>,
     path: Option<&str>,
@@ -684,26 +1085,32 @@ pub(crate) fn load_name_tuples_from_text_path(
         Some(value) => value.to_string(),
         None => default_name_tuples_path(py)?,
     };
-    if !Path::new(&effective_path).exists() {
-        return Ok(HashMap::new());
-    }
-    let text = fs::read_to_string(&effective_path).map_err(|err| {
-        pyo3::exceptions::PyIOError::new_err(format!(
-            "failed to read name tuples path {}: {}",
-            effective_path, err
-        ))
-    })?;
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some((a, b)) = trimmed.split_once(',') {
-            insert_name_tuple_alias(&mut out, a.to_string(), b.to_string());
-        }
-    }
-    Ok(out)
+    Ok(validated_name_tuple_artifact(py, Path::new(&effective_path))?.0)
+}
+
+#[pyfunction(signature = (path=None))]
+pub(crate) fn read_name_tuple_artifact_identity(
+    py: Python<'_>,
+    path: Option<&str>,
+) -> PyResult<Py<PyDict>> {
+    let effective_path = match path {
+        Some(value) => value.to_string(),
+        None => default_name_tuples_path(py)?,
+    };
+    let identity = validated_name_tuple_artifact(py, Path::new(&effective_path))?.1;
+    let output = PyDict::new(py);
+    output.set_item("schema_version", identity.schema_version)?;
+    output.set_item("artifact_version", identity.artifact_version)?;
+    output.set_item("normalization_version", identity.normalization_version)?;
+    output.set_item("data_filename", identity.data_filename)?;
+    output.set_item("data_sha256", identity.data_sha256)?;
+    output.set_item("data_size_bytes", identity.data_size_bytes)?;
+    output.set_item("directed_pair_count", identity.directed_pair_count)?;
+    output.set_item("unordered_pair_count", identity.unordered_pair_count)?;
+    output.set_item("source_filename", identity.source_filename)?;
+    output.set_item("source_sha256", identity.source_sha256)?;
+    output.set_item("source_size_bytes", identity.source_size_bytes)?;
+    Ok(output.unbind())
 }
 
 pub(crate) fn has_name_counts_artifact(raw_name_counts: &RawNameCountMaps) -> bool {
@@ -867,5 +1274,135 @@ mod name_counts_empty_surname_tests {
         assert_eq!(spaced.first_last, 1.0);
         assert_eq!(spaced.last, 1.0);
         assert_eq!(spaced.last_first_initial, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod name_tuple_artifact_tests {
+    use super::{load_name_tuples_from_text_path, python_sha256_hex};
+    use pyo3::types::PyAnyMethods;
+    use pyo3::Python;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn metadata_path(path: &Path) -> PathBuf {
+        path.with_file_name(format!(
+            "{}.meta.json",
+            path.file_name().unwrap().to_str().unwrap()
+        ))
+    }
+
+    fn write_artifact(
+        py: Python<'_>,
+        path: &Path,
+        data: &str,
+        directed_pair_count: u64,
+        unordered_pair_count: u64,
+    ) {
+        let digest = python_sha256_hex(py, data.as_bytes()).expect("hash fixture");
+        fs::write(path, data).expect("write tuple fixture");
+        let metadata = serde_json::json!({
+            "schema_version": "s2and_name_tuples_v1",
+            "artifact_version": 1,
+            "normalization_version": "canonical_v2",
+            "generated_at": "2026-07-10T00:00:00+00:00",
+            "source": {
+                "filename": "source.txt",
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "size_bytes": 0,
+            },
+            "data": {
+                "filename": path.file_name().unwrap().to_str().unwrap(),
+                "sha256": digest,
+                "size_bytes": data.len(),
+                "directed_pair_count": directed_pair_count,
+                "unordered_pair_count": unordered_pair_count,
+            },
+            "semantics": {
+                "encoding": "utf-8",
+                "line_format": "name_a,name_b",
+                "row_order": "lexicographic_by_fields_unique",
+                "directionality": "symmetric_directed_rows",
+                "runtime_pair_semantics": "unordered",
+                "canonicalizer": "canonicalize_name_text",
+                "drop_identity": true,
+                "drop_prefix_compatible": true,
+            },
+            "generation_counts": {
+                "input_pair_count": 1,
+                "dropped_identity": 0,
+                "dropped_prefix_compatible": 0,
+                "dropped_empty": 0,
+            },
+        });
+        fs::write(
+            metadata_path(path),
+            serde_json::to_vec(&metadata).expect("serialize fixture metadata"),
+        )
+        .expect("write fixture metadata");
+    }
+
+    fn remove_artifact(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(metadata_path(path));
+    }
+
+    #[test]
+    fn strict_name_tuple_artifact_accepts_valid_and_rejects_missing_invalid_and_tampered() {
+        #[cfg(windows)]
+        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
+            std::env::set_var("PYTHONHOME", python_home);
+        }
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let missing = std::env::temp_dir().join(format!(
+                "s2and-missing-name-tuples-{}-{}.txt",
+                std::process::id(),
+                std::thread::current().name().unwrap_or("test")
+            ));
+            let missing_error = load_name_tuples_from_text_path(py, missing.to_str())
+                .expect_err("missing name tuples must not become an empty alias map");
+            assert!(missing_error
+                .value(py)
+                .str()
+                .unwrap()
+                .to_string()
+                .contains("does not exist"));
+
+            let valid = std::env::temp_dir().join(format!(
+                "s2and-valid-name-tuples-{}.txt",
+                std::process::id()
+            ));
+            write_artifact(py, &valid, "alice,ally\nally,alice\n", 2, 1);
+            let aliases = load_name_tuples_from_text_path(py, valid.to_str())
+                .expect("valid strict artifact loads");
+            assert!(aliases.get("alice").unwrap().contains("ally"));
+            assert!(aliases.get("ally").unwrap().contains("alice"));
+            fs::write(&valid, "alica,ally\nally,alice\n").expect("tamper tuple fixture");
+            let tamper_error = load_name_tuples_from_text_path(py, valid.to_str())
+                .expect_err("tampered tuple bytes must fail");
+            assert!(tamper_error
+                .value(py)
+                .str()
+                .unwrap()
+                .to_string()
+                .contains("SHA-256 mismatch"));
+            remove_artifact(&valid);
+
+            let invalid = std::env::temp_dir().join(format!(
+                "s2and-invalid-name-tuples-{}.txt",
+                std::process::id()
+            ));
+            write_artifact(py, &invalid, "alice,bob,carol\n", 1, 0);
+            let invalid_error = load_name_tuples_from_text_path(py, invalid.to_str())
+                .expect_err("invalid tuple rows must fail");
+            remove_artifact(&invalid);
+            assert!(invalid_error
+                .value(py)
+                .str()
+                .unwrap()
+                .to_string()
+                .contains("expected two nonempty fields"));
+        });
     }
 }

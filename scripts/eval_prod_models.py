@@ -896,10 +896,12 @@ def arrow_training_feature_splits(
     Any,
 ]:
     from s2and import feature_port
+    from s2and.consts import NORMALIZATION_VERSION
 
     predict_arrow_paths = {str(key): value for key, value in arrow_paths.items() if key != "clusters"}
     rust_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
         predict_arrow_paths,
+        expected_normalization_version=NORMALIZATION_VERSION,
         name_tuples="filtered",
         load_name_counts=True,
         num_threads=n_jobs,

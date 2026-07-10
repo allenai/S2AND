@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import heapq
 import json
 import mmap
 import os
@@ -17,13 +19,13 @@ from typing import Any, NoReturn, cast
 
 import numpy as np
 
+from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     normalize_arrow_paths,
 )
-from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
     FeatureBlockPaper,
@@ -51,6 +53,9 @@ _ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN = b"s2and-arrow-batch-lookup-index-
 _ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES = 1024 * 1024
 _NAME_COUNTS_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQ")
 _NAME_COUNTS_INDEX_RECORD_STRUCT = struct.Struct("<QQQIId")
+_NAME_COUNTS_SORT_RUN_RECORD_STRUCT = struct.Struct("<QQdI")
+_NAME_COUNTS_SORT_BUFFER_RECORDS = 1_000_000
+_NAME_COUNTS_WRITE_BUFFER_BYTES = 1024 * 1024
 _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQQ")
 _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT = struct.Struct("<QII")
 _FNV64_OFFSET = 14695981039346656037
@@ -120,36 +125,6 @@ def read_incremental_query_signatures_arrow(path: Path) -> tuple[IncrementalQuer
         query_views=table["query_view"].to_pylist(),
         query_authors=table["query_author"].to_pylist(),
     )
-
-
-@contextmanager
-def temporary_arrow_paths_with_incremental_query_signatures(
-    arrow_paths: Mapping[str, Any],
-    signature_ids: Iterable[Any],
-    *,
-    prefix: str,
-    query_view: str | Sequence[Any] = "auto",
-    query_authors: Iterable[Any] | None = None,
-) -> Iterator[dict[str, str]]:
-    """Yield Arrow paths with a request-scoped incremental query-signature sidecar."""
-
-    paths = normalize_arrow_paths(arrow_paths)
-    signature_id_values = tuple(signature_ids)
-    query_views: Iterable[Any]
-    if isinstance(query_view, str):
-        query_views = (query_view,) * len(signature_id_values)
-    else:
-        query_views = tuple(query_view)
-    with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
-        query_signatures_path = Path(tmpdir) / "incremental_query_signatures.arrow"
-        write_incremental_query_signatures_arrow(
-            query_signatures_path,
-            signature_id_values,
-            query_views=query_views,
-            query_authors=query_authors,
-        )
-        paths["query_signatures"] = str(query_signatures_path)
-        yield paths
 
 
 def _normalize_incremental_query_signature_requests(
@@ -1039,14 +1014,20 @@ def write_feature_block_arrow_tables(
 
 
 def write_name_counts_arrow(output_dir: str | Path, *, overwrite: bool = False) -> tuple[str, dict[str, int | bool]]:
-    """Write the global name-count lookup as a Rust-readable Arrow IPC table."""
+    """Publish the global name-count Arrow table as an immutable generation."""
 
     import pyarrow as pa
 
-    from s2and.data import _load_name_counts_cached
+    from s2and.data import _load_name_counts_artifact, _validated_name_counts_provenance
 
-    output_path = Path(output_dir) / "name_counts.arrow"
-    first_dict, last_dict, first_last_dict, last_first_initial_dict = _load_name_counts_cached()
+    output_root = Path(output_dir)
+    logical_output_path = output_root / "name_counts.arrow"
+    counts_payload, raw_source_provenance = _load_name_counts_artifact()
+    source_provenance = _validated_name_counts_provenance(
+        raw_source_provenance,
+        context="write_name_counts_arrow",
+    )
+    first_dict, last_dict, first_last_dict, last_first_initial_dict = counts_payload
     fingerprint = _name_counts_arrow_fingerprint(
         {
             "first": first_dict,
@@ -1058,64 +1039,146 @@ def write_name_counts_arrow(output_dir: str | Path, *, overwrite: bool = False) 
     expected_manifest = {
         "schema_version": NAME_COUNTS_ARROW_MANIFEST_SCHEMA_VERSION,
         "fingerprint": fingerprint,
+        "normalization_version": source_provenance["normalization_version"],
+        "source_provenance": source_provenance,
     }
-    if output_path.exists() and not overwrite and _name_artifact_manifest_matches(output_path, expected_manifest):
-        return str(output_path), {"reused": True}
+    if not overwrite:
+        current_path = _verified_name_counts_arrow_generation(logical_output_path, expected_manifest)
+        if current_path is not None:
+            return str(current_path), {"reused": True}
 
-    kinds: list[str] = []
-    names: list[str] = []
-    counts: list[float] = []
     metrics: dict[str, int | bool] = {"reused": False}
-    for kind, mapping in (
-        ("first", first_dict),
-        ("last", last_dict),
-        ("first_last", first_last_dict),
-        ("last_first_initial", last_first_initial_dict),
-    ):
-        metrics[f"{kind}_count"] = len(mapping)
-        for name, count in mapping.items():
-            kinds.append(kind)
-            names.append(str(name))
-            counts.append(float(count))
-
-    table = pa.table(
-        {
-            "kind": pa.array(kinds, type=pa.string()),
-            "name": pa.array(names, type=pa.string()),
-            "count": pa.array(counts, type=pa.float64()),
-        }
-    )
-    write_arrow_ipc_table(table, output_path)
-    metrics["row_count"] = table.num_rows
-    _write_name_artifact_manifest(
-        output_path,
-        {
+    generations_dir = output_root / "name_counts_arrow_generations"
+    generations_dir.mkdir(parents=True, exist_ok=True)
+    generation_name = f"gen-{uuid.uuid4().hex}"
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{generation_name}.", dir=str(generations_dir)))
+    generation_dir = generations_dir / generation_name
+    output_tmp = staging_dir / "name_counts.arrow"
+    manifest_path = _name_artifact_manifest_path(logical_output_path)
+    manifest_tmp = manifest_path.with_name(f".{manifest_path.name}.{generation_name}.tmp")
+    schema = pa.schema((pa.field("kind", pa.string()), pa.field("name", pa.string()), pa.field("count", pa.float64())))
+    row_count = 0
+    batch_size = 100_000
+    try:
+        with pa.OSFile(str(output_tmp), "wb") as sink:
+            with pa.ipc.new_file(sink, schema) as writer:
+                for kind, mapping in (
+                    ("first", first_dict),
+                    ("last", last_dict),
+                    ("first_last", first_last_dict),
+                    ("last_first_initial", last_first_initial_dict),
+                ):
+                    metrics[f"{kind}_count"] = len(mapping)
+                    names: list[str] = []
+                    values: list[float] = []
+                    for raw_name, raw_count in mapping.items():
+                        names.append(str(raw_name))
+                        values.append(float(raw_count))
+                        if len(names) >= batch_size:
+                            writer.write_batch(
+                                pa.record_batch(
+                                    [
+                                        pa.array([kind] * len(names)),
+                                        pa.array(names),
+                                        pa.array(values, type=pa.float64()),
+                                    ],
+                                    schema=schema,
+                                )
+                            )
+                            row_count += len(names)
+                            names.clear()
+                            values.clear()
+                    if names:
+                        writer.write_batch(
+                            pa.record_batch(
+                                [pa.array([kind] * len(names)), pa.array(names), pa.array(values, type=pa.float64())],
+                                schema=schema,
+                            )
+                        )
+                        row_count += len(names)
+        with output_tmp.open("r+b") as output_input:
+            os.fsync(output_input.fileno())
+        arrow_sha256 = _sha256_file(output_tmp)
+        arrow_byte_count = output_tmp.stat().st_size
+        manifest = {
             **expected_manifest,
-            "row_count": table.num_rows,
-        },
-    )
-    return str(output_path), metrics
+            "generation_id": generation_name,
+            "row_count": row_count,
+            "files": {
+                "arrow": {
+                    "path": f"name_counts_arrow_generations/{generation_name}/name_counts.arrow",
+                    "byte_count": arrow_byte_count,
+                    "sha256": arrow_sha256,
+                }
+            },
+        }
+        manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with manifest_tmp.open("r+b") as manifest_input:
+            os.fsync(manifest_input.fileno())
+        marker_path = staging_dir / ".published"
+        with marker_path.open("wb") as marker_output:
+            marker_output.flush()
+            os.fsync(marker_output.fileno())
+        with _exclusive_name_counts_publish_lock(output_root):
+            if not overwrite:
+                current_path = _verified_name_counts_arrow_generation(logical_output_path, expected_manifest)
+                if current_path is not None:
+                    return str(current_path), {"reused": True}
+            staging_dir.rename(generation_dir)
+            manifest_tmp.replace(manifest_path)
+    finally:
+        manifest_tmp.unlink(missing_ok=True)
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+    metrics["row_count"] = row_count
+    return str(generation_dir / "name_counts.arrow"), metrics
 
 
 def _name_artifact_manifest_path(output_path: Path) -> Path:
     return output_path.with_name(f"{output_path.name}.manifest.json")
 
 
-def _name_artifact_manifest_matches(output_path: Path, expected: Mapping[str, Any]) -> bool:
-    manifest_path = _name_artifact_manifest_path(output_path)
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verified_name_counts_arrow_generation(
+    logical_output_path: Path,
+    expected: Mapping[str, Any],
+) -> Path | None:
+    manifest_path = _name_artifact_manifest_path(logical_output_path)
     if not manifest_path.exists():
-        return False
+        return None
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, Mapping):
-        return False
-    return all(manifest.get(key) == value for key, value in expected.items())
-
-
-def _write_name_artifact_manifest(output_path: Path, manifest: Mapping[str, Any]) -> None:
-    manifest_path = _name_artifact_manifest_path(output_path)
-    tmp_path = manifest_path.with_name(f".{manifest_path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(json.dumps(dict(manifest), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(manifest_path)
+        return None
+    if not all(manifest.get(key) == value for key, value in expected.items()):
+        return None
+    files = manifest.get("files")
+    arrow_entry = files.get("arrow") if isinstance(files, Mapping) else None
+    if not isinstance(arrow_entry, Mapping):
+        return None
+    raw_path = arrow_entry.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    arrow_path = (logical_output_path.parent / raw_path).resolve()
+    try:
+        arrow_path.relative_to(logical_output_path.parent.resolve())
+    except ValueError:
+        return None
+    if not arrow_path.is_file() or not (arrow_path.parent / ".published").is_file():
+        return None
+    expected_bytes = arrow_entry.get("byte_count")
+    expected_sha256 = arrow_entry.get("sha256")
+    if not isinstance(expected_bytes, int) or arrow_path.stat().st_size != expected_bytes:
+        return None
+    if not isinstance(expected_sha256, str) or _sha256_file(arrow_path) != expected_sha256:
+        return None
+    return arrow_path
 
 
 def _fnv64_text(digest: int, value: str) -> int:
@@ -1125,12 +1188,23 @@ def _fnv64_text(digest: int, value: str) -> int:
 
 
 def _name_counts_arrow_fingerprint(mappings: Mapping[str, Mapping[Any, Any]]) -> int:
-    digest = _fnv64_bytes(b"s2and-name-counts-arrow-v1\x00")
+    digest = _fnv64_bytes(b"s2and-name-counts-arrow-v2-order-independent\x00")
     for kind, mapping in sorted(mappings.items()):
-        for name, count in sorted((str(name), float(count)) for name, count in mapping.items()):
-            digest = _fnv64_text(digest, kind)
-            digest = _fnv64_text(digest, name)
-            digest = _fnv64_text(digest, float(count).hex())
+        xor_accumulator = 0
+        sum_accumulator = 0
+        square_accumulator = 0
+        kind_seed = _fnv64_text(_fnv64_bytes(b"s2and-name-count-entry-v1\x00"), kind)
+        for raw_name, raw_count in mapping.items():
+            entry_digest = _fnv64_text(kind_seed, str(raw_name))
+            entry_digest = _fnv64_text(entry_digest, float(raw_count).hex())
+            xor_accumulator ^= entry_digest
+            sum_accumulator = (sum_accumulator + entry_digest) & 0xFFFFFFFFFFFFFFFF
+            square_accumulator = (square_accumulator + (entry_digest * entry_digest)) & 0xFFFFFFFFFFFFFFFF
+        digest = _fnv64_text(digest, kind)
+        digest = _fnv64_update(digest, len(mapping).to_bytes(8, "little", signed=False))
+        digest = _fnv64_update(digest, xor_accumulator.to_bytes(8, "little", signed=False))
+        digest = _fnv64_update(digest, sum_accumulator.to_bytes(8, "little", signed=False))
+        digest = _fnv64_update(digest, square_accumulator.to_bytes(8, "little", signed=False))
     return digest
 
 
@@ -1178,48 +1252,189 @@ def _source_file_fingerprint(path: Path) -> int:
 def _name_counts_index_hashes(kind: str, name_bytes: bytes) -> tuple[int, int]:
     return (
         _fnv64_bytes(name_bytes),
-        _fnv64_bytes(_NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00" + name_bytes),
+        _fnv64_update(_name_counts_index_kind_hash_seed(kind), name_bytes),
     )
 
 
-def _write_name_count_index_file(path: Path, kind: str, mapping: Mapping[Any, Any]) -> dict[str, int]:
-    records: list[tuple[int, int, bytes, float]] = []
-    for raw_name, raw_count in mapping.items():
-        name_bytes = str(raw_name).encode("utf-8")
-        hash_1, hash_2 = _name_counts_index_hashes(kind, name_bytes)
-        records.append((hash_1, hash_2, name_bytes, float(raw_count)))
+def _name_counts_index_kind_hash_seed(kind: str) -> int:
+    """Return the reusable second-hash seed for one index kind."""
+
+    return _fnv64_bytes(_NAME_COUNTS_INDEX_HASH_DOMAIN + kind.encode("utf-8") + b"\x00")
+
+
+def _write_name_count_sort_run(path: Path, records: list[tuple[int, int, bytes, float]]) -> int:
     records.sort(key=lambda item: (item[0], item[1], item[2]))
-
-    blob = bytearray()
-    packed_records = bytearray()
-    for hash_1, hash_2, name_bytes, count in records:
-        name_offset = len(blob)
-        blob.extend(name_bytes)
-        packed_records.extend(
-            _NAME_COUNTS_INDEX_RECORD_STRUCT.pack(
-                hash_1,
-                hash_2,
-                name_offset,
-                len(name_bytes),
-                0,
-                count,
-            )
-        )
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob_offset = _NAME_COUNTS_INDEX_HEADER_STRUCT.size + len(packed_records)
+    buffer = bytearray()
     with path.open("wb") as output:
-        output.write(
-            _NAME_COUNTS_INDEX_HEADER_STRUCT.pack(
-                _NAME_COUNTS_INDEX_MAGIC,
-                len(records),
-                blob_offset,
-                len(blob),
+        for hash_1, hash_2, name_bytes, count in records:
+            buffer.extend(_NAME_COUNTS_SORT_RUN_RECORD_STRUCT.pack(hash_1, hash_2, count, len(name_bytes)))
+            buffer.extend(name_bytes)
+            if len(buffer) >= _NAME_COUNTS_WRITE_BUFFER_BYTES:
+                output.write(buffer)
+                buffer.clear()
+        if buffer:
+            output.write(buffer)
+        output.flush()
+        os.fsync(output.fileno())
+    return path.stat().st_size
+
+
+def _iter_name_count_sort_run(path: Path) -> Iterator[tuple[int, int, bytes, float]]:
+    with path.open("rb") as source:
+        while header := source.read(_NAME_COUNTS_SORT_RUN_RECORD_STRUCT.size):
+            if len(header) != _NAME_COUNTS_SORT_RUN_RECORD_STRUCT.size:
+                raise ValueError(f"truncated name-count sort run header: {path}")
+            hash_1, hash_2, count, name_length = _NAME_COUNTS_SORT_RUN_RECORD_STRUCT.unpack(header)
+            name_bytes = source.read(name_length)
+            if len(name_bytes) != name_length:
+                raise ValueError(f"truncated name-count sort run name: {path}")
+            yield hash_1, hash_2, name_bytes, count
+
+
+def _write_sorted_name_count_records(
+    path: Path,
+    records: Iterable[tuple[int, int, bytes, float]],
+    *,
+    record_count: int,
+) -> int:
+    record_fd, record_tmp_text = tempfile.mkstemp(prefix=f".{path.name}.records.", dir=str(path.parent))
+    blob_fd, blob_tmp_text = tempfile.mkstemp(prefix=f".{path.name}.blob.", dir=str(path.parent))
+    os.close(record_fd)
+    os.close(blob_fd)
+    record_tmp = Path(record_tmp_text)
+    blob_tmp = Path(blob_tmp_text)
+    output_tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    written_records = 0
+    blob_size = 0
+    record_buffer = bytearray()
+    blob_buffer = bytearray()
+    try:
+        with record_tmp.open("wb") as record_output, blob_tmp.open("wb") as blob_output:
+            for hash_1, hash_2, name_bytes, count in records:
+                record_buffer.extend(
+                    _NAME_COUNTS_INDEX_RECORD_STRUCT.pack(
+                        hash_1,
+                        hash_2,
+                        blob_size,
+                        len(name_bytes),
+                        0,
+                        count,
+                    )
+                )
+                blob_buffer.extend(name_bytes)
+                blob_size += len(name_bytes)
+                written_records += 1
+                if len(record_buffer) >= _NAME_COUNTS_WRITE_BUFFER_BYTES:
+                    record_output.write(record_buffer)
+                    record_buffer.clear()
+                if len(blob_buffer) >= _NAME_COUNTS_WRITE_BUFFER_BYTES:
+                    blob_output.write(blob_buffer)
+                    blob_buffer.clear()
+            if record_buffer:
+                record_output.write(record_buffer)
+            if blob_buffer:
+                blob_output.write(blob_buffer)
+            record_output.flush()
+            blob_output.flush()
+            os.fsync(record_output.fileno())
+            os.fsync(blob_output.fileno())
+        if written_records != record_count:
+            raise RuntimeError(f"name-count sort emitted {written_records} records, expected {record_count}")
+        blob_offset = _NAME_COUNTS_INDEX_HEADER_STRUCT.size + (record_count * _NAME_COUNTS_INDEX_RECORD_STRUCT.size)
+        with output_tmp.open("wb") as output:
+            output.write(
+                _NAME_COUNTS_INDEX_HEADER_STRUCT.pack(
+                    _NAME_COUNTS_INDEX_MAGIC,
+                    record_count,
+                    blob_offset,
+                    blob_size,
+                )
             )
+            with record_tmp.open("rb") as record_source:
+                shutil.copyfileobj(record_source, output, length=_NAME_COUNTS_WRITE_BUFFER_BYTES)
+            with blob_tmp.open("rb") as blob_source:
+                shutil.copyfileobj(blob_source, output, length=_NAME_COUNTS_WRITE_BUFFER_BYTES)
+            output.flush()
+            os.fsync(output.fileno())
+        output_tmp.replace(path)
+        return record_tmp.stat().st_size + blob_tmp.stat().st_size
+    finally:
+        for temporary_path in (record_tmp, blob_tmp, output_tmp):
+            temporary_path.unlink(missing_ok=True)
+
+
+def _write_name_count_index_file(
+    path: Path,
+    kind: str,
+    mapping: Mapping[Any, Any],
+    *,
+    max_records_in_memory: int = _NAME_COUNTS_SORT_BUFFER_RECORDS,
+) -> dict[str, int]:
+    """Write one exact index using bounded-memory sorted runs."""
+
+    if max_records_in_memory < 1:
+        raise ValueError("max_records_in_memory must be positive")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record_count = len(mapping)
+    buffered: list[tuple[int, int, bytes, float]] = []
+    run_paths: list[Path] = []
+    run_bytes = 0
+    peak_buffered_records = 0
+    kind_hash_seed = _name_counts_index_kind_hash_seed(kind)
+    try:
+        for raw_name, raw_count in mapping.items():
+            name_bytes = str(raw_name).encode("utf-8")
+            hash_1 = _fnv64_bytes(name_bytes)
+            hash_2 = _fnv64_update(kind_hash_seed, name_bytes)
+            buffered.append((hash_1, hash_2, name_bytes, float(raw_count)))
+            peak_buffered_records = max(peak_buffered_records, len(buffered))
+            if len(buffered) >= max_records_in_memory and record_count > max_records_in_memory:
+                run_path = path.parent / f".{path.name}.run.{len(run_paths)}.{uuid.uuid4().hex}"
+                run_bytes += _write_name_count_sort_run(run_path, buffered)
+                run_paths.append(run_path)
+                buffered = []
+
+        if run_paths:
+            if buffered:
+                run_path = path.parent / f".{path.name}.run.{len(run_paths)}.{uuid.uuid4().hex}"
+                run_bytes += _write_name_count_sort_run(run_path, buffered)
+                run_paths.append(run_path)
+                buffered = []
+            sorted_records: Iterable[tuple[int, int, bytes, float]] = heapq.merge(
+                *(_iter_name_count_sort_run(run_path) for run_path in run_paths),
+                key=lambda item: (item[0], item[1], item[2]),
+            )
+        else:
+            buffered.sort(key=lambda item: (item[0], item[1], item[2]))
+            sorted_records = buffered
+        assembly_tmp_bytes = _write_sorted_name_count_records(
+            path,
+            sorted_records,
+            record_count=record_count,
         )
-        output.write(packed_records)
-        output.write(blob)
-    return {"record_count": len(records), "byte_count": path.stat().st_size}
+    finally:
+        for run_path in run_paths:
+            run_path.unlink(missing_ok=True)
+    return {
+        "record_count": record_count,
+        "byte_count": path.stat().st_size,
+        "sort_run_count": len(run_paths),
+        "peak_buffered_records": peak_buffered_records,
+        "temporary_byte_count": run_bytes + assembly_tmp_bytes,
+    }
+
+
+def _name_count_index_disk_requirement(mapping: Mapping[Any, Any]) -> int:
+    """Return a conservative peak disk requirement before any temporary write."""
+
+    record_count = len(mapping)
+    # UTF-8 uses at most four bytes per Unicode code point. This avoids
+    # retaining encoded key copies during the preflight.
+    maximum_name_bytes = sum(4 * len(str(raw_name)) for raw_name in mapping)
+    sort_run_bytes = record_count * _NAME_COUNTS_SORT_RUN_RECORD_STRUCT.size + maximum_name_bytes
+    assembly_bytes = record_count * _NAME_COUNTS_INDEX_RECORD_STRUCT.size + maximum_name_bytes
+    final_bytes = _NAME_COUNTS_INDEX_HEADER_STRUCT.size + assembly_bytes
+    return sort_run_bytes + assembly_bytes + final_bytes + (4 * _NAME_COUNTS_WRITE_BUFFER_BYTES)
 
 
 def _name_counts_index_manifest_paths(index_dir: Path) -> dict[str, Path] | None:
@@ -1242,7 +1457,12 @@ def _name_counts_index_manifest_paths(index_dir: Path) -> dict[str, Path] | None
     return resolved
 
 
-def _name_counts_index_complete(index_dir: Path, *, expected_fingerprint: int) -> bool:
+def _name_counts_index_complete(
+    index_dir: Path,
+    *,
+    expected_fingerprint: int,
+    expected_source_provenance: Mapping[str, Any],
+) -> bool:
     manifest_paths = _name_counts_index_manifest_paths(index_dir)
     if manifest_paths is None or not all(path.exists() for path in manifest_paths.values()):
         return False
@@ -1254,7 +1474,9 @@ def _name_counts_index_complete(index_dir: Path, *, expected_fingerprint: int) -
         return False
     if "fingerprint" not in manifest:
         return False
-    return manifest.get("fingerprint") == expected_fingerprint
+    return manifest.get("fingerprint") == expected_fingerprint and manifest.get("source_provenance") == dict(
+        expected_source_provenance
+    )
 
 
 def _current_name_counts_generation_name(index_dir: Path) -> str | None:
@@ -1283,36 +1505,50 @@ def cleanup_stale_name_counts_generations(index_dir: str | Path) -> dict[str, in
     """Delete published name-count generations not referenced by the current manifest."""
 
     index_path = Path(index_dir)
-    generations_dir = index_path / "generations"
-    if not generations_dir.exists():
-        return {"removed_generation_count": 0}
-    current_generation_name = _current_name_counts_generation_name(index_path)
-    if current_generation_name is None:
-        raise ValueError(
-            f"refusing to clean name-count generations without a resolvable current manifest: {index_path}"
-        )
-    removed = 0
-    for child in generations_dir.iterdir():
-        if child.name.startswith(".") or not child.is_dir():
-            continue
-        if not (child / ".published").exists():
-            continue
-        if child.name == current_generation_name:
-            continue
-        shutil.rmtree(child)
-        removed += 1
-    return {"removed_generation_count": removed}
+    with _exclusive_name_counts_publish_lock(index_path):
+        generations_dir = index_path / "generations"
+        if not generations_dir.exists():
+            return {"removed_generation_count": 0}
+        current_generation_name = _current_name_counts_generation_name(index_path)
+        if current_generation_name is None:
+            raise ValueError(
+                f"refusing to clean name-count generations without a resolvable current manifest: {index_path}"
+            )
+        removed = 0
+        for child in generations_dir.iterdir():
+            if child.name.startswith(".") or not child.is_dir():
+                continue
+            if not (child / ".published").exists():
+                continue
+            if child.name == current_generation_name:
+                continue
+            shutil.rmtree(child)
+            removed += 1
+        return {"removed_generation_count": removed}
+
+
+@contextmanager
+def _exclusive_name_counts_publish_lock(index_dir: Path) -> Iterator[None]:
+    """Serialize the short manifest publication boundary across processes."""
+
+    with exclusive_file_lock(index_dir / ".publish.lock"):
+        yield
 
 
 def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) -> tuple[str, dict[str, int | bool]]:
     """Write the global name-count lookup as exact-verified sorted binary indexes."""
 
-    from s2and.data import _load_name_counts_cached
+    from s2and.data import _load_name_counts_artifact, _validated_name_counts_provenance
 
     index_dir = Path(output_dir) / "name_counts_index"
     manifest_path = index_dir / "manifest.json"
 
-    first_dict, last_dict, first_last_dict, last_first_initial_dict = _load_name_counts_cached()
+    counts, raw_source_provenance = _load_name_counts_artifact()
+    source_provenance = _validated_name_counts_provenance(
+        raw_source_provenance,
+        context="write_name_counts_index",
+    )
+    first_dict, last_dict, first_last_dict, last_first_initial_dict = counts
     fingerprint = _name_counts_arrow_fingerprint(
         {
             "first": first_dict,
@@ -1321,10 +1557,32 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
             "last_first_initial": last_first_initial_dict,
         }
     )
-    if not overwrite and _name_counts_index_complete(index_dir, expected_fingerprint=fingerprint):
+    if not overwrite and _name_counts_index_complete(
+        index_dir,
+        expected_fingerprint=fingerprint,
+        expected_source_provenance=source_provenance,
+    ):
         return str(index_dir), {"reused": True}
 
-    metrics: dict[str, int | bool] = {"reused": False}
+    mappings = (
+        ("first", first_dict),
+        ("last", last_dict),
+        ("first_last", first_last_dict),
+        ("last_first_initial", last_first_initial_dict),
+    )
+    index_dir.mkdir(parents=True, exist_ok=True)
+    required_free_bytes = sum(_name_count_index_disk_requirement(mapping) for _kind, mapping in mappings)
+    free_bytes_at_preflight = shutil.disk_usage(index_dir).free
+    if free_bytes_at_preflight < required_free_bytes:
+        raise OSError(
+            "insufficient free disk for name-count index generation: "
+            f"required={required_free_bytes} free={free_bytes_at_preflight} path={index_dir}"
+        )
+    metrics: dict[str, int | bool] = {
+        "reused": False,
+        "required_free_bytes": required_free_bytes,
+        "free_bytes_at_preflight": free_bytes_at_preflight,
+    }
     total_records = 0
     total_bytes = 0
     manifest_files: dict[str, dict[str, int | str]] = {}
@@ -1334,19 +1592,15 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
     tmp_generation_dir = Path(tempfile.mkdtemp(prefix=f".{generation_name}.", dir=str(generations_dir)))
     generation_dir = generations_dir / generation_name
     tmp_manifest_path = index_dir / f".manifest.{generation_name}.json"
-    previous_manifest = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else None
-    manifest_replaced = False
-    marker_written = False
     try:
-        for kind, mapping in (
-            ("first", first_dict),
-            ("last", last_dict),
-            ("first_last", first_last_dict),
-            ("last_first_initial", last_first_initial_dict),
-        ):
+        for kind, mapping in mappings:
             filename = f"{kind}.bin"
             tmp_file = tmp_generation_dir / filename
-            file_metrics = _write_name_count_index_file(tmp_file, kind, mapping)
+            file_metrics = _write_name_count_index_file(
+                tmp_file,
+                kind,
+                mapping,
+            )
             record_count = file_metrics["record_count"]
             byte_count = file_metrics["byte_count"]
             metrics[f"{kind}_count"] = record_count
@@ -1357,11 +1611,16 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
                 "path": f"generations/{generation_name}/{filename}",
                 "record_count": record_count,
                 "byte_count": byte_count,
+                "sha256": _sha256_file(tmp_file),
             }
+            metrics[f"{kind}_sort_run_count"] = file_metrics["sort_run_count"]
+            metrics[f"{kind}_peak_buffered_records"] = file_metrics["peak_buffered_records"]
+            metrics[f"{kind}_temporary_bytes"] = file_metrics["temporary_byte_count"]
 
         manifest = {
             "schema_version": NAME_COUNTS_INDEX_SCHEMA_VERSION,
-            "normalization_version": NORMALIZATION_VERSION,
+            "normalization_version": source_provenance["normalization_version"],
+            "source_provenance": source_provenance,
             "magic": _NAME_COUNTS_INDEX_MAGIC.decode("ascii"),
             "fingerprint": fingerprint,
             "record_layout": "hash1:u64,hash2:u64,name_offset:u64,name_len:u32,reserved:u32,count:f64",
@@ -1371,26 +1630,41 @@ def write_name_counts_index(output_dir: str | Path, *, overwrite: bool = False) 
             "files": manifest_files,
         }
         tmp_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp_generation_dir.rename(generation_dir)
-        for entry in manifest_files.values():
-            path = index_dir / str(entry["path"])
-            if not path.exists():
-                raise FileNotFoundError(f"name-count index generation is incomplete: {path}")
-        tmp_manifest_path.replace(manifest_path)
-        manifest_replaced = True
-        (generation_dir / ".published").write_text("", encoding="utf-8")
-        marker_written = True
+        with tmp_manifest_path.open("r+b") as manifest_input:
+            os.fsync(manifest_input.fileno())
+        marker_path = tmp_generation_dir / ".published"
+        with marker_path.open("wb") as marker_output:
+            marker_output.flush()
+            os.fsync(marker_output.fileno())
+        fsync_directory(tmp_generation_dir)
+
+        with _exclusive_name_counts_publish_lock(index_dir):
+            # Another writer may have completed the same generation while this
+            # process was sorting. Reuse it rather than overwriting its manifest.
+            if not overwrite and _name_counts_index_complete(
+                index_dir,
+                expected_fingerprint=fingerprint,
+                expected_source_provenance=source_provenance,
+            ):
+                return str(index_dir), {"reused": True}
+            tmp_generation_dir.rename(generation_dir)
+            fsync_directory(generations_dir)
+            for entry in manifest_files.values():
+                path = index_dir / str(entry["path"])
+                if not path.exists():
+                    raise FileNotFoundError(f"name-count index generation is incomplete: {path}")
+            tmp_manifest_path.replace(manifest_path)
+            fsync_directory(index_dir)
     finally:
         if tmp_manifest_path.exists():
             tmp_manifest_path.unlink()
         if tmp_generation_dir.exists():
             shutil.rmtree(tmp_generation_dir)
-        if generation_dir.exists() and not marker_written:
-            if previous_manifest is not None and manifest_replaced:
-                manifest_path.write_text(previous_manifest, encoding="utf-8")
-                shutil.rmtree(generation_dir)
-            elif not manifest_replaced:
-                shutil.rmtree(generation_dir)
+        if generation_dir.exists():
+            with _exclusive_name_counts_publish_lock(index_dir):
+                if _current_name_counts_generation_name(index_dir) != generation_name:
+                    shutil.rmtree(generation_dir)
+                    fsync_directory(generations_dir)
     metrics["row_count"] = total_records
     metrics["byte_count"] = total_bytes
     return str(index_dir), metrics
@@ -1681,9 +1955,6 @@ def _feature_block_signature_from_arrow_row(signature_id: str, row: Mapping[str,
 
 def _feature_block_paper_from_arrow_row(paper_id: str, row: Mapping[str, Any]) -> FeatureBlockPaper:
     is_reliable = _optional_bool(row.get("is_reliable"), field_name="papers.is_reliable")
-    language_reliability = row.get("language_reliability")
-    if language_reliability is None and is_reliable is not None:
-        language_reliability = 1.0 if is_reliable else 0.0
     return FeatureBlockPaper(
         paper_id=str(row.get("paper_id", paper_id)),
         title=_optional_str(row.get("title")),
@@ -1693,5 +1964,5 @@ def _feature_block_paper_from_arrow_row(paper_id: str, row: Mapping[str, Any]) -
         year=_optional_int(row.get("year"), field_name="papers.year"),
         predicted_language=_optional_str(row.get("predicted_language")),
         is_reliable=is_reliable,
-        language_reliability=language_reliability,
+        language_reliability=row.get("language_reliability"),
     )

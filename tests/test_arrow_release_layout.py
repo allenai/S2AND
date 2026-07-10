@@ -32,6 +32,7 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
         entry["dataset"]: entry for entry in root_manifest.get("dataset_manifests", []) if isinstance(entry, dict)
     }
     dataset_entry = dataset_entries[dataset_name]
+    default_model = json.loads((release_root / "default_production_model.json").read_text(encoding="utf-8"))
     assert dataset_entry["manifest_sha256"] == hashlib.sha256(dataset_manifest_path.read_bytes()).hexdigest()
     assert dataset_entry["manifest_size_bytes"] == dataset_manifest_path.stat().st_size
     assert root_manifest["audit"]["dataset_count"] == 1
@@ -39,7 +40,8 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
     required_paths = [
         release_root / "manifest.json",
         release_root / "LICENSE.txt",
-        release_root / "production_model_v1.21" / "manifest.json",
+        release_root / "default_production_model.json",
+        release_root / default_model["bundle_dir"] / "manifest.json",
         release_root / "name_counts_index" / "manifest.json",
         release_root / dataset_name / "manifest.json",
         release_root / dataset_name / "signatures.arrow",
@@ -95,7 +97,15 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
     pa = pytest.importorskip("pyarrow")
     release_root = tmp_path / "release"
 
-    _touch_json(release_root / "production_model_v1.21" / "manifest.json")
+    _touch_json(
+        release_root / "default_production_model.json",
+        {
+            "schema_version": "s2and_default_production_model_v1",
+            "bundle_dir": "production_model_test",
+            "bundle_version": "test",
+        },
+    )
+    _touch_json(release_root / "production_model_test" / "manifest.json", {"bundle_version": "test"})
     name_counts_index = release_root / "name_counts_index"
     for file_name in ("first.bin", "last.bin", "first_last.bin", "last_first_initial.bin"):
         _touch_file(name_counts_index / file_name)
@@ -195,6 +205,7 @@ def test_docs_work_plan_arrow_release_layout_required_files(tmp_path: Path) -> N
         "dataset_manifest_count": 1,
         "replay_dataset_manifest_count": 0,
         "name_counts_index": str(release_root.resolve() / "name_counts_index"),
+        "default_model_manifest": str(release_root.resolve() / "production_model_test" / "manifest.json"),
         "network_access": False,
     }
 
@@ -207,6 +218,16 @@ def test_validate_release_root_reports_dataset_manifest_checksum_mismatch(tmp_pa
     _touch_json(root_manifest_path, root_manifest)
 
     with pytest.raises(ValueError, match=f"root dataset {dataset_name} manifest_sha256 mismatch"):
+        validate_release_root(release_root, include_replay_bundles=False)
+
+
+def test_validate_release_root_rejects_default_model_outside_release(tmp_path: Path) -> None:
+    release_root, _dataset_name = _build_arrow_release_fixture(tmp_path)
+    _touch_json(
+        release_root / "default_production_model.json",
+        {"bundle_dir": "../outside", "bundle_version": "test"},
+    )
+    with pytest.raises(ValueError, match="outside release root"):
         validate_release_root(release_root, include_replay_bundles=False)
 
 

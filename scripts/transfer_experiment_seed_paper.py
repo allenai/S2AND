@@ -30,11 +30,10 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from s2and import feature_port
-from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
-from s2and.data import ANDData
+from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION
+from s2and.data import ANDData, _load_name_counts_artifact
 from s2and.eval import cluster_eval, facet_eval, pairwise_eval
 from s2and.featurizer import FeaturizationInfo, featurize
-from s2and.file_cache import cached_path
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 from s2and.plotting_utils import plot_facets
 
@@ -557,18 +556,14 @@ def main(
         UNION_DATASETS_TO_TRAIN = {tuple(DATASETS_FOR_UNION)}
 
     logger.info("starting transfer experiment main, loading name counts")
-    with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-        (
-            first_dict,
-            last_dict,
-            first_last_dict,
-            last_first_initial_dict,
-        ) = pickle.load(f)
+    counts, provenance = _load_name_counts_artifact()
+    first_dict, last_dict, first_last_dict, last_first_initial_dict = counts
     name_counts = {
         "first_dict": first_dict,
         "last_dict": last_dict,
         "first_last_dict": first_last_dict,
         "last_first_initial_dict": last_first_initial_dict,
+        "provenance": provenance,
     }
     logger.info("loaded name counts")
 

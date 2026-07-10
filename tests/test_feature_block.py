@@ -54,6 +54,7 @@ from s2and.incremental_linking.runtime import (
 )
 from s2and.model import Clusterer
 from scripts.arrow_conversion_helpers import feature_block_from_anddata, write_feature_block_arrow_from_anddata
+from tests.helpers import patch_name_counts_artifact
 
 
 def _raw_test_clusterer(
@@ -87,6 +88,89 @@ def test_feature_block_paper_is_reliable_parses_false_string() -> None:
     )
 
     assert paper.is_reliable is False
+
+
+@pytest.mark.parametrize(
+    ("is_reliable", "language_reliability", "match"),
+    [
+        (True, np.nan, "must be finite"),
+        (True, np.inf, "must be finite"),
+        (True, -0.01, r"must be in \[0.0, 1.0\]"),
+        (True, 1.01, r"must be in \[0.0, 1.0\]"),
+        (False, 0.25, "must be 0.0 when"),
+    ],
+)
+def test_feature_block_paper_rejects_malformed_language_reliability(
+    is_reliable: bool,
+    language_reliability: float,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        FeatureBlockPaper(
+            paper_id="p1",
+            title="A title",
+            abstract=None,
+            venue=None,
+            journal_name=None,
+            year=2024,
+            predicted_language="en",
+            is_reliable=is_reliable,
+            language_reliability=language_reliability,
+        )
+
+
+@pytest.mark.parametrize(
+    ("is_reliable", "language_reliability", "match"),
+    [
+        (None, 0.75, "predicted_language requires FeatureBlockPaper.is_reliable"),
+        (True, None, "predicted_language requires FeatureBlockPaper.language_reliability"),
+    ],
+)
+def test_feature_block_paper_requires_complete_stored_language_detection(
+    is_reliable: bool | None,
+    language_reliability: float | None,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        FeatureBlockPaper(
+            paper_id="p1",
+            title="A title",
+            abstract=None,
+            venue=None,
+            journal_name=None,
+            year=2024,
+            predicted_language="en",
+            is_reliable=is_reliable,
+            language_reliability=language_reliability,
+        )
+
+
+def test_feature_block_paper_accepts_language_reliability_boundaries() -> None:
+    reliable = FeatureBlockPaper(
+        paper_id="p1",
+        title="A title",
+        abstract=None,
+        venue=None,
+        journal_name=None,
+        year=2024,
+        predicted_language="en",
+        is_reliable=True,
+        language_reliability=1.0,
+    )
+    unreliable = FeatureBlockPaper(
+        paper_id="p2",
+        title="Un titre",
+        abstract=None,
+        venue=None,
+        journal_name=None,
+        year=2024,
+        predicted_language="fr",
+        is_reliable=False,
+        language_reliability=0.0,
+    )
+
+    assert reliable.language_reliability == 1.0
+    assert unreliable.language_reliability == 0.0
 
 
 def _signature_payload(
@@ -428,6 +512,22 @@ def test_feature_block_from_anddata_builds_requested_mini_contract() -> None:
     assert feature_block.specter_paper_ids == ("p_q", "p1")
     assert feature_block.specter_embeddings is not None
     np.testing.assert_allclose(feature_block.specter_embeddings, [[1.0, 0.0], [1.0, 0.1]])
+
+
+def test_feature_block_from_anddata_does_not_infer_reliability_from_boolean() -> None:
+    dataset = _tiny_anddata()
+    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
+        predicted_language="en",
+        is_reliable=True,
+        language_reliability=None,
+    )
+
+    with pytest.raises(ValueError, match="predicted_language requires FeatureBlockPaper.language_reliability"):
+        feature_block_from_anddata(
+            dataset,
+            signature_ids=["q"],
+            query_signature_ids=["q"],
+        )
 
 
 def test_feature_block_from_anddata_rejects_signature_missing_paper() -> None:
@@ -899,6 +999,40 @@ def test_feature_block_from_arrow_paths_rejects_duplicate_signature_rows(tmp_pat
         feature_block_from_arrow_paths(arrow_paths, raw_candidate_plan=_raw_plan())
 
 
+def test_feature_block_from_arrow_paths_does_not_infer_reliability_from_boolean(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    arrow_paths = _write_feature_block_arrow_paths(tmp_path)
+    papers_path = Path(arrow_paths["papers"])
+    with pa.memory_map(str(papers_path), "r") as source:
+        papers = pa.ipc.open_file(source).read_all()
+        paper_rows = papers.to_pylist()
+        paper_schema = papers.schema
+    papers = pa.Table.from_pylist(paper_rows, schema=paper_schema)
+    row_count = papers.num_rows
+    predicted_languages = [None] * row_count
+    reliable_flags = [None] * row_count
+    predicted_languages[0] = "en"
+    reliable_flags[0] = True
+    predicted_index = papers.schema.get_field_index("predicted_language")
+    reliable_index = papers.schema.get_field_index("is_reliable")
+    reliability_index = papers.schema.get_field_index("language_reliability")
+    papers = papers.set_column(
+        predicted_index,
+        "predicted_language",
+        pa.array(predicted_languages, type=pa.string()),
+    )
+    papers = papers.set_column(
+        reliable_index,
+        "is_reliable",
+        pa.array(reliable_flags, type=pa.bool_()),
+    )
+    papers = papers.remove_column(reliability_index)
+    write_arrow_ipc_table(papers, papers_path)
+
+    with pytest.raises(ValueError, match="predicted_language requires FeatureBlockPaper.language_reliability"):
+        feature_block_from_arrow_paths(arrow_paths, raw_candidate_plan=_raw_plan())
+
+
 def test_feature_block_from_arrow_paths_validates_raw_plan_schema(tmp_path: Path) -> None:
     arrow_paths = _write_feature_block_arrow_paths(tmp_path)
     raw_plan = _raw_plan()
@@ -1181,12 +1315,9 @@ def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -
 
 def test_write_name_artifacts_arrow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pa = pytest.importorskip("pyarrow")
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
     )
 
     counts_path, counts_metrics = write_name_counts_arrow(tmp_path)
@@ -1203,6 +1334,11 @@ def test_write_name_artifacts_arrow(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert index_metrics["reused"] is False
     assert index_metrics["row_count"] == 4
     assert index_metrics["first_count"] == 1
+    arrow_manifest = json.loads((tmp_path / "name_counts.arrow.manifest.json").read_text(encoding="utf-8"))
+    assert arrow_manifest["files"]["arrow"]["path"].startswith("name_counts_arrow_generations/")
+    assert Path(counts_path) == (tmp_path / arrow_manifest["files"]["arrow"]["path"]).resolve()
+    assert (Path(counts_path).parent / ".published").is_file()
+    assert not (tmp_path / "name_counts.arrow").exists()
     with pa.memory_map(counts_path, "r") as source:
         counts = pa.ipc.open_file(source).read_all().to_pylist()
     manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
@@ -1214,16 +1350,46 @@ def test_write_name_artifacts_arrow(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert write_name_counts_index(tmp_path)[1] == {"reused": True}
 
 
+def test_write_name_counts_arrow_manifest_failure_preserves_previous_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
+        generation_id="first-generation",
+    )
+    first_path, _metrics = write_name_counts_arrow(tmp_path)
+    manifest_path = tmp_path / "name_counts.arrow.manifest.json"
+    first_manifest = manifest_path.read_bytes()
+
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"grace": 4}, {"hopper": 6}, {"grace hopper": 3}, {"hopper g": 8}),
+        generation_id="second-generation",
+    )
+    original_replace = Path.replace
+
+    def fail_manifest_replace(path: Path, target: str | Path) -> Path:
+        if path.name.startswith(".name_counts.arrow.manifest"):
+            raise OSError("injected manifest publication failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_manifest_replace)
+    with pytest.raises(OSError, match="injected manifest publication failure"):
+        write_name_counts_arrow(tmp_path, overwrite=True)
+
+    assert manifest_path.read_bytes() == first_manifest
+    assert Path(first_path).is_file()
+
+
 def test_write_name_counts_index_rebuilds_fingerprintless_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
     )
     index_path, _metrics = write_name_counts_index(tmp_path)
     manifest_path = Path(index_path) / "manifest.json"
@@ -1231,10 +1397,10 @@ def test_write_name_counts_index_rebuilds_fingerprintless_manifest(
     original_fingerprint = manifest.pop("fingerprint")
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"grace": 11}, {"hopper": 13}, {"grace hopper": 17}, {"hopper g": 19}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"grace": 11}, {"hopper": 13}, {"grace hopper": 17}, {"hopper g": 19}),
+        generation_id="test-grace-hopper",
     )
 
     _index_path, metrics = write_name_counts_index(tmp_path, overwrite=False)
@@ -1248,12 +1414,9 @@ def test_write_name_counts_index_rebuilds_manifest_with_missing_schema_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
     )
     index_path, _metrics = write_name_counts_index(tmp_path)
     manifest_path = Path(index_path) / "manifest.json"
@@ -1272,12 +1435,9 @@ def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
     )
     index_path, _metrics = write_name_counts_index(tmp_path)
     manifest_path = Path(index_path) / "manifest.json"
@@ -1286,16 +1446,16 @@ def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
 
     real_write_file = feature_block_arrow_module._write_name_count_index_file  # noqa: SLF001
 
-    def fail_after_first_file(path: Path, kind: str, mapping: Any) -> dict[str, int]:
+    def fail_after_first_file(path: Path, kind: str, mapping: Any, **kwargs: Any) -> dict[str, int]:
         if kind == "last":
             raise RuntimeError("simulated index write failure")
-        return real_write_file(path, kind, mapping)
+        return real_write_file(path, kind, mapping, **kwargs)
 
     monkeypatch.setattr(feature_block_arrow_module, "_write_name_count_index_file", fail_after_first_file)
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19}),
+        generation_id="test-alan-turing",
     )
 
     with pytest.raises(RuntimeError, match="simulated index write failure"):
@@ -1309,30 +1469,27 @@ def test_write_name_counts_index_published_marker_failure_keeps_previous_manifes
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7}),
     )
     index_path, _metrics = write_name_counts_index(tmp_path)
     manifest_path = Path(index_path) / "manifest.json"
     original_manifest = manifest_path.read_text(encoding="utf-8")
     original_first_path = Path(index_path) / json.loads(original_manifest)["files"]["first"]["path"]
 
-    real_write_text = Path.write_text
+    real_open = Path.open
 
-    def fail_published_write(path: Path, data: str, *args: Any, **kwargs: Any) -> int:
+    def fail_published_write(path: Path, *args: Any, **kwargs: Any) -> Any:
         if path.name == ".published":
             raise RuntimeError("simulated published marker failure")
-        return real_write_text(path, data, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "write_text", fail_published_write)
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19}),
+    monkeypatch.setattr(Path, "open", fail_published_write)
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"alan": 11}, {"turing": 13}, {"alan turing": 17}, {"turing a": 19}),
+        generation_id="test-alan-turing",
     )
 
     with pytest.raises(RuntimeError, match="simulated published marker failure"):
@@ -1560,6 +1717,11 @@ def test_feature_block_rejects_duplicate_paper_author_positions() -> None:
         )
 
 
+def test_feature_block_rejects_empty_paper_author_name() -> None:
+    with pytest.raises(ValueError, match="author_name must be non-empty"):
+        FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name="")
+
+
 def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1704,7 +1866,6 @@ def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:
             query_signature_ids=["q"],
             raw_candidate_plan=raw_plan,
             rust_featurizer=FakeFeaturizer(),
-            allow_featurizer_build=False,
             runtime_context=SimpleNamespace(operation="raw-arrow-test", run_id="raw-arrow-test"),
         )
 
@@ -1845,7 +2006,6 @@ def test_raw_arrow_partial_supervision_require_unknown_seed_rejected() -> None:
             query_signature_ids=["q"],
             raw_candidate_plan=raw_plan,
             rust_featurizer=FakeFeaturizer(),
-            allow_featurizer_build=False,
             partial_supervision={("q", "s1"): 0},
         )
 
@@ -1869,7 +2029,6 @@ def test_raw_arrow_scoring_requires_featurizer_with_provided_raw_plan(
             query_signature_ids=["q"],
             raw_candidate_plan=_raw_plan(),
             rust_featurizer=None,
-            allow_featurizer_build=False,
         )
 
 
@@ -1973,7 +2132,6 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
         query_signature_ids=["q"],
         raw_candidate_plan=_raw_plan(),
         rust_featurizer=FakeFeaturizer(),
-        allow_featurizer_build=False,
         top_k=2,
         n_jobs=1,
     )
@@ -2124,7 +2282,6 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
         query_signature_ids=["q"],
         raw_candidate_plan=_raw_plan(),
         rust_featurizer=fake_featurizer,
-        allow_featurizer_build=False,
         top_k=2,
         n_jobs=1,
     )
@@ -2151,7 +2308,6 @@ def test_preplanned_raw_arrow_scoring_rejects_mismatched_raw_plan_query_ids() ->
             query_signature_ids=["s1"],
             raw_candidate_plan=_raw_plan(),
             rust_featurizer=FakeFeaturizer(),
-            allow_featurizer_build=False,
             top_k=2,
             n_jobs=1,
         )

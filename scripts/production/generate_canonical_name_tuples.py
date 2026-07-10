@@ -21,8 +21,13 @@ Usage:
     uv run python scripts/production/generate_canonical_name_tuples.py [--output PATH]
 
 Default output is ``s2and/data/s2and_name_tuples_canonical.txt`` with a JSON
-provenance sidecar. Ship it in the same release unit as the other canonical_v2
-artifacts; the loader keeps the "name1,name2" line format.
+provenance sidecar under the strict ``s2and_name_tuples_v1`` contract. Data is
+replaced first and the fsynced sidecar last as the generation commit marker.
+Ship both in the same release unit as the other canonical_v2 artifacts; the
+loader keeps the "name1,name2" line format. Generate into an offline staging
+location and validate it before package promotion: two same-directory files
+cannot be replaced atomically, so interruption between replacements is
+fail-closed (checksum mismatch) and requires rerunning generation.
 """
 
 from __future__ import annotations
@@ -31,21 +36,52 @@ import argparse
 import datetime
 import json
 import os
+import tempfile
+from pathlib import Path
 
+from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import _PACKAGE_DATA_DIR
+from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
 from s2and.text import canonicalize_name_text, same_prefix_tokens
 
 SOURCE_FILENAME = "s2and_unnormalized_filtered_name_tuples.txt"
 DEFAULT_OUTPUT_FILENAME = "s2and_name_tuples_canonical.txt"
 
 
+def _write_fsynced_temp(destination: Path, payload: bytes) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp_path = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+    )
+    temp_path = Path(raw_temp_path)
+    try:
+        with os.fdopen(descriptor, "wb") as output_file:
+            output_file.write(payload)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
 def regenerate(source_path: str, output_path: str) -> dict:
+    source = Path(source_path)
+    output = Path(output_path)
+    source_bytes = source.read_bytes()
+    try:
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Name-tuple source is not valid UTF-8: {source}") from exc
+
     raw_pairs: list[tuple[str, str]] = []
-    with open(source_path, encoding="utf-8") as source_file:
-        for line in source_file:
-            fields = line.strip().split(",")
-            if len(fields) >= 2 and fields[0] and fields[1]:
-                raw_pairs.append((fields[0], fields[1]))
+    for line_number, line in enumerate(source_text.splitlines(), start=1):
+        fields = line.split(",")
+        if len(fields) != 2 or not fields[0] or not fields[1]:
+            raise ValueError(f"Invalid source tuple at {source}:{line_number}: expected two nonempty fields")
+        raw_pairs.append((fields[0], fields[1]))
 
     canonical_pairs: set[tuple[str, str]] = set()
     dropped_identity = 0
@@ -66,22 +102,37 @@ def regenerate(source_path: str, output_path: str) -> dict:
         canonical_pairs.add((name_a, name_b))
         canonical_pairs.add((name_b, name_a))
 
-    with open(output_path, "w", encoding="utf-8", newline="\n") as output_file:
-        for name_a, name_b in sorted(canonical_pairs):
-            output_file.write(f"{name_a},{name_b}\n")
+    ordered_pairs = sorted(canonical_pairs)
+    data_bytes = "".join(f"{name_a},{name_b}\n" for name_a, name_b in ordered_pairs).encode("utf-8")
+    metadata = build_name_tuple_artifact_metadata(
+        source_filename=source.name,
+        source_bytes=source_bytes,
+        data_filename=output.name,
+        data_bytes=data_bytes,
+        directed_pair_count=len(ordered_pairs),
+        unordered_pair_count=len(ordered_pairs) // 2,
+        generated_at=datetime.datetime.now(datetime.UTC).isoformat(),
+        input_pair_count=len(raw_pairs),
+        dropped_identity=dropped_identity,
+        dropped_prefix_compatible=dropped_prefix_compatible,
+        dropped_empty=dropped_empty,
+    )
+    metadata_bytes = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
-    metadata = {
-        "normalization_version": "canonical_v2",
-        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        "source": os.path.basename(source_path),
-        "input_lines": len(raw_pairs),
-        "output_pairs_directed": len(canonical_pairs),
-        "dropped_identity": dropped_identity,
-        "dropped_prefix_compatible": dropped_prefix_compatible,
-        "dropped_empty": dropped_empty,
-    }
-    with open(output_path + ".meta.json", "w", encoding="utf-8") as meta_file:
-        json.dump(metadata, meta_file, indent=2)
+    metadata_path = output.with_name(output.name + ".meta.json")
+    with exclusive_file_lock(output.with_name(f".{output.name}.publish.lock")):
+        data_temp = _write_fsynced_temp(output, data_bytes)
+        metadata_temp = _write_fsynced_temp(metadata_path, metadata_bytes)
+        try:
+            # The sidecar is the commit marker. The lock serializes writers;
+            # readers either see one complete generation or fail its checksum.
+            os.replace(data_temp, output)
+            fsync_directory(output.parent)
+            os.replace(metadata_temp, metadata_path)
+            fsync_directory(output.parent)
+        finally:
+            data_temp.unlink(missing_ok=True)
+            metadata_temp.unlink(missing_ok=True)
     return metadata
 
 

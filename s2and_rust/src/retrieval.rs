@@ -74,8 +74,9 @@ pub(crate) const INCREMENTAL_LINKING_PAIR_PLAN_SUPPORTED_KWARGS: [&str; 5] = [
     "query_candidate_component_keys_by_signature_id",
     "full_first_global_backfill_count",
 ];
-pub(crate) const RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS: [&str; 3] = [
+pub(crate) const RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS: [&str; 4] = [
     "from_query_signatures",
+    "from_auto_queries",
     "plan_query_signatures",
     "build_telemetry",
 ];

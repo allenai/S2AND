@@ -61,6 +61,25 @@ pub(crate) fn normalize_ascii_text_compat(text: &str, special_case_apostrophes: 
     normalized
 }
 
+pub(crate) fn normalize_ascii_title_compat(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut prev_space = true;
+    for byte in text.bytes() {
+        let lowered = byte.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            normalized.push(lowered as char);
+            prev_space = false;
+        } else if !prev_space {
+            normalized.push(' ');
+            prev_space = true;
+        }
+    }
+    while normalized.ends_with(' ') {
+        normalized.pop();
+    }
+    normalized
+}
+
 #[cfg(test)]
 pub(crate) fn normalize_text_compat_native(text: &str, special_case_apostrophes: bool) -> String {
     normalize_text_compat_with_map(text, special_case_apostrophes, None)
@@ -72,6 +91,34 @@ pub(crate) fn normalize_text_compat_from_map(
     unidecode_char_map: &HashMap<char, String>,
 ) -> String {
     normalize_text_compat_with_map(text, special_case_apostrophes, Some(unidecode_char_map))
+}
+
+pub(crate) fn normalize_title_compat_from_map(
+    text: &str,
+    unidecode_char_map: &HashMap<char, String>,
+) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    if text.is_ascii() {
+        return normalize_ascii_title_compat(text);
+    }
+
+    let mut transliterated = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            transliterated.push(ch.to_ascii_lowercase());
+            continue;
+        }
+        let mapped = unidecode_char_map
+            .get(&ch)
+            .map(String::as_str)
+            .unwrap_or_else(|| text_unidecode_char(ch));
+        for mapped_ch in mapped.chars() {
+            transliterated.push(mapped_ch.to_ascii_lowercase());
+        }
+    }
+    normalize_ascii_title_compat(&transliterated)
 }
 
 fn normalize_text_compat_with_map(

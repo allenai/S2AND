@@ -22,8 +22,16 @@ class FakePositiveClassifier:
 
     def __init__(self) -> None:
         self.last_shape: tuple[int, int] | None = None
+        self.last_dtype: np.dtype | None = None
 
-    def predict_proba_positive(self, features_2d: np.ndarray) -> np.ndarray:
+    def predict_proba_positive(
+        self,
+        features_2d: np.ndarray,
+        *,
+        max_rows_per_chunk: int | None = None,
+    ) -> np.ndarray:
+        assert max_rows_per_chunk is None or max_rows_per_chunk >= 1
+        self.last_dtype = features_2d.dtype
         features_2d = np.asarray(features_2d, dtype=np.float64)
         self.last_shape = tuple(int(v) for v in features_2d.shape)  # type: ignore[assignment]
         return np.asarray([0.2, 0.7], dtype=np.float64)[: features_2d.shape[0]]
@@ -107,6 +115,17 @@ def test_predict_and_combine_uses_native_positive_probability_fast_path():
 
     assert classifier.last_shape == features.shape
     assert seconds >= 0.0
+    assert np.allclose(predictions, [0.8, 0.3])
+
+
+def test_predict_and_combine_preserves_float32_for_native_scorer():
+    classifier = FakePositiveClassifier()
+    features = np.asarray([[1.0], [2.0]], dtype=np.float32)
+    labels = np.asarray([np.nan, np.nan], dtype=np.float64)
+
+    predictions, _ = _predict_and_combine(classifier, None, features, labels, None, "batch")
+
+    assert classifier.last_dtype == np.dtype(np.float32)
     assert np.allclose(predictions, [0.8, 0.3])
 
 

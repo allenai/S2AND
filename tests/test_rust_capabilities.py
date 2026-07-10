@@ -44,6 +44,7 @@ def _pair_plan_build_info(
     row_signals: tuple[str, ...] = ("row_orcid_match",),
     raw_planner_methods: tuple[str, ...] = (
         "from_query_signatures",
+        "from_auto_queries",
         "plan_query_signatures",
         "build_telemetry",
     ),
@@ -223,6 +224,10 @@ def test_detect_rust_runtime_capabilities_reports_incremental_linker_names():
         def from_query_signatures(*args, **kwargs):
             return None
 
+        @staticmethod
+        def from_auto_queries(*args, **kwargs):
+            return None
+
     class Module:
         __version__ = _SUPPORTED_VERSION
         RustFeaturizer = NamedRustFeaturizer
@@ -340,5 +345,6 @@ def test_rust_get_build_info_contract():
         )
     raw_planner_methods = tuple(info.get("raw_arrow_query_signature_planner_methods", ()))
     assert "from_query_signatures" in raw_planner_methods
+    assert "from_auto_queries" in raw_planner_methods
     assert "plan_query_signatures" in raw_planner_methods
     assert "build_telemetry" in raw_planner_methods

@@ -74,16 +74,31 @@ The Rust featurizer has two distinct reuse mechanisms.
 
 ### Same-Process In-Memory Reuse
 
-When the same `ANDData` object is reused inside one Python process, S2AND keeps the built Rust
-featurizer in memory and reuses it on later calls. This is always enabled.
+When the same Arrow-attached dataset object is reused inside one Python process,
+S2AND keeps the built Rust featurizer in memory and reuses it on later calls.
+Rust construction is Arrow-only; `warm_rust_featurizer(dataset)` therefore
+requires validated attached Arrow artifacts and is not a generic JSON/`ANDData`
+warm path.
 
-Implications for compatibility paths:
+Current implications:
 
-- `warm_rust_featurizer(dataset)` is useful for long-lived processes that still
-  run through an `ANDData` compatibility route
 - `use_cache=False` does not force a rebuild if the same dataset object already has a live cached
   Rust featurizer
 - Rust featurizers are not serialized to disk; process restarts rebuild them from the dataset
+- `evict_rust_featurizer(dataset)` evicts one dataset and
+  `clear_rust_featurizer_cache()` clears the process cache
+- published Arrow/count artifacts are immutable content-addressed generations
+- the cache key binds the exact normalized path set, full artifact-generation
+  inventory, non-seed settings, and seed version
+- filesystem change watches invalidate a cached generation before reuse;
+  same-size rewrites and restored mtimes do not preserve a stale cache hit
+- request-local sidecars are deliberately excluded from the immutable
+  generation and are consumed separately under the request boundary
+
+The verified-generation hot-cache check is fixed request/build overhead, not a
+pair-loop operation. The current local benchmark is 12.76 microseconds per hit
+(78.4k checks/s), including the exact material binding and mutation watch, with
+no retained duplicate artifact payload.
 
 ## Artifact Download Cache
 
@@ -114,9 +129,8 @@ work even when the cache backend itself is fast.
 
 - Repeated training or repeated inference on the same dataset or pair set: use `use_cache=True`
 - One-shot experiments, one-pass offline jobs, or feature-development work: use `use_cache=False`
-- Long-lived compatibility services that still own an `ANDData` object and want
-  lower cold-start latency in a single process: call
-  `warm_rust_featurizer(dataset)` during startup
+- Long-lived Arrow-attached services that want lower cold-start latency in a
+  single process may call `warm_rust_featurizer(dataset)` during startup
 - Production Arrow services should keep Arrow artifacts local and call
   `Clusterer.predict_from_arrow_paths(...)` or Arrow-routed
   `Clusterer.predict(...)`; `warm_rust_featurizer(dataset)` is not the Arrow
@@ -132,3 +146,7 @@ To force a rebuild, delete the relevant cache paths under `S2AND_CACHE`:
 - artifact cache: `<S2AND_CACHE>/artifacts/`
 
 You can delete one layer without affecting the others.
+
+For process-local Rust reuse, call `evict_rust_featurizer(dataset)` or
+`clear_rust_featurizer_cache()`; deleting disk cache directories does not evict
+live Rust objects.

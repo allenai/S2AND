@@ -79,7 +79,8 @@ fn unknown_language_detection() -> LanguageDetectionAudit {
 
 #[cfg(test)]
 mod alpha_gate_tests {
-    use super::{is_python_alpha, python_alpha_count};
+    use super::{is_python_alpha, python_alpha_count, LanguageDetectorCompat};
+    use pyo3::Python;
 
     #[test]
     fn letter_categories_are_python_alpha() {
@@ -102,5 +103,26 @@ mod alpha_gate_tests {
     #[test]
     fn text_of_only_combining_marks_counts_zero_alpha() {
         assert_eq!(python_alpha_count("\u{093F}\u{0941} \u{093F}"), 0);
+    }
+
+    #[test]
+    fn markup_title_uses_plain_text_cld2_mode_matching_python() {
+        #[cfg(windows)]
+        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
+            std::env::set_var("PYTHONHOME", python_home);
+        }
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let detector = LanguageDetectorCompat::new(py).expect("detector");
+            let result = detector
+                .audit(
+                    "<div>This is a detailed English research title about neural systems and scientific evaluation.</div>",
+                )
+                .expect("detection");
+            assert_eq!(result.predicted_language, "en");
+            assert!(result.is_reliable);
+            assert!(result.is_english);
+            assert_eq!(result.language_reliability, 0.98);
+        });
     }
 }

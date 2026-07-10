@@ -231,7 +231,7 @@ def test_subblocking_handles_missing_signature_affiliation_ngrams():
     with _temporary_env("S2AND_BACKEND", "rust"):
         dataset_rust = build_dummy_dataset("dummy_signature_preprocess_subblocking_rust")
     signature_ids = list(dataset_rust.signatures.keys())
-    output = make_subblocks(signature_ids, dataset_rust, maximum_size=2)
+    output = make_subblocks(signature_ids, dataset_rust, maximum_size=2, first_k_letter_counts_sorted={})
     assert sum(len(subblock) for subblock in output.values()) == len(signature_ids)
 
 
@@ -243,9 +243,19 @@ def test_subblocking_membership_parity_python_vs_rust():
 
     signature_ids = list(dataset_python.signatures.keys())
     random.seed(12345)
-    output_python = make_subblocks(signature_ids, dataset_python, maximum_size=2)
+    output_python = make_subblocks(
+        signature_ids,
+        dataset_python,
+        maximum_size=2,
+        first_k_letter_counts_sorted={},
+    )
     random.seed(12345)
-    output_rust = make_subblocks(signature_ids, dataset_rust, maximum_size=2)
+    output_rust = make_subblocks(
+        signature_ids,
+        dataset_rust,
+        maximum_size=2,
+        first_k_letter_counts_sorted={},
+    )
 
     clusters_python = {tuple(sorted(subblock)) for subblock in output_python.values()}
     clusters_rust = {tuple(sorted(subblock)) for subblock in output_rust.values()}

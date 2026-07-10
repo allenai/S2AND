@@ -250,7 +250,6 @@ def _compute_feature_parity(
     *,
     non_language_rtol: float,
     non_language_atol: float,
-    language_max_mismatch_fraction: float,
 ) -> dict[str, Any]:
     if python_features.shape != rust_features.shape:
         return {
@@ -281,6 +280,10 @@ def _compute_feature_parity(
         atol=non_language_atol,
         equal_nan=True,
     )
+    finite_integer_reference = np.isfinite(python_features) & (python_features == np.trunc(python_features))
+    close_matrix[finite_integer_reference] = (
+        python_features[finite_integer_reference] == rust_features[finite_integer_reference]
+    )
 
     non_language_mismatches = 0
     non_language_elements = 0
@@ -301,7 +304,7 @@ def _compute_feature_parity(
     )
 
     non_language_pass = non_language_mismatches == 0
-    language_pass = language_mismatch_fraction <= language_max_mismatch_fraction
+    language_pass = language_mismatches == 0
 
     return {
         "pass": bool(non_language_pass and language_pass),
@@ -322,7 +325,7 @@ def _compute_feature_parity(
             "elements": language_elements,
             "mismatches": language_mismatches,
             "mismatch_fraction": language_mismatch_fraction,
-            "max_mismatch_fraction": language_max_mismatch_fraction,
+            "max_mismatch_fraction": 0.0,
             "pass": language_pass,
         },
     }
@@ -394,7 +397,6 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
             feature_names,
             non_language_rtol=args.non_language_rtol,
             non_language_atol=args.non_language_atol,
-            language_max_mismatch_fraction=args.language_max_mismatch_fraction,
         )
 
     runtime_speedup = (
@@ -460,7 +462,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Compare all-python path vs max-rust path on total runtime, process-tree peak RSS, "
-            "and feature parity (language features allowed tiny drift)."
+            "and strict feature parity."
         )
     )
     parser.add_argument("--mode", choices=["compare", "single"], default="compare")
@@ -473,14 +475,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42, help="Deterministic pair sampling seed")
     parser.add_argument("--require-non-dev-rust", type=int, choices=[0, 1], default=1)
     parser.add_argument("--require-rust-release", type=int, choices=[0, 1], default=0)
-    parser.add_argument("--non-language-rtol", type=float, default=1e-6)
-    parser.add_argument("--non-language-atol", type=float, default=1e-3)
-    parser.add_argument(
-        "--language-max-mismatch-fraction",
-        type=float,
-        default=0.005,
-        help="Allowed mismatch fraction for language-sensitive features only",
-    )
+    parser.add_argument("--non-language-rtol", type=float, default=0.0)
+    parser.add_argument("--non-language-atol", type=float, default=1e-6)
     parser.add_argument("--fail-on-parity-mismatch", type=int, choices=[0, 1], default=1)
     parser.add_argument("--write-json", default="", help="Optional compare-mode output JSON path")
     parser.add_argument("--output-features-path", default="", help="Required for --mode single")

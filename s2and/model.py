@@ -31,19 +31,18 @@ from s2and.arrow_inputs import (
     validate_arrow_prediction_artifacts,
 )
 from s2and.consts import (
-    _PACKAGE_DATA_DIR,
     DEFAULT_CHUNK_SIZE,
     LARGE_DISTANCE,
     LARGE_INTEGER,
     NORMALIZATION_VERSION,
     NORMALIZATION_VERSION_LEGACY_COMPAT,
-    PROJECT_ROOT_PATH,
     VALID_NORMALIZATION_VERSIONS,
 )
 from s2and.data import (
     NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
     ANDData,
     _load_name_tuples_from_file,
+    _validated_name_counts_provenance,
 )
 from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
@@ -73,6 +72,8 @@ from s2and.incremental_linking.policy import (
     clusterer_uses_embedding_features,
     clusterer_uses_name_count_features,
     request_cluster_seed_disallow_parts,
+    require_dataset_name_counts_binding_for_clusterer,
+    require_rust_featurizer_name_counts_binding_for_clusterer,
 )
 from s2and.incremental_linking.policy import (
     existing_name_counts_index_path as _existing_name_counts_index_path,
@@ -105,7 +106,12 @@ from s2and.subblocking import (
     make_subblocks,
     rust_arrow_subblocking_available,
 )
-from s2and.text import canonicalize_name_parts, first_names_name_compatible, normalize_orcid_compact
+from s2and.text import (
+    canonical_name_tuple_pair,
+    canonicalize_name_parts,
+    first_names_name_compatible,
+    normalize_orcid_compact,
+)
 from s2and.thread_config import resolve_n_jobs
 
 logger = logging.getLogger("s2and")
@@ -115,10 +121,9 @@ IncrementalSeedScoreMode = Literal["mean", "min", "mean_min_hybrid"]
 IncrementalDistStats = tuple[float, int, float]
 _TReturn = TypeVar("_TReturn")
 _MISSING = object()
-DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR = Path(_PACKAGE_DATA_DIR) / "production_model_v1.21" / "incremental_linker"
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
 _CLUSTER_SEEDS_ARROW_CACHE_MAX_ENTRIES = 16
-_PATH_CACHE_KEY: TypeAlias = tuple[str, int | None, int | None, str | None]
+_PATH_CACHE_KEY: TypeAlias = tuple[str, int | None, int | None, Any]
 _CLUSTER_SEEDS_ARROW_CACHE: OrderedDict[
     _PATH_CACHE_KEY,
     tuple[tuple[str, str], ...],
@@ -161,7 +166,7 @@ class _ArrowIncrementalPredictionDataset:
         signatures: Mapping[str, _ArrowIncrementalSignatureInfo],
     ) -> None:
         self.arrow_paths = dict(arrow_paths)
-        self.name_tuples = name_tuples
+        self.name_tuples = _name_tuples_for_incremental_rules(name_tuples)
         self.cluster_seeds_require = _normalize_cluster_seeds_require(cluster_seeds_require or {})
         self.cluster_seeds_disallow = (
             normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow)
@@ -348,33 +353,39 @@ def _cacheable_value(value: Any) -> Any:
     return repr(value)
 
 
-def _path_sample_digest(path: Path, size: int) -> str:
-    digest = hashlib.blake2b(digest_size=16)
-    sample_size = 65_536
+def _path_full_digest(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as infile:
-        digest.update(infile.read(min(sample_size, size)))
-        if size > sample_size:
-            middle_start = max(0, (size // 2) - (sample_size // 2))
-            infile.seek(middle_start)
-            digest.update(infile.read(min(sample_size, size - middle_start)))
-            suffix_start = max(sample_size, size - sample_size)
-            infile.seek(suffix_start)
-            digest.update(infile.read(size - suffix_start))
+        while chunk := infile.read(1024 * 1024):
+            digest.update(chunk)
     return digest.hexdigest()
 
 
-def _path_cache_fingerprint(path_value: Any) -> _PATH_CACHE_KEY:
+def _path_cache_fingerprint(path_value: Any, *, hash_content: bool = True) -> _PATH_CACHE_KEY:
     path = Path(str(path_value))
-    try:
-        stat = path.stat()
-    except OSError:
-        return str(path_value), None, None, None
-    size = int(stat.st_size)
-    try:
-        digest = _path_sample_digest(path, size)
-    except OSError:
-        digest = None
-    return str(path), size, int(stat.st_mtime_ns), digest
+    if not hash_content:
+        try:
+            stat = path.stat()
+        except OSError:
+            return str(path_value), None, None, None
+        return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns), None
+
+    for _attempt in range(3):
+        try:
+            before = path.stat()
+            digest = _path_full_digest(path)
+            after = path.stat()
+        except OSError:
+            return str(path_value), None, None, None
+        if (int(before.st_size), int(before.st_mtime_ns)) == (
+            int(after.st_size),
+            int(after.st_mtime_ns),
+        ):
+            return str(path.resolve()), int(after.st_size), int(after.st_mtime_ns), digest
+    # A concurrently rewritten sidecar must never hit a cache entry. The
+    # monotonic token deliberately makes this read uncached while its writer
+    # is active; the next stable read regains normal cache reuse.
+    return str(path.resolve()), int(after.st_size), int(after.st_mtime_ns), ("unstable", time.monotonic_ns())
 
 
 def _arrow_paths_cache_fingerprint(arrow_paths: Mapping[str, Any] | None) -> tuple[tuple[str, Any], ...]:
@@ -382,7 +393,13 @@ def _arrow_paths_cache_fingerprint(arrow_paths: Mapping[str, Any] | None) -> tup
         return ()
     return tuple(
         sorted(
-            (str(key), _path_cache_fingerprint(value))
+            (
+                str(key),
+                _path_cache_fingerprint(
+                    value,
+                    hash_content=str(key) in {"cluster_seed_disallows", "altered_cluster_signatures"},
+                ),
+            )
             for key, value in arrow_paths.items()
             if value is not None and str(key) != "cluster_seeds"
         )
@@ -555,14 +572,6 @@ def _can_skip_orcid_homogeneous_altered_presplit(
     return len(set(orcid_values)) == 1
 
 
-def _resolve_total_ram_bytes_for_incremental(total_ram_bytes: int | None = None) -> tuple[int, str]:
-    return memory_budget.resolve_total_ram_bytes(
-        total_ram_bytes,
-        detect_cgroup_fn=memory_budget.detect_cgroup_total_ram_bytes_best_effort,
-        detect_total_fn=memory_budget.detect_total_ram_bytes_best_effort,
-    )
-
-
 def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
     """Count the number of feature indices selected by features_to_use."""
     return len(_selected_feature_indices(featurizer_info))
@@ -623,19 +632,8 @@ def _add_raw_planner_batch_index_paths(paths: dict[str, str], arrow_dataset_dir:
 
 def _resolve_existing_arrow_manifest_path(path_value: Any, arrow_dataset_dir: Path) -> Path | None:
     raw_path = Path(str(path_value))
-    candidates = [raw_path] if raw_path.is_absolute() else []
-    if not raw_path.is_absolute():
-        candidates.extend(
-            [
-                arrow_dataset_dir / raw_path,
-                Path(PROJECT_ROOT_PATH) / raw_path,
-                raw_path,
-            ]
-        )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    candidate = raw_path if raw_path.is_absolute() else arrow_dataset_dir / raw_path
+    return candidate.resolve() if candidate.exists() else None
 
 
 def _resolve_name_counts_index_path(arrow_dataset_dir: Path) -> str | None:
@@ -996,6 +994,7 @@ def _explicit_dataset_arrow_paths_for_prediction(
             require_name_counts_index=clusterer_uses_name_count_features(clusterer),
             require_batch_indexes=True,
             expected_normalization_version=_resolve_clusterer_normalization_version(clusterer),
+            require_canonical_manifest=True,
             context=context,
             producer_hint=producer_hint,
         )
@@ -1492,21 +1491,33 @@ def _signature_first_for_rules(signature: Any) -> str:
     return signature.author_info_first_normalized_without_apostrophe or signature.author_info_first or ""
 
 
-@lru_cache(maxsize=2)
-def _load_name_tuples_for_incremental_rules(name_tuples: str | None) -> frozenset[tuple[str, str]]:
-    if name_tuples == "filtered":
-        return frozenset(_load_name_tuples_from_file("s2and_name_tuples_canonical.txt"))
-    if name_tuples is None:
-        return frozenset(_load_name_tuples_from_file("s2and_name_tuples.txt"))
-    raise ValueError("name_tuples must be None, 'filtered', or a set of (first_a, first_b) tuples")
+@lru_cache(maxsize=1)
+def _load_name_tuples_for_incremental_rules() -> frozenset[tuple[str, str]]:
+    return frozenset(_load_name_tuples_from_file("s2and_name_tuples_canonical.txt"))
 
 
 def _name_tuples_for_incremental_rules(
     name_tuples: set[tuple[str, str]] | str | None,
 ) -> set[tuple[str, str]] | frozenset[tuple[str, str]]:
     if isinstance(name_tuples, set):
-        return name_tuples
-    return _load_name_tuples_for_incremental_rules(name_tuples)
+        return {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
+    if name_tuples not in {None, "filtered"}:
+        raise ValueError("name_tuples must be None, 'filtered', or a set of (first_a, first_b) tuples")
+    return _load_name_tuples_for_incremental_rules()
+
+
+def _required_incremental_linker_artifact_dir(clusterer: Any) -> Path:
+    """Return the explicitly attached linker path; never select another bundle implicitly."""
+
+    value = getattr(clusterer, "incremental_linker_artifact_dir", None)
+    if value is None:
+        value = getattr(getattr(clusterer, "incremental_linker_artifact", None), "artifact_dir", None)
+    if value is None:
+        raise FileNotFoundError(
+            "Promoted incremental prediction requires an attached incremental linker artifact. "
+            "Load a complete production bundle or set incremental_linker_artifact_dir explicitly."
+        )
+    return Path(value)
 
 
 def _signature_first_initials_for_rules(first: str) -> frozenset[str]:
@@ -1758,18 +1769,52 @@ def _predict_class0_with_runtime(
     features: np.ndarray,
     *,
     num_threads: int | None = None,
+    total_ram_bytes: int | None = None,
 ) -> tuple[np.ndarray, float, str]:
-    features_2d = np.asarray(features, dtype=np.float64, order="C")
+    raw_features = np.asarray(features)
+    native_backend = str(getattr(classifier, "prediction_backend", "python")) == "rust_lightgbm"
+    features_2d = raw_features if native_backend else np.asarray(raw_features, dtype=np.float64, order="C")
     if features_2d.size == 0:
         return np.asarray([], dtype=np.float64), 0.0, "none"
+
+    if native_backend:
+        if features_2d.ndim != 2:
+            raise ValueError(f"native scorer features must be 2D, got shape={features_2d.shape}")
+        if features_2d.dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
+            raise ValueError(f"native scorer features must be float32 or float64, got {features_2d.dtype}")
+        if not features_2d.flags.c_contiguous:
+            raise ValueError("native scorer features must be C-contiguous")
+        scorer_plan = memory_budget.compute_native_scorer_chunk_plan(
+            row_count=int(features_2d.shape[0]),
+            feature_count=int(features_2d.shape[1]),
+            input_itemsize=int(features_2d.dtype.itemsize),
+            total_ram_bytes=total_ram_bytes,
+        )
+        started = time.perf_counter()
+        positive = classifier.predict_proba_positive(
+            features_2d,
+            max_rows_per_chunk=max(1, scorer_plan.chunk_rows),
+        )
+        logger.info(
+            "Telemetry: native_scorer rows=%d features=%d dtype=%s chunk_rows=%d chunks=%d "
+            "predicted_peak_delta_bytes=%d predicted_peak_rss_bytes=%d",
+            int(features_2d.shape[0]),
+            int(features_2d.shape[1]),
+            str(features_2d.dtype),
+            int(scorer_plan.chunk_rows),
+            int(scorer_plan.chunk_count),
+            int(scorer_plan.predicted_peak_delta_bytes),
+            int(scorer_plan.predicted_peak_rss_bytes),
+        )
+        backend = "rust_lightgbm_chunked" if scorer_plan.chunk_count > 1 else "rust_lightgbm"
+        return 1.0 - np.asarray(positive, dtype=np.float64), time.perf_counter() - started, backend
 
     # Estimator threading is configured through propagated n_jobs; predict_proba(num_threads=...)
     # is LightGBM-specific and breaks sklearn-compatible wrappers.
     del num_threads
-
-    backend = str(getattr(classifier, "prediction_backend", "python"))
     python_start = time.perf_counter()
     predictions = predict_pairwise_class0(classifier, features_2d)
+    backend = str(getattr(classifier, "prediction_backend", "python"))
     return predictions, time.perf_counter() - python_start, backend
 
 
@@ -1783,6 +1828,7 @@ def _predict_and_combine(
     *,
     num_threads: int | None = None,
     runtime_context: RuntimeContext | None = None,
+    total_ram_bytes: int | None = None,
 ) -> tuple[np.ndarray, float]:
     """Predict with main (and optional nameless) classifier, log telemetry, return (predictions, seconds)."""
     row_count = int(features.shape[0])
@@ -1802,13 +1848,19 @@ def _predict_and_combine(
         row_total: int,
     ) -> tuple[np.ndarray, float]:
         main_pred, main_sec, main_backend = _predict_class0_with_runtime(
-            classifier, main_matrix, num_threads=num_threads
+            classifier,
+            main_matrix,
+            num_threads=num_threads,
+            total_ram_bytes=total_ram_bytes,
         )
         if nameless_classifier is not None:
             if nameless_matrix is None:
                 raise RuntimeError("nameless_classifier is configured but nameless feature matrix is missing")
             nl_pred, nl_sec, nl_backend = _predict_class0_with_runtime(
-                nameless_classifier, nameless_matrix, num_threads=num_threads
+                nameless_classifier,
+                nameless_matrix,
+                num_threads=num_threads,
+                total_ram_bytes=total_ram_bytes,
             )
             logger.info(
                 "Telemetry: model_predict batch=%s main=%s nameless=%s main_s=%.3f nl_s=%.3f rows=%d",
@@ -2681,6 +2733,7 @@ class Clusterer:
         self.incremental_seed_score_mode: IncrementalSeedScoreMode = "mean"
         self.incremental_mean_min_hybrid_weight: float = 0.5
         self.incremental_linker_artifact_dir: Path | None = None
+        self.incremental_linker_artifact: Any | None = None
         self.production_model_bundle_dir: Path | None = None
         self.production_model_bundle_version: str | None = None
         self.production_model_bundle_status: str | None = None
@@ -3214,6 +3267,7 @@ class Clusterer:
             batch_label,
             num_threads=self.n_jobs,
             runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
         if int(batch_predictions.shape[0]) != expected_rows:
             raise RuntimeError(
@@ -3328,6 +3382,7 @@ class Clusterer:
                 batch_num,
                 num_threads=self.n_jobs,
                 runtime_context=runtime_context,
+                total_ram_bytes=total_ram_bytes,
             )
             yield _PredictedDistanceMatrixBatch(
                 batch_num=int(batch_num),
@@ -3422,7 +3477,21 @@ class Clusterer:
         -------
         Dict: the distance matrix dictionary, keyed by block key
         """
+        require_dataset_name_counts_binding_for_clusterer(
+            self,
+            dataset,
+            context="Clusterer.make_distance_matrices",
+        )
         runtime_context = build_runtime_context("model_predict")
+        use_rust_blockwise = dataset_stage_uses_rust(runtime_context, dataset)
+        if use_rust_blockwise:
+            rust_featurizer_arrow_paths = getattr(dataset, RUST_FEATURIZER_ARROW_PATHS_ATTR, None)
+            if rust_featurizer_arrow_paths is not None:
+                _require_arrow_name_counts_index_for_clusterer(
+                    self,
+                    rust_featurizer_arrow_paths,
+                    context="Clusterer.make_distance_matrices Arrow featurizer",
+                )
         _sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
         _ensure_lightgbm_fitted(self.classifier)
         _ensure_lightgbm_fitted(self.nameless_classifier)
@@ -3433,7 +3502,6 @@ class Clusterer:
         # initialize pairwise_probas with correctly size arrays
         pairwise_probas = {}
         num_pairs = 0
-        use_rust_blockwise = dataset_stage_uses_rust(runtime_context, dataset)
         fastcluster_dtype = np.float64 if use_rust_blockwise else np.float16
         for block_key, signatures in block_dict.items():
             block_size = len(signatures)
@@ -3551,6 +3619,33 @@ class Clusterer:
         constraint APIs as `make_distance_matrices`, but takes the already-built
         featurizer directly instead of looking it up through an `ANDData`.
         """
+
+        require_rust_featurizer_name_counts_binding_for_clusterer(
+            self,
+            rust_featurizer,
+            context="Clusterer.make_distance_matrices_from_rust_featurizer",
+        )
+        return self._make_distance_matrices_from_verified_rust_featurizer(
+            block_dict,
+            rust_featurizer,
+            partial_supervision=partial_supervision,
+            incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
+            runtime_context=runtime_context,
+            pair_chunk_size=pair_chunk_size,
+            total_ram_bytes=total_ram_bytes,
+        )
+
+    def _make_distance_matrices_from_verified_rust_featurizer(
+        self,
+        block_dict: dict[str, list[str]],
+        rust_featurizer: object,
+        partial_supervision: dict[tuple[str, str], int | float] | None = None,
+        incremental_dont_use_cluster_seeds: bool = False,
+        runtime_context: RuntimeContext | None = None,
+        pair_chunk_size: int | None = None,
+        total_ram_bytes: int | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Build matrices after the request boundary verified the featurizer binding."""
 
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_rust_featurizer")
@@ -3723,6 +3818,7 @@ class Clusterer:
                     f"{block_key}:{offset}",
                     num_threads=self.n_jobs,
                     runtime_context=runtime_context,
+                    total_ram_bytes=total_ram_bytes,
                 )
                 model_predict_seconds += float(batch_seconds)
                 stage_start = time.perf_counter()
@@ -3803,6 +3899,13 @@ class Clusterer:
             runtime_context = build_runtime_context("cluster_predict_rust_featurizer")
         if partial_supervision is None:
             partial_supervision = {}
+        built_dists = dists is None
+        if built_dists:
+            require_rust_featurizer_name_counts_binding_for_clusterer(
+                self,
+                rust_featurizer,
+                context="Clusterer.predict_from_rust_featurizer",
+            )
         resolved_cluster_seeds_require: dict[str, int | str]
         if cluster_seeds_require is None:
             resolved_cluster_seeds_require = _cluster_seeds_require_from_rust_featurizer(rust_featurizer)
@@ -3832,7 +3935,6 @@ class Clusterer:
             cluster_seeds_disallow=resolved_cluster_seeds_disallow,
             signatures=_signature_rule_metadata_from_rust_featurizer(rust_featurizer),
         )
-        built_dists = dists is None
         if built_dists:
             pred_clusters: defaultdict[str, list[str]] = defaultdict(list)
             all_disallow_signature_ids: set[str] = set()
@@ -3861,7 +3963,7 @@ class Clusterer:
                 make_dists_incremental_dont_use_cluster_seeds = (
                     incremental_dont_use_cluster_seeds or explicit_cluster_seeds_require is not None
                 )
-                block_dists = self.make_distance_matrices_from_rust_featurizer(
+                block_dists = self._make_distance_matrices_from_verified_rust_featurizer(
                     {block_key: signatures},
                     rust_featurizer,
                     partial_supervision=block_partial_supervision,
@@ -3981,6 +4083,7 @@ class Clusterer:
         featurizer_start = time.perf_counter()
         rust_featurizer = build_rust_featurizer_from_arrow_paths(
             arrow_path_payload,
+            expected_normalization_version=_resolve_clusterer_normalization_version(self),
             signature_ids=signature_ids,
             name_tuples=name_tuples,
             load_name_counts=bool(
@@ -4068,12 +4171,52 @@ class Clusterer:
                 "Clusterer.fit could not determine valid dataset name-count semantics; "
                 f"observed={training_semantics!r}"
             )
+        dataset_normalization_versions = {getattr(dataset, "normalization_version", None) for dataset in datasets}
+        if len(dataset_normalization_versions) != 1:
+            raise ValueError(
+                "Clusterer.fit requires one dataset normalization version; "
+                f"observed={sorted(repr(value) for value in dataset_normalization_versions)}"
+            )
+        training_normalization_version = next(iter(dataset_normalization_versions))
+        if training_normalization_version not in VALID_NORMALIZATION_VERSIONS:
+            raise ValueError(
+                "Clusterer.fit requires explicit valid dataset normalization provenance; "
+                f"observed={training_normalization_version!r}"
+            )
         contract = getattr(self, "feature_contract", None)
         if not isinstance(contract, dict):
             contract = {}
         contract["name_counts_last_first_initial_semantics"] = training_semantics
-        # Training runs under this package's normalization policy.
-        contract["normalization_version"] = NORMALIZATION_VERSION
+        contract["normalization_version"] = training_normalization_version
+        if clusterer_uses_name_count_features(self):
+            count_provenances = [
+                _validated_name_counts_provenance(
+                    getattr(dataset, "name_counts_provenance", None),
+                    context=f"Clusterer.fit dataset={getattr(dataset, 'name', '<unnamed>')}",
+                )
+                for dataset in datasets
+            ]
+            count_versions = {value.get("normalization_version") for value in count_provenances}
+            generation_ids = {value.get("generation_id") for value in count_provenances}
+            pickle_digests = {value.get("pickle_sha256") for value in count_provenances}
+            snapshot_ids = {value.get("source_snapshot_id") for value in count_provenances}
+            selected_row_digests = {value.get("selected_rows_sha256") for value in count_provenances}
+            if (
+                count_versions != {training_normalization_version}
+                or len(generation_ids) != 1
+                or len(pickle_digests) != 1
+                or len(snapshot_ids) != 1
+                or len(selected_row_digests) != 1
+            ):
+                raise ValueError(
+                    "Clusterer.fit requires one verified name-count generation matching dataset normalization; "
+                    f"versions={count_versions!r} generations={generation_ids!r} digests={pickle_digests!r} "
+                    f"snapshots={snapshot_ids!r} row_digests={selected_row_digests!r}"
+                )
+            contract["name_counts_generation_id"] = next(iter(generation_ids))
+            contract["name_counts_pickle_sha256"] = next(iter(pickle_digests))
+            contract["name_counts_source_snapshot_id"] = next(iter(snapshot_ids))
+            contract["name_counts_selected_rows_sha256"] = next(iter(selected_row_digests))
         self.feature_contract = contract
 
         val_block_dict_list = []
@@ -4776,6 +4919,7 @@ class Clusterer:
                     stage_start = time.perf_counter()
                     rust_featurizer = build_rust_featurizer_from_arrow_paths(
                         arrow_path_payload,
+                        expected_normalization_version=_resolve_clusterer_normalization_version(self),
                         signature_ids=signature_ids,
                         name_tuples=getattr(dataset, "name_tuples", "filtered"),
                         load_name_counts=clusterer_uses_name_count_features(self),
@@ -4906,6 +5050,13 @@ class Clusterer:
             )
             if arrow_paths is None:
                 prediction_runtime_context = _runtime_context_for_python_prediction(runtime_context)
+
+        if dists is None and not use_s2_clusters and (arrow_paths is not None or batching_threshold is not None):
+            require_dataset_name_counts_binding_for_clusterer(
+                self,
+                dataset,
+                context="Clusterer.predict",
+            )
 
         if arrow_paths is not None and batching_threshold is None:
             logger.info("Running predict through Arrow/Rust paths - no subblocking")
@@ -5106,6 +5257,12 @@ class Clusterer:
             raise ValueError(
                 "partial_supervision cannot be used with precomputed dists because override pairs "
                 "would not be injected into the distance matrix"
+            )
+        if dists is None and not use_s2_clusters:
+            require_dataset_name_counts_binding_for_clusterer(
+                self,
+                dataset,
+                context="Clusterer.predict_helper",
             )
         _apply_dataset_name_count_semantics_for_prediction(self, dataset)
 
@@ -5841,9 +5998,7 @@ class Clusterer:
         batching_threshold: int | None,
         arrow_paths: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        artifact_dir = Path(
-            getattr(self, "incremental_linker_artifact_dir", None) or DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
-        )
+        artifact_dir = _required_incremental_linker_artifact_dir(self)
         resolved_arrow_paths = arrow_paths
         if resolved_arrow_paths is None:
             resolved_arrow_paths = _explicit_dataset_arrow_paths_for_prediction(
@@ -5874,13 +6029,12 @@ class Clusterer:
             dataset,
             arrow_paths=resolved_arrow_paths,
             artifact_dir=artifact_dir,
+            artifact=getattr(self, "incremental_linker_artifact", None),
             prevent_new_incompatibilities=prevent_new_incompatibilities,
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
             batching_threshold=batching_threshold,
-            resolve_total_ram_bytes=_resolve_total_ram_bytes_for_incremental,
-            build_incremental_result=_build_incremental_result,
         )
 
     def predict_incremental_from_arrow_paths(
@@ -6001,16 +6155,13 @@ class Clusterer:
             block_signature_ids,
             cast(ANDData, request_dataset),
             arrow_paths=arrow_path_payload,
-            artifact_dir=Path(
-                getattr(self, "incremental_linker_artifact_dir", None) or DEFAULT_INCREMENTAL_LINKER_ARTIFACT_DIR
-            ),
+            artifact_dir=_required_incremental_linker_artifact_dir(self),
+            artifact=getattr(self, "incremental_linker_artifact", None),
             prevent_new_incompatibilities=prevent_new_incompatibilities,
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,
             total_ram_bytes=total_ram_bytes,
             batching_threshold=batching_threshold,
-            resolve_total_ram_bytes=_resolve_total_ram_bytes_for_incremental,
-            build_incremental_result=_build_incremental_result,
         )
         return dict(incremental_result["clusters"]) if return_clusters_only else incremental_result
 
@@ -6072,6 +6223,11 @@ class Clusterer:
         """
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_incremental")
+        require_dataset_name_counts_binding_for_clusterer(
+            self,
+            dataset,
+            context="Clusterer.predict_incremental",
+        )
         _apply_dataset_name_count_semantics_for_prediction(self, dataset)
         if partial_supervision is None:
             partial_supervision = {}
@@ -6157,6 +6313,11 @@ class Clusterer:
         """
         if runtime_context is None:
             runtime_context = build_runtime_context("cluster_predict_incremental")
+        require_dataset_name_counts_binding_for_clusterer(
+            self,
+            dataset,
+            context="Clusterer._predict_incremental_python_fallback",
+        )
         _apply_dataset_name_count_semantics_for_prediction(self, dataset)
         if partial_supervision is None:
             partial_supervision = {}
@@ -6278,6 +6439,7 @@ class Clusterer:
             "incremental",
             num_threads=self.n_jobs,
             runtime_context=runtime_context,
+            total_ram_bytes=total_ram_bytes,
         )
         logger.info("Telemetry: model_predict_total seconds=%.3f blocks=1", model_predict_seconds)
 

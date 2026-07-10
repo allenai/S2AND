@@ -53,7 +53,7 @@ cleanup risk, not a user-facing API promise.
 | `RustHybridCentroidRetriever.__new__(...)` | raw Arrow planners, training query support, tests | Maintained constructor. |
 | `top_k_hybrid_centroid_pair_plan(...)` | `s2and/incremental_linking/retrieval.py`, raw Arrow planners | Canonical runtime retrieval output. |
 | `top_k_experimental_weighted_hybrid_centroid_subset(...)` | `s2and/incremental_linking_training/query_support.py`, tests | Training/query-support scoring surface. |
-| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. The public constructor is intentionally not exposed; callers enter through typed request-local `query_signatures.arrow`. |
+| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; promoted auto-query windows use the separate auto constructor without a temporary empty sidecar. |
 
 ## Python Wrapper Ownership
 

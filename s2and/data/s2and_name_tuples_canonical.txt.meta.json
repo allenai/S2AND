@@ -1,10 +1,34 @@
 {
-  "normalization_version": "canonical_v2",
+  "artifact_version": 1,
+  "data": {
+    "directed_pair_count": 7368,
+    "filename": "s2and_name_tuples_canonical.txt",
+    "sha256": "8d05d28eb88c9b84b6f281765841ab5201b6ab829874b250a5fb69a3784dc9b7",
+    "size_bytes": 114096,
+    "unordered_pair_count": 3684
+  },
   "generated_at": "2026-07-09T18:00:32.740594+00:00",
-  "source": "s2and_unnormalized_filtered_name_tuples.txt",
-  "input_lines": 9925,
-  "output_pairs_directed": 7368,
-  "dropped_identity": 1385,
-  "dropped_prefix_compatible": 1088,
-  "dropped_empty": 0
+  "generation_counts": {
+    "dropped_empty": 0,
+    "dropped_identity": 1385,
+    "dropped_prefix_compatible": 1088,
+    "input_pair_count": 9925
+  },
+  "normalization_version": "canonical_v2",
+  "schema_version": "s2and_name_tuples_v1",
+  "semantics": {
+    "canonicalizer": "canonicalize_name_text",
+    "directionality": "symmetric_directed_rows",
+    "drop_identity": true,
+    "drop_prefix_compatible": true,
+    "encoding": "utf-8",
+    "line_format": "name_a,name_b",
+    "row_order": "lexicographic_by_fields_unique",
+    "runtime_pair_semantics": "unordered"
+  },
+  "source": {
+    "filename": "s2and_unnormalized_filtered_name_tuples.txt",
+    "sha256": "68f0c70fcf138d08656eaa39e485ba0d513ce6da6ce1164a3cc8bb2c680430f2",
+    "size_bytes": 155960
+  }
 }

@@ -699,10 +699,15 @@ def _load_cached_distance(path: Path, expected_metadata: Mapping[str, Any]) -> A
 def _build_arrow_featurizer(clusterer: Any, arrow_paths: Mapping[str, str], signature_ids: Sequence[str]) -> Any:
     """Build a Rust featurizer from Arrow paths for the requested signatures."""
 
+    from s2and.arrow_inputs import require_feature_contract_normalization_version
     from s2and.feature_port import build_rust_featurizer_from_arrow_paths
 
     return build_rust_featurizer_from_arrow_paths(
         arrow_paths,
+        expected_normalization_version=require_feature_contract_normalization_version(
+            clusterer,
+            context="epsilon sweep Arrow featurizer",
+        ),
         signature_ids=signature_ids,
         name_tuples="filtered",
         load_name_counts="name_counts_index" in arrow_paths,

@@ -7,6 +7,7 @@ from typing import Any
 
 from s2and.arrow_inputs import require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
+from s2and.name_count_binding import NameCountsBinding
 
 
 def clusterer_uses_name_count_features(clusterer: Any) -> bool:
@@ -56,13 +57,88 @@ def require_arrow_name_counts_index_for_clusterer(
     *,
     context: str,
 ) -> None:
-    """Raise when a name-count model is used without an Arrow index sidecar."""
+    """Require the exact Arrow name-count generation selected by the model."""
 
-    if clusterer_uses_name_count_features(clusterer) and not arrow_paths_have_name_counts_index(arrow_paths):
+    if not clusterer_uses_name_count_features(clusterer):
+        return
+    index_path = existing_name_counts_index_path(arrow_paths)
+    if index_path is None:
         raise ValueError(
             f"{context} with selected name_counts features requires name_counts_index. "
             "Pass the S2AND name-count index directory in arrow_paths['name_counts_index']."
         )
+    expected = NameCountsBinding.from_feature_contract(
+        getattr(clusterer, "feature_contract", None),
+        context=f"{context} model feature_contract",
+        required=False,
+    )
+    if expected is None:
+        return
+    observed = NameCountsBinding.from_arrow_name_counts_index(
+        index_path,
+        context=f"{context} Arrow name_counts_index",
+    )
+    expected.require_matches(
+        observed,
+        context=context,
+        source="arrow_paths['name_counts_index']",
+    )
+
+
+def require_dataset_name_counts_binding_for_clusterer(
+    clusterer: Any,
+    dataset: Any,
+    *,
+    context: str,
+) -> None:
+    """Require the exact in-memory name-count generation selected by the model."""
+
+    if not clusterer_uses_name_count_features(clusterer):
+        return
+    expected = NameCountsBinding.from_feature_contract(
+        getattr(clusterer, "feature_contract", None),
+        context=f"{context} model feature_contract",
+        required=False,
+    )
+    if expected is None:
+        return
+    observed = NameCountsBinding.from_provenance(
+        getattr(dataset, "name_counts_provenance", None),
+        context=f"{context} ANDData.name_counts_provenance",
+    )
+    expected.require_matches(
+        observed,
+        context=context,
+        source="ANDData.name_counts_provenance",
+    )
+
+
+def require_rust_featurizer_name_counts_binding_for_clusterer(
+    clusterer: Any,
+    rust_featurizer: Any,
+    *,
+    context: str,
+) -> None:
+    """Require the exact name-count generation retained by a Rust featurizer."""
+
+    if not clusterer_uses_name_count_features(clusterer):
+        return
+    expected = NameCountsBinding.from_feature_contract(
+        getattr(clusterer, "feature_contract", None),
+        context=f"{context} model feature_contract",
+        required=False,
+    )
+    if expected is None:
+        return
+    observed = NameCountsBinding.from_rust_featurizer(
+        rust_featurizer,
+        context=f"{context} Rust featurizer",
+    )
+    expected.require_matches(
+        observed,
+        context=context,
+        source="RustFeaturizer.name_counts_provenance_binding",
+    )
 
 
 def resolve_load_name_counts_policy(

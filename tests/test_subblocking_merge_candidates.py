@@ -11,6 +11,7 @@ from s2and.arrow_inputs import MissingArrowArtifactError
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
 from s2and.subblocking import (
     GraphSubblockingConfig,
+    _orcid_prefix_pair_count,
     _projection_neighbor_edge_scores,
     _prune_edge_scores,
     _score_candidate_edge,
@@ -75,8 +76,9 @@ def _legacy_sorted_subblock_merge_candidates(output, maximum_size, first_k_lette
                 # string (the legacy first-token reduction is retired).
                 lookup_1 = name_for_splits_1
                 lookup_2 = name_for_splits_2
-                if lookup_1 in first_k_letter_counts_sorted and lookup_2 in first_k_letter_counts_sorted[lookup_1]:
-                    small_enough_pairs_counts.append((pair, first_k_letter_counts_sorted[lookup_1][lookup_2]))
+                pair_count = _orcid_prefix_pair_count(first_k_letter_counts_sorted, lookup_1, lookup_2)
+                if pair_count is not None:
+                    small_enough_pairs_counts.append((pair, pair_count))
 
     return sorted(small_enough_pairs_counts, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
@@ -148,6 +150,25 @@ def test_sorted_subblock_merge_candidates_middle_prefix_score_is_order_invariant
     }
 
     assert score_for(short_first) == score_for(long_first) == 1e10 + 2
+
+
+def test_sorted_subblock_merge_candidates_orcid_counts_are_order_invariant() -> None:
+    counts = {"wei": {"li": 7}}
+    forward = _sorted_subblock_merge_candidates(
+        {"a|middle=wei": ["s1"], "a|middle=li": ["s2"]},
+        maximum_size=3,
+        first_k_letter_counts_sorted=counts,
+    )
+    reverse = _sorted_subblock_merge_candidates(
+        {"a|middle=li": ["s2"], "a|middle=wei": ["s1"]},
+        maximum_size=3,
+        first_k_letter_counts_sorted=counts,
+    )
+
+    assert [(frozenset(pair), score) for pair, score in forward] == [
+        (frozenset(pair), score) for pair, score in reverse
+    ]
+    assert forward[0][1] == 7
 
 
 def test_sorted_subblock_merge_candidates_keeps_exact_maximum_size_pair() -> None:
@@ -859,6 +880,7 @@ def test_graph_subblocking_packs_micro_components_before_legacy_merge() -> None:
         signature_ids,
         dataset,
         maximum_size=2,
+        first_k_letter_counts_sorted={},
         specter_cluster_fn=fallback,
     )
 

@@ -9,6 +9,7 @@ from s2and.incremental_linking.feature_block import (
     cleanup_stale_name_counts_generations,
     write_name_counts_index,
 )
+from tests.helpers import patch_name_counts_artifact
 
 
 def _write_generation(index_dir: Path, generation_name: str) -> None:
@@ -20,12 +21,9 @@ def _write_generation(index_dir: Path, generation_name: str) -> None:
 
 
 def test_write_name_counts_index_does_not_delete_previous_published_generation(tmp_path, monkeypatch) -> None:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
     )
 
     index_path, _first_metrics = write_name_counts_index(tmp_path, overwrite=True)
@@ -36,22 +34,19 @@ def test_write_name_counts_index_does_not_delete_previous_published_generation(t
     assert all((path / ".published").exists() for path in generations)
 
 
-def test_write_name_counts_index_commits_manifest_before_marker_write_fails(tmp_path, monkeypatch) -> None:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
+def test_write_name_counts_index_keeps_manifest_absent_when_marker_write_fails(tmp_path, monkeypatch) -> None:
+    patch_name_counts_artifact(
+        monkeypatch,
+        ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
     )
-    original_write_text = Path.write_text
+    original_open = Path.open
 
     def fail_published_marker(path: Path, *args, **kwargs):
         if path.name == ".published":
             raise OSError("marker write failed")
-        return original_write_text(path, *args, **kwargs)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "write_text", fail_published_marker)
+    monkeypatch.setattr(Path, "open", fail_published_marker)
 
     try:
         write_name_counts_index(tmp_path, overwrite=True)
@@ -62,13 +57,10 @@ def test_write_name_counts_index_commits_manifest_before_marker_write_fails(tmp_
 
     index_dir = tmp_path / "name_counts_index"
     manifest_path = index_dir / "manifest.json"
-    assert manifest_path.exists()
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert not manifest_path.exists()
     generation_root = index_dir / "generations"
     generations = [path for path in generation_root.iterdir() if path.is_dir()]
-    assert len(generations) == 1
-    assert generations[0].name in str(manifest["files"]["first"]["path"])
-    assert not (generations[0] / ".published").exists()
+    assert generations == []
 
 
 def test_cleanup_stale_name_counts_generations_keeps_manifest_generation(tmp_path: Path) -> None:

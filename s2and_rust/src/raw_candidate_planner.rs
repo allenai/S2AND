@@ -55,12 +55,9 @@ struct RawArrowQueryInputReadResult {
     metadata_reads_parallel_secs: f64,
 }
 
-fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyResult<()> {
-    if query_signature_ids.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "query_signature_ids must be non-empty",
-        ));
-    }
+fn validate_raw_arrow_query_signature_ids_allow_empty(
+    query_signature_ids: &[String],
+) -> PyResult<()> {
     let mut seen = HashSet::<&str>::with_capacity(query_signature_ids.len());
     for signature_id in query_signature_ids.iter() {
         if !seen.insert(signature_id.as_str()) {
@@ -70,6 +67,15 @@ fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyR
         }
     }
     Ok(())
+}
+
+fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyResult<()> {
+    if query_signature_ids.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "query_signature_ids must be non-empty",
+        ));
+    }
+    validate_raw_arrow_query_signature_ids_allow_empty(query_signature_ids)
 }
 
 fn validate_signatures_batch_index_before_missing_signature_error(
@@ -453,6 +459,11 @@ fn read_reusable_raw_arrow_query_inputs(
     })
 }
 
+enum RawPlannerQueryMode {
+    Declared,
+    Auto,
+}
+
 #[pyclass]
 pub(crate) struct RawBlockQueryCandidatePlanner {
     paths: RawArrowPlannerPaths,
@@ -461,6 +472,7 @@ pub(crate) struct RawBlockQueryCandidatePlanner {
     planner_query_signature_count: usize,
     planner_query_signature_id_set: HashSet<String>,
     planner_query_requests_by_signature_id: HashMap<String, RawArrowQuerySignatureRequest>,
+    query_mode: RawPlannerQueryMode,
     top_k: usize,
     orcid_enabled: bool,
     num_threads: Option<usize>,
@@ -478,7 +490,7 @@ impl RawBlockQueryCandidatePlanner {
         max_exemplars: usize,
     ) -> PyResult<Self> {
         validate_retrieval_rank_top_k(top_k)?;
-        validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
+        validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
         let paths = RawArrowPlannerPaths::from_py_dict(paths)?;
 
@@ -772,6 +784,7 @@ impl RawBlockQueryCandidatePlanner {
             planner_query_signature_count: query_signature_ids.len(),
             planner_query_signature_id_set,
             planner_query_requests_by_signature_id: HashMap::new(),
+            query_mode: RawPlannerQueryMode::Declared,
             top_k,
             orcid_enabled,
             num_threads,
@@ -804,7 +817,7 @@ impl RawBlockQueryCandidatePlanner {
             .iter()
             .map(|request| request.signature_id.clone())
             .collect::<Vec<_>>();
-        validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
+        validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let mut planner = Self::build_from_query_signature_ids(
             py,
             paths,
@@ -820,6 +833,35 @@ impl RawBlockQueryCandidatePlanner {
             .into_iter()
             .map(|request| (request.signature_id.clone(), request))
             .collect();
+        Ok(planner)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        paths,
+        top_k,
+        orcid_enabled = true,
+        num_threads = None,
+        max_exemplars = 4
+    ))]
+    fn from_auto_queries(
+        py: Python<'_>,
+        paths: &Bound<'_, PyDict>,
+        top_k: usize,
+        orcid_enabled: bool,
+        num_threads: Option<usize>,
+        max_exemplars: usize,
+    ) -> PyResult<Self> {
+        let mut planner = Self::build_from_query_signature_ids(
+            py,
+            paths,
+            Vec::new(),
+            top_k,
+            orcid_enabled,
+            num_threads,
+            max_exemplars,
+        )?;
+        planner.query_mode = RawPlannerQueryMode::Auto;
         Ok(planner)
     }
 
@@ -896,21 +938,28 @@ impl RawBlockQueryCandidatePlanner {
     }
 
     fn plan_query_signatures(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        if matches!(self.query_mode, RawPlannerQueryMode::Auto) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "RawBlockQueryCandidatePlanner.from_auto_queries requires explicit plan(query_signature_ids)",
+            ));
+        }
         self.plan(py, self.planner_query_signature_ids.clone())
     }
 
     #[pyo3(signature = (query_signature_ids))]
     fn plan(&mut self, py: Python<'_>, query_signature_ids: Vec<String>) -> PyResult<Py<PyDict>> {
         validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
-        let missing: Vec<&String> = query_signature_ids
-            .iter()
-            .filter(|signature_id| !self.planner_query_signature_id_set.contains(*signature_id))
-            .collect();
-        if !missing.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "RawBlockQueryCandidatePlanner plan requested query_signature_ids outside the planner query set: {:?}",
-                missing.into_iter().take(10).collect::<Vec<_>>()
-            )));
+        if matches!(self.query_mode, RawPlannerQueryMode::Declared) {
+            let missing: Vec<&String> = query_signature_ids
+                .iter()
+                .filter(|signature_id| !self.planner_query_signature_id_set.contains(*signature_id))
+                .collect();
+            if !missing.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "RawBlockQueryCandidatePlanner plan requested query_signature_ids outside the planner query set: {:?}",
+                    missing.into_iter().take(10).collect::<Vec<_>>()
+                )));
+            }
         }
 
         let total_start = Instant::now();
@@ -982,22 +1031,25 @@ impl RawBlockQueryCandidatePlanner {
             let base = &base_feature.query;
             let request = self
                 .planner_query_requests_by_signature_id
-                .get(signature_id)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "RawBlockQueryCandidatePlanner is missing query_signatures request row for \
-                         signature_id {signature_id:?}"
-                    ))
-                })?;
-            if !request.query_author.is_empty() && request.query_author != base_feature.query_author
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "query_signatures Arrow query_author for signature_id {:?} does not match \
-                     signatures-derived query_author: {:?} != {:?}",
-                    signature_id, request.query_author, base_feature.query_author
+                .get(signature_id);
+            if let Some(request) = request {
+                if !request.query_author.is_empty()
+                    && request.query_author != base_feature.query_author
+                {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "query_signatures Arrow query_author for signature_id {:?} does not match \
+                         signatures-derived query_author: {:?} != {:?}",
+                        signature_id, request.query_author, base_feature.query_author
+                    )));
+                }
+            } else if matches!(self.query_mode, RawPlannerQueryMode::Declared) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "RawBlockQueryCandidatePlanner is missing query_signatures request row for \
+                     signature_id {signature_id:?}"
                 )));
             }
-            let (masked, resolved_view) = mask_raw_arrow_query(base, request.query_view.as_str())
+            let query_view = request.map_or("auto", |request| request.query_view.as_str());
+            let (masked, resolved_view) = mask_raw_arrow_query(base, query_view)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
             queries.push(masked);
             query_views.push(resolved_view);

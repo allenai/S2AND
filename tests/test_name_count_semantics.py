@@ -5,6 +5,8 @@ canonical_v2 migration (D8); these tests pin that the token is rejected
 everywhere and that the initial-char behavior is stable across prediction.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -14,6 +16,7 @@ from s2and.data import (
 )
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
+from tests.helpers import tiny_name_counts_provenance
 
 RETIRED_LEGACY_SEMANTICS = "legacy_full_first_token"
 
@@ -25,7 +28,7 @@ class _ConstantClassifier:
         return np.tile(np.asarray([[0.5, 0.5]], dtype=np.float64), (rows, 1))
 
 
-def _name_count_tables() -> dict[str, dict[str, int]]:
+def _name_count_tables() -> dict[str, Any]:
     return {
         "first_dict": {"abdul": 7, "alexander": 8},
         "last_dict": {"sattar": 9, "konovalov": 10},
@@ -36,6 +39,7 @@ def _name_count_tables() -> dict[str, dict[str, int]]:
             "konovalov a": 14,
             "konovalov alexander": 42,
         },
+        "provenance": tiny_name_counts_provenance(),
     }
 
 

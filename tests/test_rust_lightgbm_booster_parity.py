@@ -139,6 +139,27 @@ def _assert_parity(lgb_booster: lgb.Booster, rust_booster: Any, features: np.nda
     assert raw_rust.tobytes() == raw_threaded.tobytes()
 
 
+def _assert_float32_matches_prior_widening(rust_booster: Any, features: np.ndarray) -> None:
+    """The optimized f32 traversal must reproduce the retired f32->f64 path bit-for-bit."""
+    with np.errstate(over="ignore"):
+        features_f32 = np.ascontiguousarray(features, dtype=np.float32)
+    widened = np.ascontiguousarray(features_f32, dtype=np.float64)
+
+    raw_widened = np.asarray(rust_booster.predict_raw(widened), dtype=np.float64)
+    raw_f32 = np.asarray(rust_booster.predict_raw_f32(features_f32), dtype=np.float64)
+    assert raw_f32.tobytes() == raw_widened.tobytes()
+
+    proba_widened = np.asarray(rust_booster.predict_proba_positive(widened), dtype=np.float64)
+    proba_f32 = np.asarray(rust_booster.predict_proba_positive_f32(features_f32), dtype=np.float64)
+    assert proba_f32.tobytes() == proba_widened.tobytes()
+
+    proba_threaded = np.asarray(
+        rust_booster.predict_proba_positive_f32(features_f32, num_threads=4),
+        dtype=np.float64,
+    )
+    assert proba_f32.tobytes() == proba_threaded.tobytes()
+
+
 def _train_booster(
     rng: np.random.Generator,
     *,
@@ -195,6 +216,7 @@ def test_bundle_booster_bit_exact_parity(relpath: str) -> None:
     model_text = model_path.read_text(encoding="utf-8")
     features = _mixed_matrix(model_text, lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
+    _assert_float32_matches_prior_widening(rust_booster, features)
 
 
 @pytest.mark.parametrize(
@@ -252,6 +274,7 @@ def test_missing_type_nan_semantics() -> None:
 
     features = _mixed_matrix(lgb_booster.model_to_string(), lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
+    _assert_float32_matches_prior_widening(rust_booster, features)
 
 
 def test_missing_type_none_semantics() -> None:
@@ -264,6 +287,7 @@ def test_missing_type_none_semantics() -> None:
 
     features = _mixed_matrix(lgb_booster.model_to_string(), lgb_booster.num_feature(), rng)
     _assert_parity(lgb_booster, rust_booster, features)
+    _assert_float32_matches_prior_widening(rust_booster, features)
 
     # NaN rows and zero rows must be indistinguishable under None-missing
     # semantics (NaN -> 0.0 conversion), pinning the conversion explicitly.
@@ -290,6 +314,7 @@ def test_missing_type_zero_semantics() -> None:
         special_fraction=0.5,
     )
     _assert_parity(lgb_booster, rust_booster, features)
+    _assert_float32_matches_prior_widening(rust_booster, features)
 
 
 def test_default_direction_coverage_across_synthetic_models() -> None:

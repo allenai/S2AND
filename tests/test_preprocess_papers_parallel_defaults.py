@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from s2and import data
 from s2and.data import Author, Paper, preprocess_papers_parallel
-from s2and.text import normalize_text
+from s2and.text import normalize_text, normalize_title
 
 
 def _make_paper(*, paper_id: int, title: str, venue: str, journal: str) -> Paper:
@@ -83,5 +83,5 @@ def test_preprocess_papers_parallel_linux_uses_pool(monkeypatch):
     assert FakeUniversalPool.init_calls == 1
     assert FakeUniversalPool.imap_calls == 1
     assert FakeUniversalPool.last_use_threads is False
-    assert out["1"].title == normalize_text("Paper 1")
-    assert out["2"].title == normalize_text("Paper 2")
+    assert out["1"].title == normalize_title("Paper 1")
+    assert out["2"].title == normalize_title("Paper 2")

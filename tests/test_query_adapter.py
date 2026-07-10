@@ -69,16 +69,34 @@ def test_title_and_venue_terms_keep_single_character_tokens() -> None:
     assert counter_query_overlap(query.venue_terms, summary.venue_counts, summary.size) == pytest.approx(0.5)
 
 
-def test_signature_query_author_prefers_raw_full_name() -> None:
+def test_title_terms_preserve_identifying_digits() -> None:
+    dataset = SimpleNamespace(
+        signatures={"q": _signature("pq")},
+        papers={"pq": SimpleNamespace(title="Part 1: Co3O4", venue=None, journal_name=None, year=2020)},
+        specter_embeddings=None,
+    )
+
+    query = extract_query_features(_dataset_arg(dataset), "q")
+
+    assert query.title_terms == frozenset({"part", "1", "co3o4"})
+
+
+def test_signature_query_author_ignores_raw_full_name_and_uses_canonical_fields() -> None:
     signature = SimpleNamespace(
         author_info_full_name="Ada B. Lovelace, PhD",
-        author_info_first="Ada",
-        author_info_middle="B.",
+        author_info_first="Dr.",
+        author_info_middle="B-2",
         author_info_last="Lovelace",
         author_info_suffix="PhD",
     )
 
-    assert query_adapter_module._signature_query_author(signature) == "Ada B. Lovelace, PhD"
+    assert query_adapter_module._signature_query_author(signature) == "b lovelace phd"
+
+    signature.author_info_first_normalized_without_apostrophe = ""
+    signature.author_info_middle_normalized_without_apostrophe = ""
+    signature.author_info_last_normalized = "lovelace"
+    signature.author_info_suffix_normalized = "phd"
+    assert query_adapter_module._signature_query_author(signature) == "lovelace phd"
 
 
 def test_signature_coauthor_blocks_uses_precomputed_blocks_without_position() -> None:

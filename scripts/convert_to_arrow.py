@@ -29,7 +29,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from s2and.arrow_inputs import require_name_counts_index_artifact  # noqa: E402
+from s2and.arrow_inputs import (  # noqa: E402
+    _build_arrow_artifact_generation,
+    require_name_counts_index_artifact,
+)
 from s2and.consts import (  # noqa: E402
     NORMALIZATION_VERSION,
     NORMALIZATION_VERSION_LEGACY_COMPAT,
@@ -114,6 +117,12 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: infile.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: Path) -> dict[str, Any]:
+    """Build a content-addressed inventory for every Rust-consumed artifact."""
+
+    return _build_arrow_artifact_generation(paths, manifest_dir)
 
 
 def _git_output(args: Sequence[str]) -> str | None:
@@ -1085,6 +1094,7 @@ def convert_service_json_to_arrow(
         "altered_cluster_signature_count": len(altered),
         "altered_cluster_signatures": altered,
         "paths": manifest_paths,
+        "artifact_generation": _arrow_artifact_generation(paths, output_dir),
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
         "name_counts_index": name_counts_index_metrics,
@@ -1247,6 +1257,7 @@ def convert_runtime_dataset_to_arrow(
         "paper_count": len(dataset.papers),
         "cluster_count": len(dataset.clusters or {}),
         "paths": manifest_paths,
+        "artifact_generation": _arrow_artifact_generation(paths, output_dir),
         "specter": specter_reports,
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,

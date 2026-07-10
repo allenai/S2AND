@@ -48,7 +48,7 @@ are not alternate production paths.
 | Job | Production route | Not production |
 |---|---|---|
 | Full-block prediction | `Clusterer.predict_from_arrow_paths(...)` or Arrow-routed `Clusterer.predict(...)` -> `feature_port.build_rust_featurizer_from_arrow_paths(...)` -> `RustFeaturizer.from_arrow_paths(...)`. | JSON loaders and raw Python object scoring. |
-| Raw incremental candidate planning | `RawBlockQueryCandidatePlanner.from_query_signatures(paths_with_query_signatures_and_batch_indexes, ...)` -> `.plan_query_signatures()` or subset `.plan(...)` calls. | Unindexed filtered Arrow scans, Python mini object materialization, direct retriever wiring from callers. |
+| Raw incremental candidate planning | Explicit requests use `RawBlockQueryCandidatePlanner.from_query_signatures(paths_with_query_signatures_and_batch_indexes, ...)`; promoted auto windows use `from_auto_queries(paths_with_batch_indexes, ...)`. Both reuse `.plan(...)` calls. | Unindexed filtered Arrow scans, Python mini object materialization, temporary empty request sidecars, direct retriever wiring from callers. |
 | Pairwise feature and prediction inputs | `LinkerCandidateBatch` index arrays -> indexed Rust pairwise APIs. | String-pair feature APIs or ad hoc per-pair calls. |
 | Constraints | `get_constraints_matrix_indexed`, `get_constraints_block_upper_triangle_indexed`, or linker label-array APIs. | Single-pair Rust constraints. |
 | Arrow graph subblocking | `make_subblocks_with_telemetry_arrow_native_graph(...)` with `signatures_batch_index`. | Full scans or Python callback-based Rust subblocking. |

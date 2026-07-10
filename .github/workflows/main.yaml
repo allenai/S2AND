@@ -55,6 +55,8 @@ jobs:
     name: typecheck-and-test (${{ matrix.lane }})
     runs-on: ubuntu-latest
     needs: [lint]
+    env:
+      S2AND_TEST_REQUIRE_RUST: ${{ matrix.lane == 'rust-enabled' && '1' || '0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,16 +81,21 @@ jobs:
       - name: Verify hydrated CI LFS artifacts
         run: |
           uv run --no-project python - <<'PY'
+          import json
           from pathlib import Path
 
           pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
+          declaration_path = Path("s2and/data/default_production_model.json")
+          declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
+          default_dir = Path("s2and/data") / declaration["bundle_dir"]
           required_paths = [
               Path("s2and/data/production_model_v1.0.pickle"),
               Path("s2and/data/production_model_v1.1.pickle"),
               Path("s2and/data/production_model_v1.2.pickle"),
+              declaration_path,
           ]
           required_paths.extend(
-              sorted(path for path in Path("s2and/data/production_model_v1.21").rglob("*") if path.is_file())
+              sorted(path for path in default_dir.rglob("*") if path.is_file())
           )
           required_paths.extend(
               [
@@ -186,6 +193,10 @@ jobs:
       - name: Build Rust extension
         if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync --with maturin maturin develop -m s2and_rust/Cargo.toml
+
+      - name: Fail-hard Rust API smoke
+        if: matrix.lane == 'rust-enabled'
+        run: uv run --no-sync python scripts/verification/smoke_installed_rust_api.py
 
       - name: "Rust artifact guardrail: default incremental linker"
         if: matrix.lane == 'rust-enabled'

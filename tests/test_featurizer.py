@@ -86,6 +86,26 @@ def test_featurizer_computes_requested_pairs() -> None:
     assert np.any(features != -LARGE_INTEGER)
 
 
+def test_malformed_emails_produce_only_missing_features() -> None:
+    dataset = _dummy_dataset("dummy_malformed_emails", load_name_counts=False)
+    dataset.signatures["0"] = dataset.signatures["0"]._replace(author_info_email="a@b@c")
+    dataset.signatures["1"] = dataset.signatures["1"]._replace(author_info_email="ab@c")
+    featurizer = FeaturizationInfo(features_to_use=["email_similarity"])
+
+    features, _labels, _ = many_pairs_featurize(
+        [("0", "1", 0)],
+        dataset,
+        featurizer,
+        n_jobs=1,
+        use_cache=False,
+        chunk_size=1,
+        nan_value=np.nan,
+    )
+
+    assert features.shape == (1, 2)
+    assert np.isnan(features).all()
+
+
 def test_empty_python_pair_featurization_does_not_mark_missing_ngrams_ready() -> None:
     runtime_context = RuntimeContext(
         operation="featurization_run",

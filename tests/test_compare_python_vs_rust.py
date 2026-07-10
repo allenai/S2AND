@@ -33,7 +33,7 @@ def test_language_feature_indices_detect_expected_columns():
     assert indices == [1, 2, 3]
 
 
-def test_feature_parity_allows_small_language_mismatch():
+def test_feature_parity_rejects_any_language_mismatch():
     module = _load_compare_module()
     feature_names = [
         "first_names_equal",
@@ -57,14 +57,13 @@ def test_feature_parity_allows_small_language_mismatch():
         python_features,
         rust_features,
         feature_names,
-        non_language_rtol=1e-6,
+        non_language_rtol=0.0,
         non_language_atol=1e-6,
-        language_max_mismatch_fraction=0.20,
     )
 
     assert parity["non_language"]["pass"] is True
-    assert parity["language"]["pass"] is True
-    assert parity["pass"] is True
+    assert parity["language"]["pass"] is False
+    assert parity["pass"] is False
 
 
 def test_feature_parity_fails_on_non_language_mismatch():
@@ -77,12 +76,24 @@ def test_feature_parity_fails_on_non_language_mismatch():
         python_features,
         rust_features,
         feature_names,
-        non_language_rtol=1e-6,
+        non_language_rtol=0.0,
         non_language_atol=1e-6,
-        language_max_mismatch_fraction=1.0,
     )
 
     assert parity["non_language"]["pass"] is False
+    assert parity["pass"] is False
+
+
+def test_feature_parity_requires_exact_discrete_values() -> None:
+    module = _load_compare_module()
+    parity = module._compute_feature_parity(
+        np.asarray([[1.0]], dtype=np.float64),
+        np.asarray([[1.0 + 1e-7]], dtype=np.float64),
+        ["english_count"],
+        non_language_rtol=0.0,
+        non_language_atol=1e-6,
+    )
+
     assert parity["pass"] is False
 
 

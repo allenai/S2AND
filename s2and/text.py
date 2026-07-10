@@ -22,6 +22,7 @@ logger = logging.getLogger("s2and")
 
 
 RE_NORMALIZE_WHOLE_NAME = re.compile(r"[^a-zA-Z\s]+")
+RE_NORMALIZE_TITLE = re.compile(r"[^a-zA-Z0-9\s]+")
 
 DASH_CHARS = "-\u2010\u2011\u2012\u2013\u2014\u2212\ufe58\ufe63\uff0d"
 NAME_DASH_CHARS = frozenset(DASH_CHARS)
@@ -308,7 +309,9 @@ def detect_language(text: str | None) -> LanguageDetection:
         return _unknown_language_detection()
 
     try:
-        cld2_pred = cld2.detect(text)
+        # Titles are plain text. Pin the mode explicitly so Python matches the
+        # Rust detector instead of inheriting pycld2's HTML-aware default.
+        cld2_pred = cld2.detect(text, isPlainText=True)
     except (UnicodeError, cld2.error):
         logger.exception("cld2 language detection failed; using unknown language marker")
         return _unknown_language_detection()
@@ -355,6 +358,28 @@ def normalize_text(text: str | None, special_case_apostrophes: bool = False) -> 
     norm_text = re.sub(r"\s+", " ", norm_text).strip()
 
     return norm_text
+
+
+def normalize_title(text: str | None) -> str:
+    """Normalize publication titles while preserving identifying digits.
+
+    Person-name normalization intentionally removes digits. Titles have a
+    different contract: section numbers, years, and formula subscripts such as
+    ``Co3O4`` are evidence and must survive normalization.
+
+    Args:
+        text: Raw publication title, or ``None``.
+
+    Returns:
+        Lowercase transliterated title containing only ASCII letters, digits,
+        and single spaces.
+    """
+
+    if not text:
+        return ""
+    normalized = unidecode(text).lower()
+    normalized = RE_NORMALIZE_TITLE.sub(" ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def normalize_orcid(value: Any) -> str | None:
@@ -599,21 +624,29 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
         return inner(a, b) / (a_norm * b_norm)
 
 
-def email_prefix_suffix(email: str) -> tuple[str, str | None]:
-    """Split an email into (prefix, suffix), normalized (dot-stripped, lowercased).
+def email_prefix_suffix(email: str) -> tuple[str | None, str | None]:
+    """Return normalized email components, or missing values when malformed.
 
-    When the address has no ``@``, the whole string is the prefix and the suffix
-    is None (missing) rather than a sentinel like "missing" — so two malformed
-    emails do not spuriously match on a shared sentinel suffix. Mirrors the Rust
-    ``email_parts`` in s2and_rust/src/features.rs.
+    A valid feature input has exactly one ``@``, nonempty local and domain
+    components after edge-dot normalization, and no whitespace. Malformed
+    values return ``(None, None)`` so neither exact-match feature can become
+    positive evidence. This mirrors Rust ``email_parts``.
     """
-    if "@" in email:
-        prefix_raw, _, suffix_raw = email.rpartition("@")
-        prefix = prefix_raw.replace("@", "").strip(".").lower()
-        suffix: str | None = suffix_raw.strip(".").lower()
-    else:
-        prefix = email.strip(".").lower()
-        suffix = None
+    prefix_raw, separator, suffix_raw = email.partition("@")
+    whitespace_parts = email.split()
+    if (
+        not separator
+        or not prefix_raw
+        or not suffix_raw
+        or "@" in suffix_raw
+        or len(whitespace_parts) != 1
+        or whitespace_parts[0] != email
+    ):
+        return None, None
+    prefix = prefix_raw.strip(".").lower()
+    suffix = suffix_raw.strip(".").lower()
+    if not prefix or not suffix:
+        return None, None
     return prefix, suffix
 
 
@@ -682,7 +715,12 @@ def get_text_ngrams(
     return ngrams
 
 
-def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> Counter:
+def get_text_ngrams_words(
+    text: str | None,
+    stopwords: set[str] = STOPWORDS,
+    *,
+    drop_short_tokens: bool = True,
+) -> Counter:
     """
     Get word unigrams, bigrams, and trigrams for a piece of text.
 
@@ -692,6 +730,9 @@ def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> 
         the text to get ngrams for
     stopwords: Set
         The set of stopwords to filter out before computing word ngrams
+    drop_short_tokens: bool
+        Whether to drop one-character tokens. Titles disable this so section
+        and formula digits remain evidence.
 
     Returns
     -------
@@ -699,7 +740,7 @@ def get_text_ngrams_words(text: str | None, stopwords: set[str] = STOPWORDS) -> 
     """
     if text is None or len(text) == 0:
         return Counter()
-    text_split = [word for word in text.split() if word not in stopwords and len(word) > 1]
+    text_split = [word for word in text.split() if word not in stopwords and (not drop_short_tokens or len(word) > 1)]
     unigrams = Counter(text_split)
     bigrams = map(
         lambda x: " ".join(x),
@@ -733,6 +774,12 @@ def same_prefix_tokens(a: str, b: str) -> bool:
     return True
 
 
+def canonical_name_tuple_pair(first_a: str, first_b: str) -> tuple[str, str]:
+    """Return the order-independent storage key for one first-name alias."""
+
+    return (first_a, first_b) if first_a <= first_b else (first_b, first_a)
+
+
 def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tuple[str, str]]) -> bool:
     """Return canonical first-name compatibility.
 
@@ -750,7 +797,8 @@ def first_names_name_compatible(first_a: str, first_b: str, name_tuples: Set[tup
     if same_prefix_tokens(first_a, first_b):
         return True
 
-    return (first_a, first_b) in name_tuples
+    pair = canonical_name_tuple_pair(first_a, first_b)
+    return pair in name_tuples or (pair[1], pair[0]) in name_tuples
 
 
 def equal(

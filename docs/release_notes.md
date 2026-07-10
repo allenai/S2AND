@@ -2,67 +2,92 @@
 
 ## 0.60.0
 
-- Fixes query-vs-query `cluster_seed_disallows` enforcement in promoted
-  incremental linking. Previously a disallow pair whose endpoints were both
-  residual queries was silently unenforced at link time, so two mutually
-  disallowed queries could link into the same predicted cluster. Enforcement
-  now happens at the moment a pair becomes resolvable: same-batch conflicts
-  resolve in priority order (require-forced links first, then descending link
-  score) over already-scored candidate rows, and a query whose disallowed
-  partner linked in an earlier batch has that component excluded as if never
-  retrieved. Contradictory hard constraints (a require into a component that a
-  mutually-disallowed partner already claimed) raise
-  `cluster_seed_disallow_conflicts_with_require_constraint`. New telemetry:
-  `cluster_seed_disallow_excluded_row_count`,
-  `cluster_seed_disallow_excluded_query_count`, and the
-  `cluster_seed_disallow_same_batch_{conflict,reassigned_link,demoted_abstain}_count`
-  counters.
-- Rust subblocking now fails loudly on duplicate signature ids: the final
-  complete-partition check compares multisets (matching the Python assert),
-  and the ORCID merge pass raises a typed error instead of silently binding a
-  duplicated signature to the last subblock visited.
-- Rust language detection's text gate now counts alphabetic characters with
-  Python `str.isalpha` semantics (general category L* only) instead of
-  `char::is_alphabetic` (which also counts `Other_Alphabetic` combining marks
-  and Nl characters). This removes a Python/Rust divergence on titles whose
-  alphabetic content includes Indic combining vowel signs and similar marks
-  near the zero-alpha and >0.9-uppercase-ratio gate boundaries.
-- Breaking: `s2and-rust` is now a required runtime dependency of `s2and`.
-  `uv pip install s2and` installs the Rust package; `s2and[rust]` remains only
-  as a compatibility alias.
-- Breaking: removes the Sinonym-dependent `ANDData` rewrite API. `ANDData(...)`
-  no longer accepts `use_sinonym_overwrite` or `sinonym_overwrite_min_ratio`;
-  callers must provide upstream-normalized names before constructing `ANDData`.
-- Breaking: language detection is now CLD2-only; the fastText runtime
-  dependency and `lid.176.bin` release artifact are removed. The pairwise
-  language feature `language_reliability_count` is replaced by
-  `language_reliability_min`, the minimum CLD2 reliable-confidence score for
-  the two papers. Cached `predicted_language`/`is_reliable`/language
-  reliability Arrow columns produced under the old policy must be regenerated
-  or cleared; when the cached language columns are missing or NULL, Rust
-  recomputes language locally from the raw title. `FEATURIZER_VERSION` is
-  bumped to 9.
-- Breaking: Rust featurization and ingest enter through Arrow IPC artifacts
-  only; the JSON `from_dataset` ingestion surface is removed. Classic
-  JSON/`ANDData` datasets remain supported through the Python featurizer.
-- Feature caches are invalidated: `FEATURIZER_VERSION` is bumped 3 -> 9 across
-  the feature-correctness pass (self-cite shared-paper guard, email
-  missing-suffix handling, multi-token middle-initial comparison, empty-surname
-  name-count keys, and related parity fixes), the language-detection policy
-  change, and the Arrow migration.
-- Adds a pure-Rust LightGBM evaluator for the production `.lgb` boosters
-  (single-model binary-objective GBDTs with numerical splits; unsupported
-  model types are rejected at load time). Production scoring no longer round
-  trips through the Python `lightgbm` package; parity is pinned bit-for-bit by
-  `tests/test_rust_lightgbm_booster_parity.py`.
-- Arrow-backed training ingestion now streams IPC record batches for
-  signatures/papers/authors and skips Python SPECTER embedding materialization
-  by default when Rust featurization is attached. Pass
-  `load_python_specter=True` only for Python reference featurization or direct
-  Python embedding access.
-- Filtered Arrow reads now reject duplicate signature/paper ids even when
-  every copy of the duplicated id falls outside the requested id filter, so a
-  filtered scan is never more permissive than a full scan.
+- **Unreleased migration state:** the artifact-independent canonical-v2 code
+  and release hardening are implemented, but canonical name counts, canonical
+  ORCID prefix counts, benchmark-name re-export, the v1.3 retrain, and
+  release-candidate quality/scale measurements are still pending. The packaged
+  legacy v1.21/v1.0-v1.2 models are deliberately rejected, so 0.60.0 is not yet
+  a usable production release. See [work_plan.md](work_plan.md).
+- Breaking: Python and Rust now share one `canonical_v2` name contract and one
+  versioned feature contract. `FEATURIZER_VERSION` is 10. Titles retain letters
+  and digits, CLD2 runs in explicit plain-text mode, malformed email is missing
+  evidence, query-author text uses canonical fields only, and incremental
+  six-decimal values use ties-to-even rounding. Deterministic parity is pinned
+  at `1e-6` (exact for discrete/count/boolean features).
+- Breaking: runtime legacy-normalization shims, Sinonym rewriting, fastText,
+  and reference features are removed. `s2and-rust` is a required runtime
+  dependency. Production Rust featurization and ingest enter through validated
+  Arrow IPC artifacts; classic JSON/`ANDData` remains a Python compatibility
+  and reference surface.
+- Promoted query-disallow resolution is request-global and deterministic:
+  require-forced decisions first, then descending initial score, then signature
+  ID. Component-aware packing and bounded replay preserve outcomes across input
+  permutations and batch/window sizes. Outcome telemetry is invariant; physical
+  batch telemetry may vary with the RAM plan.
+- Promoted RAM limits are refreshed after planner, featurizer, and scorer
+  allocations. Oversized work is discarded and re-planned before scoring. The
+  native LightGBM path consumes contiguous float32 features and uses budgeted
+  row chunks, avoiding the previous full float64 widening transient. Loaded
+  incremental linker artifacts are retained on the clusterer instead of being
+  reloaded and rehashed per request.
+- Name-count pickle, binary index, Arrow inputs, pairwise boosters, and linker
+  metadata now carry and verify normalization, generation, size, SHA-256, and
+  feature-contract provenance. Manifest-relative paths cannot escape their
+  authority or depend on process CWD. Equal-size/equal-mtime source and sidecar
+  mutation is detected before cache reuse. Models selecting name-count features
+  compare the exact four-field generation binding at Python, Arrow, and
+  prebuilt-Rust-featurizer boundaries before feature work.
+- Arrow production inputs require a canonical content-addressed generation
+  manifest. Immutable dataset files and indexes are inventoried centrally;
+  request-local seed/query sidecars are kept outside that identity. Hot cache
+  checks bind exact paths and filesystem mutation watches without hashing files
+  again on a hit.
+- Stored language evidence is now an all-or-nothing triple with finite
+  reliability in `[0,1]`; unreliable rows must carry zero. Python and Rust
+  reject partial/malformed values and agree across pair order. Raw candidate
+  planning likewise has only two valid constructors: declared queries and
+  explicit automatic queries; the empty-sidecar/boolean-bypass state is gone.
+- Count generation is guarded and transactional. Warehouse access requires an
+  explicit full-run flag; local fixtures are bounded. Immutable generations are
+  fsynced and pointer manifests publish last under a cross-process lock. The
+  ORCID runtime lazily requires the new canonical manifest and never falls back
+  to the unversioned JSON. Setuptools explicitly excludes that obsolete file,
+  and distribution verification rejects it if it reappears in either wheel or
+  sdist.
+- Pairwise bundles, linker artifacts, and in-place pairwise-to-complete
+  finalization use validated staging and manifest-last commits. Metric promotion
+  rejects missing/nonfinite values, and diagnostic metric-drift overrides cannot
+  promote artifacts. Wheel/sdist validation rejects undeclared production
+  assets and checks the single declared default.
+- The release workflow builds and installs the exact Python and Rust wheels
+  outside the source tree. A synthetic public
+  `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the
+  installed wheels and itself carries the strict canonical Arrow manifest.
+  Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS jobs execute
+  their built wheels. The declared-default smoke remains blocked only on the
+  new v1.3 artifacts.
+- Arrow training iterates record batches and avoids duplicate full-table
+  materialization. Paper-author inputs reject duplicate positions, empty names,
+  and dangling references consistently in Python and Rust. Python subblocking
+  rejects duplicate IDs with explicit runtime invariants.
+- Remaining non-artifact decisions are explicit: nullable
+  `signatures.author_position` is not made non-null until the new datasets are
+  audited, and `backend="python"` still uses the native scorer because the true
+  zero-Rust scorer measured about 27% lower throughput. The latter is not being
+  changed under the no-throughput-regression requirement. Verified ORCID and
+  canonical tuple identities are exposed but not yet serialized/routed by
+  production bundles; those v1.3 bundle-schema decisions require owner
+  approval. Canonical tuple regeneration is metadata-last and fail-closed, but
+  true crash-atomic replacement would also require a generation-pointer layout.
+  Explicit caller-supplied `ANDData(load_name_counts={...})` remains a mutable
+  test/training seam and is rejected by production raw scoring; replacing that
+  public seam with a verified immutable handle requires separate API approval.
+- Local code-now performance gates stayed inside the requested envelope. The
+  specialized float32 scorer improved throughput by 26.8-34.9% while removing
+  roughly 74% of per-call RSS; retained model RSS rose 7.0-7.39%. Read-only
+  million-entry name-count views cost 4.06% lookup throughput and only 40 bytes
+  per view. Deterministic ORCID JSON publication improved 300k-record
+  throughput by 713% and reduced incremental peak RSS by 13.5%.
 
 ## 0.51.1
 

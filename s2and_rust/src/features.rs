@@ -118,13 +118,14 @@ pub(crate) fn char_ngrams_counter_python_compat(
 pub(crate) fn word_ngrams_counter_python_compat(
     text: &str,
     stopwords: &HashSet<String>,
+    drop_short_tokens: bool,
 ) -> HashMap<String, usize> {
     if text.is_empty() {
         return HashMap::new();
     }
     let text_split: Vec<&str> = text
         .split_whitespace()
-        .filter(|word| !stopwords.contains(*word) && py_len(word) > 1)
+        .filter(|word| !stopwords.contains(*word) && (!drop_short_tokens || py_len(word) > 1))
         .collect();
     if text_split.is_empty() {
         return HashMap::new();
@@ -463,35 +464,34 @@ pub(crate) fn single_char_middle(name1: Option<&str>, name2: Option<&str>) -> f6
     }
 }
 
-pub(crate) fn email_parts(email: &str) -> (String, Option<String>) {
-    if let Some((before_last, after_last)) = email.rsplit_once('@') {
-        let mut merged_prefix = String::with_capacity(before_last.len());
-        for ch in before_last.chars() {
-            if ch != '@' {
-                merged_prefix.push(ch);
-            }
-        }
-        let prefix = merged_prefix.trim_matches('.').to_lowercase();
-        let suffix = after_last.trim_matches('.').to_lowercase();
-        (prefix, Some(suffix))
-    } else {
-        // No "@": the whole string is the prefix and the suffix is missing
-        // (None), so two malformed emails do not match on a shared sentinel.
-        (email.trim_matches('.').to_lowercase(), None)
+pub(crate) fn email_parts(email: &str) -> Option<(String, String)> {
+    let (prefix_raw, suffix_raw) = email.split_once('@')?;
+    if prefix_raw.is_empty()
+        || suffix_raw.is_empty()
+        || suffix_raw.contains('@')
+        || email.chars().any(char::is_whitespace)
+    {
+        return None;
     }
+    let prefix = prefix_raw.trim_matches('.').to_lowercase();
+    let suffix = suffix_raw.trim_matches('.').to_lowercase();
+    if prefix.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    Some((prefix, suffix))
 }
 
 pub(crate) fn email_pair_parts(
     email1: Option<&str>,
     email2: Option<&str>,
-) -> Option<((String, Option<String>), (String, Option<String>))> {
+) -> Option<((String, String), (String, String))> {
     let (Some(e1), Some(e2)) = (email1, email2) else {
         return None;
     };
     if py_len(e1) == 0 || py_len(e2) == 0 {
         return None;
     }
-    Some((email_parts(e1), email_parts(e2)))
+    Some((email_parts(e1)?, email_parts(e2)?))
 }
 
 pub(crate) fn year_diff(year1: Option<i64>, year2: Option<i64>) -> f64 {
@@ -874,4 +874,33 @@ pub(crate) fn resolve_matrix_aggregate_indices(
         aggregate_indices: resolved_aggregate_indices,
         aggregate_matrix_positions,
     })
+}
+
+#[cfg(test)]
+mod email_tests {
+    use super::{email_pair_parts, email_parts};
+
+    #[test]
+    fn malformed_emails_are_missing_evidence() {
+        for malformed in [
+            "jsmith",
+            "a@b@c",
+            "@",
+            "a@",
+            "@b",
+            "a b@c",
+            "a@b c",
+            " a@b",
+            "a@b ",
+            "a\u{00a0}@b",
+            ".@b",
+        ] {
+            assert_eq!(email_parts(malformed), None, "{malformed:?}");
+        }
+        assert_eq!(
+            email_parts("J.Smith@MIT.EDU."),
+            Some(("j.smith".into(), "mit.edu".into()))
+        );
+        assert_eq!(email_pair_parts(Some("a@b@c"), Some("ab@c")), None);
+    }
 }

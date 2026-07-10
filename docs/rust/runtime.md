@@ -1,6 +1,6 @@
 # Rust Runtime Contract
 
-Status date: 2026-05-25
+Status date: 2026-07-09
 
 This document defines the operational contract for the Rust extension: backend
 resolution, stage defaults, failure semantics, verification gates, and the risk
@@ -25,7 +25,10 @@ Project goals:
 1. Keep quality parity with Python.
 2. Keep or improve latency on maintained train/eval workloads.
 3. Keep Rust peak RSS non-regressed vs Python (inference and train/eval).
-4. Treat `s2and-rust` as a required install dependency while preserving explicit Python fallback modes where stages still support them.
+4. Treat `s2and-rust` as a required install dependency. Explicit Python mode
+   currently controls featurization/constraints but native production-model
+   scoring still calls Rust; making it a true zero-Rust rollback is tracked in
+   [../work_plan.md](../work_plan.md#b16-backendpython-is-not-a-zero-rust-rollback).
 5. Keep rollback controls and explicit-Rust override behavior.
 6. Reach full train/eval + inference Rust unification only after all gates pass.
 
@@ -75,13 +78,16 @@ Python fallback paths remain available via explicit backend and stage overrides 
   direct Python embedding access.
 - Train/eval and classic `ANDData` payloads without Arrow artifacts use Python
   featurization.
-- `S2AND_BACKEND` controls all stages uniformly.
+- `S2AND_BACKEND` controls featurization, constraints, indexed subblocking, and
+  promoted-linker routing. It does not yet control native production booster
+  scoring, which is a known contract defect rather than an intentional stage
+  exception.
 
 ### Failure semantics
 
 | Backend | Failure behavior |
 |---|---|
-| Explicit `python` | Zero Rust calls; any Rust code paths are unreachable. |
+| Explicit `python` | Python featurization/constraints, but native production booster scoring still calls Rust until work-plan B16 lands. |
 | Explicit `rust` | Strict fail-fast on any Rust-stage execution error. |
 | `auto` (resolved to Python) | Python only; no Rust fallback needed. |
 | `auto` (resolved to Rust) | Fail-fast on runtime Rust-stage errors. Fallback only happens during initial backend resolution. |
@@ -94,9 +100,9 @@ These gates must pass before promoting any Rust defaults further.
 
 | Gate | Threshold |
 |---|---|
-| Quality parity | No metric regression beyond `1e-6` absolute on maintained parity tests |
-| Latency | No regression worse than `+5%` vs Python baseline on maintained workloads |
-| Peak RSS | No regression worse than `+5%` vs Python baseline on maintained workloads |
+| Quality parity | `1e-6` absolute for continuous features and exact for discrete/count/boolean fields |
+| Latency | No regression worse than `+10%` vs the pinned migration protocol unless explicitly accepted |
+| Peak RSS | No regression worse than `+10%` vs the pinned migration protocol unless explicitly accepted |
 | CI release | Both `py-only` and `rust-enabled` CI lanes green |
 | Full-unification | Train/eval and inference both pass latency + RSS gates before removing mode-specific path logic |
 
@@ -122,6 +128,10 @@ These gates must pass before promoting any Rust defaults further.
 - Public `use_cache` remains the pair-feature persistent-cache knob across training and inference.
 - `use_cache=True` enables the pair-feature SQLite cache.
 - Same-process Rust featurizer reuse is independent of `use_cache`.
+- Published Arrow/count inputs are immutable content-addressed generations.
+  Reuse is bound to the exact material paths, full generation inventory,
+  non-seed settings, and seed version. Filesystem watches invalidate same-path
+  mutation before reuse, including same-size/restored-mtime rewrites.
 - See [../caching.md](../caching.md) for the full cache layout and operational guidance.
 
 ---

@@ -26,9 +26,7 @@ from s2and.incremental_linking_training.classic import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_BUNDLE_ROOTS = (
-    REPO_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525",
-)
+DEFAULT_BUNDLE_ROOTS = (REPO_ROOT / "s2and" / "data" / "s2and_and_big_blocks_linker_dataset_20260525",)
 DEFAULT_REPORT_PATH = REPO_ROOT / "scratch" / "clean_linker_dataset_bundles_report.json"
 
 

@@ -310,6 +310,12 @@ One row per signature. Required columns:
 
 Name-count values are intentionally not part of the signature table.
 
+Migration warning: although this table currently permits null
+`author_position`, full Rust featurization rejects it and correct coauthor
+exclusion cannot be reconstructed without a focal position. The canonical
+target is a required/non-null field after intended release datasets are audited
+and repaired; see [../work_plan.md B14](../work_plan.md#b14-nullable-signature-author_position-has-contradictory-contracts).
+
 ### `papers.arrow`
 
 One row per paper referenced by `signatures.arrow`. Columns:

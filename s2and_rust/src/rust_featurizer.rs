@@ -13,7 +13,203 @@ pub(crate) struct RustFeaturizer {
     cluster_seed_require_value: f64,
     cluster_seed_disallow_value: f64,
     #[serde(skip)]
+    name_counts_provenance_binding: Option<NameCountsProvenanceBinding>,
+    #[serde(skip)]
     cluster_seeds_disallow_index: OnceLock<HashMap<String, HashSet<String>>>,
+}
+
+#[cfg(test)]
+mod compact_index_tests {
+    use super::{select_signature_index_layout, SignatureIndexLayout};
+    use std::collections::{HashMap, HashSet};
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    static LOOKUP_SENTINEL: u8 = 0;
+    type BenchmarkLookupEntry = (&'static u8, &'static u8);
+
+    #[test]
+    fn dense_indices_keep_global_index_arrays() {
+        let selection = select_signature_index_layout(4, 3, || [0, 1, 2, 1, 2, 3].into_iter(), 8)
+            .expect("valid dense indices should select a layout");
+        assert!(matches!(selection, SignatureIndexLayout::Dense { .. }));
+    }
+
+    #[test]
+    fn sparse_indices_select_compact_storage() {
+        let selection = select_signature_index_layout(
+            10_000_001,
+            2,
+            || [0, 10_000_000, 10_000_000, 0].into_iter(),
+            8,
+        )
+        .expect("valid sparse indices should select a layout");
+        let owned_selection = select_signature_index_layout(
+            10_000_001,
+            2,
+            || [0, 10_000_000, 10_000_000, 0].into_iter(),
+            0,
+        )
+        .expect("valid owned sparse indices should select a layout");
+        let SignatureIndexLayout::Compact { global_indices } = selection else {
+            panic!("sparse indices must select compact storage");
+        };
+        assert!(matches!(
+            owned_selection,
+            SignatureIndexLayout::Compact { .. }
+        ));
+        assert_eq!(global_indices, vec![0, 10_000_000]);
+        assert!(global_indices.capacity() <= 4);
+    }
+
+    #[test]
+    fn repeated_pairs_keep_bounded_direct_dense_layout() {
+        let repeated_indices = (0..200).map(|offset| if offset % 2 == 0 { 0 } else { 9 });
+        let borrowed = select_signature_index_layout(10, 100, || repeated_indices.clone(), 8)
+            .expect("valid borrowed indices should select a layout");
+        let owned = select_signature_index_layout(10, 100, || repeated_indices.clone(), 0)
+            .expect("valid owned indices should select a layout");
+        assert!(matches!(borrowed, SignatureIndexLayout::Dense { .. }));
+        assert!(matches!(owned, SignatureIndexLayout::Dense { .. }));
+    }
+
+    #[test]
+    fn layout_selection_rejects_out_of_range_indices() {
+        let error = select_signature_index_layout(2, 1, || [0, 2].into_iter(), 8)
+            .expect_err("out-of-range indices must fail");
+        assert!(error.contains("index=2 signature_count=2"));
+    }
+
+    fn dense_benchmark_indices() -> (usize, Vec<u32>, Vec<u32>) {
+        let signature_count = 100_000usize;
+        let pair_count = 2_000_000usize;
+        let left = (0..pair_count)
+            .map(|offset| (offset % signature_count) as u32)
+            .collect::<Vec<_>>();
+        let right = (0..pair_count)
+            .map(|offset| ((offset * 17 + 1) % signature_count) as u32)
+            .collect::<Vec<_>>();
+        (signature_count, left, right)
+    }
+
+    fn sparse_benchmark_indices() -> (usize, Vec<u32>, Vec<u32>) {
+        let signature_count = 10_000_001usize;
+        let pair_count = 100_000usize;
+        (
+            signature_count,
+            vec![0; pair_count],
+            vec![(signature_count - 1) as u32; pair_count],
+        )
+    }
+
+    fn benchmark_old_dense_layout(signature_count: usize, left: &[u32], right: &[u32]) {
+        let start = Instant::now();
+        let mut used_indices = HashSet::<usize>::new();
+        let mut max_index = 0usize;
+        for index in left.iter().chain(right.iter()).copied() {
+            let index = index as usize;
+            assert!(index < signature_count);
+            max_index = max_index.max(index);
+            used_indices.insert(index);
+        }
+        let mut lookup = vec![None::<BenchmarkLookupEntry>; max_index + 1];
+        for index in used_indices {
+            lookup[index] = Some((&LOOKUP_SENTINEL, &LOOKUP_SENTINEL));
+        }
+        let live_layout_bytes =
+            lookup.capacity() * std::mem::size_of::<Option<BenchmarkLookupEntry>>();
+        let checksum = lookup.iter().filter(|entry| entry.is_some()).count();
+        black_box((&lookup, checksum));
+        drop(lookup);
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "elapsed_secs={elapsed:.6} live_layout_bytes={live_layout_bytes} checksum={checksum}"
+        );
+    }
+
+    fn benchmark_adaptive_layout(signature_count: usize, left: &[u32], right: &[u32]) {
+        let start = Instant::now();
+        let selection = select_signature_index_layout(
+            signature_count,
+            left.len(),
+            || left.iter().chain(right.iter()).copied(),
+            2 * std::mem::size_of::<u32>(),
+        )
+        .expect("benchmark indices are valid");
+        let (live_layout_bytes, checksum) = match selection {
+            SignatureIndexLayout::Dense { max_index } => {
+                let mut lookup = vec![None::<BenchmarkLookupEntry>; max_index + 1];
+                for index in left.iter().chain(right.iter()).copied() {
+                    let slot = &mut lookup[index as usize];
+                    if slot.is_none() {
+                        *slot = Some((&LOOKUP_SENTINEL, &LOOKUP_SENTINEL));
+                    }
+                }
+                let live_bytes =
+                    lookup.capacity() * std::mem::size_of::<Option<BenchmarkLookupEntry>>();
+                let checksum = lookup.iter().filter(|entry| entry.is_some()).count();
+                black_box(&lookup);
+                (live_bytes, checksum)
+            }
+            SignatureIndexLayout::Compact { global_indices } => {
+                let global_to_local = global_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(local_index, global_index)| (*global_index as u32, local_index as u32))
+                    .collect::<HashMap<_, _>>();
+                let remap = |index: &u32| {
+                    *global_to_local
+                        .get(index)
+                        .expect("benchmark index must have a compact index")
+                };
+                let remapped_left = left.iter().map(remap).collect::<Vec<_>>();
+                let remapped_right = right.iter().map(remap).collect::<Vec<_>>();
+                drop(global_to_local);
+                let lookup = global_indices
+                    .iter()
+                    .map(|_| (&LOOKUP_SENTINEL, &LOOKUP_SENTINEL))
+                    .collect::<Vec<_>>();
+                let live_bytes = remapped_left.capacity() * std::mem::size_of::<u32>()
+                    + remapped_right.capacity() * std::mem::size_of::<u32>()
+                    + lookup.capacity() * std::mem::size_of::<BenchmarkLookupEntry>();
+                let checksum = lookup.len();
+                black_box((&remapped_left, &remapped_right, &lookup));
+                (live_bytes, checksum)
+            }
+        };
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "elapsed_secs={elapsed:.6} live_layout_bytes={live_layout_bytes} checksum={checksum}"
+        );
+    }
+
+    #[test]
+    #[ignore = "reproducible C1 wall/RSS benchmark; run explicitly in release mode"]
+    fn benchmark_old_dense_index_layout() {
+        let (signature_count, left, right) = dense_benchmark_indices();
+        benchmark_old_dense_layout(signature_count, &left, &right);
+    }
+
+    #[test]
+    #[ignore = "reproducible C1 wall/RSS benchmark; run explicitly in release mode"]
+    fn benchmark_adaptive_dense_index_layout() {
+        let (signature_count, left, right) = dense_benchmark_indices();
+        benchmark_adaptive_layout(signature_count, &left, &right);
+    }
+
+    #[test]
+    #[ignore = "reproducible C1 wall/RSS benchmark; run explicitly in release mode"]
+    fn benchmark_old_sparse_index_layout() {
+        let (signature_count, left, right) = sparse_benchmark_indices();
+        benchmark_old_dense_layout(signature_count, &left, &right);
+    }
+
+    #[test]
+    #[ignore = "reproducible C1 wall/RSS benchmark; run explicitly in release mode"]
+    fn benchmark_adaptive_sparse_index_layout() {
+        let (signature_count, left, right) = sparse_benchmark_indices();
+        benchmark_adaptive_layout(signature_count, &left, &right);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +233,91 @@ struct LinkerPairDistanceAccumulator {
     mins: Vec<f64>,
     top_distances: Vec<f64>,
     hard_disallow_pair_count: u64,
+}
+
+#[derive(Debug)]
+enum SignatureIndexLayout {
+    Dense { max_index: usize },
+    Compact { global_indices: Vec<usize> },
+}
+
+enum BorrowedSignaturePaperLookup<'data> {
+    Dense(Vec<Option<(&'data SignatureData, &'data PaperData)>>),
+    Compact {
+        lookup: Vec<(&'data SignatureData, &'data PaperData)>,
+        left_indices: Vec<u32>,
+        right_indices: Vec<u32>,
+    },
+}
+
+enum OwnedSignaturePaperLookup<'data> {
+    Dense(Vec<Option<(&'data SignatureData, &'data PaperData)>>),
+    Compact(Vec<(&'data SignatureData, &'data PaperData)>),
+}
+
+fn select_signature_index_layout<IndexIter, BuildIndexIter>(
+    signature_count: usize,
+    pair_count: usize,
+    indices: BuildIndexIter,
+    compact_remap_bytes_per_pair: usize,
+) -> Result<SignatureIndexLayout, String>
+where
+    IndexIter: Iterator<Item = u32>,
+    BuildIndexIter: Fn() -> IndexIter,
+{
+    let mut max_index = None::<usize>;
+    for raw_index in indices() {
+        let index = raw_index as usize;
+        if index >= signature_count {
+            return Err(format!(
+                "pair index out of range: index={} signature_count={}",
+                index, signature_count
+            ));
+        }
+        max_index = Some(max_index.map_or(index, |current| current.max(index)));
+    }
+    let Some(max_index) = max_index else {
+        return Ok(SignatureIndexLayout::Dense { max_index: 0 });
+    };
+
+    let dense_lookup_bytes = (max_index as u128 + 1)
+        * std::mem::size_of::<Option<(&SignatureData, &PaperData)>>() as u128;
+    // Direct dense construction uses the lookup itself as the seen-index set.
+    // When that lookup is no larger than the two u32 arrays eliminated from
+    // the old tuple path (and no larger than a borrowed compact remap), it is
+    // both memory-safe against the old path and avoids all hashing.
+    let direct_dense_budget_bytes = pair_count as u128 * 2 * std::mem::size_of::<u32>() as u128;
+    if dense_lookup_bytes <= direct_dense_budget_bytes {
+        return Ok(SignatureIndexLayout::Dense { max_index });
+    }
+
+    let used_indices = indices()
+        .map(|index| index as usize)
+        .collect::<HashSet<_>>();
+    let compact_entry_count = used_indices.len() as u128;
+    let compact_lookup_bytes =
+        compact_entry_count * std::mem::size_of::<(&SignatureData, &PaperData)>() as u128;
+    let compact_global_index_bytes = compact_entry_count * std::mem::size_of::<usize>() as u128;
+    // hashbrown stores each u32->u32 remap entry plus control/capacity slack.
+    // Sixteen bytes/entry is a conservative planning bound for this temporary
+    // map on 64-bit targets; the permanent compact lookup is also accounted.
+    let compact_hash_map_bytes = compact_entry_count * 16;
+    let compact_remap_bytes = pair_count as u128 * compact_remap_bytes_per_pair as u128;
+    let compact_peak_bytes = compact_remap_bytes
+        + compact_global_index_bytes
+        + compact_lookup_bytes.max(compact_hash_map_bytes);
+
+    // Remapping adds a temporary hash map and, for borrowed arrays, two full
+    // u32 buffers. Only pay that cost when the compact representation cuts the
+    // peak index-layout memory by more than half.
+    if compact_peak_bytes.saturating_mul(2) >= dense_lookup_bytes {
+        return Ok(SignatureIndexLayout::Dense { max_index });
+    }
+
+    let mut global_indices = used_indices.into_iter().collect::<Vec<_>>();
+    global_indices.sort_unstable();
+    global_indices.shrink_to_fit();
+    Ok(SignatureIndexLayout::Compact { global_indices })
 }
 
 impl LinkerPairDistanceAccumulator {
@@ -130,17 +411,7 @@ impl RustFeaturizer {
             match email_pair_parts(s1.email.as_deref(), s2.email.as_deref()) {
                 Some(((p1, sfx1), (p2, sfx2))) => (
                     if p1 == p2 { 1.0 } else { 0.0 },
-                    match (sfx1, sfx2) {
-                        // A missing suffix (no "@") is treated as missing, not a match.
-                        (Some(a), Some(b)) => {
-                            if a == b {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }
-                        _ => f64::NAN,
-                    },
+                    if sfx1 == sfx2 { 1.0 } else { 0.0 },
                 ),
                 None => (f64::NAN, f64::NAN),
             };
@@ -422,57 +693,230 @@ impl RustFeaturizer {
         Ok(lookup)
     }
 
-    fn sparse_signature_paper_lookup_for_indices(
-        &self,
-        left_indices: &[u32],
-        right_indices: &[u32],
-    ) -> PyResult<Vec<Option<(&SignatureData, &PaperData)>>> {
+    fn signature_paper_entry(&self, index: usize) -> PyResult<(&SignatureData, &PaperData)> {
         let signature_ids = self.signature_id_order();
-        let signature_count = signature_ids.len();
-        let mut used_indices = HashSet::<usize>::new();
-        let mut max_index = 0usize;
-        for (left_idx, right_idx) in left_indices.iter().zip(right_indices.iter()) {
-            for raw_index in [*left_idx, *right_idx] {
-                let index = raw_index as usize;
-                if index >= signature_count {
-                    return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                        "pair index out of range: index={} signature_count={}",
-                        index, signature_count
-                    )));
-                }
-                max_index = max_index.max(index);
-                used_indices.insert(index);
-            }
-        }
-        if used_indices.is_empty() {
+        let signature_id = &signature_ids[index];
+        let signature = self
+            .signatures
+            .get(signature_id)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
+        let paper = self
+            .papers
+            .get(&signature.paper_id)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string()))?;
+        Ok((signature, paper))
+    }
+
+    fn dense_signature_paper_lookup(
+        &self,
+        max_index: usize,
+        indices: impl Iterator<Item = u32>,
+    ) -> PyResult<Vec<Option<(&SignatureData, &PaperData)>>> {
+        let mut indices = indices.peekable();
+        if indices.peek().is_none() {
             return Ok(Vec::new());
         }
         let mut lookup = vec![None; max_index + 1];
-        for index in used_indices {
-            let signature_id = &signature_ids[index];
-            let signature = self
-                .signatures
-                .get(signature_id)
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(signature_id.clone()))?;
-            let paper = self.papers.get(&signature.paper_id).ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(signature.paper_id.to_string())
-            })?;
-            lookup[index] = Some((signature, paper));
+        for raw_index in indices {
+            let index = raw_index as usize;
+            if lookup[index].is_none() {
+                lookup[index] = Some(self.signature_paper_entry(index)?);
+            }
         }
         Ok(lookup)
     }
 
-    fn sparse_signature_paper_lookup_for_pair_tuples(
+    fn compact_signature_paper_lookup(
         &self,
-        pairs: &[(u32, u32)],
-    ) -> PyResult<Vec<Option<(&SignatureData, &PaperData)>>> {
-        let mut left_indices = Vec::with_capacity(pairs.len());
-        let mut right_indices = Vec::with_capacity(pairs.len());
-        for (left_idx, right_idx) in pairs.iter() {
-            left_indices.push(*left_idx);
-            right_indices.push(*right_idx);
+        global_indices: &[usize],
+    ) -> PyResult<Vec<(&SignatureData, &PaperData)>> {
+        global_indices
+            .iter()
+            .map(|index| self.signature_paper_entry(*index))
+            .collect()
+    }
+
+    fn adaptive_signature_paper_lookup_for_indices(
+        &self,
+        left_indices: &[u32],
+        right_indices: &[u32],
+    ) -> PyResult<BorrowedSignaturePaperLookup<'_>> {
+        let selection = select_signature_index_layout(
+            self.signature_id_order().len(),
+            left_indices.len(),
+            || left_indices.iter().chain(right_indices.iter()).copied(),
+            2 * std::mem::size_of::<u32>(),
+        )
+        .map_err(pyo3::exceptions::PyIndexError::new_err)?;
+        match selection {
+            SignatureIndexLayout::Dense { max_index } => Ok(BorrowedSignaturePaperLookup::Dense(
+                self.dense_signature_paper_lookup(
+                    max_index,
+                    left_indices.iter().chain(right_indices.iter()).copied(),
+                )?,
+            )),
+            SignatureIndexLayout::Compact { global_indices } => {
+                let global_to_local = global_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(local_index, global_index)| (*global_index as u32, local_index as u32))
+                    .collect::<HashMap<_, _>>();
+                let remap = |index: &u32| {
+                    *global_to_local
+                        .get(index)
+                        .expect("validated used signature index must have a compact index")
+                };
+                let remapped_left = left_indices.iter().map(remap).collect();
+                let remapped_right = right_indices.iter().map(remap).collect();
+                drop(global_to_local);
+                let lookup = self.compact_signature_paper_lookup(&global_indices)?;
+                Ok(BorrowedSignaturePaperLookup::Compact {
+                    lookup,
+                    left_indices: remapped_left,
+                    right_indices: remapped_right,
+                })
+            }
         }
-        self.sparse_signature_paper_lookup_for_indices(&left_indices, &right_indices)
+    }
+
+    fn adaptive_signature_paper_lookup_for_pair_tuples(
+        &self,
+        pairs: &mut [(u32, u32)],
+    ) -> PyResult<OwnedSignaturePaperLookup<'_>> {
+        let selection = select_signature_index_layout(
+            self.signature_id_order().len(),
+            pairs.len(),
+            || pairs.iter().flat_map(|(left, right)| [*left, *right]),
+            0,
+        )
+        .map_err(pyo3::exceptions::PyIndexError::new_err)?;
+        match selection {
+            SignatureIndexLayout::Dense { max_index } => Ok(OwnedSignaturePaperLookup::Dense(
+                self.dense_signature_paper_lookup(
+                    max_index,
+                    pairs.iter().flat_map(|(left, right)| [*left, *right]),
+                )?,
+            )),
+            SignatureIndexLayout::Compact { global_indices } => {
+                let global_to_local = global_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(local_index, global_index)| (*global_index as u32, local_index as u32))
+                    .collect::<HashMap<_, _>>();
+                for (left, right) in pairs.iter_mut() {
+                    *left = *global_to_local
+                        .get(left)
+                        .expect("validated left signature index must have a compact index");
+                    *right = *global_to_local
+                        .get(right)
+                        .expect("validated right signature index must have a compact index");
+                }
+                drop(global_to_local);
+                Ok(OwnedSignaturePaperLookup::Compact(
+                    self.compact_signature_paper_lookup(&global_indices)?,
+                ))
+            }
+        }
+    }
+
+    fn featurize_pair_index_matrix<'data, Lookup>(
+        &'data self,
+        pairs: &[(u32, u32)],
+        indices: &[usize],
+        nan_value: f64,
+        lookup: &Lookup,
+    ) -> Vec<f64>
+    where
+        Lookup: Fn(u32) -> (&'data SignatureData, &'data PaperData) + Sync,
+    {
+        let out_cols = indices.len();
+        let mut buffer = vec![0.0_f64; pairs.len() * out_cols];
+        buffer
+            .par_chunks_mut(out_cols)
+            .zip(pairs.par_iter())
+            .for_each(|(out_row, (left_idx, right_idx))| {
+                let (s1, p1) = lookup(*left_idx);
+                let (s2, p2) = lookup(*right_idx);
+                let row = self.featurize_pair_data(s1, s2, p1, p2);
+                for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
+                    let mut value = row[*idx];
+                    if value.is_nan() && !nan_value.is_nan() {
+                        value = nan_value;
+                    }
+                    *dest = value;
+                }
+            });
+        buffer
+    }
+
+    fn featurize_pair_index_arrays_matrix<'data, Lookup>(
+        &'data self,
+        left_indices: &[u32],
+        right_indices: &[u32],
+        indices: &[usize],
+        nan_value: f64,
+        lookup: &Lookup,
+    ) -> Vec<f64>
+    where
+        Lookup: Fn(u32) -> (&'data SignatureData, &'data PaperData) + Sync,
+    {
+        let out_cols = indices.len();
+        let mut buffer = vec![0.0_f64; left_indices.len() * out_cols];
+        if out_cols == 0 {
+            return buffer;
+        }
+        buffer
+            .par_chunks_mut(out_cols)
+            .zip(left_indices.par_iter().zip(right_indices.par_iter()))
+            .for_each(|(out_row, (left_idx, right_idx))| {
+                let (s1, p1) = lookup(*left_idx);
+                let (s2, p2) = lookup(*right_idx);
+                let row = self.featurize_pair_data(s1, s2, p1, p2);
+                for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
+                    let mut value = row[*idx];
+                    if value.is_nan() && !nan_value.is_nan() {
+                        value = nan_value;
+                    }
+                    *dest = value;
+                }
+            });
+        buffer
+    }
+
+    fn aggregate_pair_index_arrays<'data, Lookup>(
+        &'data self,
+        left_indices: &[u32],
+        right_indices: &[u32],
+        owner_row_indices: &[u32],
+        row_ranges: Option<&[PairAggregateRowRange]>,
+        row_count: usize,
+        aggregate_indices: &[usize],
+        nan_value: f64,
+        lookup: &Lookup,
+    ) -> PairAggregateBuffers
+    where
+        Lookup: Fn(u32) -> (&'data SignatureData, &'data PaperData) + Sync,
+    {
+        match row_ranges {
+            Some(ranges) => self.aggregate_pair_index_arrays_grouped(
+                left_indices,
+                right_indices,
+                ranges,
+                row_count,
+                aggregate_indices,
+                nan_value,
+                lookup,
+            ),
+            None => self.aggregate_pair_index_arrays_sequential(
+                left_indices,
+                right_indices,
+                owner_row_indices,
+                row_count,
+                aggregate_indices,
+                nan_value,
+                lookup,
+            ),
+        }
     }
 
     fn pair_aggregate_row_ranges(owner_row_indices: &[u32]) -> Option<Vec<PairAggregateRowRange>> {
@@ -517,16 +961,19 @@ impl RustFeaturizer {
         }
     }
 
-    fn aggregate_pair_index_arrays_grouped(
-        &self,
+    fn aggregate_pair_index_arrays_grouped<'data, Lookup>(
+        &'data self,
         left_indices: &[u32],
         right_indices: &[u32],
         row_ranges: &[PairAggregateRowRange],
         row_count: usize,
         aggregate_indices: &[usize],
         nan_value: f64,
-        lookup: &[Option<(&SignatureData, &PaperData)>],
-    ) -> PairAggregateBuffers {
+        lookup: &Lookup,
+    ) -> PairAggregateBuffers
+    where
+        Lookup: Fn(u32) -> (&'data SignatureData, &'data PaperData) + Sync,
+    {
         let aggregate_cols = aggregate_indices.len();
         let mut out = Self::empty_pair_aggregate_buffers(row_count, aggregate_cols);
         if aggregate_cols == 0 {
@@ -554,10 +1001,8 @@ impl RustFeaturizer {
                 |(((((count, valid_counts_row), sums_row), mins_row), maxs_row), range)| {
                     for pair_offset in range.start..range.stop {
                         *count = count.saturating_add(1);
-                        let (s1, p1) = lookup[left_indices[pair_offset] as usize]
-                            .expect("left signature index was validated before aggregation");
-                        let (s2, p2) = lookup[right_indices[pair_offset] as usize]
-                            .expect("right signature index was validated before aggregation");
+                        let (s1, p1) = lookup(left_indices[pair_offset]);
+                        let (s2, p2) = lookup(right_indices[pair_offset]);
                         let row = self.featurize_pair_data(s1, s2, p1, p2);
                         for (aggregate_position, feature_index) in
                             aggregate_indices.iter().enumerate()
@@ -599,16 +1044,19 @@ impl RustFeaturizer {
         out
     }
 
-    fn aggregate_pair_index_arrays_sequential(
-        &self,
+    fn aggregate_pair_index_arrays_sequential<'data, Lookup>(
+        &'data self,
         left_indices: &[u32],
         right_indices: &[u32],
         owner_row_indices: &[u32],
         row_count: usize,
         aggregate_indices: &[usize],
         nan_value: f64,
-        lookup: &[Option<(&SignatureData, &PaperData)>],
-    ) -> PairAggregateBuffers {
+        lookup: &Lookup,
+    ) -> PairAggregateBuffers
+    where
+        Lookup: Fn(u32) -> (&'data SignatureData, &'data PaperData) + Sync,
+    {
         let aggregate_cols = aggregate_indices.len();
         let mut out = Self::empty_pair_aggregate_buffers(row_count, aggregate_cols);
         if aggregate_cols == 0 {
@@ -622,10 +1070,8 @@ impl RustFeaturizer {
             let row_offset = *row_index as usize;
             out.counts[row_offset] = out.counts[row_offset].saturating_add(1);
             let aggregate_row_start = row_offset * aggregate_cols;
-            let (s1, p1) = lookup[left_indices[pair_offset] as usize]
-                .expect("left signature index was validated before aggregation");
-            let (s2, p2) = lookup[right_indices[pair_offset] as usize]
-                .expect("right signature index was validated before aggregation");
+            let (s1, p1) = lookup(left_indices[pair_offset]);
+            let (s2, p2) = lookup(right_indices[pair_offset]);
             let row = self.featurize_pair_data(s1, s2, p1, p2);
             for (aggregate_position, feature_index) in aggregate_indices.iter().enumerate() {
                 let mut value = row[*feature_index];
@@ -861,13 +1307,20 @@ impl RustFeaturizer {
                 .predicted_language
                 .is_some()
             {
-                let is_reliable = raw_paper.is_reliable.unwrap_or(false);
+                let is_reliable = raw_paper.is_reliable.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "papers Arrow predicted_language requires is_reliable for paper_id {paper_id:?}"
+                    ))
+                })?;
+                let language_reliability = raw_paper.language_reliability.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
+                    ))
+                })?;
                 (
                     is_reliable,
                     raw_paper.predicted_language.clone(),
-                    raw_paper
-                        .language_reliability
-                        .unwrap_or(if is_reliable { 1.0 } else { 0.0 }),
+                    language_reliability,
                 )
             } else {
                 if language_detector.is_none() {
@@ -963,7 +1416,20 @@ impl RustFeaturizer {
             cluster_seeds_require,
             cluster_seed_require_value,
             cluster_seed_disallow_value,
+            name_counts_provenance_binding: raw_name_counts.provenance_binding().cloned(),
             cluster_seeds_disallow_index: OnceLock::new(),
+        })
+    }
+
+    #[getter]
+    fn name_counts_provenance_binding(&self) -> Option<(String, String, String, String)> {
+        self.name_counts_provenance_binding.as_ref().map(|binding| {
+            (
+                binding.generation_id.clone(),
+                binding.pickle_sha256.clone(),
+                binding.source_snapshot_id.clone(),
+                binding.selected_rows_sha256.clone(),
+            )
         })
     }
 
@@ -1427,7 +1893,7 @@ impl RustFeaturizer {
     fn featurize_pairs_matrix_indexed<'py>(
         &self,
         py: Python<'py>,
-        pairs: Vec<(u32, u32)>,
+        mut pairs: Vec<(u32, u32)>,
         selected_indices: Option<Vec<usize>>,
         num_threads: Option<usize>,
         nan_value: f64,
@@ -1438,7 +1904,7 @@ impl RustFeaturizer {
             return Ok(empty.to_pyarray(py));
         }
 
-        let lookup = self.sparse_signature_paper_lookup_for_pair_tuples(&pairs)?;
+        let lookup = self.adaptive_signature_paper_lookup_for_pair_tuples(&mut pairs)?;
 
         let full_cols = self.full_feature_count();
         let indices = resolve_feature_indices("selected_indices", selected_indices, full_cols)?;
@@ -1449,26 +1915,17 @@ impl RustFeaturizer {
         }
 
         let out = py.allow_threads(|| {
-            let compute = || {
-                let mut buffer = vec![0.0_f64; row_count * out_cols];
-                buffer
-                    .par_chunks_mut(out_cols)
-                    .zip(pairs.par_iter())
-                    .for_each(|(out_row, (left_idx, right_idx))| {
-                        let (s1, p1) = lookup[*left_idx as usize]
-                            .expect("left signature index was validated before featurization");
-                        let (s2, p2) = lookup[*right_idx as usize]
-                            .expect("right signature index was validated before featurization");
-                        let row = self.featurize_pair_data(s1, s2, p1, p2);
-                        for (dest, idx) in out_row.iter_mut().zip(indices.iter()) {
-                            let mut value = row[*idx];
-                            if value.is_nan() && !nan_value.is_nan() {
-                                value = nan_value;
-                            }
-                            *dest = value;
-                        }
-                    });
-                buffer
+            let compute = || match &lookup {
+                OwnedSignaturePaperLookup::Dense(dense_lookup) => {
+                    self.featurize_pair_index_matrix(&pairs, &indices, nan_value, &|index| {
+                        dense_lookup[index as usize]
+                            .expect("dense signature index was validated before featurization")
+                    })
+                }
+                OwnedSignaturePaperLookup::Compact(compact_lookup) => self
+                    .featurize_pair_index_matrix(&pairs, &indices, nan_value, &|index| {
+                        compact_lookup[index as usize]
+                    }),
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });
@@ -1531,7 +1988,8 @@ impl RustFeaturizer {
             )));
         }
 
-        let lookup = self.sparse_signature_paper_lookup_for_indices(left_indices, right_indices)?;
+        let lookup =
+            self.adaptive_signature_paper_lookup_for_indices(left_indices, right_indices)?;
         for row_index in owner_row_indices.iter() {
             let bounded = *row_index as usize;
             if bounded >= row_count {
@@ -1550,24 +2008,35 @@ impl RustFeaturizer {
             let row_ranges = Self::pair_aggregate_row_ranges(owner_row_indices);
             let aggregate_cols = resolved_aggregate_indices.len();
             let aggregate_buffers = py.allow_threads(|| {
-                let compute = || match row_ranges.as_ref() {
-                    Some(ranges) => self.aggregate_pair_index_arrays_grouped(
-                        left_indices,
-                        right_indices,
-                        ranges,
-                        row_count,
-                        &resolved_aggregate_indices,
-                        resolved_aggregate_nan_value,
-                        &lookup,
-                    ),
-                    None => self.aggregate_pair_index_arrays_sequential(
-                        left_indices,
-                        right_indices,
+                let compute = || match &lookup {
+                    BorrowedSignaturePaperLookup::Dense(dense_lookup) => self
+                        .aggregate_pair_index_arrays(
+                            left_indices,
+                            right_indices,
+                            owner_row_indices,
+                            row_ranges.as_deref(),
+                            row_count,
+                            &resolved_aggregate_indices,
+                            resolved_aggregate_nan_value,
+                            &|index| {
+                                dense_lookup[index as usize].expect(
+                                    "dense signature index was validated before aggregation",
+                                )
+                            },
+                        ),
+                    BorrowedSignaturePaperLookup::Compact {
+                        lookup: compact_lookup,
+                        left_indices: compact_left,
+                        right_indices: compact_right,
+                    } => self.aggregate_pair_index_arrays(
+                        compact_left,
+                        compact_right,
                         owner_row_indices,
+                        row_ranges.as_deref(),
                         row_count,
                         &resolved_aggregate_indices,
                         resolved_aggregate_nan_value,
-                        &lookup,
+                        &|index| compact_lookup[index as usize],
                     ),
                 };
                 install_with_optional_rayon_pool(num_threads, compute)
@@ -1633,29 +2102,29 @@ impl RustFeaturizer {
         let aggregate_cols = resolved_aggregate_indices.len();
         let resolved_aggregate_nan_value = aggregate_nan_value.unwrap_or(nan_value);
         let matrix_buffer = py.allow_threads(|| {
-            let compute = || {
-                let mut buffer = vec![0.0_f64; pair_count * out_cols];
-                if out_cols == 0 {
-                    return buffer;
-                }
-                buffer
-                    .par_chunks_mut(out_cols)
-                    .zip(left_indices.par_iter().zip(right_indices.par_iter()))
-                    .for_each(|(out_row, (left_idx, right_idx))| {
-                        let (s1, p1) = lookup[*left_idx as usize]
-                            .expect("left signature index was validated before featurization");
-                        let (s2, p2) = lookup[*right_idx as usize]
-                            .expect("right signature index was validated before featurization");
-                        let row = self.featurize_pair_data(s1, s2, p1, p2);
-                        for (dest, idx) in out_row.iter_mut().zip(resolved_matrix_indices.iter()) {
-                            let mut value = row[*idx];
-                            if value.is_nan() && !nan_value.is_nan() {
-                                value = nan_value;
-                            }
-                            *dest = value;
-                        }
-                    });
-                buffer
+            let compute = || match &lookup {
+                BorrowedSignaturePaperLookup::Dense(dense_lookup) => self
+                    .featurize_pair_index_arrays_matrix(
+                        left_indices,
+                        right_indices,
+                        &resolved_matrix_indices,
+                        nan_value,
+                        &|index| {
+                            dense_lookup[index as usize]
+                                .expect("dense signature index was validated before featurization")
+                        },
+                    ),
+                BorrowedSignaturePaperLookup::Compact {
+                    lookup: compact_lookup,
+                    left_indices: compact_left,
+                    right_indices: compact_right,
+                } => self.featurize_pair_index_arrays_matrix(
+                    compact_left,
+                    compact_right,
+                    &resolved_matrix_indices,
+                    nan_value,
+                    &|index| compact_lookup[index as usize],
+                ),
             };
             install_with_optional_rayon_pool(num_threads, compute)
         });

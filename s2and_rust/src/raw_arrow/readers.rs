@@ -38,6 +38,44 @@ pub(crate) struct RawArrowPaper {
     pub(crate) language_reliability: Option<f64>,
 }
 
+fn validate_stored_language_detection(
+    paper_id: &str,
+    predicted_language: Option<&str>,
+    is_reliable: Option<bool>,
+    language_reliability: Option<f64>,
+) -> PyResult<()> {
+    if let Some(reliability) = language_reliability {
+        if !reliability.is_finite() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow language_reliability must be finite for paper_id {paper_id:?}"
+            )));
+        }
+        if !(0.0..=1.0).contains(&reliability) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow language_reliability must be in [0.0, 1.0] for paper_id {paper_id:?}"
+            )));
+        }
+        if is_reliable == Some(false) && reliability != 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow language_reliability must be 0.0 when is_reliable is false for paper_id {paper_id:?}"
+            )));
+        }
+    }
+    if predicted_language.is_some() {
+        if is_reliable.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow predicted_language requires is_reliable for paper_id {paper_id:?}"
+            )));
+        }
+        if language_reliability.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(crate) struct RawArrowFeature {
     pub(crate) query: RetrievalQueryData,
@@ -257,19 +295,28 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
                 continue;
             }
             let paper_id = paper_id_value.into_owned();
+            let predicted_language = predicted_language_values
+                .as_ref()
+                .and_then(|col| col.optional_owned(row));
+            let is_reliable = match is_reliable_col {
+                Some(col) => arrow_optional_bool(col, row, "is_reliable")?,
+                None => None,
+            };
+            let language_reliability = match language_reliability_col {
+                Some(col) => arrow_optional_f64(col, row, "language_reliability")?,
+                None => None,
+            };
+            validate_stored_language_detection(
+                &paper_id,
+                predicted_language.as_deref(),
+                is_reliable,
+                language_reliability,
+            )?;
             match out.entry(paper_id) {
                 Entry::Occupied(_) => unreachable!(
                     "duplicate paper_id should be caught by the pre-filter check above"
                 ),
                 Entry::Vacant(entry) => {
-                    let is_reliable = match is_reliable_col {
-                        Some(col) => arrow_optional_bool(col, row, "is_reliable")?,
-                        None => None,
-                    };
-                    let language_reliability = match language_reliability_col {
-                        Some(col) => arrow_optional_f64(col, row, "language_reliability")?,
-                        None => is_reliable.map(|value| if value { 1.0 } else { 0.0 }),
-                    };
                     entry.insert(RawArrowPaper {
                         // title/venue/journal_name are serialized with the same
                         // ""/None -> NULL producer convention, so NULL means
@@ -286,9 +333,7 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
                             Some(values) => values.optional_value(row, "year")?,
                             None => None,
                         },
-                        predicted_language: predicted_language_values
-                            .as_ref()
-                            .and_then(|col| col.optional_owned(row)),
+                        predicted_language,
                         is_reliable,
                         language_reliability,
                     });
@@ -305,6 +350,10 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, Vec<(i64, String)>>> {
     let mut out: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    // Kept rows are checked after sorting their existing output vectors. Only
+    // index false-positive rows need compact position storage, avoiding a
+    // second per-row structure on full and exact-index reads.
+    let mut excluded_positions_by_paper = HashMap::<String, Vec<i64>>::new();
     for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -316,31 +365,51 @@ pub(crate) fn read_raw_arrow_paper_authors_from_batches(
             ArrowStringColumn::from_string_array(author_name_col.as_ref(), "author_name")?;
         for row in 0..batch.num_rows() {
             let paper_id_value = paper_id_values.required_value(row, "paper_id")?;
-            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
-                continue;
-            }
             if paper_id_value.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "paper_authors Arrow cannot contain empty paper_id values",
                 ));
             }
-            let paper_id = paper_id_value.into_owned();
             let position = position_values.required_value(row, "position")?;
             let author_name = author_name_values
                 .required_value(row, "author_name")?
                 .into_owned();
+            if author_name.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "paper_authors Arrow cannot contain empty author_name values",
+                ));
+            }
+            if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
+                excluded_positions_by_paper
+                    .entry(paper_id_value.to_string())
+                    .or_default()
+                    .push(position);
+                continue;
+            }
+            let paper_id = paper_id_value.into_owned();
             out.entry(paper_id)
                 .or_default()
                 .push((position, author_name));
         }
     }
-    // Duplicate (paper_id, position) rows are tolerated here to match the Python
-    // adapter at s2and/incremental_linking/query_adapter.py:_normalized_author_records,
-    // which sorts by (position, original-index) and lets downstream code treat the
-    // result as a set. Null positions remain rejected because the Arrow schema
-    // contract declares position required.
-    for (_paper_id, authors) in out.iter_mut() {
+    for (paper_id, positions) in excluded_positions_by_paper.iter_mut() {
+        positions.sort_unstable();
+        if let Some(pair) = positions.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
+                paper_id, pair[0]
+            )));
+        }
+    }
+    drop(excluded_positions_by_paper);
+    for (paper_id, authors) in out.iter_mut() {
         authors.sort_by_key(|(position, _name)| *position);
+        if let Some(pair) = authors.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "paper_authors Arrow contains duplicate (paper_id, position): ({:?}, {})",
+                paper_id, pair[0].0
+            )));
+        }
     }
     Ok(out)
 }
@@ -681,9 +750,133 @@ mod null_required_string_tests {
 }
 
 #[cfg(test)]
+mod language_reliability_tests {
+    use super::read_raw_arrow_papers_from_batches;
+    use arrow::array::{ArrayRef, BooleanArray, Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use pyo3::types::PyAnyMethods;
+    use pyo3::{PyErr, Python};
+    use std::sync::Arc;
+
+    fn py_err_message(err: PyErr) -> String {
+        #[cfg(windows)]
+        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
+            std::env::set_var("PYTHONHOME", python_home);
+        }
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            err.value(py)
+                .str()
+                .expect("PyErr value should stringify")
+                .to_string()
+        })
+    }
+
+    fn papers_batch(
+        predicted_language: Option<&str>,
+        is_reliable: Option<bool>,
+        language_reliability: Option<f64>,
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("paper_id", DataType::Utf8, false),
+            Field::new("title", DataType::Utf8, true),
+            Field::new("venue", DataType::Utf8, true),
+            Field::new("journal_name", DataType::Utf8, true),
+            Field::new("predicted_language", DataType::Utf8, true),
+            Field::new("is_reliable", DataType::Boolean, true),
+            Field::new("language_reliability", DataType::Float64, true),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![Some("p1")])),
+            Arc::new(StringArray::from(vec![Some("A title")])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec![predicted_language])),
+            Arc::new(BooleanArray::from(vec![is_reliable])),
+            Arc::new(Float64Array::from(vec![language_reliability])),
+        ];
+        RecordBatch::try_new(schema, columns).expect("valid language-reliability batch")
+    }
+
+    #[test]
+    fn malformed_language_reliability_is_rejected() {
+        let cases = [
+            (Some(true), Some(f64::NAN), "must be finite"),
+            (Some(true), Some(f64::INFINITY), "must be finite"),
+            (Some(true), Some(-0.01), "must be in [0.0, 1.0]"),
+            (Some(true), Some(1.01), "must be in [0.0, 1.0]"),
+            (
+                Some(false),
+                Some(0.25),
+                "must be 0.0 when is_reliable is false",
+            ),
+        ];
+        for (is_reliable, language_reliability, expected) in cases {
+            let err = read_raw_arrow_papers_from_batches(
+                "<test>",
+                vec![papers_batch(Some("en"), is_reliable, language_reliability)],
+                None,
+            )
+            .err()
+            .expect("malformed language reliability must fail");
+            let message = py_err_message(err);
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn stored_language_requires_boolean_and_continuous_reliability() {
+        let cases = [
+            (None, Some(0.75), "predicted_language requires is_reliable"),
+            (
+                Some(true),
+                None,
+                "predicted_language requires language_reliability",
+            ),
+        ];
+        for (is_reliable, language_reliability, expected) in cases {
+            let err = read_raw_arrow_papers_from_batches(
+                "<test>",
+                vec![papers_batch(Some("en"), is_reliable, language_reliability)],
+                None,
+            )
+            .err()
+            .expect("partial stored language detection must fail");
+            let message = py_err_message(err);
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn valid_reliable_and_unreliable_scores_are_preserved() {
+        for (paper_id, is_reliable, language_reliability) in
+            [("p1", true, 0.75), ("p1", false, 0.0)]
+        {
+            let papers = read_raw_arrow_papers_from_batches(
+                "<test>",
+                vec![papers_batch(
+                    Some("en"),
+                    Some(is_reliable),
+                    Some(language_reliability),
+                )],
+                None,
+            )
+            .expect("valid language detection must read");
+            let paper = papers.get(paper_id).expect("paper present");
+            assert_eq!(paper.is_reliable, Some(is_reliable));
+            assert_eq!(paper.language_reliability, Some(language_reliability));
+        }
+    }
+}
+
+#[cfg(test)]
 mod filtered_duplicate_detection_tests {
-    use super::{read_raw_arrow_papers_from_batches, read_raw_arrow_specter_from_batches};
-    use arrow::array::{ArrayRef, FixedSizeListArray, StringArray};
+    use super::{
+        read_raw_arrow_paper_authors_from_batches, read_raw_arrow_papers_from_batches,
+        read_raw_arrow_specter_from_batches,
+    };
+    use arrow::array::{ArrayRef, FixedSizeListArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Float32Type, Schema};
     use arrow::record_batch::RecordBatch;
     use pyo3::types::PyAnyMethods;
@@ -739,6 +932,24 @@ mod filtered_duplicate_detection_tests {
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(paper_ids.to_vec())),
             Arc::new(embeddings),
+        ];
+        RecordBatch::try_new(schema, columns).expect("valid record batch")
+    }
+
+    fn paper_authors_batch(
+        paper_ids: &[&str],
+        positions: &[i64],
+        author_names: &[&str],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("paper_id", DataType::Utf8, false),
+            Field::new("position", DataType::Int64, false),
+            Field::new("author_name", DataType::Utf8, false),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(paper_ids.to_vec())),
+            Arc::new(Int64Array::from(positions.to_vec())),
+            Arc::new(StringArray::from(author_names.to_vec())),
         ];
         RecordBatch::try_new(schema, columns).expect("valid record batch")
     }
@@ -800,5 +1011,29 @@ mod filtered_duplicate_detection_tests {
             .expect("unique ids must read");
         assert_eq!(specter.len(), 1);
         assert!(specter.contains_key("p2"));
+    }
+
+    #[test]
+    fn paper_author_duplicate_position_outside_keep_filter_is_rejected() {
+        let batch = paper_authors_batch(&["p1", "p1", "p2"], &[0, 0, 0], &["A", "B", "C"]);
+        let keep_ids = keep(&["p2"]);
+        let err = read_raw_arrow_paper_authors_from_batches("<test>", vec![batch], Some(&keep_ids))
+            .err()
+            .expect("duplicate paper-author position must be detected before filtering");
+        let message = py_err_message(err);
+        assert!(
+            message.contains("duplicate (paper_id, position)"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn paper_author_empty_name_is_rejected() {
+        let batch = paper_authors_batch(&["p1"], &[0], &[""]);
+        let err = read_raw_arrow_paper_authors_from_batches("<test>", vec![batch], None)
+            .err()
+            .expect("empty paper-author names must fail");
+        let message = py_err_message(err);
+        assert!(message.contains("empty author_name"), "{message}");
     }
 }

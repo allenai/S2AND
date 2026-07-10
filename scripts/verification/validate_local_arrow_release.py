@@ -20,7 +20,7 @@ from s2and.arrow_inputs import (
 ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
 ROOT_HELPER_FILES = (
     "LICENSE.txt",
-    "production_model_v1.21/manifest.json",
+    "default_production_model.json",
 )
 DECLARED_DIRECTORY_KEYS = frozenset({"name_counts_index"})
 
@@ -69,6 +69,45 @@ def _validate_name_counts_index(path: Path, errors: list[str], *, label: str) ->
         )
     except (OSError, TypeError, ValueError) as exc:
         _record_error(errors, str(exc))
+
+
+def _validate_default_model_declaration(release_root: Path, errors: list[str]) -> str | None:
+    declaration_path = release_root / "default_production_model.json"
+    if not declaration_path.is_file():
+        return None
+    try:
+        declaration = _load_json_object(declaration_path)
+    except (OSError, TypeError, ValueError) as exc:
+        _record_error(errors, str(exc))
+        return None
+    bundle_dir_value = declaration.get("bundle_dir")
+    if not isinstance(bundle_dir_value, str) or not bundle_dir_value.strip():
+        _record_error(errors, f"{declaration_path} is missing non-empty bundle_dir")
+        return None
+    bundle_dir = _manifest_path(bundle_dir_value, release_root).resolve()
+    try:
+        bundle_dir.relative_to(release_root)
+    except ValueError:
+        _record_error(errors, f"default production bundle is outside release root: {bundle_dir}")
+        return None
+    bundle_manifest_path = bundle_dir / "manifest.json"
+    _require_file(bundle_manifest_path, errors, label="declared default production model manifest")
+    if not bundle_manifest_path.is_file():
+        return None
+    try:
+        bundle_manifest = _load_json_object(bundle_manifest_path)
+    except (OSError, TypeError, ValueError) as exc:
+        _record_error(errors, str(exc))
+        return None
+    declared_version = declaration.get("bundle_version")
+    manifest_version = bundle_manifest.get("bundle_version")
+    if declared_version is not None and str(declared_version) != str(manifest_version):
+        _record_error(
+            errors,
+            f"default production bundle_version mismatch: declaration={declared_version!r} "
+            f"manifest={manifest_version!r}",
+        )
+    return str(bundle_manifest_path)
 
 
 def _dataset_manifest_entries(root_manifest: Mapping[str, Any], root_manifest_path: Path) -> list[Mapping[str, Any]]:
@@ -145,6 +184,7 @@ def _validate_dataset_manifest(
             require_specter=True,
             require_name_counts_index=require_name_counts_index,
             require_batch_indexes=True,
+            strict_batch_index_validation=True,
             context=label,
         )
     except MissingArrowArtifactError as exc:
@@ -215,6 +255,7 @@ def validate_release_root(release_root: Path, *, include_replay_bundles: bool = 
 
     for helper in ROOT_HELPER_FILES:
         _require_file(resolved_root / helper, errors, label=f"root helper {helper}")
+    default_model_manifest = _validate_default_model_declaration(resolved_root, errors)
     _validate_name_counts_index(resolved_root / "name_counts_index", errors, label="root name_counts_index")
 
     entries = _dataset_manifest_entries(root_manifest, root_manifest_path)
@@ -239,6 +280,7 @@ def validate_release_root(release_root: Path, *, include_replay_bundles: bool = 
         "dataset_manifest_count": validated_datasets,
         "replay_dataset_manifest_count": validated_replay_datasets,
         "name_counts_index": str(resolved_root / "name_counts_index"),
+        "default_model_manifest": default_model_manifest,
         "network_access": False,
     }
 

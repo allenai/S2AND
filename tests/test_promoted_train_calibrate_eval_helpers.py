@@ -876,6 +876,8 @@ def test_score_eval_candidate_rows_defaults_to_w5_and_w25_only() -> None:
     )
 
     assert sorted(scored["retrieval_rank_limit"].astype(int).unique().tolist()) == [5, 25]
+    assert scored["second_probability"].dtype == np.dtype(np.float64)
+    assert scored["score_margin"].dtype == np.dtype(np.float64)
 
 
 def test_score_eval_candidate_rows_uses_positions_not_index_labels() -> None:

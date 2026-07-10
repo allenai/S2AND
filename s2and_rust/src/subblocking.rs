@@ -1711,7 +1711,7 @@ pub(crate) fn build_native_graph_evidence_store(
             .collect();
         let affiliation_text = normalized_affiliations.join(" ");
         let affiliation_keys: HashSet<String> =
-            word_ngrams_counter_python_compat(&affiliation_text, &affiliation_stopwords)
+            word_ngrams_counter_python_compat(&affiliation_text, &affiliation_stopwords, true)
                 .into_keys()
                 .collect();
         signatures.insert(
@@ -2032,6 +2032,23 @@ pub(crate) fn common_prefix_char_count(left: &str, right: &str) -> usize {
         .count()
 }
 
+fn unordered_prefix_pair_score(
+    counts: &HashMap<String, HashMap<String, f64>>,
+    first: &str,
+    second: &str,
+) -> Option<f64> {
+    let (left, right) = if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    counts
+        .get(left)
+        .and_then(|nested| nested.get(right))
+        .or_else(|| counts.get(right).and_then(|nested| nested.get(left)))
+        .copied()
+}
+
 pub(crate) fn sorted_subblock_merge_candidates(
     output: &OrderedSubblocks,
     maximum_size: usize,
@@ -2085,10 +2102,12 @@ pub(crate) fn sorted_subblock_merge_candidates(
                 let score = py_len(left_name).min(py_len(right_name));
                 candidates.push((pair, 1e5 + score as f64));
             } else if let (Some(left_lookup), Some(right_lookup)) = (&left.lookup, &right.lookup) {
-                if let Some(right_counts) = first_k_letter_counts_sorted.get(left_lookup) {
-                    if let Some(score) = right_counts.get(right_lookup) {
-                        candidates.push((pair, *score));
-                    }
+                if let Some(score) = unordered_prefix_pair_score(
+                    first_k_letter_counts_sorted,
+                    left_lookup,
+                    right_lookup,
+                ) {
+                    candidates.push((pair, score));
                 }
             }
         }
@@ -2428,6 +2447,11 @@ pub(crate) fn make_subblocks_with_telemetry_from_rows_native_graph(
         .iter()
         .map(|row| (row.signature_id.clone(), row.clone()))
         .collect();
+    if row_by_signature_id.len() != rows.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "subblocking signature rows must contain unique signature_id values",
+        ));
+    }
     let single_letter_flags: Vec<bool> = rows.iter().map(|row| py_len(&row.first) <= 1).collect();
     let single_letter_count = single_letter_flags
         .iter()

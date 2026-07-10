@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +14,16 @@ import pytest
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
 from s2and.production_model import load_production_model
-from tests.helpers import import_s2and_rust
+from scripts.production.counts.generate_name_counts import publish_name_counts
+from tests.helpers import import_s2and_rust, tiny_name_counts_tuple
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
     required_module_attrs=("RustLightGBMBooster",),
     prefer_site_packages=True,
+)
+_HAS_RUST_LIGHTGBM = bool(
+    _HAS_RUST_LIGHTGBM
+    and hasattr(getattr(_RUST_LIGHTGBM_PAYLOAD, "RustLightGBMBooster", object), "predict_proba_positive_f32")
 )
 requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
@@ -24,7 +31,13 @@ requires_rust_lightgbm = pytest.mark.skipif(
 )
 
 
-def _run_cli(args: list[str], *, repo_root: Path, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    args: list[str],
+    *,
+    repo_root: Path,
+    timeout: int = 300,
+    env_overrides: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         [sys.executable, *args],
         cwd=repo_root,
@@ -32,6 +45,7 @@ def _run_cli(args: list[str], *, repo_root: Path, timeout: int = 300) -> subproc
         text=True,
         check=False,
         timeout=timeout,
+        env={**os.environ, "S2AND_BACKEND": "python", **dict(env_overrides or {})},
     )
     assert completed.returncode == 0, (
         f"Command failed: {[sys.executable, *args]}\n" f"stdout:\n{completed.stdout}\n" f"stderr:\n{completed.stderr}"
@@ -135,7 +149,14 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
             "min_data_in_leaf": 1,
             "force_col_wise": True,
         },
-        "metrics": {},
+        "metrics": {
+            "stratified_test_queries": 2,
+            "stratified_test_accuracy": 0.5,
+            "stratified_test_errors": 1,
+            "stratified_test_false_abstain": 1,
+            "stratified_test_false_link": 0,
+            "stratified_test_wrong_candidate_link": 0,
+        },
     }
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(json.dumps(target, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -245,6 +266,27 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
 def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     bundle_dir = tmp_path / "production_model_v9.8"
+    canonical_data_dir = tmp_path / "canonical_data"
+    publish_name_counts(
+        tiny_name_counts_tuple(),
+        output_dir=canonical_data_dir,
+        source_snapshot_id="tiny-cli-fixture",
+        source_kind="fixture:test",
+        query_digest="1" * 64,
+        row_metrics={
+            "source_row_count": 1,
+            "selected_row_count": 1,
+            "selected_rows_sha256": "2" * 64,
+            "rejected_row_count": 0,
+        },
+        overwrite=False,
+    )
+    path_config = tmp_path / "path_config.json"
+    path_config.write_text(
+        json.dumps({"main_data_dir": str(canonical_data_dir.resolve())}) + "\n",
+        encoding="utf-8",
+    )
+    cli_env = {"S2AND_PATH_CONFIG": str(path_config)}
 
     _run_cli(
         [
@@ -273,6 +315,7 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
             "--run-full",
         ],
         repo_root=repo_root,
+        env_overrides=cli_env,
     )
 
     pairwise_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -309,9 +352,9 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
             "--prod-holdout-importance-weight",
             "2.0",
             "--run-full",
-            "--allow-metric-drift",
         ],
         repo_root=repo_root,
+        env_overrides=cli_env,
     )
 
     final_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))

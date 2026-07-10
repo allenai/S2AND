@@ -2,6 +2,11 @@
 
 This document covers dataset download, checked-in model artifacts, and `path_config.json`.
 
+> **Canonical-v2 migration status (2026-07-09):** the published Arrow release,
+> shared name counts, and checked-in v1.21 model are legacy inputs. They are not
+> a compatible production release unit for this branch. Canonical counts and the
+> v1.3 bundle are pending; see [work_plan.md](work_plan.md).
+
 ## Dataset download
 
 Download the Arrow-native production runtime release into `s2and/data/` for
@@ -11,9 +16,9 @@ Rust/Arrow prediction and evaluation:
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
 ```
 
-Expected size is about `10.1 GiB`. The release root contains the benchmark
-dataset directories, shared `name_counts_index/`, `production_model_v1.21/`,
-and the promoted-linker replay bundle.
+Expected size is about `10.1 GiB`. The currently published release root contains
+benchmark dataset directories, the legacy shared `name_counts_index/`, the
+legacy `production_model_v1.21/`, and the promoted-linker replay bundle.
 
 Download the legacy JSON/pickle S2AND release only when you need paper-era
 `ANDData` inputs:
@@ -37,12 +42,13 @@ The Arrow release stores runtime signatures, papers, paper authors, and SPECTER
 rows as Arrow IPC files. It intentionally does not duplicate legacy `raw/`,
 `embeddings/`, or precomputed `features_corrected/` directories.
 
-The current production model bundle is checked into this repo under
-`s2and/data/production_model_v1.21/`.
+The previous production model bundle is checked into this repo under
+`s2and/data/production_model_v1.21/`. Canonical-v2 rejects it; it is retained as
+a migration and historical validation input until v1.3 replaces it.
 
-## Production model bundle
+## Previous production model bundle
 
-The current production model is a native bundle directory:
+The previous production model is a native bundle directory:
 
 - `s2and/data/production_model_v1.21/manifest.json`
 - `s2and/data/production_model_v1.21/clusterer.json`
@@ -58,15 +64,15 @@ The current production model is a native bundle directory:
 See [production_inference.md](production_inference.md) for what each file is
 for.
 
-This bundle is included in package data, so prediction does not require a
-separate model download. The older `production_model_v1.2.pickle` is retained
-for legacy pairwise compatibility, but the documented production loader points
-at the v1.21 bundle.
+This bundle and older pickles are temporarily present in package data, but none
+is loadable by canonical-v2. After v1.3 passes the installed-wheel release gate,
+only the declared canonical default should remain in distributions.
 
-New production releases should be built as native bundle directories with
+New production releases must be built as immutable native bundle directories with
 `scripts/production/model/train_pairwise.py` followed by
-`scripts/production/model/train_linker_and_finalize.py`; do not create new
-production pickles.
+`scripts/production/model/train_linker_and_finalize.py`; stage, validate, and
+rename the complete bundle rather than mutating a live directory. Do not create
+new production pickles.
 
 The replay target for rebuilding/auditing the promoted incremental linker lives
 at:
@@ -124,6 +130,13 @@ Arrow production/eval workflows use each dataset's `manifest.json` to resolve:
 - shared `name_counts_index/`
 - eval-only clusters JSON when metrics are requested
 
+Production manifests must declare `canonical_v2` and include the canonical
+content-addressed `artifact_generation` inventory for every immutable table,
+batch index, and count-index manifest. Request-time query/seed sidecars are not
+part of that generation. Older local Arrow directories without this inventory
+are intentionally rejected and must be reconverted; relabeling their manifests
+is not sufficient.
+
 Legacy workflows use the standard S2AND JSON files for:
 
 - signatures
@@ -139,4 +152,6 @@ absent. JSON mode supports:
 - mini-dataset naming such as `<dataset>_papers.json`
 - plain fixture naming such as `papers.json`
 
-See [production_inference.md](production_inference.md) for the minimal inference input contract, and [training.md](training.md) for training-mode dataset requirements.
+See [production_inference.md](production_inference.md) for the minimal inference
+input contract, and [training.md](training.md) for training-mode dataset
+requirements.

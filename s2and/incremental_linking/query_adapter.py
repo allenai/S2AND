@@ -15,8 +15,10 @@ from s2and.incremental_linking.gate_buckets import QueryView, normalize_query_vi
 from s2and.incremental_linking.retrieval import LinkerRetrievalBatch
 from s2and.subblocking import signature_affiliation_feature_keys, signature_name_parts_for_subblocking
 from s2and.text import (
+    canonicalize_name_parts,
     compute_block,
     normalize_text,
+    normalize_title,
     same_prefix_tokens,
 )
 from s2and.text import (
@@ -137,8 +139,9 @@ class IncrementalLinkerInputs:
     summary_by_component: dict[str, ClusterSummary]
 
 
-def _normalize_term_set(value: Any) -> frozenset[str]:
-    normalized = normalize_text(str(value or ""))
+def _normalize_term_set(value: Any, *, is_title: bool = False) -> frozenset[str]:
+    normalizer = normalize_title if is_title else normalize_text
+    normalized = normalizer(str(value or ""))
     if not normalized:
         return EMPTY_STRING_SET
     return frozenset(token for token in normalized.split() if token)
@@ -249,18 +252,22 @@ def _get_specter_vector(dataset: ANDData, paper_id: Any) -> np.ndarray | None:
 
 
 def _signature_query_author(signature: Any) -> str:
-    """Return raw author text for query-level gate features."""
+    """Return canonical author text for query-level gate features."""
 
-    full_name = getattr(signature, "author_info_full_name", None)
-    if full_name is not None and str(full_name).strip():
-        return str(full_name).strip()
-    parts = [
-        getattr(signature, "author_info_first", None),
-        getattr(signature, "author_info_middle", None),
-        getattr(signature, "author_info_last", None),
-        getattr(signature, "author_info_suffix", None),
-    ]
-    return " ".join(str(part).strip() for part in parts if part is not None and str(part).strip())
+    stored_first = getattr(signature, "author_info_first_normalized_without_apostrophe", None)
+    stored_middle = getattr(signature, "author_info_middle_normalized_without_apostrophe", None)
+    stored_last = getattr(signature, "author_info_last_normalized", None)
+    if stored_first is None or stored_middle is None or stored_last is None:
+        canonical = canonicalize_name_parts(
+            getattr(signature, "author_info_first", None),
+            getattr(signature, "author_info_middle", None),
+            getattr(signature, "author_info_last", None),
+        )
+    else:
+        canonical = (stored_first, stored_middle, stored_last)
+    stored_suffix = getattr(signature, "author_info_suffix_normalized", None)
+    suffix = normalize_text(getattr(signature, "author_info_suffix", None)) if stored_suffix is None else stored_suffix
+    return " ".join(part for part in (*canonical, suffix) if part)
 
 
 def extract_query_features(
@@ -290,7 +297,7 @@ def extract_query_features(
         author_position = _signature_author_position(signature)
         if paper is not None:
             venue_terms = _normalize_term_set(" ".join(part for part in [paper.venue, paper.journal_name] if part))
-            title_terms = _normalize_term_set(getattr(paper, "title", None))
+            title_terms = _normalize_term_set(getattr(paper, "title", None), is_title=True)
             year = paper.year
             authors = getattr(paper, "authors", None)
             paper_author_count = len(authors) if authors is not None else 0

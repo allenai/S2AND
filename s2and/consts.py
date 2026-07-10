@@ -22,7 +22,6 @@ _PACKAGE_DATA_DIR = os.path.join(_PACKAGE_DIR, "data")
 CONFIG_LOCATION_ENV = "S2AND_PATH_CONFIG"
 CONFIG_LOCATION = os.path.join(_PACKAGE_DATA_DIR, "path_config.json")
 _MAIN_DATA_DIR_PLACEHOLDER = "absolute path of wherever you downloaded the data to"
-_NAME_COUNTS_FALLBACK_URL = "https://s3-us-west-2.amazonaws.com/ai2-s2-research-public/s2and-release/name_counts.pickle"
 _CONFIG: dict[str, Any] | None = None
 _CONFIG_LOCK = threading.Lock()
 
@@ -126,7 +125,8 @@ class _LazyDataPath(os.PathLike[str]):
 CONFIG: MutableMapping[str, Any] = _LazyConfig()
 
 # Lazily-resolved artifact paths
-NAME_COUNTS_PATH = _LazyDataPath("name_counts.pickle", fallback_url=_NAME_COUNTS_FALLBACK_URL)
+NAME_COUNTS_PATH = _LazyDataPath("name_counts.pickle")
+NAME_COUNTS_MANIFEST_PATH = _LazyDataPath("name_counts/manifest.json")
 
 # feature caching related consts
 CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and"))).resolve()
@@ -172,8 +172,12 @@ Incrementation history
     `language_reliability_min`, the minimum CLD2 reliable-confidence score for
     the two papers. Models trained on the old language-feature policy are
     incompatible.
+10 - canonical runtime/parity corrections: titles preserve identifying digits,
+     CLD2 is explicitly called in plain-text mode, malformed emails are missing
+     evidence, query-author text is assembled only from canonical fields, and
+     incremental six-decimal values use ties-to-even rounding.
 """
-FEATURIZER_VERSION = 9
+FEATURIZER_VERSION = 10
 
 # Name-normalization contract (docs/normalization_migration_blocked.md, OD4 single-mode
 # cutover). NORMALIZATION_VERSION declares which normalization policy THIS code

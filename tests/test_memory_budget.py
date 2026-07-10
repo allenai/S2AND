@@ -10,6 +10,15 @@ import pytest
 from s2and import memory_budget
 
 
+def _compute_promoted_phase_a_limits(**kwargs):
+    return memory_budget.compute_promoted_phase_a_limits(
+        final_matrix_feature_count=53,
+        pairwise_matrix_feature_count=35,
+        aggregate_feature_count=18,
+        **kwargs,
+    )
+
+
 class _MemoryBudgetKwargs(TypedDict):
     total_ram_bytes: int
     detect_cgroup_fn: Callable[[], tuple[int | None, str]]
@@ -141,6 +150,43 @@ def test_compute_rust_batch_chunk_plan_respects_stage_budget():
     assert int(plan.predicted_stage_peak_delta_bytes) >= int(plan.predicted_chunk_bytes)
 
 
+def test_compute_rust_batch_chunk_plan_accounts_for_borrowed_index_remap_arrays():
+    common_kwargs = {
+        "num_features": 10,
+        "total_pairs": 1_000,
+        "total_rows": 10,
+        "total_ram_bytes": 10_000_000_000,
+        "base_chunk_pairs": 0,
+        "max_chunk_pairs": 0,
+        "fixed_overhead_bytes": 0,
+        "detect_cgroup_fn": lambda: (None, "unavailable"),
+        "detect_total_fn": lambda: (None, "unavailable"),
+        "current_rss_fn": lambda _total: (0, "rss:test"),
+    }
+    owned = memory_budget.compute_rust_batch_chunk_plan(**common_kwargs)
+    borrowed = memory_budget.compute_rust_batch_chunk_plan(
+        **common_kwargs,
+        index_remap_bytes_per_pair=memory_budget.BORROWED_SIGNATURE_INDEX_REMAP_BYTES_PER_PAIR,
+    )
+
+    assert owned.chunk_pairs == borrowed.chunk_pairs == 1_000
+    assert owned.index_remap_bytes_per_pair == 0
+    assert owned.predicted_index_remap_bytes == 0
+    assert borrowed.index_remap_bytes_per_pair == 8
+    assert borrowed.predicted_index_remap_bytes == 8_000
+    assert borrowed.bytes_per_pair_row == owned.bytes_per_pair_row + 8
+    assert borrowed.predicted_chunk_bytes == owned.predicted_chunk_bytes + 8_000
+
+
+def test_compute_rust_batch_chunk_plan_rejects_negative_index_remap_bytes():
+    with pytest.raises(ValueError, match="index_remap_bytes_per_pair must be non-negative"):
+        memory_budget.compute_rust_batch_chunk_plan(
+            num_features=1,
+            total_pairs=1,
+            index_remap_bytes_per_pair=-1,
+        )
+
+
 def test_compute_rust_batch_chunk_plan_base_chunk_pairs_zero_disables_floor():
     plan = memory_budget.compute_rust_batch_chunk_plan(
         num_features=1_000,
@@ -189,7 +235,7 @@ def test_compute_rust_batch_chunk_plan_respects_named_max_chunk_pairs():
 
 
 def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=20,
         component_sizes=[100, 50, 25, 10],
         retrieval_top_k=3,
@@ -209,10 +255,50 @@ def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
     assert int(limits.predicted_pairs_per_batch) == 3500
     assert float(limits.observed_safety_multiplier) == pytest.approx(2.0)
     assert bool(limits.single_query_exceeds_budget) is False
+    assert int(limits.predicted_scorer_full_input_bytes) == 60 * 53 * 4
+    assert int(limits.predicted_scorer_persistent_output_bytes) == 60 * 8
+
+
+def test_native_scorer_chunk_plan_uses_full_call_when_scratch_fits() -> None:
+    plan = memory_budget.compute_native_scorer_chunk_plan(
+        row_count=1_000,
+        feature_count=53,
+        total_ram_bytes=100_000_000,
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+
+    assert plan.chunk_rows == 1_000
+    assert plan.chunk_count == 1
+    assert plan.predicted_peak_delta_bytes == 1_000 * (53 * 4 + 8)
+
+
+def test_native_scorer_chunk_plan_bounds_owned_copy_under_tight_budget() -> None:
+    plan = memory_budget.compute_native_scorer_chunk_plan(
+        row_count=100_000,
+        feature_count=70,
+        total_ram_bytes=10_000_000,
+        current_rss_fn=lambda _total: (1_000_000, "rss:test"),
+    )
+
+    assert 1 <= plan.chunk_rows < 100_000
+    assert plan.chunk_count > 1
+    assert plan.predicted_peak_delta_bytes <= plan.stage_budget_bytes
+
+
+def test_native_scorer_chunk_plan_fails_when_output_and_one_row_do_not_fit() -> None:
+    with pytest.raises(MemoryError, match="cannot fit one scratch row"):
+        memory_budget.compute_native_scorer_chunk_plan(
+            row_count=10_000,
+            feature_count=70,
+            total_ram_bytes=1_000_000,
+            safety_margin_fraction=0.1,
+            stage_budget_fraction=0.5,
+            current_rss_fn=lambda _total: (800_000, "rss:test"),
+        )
 
 
 def test_compute_promoted_phase_a_limits_allows_zero_queries_with_default_batch_limit():
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=0,
         component_sizes=[100, 50],
         retrieval_top_k=2,
@@ -231,7 +317,7 @@ def test_compute_promoted_phase_a_limits_allows_zero_queries_with_default_batch_
 
 
 def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget():
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=100,
         component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
         retrieval_top_k=5,
@@ -250,7 +336,7 @@ def test_compute_promoted_phase_a_limits_shrinks_query_batch_under_tight_budget(
 
 
 def test_compute_promoted_phase_a_limits_uses_observed_probe_for_operational_batch():
-    hard = memory_budget.compute_promoted_phase_a_limits(
+    hard = _compute_promoted_phase_a_limits(
         query_count=100,
         component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
         retrieval_top_k=5,
@@ -261,7 +347,7 @@ def test_compute_promoted_phase_a_limits_uses_observed_probe_for_operational_bat
         detect_total_fn=lambda: (None, "unavailable"),
         current_rss_fn=lambda _total: (10_000_000, "rss:test"),
     )
-    observed = memory_budget.compute_promoted_phase_a_limits(
+    observed = _compute_promoted_phase_a_limits(
         query_count=100,
         component_sizes=[20_000, 16_000, 12_000, 8_000, 4_000],
         retrieval_top_k=5,
@@ -286,7 +372,7 @@ def test_compute_promoted_phase_a_limits_uses_observed_probe_for_operational_bat
 
 
 def test_compute_promoted_phase_a_limits_lets_observed_rows_exceed_top_k():
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=10,
         component_sizes=[1] * 100,
         retrieval_top_k=25,
@@ -309,7 +395,7 @@ def test_compute_promoted_phase_a_limits_lets_observed_rows_exceed_top_k():
 
 
 def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=10,
         component_sizes=[1] * 100,
         retrieval_top_k=25,
@@ -332,7 +418,7 @@ def test_compute_promoted_phase_a_limits_uses_orcid_fanout_floor_above_top_k():
 
 
 def test_compute_promoted_phase_a_limits_uses_orcid_total_floor_for_mixed_batch():
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=10,
         component_sizes=[1] * 100,
         retrieval_top_k=25,
@@ -361,7 +447,7 @@ def test_compute_promoted_phase_a_limits_uses_orcid_total_floor_for_mixed_batch(
 
 def test_compute_promoted_phase_a_limits_fails_when_single_query_exceeds_budget():
     with pytest.raises(MemoryError, match="cannot fit a single query"):
-        memory_budget.compute_promoted_phase_a_limits(
+        _compute_promoted_phase_a_limits(
             query_count=10,
             component_sizes=[2_000_000],
             retrieval_top_k=1,
@@ -378,7 +464,7 @@ def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty
     # All-seeded incremental request: every signature is already in a seed component,
     # so query_count == 0 and no batching_threshold is forwarded. This must not raise;
     # the planner short-circuits to a zero-size batch (no work to do).
-    limits = memory_budget.compute_promoted_phase_a_limits(
+    limits = _compute_promoted_phase_a_limits(
         query_count=0,
         component_sizes=[4],
         retrieval_top_k=50,
@@ -400,7 +486,7 @@ def test_compute_promoted_phase_a_limits_rejects_explicit_nonpositive_threshold(
     # An explicit non-positive caller value is always invalid, including when
     # query_count == 0 (it must not be silently coerced to a 1-size batch).
     with pytest.raises(ValueError, match="max_query_batch_size must be positive"):
-        memory_budget.compute_promoted_phase_a_limits(
+        _compute_promoted_phase_a_limits(
             query_count=query_count,
             component_sizes=[4],
             retrieval_top_k=50,

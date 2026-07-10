@@ -59,10 +59,12 @@ def _build_from_arrow_paths(
     preprocess: bool,
     num_threads: int,
 ) -> Any:
+    from s2and.consts import NORMALIZATION_VERSION
     from s2and.feature_port import build_rust_featurizer_from_arrow_paths
 
     return build_rust_featurizer_from_arrow_paths(
         paths,
+        expected_normalization_version=NORMALIZATION_VERSION,
         name_tuples="filtered",
         load_name_counts=True,
         preprocess=bool(preprocess),
@@ -212,9 +214,7 @@ def _rss_growth_fraction(rss_peak_gb_by_iteration: list[float]) -> float | None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Repeatedly build/drop RustFeaturizer using from_arrow_paths to stress lifecycle robustness."
-        )
+        description=("Repeatedly build/drop RustFeaturizer using from_arrow_paths to stress lifecycle robustness.")
     )
     parser.add_argument("--dataset", required=True, help="Dataset name (e.g. dummy, qian, aminer)")
     parser.add_argument(

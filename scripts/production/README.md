@@ -87,7 +87,21 @@ deeper per-dataset Arrow schema/table validation.
 
 The `counts/` scripts document production count artifacts:
 
-- `counts/generate_name_counts.py`: documents the internal query used to build
-  `name_counts.pickle`.
-- `counts/generate_orcid_name_prefix_counts.py`: documents the internal query
-  used to build `first_k_letter_counts_from_orcid.json`.
+- `counts/generate_name_counts.py` writes a provenance-bound immutable
+  `name_counts` generation and publishes its pointer manifest last. It requires
+  an explicit source snapshot, verifies selected-row content, and supports
+  bounded fixture runs before any authorized warehouse run. Package-cached maps
+  are shared read-only views with no million-key copy; models compare the exact
+  generation/source binding before feature work.
+- `counts/generate_orcid_name_prefix_counts.py` writes canonical unordered
+  ORCID prefix pairs into an immutable generation and publishes
+  `first_k_letter_counts_from_orcid.manifest.json` last. The runtime accepts
+  only a fully verified generation; it never falls back to the old unversioned
+  JSON. `--max-names-per-orcid` is checked before quadratic pair expansion.
+  Publication uses deterministic native JSON encoding, validation/fsync, a
+  cross-process lock, and a pointer-last commit.
+
+Both scripts are import-safe without the internal warehouse package. Start
+with `--help`, `--dry-run`, or a small `--input-json` fixture. A full internal
+query requires `--run-full`, an explicit `--output-dir`, and a reviewed
+`--source-snapshot-id`; it is not part of the local verification suite.

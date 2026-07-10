@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 import time
@@ -11,9 +12,10 @@ import pytest
 import s2and.feature_port as feature_port
 import s2and.runtime as runtime
 from s2and.arrow_inputs import MissingArrowArtifactError
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import write_name_counts_index
-from tests.helpers import patch_tiny_name_counts_loader
+from tests.helpers import patch_tiny_name_counts_loader, write_test_arrow_artifact_manifest
 
 
 def _missing_module(name: str) -> ModuleNotFoundError:
@@ -198,8 +200,8 @@ def test_rust_featurizer_cache_key_tracks_arrow_file_metadata(tmp_path: Path):
     feature_port.evict_rust_featurizer(dataset)
     refreshed_key = feature_port._rust_featurizer_cache_key(dataset)
 
-    assert second_key == first_key
-    assert refreshed_key != first_key
+    assert second_key != first_key
+    assert refreshed_key == second_key
 
 
 def test_rust_featurizer_cache_key_tracks_name_counts_index_child_metadata(tmp_path: Path):
@@ -226,11 +228,11 @@ def test_rust_featurizer_cache_key_tracks_name_counts_index_child_metadata(tmp_p
     feature_port.evict_rust_featurizer(dataset)
     refreshed_key = feature_port._rust_featurizer_cache_key(dataset)
 
-    assert second_key == first_key
-    assert refreshed_key != first_key
+    assert second_key != first_key
+    assert refreshed_key == second_key
 
 
-def test_rust_featurizer_cache_key_memoizes_non_seed_fingerprint(monkeypatch):
+def test_rust_featurizer_cache_key_rechecks_non_seed_fingerprint(monkeypatch):
     dataset = DummyDataset("memoized_non_seed_cache_dataset", mode="train")
     calls = {"count": 0}
 
@@ -243,7 +245,7 @@ def test_rust_featurizer_cache_key_memoizes_non_seed_fingerprint(monkeypatch):
     first_key = feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=0)
     second_key = feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)
 
-    assert calls["count"] == 1
+    assert calls["count"] == 2
     assert first_key.non_seed == second_key.non_seed
     assert first_key.seed.cluster_seeds_version == 0
     assert second_key.seed.cluster_seeds_version == 1
@@ -308,7 +310,7 @@ def test_rust_featurizer_cache_retries_when_seed_version_changes_during_build(mo
         ("name_tuples", lambda dataset: dataset.name_tuples.add(("bill", "william"))),
     ],
 )
-def test_rust_featurizer_cache_requires_evict_for_material_dataset_fields(case_name, mutate_dataset):
+def test_rust_featurizer_cache_rebuilds_for_material_dataset_fields(case_name, mutate_dataset):
     dataset = DummyDataset(f"material_cache_{case_name}", mode="train")
 
     first = feature_port._get_rust_featurizer(dataset)
@@ -317,14 +319,14 @@ def test_rust_featurizer_cache_requires_evict_for_material_dataset_fields(case_n
     removed = feature_port.evict_rust_featurizer(dataset)
     third = feature_port._get_rust_featurizer(dataset)
 
-    assert second is first
+    assert second is not first
     assert removed is True
-    assert third is not first
-    assert DummyRustFeaturizer.created == [dataset.name, dataset.name]
+    assert third is not second
+    assert DummyRustFeaturizer.created == [dataset.name, dataset.name, dataset.name]
     assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset)]
 
 
-def test_rust_featurizer_cache_requires_evict_for_material_mutation_beyond_prefix_sample():
+def test_rust_featurizer_cache_rebuilds_for_material_mutation_beyond_prefix_sample():
     dataset = DummyDataset("material_cache_full_digest", mode="train")
     dataset.signatures = {f"s{index}": object() for index in range(64)}
 
@@ -334,14 +336,14 @@ def test_rust_featurizer_cache_requires_evict_for_material_mutation_beyond_prefi
     removed = feature_port.evict_rust_featurizer(dataset)
     third = feature_port._get_rust_featurizer(dataset)
 
-    assert second is first
+    assert second is not first
     assert removed is True
-    assert third is not first
-    assert DummyRustFeaturizer.created == [dataset.name, dataset.name]
+    assert third is not second
+    assert DummyRustFeaturizer.created == [dataset.name, dataset.name, dataset.name]
     assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset)]
 
 
-def test_rust_featurizer_cache_requires_evict_for_in_place_numpy_embedding_mutation(monkeypatch):
+def test_rust_featurizer_cache_rebuilds_for_in_place_numpy_embedding_mutation(monkeypatch):
     snapshots: list[float] = []
 
     def _embedding_build(dataset_arg):
@@ -362,10 +364,56 @@ def test_rust_featurizer_cache_requires_evict_for_in_place_numpy_embedding_mutat
     removed = feature_port.evict_rust_featurizer(dataset)
     third = feature_port._get_rust_featurizer(dataset)
 
-    assert second is first
+    assert second is not first
     assert removed is True
+    assert third is not second
+    assert snapshots == [0.0, 1.0, 1.0]
+
+
+def test_validated_arrow_generation_ignores_unconsumed_python_rows_and_rekeys_generation(tmp_path: Path) -> None:
+    signatures_path = tmp_path / "immutable.arrow"
+
+    def publish_generation(payload: bytes) -> str:
+        signatures_path.write_bytes(payload)
+        files = {
+            "signatures": {
+                "path": signatures_path.name,
+                "kind": "file",
+                "byte_count": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        }
+        generation_id = hashlib.sha256(
+            json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        (tmp_path / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "artifact_generation": {
+                        "schema_version": "s2and_arrow_artifact_generation_v1",
+                        "generation_id": generation_id,
+                        "files": files,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return generation_id
+
+    dataset = DummyDataset("validated_arrow_generation", mode="train")
+    dataset.rust_featurizer_arrow_paths = {"signatures": str(signatures_path)}
+    dataset.rust_featurizer_artifact_generation = publish_generation(b"generation-1")
+    dataset.name_tuples = frozenset({("bill", "william")})
+
+    first = feature_port._get_rust_featurizer(dataset)
+    dataset.signatures["not-consumed-from-python"] = object()
+    second = feature_port._get_rust_featurizer(dataset)
+    dataset.rust_featurizer_artifact_generation = publish_generation(b"generation-2")
+    third = feature_port._get_rust_featurizer(dataset)
+
+    assert second is first
     assert third is not first
-    assert snapshots == [0.0, 1.0]
+    assert DummyRustFeaturizer.created == [dataset.name, dataset.name]
 
 
 def test_update_rust_cluster_seeds_reuses_cached_featurizer_without_default_version_bump():
@@ -530,7 +578,8 @@ def test_build_rust_featurizer_from_arrow_paths_rejects_none_path(monkeypatch):
             {
                 "signatures": "signatures.arrow",
                 "papers": None,
-            }
+            },
+            expected_normalization_version=NORMALIZATION_VERSION,
         )
 
 
@@ -564,14 +613,26 @@ def test_build_rust_featurizer_from_arrow_paths_requires_index_for_name_counts(m
     with pytest.raises(MissingArrowArtifactError) as exc_info:
         feature_port.build_rust_featurizer_from_arrow_paths(
             paths,
+            expected_normalization_version=NORMALIZATION_VERSION,
             load_name_counts=True,
         )
     assert exc_info.value.missing_keys == ("name_counts_index",)
 
     patch_tiny_name_counts_loader(monkeypatch)
     index_path, _metrics = write_name_counts_index(tmp_path / "name_counts_index")
+    write_test_arrow_artifact_manifest(tmp_path, {**paths, "name_counts_index": index_path})
+    real_validate = feature_port.validate_arrow_prediction_artifacts
+    monkeypatch.setattr(
+        feature_port,
+        "validate_arrow_prediction_artifacts",
+        lambda *args, **kwargs: real_validate(
+            *args,
+            **{**kwargs, "strict_batch_index_validation": False},
+        ),
+    )
     result = feature_port.build_rust_featurizer_from_arrow_paths(
         {**paths, "name_counts_index": index_path},
+        expected_normalization_version=NORMALIZATION_VERSION,
         load_name_counts=True,
     )
 
@@ -603,7 +664,10 @@ def test_build_rust_featurizer_from_arrow_paths_requires_batch_indexes_by_defaul
         Path(path).touch()
 
     with pytest.raises(ValueError, match="signatures_batch_index"):
-        feature_port.build_rust_featurizer_from_arrow_paths(paths)
+        feature_port.build_rust_featurizer_from_arrow_paths(
+            paths,
+            expected_normalization_version=NORMALIZATION_VERSION,
+        )
 
     with pytest.raises(ValueError, match="missing_papers.arrow"):
         feature_port.build_rust_featurizer_from_arrow_paths(
@@ -614,6 +678,7 @@ def test_build_rust_featurizer_from_arrow_paths_requires_batch_indexes_by_defaul
                 "papers_batch_index": str(tmp_path / "papers.index"),
                 "paper_authors_batch_index": str(tmp_path / "paper_authors.index"),
             },
+            expected_normalization_version=NORMALIZATION_VERSION,
         )
 
     with pytest.raises(ValueError, match="name_pairs"):
@@ -625,6 +690,7 @@ def test_build_rust_featurizer_from_arrow_paths_requires_batch_indexes_by_defaul
                 "papers_batch_index": str(tmp_path / "papers.index"),
                 "paper_authors_batch_index": str(tmp_path / "paper_authors.index"),
             },
+            expected_normalization_version=NORMALIZATION_VERSION,
         )
 
     index_paths = {
@@ -634,8 +700,21 @@ def test_build_rust_featurizer_from_arrow_paths_requires_batch_indexes_by_defaul
     }
     for path in index_paths.values():
         Path(path).touch()
+    write_test_arrow_artifact_manifest(tmp_path, {**paths, **index_paths})
 
-    result = feature_port.build_rust_featurizer_from_arrow_paths({**paths, **index_paths})
+    real_validate = feature_port.validate_arrow_prediction_artifacts
+    monkeypatch.setattr(
+        feature_port,
+        "validate_arrow_prediction_artifacts",
+        lambda *args, **kwargs: real_validate(
+            *args,
+            **{**kwargs, "strict_batch_index_validation": False},
+        ),
+    )
+    result = feature_port.build_rust_featurizer_from_arrow_paths(
+        {**paths, **index_paths},
+        expected_normalization_version=NORMALIZATION_VERSION,
+    )
     assert result.dataset_name == "arrow"
 
 

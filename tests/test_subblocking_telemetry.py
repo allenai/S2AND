@@ -77,6 +77,18 @@ def test_make_subblocks_uses_specter_for_oversized_single_letter_block(monkeypat
     assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"], ["s3", "s4"]]
 
 
+def test_make_subblocks_rejects_duplicate_ids_after_string_coercion() -> None:
+    dataset = SimpleNamespace(signatures={"1": _signature("1", first="anna")}, random_seed=0)
+
+    with pytest.raises(ValueError, match="must be unique.*'1'"):
+        subblocking.make_subblocks_with_telemetry(
+            [1, "1"],
+            dataset,
+            maximum_size=2,
+            first_k_letter_counts_sorted={},
+        )
+
+
 def test_make_subblocks_skips_specter_when_single_letter_block_is_in_budget(monkeypatch):
     dataset = SimpleNamespace(
         signatures={

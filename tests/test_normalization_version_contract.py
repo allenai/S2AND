@@ -28,6 +28,7 @@ from s2and.consts import (
 )
 from s2and.model import _resolve_clusterer_normalization_version
 from s2and.production_model import _require_bundle_normalization_version
+from tests.helpers import patch_name_counts_artifact
 
 
 def _write_minimal_name_counts_index(root: Path, *, normalization_version: str | None) -> Path:
@@ -133,17 +134,11 @@ def test_bundle_gate_accepts_matching_and_rejects_mismatching(tmp_path):
         _require_bundle_normalization_version(tmp_path, {"normalization_version": "bogus"})
 
 
-def test_name_counts_index_writer_stamps_package_version(tmp_path):
+def test_name_counts_index_writer_stamps_package_version(tmp_path, monkeypatch):
     from s2and.incremental_linking import feature_block_arrow
 
     seeded = ({"anna": 2.0}, {"smith": 3.0}, {"anna smith": 2.0}, {"smith a": 2.0})
-    import s2and.data as s2and_data
-
-    previous_cache = s2and_data._NAME_COUNTS_CACHE
-    s2and_data._NAME_COUNTS_CACHE = seeded
-    try:
-        index_dir, _ = feature_block_arrow.write_name_counts_index(tmp_path, overwrite=True)
-    finally:
-        s2and_data._NAME_COUNTS_CACHE = previous_cache
+    patch_name_counts_artifact(monkeypatch, seeded)
+    index_dir, _ = feature_block_arrow.write_name_counts_index(tmp_path, overwrite=True)
     manifest = json.loads((Path(index_dir) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["normalization_version"] == NORMALIZATION_VERSION

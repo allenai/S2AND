@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS, promoted_linker_feature_columns
 from s2and.incremental_linking.linker_pairwise import promoted_pairwise_aggregate_columns
 from s2and.runtime import (
@@ -17,7 +18,7 @@ from s2and.runtime import (
     detect_rust_runtime_capabilities,
 )
 
-ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v1"
+ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v2"
 CONTRACT_SCHEMA_VERSION = "incremental_linking_contract_v1"
 MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER = "classic_lightgbm_linker"
 GATE_SURFACE_PROMOTED_LOGISTIC = "promoted_numpy_logistic_gate"
@@ -43,6 +44,12 @@ CONSTRAINT_DECISION_POLICY: dict[str, Any] = {
     "top_row_veto": {
         "action": "recompute_gate_over_eligible_rows",
         "all_rows_vetoed_action": "abstain",
+    },
+    "query_query_disallow": {
+        "action": "request_global_finalize",
+        "priority": ["require_forced", "initial_score_descending", "signature_id_ascending"],
+        "conflict_action": "rescore_query_with_finalized_partner_components_excluded",
+        "batch_and_input_order_invariant": True,
     },
 }
 
@@ -109,8 +116,11 @@ def production_contract_payload(feature_columns: Sequence[str] | None = None) ->
             "pairwise_aggregate_nan_value": 0.0,
             "matrix_nan_allowed": False,
         },
+        "query_author_policy": "canonical_v2_fields_plus_normalized_suffix",
+        "title_normalization_policy": "transliterated_lower_alphanumeric_preserve_digits",
         "rounding_policy": {
             "compact_non_pairwise": "round_to_6_decimal_places_where_formula_requires",
+            "incremental_six_decimal": "ties_to_even_before_float32",
             "pairwise_aggregates": "rust_f64_then_matrix_float32",
         },
     }
@@ -205,3 +215,21 @@ def validate_artifact_contract_metadata(metadata: Mapping[str, Any]) -> None:
         raise ValueError("Incremental linker artifact retrieval_stack_digest mismatch")
     if metadata.get("gate_surface") != GATE_SURFACE_PROMOTED_LOGISTIC:
         raise ValueError(f"Unsupported incremental linker gate_surface: {metadata.get('gate_surface')!r}")
+    binding = metadata.get("pairwise_bundle_binding")
+    required_binding_fields = {
+        "normalization_version",
+        "featurizer_version",
+        "ordered_feature_contract_digest",
+        "main_booster_sha256",
+        "nameless_booster_sha256",
+    }
+    if not isinstance(binding, Mapping) or set(binding) != required_binding_fields:
+        raise ValueError("Incremental linker artifact pairwise_bundle_binding is missing or malformed")
+    if binding["normalization_version"] != NORMALIZATION_VERSION:
+        raise ValueError("Incremental linker artifact normalization_version mismatch")
+    if int(binding["featurizer_version"]) != FEATURIZER_VERSION:
+        raise ValueError("Incremental linker artifact featurizer_version mismatch")
+    for field in ("ordered_feature_contract_digest", "main_booster_sha256", "nameless_booster_sha256"):
+        digest = binding[field]
+        if not isinstance(digest, str) or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise ValueError(f"Incremental linker artifact pairwise_bundle_binding {field} is not a SHA-256")

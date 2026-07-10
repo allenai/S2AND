@@ -1,13 +1,17 @@
 import hashlib
+import io
 import json
 import logging
 import os
 import random
+import re
+import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import combinations
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,7 +24,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from s2and.arrow_inputs import require_arrow_artifacts
-from s2and.consts import _PACKAGE_DATA_DIR, SPECTER_DIM
+from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION, SPECTER_DIM
 from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_lookup_index_batch_indices_for_request
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
@@ -35,8 +39,271 @@ from s2and.text import (
 logger = logging.getLogger("s2and")
 
 
-with open(os.path.join(_PACKAGE_DATA_DIR, "first_k_letter_counts_from_orcid.json")) as f:
-    FIRST_K_LETTER_COUNTS = json.load(f)
+def _canonical_orcid_prefix_pair(first: str, second: str) -> tuple[str, str]:
+    """Return the order-independent key for an ORCID prefix pair."""
+
+    return (first, second) if first <= second else (second, first)
+
+
+def _orcid_prefix_pair_count(counts: Mapping[str, Mapping[str, int]], first: str, second: str) -> int | None:
+    """Look up an ORCID prefix-pair count independently of argument order."""
+
+    left, right = _canonical_orcid_prefix_pair(first, second)
+    nested = counts.get(left)
+    count = None if nested is None else nested.get(right)
+    if count is not None:
+        return count
+    # Accept an uncanonicalized mapping supplied directly by compatibility or
+    # test callers. The packaged mapping is canonicalized once at import, so
+    # production lookups remain the one-probe path above.
+    reverse = counts.get(right)
+    return None if reverse is None else reverse.get(left)
+
+
+_ORCID_PREFIX_MANIFEST_FILENAME = "first_k_letter_counts_from_orcid.manifest.json"
+_ORCID_PREFIX_METADATA_FILENAME = "first_k_letter_counts_from_orcid.meta.json"
+_ORCID_PREFIX_DATA_FILENAME = "first_k_letter_counts_from_orcid.json"
+_ORCID_PREFIX_PAIR_KEY_SEMANTICS = "unordered_lexicographic"
+_ORCID_PREFIX_GENERATION_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*-[0-9a-f]{12}"
+
+
+def _sha256_payload(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_json_mapping(path: Path, *, label: str) -> tuple[bytes, dict[str, Any]]:
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"Missing canonical ORCID prefix-count {label}: {path}. Regenerate and publish the "
+            "versioned ORCID prefix-count artifact before using default subblocking priors."
+        ) from error
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Canonical ORCID prefix-count {label} is invalid JSON: {path}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"Canonical ORCID prefix-count {label} must be a JSON object: {path}")
+    return payload, value
+
+
+def _require_contained_file(path: Path, *, parent: Path, label: str) -> None:
+    """Reject symlinks, path escapes, and non-files at an artifact boundary."""
+
+    if path.is_symlink() or path.resolve().parent != parent.resolve():
+        raise ValueError(f"Canonical ORCID prefix-count {label} escapes its expected directory")
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing canonical ORCID prefix-count {label}: {path}")
+
+
+def _read_verified_json_mapping(
+    path: Path,
+    *,
+    label: str,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Hash and parse one file without retaining its bytes beside the parsed mapping."""
+
+    try:
+        with path.open("rb") as binary_stream:
+            before = os.fstat(binary_stream.fileno())
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: binary_stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise ValueError(f"Canonical ORCID prefix-count {label} SHA-256 does not match its metadata")
+            binary_stream.seek(0)
+            text_stream = io.TextIOWrapper(binary_stream, encoding="utf-8")
+            try:
+                value = json.load(text_stream)
+            finally:
+                text_stream.detach()
+            after = os.fstat(binary_stream.fileno())
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"Missing canonical ORCID prefix-count {label}: {path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Canonical ORCID prefix-count {label} is invalid JSON: {path}") from error
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise RuntimeError(f"Canonical ORCID prefix-count {label} changed while it was being verified")
+    if not isinstance(value, dict):
+        raise ValueError(f"Canonical ORCID prefix-count {label} must be a JSON object: {path}")
+    return value
+
+
+def _require_sha256(value: Any, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"Canonical ORCID prefix-count {field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _load_canonical_orcid_prefix_count_artifact(
+    data_dir: str | Path = _PACKAGE_DATA_DIR,
+) -> tuple[dict[str, dict[str, int]], dict[str, Any]]:
+    """Load counts plus the exact immutable-generation binding after full verification."""
+
+    root = Path(data_dir).resolve()
+    pointer_path = root / _ORCID_PREFIX_MANIFEST_FILENAME
+    if pointer_path.is_symlink() or pointer_path.resolve().parent != root:
+        raise ValueError("Canonical ORCID prefix-count manifest escapes the package data directory")
+    _, pointer = _read_json_mapping(pointer_path, label="manifest")
+    if pointer.get("schema_version") != 1:
+        raise ValueError("Canonical ORCID prefix-count manifest schema_version must equal 1")
+    generation_id = pointer.get("generation_id")
+    if not isinstance(generation_id, str) or re.fullmatch(_ORCID_PREFIX_GENERATION_ID_PATTERN, generation_id) is None:
+        raise ValueError("Canonical ORCID prefix-count manifest generation_id has an invalid format")
+    generation_dir_name = pointer.get("generation_dir")
+    expected_generation_dir_name = f"orcid-prefix-counts-{generation_id}"
+    if generation_dir_name != expected_generation_dir_name:
+        raise ValueError("Canonical ORCID prefix-count manifest generation_dir must exactly match its generation_id")
+    generation_dir = root / expected_generation_dir_name
+    if generation_dir.is_symlink() or generation_dir.resolve().parent != root:
+        raise ValueError("Canonical ORCID prefix-count generation_dir escapes the package data directory")
+
+    metadata_path = generation_dir / _ORCID_PREFIX_METADATA_FILENAME
+    _require_contained_file(metadata_path, parent=generation_dir, label="metadata")
+    metadata_payload, metadata = _read_json_mapping(metadata_path, label="metadata")
+    expected_metadata_sha256 = _require_sha256(pointer.get("metadata_sha256"), field="metadata_sha256")
+    if _sha256_payload(metadata_payload) != expected_metadata_sha256:
+        raise ValueError("Canonical ORCID prefix-count metadata SHA-256 does not match the manifest")
+    expected_metadata = {
+        "schema_version": 1,
+        "normalization_version": NORMALIZATION_VERSION,
+        "pair_key_semantics": _ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+        "generation_id": generation_id,
+    }
+    for key, expected in expected_metadata.items():
+        if metadata.get(key) != expected:
+            raise ValueError(f"Canonical ORCID prefix-count metadata {key} must equal {expected!r}")
+    source_snapshot_id = metadata.get("source_snapshot_id")
+    if (
+        not isinstance(source_snapshot_id, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_snapshot_id) is None
+    ):
+        raise ValueError("Canonical ORCID prefix-count metadata source_snapshot_id has an invalid format")
+    if generation_id != f"{source_snapshot_id}-{generation_id[-12:]}":
+        raise ValueError("Canonical ORCID prefix-count generation_id is not bound to source_snapshot_id")
+    _require_sha256(metadata.get("source_digest"), field="source_digest")
+
+    data_path = generation_dir / _ORCID_PREFIX_DATA_FILENAME
+    _require_contained_file(data_path, parent=generation_dir, label="data")
+    expected_data_byte_count = metadata.get("data_byte_count")
+    if type(expected_data_byte_count) is not int or expected_data_byte_count < 0:
+        raise ValueError("Canonical ORCID prefix-count data_byte_count must be a nonnegative integer")
+    if data_path.stat().st_size != expected_data_byte_count:
+        raise ValueError("Canonical ORCID prefix-count data_byte_count does not match the data")
+    expected_data_sha256 = _require_sha256(metadata.get("data_sha256"), field="data_sha256")
+    raw_counts = _read_verified_json_mapping(
+        data_path,
+        label="data",
+        expected_sha256=expected_data_sha256,
+    )
+
+    pair_count = 0
+    for left, nested_counts in raw_counts.items():
+        if not isinstance(left, str) or not left:
+            raise ValueError("Canonical ORCID prefix-count outer keys must be nonempty strings")
+        if not isinstance(nested_counts, dict):
+            raise ValueError(f"Canonical ORCID prefix-count values must be JSON objects: {left!r}")
+        for right, count in nested_counts.items():
+            if not isinstance(right, str) or not right:
+                raise ValueError("Canonical ORCID prefix-count inner keys must be nonempty strings")
+            if left >= right:
+                raise ValueError("Canonical ORCID prefix-count pairs must be unequal and lexicographically ordered")
+            if (
+                not 2 <= len(left) <= 5
+                or not 2 <= len(right) <= 5
+                or left[0] != right[0]
+                or same_prefix_tokens(left, right)
+            ):
+                raise ValueError("Canonical ORCID prefix-count keys violate the generated prefix-pair semantics")
+            if type(count) is not int or count <= 0:
+                raise ValueError("Canonical ORCID prefix-count values must be positive integers")
+            pair_count += 1
+    outer_key_cardinality = metadata.get("outer_key_cardinality")
+    pair_key_cardinality = metadata.get("pair_key_cardinality")
+    if type(outer_key_cardinality) is not int or outer_key_cardinality < 0:
+        raise ValueError("Canonical ORCID prefix-count outer_key_cardinality must be a nonnegative integer")
+    if type(pair_key_cardinality) is not int or pair_key_cardinality < 0:
+        raise ValueError("Canonical ORCID prefix-count pair_key_cardinality must be a nonnegative integer")
+    if outer_key_cardinality != len(raw_counts):
+        raise ValueError("Canonical ORCID prefix-count outer_key_cardinality does not match the data")
+    if pair_key_cardinality != pair_count:
+        raise ValueError("Canonical ORCID prefix-count pair_key_cardinality does not match the data")
+    binding = {
+        "schema_version": "s2and_orcid_prefix_counts_binding_v1",
+        "normalization_version": NORMALIZATION_VERSION,
+        "pair_key_semantics": _ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+        "generation_id": generation_id,
+        "source_snapshot_id": source_snapshot_id,
+        "source_digest": str(metadata["source_digest"]),
+        "metadata_sha256": expected_metadata_sha256,
+        "data_sha256": expected_data_sha256,
+        "data_byte_count": expected_data_byte_count,
+        "outer_key_cardinality": outer_key_cardinality,
+        "pair_key_cardinality": pair_key_cardinality,
+    }
+    return raw_counts, binding
+
+
+def _load_canonical_orcid_prefix_counts(data_dir: str | Path = _PACKAGE_DATA_DIR) -> dict[str, dict[str, int]]:
+    """Load and fully verify the immutable canonical ORCID prefix-count generation."""
+
+    counts, _binding = _load_canonical_orcid_prefix_count_artifact(data_dir)
+    return counts
+
+
+class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
+    """Defer canonical artifact I/O until subblocking actually needs the priors."""
+
+    def __init__(self, data_dir: str | Path) -> None:
+        self._data_dir = Path(data_dir)
+        self._loaded: dict[str, dict[str, int]] | None = None
+        self._binding: dict[str, Any] | None = None
+        self._load_lock = threading.Lock()
+
+    def load(self) -> dict[str, dict[str, int]]:
+        loaded = self._loaded
+        if loaded is not None:
+            return loaded
+        with self._load_lock:
+            loaded = self._loaded
+            if loaded is None:
+                loaded, binding = _load_canonical_orcid_prefix_count_artifact(self._data_dir)
+                self._binding = binding
+                self._loaded = loaded
+            return loaded
+
+    def binding(self) -> dict[str, Any]:
+        """Return a copy of the verified immutable generation identity."""
+
+        self.load()
+        binding = self._binding
+        if binding is None:
+            raise RuntimeError("Canonical ORCID prefix-count binding was not retained after loading")
+        return dict(binding)
+
+    def __getitem__(self, key: str) -> Mapping[str, int]:
+        return self.load()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.load())
+
+    def __len__(self) -> int:
+        return len(self.load())
+
+
+def _resolved_orcid_prefix_counts(
+    counts: Mapping[str, Mapping[str, int]],
+) -> Mapping[str, Mapping[str, int]]:
+    return counts.load() if isinstance(counts, _LazyCanonicalOrcidPrefixCounts) else counts
+
+
+FIRST_K_LETTER_COUNTS: Mapping[str, Mapping[str, int]] = _LazyCanonicalOrcidPrefixCounts(_PACKAGE_DATA_DIR)
 
 
 def normalize_orcid_for_subblocking(value: Any) -> str | None:
@@ -1547,7 +1814,7 @@ def _subblock_merge_candidate_metadata(key: str, size: int) -> tuple[int, str, s
 def _sorted_subblock_merge_candidates(
     output: dict[str, list[str]],
     maximum_size: int,
-    first_k_letter_counts_sorted: dict,
+    first_k_letter_counts_sorted: Mapping[str, Mapping[str, int]],
 ) -> list[tuple[tuple[str, str], float]]:
     """Return legacy subblock merge candidates with key metadata parsed once."""
 
@@ -1588,13 +1855,10 @@ def _sorted_subblock_merge_candidates(
         elif same_prefix_tokens(name_for_splits_1, name_for_splits_2):
             score = min(len(name_for_splits_1), len(name_for_splits_2))
             candidates.append((pair, 1e5 + score))
-        elif (
-            lookup_1 is not None
-            and lookup_2 is not None
-            and lookup_1 in first_k_letter_counts_sorted
-            and lookup_2 in first_k_letter_counts_sorted[lookup_1]
-        ):
-            candidates.append((pair, first_k_letter_counts_sorted[lookup_1][lookup_2]))
+        elif lookup_1 is not None and lookup_2 is not None:
+            pair_count = _orcid_prefix_pair_count(first_k_letter_counts_sorted, lookup_1, lookup_2)
+            if pair_count is not None:
+                candidates.append((pair, pair_count))
     return sorted(candidates, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
 
@@ -1624,6 +1888,7 @@ def _make_subblocks_with_telemetry_arrow_rust(
 ):
     """Run native Rust graph subblocking with signature rows loaded from Arrow."""
 
+    first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
     rust_make_subblocks = _rust_arrow_native_graph_subblocking_callable()
     if not callable(rust_make_subblocks):
         raise RuntimeError(
@@ -1679,7 +1944,15 @@ def make_subblocks_with_telemetry(
         subblock counts/signatures.
     """
     logger.info("Beginning subblocking...")
-    signature_ids = np.array(signature_ids)
+    first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
+    normalized_signature_ids = [str(signature_id) for signature_id in signature_ids]
+    seen_signature_ids: set[str] = set()
+    for signature_id in normalized_signature_ids:
+        if signature_id in seen_signature_ids:
+            raise ValueError(f"Subblocking signature_ids must be unique after string coercion: {signature_id!r}")
+        seen_signature_ids.add(signature_id)
+    signature_ids = np.asarray(normalized_signature_ids)
+    del normalized_signature_ids, seen_signature_ids
     first_middle_names = [signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids]
     first_names = np.array([name_parts[0] for name_parts in first_middle_names])
     middle_names = np.array([name_parts[1] for name_parts in first_middle_names])
@@ -1897,7 +2170,8 @@ def make_subblocks_with_telemetry(
         for k in keys_to_merge:
             counter_of_keys[k] += 1
 
-    assert all(v == 1 for v in counter_of_keys.values())
+    if not all(value == 1 for value in counter_of_keys.values()):
+        raise RuntimeError("Subblocking merge invariant failed: a key belongs to multiple merge components")
 
     # now perform the actual merges
     for merge_cluster_id in sorted(merging_log):
@@ -2023,7 +2297,9 @@ def make_subblocks_with_telemetry(
     # dict insertion order vs Rust last-subblock-wins), silently diverging the
     # two implementations.
     output_signature_ids = sorted(str(signature_id) for k in output for signature_id in output[k])
-    assert output_signature_ids == sorted(str(signature_id) for signature_id in signature_ids)
+    expected_signature_ids = sorted(str(signature_id) for signature_id in signature_ids)
+    if output_signature_ids != expected_signature_ids:
+        raise RuntimeError("Subblocking output is not a complete one-to-one partition of signature_ids")
 
     # before the end, makes sure everything is a standard list
     for k in list(output.keys()):

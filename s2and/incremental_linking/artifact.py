@@ -5,9 +5,14 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
+import os
+import shutil
+import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import lightgbm as lgb
@@ -17,6 +22,7 @@ from s2and.incremental_linking.contracts import (
     ARTIFACT_SCHEMA_VERSION,
     DEFAULT_RETRIEVAL_TOP_K,
     GATE_SURFACE_PROMOTED_LOGISTIC,
+    INCREMENTAL_LINKING_RUST_CAPABILITIES,
     MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER,
     production_contract_digest,
     promoted_linker_feature_schema_digest,
@@ -32,6 +38,115 @@ BOOSTER_FILENAME = "booster.lgb"
 METADATA_FILENAME = "metadata.json"
 PREDICTION_FIXTURE_ATOL = 1e-10
 PREDICTION_FIXTURE_RTOL = 1e-10
+_METADATA_FIELDS = frozenset(
+    {
+        "audit_metadata",
+        "booster_sha256",
+        "feature_columns",
+        "feature_schema_digest",
+        "gate_config",
+        "gate_surface",
+        "lightgbm_version",
+        "model_family",
+        "pairwise_bundle_binding",
+        "prediction_fixture_expected_probabilities",
+        "prediction_fixture_matrix",
+        "production_contract_digest",
+        "required_rust_capabilities",
+        "retrieval_stack_digest",
+        "retrieval_top_k",
+        "schema_version",
+    }
+)
+
+
+def _freeze_json_value(value: Any) -> Any:
+    """Return an immutable representation of one JSON-compatible value."""
+
+    if isinstance(value, Mapping):
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"artifact metadata mapping keys must be strings, got {key!r}")
+            frozen[key] = _freeze_json_value(item)
+        return MappingProxyType(frozen)
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json_value(item) for item in value)
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("artifact metadata numbers must be finite")
+        return value
+    raise ValueError(f"artifact metadata contains a non-JSON value: {type(value)!r}")
+
+
+def _freeze_json_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    frozen = _freeze_json_value(value)
+    if not isinstance(frozen, Mapping):  # pragma: no cover - helper invariant
+        raise TypeError("frozen artifact metadata must remain a mapping")
+    return frozen
+
+
+def _json_compatible_value(value: Any) -> Any:
+    """Return mutable JSON containers without exposing stored metadata state."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_compatible_value(item) for item in value]
+    return value
+
+
+def _require_metadata_string(payload: Mapping[str, Any], field_name: str) -> str:
+    value = payload[field_name]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Incremental linker artifact {field_name} must be a nonempty string")
+    return value
+
+
+def _require_metadata_string_list(payload: Mapping[str, Any], field_name: str) -> tuple[str, ...]:
+    value = payload[field_name]
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ValueError(f"Incremental linker artifact {field_name} must be a nonempty list of strings")
+    return tuple(value)
+
+
+def _require_metadata_mapping(payload: Mapping[str, Any], field_name: str) -> Mapping[str, Any]:
+    value = payload[field_name]
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Incremental linker artifact {field_name} must be an object")
+    return value
+
+
+def _require_metadata_number(value: Any, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"Incremental linker artifact {field_name} must contain numbers")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"Incremental linker artifact {field_name} must contain finite numbers")
+    return number
+
+
+def _prediction_fixture_from_mapping(
+    payload: Mapping[str, Any],
+) -> tuple[tuple[tuple[float, ...], ...], tuple[float, ...]]:
+    raw_matrix = payload["prediction_fixture_matrix"]
+    raw_probabilities = payload["prediction_fixture_expected_probabilities"]
+    if not isinstance(raw_matrix, list) or not raw_matrix:
+        raise ValueError("prediction_fixture_matrix must contain at least one row")
+    matrix: list[tuple[float, ...]] = []
+    for row in raw_matrix:
+        if not isinstance(row, list):
+            raise ValueError("prediction_fixture_matrix rows must be lists")
+        matrix.append(tuple(_require_metadata_number(value, field_name="prediction_fixture_matrix") for value in row))
+    if not isinstance(raw_probabilities, list):
+        raise ValueError("prediction_fixture_expected_probabilities must be a list")
+    probabilities = tuple(
+        _require_metadata_number(value, field_name="prediction_fixture_expected_probabilities")
+        for value in raw_probabilities
+    )
+    return tuple(matrix), probabilities
 
 
 @dataclass(frozen=True)
@@ -46,13 +161,102 @@ class IncrementalLinkingArtifactMetadata:
     retrieval_stack_digest: str
     retrieval_top_k: int
     gate_surface: str
-    gate_config: dict[str, Any]
+    gate_config: Mapping[str, Any]
     prediction_fixture_matrix: tuple[tuple[float, ...], ...]
     prediction_fixture_expected_probabilities: tuple[float, ...]
     required_rust_capabilities: tuple[str, ...]
     booster_sha256: str
     lightgbm_version: str
-    audit_metadata: dict[str, Any] = field(default_factory=dict)
+    pairwise_bundle_binding: Mapping[str, Any]
+    audit_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate the v2 contract and make all stored containers immutable."""
+
+        string_fields = (
+            "schema_version",
+            "model_family",
+            "feature_schema_digest",
+            "production_contract_digest",
+            "retrieval_stack_digest",
+            "gate_surface",
+            "booster_sha256",
+            "lightgbm_version",
+        )
+        for field_name in string_fields:
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Incremental linker artifact {field_name} must be a nonempty string")
+
+        if isinstance(self.retrieval_top_k, bool) or not isinstance(self.retrieval_top_k, int):
+            raise ValueError("Incremental linker artifact retrieval_top_k must be a positive integer")
+        if self.retrieval_top_k <= 0:
+            raise ValueError("Incremental linker artifact retrieval_top_k must be a positive integer")
+
+        columns = tuple(self.feature_columns)
+        if not columns or not all(isinstance(column, str) and column.strip() for column in columns):
+            raise ValueError("Incremental linker artifact feature_columns must be nonempty strings")
+        object.__setattr__(self, "feature_columns", columns)
+
+        matrix: list[tuple[float, ...]] = []
+        for row in self.prediction_fixture_matrix:
+            resolved_row = tuple(
+                _require_metadata_number(value, field_name="prediction_fixture_matrix") for value in row
+            )
+            matrix.append(resolved_row)
+        fixture_matrix = tuple(matrix)
+        if not fixture_matrix:
+            raise ValueError("prediction_fixture_matrix must contain at least one row")
+        if any(len(row) != len(columns) for row in fixture_matrix):
+            raise ValueError("prediction_fixture_matrix row width must match feature_columns")
+        object.__setattr__(self, "prediction_fixture_matrix", fixture_matrix)
+
+        fixture_probabilities = tuple(
+            _require_metadata_number(
+                value,
+                field_name="prediction_fixture_expected_probabilities",
+            )
+            for value in self.prediction_fixture_expected_probabilities
+        )
+        if len(fixture_probabilities) != len(fixture_matrix):
+            raise ValueError("prediction_fixture_expected_probabilities length must match fixture rows")
+        if any(probability < 0.0 or probability > 1.0 for probability in fixture_probabilities):
+            raise ValueError("prediction_fixture_expected_probabilities must be between 0 and 1")
+        object.__setattr__(self, "prediction_fixture_expected_probabilities", fixture_probabilities)
+
+        capabilities = tuple(self.required_rust_capabilities)
+        if not capabilities or not all(
+            isinstance(capability, str) and capability.strip() for capability in capabilities
+        ):
+            raise ValueError("required_rust_capabilities must be a nonempty list of strings")
+        if len(set(capabilities)) != len(capabilities):
+            raise ValueError("required_rust_capabilities must not contain duplicates")
+        missing_required_capabilities = sorted(set(INCREMENTAL_LINKING_RUST_CAPABILITIES) - set(capabilities))
+        if missing_required_capabilities:
+            raise ValueError(
+                "required_rust_capabilities omits current incremental-linking capabilities: "
+                f"{missing_required_capabilities}"
+            )
+        object.__setattr__(self, "required_rust_capabilities", capabilities)
+
+        if len(self.booster_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.booster_sha256):
+            raise ValueError("Incremental linker artifact booster_sha256 is not a SHA-256")
+
+        frozen_gate_config = _freeze_json_mapping(self.gate_config)
+        frozen_pairwise_binding = _freeze_json_mapping(self.pairwise_bundle_binding)
+        frozen_audit_metadata = _freeze_json_mapping(self.audit_metadata)
+        object.__setattr__(self, "gate_config", frozen_gate_config)
+        object.__setattr__(self, "pairwise_bundle_binding", frozen_pairwise_binding)
+        object.__setattr__(self, "audit_metadata", frozen_audit_metadata)
+
+        validate_artifact_contract_metadata(self.to_json_dict())
+        load_logistic_gate_config(frozen_gate_config)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> IncrementalLinkingArtifactMetadata:
+        """Share metadata because every reachable container is immutable."""
+
+        memo[id(self)] = self
+        return self
 
     @classmethod
     def build(
@@ -63,9 +267,10 @@ class IncrementalLinkingArtifactMetadata:
         gate_config: Mapping[str, Any] | None = None,
         prediction_fixture_matrix: Sequence[Sequence[float]],
         prediction_fixture_expected_probabilities: Sequence[float],
-        required_rust_capabilities: Sequence[str] = (),
+        required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
         booster_sha256: str,
         lightgbm_version: str,
+        pairwise_bundle_binding: Mapping[str, Any],
         audit_metadata: Mapping[str, Any] | None = None,
     ) -> IncrementalLinkingArtifactMetadata:
         """Build validated metadata for a promoted linker artifact."""
@@ -73,12 +278,6 @@ class IncrementalLinkingArtifactMetadata:
         columns = tuple(promoted_linker_feature_columns() if feature_columns is None else feature_columns)
         fixture_matrix = tuple(tuple(float(value) for value in row) for row in prediction_fixture_matrix)
         fixture_probabilities = tuple(float(value) for value in prediction_fixture_expected_probabilities)
-        if len(fixture_matrix) == 0:
-            raise ValueError("prediction_fixture_matrix must contain at least one row")
-        if any(len(row) != len(columns) for row in fixture_matrix):
-            raise ValueError("prediction_fixture_matrix row width must match feature_columns")
-        if len(fixture_probabilities) != len(fixture_matrix):
-            raise ValueError("prediction_fixture_expected_probabilities length must match fixture rows")
         resolved_audit_metadata = dict(audit_metadata or {})
         resolved_audit_metadata.setdefault(
             "runtime_decision_policy",
@@ -99,47 +298,71 @@ class IncrementalLinkingArtifactMetadata:
             required_rust_capabilities=tuple(str(value) for value in required_rust_capabilities),
             booster_sha256=str(booster_sha256),
             lightgbm_version=str(lightgbm_version),
+            pairwise_bundle_binding=dict(pairwise_bundle_binding),
             audit_metadata=resolved_audit_metadata,
         )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> IncrementalLinkingArtifactMetadata:
-        """Load metadata from a JSON mapping."""
+        """Load an exact, strictly typed v2 metadata mapping."""
 
-        metadata = cls(
-            schema_version=str(payload["schema_version"]),
-            model_family=str(payload["model_family"]),
-            feature_columns=tuple(str(value) for value in payload["feature_columns"]),
-            feature_schema_digest=str(payload["feature_schema_digest"]),
-            production_contract_digest=str(payload["production_contract_digest"]),
-            retrieval_stack_digest=str(payload["retrieval_stack_digest"]),
-            retrieval_top_k=int(payload["retrieval_top_k"]),
-            gate_surface=str(payload["gate_surface"]),
-            gate_config=dict(payload.get("gate_config", {})),
-            prediction_fixture_matrix=tuple(
-                tuple(float(value) for value in row) for row in payload["prediction_fixture_matrix"]
-            ),
-            prediction_fixture_expected_probabilities=tuple(
-                float(value) for value in payload["prediction_fixture_expected_probabilities"]
-            ),
-            required_rust_capabilities=tuple(str(value) for value in payload.get("required_rust_capabilities", ())),
-            booster_sha256=str(payload.get("booster_sha256", "")),
-            lightgbm_version=str(payload.get("lightgbm_version", "")),
-            audit_metadata=dict(payload.get("audit_metadata", {})),
+        if not isinstance(payload, Mapping):
+            raise ValueError("Incremental linker artifact metadata must be a JSON object")
+        if any(not isinstance(key, str) for key in payload):
+            raise ValueError("Incremental linker artifact metadata field names must be strings")
+        observed_fields = set(payload)
+        if observed_fields != _METADATA_FIELDS:
+            missing = sorted(_METADATA_FIELDS - observed_fields)
+            unknown = sorted(observed_fields - _METADATA_FIELDS)
+            raise ValueError(
+                "Incremental linker artifact metadata fields do not match the v2 schema: "
+                f"missing={missing} unknown={unknown}"
+            )
+
+        retrieval_top_k = payload["retrieval_top_k"]
+        if isinstance(retrieval_top_k, bool) or not isinstance(retrieval_top_k, int) or retrieval_top_k <= 0:
+            raise ValueError("Incremental linker artifact retrieval_top_k must be a positive integer")
+        fixture_matrix, fixture_probabilities = _prediction_fixture_from_mapping(payload)
+        return cls(
+            schema_version=_require_metadata_string(payload, "schema_version"),
+            model_family=_require_metadata_string(payload, "model_family"),
+            feature_columns=_require_metadata_string_list(payload, "feature_columns"),
+            feature_schema_digest=_require_metadata_string(payload, "feature_schema_digest"),
+            production_contract_digest=_require_metadata_string(payload, "production_contract_digest"),
+            retrieval_stack_digest=_require_metadata_string(payload, "retrieval_stack_digest"),
+            retrieval_top_k=retrieval_top_k,
+            gate_surface=_require_metadata_string(payload, "gate_surface"),
+            gate_config=_require_metadata_mapping(payload, "gate_config"),
+            prediction_fixture_matrix=fixture_matrix,
+            prediction_fixture_expected_probabilities=fixture_probabilities,
+            required_rust_capabilities=_require_metadata_string_list(payload, "required_rust_capabilities"),
+            booster_sha256=_require_metadata_string(payload, "booster_sha256"),
+            lightgbm_version=_require_metadata_string(payload, "lightgbm_version"),
+            pairwise_bundle_binding=_require_metadata_mapping(payload, "pairwise_bundle_binding"),
+            audit_metadata=_require_metadata_mapping(payload, "audit_metadata"),
         )
-        validate_artifact_contract_metadata(metadata.to_json_dict())
-        load_logistic_gate_config(metadata.gate_config)
-        return metadata
 
     def to_json_dict(self) -> dict[str, Any]:
         """Return JSON-compatible metadata."""
 
-        payload = asdict(self)
-        payload["feature_columns"] = list(self.feature_columns)
-        payload["prediction_fixture_matrix"] = [list(row) for row in self.prediction_fixture_matrix]
-        payload["prediction_fixture_expected_probabilities"] = list(self.prediction_fixture_expected_probabilities)
-        payload["required_rust_capabilities"] = list(self.required_rust_capabilities)
-        return payload
+        return {
+            "schema_version": self.schema_version,
+            "model_family": self.model_family,
+            "feature_columns": list(self.feature_columns),
+            "feature_schema_digest": self.feature_schema_digest,
+            "production_contract_digest": self.production_contract_digest,
+            "retrieval_stack_digest": self.retrieval_stack_digest,
+            "retrieval_top_k": self.retrieval_top_k,
+            "gate_surface": self.gate_surface,
+            "gate_config": _json_compatible_value(self.gate_config),
+            "prediction_fixture_matrix": [list(row) for row in self.prediction_fixture_matrix],
+            "prediction_fixture_expected_probabilities": list(self.prediction_fixture_expected_probabilities),
+            "required_rust_capabilities": list(self.required_rust_capabilities),
+            "booster_sha256": self.booster_sha256,
+            "lightgbm_version": self.lightgbm_version,
+            "pairwise_bundle_binding": _json_compatible_value(self.pairwise_bundle_binding),
+            "audit_metadata": _json_compatible_value(self.audit_metadata),
+        }
 
 
 def _rust_lightgbm_booster_unavailable_error(found_version: Any = None) -> RuntimeError:
@@ -174,25 +397,62 @@ class IncrementalLinkingArtifact:
     artifact_dir: Path
     gate_model: NumpyLogisticGate
 
-    def predict_probabilities(self, matrix: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
+    def __deepcopy__(self, memo: dict[int, Any]) -> IncrementalLinkingArtifact:
+        """Share this immutable, thread-safe loaded artifact across clusterer copies."""
+
+        memo[id(self)] = self
+        return self
+
+    def __reduce__(self) -> tuple[Any, tuple[Path]]:
+        """Revalidate and reload the native scorer instead of pickling a PyO3 object."""
+
+        return load_incremental_linking_artifact, (self.artifact_dir,)
+
+    def predict_probabilities(
+        self,
+        matrix: np.ndarray,
+        *,
+        num_threads: int | None = None,
+        max_rows_per_chunk: int | None = None,
+    ) -> np.ndarray:
         """Predict positive-class probabilities for an artifact-ordered matrix."""
 
-        features = np.asarray(matrix, dtype=np.float32, order="C")
+        features = np.asarray(matrix)
         if features.ndim != 2:
             raise ValueError(f"feature matrix must be 2D, got shape={features.shape}")
+        if features.dtype != np.float32 or not features.flags.c_contiguous:
+            raise ValueError("incremental linker feature matrix must be C-contiguous float32")
         expected_cols = len(self.metadata.feature_columns)
         if features.shape[1] != expected_cols:
             raise ValueError(f"feature matrix width must be {expected_cols}, got {features.shape[1]}")
-        # Quantize through float32 exactly as the historical float32 LightGBM
-        # C-API path did, then widen losslessly for the Rust scorer.
-        probabilities = np.asarray(
-            self.booster.predict_proba_positive(
-                np.ascontiguousarray(features, dtype=np.float64),
-                num_threads=num_threads,
-            ),
-            dtype=np.float64,
-        )
-        return probabilities.reshape(-1)
+        row_count = int(features.shape[0])
+        if max_rows_per_chunk is None:
+            chunk_rows = max(1, row_count)
+        else:
+            chunk_rows = int(max_rows_per_chunk)
+            if chunk_rows <= 0:
+                raise ValueError(f"max_rows_per_chunk must be positive, got {max_rows_per_chunk}")
+        if row_count == 0 or chunk_rows >= row_count:
+            probabilities = np.asarray(
+                self.booster.predict_proba_positive_f32(
+                    features,
+                    num_threads=num_threads,
+                ),
+                dtype=np.float64,
+            )
+            return probabilities.reshape(-1)
+
+        probabilities = np.empty(row_count, dtype=np.float64)
+        for start in range(0, row_count, chunk_rows):
+            stop = min(row_count, start + chunk_rows)
+            probabilities[start:stop] = np.asarray(
+                self.booster.predict_proba_positive_f32(
+                    features[start:stop],
+                    num_threads=num_threads,
+                ),
+                dtype=np.float64,
+            ).reshape(-1)
+        return probabilities
 
 
 def _booster_from_model(model: Any) -> lgb.Booster:
@@ -233,6 +493,48 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _artifact_tree_hashes(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): _sha256_file(path)
+        for path in sorted((path for path in root.rglob("*") if path.is_file()), key=lambda item: item.as_posix())
+    }
+
+
+def _fsync_artifact_stage(root: Path) -> None:
+    for path in sorted((path for path in root.rglob("*") if path.is_file()), key=lambda item: item.as_posix()):
+        mode = "rb+" if os.name == "nt" else "rb"
+        with path.open(mode) as handle:
+            os.fsync(handle.fileno())
+    if os.name != "nt":
+        descriptor = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _publish_immutable_artifact(staging_dir: Path, artifact_dir: Path) -> None:
+    if artifact_dir.exists():
+        if not artifact_dir.is_dir():
+            raise FileExistsError(f"Incremental linker artifact target is not a directory: {artifact_dir}")
+        existing_hashes = _artifact_tree_hashes(artifact_dir)
+        if existing_hashes:
+            if existing_hashes != _artifact_tree_hashes(staging_dir):
+                raise FileExistsError(
+                    "Incremental linker artifacts are immutable; existing target differs from staged artifact: "
+                    f"{artifact_dir}"
+                )
+            return
+        artifact_dir.rmdir()
+    os.replace(staging_dir, artifact_dir)
+    if os.name != "nt":
+        descriptor = os.open(artifact_dir.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def _required_lightgbm_version() -> str:
     version = getattr(lgb, "__version__", None)
     if version is None:
@@ -248,13 +550,12 @@ def save_incremental_linking_artifact(
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
     gate_config: Mapping[str, Any] | None = None,
     prediction_fixture_matrix: Sequence[Sequence[float]] | np.ndarray,
-    required_rust_capabilities: Sequence[str] = (),
+    required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
     audit_metadata: Mapping[str, Any] | None = None,
 ) -> IncrementalLinkingArtifactMetadata:
     """Write `booster.lgb` and `metadata.json` for a fitted linker model."""
 
-    artifact_dir = Path(artifact_dir)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir = Path(artifact_dir).resolve()
     columns = tuple(promoted_linker_feature_columns() if feature_columns is None else feature_columns)
     fixture = np.asarray(prediction_fixture_matrix, dtype=np.float32)
     if fixture.ndim != 2:
@@ -270,26 +571,40 @@ def save_incremental_linking_artifact(
     fixture_rows = tuple(tuple(float(value) for value in row) for row in fixture.tolist())
     expected_probability_values = tuple(float(value) for value in expected_probabilities.tolist())
     lightgbm_version = _required_lightgbm_version()
+    pairwise_bundle_binding = dict((audit_metadata or {}).get("pairwise_bundle_binding", {}))
+    if not pairwise_bundle_binding:
+        raise ValueError("audit_metadata.pairwise_bundle_binding is required")
 
-    booster = _booster_from_model(model)
-    booster_path = artifact_dir / BOOSTER_FILENAME
-    booster.save_model(str(booster_path))
-    metadata = IncrementalLinkingArtifactMetadata.build(
-        feature_columns=columns,
-        retrieval_top_k=int(retrieval_top_k),
-        gate_config=gate_config,
-        prediction_fixture_matrix=fixture_rows,
-        prediction_fixture_expected_probabilities=expected_probability_values,
-        required_rust_capabilities=required_rust_capabilities,
-        booster_sha256=_sha256_file(booster_path),
-        lightgbm_version=lightgbm_version,
-        audit_metadata=audit_metadata,
-    )
-    (artifact_dir / METADATA_FILENAME).write_text(
-        json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return metadata
+    artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{artifact_dir.name}.staging-", dir=artifact_dir.parent))
+    try:
+        booster = _booster_from_model(model)
+        booster_path = staging_dir / BOOSTER_FILENAME
+        booster.save_model(str(booster_path))
+        metadata = IncrementalLinkingArtifactMetadata.build(
+            feature_columns=columns,
+            retrieval_top_k=int(retrieval_top_k),
+            gate_config=gate_config,
+            prediction_fixture_matrix=fixture_rows,
+            prediction_fixture_expected_probabilities=expected_probability_values,
+            required_rust_capabilities=required_rust_capabilities,
+            booster_sha256=_sha256_file(booster_path),
+            lightgbm_version=lightgbm_version,
+            pairwise_bundle_binding=pairwise_bundle_binding,
+            audit_metadata=audit_metadata,
+        )
+        validate_artifact_contract_metadata(metadata.to_json_dict())
+        (staging_dir / METADATA_FILENAME).write_text(
+            json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        load_incremental_linking_artifact(staging_dir, require_rust_capabilities=False)
+        _fsync_artifact_stage(staging_dir)
+        _publish_immutable_artifact(staging_dir, artifact_dir)
+        return metadata
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
 
 
 def load_incremental_linking_artifact(
@@ -303,14 +618,13 @@ def load_incremental_linking_artifact(
     during training/finalization).
     """
 
-    artifact_dir = Path(artifact_dir)
+    artifact_dir = Path(artifact_dir).resolve(strict=True)
     metadata_payload = json.loads((artifact_dir / METADATA_FILENAME).read_text(encoding="utf-8"))
     metadata = IncrementalLinkingArtifactMetadata.from_mapping(metadata_payload)
     booster_path = artifact_dir / BOOSTER_FILENAME
-    if metadata.booster_sha256:
-        observed_booster_sha256 = _sha256_file(booster_path)
-        if observed_booster_sha256 != metadata.booster_sha256:
-            raise ValueError("Incremental linker artifact booster_sha256 mismatch")
+    observed_booster_sha256 = _sha256_file(booster_path)
+    if observed_booster_sha256 != metadata.booster_sha256:
+        raise ValueError("Incremental linker artifact booster_sha256 mismatch")
     if require_rust_capabilities:
         validate_required_rust_capabilities(metadata.required_rust_capabilities)
     booster = _load_rust_lightgbm_booster(booster_path)

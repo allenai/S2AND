@@ -3,7 +3,20 @@ from __future__ import annotations
 import lightgbm as lgb
 import numpy as np
 
+from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.incremental_linking.features import promoted_linker_feature_columns
+
+
+def synthetic_pairwise_bundle_binding() -> dict[str, object]:
+    """Return a structurally valid pairwise binding for isolated linker tests."""
+
+    return {
+        "normalization_version": NORMALIZATION_VERSION,
+        "featurizer_version": FEATURIZER_VERSION,
+        "ordered_feature_contract_digest": "1" * 64,
+        "main_booster_sha256": "2" * 64,
+        "nameless_booster_sha256": "3" * 64,
+    }
 
 
 def build_tiny_promoted_booster() -> tuple[lgb.Booster, np.ndarray]:

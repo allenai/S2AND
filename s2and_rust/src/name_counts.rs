@@ -61,6 +61,15 @@ pub(crate) struct RawNameCountIndex {
     last: RawNameCountIndexFile,
     first_last: RawNameCountIndexFile,
     last_first_initial: RawNameCountIndexFile,
+    provenance_binding: Option<NameCountsProvenanceBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NameCountsProvenanceBinding {
+    pub(crate) generation_id: String,
+    pub(crate) pickle_sha256: String,
+    pub(crate) source_snapshot_id: String,
+    pub(crate) selected_rows_sha256: String,
 }
 
 struct RawNameCountIndexPaths {
@@ -69,6 +78,7 @@ struct RawNameCountIndexPaths {
     first_last: PathBuf,
     last_first_initial: PathBuf,
     normalization_version: String,
+    provenance_binding: Option<NameCountsProvenanceBinding>,
 }
 
 impl RawNameCountIndex {
@@ -85,6 +95,7 @@ impl RawNameCountIndex {
                 &paths.last_first_initial,
                 RawNameCountKind::LastFirstInitial,
             )?,
+            provenance_binding: paths.provenance_binding,
         })
     }
 
@@ -310,6 +321,91 @@ impl RawNameCountMaps {
     pub(crate) fn get(&self, kind: RawNameCountKind, name: &str) -> Option<f64> {
         self.index.as_ref().and_then(|index| index.get(kind, name))
     }
+
+    pub(crate) fn provenance_binding(&self) -> Option<&NameCountsProvenanceBinding> {
+        self.index
+            .as_ref()
+            .and_then(|index| index.provenance_binding.as_ref())
+    }
+}
+
+fn required_provenance_string(
+    provenance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    manifest_path: &Path,
+) -> PyResult<String> {
+    provenance
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index manifest {} source_provenance requires nonempty string {}",
+                manifest_path.display(),
+                field
+            ))
+        })
+}
+
+fn required_provenance_sha256(
+    provenance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    manifest_path: &Path,
+) -> PyResult<String> {
+    let value = required_provenance_string(provenance, field, manifest_path)?;
+    if value.len() != 64
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|character| character.is_ascii_digit() || (b'a'..=b'f').contains(character))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "name-count index manifest {} source_provenance requires lowercase SHA-256 {}",
+            manifest_path.display(),
+            field
+        )));
+    }
+    Ok(value)
+}
+
+fn read_name_counts_provenance_binding(
+    manifest: &serde_json::Value,
+    manifest_path: &Path,
+) -> PyResult<Option<NameCountsProvenanceBinding>> {
+    let Some(value) = manifest.get("source_provenance") else {
+        return Ok(None);
+    };
+    let provenance = value.as_object().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "name-count index manifest {} has non-object source_provenance",
+            manifest_path.display()
+        ))
+    })?;
+    if provenance
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+        != Some("name_counts_provenance_v1")
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "name-count index manifest {} source_provenance requires name_counts_provenance_v1",
+            manifest_path.display()
+        )));
+    }
+    Ok(Some(NameCountsProvenanceBinding {
+        generation_id: required_provenance_string(provenance, "generation_id", manifest_path)?,
+        pickle_sha256: required_provenance_sha256(provenance, "pickle_sha256", manifest_path)?,
+        source_snapshot_id: required_provenance_string(
+            provenance,
+            "source_snapshot_id",
+            manifest_path,
+        )?,
+        selected_rows_sha256: required_provenance_sha256(
+            provenance,
+            "selected_rows_sha256",
+            manifest_path,
+        )?,
+    }))
 }
 
 fn name_counts_index_manifest_path(
@@ -411,6 +507,7 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
                 manifest_path.display()
             ))
         })?;
+    let provenance_binding = read_name_counts_provenance_binding(&manifest, &manifest_path)?;
     Ok(RawNameCountIndexPaths {
         first: name_counts_index_manifest_path(index_dir, files, "first")?,
         last: name_counts_index_manifest_path(index_dir, files, "last")?,
@@ -421,6 +518,7 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
             "last_first_initial",
         )?,
         normalization_version,
+        provenance_binding,
     })
 }
 
@@ -459,7 +557,9 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 
 #[cfg(test)]
 mod normalization_version_tests {
-    use super::read_name_counts_index_normalization_version;
+    use super::{
+        read_name_counts_index_normalization_version, read_name_counts_provenance_binding,
+    };
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -514,6 +614,46 @@ mod normalization_version_tests {
         }
         pyo3::prepare_freethreaded_python();
         pyo3::Python::with_gil(|py| err.value(py).to_string())
+    }
+
+    #[test]
+    fn source_provenance_binding_is_exact_and_validated() {
+        let manifest = serde_json::json!({
+            "source_provenance": {
+                "schema_version": "name_counts_provenance_v1",
+                "generation_id": "generation-a",
+                "pickle_sha256": "0".repeat(64),
+                "source_snapshot_id": "snapshot-a",
+                "selected_rows_sha256": "1".repeat(64),
+            }
+        });
+        let binding =
+            read_name_counts_provenance_binding(&manifest, std::path::Path::new("manifest.json"))
+                .expect("valid provenance")
+                .expect("present provenance");
+
+        assert_eq!(binding.generation_id, "generation-a");
+        assert_eq!(binding.pickle_sha256, "0".repeat(64));
+        assert_eq!(binding.source_snapshot_id, "snapshot-a");
+        assert_eq!(binding.selected_rows_sha256, "1".repeat(64));
+    }
+
+    #[test]
+    fn source_provenance_binding_rejects_non_sha_digest() {
+        let manifest = serde_json::json!({
+            "source_provenance": {
+                "schema_version": "name_counts_provenance_v1",
+                "generation_id": "generation-a",
+                "pickle_sha256": "G".repeat(64),
+                "source_snapshot_id": "snapshot-a",
+                "selected_rows_sha256": "1".repeat(64),
+            }
+        });
+        let error =
+            read_name_counts_provenance_binding(&manifest, std::path::Path::new("manifest.json"))
+                .expect_err("invalid digest must fail");
+
+        assert!(py_err_message(error).contains("lowercase SHA-256 pickle_sha256"));
     }
 
     #[test]

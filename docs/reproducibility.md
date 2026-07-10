@@ -13,7 +13,7 @@ git checkout s2and_paper
 uv venv --python 3.7.9
 ```
 
-Then install the pinned environment from `paper_experiments_env.txt` inside that isolated environment and rerun the paper experiment command set from the `s2and_paper` branch. The current branch keeps a reference copy at `scripts/archive/paper_experiments.sh`, but that file is historical and not the supported entrypoint for current `main` development.
+Then install the pinned environment from `paper_experiments_env.txt` inside that isolated environment and rerun the paper experiment command set from the `s2and_paper` branch. The repository keeps a reference copy at `scripts/archive/paper_experiments.sh`, but that file is historical and not the supported entrypoint for current development.
 
 ## Paper-era released artifacts
 
@@ -29,18 +29,23 @@ with a `clusterer` key rather than a bare clusterer object. Current `main`
 compatibility artifacts use versioned names such as `production_model_v1.2.pickle`
 and are covered below.
 
-## Current branch
+## Previous release and canonical migration branch
 
-For current work on `main`, prefer the checked-in native production bundle:
+The checked-in native v1.21 bundle was the previous release default:
 
 - `production_model_v1.21/`
 
-Legacy pickles are still present for compatibility and parity checks:
+Legacy pickles are still present as historical/parity inputs:
 
 - `production_model_v1.2.pickle`
 - `production_model_v1.1.pickle`
 
-The v1.21 bundle includes the promoted incremental linker under
+Canonical-v2 rejects all of these artifacts because their normalization
+contract is legacy. No compatible default exists on this branch until v1.3 is
+trained and validated. Do not use their presence in package data as evidence
+that current inference is supported.
+
+The v1.21 bundle includes the previous promoted incremental linker under
 `incremental_linker/`. Its replay target is tracked separately at
 `production_model_v1.21/reproducibility/incremental_linker_training_target.json`;
 replay scripts should not depend on machine-local analysis artifacts.

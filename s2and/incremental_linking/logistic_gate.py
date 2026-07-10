@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -115,6 +116,15 @@ _CATEGORICAL_FEATURES = (
 )
 
 
+def _immutable_float64_array(value: Any) -> np.ndarray:
+    """Copy an array into a read-only bytes-backed NumPy view."""
+
+    array = np.asarray(value, dtype=np.float64, order="C")
+    frozen = np.frombuffer(array.tobytes(order="C"), dtype=np.float64)
+    frozen.shape = array.shape
+    return frozen
+
+
 def _validate_unique_feature_names(feature_names: Sequence[str]) -> tuple[str, ...]:
     """Return feature names after rejecting duplicate columns."""
 
@@ -175,24 +185,34 @@ class NumpyLogisticGate:
     bias: np.ndarray
     missing_values: np.ndarray
     classes: tuple[int, ...]
-    error_weights: dict[str, float]
+    error_weights: Mapping[str, float]
 
     def __post_init__(self) -> None:
-        _validate_unique_feature_names(self.feature_names)
-        n_features = len(self.feature_names)
-        if self.weights.shape != (n_features, len(self.classes)):
+        feature_names = _validate_unique_feature_names(self.feature_names)
+        classes = tuple(self.classes)
+        weights = _immutable_float64_array(self.weights)
+        bias = _immutable_float64_array(self.bias)
+        missing_values = _immutable_float64_array(self.missing_values)
+        error_weights = MappingProxyType({key: float(value) for key, value in self.error_weights.items()})
+        object.__setattr__(self, "feature_names", feature_names)
+        object.__setattr__(self, "classes", classes)
+        object.__setattr__(self, "weights", weights)
+        object.__setattr__(self, "bias", bias)
+        object.__setattr__(self, "missing_values", missing_values)
+        object.__setattr__(self, "error_weights", error_weights)
+
+        n_features = len(feature_names)
+        if weights.shape != (n_features, len(classes)):
             raise ValueError(
-                "logistic gate weights shape must be " f"({n_features}, {len(self.classes)}), got {self.weights.shape}"
+                "logistic gate weights shape must be " f"({n_features}, {len(classes)}), got {weights.shape}"
             )
-        if self.bias.shape != (len(self.classes),):
-            raise ValueError(f"logistic gate bias shape must be ({len(self.classes)},), got {self.bias.shape}")
-        if self.missing_values.shape != (n_features,):
-            raise ValueError(
-                f"logistic gate missing_values shape must be ({n_features},), got {self.missing_values.shape}"
-            )
-        if tuple(self.classes) != LOGISTIC_GATE_CLASSES:
-            raise ValueError(f"logistic gate classes must be {LOGISTIC_GATE_CLASSES}, got {self.classes}")
-        missing_error_weights = sorted(LOGISTIC_GATE_REQUIRED_ERROR_WEIGHTS - set(self.error_weights))
+        if bias.shape != (len(classes),):
+            raise ValueError(f"logistic gate bias shape must be ({len(classes)},), got {bias.shape}")
+        if missing_values.shape != (n_features,):
+            raise ValueError(f"logistic gate missing_values shape must be ({n_features},), got {missing_values.shape}")
+        if classes != LOGISTIC_GATE_CLASSES:
+            raise ValueError(f"logistic gate classes must be {LOGISTIC_GATE_CLASSES}, got {classes}")
+        missing_error_weights = sorted(LOGISTIC_GATE_REQUIRED_ERROR_WEIGHTS - set(error_weights))
         if missing_error_weights:
             raise ValueError(f"logistic gate error_weights missing required keys: {missing_error_weights}")
 

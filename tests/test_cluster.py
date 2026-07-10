@@ -1,6 +1,7 @@
 import os
 import unittest
 from collections import Counter
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -169,21 +170,27 @@ class TestClusterer(unittest.TestCase):
 
         # now with batching
         # interestingly, this causes an odd outcome where the subblock clustering is different
-        prediction_full, _ = self.dummy_clusterer.predict(
-            block, self.dummy_dataset, batching_threshold=7, backend="python"
-        )
-        prediction_subblock_1, _ = self.dummy_clusterer.predict(
-            {"a sattar|subblock=ab": ["0", "1", "2"]}, self.dummy_dataset, backend="python"
-        )
-        self.assertTrue(
-            set(prediction_full["a sattar|subblock=ab_1"]).issubset(
-                set(prediction_subblock_1["a sattar|subblock=ab_1"])
+        # The checked-in legacy ORCID priors are intentionally unavailable to
+        # the strict production loader until the replacement snapshot is
+        # published. This unit test exercises the subblocking algorithm with a
+        # small explicit prior fixture rather than crossing that artifact
+        # boundary.
+        with patch("s2and.subblocking._resolved_orcid_prefix_counts", return_value={}):
+            prediction_full, _ = self.dummy_clusterer.predict(
+                block, self.dummy_dataset, batching_threshold=7, backend="python"
             )
-        )
+            prediction_subblock_1, _ = self.dummy_clusterer.predict(
+                {"a sattar|subblock=ab": ["0", "1", "2"]}, self.dummy_dataset, backend="python"
+            )
+            self.assertTrue(
+                set(prediction_full["a sattar|subblock=ab_1"]).issubset(
+                    set(prediction_subblock_1["a sattar|subblock=ab_1"])
+                )
+            )
 
-        # stricter batching - just making sure it doesn't break
-        self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=2, backend="python")
-        self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=1, backend="python")
+            # stricter batching - just making sure it doesn't break
+            self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=2, backend="python")
+            self.dummy_clusterer.predict(block, self.dummy_dataset, batching_threshold=1, backend="python")
 
     def test_fused_path_equivalence(self):
         """The fused cluster-and-free path (dists=None) must produce

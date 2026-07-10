@@ -72,6 +72,31 @@ def _write_paper_authors_table(pa: Any, path: Path, paper_ids: list[str], author
     )
 
 
+def test_arrow_artifact_generation_excludes_request_local_sidecars(tmp_path: Path) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+    signatures_path.write_bytes(b"signatures")
+    sidecar_paths = {
+        "query_signatures": tmp_path / "query-signatures.arrow",
+        "cluster_seeds": tmp_path / "cluster-seeds.arrow",
+        "cluster_seed_disallows": tmp_path / "cluster-seed-disallows.arrow",
+        "altered_cluster_signatures": tmp_path / "altered-cluster-signatures.arrow",
+    }
+    for key, path in sidecar_paths.items():
+        path.write_bytes(key.encode("utf-8"))
+    paths = {
+        "signatures": str(signatures_path),
+        **{key: str(path) for key, path in sidecar_paths.items()},
+    }
+
+    first = convert_to_arrow._arrow_artifact_generation(paths, tmp_path)
+    for path in sidecar_paths.values():
+        path.write_bytes(b"request-local replacement")
+    second = convert_to_arrow._arrow_artifact_generation(paths, tmp_path)
+
+    assert set(first["files"]) == {"signatures"}
+    assert second == first
+
+
 def test_benchmark_parser_requires_explicit_dataset_selection(tmp_path: Path) -> None:
     parser = convert_to_arrow._build_parser()
 

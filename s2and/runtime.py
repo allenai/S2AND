@@ -47,6 +47,7 @@ _REQUIRED_INCREMENTAL_PAIR_PLAN_ROW_SIGNALS = ("row_orcid_match",)
 _REQUIRED_INCREMENTAL_PAIR_PLAN_KWARGS = ("query_candidate_component_keys_by_signature_id",)
 _REQUIRED_RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS = (
     "from_query_signatures",
+    "from_auto_queries",
     "plan_query_signatures",
     "build_telemetry",
 )

@@ -71,6 +71,33 @@ def test_negative_limit_rows_is_rejected() -> None:
         promoted_train.run(args)
 
 
+@pytest.mark.parametrize("save_option", ["--save-artifact-to", "--save-production-bundle-to"])
+def test_metric_drift_override_cannot_promote_before_loading_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    save_option: str,
+) -> None:
+    def fail_load(_path: Path) -> dict[str, Any]:
+        raise AssertionError("promotion validation must run before loading the target")
+
+    monkeypatch.setattr(promoted_train, "_load_target", fail_load)  # noqa: SLF001
+    output_dir = tmp_path / "must_not_be_created"
+    args = promoted_train.build_parser().parse_args(
+        [
+            "--allow-metric-drift",
+            save_option,
+            str(tmp_path / "promotion"),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="--allow-metric-drift is diagnostic-only"):
+        promoted_train.run(args)
+
+    assert not output_dir.exists()
+
+
 def test_selected_row_positions_rejects_non_positive_limit_rows() -> None:
     labels = pd.DataFrame({"dataset": ["pubmed", "pubmed"]})
 
@@ -396,6 +423,96 @@ def test_hyperopt_loss_uses_weighted_average_error() -> None:
     ) == {"weighted_average_error_weights": True}
 
 
+@pytest.mark.parametrize(
+    ("observed", "target", "message"),
+    (
+        ({}, {"metrics": {"score": 1.0}}, "missing target metrics"),
+        ({"score": float("nan")}, {"metrics": {"score": 1.0}}, "must be finite"),
+        ({"score": float("inf")}, {"metrics": {"score": 1.0}}, "must be finite"),
+        ({"score": float("-inf")}, {"metrics": {"score": 1.0}}, "must be finite"),
+        ({}, {"metrics": {}}, "must not be empty"),
+    ),
+)
+def test_metric_gate_rejects_missing_and_nonfinite_values(
+    observed: dict[str, float],
+    target: dict[str, dict[str, float]],
+    message: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        promoted_train._assert_no_metric_drift(observed, target)  # noqa: SLF001
+
+
+def test_metric_gate_runs_before_artifact_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = {
+        "features": ["f0"],
+        "feature_count": 1,
+        "params": {"n_estimators": 1},
+        "metrics": {"stratified_test_errors": 0},
+    }
+    bundle = promoted_train.OfficialBundle(
+        root=tmp_path,
+        bundle_name="gate-order",
+        assets={},
+        models={"classic": {"feature_columns": ["f0"], "best_params": {"n_estimators": 1}}},
+        expected_metrics={},
+    )
+    summary = {
+        "training_summary": {"rows": 3, "positive_rows": 1},
+        "stratified_eval_test_split": {
+            "overall": {
+                "test": {
+                    "accuracy": 0.0,
+                    "balanced_accuracy": 0.0,
+                    "error_rate": 1.0,
+                    "n_queries": 1,
+                    "errors": 1,
+                    "false_abstain": 1,
+                    "false_link": 0,
+                    "wrong_candidate_link": 0,
+                }
+            }
+        },
+    }
+    promoted = False
+
+    def fail_if_promoted(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal promoted
+        promoted = True
+        raise AssertionError("artifact promotion ran before metric gate")
+
+    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
+    monkeypatch.setattr(
+        promoted_train,
+        "_load_precomputed_promoted_feature_bundle",
+        lambda **_kwargs: (bundle, [{"mode": "precomputed-promoted"}]),
+    )
+    monkeypatch.setattr(promoted_train, "run_classic", lambda *_args, **_kwargs: summary)
+    monkeypatch.setattr(promoted_train, "_train_and_save_prod_artifact", fail_if_promoted)  # noqa: SLF001
+    monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path: {"test": "binding"})
+    args = promoted_train.build_parser().parse_args(
+        [
+            "--feature-mode",
+            "precomputed-promoted",
+            "--precomputed-feature-bundle-root",
+            str(tmp_path / "features"),
+            "--run-full",
+            "--save-artifact-to",
+            str(tmp_path / "artifact"),
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="drifted from target metrics"):
+        promoted_train.run(args)
+
+    assert not promoted
+    assert not (tmp_path / "artifact").exists()
+
+
 def test_hyperopt_includes_base_params_as_candidate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -600,6 +717,7 @@ def test_prepare_prod_training_data_weights_calibration_rows_and_leaves_test_for
     prod_data = promoted_train._prepare_prod_training_data(  # noqa: SLF001
         bundle,
         holdout_importance_weight=10.0,
+        retrieval_rank_limit=promoted_train.DEFAULT_RETRIEVAL_TOP_K,
     )
 
     assert prod_data.rows["query_group_id"].tolist() == [
@@ -692,6 +810,7 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     monkeypatch.setattr(promoted_train, "_run_classic_hyperopt", fake_hyperopt)  # noqa: SLF001
     monkeypatch.setattr(promoted_train, "run_classic", fake_run_classic)
     monkeypatch.setattr(promoted_train, "_train_and_save_prod_artifact", fake_train_prod)  # noqa: SLF001
+    monkeypatch.setattr(promoted_train, "pairwise_bundle_binding", lambda _path: {"test": "binding"})
 
     artifact_dir = tmp_path / "artifact"
     args = promoted_train.build_parser().parse_args(
@@ -720,7 +839,7 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     ]
     assert result["n_estimators"] == 42
     assert result["artifact_summary"]["path"] == str(artifact_dir.resolve())
-    assert result["metric_drift_check"] == "skipped_after_hyperopt_param_search"
+    assert result["metric_drift_check"] == "passed"
 
 
 def test_run_uses_explicit_precomputed_promoted_bundle(

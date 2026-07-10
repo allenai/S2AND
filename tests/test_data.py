@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
@@ -7,7 +8,9 @@ import pytest
 
 import s2and.data as data_module
 from s2and.data import ANDData
+from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
 from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
+from tests.helpers import tiny_name_counts_provenance
 
 
 def test_maybe_load_list_empty_file_returns_empty_list(tmp_path):
@@ -56,6 +59,112 @@ def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
 
     assert dataset.signatures["s1"].author_info_affiliations == ["analytical engine lab"]
     assert "" not in dataset.signatures["s1"].author_info_affiliations
+
+
+def test_name_tuples_none_uses_canonical_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
+    loaded: list[str] = []
+
+    def fake_load(filename: str) -> set[tuple[str, str]]:
+        loaded.append(filename)
+        return {("bill", "william")}
+
+    monkeypatch.setattr(data_module, "_load_name_tuples_from_file", fake_load)
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="canonical_name_tuple_default",
+        mode="inference",
+        load_name_counts=False,
+        preprocess=False,
+        name_tuples=None,
+    )
+
+    assert loaded == ["s2and_name_tuples_canonical.txt"]
+    assert dataset.name_tuples == {("bill", "william")}
+
+
+def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="canonical_custom_name_tuples",
+        mode="inference",
+        load_name_counts=False,
+        preprocess=False,
+        name_tuples={("william", "bill")},
+    )
+
+    assert dataset.name_tuples == {("bill", "william")}
+
+
+def test_name_tuple_loader_rejects_invalid_rows_with_valid_binding_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(data_module, "_PACKAGE_DATA_DIR", str(tmp_path))
+    data_bytes = b"alice,bob,carol\n"
+    (tmp_path / "invalid.txt").write_bytes(data_bytes)
+    metadata = build_name_tuple_artifact_metadata(
+        source_filename="source.txt",
+        source_bytes=b"source\n",
+        data_filename="invalid.txt",
+        data_bytes=data_bytes,
+        directed_pair_count=1,
+        unordered_pair_count=0,
+        generated_at="2026-07-10T00:00:00+00:00",
+        input_pair_count=1,
+        dropped_identity=0,
+        dropped_prefix_compatible=0,
+        dropped_empty=0,
+    )
+    (tmp_path / "invalid.txt.meta.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid.txt:1"):
+        data_module._load_name_tuples_from_file("invalid.txt")
+
+
+def test_signature_full_name_uses_only_canonical_fields() -> None:
+    dataset = ANDData(
+        signatures={
+            "s1": {
+                "signature_id": "s1",
+                "paper_id": 1,
+                "author_info": {
+                    "position": 0,
+                    "block": "d smith",
+                    "first": "Dr.",
+                    "middle": "",
+                    "last": "Smith",
+                    "suffix": None,
+                    "email": None,
+                    "affiliations": [],
+                },
+            }
+        },
+        papers={
+            "1": {
+                "paper_id": 1,
+                "title": "Part 1",
+                "abstract": "",
+                "journal_name": "",
+                "venue": "",
+                "year": 2020,
+                "authors": [{"position": 0, "author_name": "Dr. Smith"}],
+                "references": [],
+            }
+        },
+        name="canonical_full_name",
+        mode="inference",
+        load_name_counts=False,
+        preprocess=True,
+        n_jobs=1,
+        name_tuples=set(),
+    )
+
+    signature = dataset.signatures["s1"]
+    assert signature.author_info_first_normalized_without_apostrophe == ""
+    assert signature.author_info_full_name == "smith"
+    assert dataset.papers["1"].title == "part 1"
+    assert dataset.papers["1"].title_ngrams_words["1"] == 1
 
 
 def test_anddata_passes_arrow_featurization_to_rust_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,6 +507,7 @@ def test_compute_signature_name_counts_uses_single_character_initial():
         "last_dict": {"smith": 11},
         "first_last_dict": {},
         "last_first_initial_dict": {"smith m": 17},
+        "provenance": tiny_name_counts_provenance(),
     }
     dataset = ANDData(
         "tests/dummy/signatures.json",

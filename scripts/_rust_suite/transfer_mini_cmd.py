@@ -36,7 +36,6 @@ import contextlib
 import gc
 import json
 import os
-import pickle
 import subprocess
 import sys
 import time
@@ -456,11 +455,10 @@ def _single_run(
     import numpy as np
     from hyperopt import hp
 
-    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_PATH
-    from s2and.data import ANDData
+    from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NORMALIZATION_VERSION
+    from s2and.data import ANDData, _load_name_counts_artifact
     from s2and.eval import cluster_eval
     from s2and.featurizer import FeaturizationInfo, featurize
-    from s2and.file_cache import cached_path
     from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
     DATA_DIR = data_dir or _resolve_data_dir()
@@ -502,13 +500,14 @@ def _single_run(
         t0 = time.perf_counter()
         name_counts: dict[str, Any] | None = None
         if ingest != "arrow":
-            with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-                first_dict, last_dict, first_last_dict, last_first_initial_dict = pickle.load(f)
+            counts, provenance = _load_name_counts_artifact()
+            first_dict, last_dict, first_last_dict, last_first_initial_dict = counts
             name_counts = {
                 "first_dict": first_dict,
                 "last_dict": last_dict,
                 "first_last_dict": first_last_dict,
                 "last_first_initial_dict": last_first_initial_dict,
+                "provenance": provenance,
             }
         stage_timings["name_counts_load_seconds"] = round(time.perf_counter() - t0, 3)
         _snapshot_stage_rss(stage_rss_gb, monitor, "name_counts_load")
@@ -537,6 +536,7 @@ def _single_run(
                 anddata = build_training_anddata_from_arrow(
                     arrow_paths,
                     dataset_name,
+                    expected_normalization_version=NORMALIZATION_VERSION,
                     clusters=clusters_path,
                     mode="train",
                     block_type=BLOCK_TYPE,

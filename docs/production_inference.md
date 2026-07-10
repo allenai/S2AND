@@ -1,19 +1,29 @@
 # Production Inference
 
-This document collects the operational details for using the released S2AND production models.
+This document collects the operational details for released S2AND production
+models and the current canonical-v2 migration boundary.
+
+> **Migration status (2026-07-09):** no production model is compatible with the
+> current canonical-v2 branch. The checked-in v1.21 bundle and v1.0-v1.2 pickles
+> are legacy artifacts and fail normalization-version validation. Use the
+> previous published package for v1.21 inference until canonical v1.3 is trained,
+> validated, and packaged. The remaining work is tracked in
+> [work_plan.md](work_plan.md).
 
 ## Which production model to use
 
 | Model artifact | Status | Embeddings | Usable with current S2AND? | Format |
 | --- | --- | --- | --- | --- |
-| `production_model_v1.21/` | Current | SPECTER2 PRX | Yes | Native LightGBM + JSON bundle |
-| `production_model_v1.2.pickle` | Legacy pairwise pickle | SPECTER2 PRX | Yes | Pickle |
-| `production_model_v1.1.pickle` | Legacy | SPECTER1 | Yes | Pickle |
+| `production_model_v1.3/` | Pending canonical retrain | Not frozen | No | Future native bundle |
+| `production_model_v1.21/` | Previous release | SPECTER2 PRX | No, legacy normalization | Native LightGBM + JSON bundle |
+| `production_model_v1.2.pickle` | Legacy pairwise pickle | SPECTER2 PRX | No, legacy normalization | Pickle |
+| `production_model_v1.1.pickle` | Legacy | SPECTER1 | No, legacy normalization | Pickle |
 | `production_model_v1.0.pickle` | Deprecated | SPECTER1 | No (required removed reference features) | Pickle |
 
-Recommended default:
+Current default status:
 
-- Use `production_model_v1.21/` unless you have a specific compatibility reason to load an older pickle.
+- There is no loadable default on the migration branch.
+- Use `production_model_v1.21/` only with the previous compatible S2AND release.
 - The v1.21 bundle contains pairwise artifacts whose source model version is
   v1.2 and the v1.2 promoted Rust incremental linker. Linker audit metadata may
   record the enclosing bundle path/version used during finalization.
@@ -26,7 +36,8 @@ Embedding source:
 
 ## Production model bundle
 
-The current production model is a single directory:
+The previous production model is a single directory retained as a migration
+input:
 
 ```text
 s2and/data/production_model_v1.21/
@@ -45,7 +56,9 @@ s2and/data/production_model_v1.21/
     incremental_linker_training_target.json
 ```
 
-Load this directory once with `load_production_model(...)`. The returned object
+With the previous compatible package, load this directory once with
+`load_production_model(...)`. It is intentionally rejected by canonical-v2. In
+the previous release, the returned object
 is still a normal mutable `Clusterer`, so callers can set `clusterer.n_jobs`,
 `clusterer.use_cache`, or `clusterer.cluster_model.eps` just as they did with
 the old pickle-loaded clusterer.
@@ -72,12 +85,31 @@ included in manifest checksum validation at bundle load time and records the
 53-feature replay target and LightGBM training params for rebuilding or auditing
 the promoted incremental linker.
 
-New production releases are built as a two-stage native bundle. First,
-`scripts/production/model/train_pairwise.py` writes the pairwise-only
-`production_model_vX.Y/` stage. Then
-`scripts/production/model/train_linker_and_finalize.py` trains the promoted
-linker into the same directory and writes the final checksummed `manifest.json`.
-Production release scripts should not write pickle artifacts.
+The canonical production release will be built as an atomic native bundle.
+`scripts/production/model/train_pairwise.py` and
+`scripts/production/model/train_linker_and_finalize.py` must write into a
+staging generation. Metric and integrity gates run there before the complete
+directory is renamed into a previously nonexistent final target. Production
+release scripts must not mutate a live bundle or write new pickle artifacts.
+
+The supported in-place transition is narrower: a pairwise-only staging bundle
+may be finalized at the same path. Finalization validates and fsyncs a complete
+sibling staging tree, installs the complete-only linker and replay target while
+the pairwise-only manifest remains authoritative, and atomically replaces
+`manifest.json` last. A normal process crash therefore leaves the directory
+continuously present and either pairwise-only or complete, and rerunning the
+same finalization is safe. On Windows, Python cannot portably fsync directory
+entries; file contents are flushed and the manifest replacement is atomic, but
+durability across sudden power loss still depends on the filesystem and storage
+stack. Always run the post-publication loader/checksum smoke after restart when
+power-loss durability is in doubt.
+
+`load_production_model(...)` validates and loads the promoted linker once and
+retains that immutable artifact on the returned clusterer. Repeated incremental
+requests reuse the loaded booster instead of rereading, rehashing, and parsing
+it. A deep-copied clusterer safely shares the immutable artifact; pickling omits
+the native PyO3 object and revalidates/reloads it from the artifact directory on
+unpickle.
 
 New bundles must store their intended runtime `eps` in `clusterer.json` at
 export time. The loader's runtime eps override is scoped to v1.2-derived
@@ -135,7 +167,8 @@ Its main inputs are:
   `metadata.json`; this is a low-level linker-only output.
 - `--save-production-bundle-to`: preferred release output. It writes the linker
   under `incremental_linker/`, copies the target JSON into `reproducibility/`,
-  refreshes linker audit metadata, and writes the final bundle manifest.
+  verifies the linker's immutable pairwise-bundle binding, and writes the final
+  bundle manifest without rewriting linker metadata.
 
 In the default `--feature-mode arrow-rust`, the script rebuilds promoted
 features from the Arrow source bundle. For each selected table and dataset, it
@@ -161,7 +194,10 @@ configured NumPy logistic gate, evaluates the configured S2AND/Hwang/extra/manua
 holdout tables, writes `classic/summary.json`, and writes `run_summary.json`
 with observed metrics and deltas from the replay target JSON. Unless
 `--allow-metric-drift` is passed, a full replay fails when observed metrics do
-not match the target metrics.
+not match the target metrics. That override is diagnostic-only: it cannot be
+combined with `--save-artifact-to` or `--save-production-bundle-to`, and this
+incompatibility is rejected before inputs are loaded or work directories are
+created.
 
 When `--save-artifact-to` or `--save-production-bundle-to` is set, the script
 also fits the final production linker on train rows plus weighted
@@ -174,6 +210,12 @@ production training summary. Keep the replay target under the bundle's
 `reproducibility/` directory. `--save-production-bundle-to` is the
 normal release path because it assembles the complete runtime directory and
 validates it with `load_production_model(...)`.
+
+Both native pairwise export and standalone linker-artifact export publish from
+validated, fsynced sibling staging directories. A pre-existing destination is
+accepted only when every file is byte-identical; a different destination is an
+immutable generation and must be given a new path. This prevents a failed
+writer from partially overwriting an earlier valid pairwise or linker artifact.
 
 Safety behavior is intentional: an unbounded full run requires `--run-full`;
 `--datasets`, `--tables`, and `--limit-rows` are smoke/materialization controls
@@ -274,7 +316,7 @@ with current S2AND.
 
 ## Minimal input contract
 
-Minimal paper entry for `v1.21`, `v1.2`, and `v1.1`:
+Historical minimal paper entry for `v1.21`, `v1.2`, and `v1.1`:
 
 ```json
 {
@@ -310,21 +352,19 @@ Minimal signature entry:
 }
 ```
 
-## Name-count semantics compatibility
+## Canonical name-count contract
 
-S2AND supports two runtime semantics for the name-count feature key used by `last_first_initial_count_min`:
-
-- `legacy_full_first_token`: key is `<last> <first_token>`
-- `initial_char`: key is `<last> <first[0]>`
-
-Compatibility rules:
-
-- `production_model_v1.21/`, `production_model_v1.2.pickle`, and `production_model_v1.1.pickle` use `initial_char` with
-  `s2and/data/name_counts.pickle`; that pickle stores keys like `smith j`, not `smith john`.
-- In `ANDData(..., mode="inference")`, prediction automatically applies the semantics expected by the loaded model via the stored feature contract.
-- Do not mix model artifacts and feature semantics without retraining.
+Canonical-v2 has one runtime key contract. `last_first_initial_count_min` uses
+`<canonical last> <canonical first[0]>` when both fields exist and a null key
+otherwise. The model, dataset, count pickle/index, ORCID counts, name tuples,
+and linker must carry and agree on their normalization/generation contract.
+Legacy models and counts are rejected rather than adapted or relabeled.
 
 ## Minimal Arrow Prediction Flow
+
+This v1.21 example is historical and requires the previous compatible package.
+Replace the model and artifact paths with the declared canonical default after
+v1.3 is released.
 
 ```python
 from scripts.eval_prod_models import (
@@ -374,6 +414,10 @@ Semantics:
   `use_cache=False`.
 - Direct Arrow/Rust production prediction bypasses the pair-feature SQLite
   cache and reads the request/runtime Arrow artifacts directly.
+- Published artifacts are immutable content-addressed generations. In-process
+  Rust reuse binds exact paths, the full generation inventory, non-seed
+  settings, and seed version; filesystem watches invalidate same-path mutation
+  automatically before reuse.
 
 Recommended defaults:
 
@@ -411,6 +455,14 @@ the promoted Rust incremental target, query batching should provide the memory
 bound for the promoted retrieval/linker/gate path. The legacy incremental
 implementation remains a fallback or compatibility mode, not the output target.
 
+Promoted query-disallow outcomes are request-global and deterministic across
+input order, query windows, and `batching_threshold`. RAM limits are refreshed
+after planner, featurizer, and scorer allocations; work selected under a stale
+larger limit is discarded and re-planned before scoring. Planning uses the
+loaded model's exact final, pairwise, and aggregate feature widths. Release-scale
+profiling is still required, but these controls no longer change request
+semantics.
+
 Standard large-block prediction:
 
 ```python
@@ -427,8 +479,10 @@ or provide complete Arrow paths to `Clusterer.predict(...)`: at least
 `signatures`, `papers`, `paper_authors`, and their raw-planner batch-index
 sidecars. Models that use SPECTER features also require `specter` plus
 `specter_batch_index`, and models that use name-count features require
-`name_counts_index`. The direct Arrow route validates required keys and declared
-files before Rust featurizer construction and raises
+`name_counts_index`. Production routes also require a canonical manifest whose
+content-addressed inventory covers every immutable table/index artifact. The
+direct Arrow route validates required keys and declared files before Rust
+featurizer construction and raises
 `MissingArrowArtifactError` with structured `missing_keys` and `missing_files`
 fields. When the generic `Clusterer.predict(...)` route resolves to Rust,
 including subblocked large-block prediction, it follows the same strict artifact

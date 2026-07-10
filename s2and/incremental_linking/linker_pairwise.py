@@ -336,6 +336,7 @@ def compute_linker_pair_chunk_plan(
         total_pairs=int(total_pairs),
         total_rows=int(row_count),
         total_ram_bytes=total_ram_bytes,
+        index_remap_bytes_per_pair=memory_budget.BORROWED_SIGNATURE_INDEX_REMAP_BYTES_PER_PAIR,
     )
 
 

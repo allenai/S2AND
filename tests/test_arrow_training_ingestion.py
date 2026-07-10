@@ -34,7 +34,7 @@ from s2and.arrow_training import (  # noqa: E402
     load_signatures_dict_from_arrow,
     load_specter_tuple_from_arrow,
 )
-from s2and.consts import FEATURIZER_VERSION  # noqa: E402
+from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.featurizer import FeaturizationInfo, featurize  # noqa: E402
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table  # noqa: E402
@@ -43,7 +43,12 @@ from s2and.incremental_linking.feature_block_arrow import (  # noqa: E402
     write_raw_arrow_batch_lookup_indexes,
 )
 from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata  # noqa: E402
-from tests.helpers import import_s2and_rust, patch_tiny_name_counts_loader, tiny_name_counts  # noqa: E402
+from tests.helpers import (  # noqa: E402
+    import_s2and_rust,
+    patch_tiny_name_counts_loader,
+    tiny_name_counts,
+    write_test_arrow_artifact_manifest,
+)
 
 HAS_RUST, _RUST_MODULE = import_s2and_rust()
 if not HAS_RUST:
@@ -157,6 +162,36 @@ def test_arrow_training_rejects_null_paper_author_ids(tmp_path: Path) -> None:
         load_papers_dict_from_arrow(papers_path, authors_path)
 
 
+def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1"])
+    _write_minimal_paper_authors_table(authors_path, ["p1", "p1"])
+
+    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+
+@pytest.mark.parametrize("author_name", [None, "", "   "])
+def test_arrow_training_rejects_empty_paper_author_names(tmp_path: Path, author_name: str | None) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1"])
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "position": pa.array([0], type=pa.int64()),
+                "author_name": pa.array([author_name], type=pa.string()),
+            }
+        ),
+        authors_path,
+    )
+
+    with pytest.raises(ValueError, match="empty author_name"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+
 def test_arrow_training_rejects_duplicate_specter_ids(tmp_path: Path) -> None:
     specter_path = tmp_path / "specter.arrow"
     write_arrow_ipc_table(
@@ -225,10 +260,12 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
         arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
         name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir)
         arrow_paths["name_counts_index"] = name_counts_index_path
+        write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
 
         arrow_dataset = build_training_anddata_from_arrow(
             arrow_paths,
             "dummy_arrow_training",
+            expected_normalization_version=NORMALIZATION_VERSION,
             clusters=str(DUMMY_DIR / "clusters.json"),
             mode="train",
             block_type="s2",
@@ -315,6 +352,7 @@ def test_arrow_ingestion_loads_specter2_alias_embeddings(training_bundle: dict[s
     alias_dataset = build_training_anddata_from_arrow(
         alias_paths,
         "dummy_arrow_specter2_alias",
+        expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         mode="train",
         block_type="s2",
@@ -341,6 +379,7 @@ def test_arrow_training_skips_python_specter_by_default_when_rust_attached(
     arrow_dataset = build_training_anddata_from_arrow(
         training_bundle["arrow_paths"],
         "dummy_arrow_training_skip_python_specter",
+        expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         mode="train",
         block_type="s2",
@@ -365,6 +404,7 @@ def test_arrow_training_loads_python_specter_by_default_when_backend_python(
     arrow_dataset = build_training_anddata_from_arrow(
         training_bundle["arrow_paths"],
         "dummy_arrow_training_python_backend_specter",
+        expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         mode="train",
         block_type="s2",
@@ -437,6 +477,7 @@ def test_featurize_end_to_end_with_fixed_pairs(training_bundle: dict[str, Any]) 
     arrow_dataset = build_training_anddata_from_arrow(
         training_bundle["arrow_paths"],
         "dummy_arrow_fixed_pairs",
+        expected_normalization_version=NORMALIZATION_VERSION,
         mode="train",
         block_type="s2",
         load_name_counts=tiny_name_counts(),
@@ -501,9 +542,17 @@ def test_attach_requires_batch_indexes_and_name_counts_index(training_bundle: di
 
     missing_indexes = {key: value for key, value in complete_paths.items() if "batch_index" not in key}
     with pytest.raises((ValueError, FileNotFoundError)):
-        attach_training_arrow_featurizer_paths(arrow_dataset, missing_indexes)
+        attach_training_arrow_featurizer_paths(
+            arrow_dataset,
+            missing_indexes,
+            expected_normalization_version=NORMALIZATION_VERSION,
+        )
 
     missing_name_counts = dict(complete_paths)
     missing_name_counts.pop("name_counts_index", None)
     with pytest.raises((ValueError, FileNotFoundError)):
-        attach_training_arrow_featurizer_paths(arrow_dataset, missing_name_counts)
+        attach_training_arrow_featurizer_paths(
+            arrow_dataset,
+            missing_name_counts,
+            expected_normalization_version=NORMALIZATION_VERSION,
+        )

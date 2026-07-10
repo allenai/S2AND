@@ -359,10 +359,12 @@ def test_linker_pairwise_aggregates_use_memory_chunk_plan(monkeypatch: pytest.Mo
 
     fake_featurizer = FakeRustFeaturizer()
     plan_call_count = 0
+    plan_kwargs: dict[str, Any] = {}
 
-    def fake_chunk_plan(**_kwargs):
+    def fake_chunk_plan(**kwargs):
         nonlocal plan_call_count
         plan_call_count += 1
+        plan_kwargs.update(kwargs)
         return _mock_chunk_plan(chunk_pairs=2, total_pairs=candidate_batch.pair_count)
 
     monkeypatch.setattr(
@@ -386,6 +388,7 @@ def test_linker_pairwise_aggregates_use_memory_chunk_plan(monkeypatch: pytest.Mo
 
     assert call_sizes == [2, 2, 1]
     assert plan_call_count == 1
+    assert plan_kwargs["index_remap_bytes_per_pair"] == 8
     assert all(0 in seen and 6 in seen for seen in aggregate_indices_seen)
     assert stats.counts.tolist() == [2, 3]
     assert stats.feature_matrix().shape == (2, 6)
@@ -735,3 +738,60 @@ def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) ->
     np.testing.assert_allclose(stats.sums, expected_sums, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(stats.mins, expected_mins, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(stats.maxs, expected_maxs, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.skipif(
+    not HAS_LINKER_ARRAY_FEATURE_AGG_RUST,
+    reason=f"s2and_rust linker array feature aggregate API unavailable: {LINKER_ARRAY_FEATURE_AGG_RUST_IMPORT_ERROR}",
+)
+def test_dense_and_sparse_signature_index_layouts_produce_identical_features(tmp_path) -> None:
+    dataset = build_dummy_dataset("dummy_linker_signature_index_layouts", load_name_counts=True)
+    template_signature = next(iter(dataset.signatures.values()))
+    template_paper = dataset.papers[str(template_signature.paper_id)]
+    next_paper_id = max(int(paper_id) for paper_id in dataset.papers) + 1
+    while len(dataset.signatures) < 128:
+        offset = len(dataset.signatures)
+        signature_id = f"layout_{offset:04d}"
+        paper_id = next_paper_id + offset
+        dataset.papers[str(paper_id)] = template_paper._replace(paper_id=paper_id)
+        dataset.signatures[signature_id] = template_signature._replace(
+            signature_id=signature_id,
+            paper_id=paper_id,
+        )
+
+    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    rust_featurizer = feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
+    signature_count = len(rust_featurizer.signature_ids())
+    target_pair = (0, signature_count - 1)
+    dense_pairs = [target_pair, *((index, index + 1) for index in range(signature_count - 1))]
+    selected_indices = [0, 6, 10]
+
+    dense_owned = np.asarray(rust_featurizer.featurize_pairs_matrix_indexed(dense_pairs, selected_indices, 1, 0.0))
+    sparse_owned = np.asarray(rust_featurizer.featurize_pairs_matrix_indexed([target_pair], selected_indices, 1, 0.0))
+    np.testing.assert_allclose(sparse_owned[0], dense_owned[0], rtol=0.0, atol=0.0)
+
+    def array_result(pairs: list[tuple[int, int]]):
+        left = np.asarray([pair[0] for pair in pairs], dtype=np.uint32)
+        right = np.asarray([pair[1] for pair in pairs], dtype=np.uint32)
+        rows = np.arange(len(pairs), dtype=np.uint32)
+        return rust_featurizer.linker_pair_index_arrays_and_aggregate_stats(
+            left,
+            right,
+            rows,
+            len(pairs),
+            selected_indices,
+            selected_indices,
+            1,
+            0.0,
+            0.0,
+            True,
+        )
+
+    dense_matrix, dense_counts, dense_valid, dense_sums, dense_mins, dense_maxs = array_result(dense_pairs)
+    sparse_matrix, sparse_counts, sparse_valid, sparse_sums, sparse_mins, sparse_maxs = array_result([target_pair])
+    np.testing.assert_allclose(np.asarray(sparse_matrix)[0], np.asarray(dense_matrix)[0], rtol=0.0, atol=0.0)
+    np.testing.assert_array_equal(np.asarray(sparse_counts), np.asarray(dense_counts)[:1])
+    np.testing.assert_array_equal(np.asarray(sparse_valid), np.asarray(dense_valid)[:1])
+    np.testing.assert_allclose(np.asarray(sparse_sums), np.asarray(dense_sums)[:1], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(np.asarray(sparse_mins), np.asarray(dense_mins)[:1], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(np.asarray(sparse_maxs), np.asarray(dense_maxs)[:1], rtol=0.0, atol=0.0)

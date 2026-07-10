@@ -193,6 +193,7 @@ def _numeric_report(left: np.ndarray, right: np.ndarray, *, atol: float, rtol: f
 
 
 def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
+    from s2and.consts import NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import build_rust_featurizer_from_arrow_paths, clear_rust_featurizer_cache
     from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
@@ -265,6 +266,7 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
     started = time.perf_counter()
     arrow_featurizer = build_rust_featurizer_from_arrow_paths(
         paths,
+        expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=selected_signature_ids,
         name_tuples="filtered",
         load_name_counts=True,
@@ -308,7 +310,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--embedding", choices=("specter", "specter2"), default="specter2")
     parser.add_argument("--n-jobs", type=int, default=1)
-    parser.add_argument("--atol", type=float, default=1e-5)
+    parser.add_argument("--atol", type=float, default=1e-6)
     parser.add_argument("--rtol", type=float, default=0.0)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--allow-mismatch", action="store_true")

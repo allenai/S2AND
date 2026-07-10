@@ -11,6 +11,7 @@ def test_path_cache_fingerprint_omits_ctime(monkeypatch) -> None:
         "stat",
         lambda _path: SimpleNamespace(st_size=7, st_mtime_ns=11, st_ctime_ns=13),
     )
-    monkeypatch.setattr(model, "_path_sample_digest", lambda _path, _size: "digest")
+    monkeypatch.setattr(model, "_path_full_digest", lambda _path: "digest")
 
-    assert model._path_cache_fingerprint("artifact.arrow") == ("artifact.arrow", 7, 11, "digest")
+    path = model.Path("artifact.arrow")
+    assert model._path_cache_fingerprint(path) == (str(path.resolve()), 7, 11, "digest")

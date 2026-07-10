@@ -29,6 +29,7 @@ from s2and.text import (
     normalize_orcid,
     normalize_orcid_compact,
     normalize_text,
+    normalize_title,
     same_prefix_tokens,
 )
 
@@ -41,6 +42,11 @@ class TestClusterer(unittest.TestCase):
         assert "te han zi xt" == normalize_text("te'漢字xt")
         assert "text" == normalize_text("te'xt", True)
         assert "a b" == normalize_text("A1 B-2")
+
+    def test_normalize_title_preserves_identifying_digits(self):
+        assert normalize_title("Part 1: Co3O4 in 2025") == "part 1 co3o4 in 2025"
+        assert normalize_title("PART-1 / Co3O4") == "part 1 co3o4"
+        assert normalize_title(None) == ""
 
     def test_normalize_orcid_canonicalizes_common_forms(self):
         assert normalize_orcid(" https://orcid.org/0000-0002-1825-0097 ") == "0000-0002-1825-0097"
@@ -141,6 +147,7 @@ class TestClusterer(unittest.TestCase):
                 "jumped",
             ]
         ) == get_text_ngrams_words("the quick green fox jumped")
+        assert get_text_ngrams_words("part 1", drop_short_tokens=False)["1"] == 1
 
     def test_equal(self):
         assert np.isnan(equal(None, None))
@@ -174,10 +181,25 @@ class TestClusterer(unittest.TestCase):
         assert email_prefix_suffix("jsmith@mit.edu") == ("jsmith", "mit.edu")
         # Leading/trailing dots are stripped and case lowered; internal dots kept.
         assert email_prefix_suffix("J.Smith@MIT.EDU.") == ("j.smith", "mit.edu")
-        # No "@" -> whole string is prefix, suffix is missing (None), so two
-        # malformed emails never match on a shared sentinel suffix.
-        assert email_prefix_suffix("jsmith") == ("jsmith", None)
-        assert email_prefix_suffix("a@b@c") == ("ab", "c")
+        for malformed in (
+            "jsmith",
+            "a@b@c",
+            "@",
+            "a@",
+            "@b",
+            "a b@c",
+            "a@b c",
+            " a@b",
+            "a@b ",
+            "a\u00a0@b",
+            ".@b",
+        ):
+            assert email_prefix_suffix(malformed) == (None, None)
+
+    def test_first_name_aliases_are_order_independent(self):
+        directed_aliases = {("qi xin", "qadir")}
+        assert first_names_name_compatible("qi xin", "qadir", directed_aliases)
+        assert first_names_name_compatible("qadir", "qi xin", directed_aliases)
 
     def test_get_text_ngrams_short_token_filter_decoupled_from_stopwords(self):
         # Reference-author ngrams pass stopwords=None but still drop short tokens.
@@ -240,7 +262,7 @@ class TestClusterer(unittest.TestCase):
             monkeypatch.setattr(
                 text_module.cld2,
                 "detect",
-                lambda _text: (True, None, [("ENGLISH", "en", 92, 0.0)]),
+                lambda _text, **kwargs: (True, kwargs, [("ENGLISH", "en", 92, 0.0)]),
             )
 
             detection = detect_language("hello world")
@@ -257,7 +279,7 @@ class TestClusterer(unittest.TestCase):
             monkeypatch.setattr(
                 text_module.cld2,
                 "detect",
-                lambda _text: (False, None, [("FRENCH", "fr", 82, 0.0)]),
+                lambda _text, **kwargs: (False, kwargs, [("FRENCH", "fr", 82, 0.0)]),
             )
 
             detection = detect_language("bonjour monde")
@@ -266,6 +288,21 @@ class TestClusterer(unittest.TestCase):
         assert detection.is_english is False
         assert detection.predicted_language == "fr"
         assert detection.language_reliability == 0.0
+
+    def test_detect_language_pins_plain_text_mode(self):
+        import s2and.text as text_module
+
+        captured: dict[str, Any] = {}
+
+        def fake_detect(_text: str, **kwargs: Any):
+            captured.update(kwargs)
+            return True, None, [("ENGLISH", "en", 99, 0.0)]
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(text_module.cld2, "detect", fake_detect)
+            detect_language("<b>hello world</b>")
+
+        assert captured == {"isPlainText": True}
 
     def test_detect_language_returns_unknown_for_combining_marks_only_text(self):
         # str.isalpha counts general-category Letter (L*) characters only, so a
@@ -283,7 +320,7 @@ class TestClusterer(unittest.TestCase):
 def test_cld2_unexpected_error_propagates(monkeypatch):
     import s2and.text as text_module
 
-    def _raise_type_error(_text: str):
+    def _raise_type_error(_text: str, **_kwargs: Any):
         raise TypeError("bad cld2 state")
 
     monkeypatch.setattr(text_module.cld2, "detect", _raise_type_error)

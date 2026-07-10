@@ -403,6 +403,41 @@ def test_indexed_pair_matrix_rust_parity(dataset, sample_pairs):
             )
 
 
+def test_language_reliability_min_is_pair_order_invariant_in_python_and_rust(tmp_path):
+    data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
+    dataset = _load_dataset_from_dir(data_dir, "dummy_language_reliability_pair_order")
+    signature_id_1 = "0"
+    signature_id_2 = "2"
+    paper_id_1 = str(dataset.signatures[signature_id_1].paper_id)
+    paper_id_2 = str(dataset.signatures[signature_id_2].paper_id)
+    dataset.papers[paper_id_1] = dataset.papers[paper_id_1]._replace(
+        predicted_language="en",
+        is_reliable=True,
+        language_reliability=0.25,
+    )
+    dataset.papers[paper_id_2] = dataset.papers[paper_id_2]._replace(
+        predicted_language="fr",
+        is_reliable=True,
+        language_reliability=0.75,
+    )
+    attach_arrow_featurizer_bundle(dataset, tmp_path)
+    feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
+    reliability_index = feature_names.index("language_reliability_min")
+
+    python_forward, _ = _single_pair_featurize((signature_id_1, signature_id_2), dataset=dataset)
+    python_reverse, _ = _single_pair_featurize((signature_id_2, signature_id_1), dataset=dataset)
+    rust_forward = _featurize_pair_indexed_rust(dataset, signature_id_1, signature_id_2)
+    rust_reverse = _featurize_pair_indexed_rust(dataset, signature_id_2, signature_id_1)
+
+    observed = [
+        python_forward[reliability_index],
+        python_reverse[reliability_index],
+        rust_forward[reliability_index],
+        rust_reverse[reliability_index],
+    ]
+    assert all(equalish(float(value), 0.25) for value in observed), observed
+
+
 def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
 
@@ -440,7 +475,7 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
 
     assert np.array_equal(labels_python, labels_rust)
     assert features_python.shape == features_rust.shape
-    close_mask = np.isclose(features_python, features_rust, rtol=1e-6, atol=1e-3, equal_nan=True)
+    close_mask = np.isclose(features_python, features_rust, rtol=0.0, atol=1e-6, equal_nan=True)
     assert np.all(close_mask), f"Feature matrix mismatch count: {int((~close_mask).sum())}"
     _reset_featurizer_env_caches()
 

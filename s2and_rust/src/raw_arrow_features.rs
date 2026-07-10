@@ -11,6 +11,7 @@ use crate::raw_arrow::readers::{
 };
 use crate::text_compat::{
     canonicalize_name_parts_compat, compute_block_compat, normalize_text_compat_from_map,
+    normalize_title_compat_from_map,
 };
 use crate::{
     build_name_counts_data_from_artifact, counter_data_from_hash_count_map, fnv64,
@@ -90,7 +91,7 @@ pub(crate) fn build_raw_arrow_feature(
         let normalized_venue =
             normalize_text_compat_from_map(&venue_text, false, unidecode_char_map);
         let normalized_title =
-            normalize_text_compat_from_map(&paper_data.title, false, unidecode_char_map);
+            normalize_title_compat_from_map(&paper_data.title, unidecode_char_map);
         (
             term_set_from_normalized_text(&normalized_venue),
             term_set_from_normalized_text(&normalized_title),
@@ -143,11 +144,13 @@ pub(crate) fn build_raw_arrow_feature(
         .and_then(|values| values.get(&signature.paper_id))
         .map(Arc::clone);
     let specter_norm = specter.as_ref().map(|values| vector_norm_f32(values));
+    let canonical_suffix =
+        normalize_text_compat_from_map(&signature.author_suffix, false, unidecode_char_map);
     let query_author = [
-        signature.author_first.as_str(),
-        signature.author_middle.as_str(),
-        signature.author_last.as_str(),
-        signature.author_suffix.as_str(),
+        first.as_str(),
+        middle.as_str(),
+        last_normalized.as_str(),
+        canonical_suffix.as_str(),
     ]
     .iter()
     .filter(|value| !value.trim().is_empty())
@@ -525,7 +528,7 @@ pub(crate) fn build_raw_arrow_summary_signals(
 }
 
 pub(crate) fn round_six(value: f64) -> f32 {
-    ((value * 1_000_000.0).round() / 1_000_000.0) as f32
+    ((value * 1_000_000.0).round_ties_even() / 1_000_000.0) as f32
 }
 
 pub(crate) fn valid_positive_finite(value: f64) -> Option<f64> {
@@ -634,9 +637,6 @@ pub(crate) fn raw_arrow_paper_evidence_row(
             .zip(summary_signals.member_local10_author_names.iter())
             .zip(summary_signals.member_signature_ids.iter())
     {
-        if query_signature_id == candidate_signature_id {
-            continue;
-        }
         let intersection =
             set_intersection_count(&query_author_signals.paper_author_names, candidate_names);
         let union =
@@ -654,6 +654,20 @@ pub(crate) fn raw_arrow_paper_evidence_row(
         }
         best_author_overlap = best_author_overlap.max(intersection as f64);
 
+        let count_delta =
+            ((query_paper_author_count as f64).ln_1p() - (*candidate_count as f64).ln_1p()).abs();
+        best_author_count_log_absdiff = Some(match best_author_count_log_absdiff {
+            Some(current) => current.min(count_delta),
+            None => count_delta,
+        });
+
+        // Match the Python reference: the query's own member row remains valid
+        // evidence for full paper-author-list features, but not for the local10
+        // window whose focal author must be excluded.
+        if query_signature_id == candidate_signature_id {
+            continue;
+        }
+
         let local10_intersection = set_intersection_count(
             &query_author_signals.local10_author_names,
             candidate_local10_names,
@@ -666,13 +680,6 @@ pub(crate) fn raw_arrow_paper_evidence_row(
                 best_local10_jaccard.max((local10_intersection as f64) / (local10_union as f64));
         }
         best_local10_overlap_count = best_local10_overlap_count.max(local10_intersection as f64);
-
-        let count_delta =
-            ((query_paper_author_count as f64).ln_1p() - (*candidate_count as f64).ln_1p()).abs();
-        best_author_count_log_absdiff = Some(match best_author_count_log_absdiff {
-            Some(current) => current.min(count_delta),
-            None => count_delta,
-        });
     }
 
     RawArrowPaperEvidenceRow {
@@ -682,5 +689,87 @@ pub(crate) fn raw_arrow_paper_evidence_row(
         local_author_window10_jaccard_max: round_six(best_local10_jaccard),
         local_author_window10_overlap_count_max: round_six(best_local10_overlap_count),
         best_author_count_log_absdiff: round_six(best_author_count_log_absdiff.unwrap_or(0.0)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::name_counts::RawNameCountMaps;
+
+    #[test]
+    fn round_six_uses_ties_to_even() {
+        assert_eq!(round_six(0.0078125), 0.007812_f32);
+        assert_eq!(round_six(-0.0078125), -0.007812_f32);
+        assert_eq!(round_six(0.0078136), 0.007814_f32);
+    }
+
+    #[test]
+    fn self_member_contributes_full_author_evidence_but_not_local_window() {
+        let query = RawArrowAuthorSignalData {
+            paper_author_names: HashSet::from(["alice".to_string(), "bob".to_string()]),
+            local10_author_names: HashSet::from(["bob".to_string()]),
+        };
+        let summary = RawArrowSummarySignalData {
+            name_counts_values: Vec::new(),
+            member_paper_author_names: vec![HashSet::from([
+                "alice".to_string(),
+                "bob".to_string(),
+            ])],
+            member_paper_author_counts: vec![2],
+            member_local10_author_names: vec![HashSet::from(["bob".to_string()])],
+            member_signature_ids: vec!["query".to_string()],
+        };
+
+        let row = raw_arrow_paper_evidence_row("query", 2, &query, &summary);
+
+        assert_eq!(row.paper_author_list_max_jaccard, 1.0);
+        assert_eq!(row.paper_author_list_max_containment, 1.0);
+        assert_eq!(row.paper_author_list_max_overlap_count, 2.0);
+        assert_eq!(row.local_author_window10_jaccard_max, 0.0);
+        assert_eq!(row.local_author_window10_overlap_count_max, 0.0);
+        assert_eq!(row.best_author_count_log_absdiff, 0.0);
+    }
+
+    #[test]
+    fn raw_feature_uses_canonical_query_author_and_digit_preserving_title() {
+        let signature = RawArrowSignature {
+            paper_id: "p1".to_string(),
+            author_first: "...".to_string(),
+            author_middle: "B-2".to_string(),
+            author_last: "Smith".to_string(),
+            author_suffix: "PhD".to_string(),
+            author_block: None,
+            affiliations: Vec::new(),
+            email: None,
+            orcid: None,
+            position: Some(0),
+        };
+        let paper = RawArrowPaper {
+            title: "Part 1: Co3O4".to_string(),
+            abstract_text: String::new(),
+            venue: String::new(),
+            journal_name: String::new(),
+            year: None,
+            predicted_language: None,
+            is_reliable: None,
+            language_reliability: None,
+        };
+
+        let feature = build_raw_arrow_feature(
+            &signature,
+            Some(&paper),
+            None,
+            None,
+            &RawNameCountMaps::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+        );
+
+        assert_eq!(feature.query_author, "b smith phd");
+        assert!(feature.query.title_hashes.contains(&fnv64(b"1")));
+        assert!(feature.query.title_hashes.contains(&fnv64(b"co3o4")));
     }
 }

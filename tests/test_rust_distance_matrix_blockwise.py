@@ -18,7 +18,7 @@ from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow, write_name_counts_index
 from s2and.model import Clusterer
-from tests.helpers import patch_tiny_name_counts_loader
+from tests.helpers import patch_tiny_name_counts_loader, write_test_arrow_artifact_manifest
 
 s2and_rust = cast(Any, feature_port.s2and_rust)
 
@@ -187,6 +187,7 @@ def _with_fake_batch_indexes(arrow_paths: dict[str, str], tmp_path: Path) -> dic
         index_path = tmp_path / "specter.specter_batch_index.bin"
         index_path.touch()
         indexed["specter_batch_index"] = str(index_path)
+    write_test_arrow_artifact_manifest(tmp_path, indexed)
     return indexed
 
 
@@ -692,7 +693,7 @@ def test_predict_from_rust_featurizer_builds_and_clusters_one_block_at_a_time(mo
         cluster_calls.append((block_key, tuple(signatures)))
         return [0 for _signature in signatures]
 
-    monkeypatch.setattr(Clusterer, "make_distance_matrices_from_rust_featurizer", fake_make_dists)
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", fake_make_dists)
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", fake_cluster_one_block)
 
     clusterer = _dummy_clusterer(cluster_model=None)
@@ -791,7 +792,7 @@ def test_predict_from_rust_featurizer_injects_seed_overrides_into_distance_build
         del self, pairwise_proba, effective_cluster_model_params, dataset, all_disallow_signature_ids, block_key
         return [0 for _signature in signatures]
 
-    monkeypatch.setattr(Clusterer, "make_distance_matrices_from_rust_featurizer", fake_make_dists)
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", fake_make_dists)
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", fake_cluster_one_block)
 
     clusterer = _dummy_clusterer(cluster_model=None)
@@ -1040,7 +1041,6 @@ def test_predict_auto_routes_to_arrow_paths_when_dataset_advertises_them(tmp_pat
 
 
 def test_predict_auto_requires_arrow_paths_with_name_counts_index(tmp_path, monkeypatch):
-    monkeypatch.setattr(model_module, "PROJECT_ROOT_PATH", str(tmp_path / "project"))
     dataset = _dummy_dataset("dummy_predict_auto_arrow_missing_name_counts_index")
     arrow_paths = {}
     for key, filename in {

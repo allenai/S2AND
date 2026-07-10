@@ -49,13 +49,17 @@ from s2and.incremental_linking.runtime import (
 )
 from s2and.model_pairwise import predict_pairwise_class0
 from tests.helpers import attach_arrow_featurizer_bundle, build_dummy_dataset, import_s2and_rust
-from tests.promoted_linking_helpers import build_tiny_promoted_booster
+from tests.promoted_linking_helpers import build_tiny_promoted_booster, synthetic_pairwise_bundle_binding
 
 runtime_module: Any = runtime_module
 
 _HAS_RUST_LIGHTGBM, _RUST_LIGHTGBM_PAYLOAD = import_s2and_rust(
     required_module_attrs=("RustLightGBMBooster",),
     prefer_site_packages=True,
+)
+_HAS_RUST_LIGHTGBM = bool(
+    _HAS_RUST_LIGHTGBM
+    and hasattr(getattr(_RUST_LIGHTGBM_PAYLOAD, "RustLightGBMBooster", object), "predict_proba_positive_f32")
 )
 requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
@@ -98,8 +102,15 @@ class StaticArtifact:
             retrieval_top_k=25,
         )
 
-    def predict_probabilities(self, matrix: np.ndarray, *, num_threads: int | None = None) -> np.ndarray:
+    def predict_probabilities(
+        self,
+        matrix: np.ndarray,
+        *,
+        num_threads: int | None = None,
+        max_rows_per_chunk: int | None = None,
+    ) -> np.ndarray:
         assert matrix.shape[0] == len(self.probabilities)
+        assert max_rows_per_chunk is None or max_rows_per_chunk >= 1
         self.last_num_threads = num_threads
         return self.probabilities
 
@@ -597,7 +608,6 @@ def test_raw_arrow_runtime_rejects_mismatched_query_view_length_before_featurize
                 query_views=[],
             ),
             rust_featurizer=None,
-            allow_featurizer_build=False,
         )
 
 
@@ -631,7 +641,6 @@ def test_raw_arrow_runtime_rejects_unknown_query_view_before_featurizer(
                 query_views=["typo"],
             ),
             rust_featurizer=None,
-            allow_featurizer_build=False,
         )
 
 
@@ -1091,6 +1100,8 @@ def test_fused_pairwise_model_preserves_true_hard_disallow_distances(monkeypatch
     )
     np.testing.assert_array_equal(result.row_signals["pair_count"], np.asarray([2.0, 1.0], dtype=np.float32))
     assert result.telemetry["hard_disallow_distance_pair_count"] == 2
+    assert result.telemetry["index_remap_bytes_per_pair"] == 8
+    assert result.telemetry["predicted_index_remap_bytes"] == (result.pairwise_stats.chunk_plan.chunk_pairs * 8)
 
 
 def test_fused_pairwise_model_resolves_negative_n_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1295,6 +1306,7 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(0.0),
+        audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
     )
     artifact = load_incremental_linking_artifact(tmp_path)
     candidate_batch = LinkerCandidateBatch(
@@ -1334,6 +1346,7 @@ def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(1.1),
+        audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
     )
     artifact = load_incremental_linking_artifact(tmp_path)
     candidate_batch = LinkerCandidateBatch(
@@ -2070,7 +2083,7 @@ def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
 
     assert result.feature_matrix.matrix.shape == (3, len(promoted_linker_feature_columns()))
     assert [decision.component_key for decision in result.compact_result.decisions] == ["c_high", "c_single"]
-    assert result.telemetry == {
+    assert {key: value for key, value in result.telemetry.items() if not key.startswith("native_scorer_")} == {
         "candidate_row_count": 3,
         "pair_count": 0,
         "no_candidate_query_count": 0,
@@ -2085,6 +2098,9 @@ def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
         "row_feature_generated_family_id_count": 0,
         "row_feature_generic_family_override_count": 0,
     }
+    assert result.telemetry["native_scorer_chunk_rows"] == 3
+    assert result.telemetry["native_scorer_chunk_count"] == 1
+    assert result.telemetry["native_scorer_predicted_peak_delta_bytes"] == 3 * (53 * 4 + 8)
 
 
 def test_private_retrieved_candidate_slice_returns_no_candidate_abstains(

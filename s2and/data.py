@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -6,8 +7,10 @@ import platform
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial, reduce
+from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
@@ -20,11 +23,12 @@ from s2and.consts import (
     _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
     LARGE_DISTANCE,
-    NAME_COUNTS_PATH,
+    NAME_COUNTS_MANIFEST_PATH,
+    NORMALIZATION_VERSION,
     NUMPY_NAN,
 )
-from s2and.file_cache import cached_path
 from s2and.mp import UniversalPool
+from s2and.name_tuple_artifact import load_name_tuple_artifact, load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
     build_runtime_context,
@@ -39,6 +43,7 @@ from s2and.text import (
     CanonicalNameParts,
     canonical_lasts_equivalent,
     canonical_name_count_keys,
+    canonical_name_tuple_pair,
     canonicalize_name_parts,
     canonicalize_name_text,
     compute_block,
@@ -48,6 +53,7 @@ from s2and.text import (
     get_text_ngrams_words,
     normalize_orcid_compact,
     normalize_text,
+    normalize_title,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -57,7 +63,20 @@ CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 _PAIR_LABEL_MAP: dict[str | int, int] = {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
 
 # Cache for large, immutable resources loaded across instances
-_NAME_COUNTS_CACHE: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]] | None = None
+_NameCountMappings = tuple[
+    Mapping[str, int],
+    Mapping[str, int],
+    Mapping[str, int],
+    Mapping[str, int],
+]
+_MutableNameCountMappings = tuple[
+    dict[str, int],
+    dict[str, int],
+    dict[str, int],
+    dict[str, int],
+]
+_NAME_COUNTS_CACHE: _NameCountMappings | None = None
+_NAME_COUNTS_PROVENANCE_CACHE: Mapping[str, Any] | None = None
 _NAME_COUNTS_CACHE_LOCK = threading.Lock()
 SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
 # canonical_v2 retired the "legacy_full_first_token" last_first_initial semantics
@@ -133,30 +152,200 @@ def _resolve_pair_sampling_mode(
     )
 
 
-def _load_name_counts_cached() -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
-    """Load name count dictionaries once per process and cache them.
+def _sha256_file(path: Path) -> str:
+    for attempt in range(1, 4):
+        before = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
+            return digest.hexdigest()
+        logger.warning(
+            "Name-count pickle changed during checksum attempt=%d/3 path=%s",
+            attempt,
+            path,
+        )
+    raise RuntimeError(f"name-count pickle changed during all 3 checksum attempts: {path}")
 
-    Avoids repeatedly unpickling ~600MB file in tests/short runs.
-    """
-    global _NAME_COUNTS_CACHE
-    if _NAME_COUNTS_CACHE is not None:
-        return _NAME_COUNTS_CACHE
+
+def _require_lowercase_sha256(value: Any, *, context: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{context} requires a lowercase hexadecimal SHA-256")
+    return value
+
+
+def _readonly_provenance_value(value: Any) -> Any:
+    """Recursively freeze the small verified provenance payload."""
+
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _readonly_provenance_value(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_readonly_provenance_value(item) for item in value)
+    return value
+
+
+def _readonly_name_counts_provenance(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    frozen = _readonly_provenance_value(value)
+    if not isinstance(frozen, Mapping):  # pragma: no cover - helper invariant
+        raise TypeError("name-count provenance must remain a mapping")
+    return frozen
+
+
+def _name_counts_declared_path(root: Path, raw_path: Any, *, field: str) -> Path:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(f"name-count manifest {field} must be a non-empty relative path")
+    path = (root / raw_path).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"name-count manifest {field} escapes its artifact root: {path}") from exc
+    return path
+
+
+def _read_name_counts_artifact(
+    manifest_path: str | Path,
+) -> tuple[_MutableNameCountMappings, dict[str, Any]]:
+    """Verify provenance and checksum before unpickling one immutable generation."""
+
+    resolved_manifest = Path(manifest_path).resolve()
+    manifest = json.loads(resolved_manifest.read_text(encoding="utf-8"))
+    if not isinstance(manifest, Mapping) or manifest.get("schema_version") != "name_counts_manifest_v1":
+        raise ValueError(f"unsupported name-count manifest: {resolved_manifest}")
+    if manifest.get("normalization_version") != NORMALIZATION_VERSION:
+        raise ValueError(
+            f"name-count manifest normalization_version={manifest.get('normalization_version')!r}; "
+            f"expected {NORMALIZATION_VERSION!r}"
+        )
+    generation_id = manifest.get("generation_id")
+    source_snapshot_id = manifest.get("source_snapshot_id")
+    if not isinstance(generation_id, str) or not generation_id:
+        raise ValueError("name-count manifest requires generation_id")
+    if not isinstance(source_snapshot_id, str) or not source_snapshot_id:
+        raise ValueError("name-count manifest requires source_snapshot_id")
+    files = manifest.get("files")
+    if not isinstance(files, Mapping):
+        raise ValueError("name-count manifest requires files mapping")
+    root = resolved_manifest.parent
+    pickle_path = _name_counts_declared_path(root, files.get("pickle"), field="files.pickle")
+    provenance_path = _name_counts_declared_path(root, files.get("provenance"), field="files.provenance")
+    expected_provenance_sha256 = _require_lowercase_sha256(
+        manifest.get("provenance_sha256"),
+        context="name-count manifest provenance_sha256",
+    )
+    expected_provenance_bytes = manifest.get("provenance_byte_count")
+    if not isinstance(expected_provenance_bytes, int) or expected_provenance_bytes < 1:
+        raise ValueError("name-count manifest requires a positive provenance_byte_count")
+    if provenance_path.stat().st_size != expected_provenance_bytes:
+        raise ValueError("name-count provenance byte count mismatch")
+    observed_provenance_sha256 = _sha256_file(provenance_path)
+    if observed_provenance_sha256 != expected_provenance_sha256:
+        raise ValueError(
+            "name-count provenance SHA-256 mismatch: "
+            f"expected={expected_provenance_sha256} observed={observed_provenance_sha256}"
+        )
+    metadata = json.loads(provenance_path.read_text(encoding="utf-8"))
+    if not isinstance(metadata, Mapping) or metadata.get("schema_version") != "name_counts_provenance_v1":
+        raise ValueError(f"unsupported name-count provenance: {provenance_path}")
+    metadata = _validated_name_counts_provenance(metadata, context=str(provenance_path))
+    for field, expected in (
+        ("normalization_version", NORMALIZATION_VERSION),
+        ("generation_id", generation_id),
+        ("source_snapshot_id", source_snapshot_id),
+    ):
+        if metadata.get(field) != expected:
+            raise ValueError(
+                f"name-count provenance {field} mismatch: metadata={metadata.get(field)!r} expected={expected!r}"
+            )
+    expected_sha256 = _require_lowercase_sha256(
+        manifest.get("pickle_sha256"),
+        context="name-count manifest pickle_sha256",
+    )
+    if metadata.get("pickle_sha256") != expected_sha256:
+        raise ValueError("name-count manifest/provenance pickle_sha256 mismatch")
+    if metadata.get("pickle_byte_count") != pickle_path.stat().st_size:
+        raise ValueError("name-count provenance pickle_byte_count mismatch")
+    observed_sha256 = _sha256_file(pickle_path)
+    if observed_sha256 != expected_sha256:
+        raise ValueError(f"name-count pickle SHA-256 mismatch: expected={expected_sha256} observed={observed_sha256}")
+    with pickle_path.open("rb") as source:
+        payload = pickle.load(source)
+    if not isinstance(payload, tuple) or len(payload) != 4 or not all(isinstance(value, dict) for value in payload):
+        raise TypeError("name-count pickle must contain exactly four dictionaries")
+    counts = cast(_MutableNameCountMappings, payload)
+    cardinalities = metadata.get("cardinalities")
+    expected_cardinalities = dict(
+        zip(
+            ("first", "last", "first_last", "last_first_initial"),
+            (len(mapping) for mapping in counts),
+            strict=True,
+        )
+    )
+    if cardinalities != expected_cardinalities:
+        raise ValueError(
+            f"name-count provenance cardinalities mismatch: metadata={cardinalities!r} "
+            f"observed={expected_cardinalities!r}"
+        )
+    return counts, dict(metadata)
+
+
+def _load_name_counts_artifact() -> tuple[_NameCountMappings, Mapping[str, Any]]:
+    """Load and cache the verified canonical name-count generation."""
+
+    global _NAME_COUNTS_CACHE, _NAME_COUNTS_PROVENANCE_CACHE
+    if _NAME_COUNTS_CACHE is not None and _NAME_COUNTS_PROVENANCE_CACHE is not None:
+        return _NAME_COUNTS_CACHE, _NAME_COUNTS_PROVENANCE_CACHE
     with _NAME_COUNTS_CACHE_LOCK:
-        # Double-check after acquiring lock (another thread may have loaded).
-        if _NAME_COUNTS_CACHE is None:
-            with open(cached_path(NAME_COUNTS_PATH), "rb") as f:
-                _NAME_COUNTS_CACHE = pickle.load(f)
-    return cast(tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]], _NAME_COUNTS_CACHE)
+        if _NAME_COUNTS_CACHE is None or _NAME_COUNTS_PROVENANCE_CACHE is None:
+            loaded_counts, loaded_provenance = _read_name_counts_artifact(Path(os.fspath(NAME_COUNTS_MANIFEST_PATH)))
+            first, last, first_last, last_first_initial = loaded_counts
+            _NAME_COUNTS_CACHE = (
+                MappingProxyType(first),
+                MappingProxyType(last),
+                MappingProxyType(first_last),
+                MappingProxyType(last_first_initial),
+            )
+            _NAME_COUNTS_PROVENANCE_CACHE = _readonly_name_counts_provenance(loaded_provenance)
+    return _NAME_COUNTS_CACHE, _NAME_COUNTS_PROVENANCE_CACHE
+
+
+def _validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or value.get("schema_version") != "name_counts_provenance_v1":
+        raise ValueError(f"{context} requires name_counts_provenance_v1 provenance")
+    if value.get("normalization_version") != NORMALIZATION_VERSION:
+        raise ValueError(
+            f"{context} normalization_version={value.get('normalization_version')!r}; "
+            f"expected {NORMALIZATION_VERSION!r}"
+        )
+    for field in ("generation_id", "source_snapshot_id", "source_kind"):
+        if not isinstance(value.get(field), str) or not value[field]:
+            raise ValueError(f"{context} provenance requires {field}")
+    for field in ("pickle_sha256", "source_query_sha256", "selected_rows_sha256"):
+        _require_lowercase_sha256(
+            value.get(field),
+            context=f"{context} provenance {field}",
+        )
+    selected_row_count = value.get("selected_row_count")
+    if not isinstance(selected_row_count, int) or selected_row_count < 0:
+        raise ValueError(f"{context} provenance requires a nonnegative selected_row_count")
+    if value.get("source_row_count") != selected_row_count:
+        raise ValueError(f"{context} provenance selected_row_count/source_row_count mismatch")
+    return dict(value)
 
 
 def _load_name_tuples_from_file(filename: str) -> set[tuple[str, str]]:
-    resolved: set[tuple[str, str]] = set()
-    with open(os.path.join(_PACKAGE_DATA_DIR, filename), encoding="utf-8") as tuples_file:
-        for line in tuples_file:
-            line_split = line.strip().split(",")
-            if len(line_split) >= 2:
-                resolved.add((line_split[0], line_split[1]))
-    return resolved
+    """Load one canonical artifact under the strict adjacent-sidecar contract."""
+
+    if filename == "s2and_name_tuples_canonical.txt":
+        return set(load_packaged_name_tuple_artifact().pairs)
+    return set(load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / filename).pairs)
 
 
 def _resolve_name_counts_last_first_initial_semantics(
@@ -364,8 +553,9 @@ class ANDData:
         load_name_counts: Whether or not to load name counts
         n_jobs: number of cpus to use
         preprocess: whether to preprocess the data (normalization, etc)
-        name_tuples: optionally pass in the already created set of name tuples, to avoid recomputation
-            can be None or "filtered" or a set of name tuples
+        name_tuples: Canonical first-name aliases. ``None`` and ``"filtered"``
+            both select the packaged canonical artifact. Pass an explicit empty
+            set to disable aliases, or a set of pairs; pair order is ignored.
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
         name_counts_last_first_initial_semantics: semantics for constructing the
@@ -659,7 +849,13 @@ class ANDData:
             raise ValueError(f"Unknown mode: {self.mode}")
 
         name_counts_loaded = False
+        self.normalization_version = NORMALIZATION_VERSION
+        self._name_counts_provenance: Mapping[str, Any] | None = None
         if isinstance(load_name_counts, dict):
+            self.name_counts_provenance = _validated_name_counts_provenance(
+                load_name_counts.get("provenance"),
+                context="ANDData load_name_counts mapping",
+            )
             self.first_dict = load_name_counts["first_dict"]
             self.last_dict = load_name_counts["last_dict"]
             self.first_last_dict = load_name_counts["first_last_dict"]
@@ -667,12 +863,14 @@ class ANDData:
             name_counts_loaded = True
         elif load_name_counts:
             logger.info("loading name counts (cached)")
+            counts, provenance = _load_name_counts_artifact()
             (
                 first_dict,
                 last_dict,
                 first_last_dict,
                 last_first_initial_dict,
-            ) = _load_name_counts_cached()
+            ) = counts
+            self.name_counts_provenance = provenance
             self.first_dict = first_dict
             self.last_dict = last_dict
             self.first_last_dict = first_last_dict
@@ -689,16 +887,14 @@ class ANDData:
         self.preprocess = preprocess
 
         resolved_name_tuples: set[tuple[str, str]]
-        if name_tuples == "filtered":
+        if name_tuples == "filtered" or name_tuples is None:
             # canonical_v2 alias artifact, regenerated deterministically by
             # scripts/production/generate_canonical_name_tuples.py.
             resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples_canonical.txt")
-        elif name_tuples is None:
-            resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples.txt")
         elif isinstance(name_tuples, set):
-            resolved_name_tuples = name_tuples
+            resolved_name_tuples = {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
         else:
-            raise ValueError("name_tuples must be None, 'filtered', or a set of (first_a, first_b) tuples")
+            raise ValueError("name_tuples must be None, 'filtered', or a set of canonical (first_a, first_b) tuples")
         self.name_tuples = resolved_name_tuples
 
         preprocess_papers_stage_start = time.perf_counter()
@@ -732,6 +928,20 @@ class ANDData:
             "Telemetry stage: stage=anddata_total_init seconds=%.3f",
             time.perf_counter() - init_start,
         )
+
+    @property
+    def name_counts_provenance(self) -> Mapping[str, Any] | None:
+        """Return verified name-count provenance through a read-only view."""
+
+        return self._name_counts_provenance
+
+    @name_counts_provenance.setter
+    def name_counts_provenance(self, value: Mapping[str, Any] | None) -> None:
+        if value is None:
+            self._name_counts_provenance = None
+            return
+        validated = _validated_name_counts_provenance(value, context="ANDData.name_counts_provenance")
+        self._name_counts_provenance = _readonly_name_counts_provenance(validated)
 
     @property
     def pair_sampling_block(self) -> bool:
@@ -871,15 +1081,10 @@ class ANDData:
                             stored_suffix_normalized = None
                             coauthor_set = None
                             coauthor_blocks = None
-                            if full_name is None:
-                                full_name = _assemble_full_name(
-                                    [
-                                        signature.author_info_first,
-                                        signature.author_info_middle,
-                                        signature.author_info_last,
-                                        signature.author_info_suffix,
-                                    ]
-                                )
+                            # Rust derives the canonical query-author facet from
+                            # the Arrow name fields. Do not retain or synthesize
+                            # a raw-text full name on the Python object.
+                            full_name = None
                         else:
                             # canonical_v2 normalization: one routine for first/middle/last
                             # (apostrophe-like marks deleted, dash-like characters uniform,
@@ -922,10 +1127,10 @@ class ANDData:
                         if not defer_signature_fields_to_rust:
                             full_name = _assemble_full_name(
                                 [
-                                    stored_first_without_apostrophe or signature.author_info_first,
-                                    stored_middle_without_apostrophe or signature.author_info_middle,
-                                    stored_last_normalized or signature.author_info_last,
-                                    stored_suffix_normalized or signature.author_info_suffix,
+                                    stored_first_without_apostrophe,
+                                    stored_middle_without_apostrophe,
+                                    stored_last_normalized,
+                                    stored_suffix_normalized,
                                 ]
                             )
 
@@ -1956,8 +2161,8 @@ def preprocess_paper_1(item: tuple[str, Paper], *, preprocess: bool = True) -> t
             is_reliable=language_detection.is_reliable,
             language_reliability=language_detection.language_reliability,
         )
-    title = normalize_text(paper.title)
-    title_ngrams_words = get_text_ngrams_words(title)
+    title = normalize_title(paper.title)
+    title_ngrams_words = get_text_ngrams_words(title, drop_short_tokens=False)
     authors = [
         Author(
             position=author.position,

@@ -45,9 +45,8 @@ pub(crate) fn name_tuple_contains(
     a: &str,
     b: &str,
 ) -> bool {
-    // Directed lookup to match the Python reference, which tests `(a, b) in name_tuples`
-    // in argument order only (see `first_names_name_compatible` in s2and/text.py). The
-    // shipped tuples file lists both directions, so symmetric pairs still match.
+    // Alias ingestion stores both directions, so the hot constraint path needs
+    // one hash lookup while remaining order-independent.
     map.get(a).map_or(false, |vals| vals.contains(b))
 }
 
@@ -76,10 +75,11 @@ mod tests {
 
     #[test]
     fn name_tuple_compatibility_does_not_apply_extra_case_normalization() {
-        let name_tuples =
-            HashMap::from([("Bill".to_string(), HashSet::from(["William".to_string()]))]);
+        let mut name_tuples = HashMap::new();
+        crate::insert_name_tuple_alias(&mut name_tuples, "Bill".to_string(), "William".to_string());
 
         assert!(first_names_name_compatible("Bill", "William", &name_tuples));
+        assert!(first_names_name_compatible("William", "Bill", &name_tuples));
         assert!(!first_names_name_compatible(
             "bill",
             "william",

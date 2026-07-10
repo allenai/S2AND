@@ -302,6 +302,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
 
+    from s2and.consts import NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import (
         _get_rust_featurizer,
@@ -422,6 +423,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     start = time.perf_counter()
     arrow_featurizer = build_rust_featurizer_from_arrow_paths(
         arrow_paths,
+        expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=selected_signature_ids,
         name_tuples=getattr(dataset, "name_tuples", "filtered"),
         load_name_counts=True,

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
+import os
 import sys
 from collections import Counter
 from importlib.machinery import PathFinder
+from pathlib import Path
 from typing import Any
 
 from s2and.data import ANDData
@@ -12,7 +15,46 @@ from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeature
 from s2and.runtime import detect_rust_runtime_capabilities
 
 
-def tiny_name_counts() -> dict[str, dict[str, int]]:
+def write_test_arrow_artifact_manifest(bundle_dir: Any, paths: dict[str, str]) -> Path:
+    """Write the canonical manifest required by production Arrow boundaries."""
+
+    from s2and.arrow_inputs import _build_arrow_artifact_generation
+    from s2and.consts import NORMALIZATION_VERSION
+
+    root = Path(bundle_dir)
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "normalization_version": NORMALIZATION_VERSION,
+                "paths": dict(paths),
+                "artifact_generation": _build_arrow_artifact_generation(paths, root),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def tiny_name_counts_provenance() -> dict[str, Any]:
+    """Return explicit provenance for synthetic in-memory name counts."""
+
+    return {
+        "schema_version": "name_counts_provenance_v1",
+        "normalization_version": "canonical_v2",
+        "generation_id": "test-tiny-name-counts",
+        "source_snapshot_id": "test-fixture",
+        "source_kind": "fixture:test",
+        "source_query_sha256": "1" * 64,
+        "selected_rows_sha256": "2" * 64,
+        "selected_row_count": 1,
+        "source_row_count": 1,
+        "pickle_sha256": "0" * 64,
+    }
+
+
+def tiny_name_counts() -> dict[str, Any]:
     """Return a small deterministic name-count artifact for dummy tests."""
 
     return {
@@ -35,6 +77,7 @@ def tiny_name_counts() -> dict[str, dict[str, int]]:
             "sattar d": 100,
             "konovalov a": 110,
         },
+        "provenance": tiny_name_counts_provenance(),
     }
 
 
@@ -53,12 +96,28 @@ def tiny_name_counts_tuple() -> tuple[dict[str, int], dict[str, int], dict[str, 
 def patch_tiny_name_counts_loader(monkeypatch: Any) -> None:
     """Patch the production name-count loader to avoid huge fixture generation."""
 
+    patch_name_counts_artifact(monkeypatch, tiny_name_counts_tuple())
+
+
+def patch_name_counts_artifact(
+    monkeypatch: Any,
+    counts: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]],
+    *,
+    generation_id: str = "test-tiny-name-counts",
+) -> None:
+    """Patch the verified name-count artifact loader for a test fixture."""
+
     import s2and.data as data_module
 
-    monkeypatch.setattr(data_module, "_load_name_counts_cached", tiny_name_counts_tuple)
+    provenance = {**tiny_name_counts_provenance(), "generation_id": generation_id}
+    monkeypatch.setattr(
+        data_module,
+        "_load_name_counts_artifact",
+        lambda: (counts, provenance),
+    )
 
 
-def equalish(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-3) -> bool:
+def equalish(a: float, b: float, rel_tol: float = 0.0, abs_tol: float = 1e-6) -> bool:
     if math.isnan(float(a)) and math.isnan(float(b)):
         return True
     return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
@@ -70,6 +129,8 @@ def import_s2and_rust(
     required_module_attrs: tuple[str, ...] = (),
     prefer_site_packages: bool = False,
 ) -> tuple[bool, Any | Exception | None]:
+    require_rust = os.environ.get("S2AND_TEST_REQUIRE_RUST", "").strip().lower() in {"1", "true", "yes", "on"}
+
     def _has_required_api(module: Any) -> bool:
         for attr_name in required_module_attrs:
             if not hasattr(module, attr_name):
@@ -91,12 +152,16 @@ def import_s2and_rust(
         raise AttributeError("s2and_rust imported, but required Rust runtime API is unavailable")
     except Exception as err:
         if not prefer_site_packages:
+            if require_rust:
+                raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from err
             return False, err
 
+        module_names = ("s2and_rust", "s2and_rust.s2and_rust", "s2and_rust._s2and_rust")
+        missing = object()
+        original_modules = {name: sys.modules.get(name, missing) for name in module_names}
         try:
-            sys.modules.pop("s2and_rust", None)
-            sys.modules.pop("s2and_rust.s2and_rust", None)
-            sys.modules.pop("s2and_rust._s2and_rust", None)
+            for name in module_names:
+                sys.modules.pop(name, None)
             site_paths = [path for path in sys.path if "site-packages" in path]
             spec = PathFinder.find_spec("s2and_rust", site_paths)
             if spec is None or spec.loader is None:
@@ -110,7 +175,18 @@ def import_s2and_rust(
                 )
             return True, module
         except Exception as fallback_err:
+            if require_rust:
+                raise RuntimeError("Rust-enabled tests require a working s2and_rust runtime") from fallback_err
             return False, fallback_err
+        finally:
+            # A capability probe may load a different extension build. Keep
+            # the returned module object usable by its caller, but never let
+            # that temporary package replace the process-wide import state.
+            for name in module_names:
+                sys.modules.pop(name, None)
+            for name, original in original_modules.items():
+                if original is not missing:
+                    sys.modules[name] = original
 
 
 def attach_arrow_featurizer_bundle(
@@ -155,17 +231,28 @@ def attach_arrow_featurizer_bundle(
         include_specter=include_specter,
     )
     arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(arrow_paths, bundle_dir)
-    with mock.patch.object(data_module, "_load_name_counts_cached", loader):
+    with mock.patch.object(
+        data_module,
+        "_load_name_counts_artifact",
+        lambda: (loader(), tiny_name_counts_provenance()),
+    ):
         name_counts_index_path, _name_counts_metrics = write_name_counts_index(bundle_dir, overwrite=True)
     arrow_paths["name_counts_index"] = name_counts_index_path
-    return attach_training_arrow_featurizer_paths(dataset, arrow_paths)
+    write_test_arrow_artifact_manifest(bundle_dir, arrow_paths)
+    from s2and.consts import NORMALIZATION_VERSION
+
+    return attach_training_arrow_featurizer_paths(
+        dataset,
+        arrow_paths,
+        expected_normalization_version=NORMALIZATION_VERSION,
+    )
 
 
 def build_dummy_dataset(
     name: str,
     *,
     mode: str = "train",
-    load_name_counts: bool | dict[str, dict[str, int]] = False,
+    load_name_counts: bool | dict[str, Any] = False,
     n_jobs: int = 1,
 ) -> ANDData:
     resolved_name_counts = tiny_name_counts() if load_name_counts is True else load_name_counts

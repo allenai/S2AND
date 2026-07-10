@@ -30,7 +30,7 @@ from s2and.incremental_linking.runtime import (
     _raw_candidate_plan_seed_setup,
     subset_raw_candidate_plan_for_query_ids,
 )
-from tests.helpers import build_cluster_summary, build_query_features
+from tests.helpers import build_cluster_summary, build_query_features, patch_name_counts_artifact
 
 pa = pytest.importorskip("pyarrow")
 s2and_rust = pytest.importorskip("s2and_rust", reason="s2and_rust is unavailable")
@@ -232,12 +232,9 @@ def _assert_raw_candidate_plans_equal(left: dict[str, Any], right: dict[str, Any
 
 
 def _write_tiny_name_counts_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-    import s2and.data as data_module
-
-    monkeypatch.setattr(
-        data_module,
-        "_load_name_counts_cached",
-        lambda: (
+    patch_name_counts_artifact(
+        monkeypatch,
+        (
             {"alice": 10.0, "bob": 30.0},
             {"wang": 20.0, "jones": 40.0},
             {"alice wang": 5.0, "bob jones": 6.0},
@@ -578,6 +575,43 @@ def test_raw_arrow_candidate_planner_ingests_query_signature_request_table(tmp_p
     assert planned["query_signature_ids"] == ["q1"]
     assert planned["query_views"] == ["full"]
     assert planner.build_telemetry()["query_signature_count"] == 1
+
+
+def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Path) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    query_signatures_path = tmp_path / "empty_incremental_query_signatures.arrow"
+    write_incremental_query_signatures_arrow(query_signatures_path, [])
+    request_paths = {**paths, "query_signatures": str(query_signatures_path)}
+
+    strict_planner = s2and_rust.RawBlockQueryCandidatePlanner.from_query_signatures(
+        request_paths,
+        top_k=2,
+        orcid_enabled=False,
+        num_threads=1,
+    )
+    with pytest.raises(ValueError, match="outside the planner query set"):
+        strict_planner.plan(["q1"])
+
+    reusable_planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+        paths,
+        top_k=2,
+        orcid_enabled=False,
+        num_threads=1,
+    )
+    planned = reusable_planner.plan(["q1"])
+    one_shot = _raw_candidate_plan_arrow(
+        paths,
+        ["q1"],
+        top_k=2,
+        query_view="auto",
+        orcid_enabled=False,
+        num_threads=1,
+    )
+
+    _assert_raw_candidate_plans_equal(planned, one_shot)
+    assert reusable_planner.build_telemetry()["query_signature_count"] == 0
+    with pytest.raises(RuntimeError, match="requires explicit plan"):
+        reusable_planner.plan_query_signatures()
 
 
 def test_raw_arrow_candidate_planner_rejects_duplicate_query_signature_request_rows(tmp_path: Path) -> None:
@@ -1161,8 +1195,9 @@ def test_rust_featurizer_from_arrow_paths_reuses_cached_language(tmp_path: Path)
     paths = _base_arrow_paths(tmp_path)
     with pa.memory_map(paths["papers"], "r") as source:
         papers = pa.ipc.open_file(source).read_all()
-    papers = papers.append_column("predicted_language", pa.array(["en", "en", "en"], type=pa.string()))
+    papers = papers.append_column("predicted_language", pa.array(["en", "es", "fr"], type=pa.string()))
     papers = papers.append_column("is_reliable", pa.array([True, True, True], type=pa.bool_()))
+    papers = papers.append_column("language_reliability", pa.array([0.91, 0.73, 0.64], type=pa.float64()))
     paths["papers"] = _write_ipc(tmp_path / "papers_with_language.arrow", papers)
     paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
 
@@ -1177,6 +1212,14 @@ def test_rust_featurizer_from_arrow_paths_reuses_cached_language(tmp_path: Path)
     )
 
     assert tuple(featurizer.signature_ids()) == ("q1", "s1")
+    features = _indexed_pair_matrix(featurizer, [("q1", "s1")])
+    np.testing.assert_allclose(
+        features[0, 18:21],
+        [1.0, 0.0, 0.73],
+        rtol=0.0,
+        atol=1e-12,
+        err_msg="english_count, same_language, and language_reliability_min must use cached Arrow values",
+    )
 
 
 def test_rust_featurizer_from_arrow_paths_uses_batch_indexes(tmp_path: Path) -> None:

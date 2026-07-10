@@ -63,24 +63,32 @@ commands, WSL notes, and install variants, see [docs/install.md](docs/install.md
 
 ## Download Data or Model
 
+> **Canonical-v2 migration status (2026-07-09):** this branch contains the
+> canonical-v2 code cutover but does not yet contain a compatible production
+> model or canonical count artifacts. The packaged v1.21 bundle and v1.0-v1.2
+> pickles are legacy artifacts and are rejected by this branch. Use the previous
+> published S2AND release for working v1.21 inference until canonical v1.3 is
+> trained, validated, and packaged. See [docs/work_plan.md](docs/work_plan.md).
+
 Rust/Arrow dataset download:
 
 ```bash
 aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
 ```
 
-Expected size is about `10.1 GiB`. This populates the Arrow benchmark
-datasets, shared `name_counts_index/`, language-id model, production model
-bundle, and the promoted-linker replay bundle under
+Expected size is about `10.1 GiB`. The currently published release populates
+the Arrow benchmark datasets, legacy shared `name_counts_index/`, legacy
+production model bundle, and the promoted-linker replay bundle under
 `s2and/data/s2and_and_big_blocks_linker_dataset_20260525/`.
 
 The legacy JSON/pickle dataset release is still available at
 `s3://ai2-s2-research-public/s2and-release`, but it is only needed for
 paper-era `ANDData` workflows.
 
-The current production model bundle is checked into `s2and/data/production_model_v1.21/`
-and is included in package data. You do not need a separate model download for
-prediction.
+The previous production model bundle is checked into
+`s2and/data/production_model_v1.21/` and remains in the tree as a migration
+input. It is not loadable under canonical-v2. The pending v1.3 bundle will become
+the packaged default only after the release gates pass.
 
 Starting with S2AND `0.50.0`, production releases are native
 `production_model_vX.Y/` directories tracked through Git LFS, not pickle files.
@@ -103,8 +111,12 @@ More on dataset layout, config, and model-only usage: [docs/data.md](docs/data.m
 
 ## Quick Start
 
-After the Arrow download above, run the current production model on the released
-`qian` Arrow bundle:
+The commands below describe the last published v1.21 workflow and require the
+previous compatible S2AND release. They are retained for operational context but
+do not run on `canonical-v2-migration` until v1.3 replaces the model and artifact
+paths.
+
+Run v1.21 on the released `qian` Arrow bundle:
 
 ```bash
 uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
@@ -136,22 +148,26 @@ Rust extension with `maturin develop`.
 
 | Model artifact | Release line | Repo storage | Included in PyPI install? | Linker artifact | Loader | Embeddings | Usable with current S2AND? |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `production_model_v1.21/` | Current, starting with `0.50.0` | Directory bundle in Git LFS | Yes | Bundled in `incremental_linker/` | `load_production_model(...)` | SPECTER2 PRX | Yes |
-| `production_model_v1.2.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER2 PRX | Yes |
-| `production_model_v1.1.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER1 | Yes |
-| `production_model_v1.0.pickle` | Deprecated, pre-`0.50.0` | Pickle in Git LFS | Yes | Not bundled | Legacy pickle loader only | SPECTER1 | No (required removed reference features) |
+| `production_model_v1.3/` | Pending canonical-v2 release | Not generated yet | No | Must be bundled and jointly validated | Future default loader | Determined by retrain contract | No, pending retrain |
+| `production_model_v1.21/` | Previous release, starting with `0.50.0` | Directory bundle in Git LFS | Temporarily retained | Bundled in `incremental_linker/` | Previous compatible release only | SPECTER2 PRX | No, legacy normalization |
+| `production_model_v1.2.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Temporarily retained | Not bundled | Previous compatible release only | SPECTER2 PRX | No, legacy normalization |
+| `production_model_v1.1.pickle` | Legacy, pre-`0.50.0` | Pickle in Git LFS | Temporarily retained | Not bundled | Previous compatible release only | SPECTER1 | No, legacy normalization |
+| `production_model_v1.0.pickle` | Deprecated, pre-`0.50.0` | Pickle in Git LFS | Temporarily retained | Not bundled | Historical fixture only | SPECTER1 | No (required removed reference features) |
 
 Key points:
 
-- `production_model_v1.21/` is the current recommended model. Its pairwise artifacts come from the v1.2 source model,
-  and it bundles the promoted Rust incremental linker.
+- No model is currently recommended for inference from this migration branch.
+  v1.21 remains the recommended model only with the previous compatible package.
+  Its pairwise artifacts come from v1.2 and it bundles the promoted Rust
+  incremental linker.
 - Starting with S2AND `0.50.0`, production model releases are directory bundles named `production_model_vX.Y/`; new production releases should not be published as pickle files.
-- Git LFS is only a source-checkout concern. Published `s2and` wheels and sdists include the hydrated model files.
+- Git LFS is only a source-checkout concern. A future canonical release will
+  include only its validated hydrated default model in wheels and sdists.
 - Use directory bundles for workflows that need a linker model. The legacy `v1.0`, `v1.1`, and `v1.2` pickle artifacts contain only the legacy pickled model state and do not bundle `incremental_linker/` artifacts.
 - Reference features have been removed from S2AND entirely; `papers.references` is ignored if present.
 - `v1.0` required reference features and is no longer usable with current S2AND.
 
-Minimal input shape for `v1.1`, `v1.2`, and `v1.21`:
+Historical minimal input shape for `v1.1`, `v1.2`, and `v1.21`:
 
 ```json
 {
@@ -185,7 +201,7 @@ Minimal input shape for `v1.1`, `v1.2`, and `v1.21`:
 }
 ```
 
-Minimal Arrow prediction example:
+Previous-release v1.21 Arrow prediction example (not runnable on this branch):
 
 ```python
 import json

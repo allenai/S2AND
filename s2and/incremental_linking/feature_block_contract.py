@@ -133,16 +133,35 @@ class FeatureBlockPaper:
             raise ValueError("FeatureBlockPaper.paper_id must be non-empty")
         if self.year is not None:
             object.__setattr__(self, "year", int(self.year))
+        is_reliable = _optional_bool(self.is_reliable, field_name="FeatureBlockPaper.is_reliable")
+        language_reliability = _optional_float(
+            self.language_reliability,
+            field_name="FeatureBlockPaper.language_reliability",
+        )
         object.__setattr__(
             self,
             "is_reliable",
-            _optional_bool(self.is_reliable, field_name="FeatureBlockPaper.is_reliable"),
+            is_reliable,
         )
         object.__setattr__(
             self,
             "language_reliability",
-            _optional_float(self.language_reliability, field_name="FeatureBlockPaper.language_reliability"),
+            language_reliability,
         )
+        if language_reliability is not None:
+            if not np.isfinite(language_reliability):
+                raise ValueError("FeatureBlockPaper.language_reliability must be finite")
+            if not 0.0 <= language_reliability <= 1.0:
+                raise ValueError("FeatureBlockPaper.language_reliability must be in [0.0, 1.0]")
+            if is_reliable is False and language_reliability != 0.0:
+                raise ValueError(
+                    "FeatureBlockPaper.language_reliability must be 0.0 when FeatureBlockPaper.is_reliable is false"
+                )
+        if self.predicted_language is not None:
+            if is_reliable is None:
+                raise ValueError("FeatureBlockPaper.predicted_language requires FeatureBlockPaper.is_reliable")
+            if language_reliability is None:
+                raise ValueError("FeatureBlockPaper.predicted_language requires FeatureBlockPaper.language_reliability")
 
 
 @dataclass(frozen=True)
@@ -159,6 +178,8 @@ class FeatureBlockPaperAuthor:
         object.__setattr__(self, "author_name", str(self.author_name))
         if not self.paper_id:
             raise ValueError("FeatureBlockPaperAuthor.paper_id must be non-empty")
+        if not self.author_name:
+            raise ValueError("FeatureBlockPaperAuthor.author_name must be non-empty")
 
 
 @dataclass(frozen=True)

@@ -44,11 +44,12 @@ import s2and.incremental_linking.query_adapter as retrieval  # noqa: E402
 from s2and import feature_port  # noqa: E402
 from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_inputs import validate_arrow_prediction_artifacts  # noqa: E402
-from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER  # noqa: E402
+from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER, NORMALIZATION_VERSION  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
 from s2and.incremental_linking.array_validation import as_retrieval_rank_uint16_1d  # noqa: E402
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact  # noqa: E402
 from s2and.incremental_linking.contracts import (  # noqa: E402
+    DEFAULT_RETRIEVAL_TOP_K,
     INCREMENTAL_LINKING_RUST_CAPABILITIES,
     canonical_json_digest,
     promoted_linker_feature_schema_digest,
@@ -106,6 +107,7 @@ from s2and.model import (  # noqa: E402
     _build_incremental_constraint_backend,
 )
 from s2and.production_bundle import finalize_production_bundle, production_version_from_bundle_dir  # noqa: E402
+from s2and.production_model import pairwise_bundle_binding  # noqa: E402
 from s2and.runtime import build_runtime_context  # noqa: E402
 from s2and.rust_calls import get_constraint_labels_index_arrays_rust  # noqa: E402
 
@@ -338,6 +340,7 @@ def _linker_artifact_audit_metadata(
         "target_status": str(target.get("status", "")),
         "target_metrics": dict(target.get("metrics", {})),
         "pairwise_model": pairwise_model,
+        "pairwise_bundle_binding": pairwise_bundle_binding(pairwise_model_path),
         "training_source_bundle": _portable_repo_path(Path(args.source_bundle_root)),
         "training_feature_mode": str(args.feature_mode),
         "precomputed_feature_bundle": (
@@ -2839,6 +2842,7 @@ def _materialize_arrow_rust_dataset_rows(
     featurizer_started = time.perf_counter()
     featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
         context.arrow_paths,
+        expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=signature_ids,
         name_tuples="filtered",
         load_name_counts=True,
@@ -3439,7 +3443,7 @@ def _prepare_prod_training_data(
     bundle: OfficialBundle,
     *,
     holdout_importance_weight: float,
-    retrieval_rank_limit: int = 25,
+    retrieval_rank_limit: int,
 ) -> ProdTrainingData:
     """Build final production rows: train plus stratified calibration rows."""
 
@@ -3550,12 +3554,15 @@ def _train_and_save_prod_artifact(
     required_rust_capabilities: Sequence[str] = INCREMENTAL_LINKING_RUST_CAPABILITIES,
 ) -> dict[str, Any]:
     spec = dict(feature_bundle.models["classic"])
+    retrieval_top_k = int(spec.get("retrieval_top_k", DEFAULT_RETRIEVAL_TOP_K))
+    if retrieval_top_k <= 0:
+        raise ValueError("classic.retrieval_top_k must be positive")
     feature_columns = tuple(str(feature) for feature in spec["feature_columns"])
     monotone_constraints = _resolve_classic_monotone_constraints(spec, feature_columns)
     prod_training_data = _prepare_prod_training_data(
         feature_bundle,
         holdout_importance_weight=float(holdout_importance_weight),
-        retrieval_rank_limit=25,
+        retrieval_rank_limit=retrieval_top_k,
     )
     train_matrix = _classic_feature_matrix(prod_training_data.rows, feature_columns).to_numpy(dtype=np.float32)
     train_labels = prod_training_data.rows["label"].to_numpy(dtype=np.int8, copy=False)
@@ -3591,7 +3598,7 @@ def _train_and_save_prod_artifact(
     audit_metadata["prod_training"] = {
         "policy": "train_plus_calibration_weighted_test_calibrated_logistic_gate",
         "holdout_importance_weight": float(holdout_importance_weight),
-        "retrieval_rank_limit": 25,
+        "retrieval_rank_limit": retrieval_top_k,
         "booster_training_splits": booster_training_splits,
         "gate_calibration_splits": gate_calibration_splits,
         "rows": int(len(prod_training_data.rows)),
@@ -3611,7 +3618,7 @@ def _train_and_save_prod_artifact(
         model,
         Path(save_artifact_to),
         feature_columns=feature_columns,
-        retrieval_top_k=25,
+        retrieval_top_k=retrieval_top_k,
         gate_config=logistic_gate_config,
         prediction_fixture_matrix=train_matrix[:5],
         required_rust_capabilities=required_rust_capabilities,
@@ -3696,6 +3703,25 @@ def _metric_deltas(observed: Mapping[str, Any], target: Mapping[str, Any]) -> di
 
 
 def _assert_no_metric_drift(observed: Mapping[str, Any], target: Mapping[str, Any]) -> None:
+    target_metrics = target.get("metrics")
+    if not isinstance(target_metrics, Mapping):
+        raise RuntimeError("Official promoted target must contain a metrics object")
+    if not target_metrics:
+        raise RuntimeError("Official promoted target metrics must not be empty")
+    missing = sorted(set(target_metrics) - set(observed))
+    if missing:
+        raise RuntimeError(f"Official promoted run is missing target metrics: {missing}")
+
+    def require_finite(value: Any, *, path: str) -> None:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                require_finite(nested, path=f"{path}.{key}")
+        elif isinstance(value, float | np.floating) and not math.isfinite(float(value)):
+            raise RuntimeError(f"Official promoted metric {path} must be finite, got {value!r}")
+
+    for key in target_metrics:
+        require_finite(observed[key], path=str(key))
+        require_finite(target_metrics[key], path=f"target.{key}")
     deltas = _metric_deltas(observed, target)
     bad: dict[str, Any] = {}
     for key, delta in deltas.items():
@@ -3738,6 +3764,11 @@ def _resolve_hyperopt_evals(args: argparse.Namespace) -> int:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.allow_metric_drift and (args.save_artifact_to is not None or args.save_production_bundle_to is not None):
+        raise SystemExit(
+            "--allow-metric-drift is diagnostic-only and cannot be combined with "
+            "--save-artifact-to or --save-production-bundle-to"
+        )
     if args.limit_rows is not None and int(args.limit_rows) <= 0:
         raise SystemExit("--limit-rows must be > 0")
     target = _load_target(args.target_json)
@@ -3857,6 +3888,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     observed = _observed_official_metrics(summary)
     deltas = _metric_deltas(observed, target)
+    if not args.allow_metric_drift:
+        _assert_no_metric_drift(observed, target)
     if artifact_audit_metadata is not None:
         artifact_audit_metadata = {
             **artifact_audit_metadata,
@@ -3889,7 +3922,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             bundle_version=args.production_bundle_version or production_version_from_bundle_dir(production_bundle_dir),
             pairwise_model_version=_version_from_production_model_path(Path(args.pairwise_model_path)),
             incremental_linker_version=str(args.linker_artifact_version).removeprefix("v"),
-            validate=True,
         )
     result = {
         "mode": args.feature_mode,
@@ -3922,11 +3954,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     if args.feature_mode == "arrow-rust":
         result["component_scope"] = "block-local"
-    if hyperopt_summary is not None and not args.allow_metric_drift:
-        result["metric_drift_check"] = "skipped_after_hyperopt_param_search"
+    if not args.allow_metric_drift:
+        result["metric_drift_check"] = "passed"
     _write_json(output_dir / "run_summary.json", result)
-    if not args.allow_metric_drift and hyperopt_summary is None:
-        _assert_no_metric_drift(observed, target)
     return result
 
 
@@ -4048,7 +4078,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse already materialized output tables and dataset partials in the output directory.",
     )
     parser.add_argument("--run-full", action="store_true", help="Explicitly allow an unbounded official run.")
-    parser.add_argument("--allow-metric-drift", action="store_true", help="Do not fail if final metrics differ.")
+    parser.add_argument(
+        "--allow-metric-drift",
+        action="store_true",
+        help="Diagnostic-only metric comparison override; incompatible with either artifact promotion option.",
+    )
     return parser
 
 

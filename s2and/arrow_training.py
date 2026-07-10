@@ -24,6 +24,7 @@ Rust Arrow readers already assume (docs/rust/ingest_source_policy_inventory.md).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -32,8 +33,16 @@ from typing import Any
 
 import numpy as np
 
-from s2and.arrow_inputs import validate_arrow_prediction_artifacts
-from s2and.data import NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR, ANDData
+from s2and.arrow_inputs import (
+    require_normalization_version,
+    validate_arrow_prediction_artifacts,
+    verified_arrow_artifact_generation,
+)
+from s2and.data import (
+    NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
+    ANDData,
+    _validated_name_counts_provenance,
+)
 from s2and.incremental_linking.feature_block_arrow import (
     _arrow_rows_by_unique_key,
     _read_arrow_ipc_table,
@@ -50,6 +59,29 @@ def _read_arrow_table(path: str | Path) -> Any:
     import pyarrow as pa
 
     return _read_arrow_ipc_table(pa, path)
+
+
+def _iter_arrow_rows(
+    path: str | Path,
+    *,
+    table_name: str,
+    required_columns: set[str],
+) -> Any:
+    """Yield rows one record batch at a time from a memory-mapped IPC file."""
+
+    import pyarrow as pa
+
+    with pa.memory_map(str(path), "r") as source:
+        reader = pa.ipc.open_file(source)
+        missing = sorted(required_columns.difference(reader.schema.names))
+        if missing:
+            raise ValueError(f"Arrow {table_name} table is missing required columns: {missing}")
+        row_index = 0
+        for batch_index in range(reader.num_record_batches):
+            batch = reader.get_batch(batch_index)
+            for row in batch.to_pylist():
+                yield row_index, row
+                row_index += 1
 
 
 def _required_id_value(raw_value: Any, table_name: str, column_name: str, row_index: int) -> str:
@@ -75,12 +107,14 @@ def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any
         "author_position",
     }
     signatures: dict[str, dict[str, Any]] = {}
-    table = _read_arrow_table(path)
-    _require_arrow_columns(table, "signatures", required_columns)
-    rows = table.to_pylist()
-    _arrow_rows_by_unique_key(rows, table_name="signatures", key_column="signature_id")
-    for row_index, row in enumerate(rows):
+    for row_index, row in _iter_arrow_rows(
+        path,
+        table_name="signatures",
+        required_columns=required_columns,
+    ):
         signature_id = _required_id_value(row.get("signature_id"), "signatures", "signature_id", row_index)
+        if signature_id in signatures:
+            raise ValueError(f"signatures Arrow contains duplicate signature_id={signature_id!r}")
         paper_id = _required_id_value(row.get("paper_id"), "signatures", "paper_id", row_index)
         orcid = row.get("author_orcid")
         signatures[signature_id] = {
@@ -119,21 +153,37 @@ def load_papers_dict_from_arrow(
     """
 
     authors_by_paper_id: dict[str, list[dict[str, Any]]] = {}
-    authors_table = _read_arrow_table(paper_authors_path)
-    _require_arrow_columns(authors_table, "paper_authors", {"paper_id", "position", "author_name"})
-    for row_index, row in enumerate(authors_table.to_pylist()):
+    paper_author_keys: set[tuple[str, int]] = set()
+    for row_index, row in _iter_arrow_rows(
+        paper_authors_path,
+        table_name="paper_authors",
+        required_columns={"paper_id", "position", "author_name"},
+    ):
         paper_id = _required_id_value(row.get("paper_id"), "paper_authors", "paper_id", row_index)
-        authors_by_paper_id.setdefault(paper_id, []).append(
-            {"author_name": row["author_name"], "position": int(row["position"])}
-        )
+        raw_author_name = row.get("author_name")
+        if not isinstance(raw_author_name, str) or not raw_author_name.strip():
+            raise ValueError(f"Arrow paper_authors table contains empty author_name at row {row_index}")
+        raw_position = row.get("position")
+        if raw_position is None:
+            raise ValueError(f"Arrow paper_authors table contains null position at row {row_index}")
+        position = int(raw_position)
+        author_key = (paper_id, position)
+        if author_key in paper_author_keys:
+            raise ValueError(
+                "paper_authors Arrow contains duplicate " f"(paper_id, position)=({paper_id!r}, {position})"
+            )
+        paper_author_keys.add(author_key)
+        authors_by_paper_id.setdefault(paper_id, []).append({"author_name": raw_author_name, "position": position})
 
     papers: dict[str, dict[str, Any]] = {}
-    papers_table = _read_arrow_table(papers_path)
-    _require_arrow_columns(papers_table, "papers", {"paper_id", "title", "venue", "journal_name"})
-    paper_rows = papers_table.to_pylist()
-    _arrow_rows_by_unique_key(paper_rows, table_name="papers", key_column="paper_id")
-    for row_index, row in enumerate(paper_rows):
+    for row_index, row in _iter_arrow_rows(
+        papers_path,
+        table_name="papers",
+        required_columns={"paper_id", "title", "venue", "journal_name"},
+    ):
         paper_id = _required_id_value(row.get("paper_id"), "papers", "paper_id", row_index)
+        if paper_id in papers:
+            raise ValueError(f"papers Arrow contains duplicate paper_id={paper_id!r}")
         papers[paper_id] = {
             "paper_id": paper_id,
             "title": row["title"],
@@ -145,6 +195,12 @@ def load_papers_dict_from_arrow(
         }
     if not papers:
         raise ValueError(f"Arrow papers table has no rows: {papers_path}")
+    unknown_author_paper_ids = sorted(set(authors_by_paper_id).difference(papers))
+    if unknown_author_paper_ids:
+        raise ValueError(
+            "paper_authors Arrow references paper_id values absent from papers Arrow: "
+            f"{unknown_author_paper_ids[:10]}"
+        )
     return papers
 
 
@@ -168,6 +224,8 @@ def load_specter_tuple_from_arrow(path: str | Path) -> tuple[np.ndarray, list[st
 def attach_training_arrow_featurizer_paths(
     dataset: ANDData,
     arrow_paths: Mapping[str, Any],
+    *,
+    expected_normalization_version: str,
 ) -> dict[str, str]:
     """Validate and attach Arrow paths so featurization uses ``from_arrow_paths``.
 
@@ -175,6 +233,10 @@ def attach_training_arrow_featurizer_paths(
     sidecar because training featurization loads name counts in Rust.
     """
 
+    expected_version = require_normalization_version(
+        expected_normalization_version,
+        context="arrow-native training attachment",
+    )
     semantics = getattr(dataset, "name_counts_last_first_initial_semantics", None)
     if semantics != NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR:
         raise ValueError(
@@ -187,6 +249,9 @@ def attach_training_arrow_featurizer_paths(
         require_specter="specter" in path_keys or "specter2" in path_keys,
         require_name_counts_index=True,
         require_batch_indexes=True,
+        strict_batch_index_validation=True,
+        expected_normalization_version=expected_version,
+        require_canonical_manifest=True,
         context="arrow-native training featurization",
         producer_hint=(
             "write the training bundle with signatures/papers/paper_authors tables, raw-planner "
@@ -195,7 +260,32 @@ def attach_training_arrow_featurizer_paths(
         ),
     )
     normalized.pop("query_signatures", None)
+    index_manifest = json.loads((Path(normalized["name_counts_index"]) / "manifest.json").read_text(encoding="utf-8"))
+    dataset.name_counts_provenance = _validated_name_counts_provenance(
+        index_manifest.get("source_provenance"),
+        context="arrow-native training name_counts_index",
+    )
+    # Rust consumes aliases while building. Freezing provides mutation safety
+    # and an O(1) repeat fingerprint for the native featurizer cache.
+    if isinstance(getattr(dataset, "name_tuples", None), set):
+        dataset.name_tuples = frozenset(dataset.name_tuples)
+    from s2and import feature_port
+
+    feature_port.evict_rust_featurizer(dataset)
     setattr(dataset, RUST_FEATURIZER_ARROW_PATHS_ATTR, normalized)
+    setattr(dataset, feature_port.RUST_FEATURIZER_NORMALIZATION_VERSION_ATTR, expected_version)
+    verified_generation = verified_arrow_artifact_generation(normalized)
+    if verified_generation is None:
+        # Legacy/ad-hoc bundles have no immutable full-digest inventory. Their
+        # cache key must fingerprint the material files on every lookup.
+        if hasattr(dataset, feature_port.RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR):
+            delattr(dataset, feature_port.RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR)
+    else:
+        setattr(
+            dataset,
+            feature_port.RUST_FEATURIZER_ARTIFACT_GENERATION_ATTR,
+            verified_generation,
+        )
     # Rust production prediction (Clusterer.predict / cluster_eval) resolves
     # explicit dataset.arrow_paths; an Arrow-ingested training dataset carries
     # the same artifacts, so expose them for prediction too.
@@ -207,6 +297,7 @@ def build_training_anddata_from_arrow(
     arrow_paths: Mapping[str, Any],
     name: str,
     *,
+    expected_normalization_version: str,
     clusters: str | dict | None = None,
     mode: str = "train",
     load_name_counts: bool | dict = False,
@@ -235,10 +326,10 @@ def build_training_anddata_from_arrow(
     loaded into ``dataset.specter_embeddings``.
     """
 
-    missing = [key for key in _REQUIRED_TABLE_KEYS if key not in arrow_paths]
-    if missing:
-        raise ValueError(f"arrow_paths is missing required tables: {missing}")
-
+    expected_version = require_normalization_version(
+        expected_normalization_version,
+        context="arrow-native training ingestion",
+    )
     ingest_start = time.perf_counter()
     path_keys = {str(key) for key in arrow_paths}
     normalized_arrow_paths = validate_arrow_prediction_artifacts(
@@ -246,6 +337,8 @@ def build_training_anddata_from_arrow(
         require_specter="specter" in path_keys or "specter2" in path_keys,
         require_name_counts_index=False,
         require_batch_indexes=False,
+        expected_normalization_version=expected_version,
+        require_canonical_manifest=True,
         context="arrow-native training ingestion",
         producer_hint="include signatures, papers, paper_authors, and optional specter/specter2 Arrow tables",
     )
@@ -269,7 +362,11 @@ def build_training_anddata_from_arrow(
         **anddata_kwargs,
     )
     if attach_rust_featurizer:
-        attach_training_arrow_featurizer_paths(dataset, normalized_arrow_paths)
+        attach_training_arrow_featurizer_paths(
+            dataset,
+            normalized_arrow_paths,
+            expected_normalization_version=expected_version,
+        )
     if load_python_specter is None:
         rust_featurization_active = bool(
             attach_rust_featurizer and dataset_stage_uses_rust(dataset.runtime_context, dataset)

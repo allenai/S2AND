@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -10,7 +11,7 @@ from lightgbm import LGBMClassifier
 
 import s2and.incremental_linking.production as production_module
 import s2and.model as model_module
-from s2and.consts import LARGE_DISTANCE
+from s2and.consts import LARGE_DISTANCE, NORMALIZATION_VERSION
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
@@ -22,7 +23,10 @@ from s2and.incremental_linking.feature_block import (
     write_name_counts_index,
 )
 from s2and.model import Clusterer, IncrementalDistStats
-from tests.helpers import patch_tiny_name_counts_loader, tiny_name_counts
+from tests.helpers import patch_tiny_name_counts_loader, tiny_name_counts, write_test_arrow_artifact_manifest
+
+_PROMOTED_TEST_FEATURIZER_INFO = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
+_PROMOTED_TEST_FEATURE_COLUMNS = ("test_link_probability",)
 
 
 def _same_partition(a: dict[str, list[str]], b: dict[str, list[str]]) -> bool:
@@ -55,6 +59,7 @@ def _minimal_arrow_paths(tmp_path: Path, *, include_cluster_seeds: bool = False)
         cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
         write_cluster_seeds_arrow(cluster_seeds_path, {})
         paths["cluster_seeds"] = str(cluster_seeds_path)
+    write_test_arrow_artifact_manifest(tmp_path, paths)
     return paths
 
 
@@ -95,13 +100,16 @@ def _patch_fake_raw_arrow_planner(
             self._query_signature_ids = tuple(query_signature_ids)
             if captured is not None:
                 captured.setdefault("planner_inits", []).append(self._query_signature_ids)
-                captured.setdefault("planner_query_signature_paths", []).append(self._paths.get("query_signatures"))
 
         @classmethod
         def from_query_signatures(cls, paths: object, **kwargs: object) -> "FakePlanner":
             path_map = cast(dict[str, str], paths)
             rows = read_incremental_query_signatures_arrow(Path(path_map["query_signatures"]))
             return cls(path_map, [row.signature_id for row in rows], **kwargs)
+
+        @classmethod
+        def from_auto_queries(cls, paths: object, **kwargs: object) -> "FakePlanner":
+            return cls(paths, [], **kwargs)
 
         def build_telemetry(self):
             return {
@@ -284,6 +292,22 @@ def test_model_presplit_cache_fingerprint_drops_cluster_model_identity() -> None
     assert model_module._model_presplit_cache_fingerprint(first) == model_module._model_presplit_cache_fingerprint(
         second
     )
+
+
+def test_sidecar_cache_fingerprint_hashes_full_content_at_equal_size_and_mtime(tmp_path: Path) -> None:
+    path = tmp_path / "cluster_seeds.arrow"
+    path.write_bytes(b"a" * (1024 * 1024))
+    original_stat = path.stat()
+    first = model_module._path_cache_fingerprint(path)
+
+    with path.open("r+b") as output:
+        output.seek(200_000)
+        output.write(b"changed")
+    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    second = model_module._path_cache_fingerprint(path)
+    assert second[:3] == first[:3]
+    assert second[3] != first[3]
 
 
 def test_model_presplit_cache_fingerprint_tracks_classifier_state() -> None:
@@ -557,6 +581,7 @@ def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_datas
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow")
+    clusterer.incremental_linker_artifact_dir = tmp_path
     arrow_paths = _minimal_arrow_paths(tmp_path)
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
     write_cluster_seeds_arrow(cluster_seeds_path, {"3": "0", "4": "0"})
@@ -613,7 +638,7 @@ def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_datas
     assert captured["block_signatures"] == block
     assert not isinstance(captured["dataset"], ANDData)
     assert captured["dataset"].cluster_seeds_require == {}
-    assert captured["dataset"].name_tuples == {("alex", "al")}
+    assert captured["dataset"].name_tuples == {("al", "alex")}
     assert captured["dataset"].arrow_paths["cluster_seeds"] == str(cluster_seeds_path)
     assert captured["arrow_paths"]["cluster_seeds"] == str(cluster_seeds_path)
     assert captured["runtime_context"] is runtime_context
@@ -629,6 +654,7 @@ def test_predict_incremental_from_arrow_paths_accepts_explicit_seed_mapping(
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_seed_mapping")
+    clusterer.incremental_linker_artifact_dir = tmp_path
     arrow_paths = _minimal_arrow_paths(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -682,6 +708,7 @@ def test_predict_incremental_from_arrow_paths_loads_altered_seed_metadata(
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_altered")
+    clusterer.incremental_linker_artifact_dir = tmp_path
     arrow_paths = _minimal_arrow_paths(tmp_path)
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
     altered_path = tmp_path / "altered_cluster_signatures.arrow"
@@ -728,6 +755,7 @@ def test_predict_incremental_from_arrow_paths_loads_seed_orcids_for_budget_floor
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_orcid_floor")
+    clusterer.incremental_linker_artifact_dir = tmp_path
     arrow_paths = _minimal_arrow_paths(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -919,19 +947,38 @@ def test_seed_cluster_count_matches_anddata_cluster_count() -> None:
 
 def test_cached_incremental_name_tuples_are_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
     model_module._load_name_tuples_for_incremental_rules.cache_clear()
+    loaded: list[str] = []
+
+    def fake_load(filename: str) -> set[tuple[str, str]]:
+        loaded.append(filename)
+        return {("bill", "william")}
+
     monkeypatch.setattr(
         model_module,
         "_load_name_tuples_from_file",
-        lambda _filename: {("bill", "william")},
+        fake_load,
     )
     try:
-        name_tuples = model_module._load_name_tuples_for_incremental_rules("filtered")
+        name_tuples = model_module._name_tuples_for_incremental_rules("filtered")
+        default_name_tuples = model_module._name_tuples_for_incremental_rules(None)
 
         assert name_tuples == frozenset({("bill", "william")})
-        assert model_module._load_name_tuples_for_incremental_rules("filtered") is name_tuples
+        assert default_name_tuples is name_tuples
+        assert loaded == ["s2and_name_tuples_canonical.txt"]
+        assert model_module._load_name_tuples_for_incremental_rules() is name_tuples
         assert not hasattr(name_tuples, "add")
     finally:
         model_module._load_name_tuples_for_incremental_rules.cache_clear()
+
+
+def test_bare_clusterer_cannot_select_an_incremental_linker_from_another_bundle() -> None:
+    with pytest.raises(FileNotFoundError, match="requires an attached incremental linker artifact"):
+        model_module._required_incremental_linker_artifact_dir(SimpleNamespace())
+
+    attached = SimpleNamespace(artifact_dir=Path("explicit-linker"))
+    assert model_module._required_incremental_linker_artifact_dir(
+        SimpleNamespace(incremental_linker_artifact=attached)
+    ) == Path("explicit-linker")
 
 
 def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_on_failure(
@@ -941,7 +988,10 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
     closed: list[bool] = []
 
     class FakeArtifact:
-        metadata = SimpleNamespace(retrieval_top_k=25)
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
 
     @contextmanager
     def fake_temporary_arrow_paths_with_cluster_seeds(*_args: object, **_kwargs: object):
@@ -958,6 +1008,8 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
     class FakeClusterer:
         n_jobs = 1
         suppress_orcid = False
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
         _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
@@ -1002,19 +1054,21 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
             total_ram_bytes=None,
             batching_threshold=None,
-            resolve_total_ram_bytes=lambda value: (value, None),
-            build_incremental_result=lambda *_args, **_kwargs: {},
         )
 
     assert closed == [True]
 
 
-def test_predict_incremental_arrow_promoted_linker_uses_typed_request_sidecars(
+def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_typed_request_sidecars(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     class FakeArtifact:
-        metadata = SimpleNamespace(retrieval_top_k=25)
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
+        artifact_dir = tmp_path
 
     captured: dict[str, Any] = {}
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
@@ -1033,6 +1087,8 @@ def test_predict_incremental_arrow_promoted_linker_uses_typed_request_sidecars(
     class FakeClusterer:
         n_jobs = 1
         suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
         _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
         def _build_incremental_seed_setup(self, dataset: Any, *_args: object, **kwargs: object):
@@ -1059,7 +1115,7 @@ def test_predict_incremental_arrow_promoted_linker_uses_typed_request_sidecars(
     monkeypatch.setattr(
         production_module.artifact_module,
         "load_incremental_linking_artifact",
-        lambda _path: FakeArtifact(),
+        lambda _path: pytest.fail("a supplied production artifact must not be loaded again"),
     )
     monkeypatch.setattr(
         production_module,
@@ -1086,13 +1142,12 @@ def test_predict_incremental_arrow_promoted_linker_uses_typed_request_sidecars(
         ),
         arrow_paths=arrow_paths,
         artifact_dir=tmp_path,
+        artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
-        total_ram_bytes=None,
+        total_ram_bytes=100_000,
         batching_threshold=None,
-        resolve_total_ram_bytes=lambda _value: (100_000, "test"),
-        build_incremental_result=lambda clusters, **kwargs: {"clusters": clusters, **kwargs},
     )
 
     raw_kwargs = captured["raw_arrow_kwargs"]
@@ -1104,8 +1159,7 @@ def test_predict_incremental_arrow_promoted_linker_uses_typed_request_sidecars(
     assert raw_kwargs["arrow_paths"]["altered_cluster_signatures"] == str(altered_path)
     assert captured["altered_from_arrow"] == ["seed"]
     assert captured["finish_arrow_paths"]["cluster_seeds"] == str(cluster_seeds_path)
-    assert captured["planner_inits"] == [("query",)]
-    assert captured["planner_query_signature_paths"][0] is not None
+    assert captured["planner_inits"] == [()]
     assert captured["planner_plans"] == [("query",)]
     assert result["clusters"] == {"c_seed": ["seed", "query"]}
     telemetry = result["incremental_linker_telemetry"]
@@ -1114,16 +1168,109 @@ def test_predict_incremental_arrow_promoted_linker_uses_typed_request_sidecars(
     assert telemetry["raw_arrow_reusable_planner_enabled"] == 1
 
 
+def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeArtifact:
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
+
+    query_ids = [f"q{index:02d}" for index in range(20)]
+    captured: dict[str, Any] = {"featurizer_windows": [], "scored_batches": []}
+
+    class FakeClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+
+        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
+            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+
+        def _finish_incremental_with_seed_links(self, *_args: object, **_kwargs: object):
+            return {"c_seed": ["seed", *query_ids]}
+
+    def fake_limits(**kwargs: object):
+        query_count = int(kwargs["query_count"])
+        safe_size = 2 if captured["featurizer_windows"] else 10
+        return _mock_promoted_limits(
+            query_count=query_count,
+            query_batch_size=min(query_count, safe_size),
+        )
+
+    def fake_featurizer(*_args: object, **kwargs: object) -> object:
+        signature_ids = tuple(cast(Any, kwargs["signature_ids"]))
+        captured["featurizer_windows"].append(signature_ids)
+        return object()
+
+    def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
+        batch = tuple(cast(Any, kwargs["query_signature_ids"]))
+        captured["scored_batches"].append(batch)
+        return SimpleNamespace(
+            linked_signature_clusters={signature_id: "c_seed" for signature_id in batch},
+            telemetry={"query_count": len(batch), "candidate_row_count": len(batch), "pair_count": len(batch)},
+        )
+
+    monkeypatch.setattr(
+        production_module.artifact_module,
+        "load_incremental_linking_artifact",
+        lambda _path: FakeArtifact(),
+    )
+    monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        fake_linker,
+    )
+    _patch_fake_raw_arrow_planner(monkeypatch, captured=captured)
+    monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_paths", fake_featurizer)
+
+    result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
+        FakeClusterer(),
+        ["seed", *query_ids],
+        cast(
+            ANDData,
+            SimpleNamespace(
+                name_tuples=set(),
+                cluster_seeds_disallow=set(),
+                altered_cluster_signatures=None,
+            ),
+        ),
+        arrow_paths=_minimal_arrow_paths(tmp_path),
+        artifact_dir=tmp_path,
+        prevent_new_incompatibilities=False,
+        partial_supervision={},
+        runtime_context=cast(Any, SimpleNamespace(run_id="test")),
+        total_ram_bytes=100_000,
+        batching_threshold=10,
+    )
+
+    assert [len(window) for window in captured["planner_plans"]] == [20, 8, 8, 4]
+    assert [len(window) for window in captured["featurizer_windows"]] == [20, 8, 8, 4]
+    assert len(captured["scored_batches"]) == 10
+    assert {len(batch) for batch in captured["scored_batches"]} == {2}
+    assert result["incremental_linker_telemetry"]["raw_arrow_window_memory_replan_count"] == 1
+
+
 def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_query_exceeds_budget(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     class FakeArtifact:
-        metadata = SimpleNamespace(retrieval_top_k=25)
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
 
     class FakeClusterer:
         n_jobs = 1
         suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
         _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
@@ -1156,10 +1303,8 @@ def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_quer
             prevent_new_incompatibilities=False,
             partial_supervision={},
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
-            total_ram_bytes=None,
+            total_ram_bytes=100_000,
             batching_threshold=None,
-            resolve_total_ram_bytes=lambda _value: (100_000, "test"),
-            build_incremental_result=lambda *_args, **_kwargs: {},
         )
 
     assert raw_calls == []
@@ -1170,12 +1315,17 @@ def test_predict_incremental_arrow_promoted_linker_requires_raw_planner(
     tmp_path: Path,
 ) -> None:
     class FakeArtifact:
-        metadata = SimpleNamespace(retrieval_top_k=25)
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
 
     class FakeClusterer:
         n_jobs = 1
         suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
         _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "arrow"}
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
             return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}
@@ -1205,10 +1355,8 @@ def test_predict_incremental_arrow_promoted_linker_requires_raw_planner(
             prevent_new_incompatibilities=False,
             partial_supervision={},
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
-            total_ram_bytes=None,
+            total_ram_bytes=100_000,
             batching_threshold=None,
-            resolve_total_ram_bytes=lambda _value: (100_000, "test"),
-            build_incremental_result=lambda clusters, **kwargs: {"clusters": clusters, **kwargs},
         )
 
 
@@ -1335,13 +1483,33 @@ def test_compat_arrow_path_discovery_rejects_bad_manifest_name_counts_index(tmp_
         )
 
 
-def test_compat_arrow_path_discovery_declines_missing_required_name_counts_index(
+def test_compat_arrow_manifest_path_never_falls_back_to_cwd_decoy(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    arrow_paths = _minimal_arrow_paths(dataset_root)
+    (dataset_root / "manifest.json").write_text(
+        '{"paths": {"name_counts_index": "shared/name_counts_index"}}',
+        encoding="utf-8",
+    )
+    cwd = tmp_path / "cwd"
+    (cwd / "shared" / "name_counts_index").mkdir(parents=True)
+    monkeypatch.chdir(cwd)
+
+    dataset = SimpleNamespace(arrow_paths=arrow_paths)
+    with pytest.raises(FileNotFoundError, match="specifies name_counts_index path that does not exist"):
+        model_module._resolve_dataset_arrow_paths_for_compat_discovery(
+            dataset,
+            require_specter=False,
+            require_name_counts_index=True,
+        )
+
+
+def test_compat_arrow_path_discovery_declines_missing_required_name_counts_index(
     tmp_path: Path,
 ) -> None:
-    project_root = tmp_path / "project"
-    monkeypatch.setattr(model_module, "PROJECT_ROOT_PATH", str(project_root))
-    (project_root / "s2and" / "data" / "name_counts_index").mkdir(parents=True)
     arrow_paths = {}
     for key, filename in {
         "signatures": "signatures.arrow",
@@ -1553,8 +1721,6 @@ def test_predict_incremental_arrow_promoted_linker_rejects_none_arrow_path(
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
             total_ram_bytes=None,
             batching_threshold=None,
-            resolve_total_ram_bytes=lambda value: (value, None),
-            build_incremental_result=lambda clusters, **kwargs: {"clusters": clusters, **kwargs},
         )
 
 
@@ -1593,8 +1759,6 @@ def test_predict_incremental_arrow_promoted_linker_rejects_missing_declared_disa
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
             total_ram_bytes=None,
             batching_threshold=None,
-            resolve_total_ram_bytes=lambda value: (value, None),
-            build_incremental_result=lambda clusters, **kwargs: {"clusters": clusters, **kwargs},
         )
 
     assert exc_info.value.missing_files == {"cluster_seed_disallows": str(missing_disallows)}
@@ -1755,6 +1919,18 @@ def test_promoted_incremental_batch_telemetry_keeps_first_after_mixed_type_confl
     assert merged["custom_metric_batch_conflict_count"] == 2
 
 
+def test_promoted_incremental_batch_telemetry_does_not_guess_unknown_numeric_semantics() -> None:
+    merged = production_module.merge_promoted_incremental_batch_telemetry(
+        [{"query_count": 1, "new_metric": 3}, {"query_count": 1, "new_metric": 4}],
+        batch_sizes=[1, 1],
+        configured_batch_size=1,
+    )
+
+    assert merged["query_count"] == 2
+    assert merged["new_metric"] == 3
+    assert merged["new_metric_batch_conflict_count"] == 1
+
+
 def test_raw_window_plan_telemetry_marks_conflicting_string_values() -> None:
     merged: dict[str, int | float | str] = {}
 
@@ -1838,8 +2014,9 @@ def _mock_promoted_limits(
         retrieval_row_bytes=512,
         pair_label_bytes=8,
         distance_row_bytes=96,
-        final_matrix_feature_count=70,
-        aggregate_feature_count=31,
+        final_matrix_feature_count=53,
+        pairwise_matrix_feature_count=35,
+        aggregate_feature_count=18,
         fixed_overhead_bytes=16 * (1 << 20),
         predicted_retrieval_pair_arrays_bytes=0,
         predicted_retrieval_row_bytes=0,
@@ -2694,9 +2871,9 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
         "altered_profile_1": ["seed2", "seed3"],
     }
     assert captured["arrow_paths"] == {
-        "signatures": "signatures.arrow",
-        "papers": "papers.arrow",
-        "paper_authors": "paper_authors.arrow",
+        "signatures": str(Path("signatures.arrow").resolve()),
+        "papers": str(Path("papers.arrow").resolve()),
+        "paper_authors": str(Path("paper_authors.arrow").resolve()),
     }
     assert captured["partial_supervision"] == {
         ("seed0", "seed1"): LARGE_DISTANCE,

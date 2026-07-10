@@ -151,6 +151,8 @@ def _windows_change_token_api() -> tuple[Any, Any, Any, Any, Any, int]:
     import ctypes
     from ctypes import wintypes
 
+    windows_ctypes = cast(Any, ctypes)
+
     class _FileBasicInfo(ctypes.Structure):
         _fields_ = (
             ("creation_time", ctypes.c_longlong),
@@ -160,7 +162,7 @@ def _windows_change_token_api() -> tuple[Any, Any, Any, Any, Any, int]:
             ("file_attributes", wintypes.DWORD),
         )
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = windows_ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -299,6 +301,8 @@ class _WindowsArtifactWatch:
         import ctypes
         from ctypes import wintypes
 
+        windows_ctypes = cast(Any, ctypes)
+
         class _Overlapped(ctypes.Structure):
             _fields_ = (
                 ("internal", ctypes.c_void_p),
@@ -308,7 +312,7 @@ class _WindowsArtifactWatch:
                 ("event", wintypes.HANDLE),
             )
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = windows_ctypes.WinDLL("kernel32", use_last_error=True)
         self._ctypes = ctypes
         self._close_handle = kernel32.CloseHandle
         self._close_handle.argtypes = (wintypes.HANDLE,)
@@ -362,11 +366,11 @@ class _WindowsArtifactWatch:
                     None,
                 )
                 if handle == invalid_handle:
-                    raise ctypes.WinError(ctypes.get_last_error())
+                    raise windows_ctypes.WinError(windows_ctypes.get_last_error())
                 event = create_event(None, True, False, None)
                 if not event:
                     self._close_handle(handle)
-                    raise ctypes.WinError(ctypes.get_last_error())
+                    raise windows_ctypes.WinError(windows_ctypes.get_last_error())
                 buffer = ctypes.create_string_buffer(8192)
                 overlapped = _Overlapped(event=event)
                 if not read_changes(
@@ -379,11 +383,11 @@ class _WindowsArtifactWatch:
                     ctypes.byref(overlapped),
                     None,
                 ):
-                    error = ctypes.get_last_error()
+                    error = windows_ctypes.get_last_error()
                     if error != 997:  # ERROR_IO_PENDING is the expected overlapped result.
                         self._close_handle(event)
                         self._close_handle(handle)
-                        raise ctypes.WinError(error)
+                        raise windows_ctypes.WinError(error)
                 self._states.append((int(handle), int(event), buffer, overlapped))
         except Exception:
             self.close()

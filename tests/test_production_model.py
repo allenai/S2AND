@@ -17,7 +17,7 @@ import s2and.production_bundle as production_bundle_module
 import s2and.production_model as production_model_module
 import s2and.subblocking as subblocking_module
 from s2and.arrow_inputs import MissingArrowArtifactError
-from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
+from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION, NORMALIZATION_VERSION_LEGACY_COMPAT
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
@@ -171,9 +171,17 @@ def _predict_dummy_block(clusterer, *, batching_threshold: int | None) -> dict[s
     return predictions
 
 
-@pytest.mark.skip(reason="the declared packaged default remains legacy until the canonical v1.3 bundle is available")
-def test_packaged_default_production_bundle_smoke() -> None:
-    assert load_production_model().production_model_bundle_dir == DEFAULT_PRODUCTION_MODEL_DIR
+def test_packaged_default_production_bundle_is_rejected_by_canonical_v2() -> None:
+    expected = (
+        f"Production bundle {DEFAULT_PRODUCTION_MODEL_DIR.resolve()} was built with "
+        f"normalization_version {NORMALIZATION_VERSION_LEGACY_COMPAT!r} "
+        f"but this package implements {NORMALIZATION_VERSION!r}. Code, model, and artifacts move "
+        "as one release unit; redeploy the matching package or rebuild the bundle "
+        "(docs/normalization_migration_blocked.md)."
+    )
+    with pytest.raises(ValueError) as exc_info:
+        load_production_model()
+    assert str(exc_info.value) == expected
 
 
 def test_native_production_bundle_loads_as_mutable_clusterer(

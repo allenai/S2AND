@@ -749,6 +749,8 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
     manifest = _validate_manifest(bundle_dir)
     clusterer_config = _read_json(bundle_dir / str(manifest["files"]["clusterer_config"]))
     _validate_clusterer_config(manifest, clusterer_config)
+    feature_contract = clusterer_config["feature_contract"]
+    _require_bundle_normalization_version(bundle_dir, feature_contract)
     runtime_cluster_eps = _production_runtime_cluster_eps(
         bundle_dir,
         manifest=manifest,
@@ -758,7 +760,7 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
     NameCountsBinding.from_feature_contract(
-        clusterer_config["feature_contract"],
+        feature_contract,
         context=f"Production bundle {bundle_dir} feature_contract",
         required=any("name_counts" in info.features_to_use for info in (featurizer_info, nameless_featurizer_info)),
     )
@@ -815,8 +817,7 @@ def _load_bundle_clusterer(bundle_dir: Path, *, require_incremental_linker: bool
         batch_size=int(clusterer_config["batch_size"]),
         suppress_orcid=bool(clusterer_config["suppress_orcid"]),
     )
-    clusterer.feature_contract = dict(clusterer_config["feature_contract"])
-    _require_bundle_normalization_version(bundle_dir, clusterer.feature_contract)
+    clusterer.feature_contract = dict(feature_contract)
     clusterer.best_params = dict(clusterer_config["best_params"])
     clusterer.incremental_precluster_broadcast_mode = cast(
         IncrementalBroadcastMode,

@@ -20,6 +20,20 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-rust.yml"
 MAIN_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "main.yaml"
 
 
+def _workflow_job_condition(workflow: str, job_name: str) -> str:
+    """Return one job-level condition from a workflow source string."""
+
+    job_match = re.search(
+        rf"^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [a-z0-9][a-z0-9-]*:\n|\Z)",
+        workflow,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert job_match is not None, f"missing workflow job {job_name}"
+    condition_match = re.search(r"^    if: (?P<condition>.+)$", job_match.group("body"), flags=re.MULTILINE)
+    assert condition_match is not None, f"missing condition for workflow job {job_name}"
+    return condition_match.group("condition")
+
+
 def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
     rust_project = tomllib.loads((REPO_ROOT / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8"))
     assert rust_project["project"]["requires-python"] == ">=3.11,<3.14"
@@ -42,6 +56,23 @@ def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> 
     assert "github.event_name == 'pull_request'" in workflow
     assert "needs.detect-versions.outputs.force_build == 'true'" in workflow
     assert workflow.count("scripts/verification/smoke_installed_rust_api.py") >= 2
+    pr_force_build = "github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true'"
+    for job_name in ("s2and-dist", "wheels-windows", "wheels-macos", "wheels-linux", "sdist"):
+        condition = _workflow_job_condition(workflow, job_name)
+        assert condition.startswith(f"({pr_force_build}) || (github.event_name != 'pull_request' &&")
+    release_smoke_condition = _workflow_job_condition(workflow, "release-smoke")
+    assert release_smoke_condition.startswith(f"({pr_force_build}) || (github.event_name == 'push' &&")
+    for job_name in ("publish-s2and", "publish-rust"):
+        publish_condition = _workflow_job_condition(workflow, job_name)
+        assert "pull_request" not in publish_condition
+        assert "github.ref == 'refs/heads/main'" in publish_condition
+    assert 'get("name", "").lower() == "force-build"' in workflow
+    assert (
+        "ALLOW_LEGACY_DEFAULT_REJECTION: ${{ github.event_name == 'pull_request' "
+        "&& needs.detect-versions.outputs.force_build == 'true' }}"
+    ) in workflow
+    assert "expected_legacy_rejection" in workflow
+    assert "str(exc) == expected_legacy_rejection" in workflow
     incremental_smoke = (REPO_ROOT / "scripts/verification/smoke_installed_incremental_arrow.py").read_text(
         encoding="utf-8"
     )

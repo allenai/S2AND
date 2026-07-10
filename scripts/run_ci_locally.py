@@ -152,10 +152,8 @@ def run_maturin_develop_with_retries() -> None:
             time.sleep(sleep_seconds)
 
 
-def sync_deps(*, lock_present: bool, lane: str) -> None:
+def sync_deps(*, lock_present: bool) -> None:
     args = ["sync", "--extra", "dev"]
-    if lane == "rust-enabled":
-        args.extend(["--extra", "rust"])
     if lock_present:
         args.append("--frozen")
     args.extend(["--no-install-package", "s2and-rust"])
@@ -164,7 +162,7 @@ def sync_deps(*, lock_present: bool, lane: str) -> None:
 
 def run_lint_job(*, lock_present: bool) -> None:
     print("\n=== lint ===")
-    sync_deps(lock_present=lock_present, lane="py-only")
+    sync_deps(lock_present=lock_present)
     run_uv(uv_run_args("python", "scripts/sync_version.py", "--check"))
     run_uv(uv_run_args("ruff", "check", "s2and", "scripts", "tests"))
     run_uv(uv_run_args("ruff", "format", "--check", "s2and"))
@@ -212,7 +210,7 @@ def run_ty_checks() -> None:
 
 def run_typecheck_and_test_lane(*, lane: str, lock_present: bool) -> None:
     print(f"\n=== typecheck-and-test ({lane}) ===")
-    sync_deps(lock_present=lock_present, lane=lane)
+    sync_deps(lock_present=lock_present)
 
     if lane == "rust-enabled":
         ensure_rust_on_path()

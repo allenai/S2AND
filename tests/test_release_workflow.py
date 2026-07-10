@@ -73,11 +73,17 @@ def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> 
 
 def test_rust_enabled_ci_cannot_convert_import_failures_to_skips() -> None:
     main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
+    all_workflows = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(MAIN_WORKFLOW_PATH.parent.iterdir())
+        if path.suffix in {".yaml", ".yml"}
+    )
     helper_source = (REPO_ROOT / "tests" / "helpers.py").read_text(encoding="utf-8")
 
     assert "S2AND_TEST_REQUIRE_RUST" in main_workflow
     assert "S2AND_TEST_REQUIRE_RUST" in helper_source
     assert "Rust-enabled tests require a working s2and_rust runtime" in helper_source
+    assert re.search(r"--extra(?:=|\s+)rust(?:\s|$)", all_workflows) is None
     guardrail_paths = re.findall(r"pytest -q (tests/[^\s]+\.py)", main_workflow)
     assert guardrail_paths
     for relative_path in guardrail_paths:

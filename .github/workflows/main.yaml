@@ -160,18 +160,10 @@ jobs:
         shell: bash
         run: |
           if [[ -f uv.lock ]]; then
-            if [[ "${{ matrix.lane }}" == "rust-enabled" ]]; then
-              uv sync --extra dev --extra rust --frozen --no-install-package s2and-rust
-            else
-              uv sync --extra dev --frozen --no-install-package s2and-rust
-            fi
+            uv sync --extra dev --frozen --no-install-package s2and-rust
           else
             # No lock present; resolve once, then install
-            if [[ "${{ matrix.lane }}" == "rust-enabled" ]]; then
-              uv sync --extra dev --extra rust --no-install-package s2and-rust
-            else
-              uv sync --extra dev --no-install-package s2and-rust
-            fi
+            uv sync --extra dev --no-install-package s2and-rust
           fi
 
       # Build/install Rust extension for parity tests

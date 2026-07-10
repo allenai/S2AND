@@ -19,7 +19,7 @@ def test_py_only_lane_reports_expected_rust_skips(monkeypatch, capsys) -> None:
     run_ci = _load_run_ci_locally()
     calls: list[tuple[list[str], dict[str, str] | None]] = []
 
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present, lane: None)
+    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
     monkeypatch.setattr(run_ci, "run_ty_checks", lambda: None)
     monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
 
@@ -45,7 +45,7 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
     run_ci = _load_run_ci_locally()
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present, lane: None)
+    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
     monkeypatch.setattr(run_ci, "top_level_script_files", lambda: ["scripts/run_ci_locally.py"])
     monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append(args))
 
@@ -60,7 +60,7 @@ def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch)
     calls: list[tuple[list[str], dict[str, str] | None]] = []
 
     monkeypatch.delenv("S2AND_BACKEND", raising=False)
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present, lane: None)
+    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
     monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: None)
     monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: None)
     monkeypatch.setattr(run_ci, "run_ty_checks", lambda: None)
@@ -91,3 +91,18 @@ def test_rust_parity_test_paths_exist() -> None:
 
     for relative_path in run_ci.RUST_PARITY_TESTS:
         assert (run_ci.REPO / relative_path).is_file(), relative_path
+
+
+def test_sync_deps_uses_only_defined_dev_extra(monkeypatch) -> None:
+    run_ci = _load_run_ci_locally()
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append(args))
+
+    run_ci.sync_deps(lock_present=True)
+    run_ci.sync_deps(lock_present=False)
+
+    assert calls == [
+        ["sync", "--extra", "dev", "--frozen", "--no-install-package", "s2and-rust"],
+        ["sync", "--extra", "dev", "--no-install-package", "s2and-rust"],
+    ]

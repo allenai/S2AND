@@ -71,7 +71,7 @@ def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> 
     assert "predict_incremental_from_arrow_paths(" in incremental_smoke
 
 
-def test_rust_enabled_ci_cannot_convert_import_failures_to_skips() -> None:
+def test_required_rust_ci_cannot_convert_import_failures_to_skips() -> None:
     main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
     all_workflows = "\n".join(
         path.read_text(encoding="utf-8")
@@ -80,9 +80,11 @@ def test_rust_enabled_ci_cannot_convert_import_failures_to_skips() -> None:
     )
     helper_source = (REPO_ROOT / "tests" / "helpers.py").read_text(encoding="utf-8")
 
-    assert "S2AND_TEST_REQUIRE_RUST" in main_workflow
+    assert 'S2AND_TEST_REQUIRE_RUST: "1"' in main_workflow
     assert "S2AND_TEST_REQUIRE_RUST" in helper_source
     assert "Rust-enabled tests require a working s2and_rust runtime" in helper_source
+    assert "py-only" not in main_workflow
+    assert main_workflow.count("pytest tests/") == 1
     assert re.search(r"--extra(?:=|\s+)rust(?:\s|$)", all_workflows) is None
     guardrail_paths = re.findall(r"pytest -q (tests/[^\s]+\.py)", main_workflow)
     assert guardrail_paths

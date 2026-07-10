@@ -22,12 +22,11 @@ uv run python scripts/run_ci_locally.py
 `scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
 
 - lint (`scripts/sync_version.py --check`, `ruff check`, and `ruff format --check`)
-- `typecheck-and-test` matrix lanes (`py-only`, then `rust-enabled`)
-- Rust parity guardrail tests in the `rust-enabled` lane
+- one required-runtime `typecheck-and-test` job
+- Rust ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
 
-The local runner passes `-ra` to pytest so skip reasons are printed under each lane. Rust-only tests may skip in the
-`py-only` lane because the extension is not installed there; the same tests must run in the later `rust-enabled`
-lane after `maturin develop` builds exactly `s2and-rust==0.60.0`.
+Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
+exactly `s2and-rust==0.60.0` once, requires it to import, and then runs full-suite coverage of the Python route.
 
 By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
 
@@ -35,9 +34,9 @@ To override the local platform emulation:
 
 - set `S2AND_CI_TY_PLATFORM`, for example `windows`
 
-## Python-only fast path
+## Static-check fast path
 
-If you want to skip Rust extension compilation while iterating:
+If you want to skip Rust extension compilation while iterating, run only the static checks:
 
 ```bash
 uv sync --active --extra dev --frozen --no-install-package s2and-rust
@@ -46,11 +45,8 @@ uv run --active --no-project ty check s2and --ignore unresolved-import --ignore 
 uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
 ```
 
-Pytest with coverage:
-
-```bash
-uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
-```
+The full pytest suite requires the native name-count index. Build the extension first or use
+`uv run python scripts/run_ci_locally.py`.
 
 Do not set `PYTHONPATH` for normal repo scripts; it can shadow the installed package or compiled Rust extension. Test
 and CI commands may set it only when they are intentionally exercising the checkout source tree.

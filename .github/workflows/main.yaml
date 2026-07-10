@@ -52,15 +52,10 @@ jobs:
           fi
 
   typecheck-and-test:
-    name: typecheck-and-test (${{ matrix.lane }})
     runs-on: ubuntu-latest
     needs: [lint]
     env:
-      S2AND_TEST_REQUIRE_RUST: ${{ matrix.lane == 'rust-enabled' && '1' || '0' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [py-only, rust-enabled]
+      S2AND_TEST_REQUIRE_RUST: "1"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -127,11 +122,9 @@ jobs:
           PY
 
       - name: Setup Rust
-        if: matrix.lane == 'rust-enabled'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo build
-        if: matrix.lane == 'rust-enabled'
         uses: actions/cache@v5
         with:
           path: |
@@ -149,9 +142,8 @@ jobs:
           path: |
             ~/.cache/uv
             .venv
-          key: uv-venv-${{ runner.os }}-py311-${{ matrix.lane }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          key: uv-venv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml', 'uv.lock') }}
           restore-keys: |
-            uv-venv-${{ runner.os }}-py311-${{ matrix.lane }}-
             uv-venv-${{ runner.os }}-py311-
             uv-venv-
 
@@ -166,25 +158,20 @@ jobs:
             uv sync --extra dev --no-install-package s2and-rust
           fi
 
-      # Build/install Rust extension for parity tests
-      - name: Build Rust extension
-        if: matrix.lane == 'rust-enabled'
+      # Canonical-v2 uses the native name-count index even with Python orchestration.
+      - name: Build required Rust extension
         run: uv run --no-sync --with maturin maturin develop -m s2and_rust/Cargo.toml
 
       - name: Fail-hard Rust API smoke
-        if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync python scripts/verification/smoke_installed_rust_api.py
 
       - name: "Rust parity guardrail: feature parity"
-        if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync pytest -q tests/test_feature_port_parity.py
 
       - name: "Rust parity guardrail: signature preprocess parity"
-        if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync pytest -q tests/test_rust_signature_preprocess.py
 
       - name: "Rust parity guardrail: batch chunking/fallback parity"
-        if: matrix.lane == 'rust-enabled'
         run: uv run --no-sync pytest -q tests/test_rust_batch_chunking.py
 
       # Type checking (ty with tuned migration rules)
@@ -210,17 +197,10 @@ jobs:
               --ignore unresolved-attribute
           fi
 
-      - name: pytest (coverage, py-only)
-        if: matrix.lane == 'py-only'
+      - name: pytest (coverage, Python backend)
         env:
-          # keep startup lean; avoid user-level plugins on hosted runners
+          # Python orchestration still uses the required native name-count index.
           S2AND_BACKEND: python
-        run: |
-          uv run --no-sync pytest tests/ \
-            --cov=s2and --cov-report=term-missing --cov-fail-under=40
-
-      - name: pytest (coverage, rust-enabled)
-        if: matrix.lane == 'rust-enabled'
         run: |
           uv run --no-sync pytest tests/ \
             --cov=s2and --cov-report=term-missing --cov-fail-under=40

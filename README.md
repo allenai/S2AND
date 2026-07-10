@@ -228,24 +228,25 @@ uv run python scripts/run_ci_locally.py
 ```
 `scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
 - lint job (`scripts/sync_version.py --check`, `ruff check`, and `ruff format --check`)
-- `typecheck-and-test` matrix lanes (`py-only`, then `rust-enabled`)
-- Rust parity guardrail tests in the `rust-enabled` lane
+- one required-runtime `typecheck-and-test` job
+- Rust ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
 
-The runner passes `-ra` to pytest so skip reasons are printed by lane. Rust-only tests may skip in `py-only` because
-that lane forces `S2AND_BACKEND=python`; they must run in `rust-enabled` after the local extension is built with
-`maturin develop`.
+Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The local and
+hosted runners therefore build the extension once, require it to import, and use `S2AND_BACKEND=python` for full-suite
+coverage of the Python route.
 
 By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
 To override platform emulation locally, set `S2AND_CI_TY_PLATFORM` (for example, `windows`).
 
-To run CI checks locally without Rust extension compilation (faster iteration):
+To run static CI checks locally without Rust extension compilation (faster iteration):
 ```bash
 uv sync --active --extra dev --frozen --no-install-package s2and-rust
 uv run --active --no-project ruff format --check s2and scripts/*.py
 uv run --active --no-project ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 uv run --active --no-project ty check scripts/*.py --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global --ignore unresolved-reference --ignore unresolved-attribute
-uv run --active --no-project pytest tests/ --cov=s2and --cov-report=term-missing --cov-fail-under=40
 ```
+
+The full pytest suite is not a no-native check; build the required extension first or use `scripts/run_ci_locally.py`.
 
 ### Version bumping
 Versioning is centralized in the `VERSION` file (single source of truth). When you update it, we sync the Python/Rust

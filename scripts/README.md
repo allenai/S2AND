@@ -59,7 +59,7 @@
 
 | Script | What it does |
 |---|---|
-| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync check, lint job, `py-only` + `rust-enabled` matrix lanes, Rust parity tests, ty, pytest |
+| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync check, lint, one required Rust build, ABI/parity guardrails, ty, and Python-backend pytest coverage |
 | `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
 
 ### Archived

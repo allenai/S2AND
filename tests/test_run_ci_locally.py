@@ -15,32 +15,6 @@ def _load_run_ci_locally() -> ModuleType:
     return module
 
 
-def test_py_only_lane_reports_expected_rust_skips(monkeypatch, capsys) -> None:
-    run_ci = _load_run_ci_locally()
-    calls: list[tuple[list[str], dict[str, str] | None]] = []
-
-    monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
-    monkeypatch.setattr(run_ci, "run_ty_checks", lambda: None)
-    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
-
-    run_ci.run_typecheck_and_test_lane(lane="py-only", lock_present=True)
-
-    assert len(calls) == 1
-    assert calls[0][0] == [
-        "run",
-        "--no-sync",
-        "pytest",
-        "-ra",
-        "tests/",
-        "--cov=s2and",
-        "--cov-report=term-missing",
-        "--cov-fail-under=40",
-    ]
-    assert calls[0][1] is not None
-    assert calls[0][1]["S2AND_BACKEND"] == "python"
-    assert "Rust-only tests are expected to report skips in the py-only lane" in capsys.readouterr().out
-
-
 def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
     run_ci = _load_run_ci_locally()
     calls: list[list[str]] = []
@@ -55,23 +29,32 @@ def test_lint_job_runs_version_sync_check(monkeypatch) -> None:
     assert ["run", "--no-sync", "ruff", "check", "s2and", "scripts", "tests"] in calls
 
 
-def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch) -> None:
+def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> None:
     run_ci = _load_run_ci_locally()
     calls: list[tuple[list[str], dict[str, str] | None]] = []
+    lifecycle: list[str] = []
 
-    monkeypatch.delenv("S2AND_BACKEND", raising=False)
     monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
-    monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: None)
-    monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: None)
-    monkeypatch.setattr(run_ci, "run_ty_checks", lambda: None)
+    monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: lifecycle.append("ensure-rust"))
+    monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: lifecycle.append("build-rust"))
+    monkeypatch.setattr(run_ci, "run_ty_checks", lambda: lifecycle.append("typecheck"))
     monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
 
-    run_ci.run_typecheck_and_test_lane(lane="rust-enabled", lock_present=True)
+    run_ci.run_typecheck_and_test_job(lock_present=True)
 
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == len(run_ci.RUST_PARITY_TESTS) + 1
+    assert lifecycle == ["ensure-rust", "build-rust", "typecheck"]
+    assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
+    assert calls[0][1] is not None
+    assert calls[0][1]["S2AND_TEST_REQUIRE_RUST"] == "1"
+    assert "S2AND_BACKEND" not in calls[0][1]
     assert all("-ra" in args for args in pytest_calls)
     assert pytest_calls[0] == ["run", "--no-sync", "pytest", "-q", "-ra", run_ci.RUST_PARITY_TESTS[0]]
+    for _args, env in calls[1:-1]:
+        assert env is not None
+        assert env["S2AND_TEST_REQUIRE_RUST"] == "1"
+        assert "S2AND_BACKEND" not in env
     assert pytest_calls[-1] == [
         "run",
         "--no-sync",
@@ -83,7 +66,8 @@ def test_rust_enabled_lane_reports_skip_reasons_for_all_pytest_runs(monkeypatch)
         "--cov-fail-under=40",
     ]
     assert calls[-1][1] is not None
-    assert "S2AND_BACKEND" not in calls[-1][1]
+    assert calls[-1][1]["S2AND_BACKEND"] == "python"
+    assert calls[-1][1]["S2AND_TEST_REQUIRE_RUST"] == "1"
 
 
 def test_rust_parity_test_paths_exist() -> None:

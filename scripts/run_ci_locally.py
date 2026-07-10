@@ -7,9 +7,10 @@ Execution order:
      - uv sync --extra dev [--frozen if uv.lock exists]
      - version sync check
      - ruff check / format checks
-  2) typecheck-and-test matrix:
-     - py-only lane
-     - rust-enabled lane
+  2) typecheck-and-test job:
+     - build the required Rust extension
+     - run Rust parity guardrails
+     - run the full suite with Python orchestration
 """
 
 import os
@@ -45,17 +46,12 @@ def repo_root() -> Path:
 
 
 REPO = repo_root()
-LANES = ["py-only", "rust-enabled"]
 RUST_PARITY_TESTS = [
     "tests/test_feature_port_parity.py",
     "tests/test_rust_signature_preprocess.py",
     "tests/test_rust_batch_chunking.py",
 ]
 PYTEST_REPORT_FLAGS = ["-ra"]
-PY_ONLY_EXPECTED_SKIP_NOTE = (
-    "Rust-only tests are expected to report skips in the py-only lane; "
-    "the rust-enabled lane builds s2and_rust and must exercise them."
-)
 TY_PYTHON_VERSION = "3.11"
 TY_PYTHON_PLATFORM = os.environ.get("S2AND_CI_TY_PLATFORM", "linux")
 TY_BASE_IGNORES = [
@@ -208,22 +204,25 @@ def run_ty_checks() -> None:
         )
 
 
-def run_typecheck_and_test_lane(*, lane: str, lock_present: bool) -> None:
-    print(f"\n=== typecheck-and-test ({lane}) ===")
+def run_typecheck_and_test_job(*, lock_present: bool) -> None:
+    print("\n=== typecheck-and-test ===")
     sync_deps(lock_present=lock_present)
 
-    if lane == "rust-enabled":
-        ensure_rust_on_path()
-        run_maturin_develop_with_retries()
-        for parity_test in RUST_PARITY_TESTS:
-            run_uv(pytest_args(parity_test, quiet=True))
+    ensure_rust_on_path()
+    run_maturin_develop_with_retries()
+    required_rust_env = os.environ.copy()
+    required_rust_env["S2AND_TEST_REQUIRE_RUST"] = "1"
+    run_uv(
+        uv_run_args("python", "scripts/verification/smoke_installed_rust_api.py"),
+        env=required_rust_env,
+    )
+    for parity_test in RUST_PARITY_TESTS:
+        run_uv(pytest_args(parity_test, quiet=True), env=required_rust_env)
 
     run_ty_checks()
 
-    env = os.environ.copy()
-    if lane == "py-only":
-        env["S2AND_BACKEND"] = "python"
-        print(f"[{lane}] {PY_ONLY_EXPECTED_SKIP_NOTE}")
+    python_backend_env = required_rust_env.copy()
+    python_backend_env["S2AND_BACKEND"] = "python"
 
     run_uv(
         pytest_args(
@@ -232,15 +231,14 @@ def run_typecheck_and_test_lane(*, lane: str, lock_present: bool) -> None:
             "--cov-report=term-missing",
             "--cov-fail-under=40",
         ),
-        env=env,
+        env=python_backend_env,
     )
 
 
 def main() -> None:
     lock_present = (REPO / "uv.lock").exists()
     run_lint_job(lock_present=lock_present)
-    for lane in LANES:
-        run_typecheck_and_test_lane(lane=lane, lock_present=lock_present)
+    run_typecheck_and_test_job(lock_present=lock_present)
     print("\nALL CHECKS PASSED")
 
 

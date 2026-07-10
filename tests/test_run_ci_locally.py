@@ -34,6 +34,7 @@ def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> Non
     calls: list[tuple[list[str], dict[str, str] | None]] = []
     lifecycle: list[str] = []
 
+    monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
     monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: lifecycle.append("ensure-rust"))
     monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: lifecycle.append("build-rust"))

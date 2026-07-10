@@ -1,7 +1,6 @@
 import json
 import logging
 import pickle
-import warnings
 from collections import Counter
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -28,7 +27,7 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 from s2and.featurizer import many_pairs_featurize
-from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
+from s2and.model_pairwise import _validated_classifier_features
 
 logger = logging.getLogger("s2and")
 
@@ -505,12 +504,24 @@ def pairwise_eval(
     if nameless_classifier is not None and hasattr(nameless_classifier, "classifier"):
         nameless_classifier = nameless_classifier.classifier
 
-    with warnings.catch_warnings():
-        suppress_sklearn_feature_name_warnings()
-        if nameless_classifier is not None:
-            y_prob = (classifier.predict_proba(X)[:, 1] + nameless_classifier.predict_proba(nameless_X)[:, 1]) / 2
-        else:
-            y_prob = classifier.predict_proba(X)[:, 1]
+    classifier_input = _validated_classifier_features(
+        classifier,
+        X,
+        feature_names=shap_feature_names,
+    )
+    if nameless_classifier is not None:
+        if nameless_X is None or nameless_feature_names is None:
+            raise ValueError("nameless_X and nameless_feature_names are required with nameless_classifier")
+        nameless_input = _validated_classifier_features(
+            nameless_classifier,
+            nameless_X,
+            feature_names=nameless_feature_names,
+        )
+        y_prob = (
+            classifier.predict_proba(classifier_input)[:, 1] + nameless_classifier.predict_proba(nameless_input)[:, 1]
+        ) / 2
+    else:
+        y_prob = classifier.predict_proba(classifier_input)[:, 1]
 
     # plot AUROC
     fpr, tpr, _ = roc_curve(y, y_prob)
@@ -914,36 +925,34 @@ def _write_claims_eval_shap_plots(
     if nameless_features is None:
         raise ValueError("output_shap=True requires clusterer.nameless_featurizer_info to produce nameless features")
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        import s2and.shap_utils as shap_utils
+    import s2and.shap_utils as shap_utils
 
-        shap_output = _shap_values_for_tree_model_preserving_booster_params(
-            clusterer.classifier,
-            features,
-        )
-        shap_output_nameless = _shap_values_for_tree_model_preserving_booster_params(
-            clusterer.nameless_classifier,
-            nameless_features,
-        )
+    shap_output = _shap_values_for_tree_model_preserving_booster_params(
+        clusterer.classifier,
+        features,
+    )
+    shap_output_nameless = _shap_values_for_tree_model_preserving_booster_params(
+        clusterer.nameless_classifier,
+        nameless_features,
+    )
 
-        title = f"{id1}-{id2}"
-        shap_utils._safe_summary_plot(
-            shap_output,
-            features,
-            clusterer.featurizer_info.get_feature_names(),
-            "dot",
-            join(directory_for_caching, f"{title}_shap.png"),
-            fig_num=1,
-        )
-        shap_utils._safe_summary_plot(
-            shap_output_nameless,
-            nameless_features,
-            clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
-            "dot",
-            join(directory_for_caching, f"{title}_shap_nameless.png"),
-            fig_num=2,
-        )
+    title = f"{id1}-{id2}"
+    shap_utils._safe_summary_plot(
+        shap_output,
+        features,
+        clusterer.featurizer_info.get_feature_names(),
+        "dot",
+        join(directory_for_caching, f"{title}_shap.png"),
+        fig_num=1,
+    )
+    shap_utils._safe_summary_plot(
+        shap_output_nameless,
+        nameless_features,
+        clusterer.nameless_featurizer_info.get_feature_names(),  # type: ignore
+        "dot",
+        join(directory_for_caching, f"{title}_shap_nameless.png"),
+        fig_num=2,
+    )
 
 
 def claims_eval(

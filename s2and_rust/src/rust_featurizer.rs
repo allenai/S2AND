@@ -1142,7 +1142,6 @@ impl RustFeaturizer {
         let cluster_seed_disallows_path =
             extract_path_mapping_string(paths, "cluster_seed_disallows", false)?;
         let specter_path = extract_path_mapping_string(paths, "specter", false)?;
-        let name_counts_arrow_path = extract_path_mapping_string(paths, "name_counts", false)?;
         let name_counts_index_path = extract_name_counts_index_path(paths)?;
         let signatures_batch_index_path =
             extract_path_mapping_string(paths, "signatures_batch_index", false)?;
@@ -1248,14 +1247,7 @@ impl RustFeaturizer {
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
         let raw_name_counts = match name_counts_index_path.as_ref() {
             Some(path) => read_raw_name_counts_index(path)?,
-            None => match name_counts_arrow_path.as_ref() {
-                Some(path) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "name_counts Arrow path '{path}' requires name_counts_index; refusing slow Arrow fallback"
-                    )));
-                }
-                None => RawNameCountMaps::default(),
-            },
+            None => RawNameCountMaps::default(),
         };
         let mut language_detector: Option<LanguageDetectorCompat> = None;
 

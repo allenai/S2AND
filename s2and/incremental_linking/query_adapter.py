@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+import s2and_rust
 from s2and.data import ANDData
 from s2and.incremental_linking.gate_buckets import QueryView, normalize_query_views
 from s2and.incremental_linking.retrieval import LinkerRetrievalBatch
@@ -639,12 +640,6 @@ def build_rust_hybrid_centroid_retriever(
 ) -> RustHybridCentroidRetrieverHandle:
     """Build the Rust hybrid centroid retriever for promoted linker candidates."""
 
-    try:
-        import s2and_rust
-    except ImportError as exc:  # pragma: no cover - production requires Rust
-        raise RuntimeError("RustHybridCentroidRetriever is unavailable; build/install s2and_rust first") from exc
-    if not hasattr(s2and_rust, "RustHybridCentroidRetriever"):
-        raise RuntimeError("RustHybridCentroidRetriever is unavailable; rebuild/install s2and_rust")
     summaries = list(candidate_summaries)
     return RustHybridCentroidRetrieverHandle(
         retriever=s2and_rust.RustHybridCentroidRetriever(

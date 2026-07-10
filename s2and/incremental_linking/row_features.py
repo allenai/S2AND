@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+import s2and_rust
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 
@@ -140,12 +141,15 @@ def _rust_payload(candidate_batch: LinkerCandidateBatch, row_signals: Mapping[st
 def _coerce_promoted_row_feature_telemetry(result: Mapping[str, Any]) -> dict[str, int]:
     raw_telemetry = result.get("telemetry")
     if not isinstance(raw_telemetry, Mapping):
-        return {}
-    telemetry: dict[str, int] = {}
-    for key in ("generated_family_id_count", "generic_family_override_count"):
-        if key in raw_telemetry:
-            telemetry[key] = int(raw_telemetry[key])
-    return telemetry
+        raise RuntimeError("Rust promoted row-feature result must include telemetry mapping")
+    expected_keys = {"generated_family_id_count", "generic_family_override_count"}
+    actual_keys = {str(key) for key in raw_telemetry}
+    if actual_keys != expected_keys:
+        raise RuntimeError(
+            "Rust promoted row-feature telemetry schema mismatch: "
+            f"expected={sorted(expected_keys)}, got={sorted(actual_keys)}"
+        )
+    return {key: int(raw_telemetry[key]) for key in sorted(expected_keys)}
 
 
 def build_promoted_non_pairwise_row_features_with_telemetry(
@@ -154,38 +158,20 @@ def build_promoted_non_pairwise_row_features_with_telemetry(
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     """Build promoted non-`pw_*` linker features and return Rust row-formula telemetry."""
 
-    try:
-        import s2and_rust
-    except ImportError as exc:  # pragma: no cover - production requires the Rust runtime
-        raise RuntimeError("s2and_rust is required for promoted linker row feature generation") from exc
-    method = getattr(s2and_rust, "promoted_linker_non_pairwise_features", None)
-    if method is None:
-        raise RuntimeError("s2and_rust.promoted_linker_non_pairwise_features is unavailable")
-    result = method(_rust_payload(candidate_batch, row_signals))
+    result = s2and_rust.promoted_linker_non_pairwise_features(_rust_payload(candidate_batch, row_signals))
+    if not isinstance(result, Mapping):
+        raise RuntimeError("Rust promoted row-feature result must be a mapping")
     telemetry = _coerce_promoted_row_feature_telemetry(result)
-    if telemetry:
-        logger.info(
-            "Telemetry: promoted_linker_non_pairwise_features generated_family_id_count=%d "
-            "generic_family_override_count=%d",
-            telemetry.get("generated_family_id_count", 0),
-            telemetry.get("generic_family_override_count", 0),
-        )
+    logger.info(
+        "Telemetry: promoted_linker_non_pairwise_features generated_family_id_count=%d "
+        "generic_family_override_count=%d",
+        telemetry["generated_family_id_count"],
+        telemetry["generic_family_override_count"],
+    )
     result_payload = dict(result)
-    for passthrough_column in (
-        "candidate_cluster_max_paper_author_count",
-        "paper_author_list_max_jaccard",
-        "paper_author_list_max_containment",
-        "paper_author_list_max_overlap_count",
-        "local_author_window10_jaccard_max",
-        "local_author_window10_overlap_count_max",
-        "best_author_count_log_absdiff",
-    ):
-        if passthrough_column not in result_payload and passthrough_column in row_signals:
-            result_payload[passthrough_column] = _float_signal(
-                row_signals,
-                passthrough_column,
-                candidate_batch.row_count,
-            )
+    missing_columns = sorted(column for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS if column not in result_payload)
+    if missing_columns:
+        raise RuntimeError(f"Rust promoted row-feature result is missing columns: {missing_columns}")
     features = {
         column: np.asarray(result_payload[column], dtype=np.float32) for column in PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS
     }

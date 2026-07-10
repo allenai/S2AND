@@ -1,36 +1,27 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, cast
 
 import numpy as np
 import pytest
 
-from s2and.incremental_linking import (
-    LinkerCandidateBatch,
-    build_linker_retrieval_batch_rust,
-    build_promoted_non_pairwise_row_features,
-)
+import s2and_rust
+from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
 from s2and.incremental_linking.query_adapter import mask_query_features
-from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features_with_telemetry
-from tests.helpers import build_cluster_summary, build_query_features, import_s2and_rust
-from tests.linker_row_feature_reference import build_promoted_non_pairwise_row_features_python_reference
-
-_HAS_RUST_RETRIEVER, _RUST_RETRIEVER_PAYLOAD = import_s2and_rust(
-    required_module_attrs=("RustHybridCentroidRetriever",),
+from s2and.incremental_linking.retrieval import build_linker_retrieval_batch_rust
+from s2and.incremental_linking.row_features import (
+    build_promoted_non_pairwise_row_features,
+    build_promoted_non_pairwise_row_features_with_telemetry,
 )
-if not _HAS_RUST_RETRIEVER:
-    raise pytest.skip.Exception(
-        f"s2and_rust RustHybridCentroidRetriever is unavailable: {_RUST_RETRIEVER_PAYLOAD!r}",
-        allow_module_level=True,
-    )
-s2and_rust = cast(Any, _RUST_RETRIEVER_PAYLOAD)
+from tests.helpers import build_cluster_summary, build_query_features
+from tests.linker_row_feature_reference import build_promoted_non_pairwise_row_features_python_reference
 
 
 def test_rust_retrieval_public_exports_are_available() -> None:
-    assert s2and_rust.DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS == [0.40, 0.23, 0.12, 0.05, 0.07]
+    assert s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME == "h_wang_any_input_v2"
     assert hasattr(s2and_rust, "RustHybridCentroidRetriever")
     assert not hasattr(s2and_rust, "RustNameCompatibleSubblockSelector")
+    assert not hasattr(s2and_rust, "DEFAULT_HYBRID_CENTROID_WEIGHTS")
 
 
 def test_pair_plan_rejects_values_above_uint16_rank_limit() -> None:
@@ -87,8 +78,6 @@ def _base_row_signals(row_count: int) -> dict[str, object]:
 
 
 def test_rust_retrieval_batch_returns_flat_pair_plan() -> None:
-    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
-        raise pytest.skip.Exception("top_k_hybrid_centroid_pair_plan is unavailable")
     query = build_query_features(first="alice", has_coauthors=True, has_affiliations=True)
     summaries = [
         build_cluster_summary(
@@ -122,8 +111,6 @@ def test_rust_retrieval_batch_returns_flat_pair_plan() -> None:
 
 
 def test_rust_retrieval_batch_preserves_single_character_title_and_venue_terms() -> None:
-    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
-        raise pytest.skip.Exception("top_k_hybrid_centroid_pair_plan is unavailable")
     query = build_query_features(
         first="alice",
         title_terms=frozenset({"a", "m", "study"}),
@@ -157,8 +144,6 @@ def test_rust_retrieval_batch_preserves_single_character_title_and_venue_terms()
 
 
 def test_rust_retrieval_batch_has_stable_retrieval_order() -> None:
-    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
-        raise pytest.skip.Exception("top_k_hybrid_centroid_pair_plan is unavailable")
     queries = [
         build_query_features(first="alice", has_coauthors=True, has_affiliations=True),
         build_query_features(first="bob", has_coauthors=True, has_affiliations=True),
@@ -336,8 +321,6 @@ def test_rust_retrieval_batch_rejects_missing_consumed_row_signal_key() -> None:
 
 
 def test_full_query_view_changes_same_initial_retrieval_order() -> None:
-    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
-        raise pytest.skip.Exception("top_k_hybrid_centroid_pair_plan is unavailable")
     base_query = build_query_features(first="alice", has_full_first=True)
     initial_query = mask_query_features(base_query, "initial_only")
     full_query = mask_query_features(base_query, "full")
@@ -380,8 +363,6 @@ def test_full_query_view_changes_same_initial_retrieval_order() -> None:
 
 
 def test_rust_retrieval_batch_orcid_override_returns_all_matches_without_middle_or_year_filters() -> None:
-    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
-        raise pytest.skip.Exception("top_k_hybrid_centroid_pair_plan is unavailable")
     query = build_query_features(
         first="alice",
         middle_initials=frozenset({"q"}),
@@ -449,7 +430,7 @@ def test_rust_retrieval_batch_orcid_override_returns_all_matches_without_middle_
     assert batch.row_signals["orcid_match"].tolist() == [1.0, 1.0, 1.0]
 
 
-def test_rust_experimental_retrieval_rescues_high_coverage_mega_candidates() -> None:
+def test_fixed_rust_retrieval_rescues_high_coverage_mega_candidates() -> None:
     query = build_query_features(
         first="alice",
         coauthor_blocks=frozenset({"a one", "b two", "c three", "d four"}),
@@ -478,63 +459,21 @@ def test_rust_experimental_retrieval_rescues_high_coverage_mega_candidates() -> 
             max_paper_author_count=100,
         ),
     ]
-    retriever = s2and_rust.RustHybridCentroidRetriever(summaries, include_exemplars=False)
+    retriever = s2and_rust.RustHybridCentroidRetriever(summaries, include_exemplars=True)
 
-    keys, scores = retriever.top_k_experimental_weighted_hybrid_centroid_subset(
+    keys, scores = retriever.top_k_hybrid_centroid_subset(
         query,
         ["c_rescue", "c_nonmega", "c_partial"],
         top_k=3,
-        weights=[0.0, 1.0, 0.0, 0.0, 0.0],
-        first_name_mode="prefix",
-        specter_mode="centroid",
-        coauthor_use_idf=False,
-        coauthor_per_term_cap=None,
-        coauthor_total_cap=None,
-        drop_candidate_mega_coauthors=True,
-        mega_coauthor_rescue_query_coverage=0.995,
-        mega_coauthor_rescue_min_shared_blocks=3,
-        affiliation_use_idf=False,
-        affiliation_per_term_cap=None,
-        affiliation_total_cap=None,
-        affiliation_min_token_count=1,
-        affiliation_unigram_weight=1.0,
-        affiliation_multi_token_weight=1.0,
         num_threads=1,
     )
 
     assert keys == ["c_rescue", "c_nonmega", "c_partial"]
-    np.testing.assert_allclose(scores, [1.0, 0.25, 0.0], rtol=1e-6, atol=1e-6)
-
-    keys_without_rescue, scores_without_rescue = retriever.top_k_experimental_weighted_hybrid_centroid_subset(
-        query,
-        ["c_rescue", "c_nonmega", "c_partial"],
-        top_k=3,
-        weights=[0.0, 1.0, 0.0, 0.0, 0.0],
-        first_name_mode="prefix",
-        specter_mode="centroid",
-        coauthor_use_idf=False,
-        coauthor_per_term_cap=None,
-        coauthor_total_cap=None,
-        drop_candidate_mega_coauthors=True,
-        mega_coauthor_rescue_query_coverage=None,
-        mega_coauthor_rescue_min_shared_blocks=3,
-        affiliation_use_idf=False,
-        affiliation_per_term_cap=None,
-        affiliation_total_cap=None,
-        affiliation_min_token_count=1,
-        affiliation_unigram_weight=1.0,
-        affiliation_multi_token_weight=1.0,
-        num_threads=1,
-    )
-
-    assert keys_without_rescue[0] == "c_nonmega"
-    assert scores_without_rescue[0] == pytest.approx(0.25)
-    assert sorted(scores_without_rescue[1:]) == [0.0, 0.0]
+    assert scores[0] > scores[1] > 0.0
+    assert scores[2] == pytest.approx(0.0)
 
 
 def test_rust_retrieval_batch_applies_name_compatible_full_first_window() -> None:
-    if not hasattr(s2and_rust.RustHybridCentroidRetriever, "top_k_hybrid_centroid_pair_plan"):
-        raise pytest.skip.Exception("top_k_hybrid_centroid_pair_plan is unavailable")
     query = build_query_features(first="alice", has_full_first=True)
     summaries = [
         build_cluster_summary(component_key="c_same", size=1, first_name_counts=Counter({"alice": 1})),
@@ -706,6 +645,58 @@ def test_promoted_non_pairwise_row_features_reports_generated_family_ids() -> No
 
     assert telemetry["generated_family_id_count"] == 3
     assert telemetry["generic_family_override_count"] == 3
+
+
+def test_promoted_row_features_reject_missing_rust_feature(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=np.asarray([10], dtype=np.uint32),
+        right_signature_indices=np.asarray([1], dtype=np.uint32),
+        pair_row_indices=np.asarray([0], dtype=np.uint32),
+        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
+        row_component_keys=("c1",),
+        retrieval_scores=np.asarray([0.9], dtype=np.float32),
+        retrieval_ranks=np.asarray([1], dtype=np.uint16),
+    )
+    row_signals = _base_row_signals(1)
+    row_signals["retrieval_score"] = np.asarray([0.9], dtype=np.float32)
+    row_signals["retrieval_rank"] = np.asarray([1.0], dtype=np.float32)
+    original = s2and_rust.promoted_linker_non_pairwise_features
+
+    def stale_result(payload):
+        result = dict(original(payload))
+        del result["min_distance"]
+        return result
+
+    monkeypatch.setattr(s2and_rust, "promoted_linker_non_pairwise_features", stale_result)
+    with pytest.raises(RuntimeError, match="missing columns.*min_distance"):
+        build_promoted_non_pairwise_row_features(candidate_batch, row_signals)
+
+
+def test_promoted_row_features_reject_incomplete_rust_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    candidate_batch = LinkerCandidateBatch(
+        row_count=1,
+        left_signature_indices=np.asarray([10], dtype=np.uint32),
+        right_signature_indices=np.asarray([1], dtype=np.uint32),
+        pair_row_indices=np.asarray([0], dtype=np.uint32),
+        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
+        row_component_keys=("c1",),
+        retrieval_scores=np.asarray([0.9], dtype=np.float32),
+        retrieval_ranks=np.asarray([1], dtype=np.uint16),
+    )
+    row_signals = _base_row_signals(1)
+    row_signals["retrieval_score"] = np.asarray([0.9], dtype=np.float32)
+    row_signals["retrieval_rank"] = np.asarray([1.0], dtype=np.float32)
+    original = s2and_rust.promoted_linker_non_pairwise_features
+
+    def stale_result(payload):
+        result = dict(original(payload))
+        result["telemetry"] = {"generated_family_id_count": 0}
+        return result
+
+    monkeypatch.setattr(s2and_rust, "promoted_linker_non_pairwise_features", stale_result)
+    with pytest.raises(RuntimeError, match="telemetry schema mismatch"):
+        build_promoted_non_pairwise_row_features(candidate_batch, row_signals)
 
 
 def test_promoted_non_pairwise_row_features_treats_family_id_none_as_missing() -> None:

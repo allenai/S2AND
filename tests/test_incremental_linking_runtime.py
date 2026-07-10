@@ -142,6 +142,13 @@ class PositiveProbabilityClassifier:
         raise AssertionError("predict_proba should not be called when predict_proba_positive is available")
 
 
+class TwoFeatureClassifier:
+    n_features_in_ = 2
+
+    def predict_proba(self, features: np.ndarray) -> np.ndarray:
+        raise AssertionError("feature-count mismatch must fail before prediction")
+
+
 def test_pairwise_predict_class0_does_not_require_num_threads_keyword_support() -> None:
     predictions = predict_pairwise_class0(
         RejectsNumThreadsClassifier(),
@@ -158,6 +165,14 @@ def test_pairwise_predict_class0_uses_native_positive_probability_fast_path() ->
     )
 
     assert np.allclose(predictions, [0.75, 0.25])
+
+
+def test_pairwise_predict_class0_rejects_fitted_feature_count_mismatch() -> None:
+    with pytest.raises(ValueError, match="feature count does not match fitted schema"):
+        predict_pairwise_class0(
+            TwoFeatureClassifier(),
+            np.asarray([[0.25], [0.75]], dtype=np.float64),
+        )
 
 
 def test_pairwise_model_feature_indices_match_sorted_featurizer_order() -> None:

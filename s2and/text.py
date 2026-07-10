@@ -1,6 +1,5 @@
 import logging
 import re
-import warnings
 from collections import Counter
 from collections.abc import Set
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -1048,11 +1047,8 @@ def name_counts(
             counts_2.last_first_initial,
         ]
     )
-    # using nanmin so as to catch the min of counts, but regular max to propagate the nan
-    with warnings.catch_warnings():
-        # np.max of 2 nans causes annoying warnings
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        counts_array = np.array(counts, dtype=float)
-        counts_min_max = list(np.nanmin(counts_array, axis=0)) + list(np.max(counts_array[:, :2], axis=0))
+    # fmin ignores one missing count but preserves NaN when both counts are missing.
+    counts_array = np.array(counts, dtype=float)
+    counts_min_max = list(np.fmin.reduce(counts_array, axis=0)) + list(np.max(counts_array[:, :2], axis=0))
 
     return counts_min_max

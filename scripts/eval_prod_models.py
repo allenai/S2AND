@@ -1114,10 +1114,8 @@ def main() -> None:
     from s2and.eval import cluster_eval
     from s2and.featurizer import FeaturizationInfo, featurize
     from s2and.production_model import load_production_model
-    from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
 
     args = _build_parser().parse_args()
-    suppress_sklearn_feature_name_warnings()
     n_jobs = args.n_jobs
     random_seed = args.seed
     train_flag = bool(args.train)

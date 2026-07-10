@@ -16,6 +16,7 @@ import gc
 import logging
 import pickle
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -1199,26 +1200,26 @@ def main(
 
         facet_fig_path = os.path.join(DATA_DIR, "experiments", experiment_name, "facets")
 
-        plot_facets(
-            union_gender_f1,
-            union_ethnicity_f1,
-            union_author_num_f1,
-            union_year_f1,
-            union_block_len_f1,
-            union_cluster_len_f1,
-            union_homonymity_f1,
-            union_synonymity_f1,
-            union_s2_gender_f1,
-            union_s2_ethnicity_f1,
-            union_s2_author_num_f1,
-            union_s2_year_f1,
-            union_s2_block_len_f1,
-            union_s2_cluster_len_f1,
-            union_s2_homonymity_f1,
-            union_s2_synonymity_f1,
-            facet_fig_path,
-            gender_ethnicity_available,
-        )
+        s2and_facets: dict[str, Mapping[Any, Sequence[Any]]] = {
+            "number of authors": union_author_num_f1,
+            "year": union_year_f1,
+            "block size": union_block_len_f1,
+            "cluster size": union_cluster_len_f1,
+            "homonymity": union_homonymity_f1,
+            "synonymity": union_synonymity_f1,
+        }
+        s2_facets: dict[str, Mapping[Any, Sequence[Any]]] = {
+            "number of authors": union_s2_author_num_f1,
+            "year": union_s2_year_f1,
+            "block size": union_s2_block_len_f1,
+            "cluster size": union_s2_cluster_len_f1,
+            "homonymity": union_s2_homonymity_f1,
+            "synonymity": union_s2_synonymity_f1,
+        }
+        if gender_ethnicity_available:
+            s2and_facets.update({"gender": union_gender_f1, "ethnicity": union_ethnicity_f1})
+            s2_facets.update({"gender": union_s2_gender_f1, "ethnicity": union_s2_ethnicity_f1})
+        plot_facets(s2and_facets, s2_facets, facet_fig_path)
 
     logger.info("")
     logger.info("writing results to disk")

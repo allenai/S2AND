@@ -546,9 +546,6 @@ def build_linker_retrieval_batch_rust(
         if len(set(query_index_values)) != len(query_index_values):
             raise ValueError("query_signature_indices must be unique when per-query query_view values are provided")
     rust_retriever = _rust_retriever_object(retriever)
-    method = getattr(rust_retriever, "top_k_hybrid_centroid_pair_plan", None)
-    if method is None:
-        raise RuntimeError("RustHybridCentroidRetriever.top_k_hybrid_centroid_pair_plan is unavailable")
     if retrieval_subblock_index is not None or query_candidate_component_keys_by_signature_id is not None:
         if query_signature_ids is None:
             raise ValueError(
@@ -559,7 +556,7 @@ def build_linker_retrieval_batch_rust(
                 "queries and query_signature_ids must have equal length: "
                 f"{len(queries)} != {len(query_signature_ids)}"
             )
-        plan = method(
+        plan = rust_retriever.top_k_hybrid_centroid_pair_plan(
             list(queries),
             query_signature_indices_array,
             _as_uint32_mapping(component_member_indices_by_key),
@@ -578,7 +575,7 @@ def build_linker_retrieval_batch_rust(
             int(full_first_global_backfill_count),
         )
     else:
-        plan = method(
+        plan = rust_retriever.top_k_hybrid_centroid_pair_plan(
             list(queries),
             query_signature_indices_array,
             _as_uint32_mapping(component_member_indices_by_key),

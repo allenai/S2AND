@@ -628,16 +628,7 @@ impl RawBlockQueryCandidatePlanner {
                                 let start = Instant::now();
                                 let loaded = match paths.name_counts_index_path.as_ref() {
                                     Some(path) => read_raw_name_counts_index(path)?,
-                                    None => match paths.name_counts_arrow_path.as_ref() {
-                                        Some(path) => {
-                                            return Err(pyo3::exceptions::PyValueError::new_err(
-                                                format!(
-                                                    "name_counts Arrow path '{path}' requires name_counts_index; refusing slow Arrow fallback"
-                                                ),
-                                            ));
-                                        }
-                                        None => RawNameCountMaps::default(),
-                                    },
+                                    None => RawNameCountMaps::default(),
                                 };
                                 Ok((loaded, start.elapsed().as_secs_f64()))
                             },
@@ -2013,14 +2004,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         read_reusable_raw_arrow_query_inputs(py, &paths, &needed_signature_ids, num_threads)?;
     let raw_name_counts = match paths.name_counts_index_path.as_ref() {
         Some(path) => read_raw_name_counts_index(path)?,
-        None => match paths.name_counts_arrow_path.as_ref() {
-            Some(path) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "name_counts Arrow path '{path}' requires name_counts_index; refusing slow Arrow fallback"
-                )));
-            }
-            None => RawNameCountMaps::default(),
-        },
+        None => RawNameCountMaps::default(),
     };
 
     let text_context_start = Instant::now();
@@ -2159,8 +2143,6 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
             })?;
         let (query, resolved_view) = mask_raw_arrow_query(&query_feature.query, requested_view)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let weights = RustHybridCentroidRetriever::default_hybrid_weights_for_query(&query);
-        let config = RustHybridCentroidRetriever::default_experimental_config_for_query(&query);
         let mut scored_rows = Vec::<(usize, f32, u16, String)>::with_capacity(row_indices.len());
         for row_index in row_indices.iter().copied() {
             resolved_row_query_views[row_index] = resolved_view.clone();
@@ -2192,11 +2174,9 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
                     max_exemplars,
                 )?
             };
-            let score = round_six(score_experimental_hybrid_centroid_query(
+            let score = round_six(score_hybrid_centroid_query(
                 &query,
                 &summary,
-                weights,
-                config,
                 &retriever.coauthor_cluster_df,
                 &retriever.non_mega_coauthor_cluster_df,
                 &retriever.affiliation_cluster_df,

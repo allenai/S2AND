@@ -72,8 +72,8 @@ The legacy direct-file layout with `first.bin`, `last.bin`, `first_last.bin`,
 and `last_first_initial.bin` directly under `name_counts_index/` is accepted
 only when referenced by `manifest.json`. New publication runs should regenerate
 a manifest-backed generation instead of reusing direct files. Production
-manifests should use the `name_counts_index` key; do not emit the old
-`name_counts_index_dir` alias.
+manifests must use the `name_counts_index` key; runtime boundaries reject the
+old `name_counts_index_dir` alias.
 
 ## Arrow Runtime Writers
 

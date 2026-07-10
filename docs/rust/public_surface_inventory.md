@@ -27,9 +27,8 @@ requested and does not probe individual methods or constants.
 
 | Export | Owner / caller | Status |
 |---|---|---|
-| `RETRIEVAL_FEATURE_ORDER` | `s2and/incremental_linking_training/retrieval_policy.py`, retrieval parity tests | Retrieval feature ordering contract mirrored into Python training/reference policy code. |
-| `DEFAULT_HYBRID_CENTROID_POLICY_NAME`, `DEFAULT_HYBRID_CENTROID_WEIGHTS`, `DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS`, `DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS` | `s2and/incremental_linking_training/retrieval_policy.py`, promoted-linker training and retrieval tests | Frozen retrieval policy constants; update Python training/reference defaults and tests together with Rust. |
-| `RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE`, `RETRIEVAL_YEAR_SCORE_DECAY_YEARS`, `RETRIEVAL_YEAR_SCORE_RANGE_GAP`, `RETRIEVAL_YEAR_SCORE_RANGE_PENALTY`, `RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP` | `s2and/incremental_linking_training/query_support.py`, retrieval parity tests | Training/query-support scoring constants. |
+| `DEFAULT_HYBRID_CENTROID_POLICY_NAME` | Promoted-linker training metadata | Name of the fixed Rust retrieval policy. Weights and feature order are private Rust implementation details. |
+| `RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE`, `RETRIEVAL_YEAR_SCORE_DECAY_YEARS`, `RETRIEVAL_YEAR_SCORE_RANGE_GAP`, `RETRIEVAL_YEAR_SCORE_RANGE_PENALTY` | `s2and/incremental_linking_training/query_support.py`, retrieval parity tests | Rust-owned scoring constants used by the Python training reference. |
 
 ## `RustFeaturizer`
 
@@ -54,7 +53,7 @@ requested and does not probe individual methods or constants.
 |---|---|---|
 | `RustHybridCentroidRetriever.__new__(...)` | raw Arrow planners, training query support, tests | Maintained constructor. |
 | `top_k_hybrid_centroid_pair_plan(...)` | `s2and/incremental_linking/retrieval.py`, raw Arrow planners | Canonical runtime retrieval output. |
-| `top_k_experimental_weighted_hybrid_centroid_subset(...)` | `s2and/incremental_linking_training/query_support.py`, tests | Training/query-support scoring surface. |
+| `top_k_hybrid_centroid_subset(...)` | `s2and/incremental_linking_training/query_support.py`, tests | Fixed Rust-owned training/query-support scoring surface. |
 | `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; automatically selected promoted query windows use the separate constructor without a temporary empty sidecar. |
 
 ## Python Wrapper Ownership

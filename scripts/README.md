@@ -40,7 +40,7 @@
 |---|---|
 | `make_inventors_s2and_subset.py` | Create inventors S2AND subset (defaults to a local ignored output path) |
 | `make_inventors_split_and_histograms.py` | Split inventors data and generate histograms (defaults to a local ignored output path) |
-| `make_inventors_hf_specter_embeddings.py` | Generate SPECTER embeddings for inventors dataset (defaults to a local ignored output path) |
+| `make_inventors_hf_specter_embeddings.py` | Generate one inventors SPECTER embedding set per invocation (`--model specter` or `--model specter2`; defaults to a local ignored output path) |
 | `extract_big_block_dataset.py` | Convert a monolithic big-block export into `ANDData`-friendly `signatures.json`, `papers.json`, and `specter.pickle` files; supports both pretty-printed and minified JSON exports |
 | `convert_to_arrow.py` | Convert service JSON, benchmark datasets, linker replay raw inputs, and shared name-counts into bounded Arrow runtime artifacts with current raw-planner batch-index sidecars (`S2ABI002`); subcommands are `service-json`, `benchmark`, `linker-replay`, `name-counts-index`, and `validate` |
 | `analyze_giant_block_subblocking.py` | Sweep subblocking thresholds on an extracted giant block and write preservation metrics, plots, and tables |
@@ -62,29 +62,11 @@
 | `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync check, lint, one required Rust build, ABI/parity guardrails, ty, and Python-backend pytest coverage |
 | `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
 
-### Archived
-
-Scripts in `archive/` are historical and generally not intended to be rerun.
-
-| Script | What it does |
-|---|---|
-| `archive/transfer_experiment_internal.py` | Full-scale transfer experiment with unreleased datasets (supports Rust backend) |
-| `archive/make_augmentation_dataset_a.py` | Create augmentation dataset step 1 (unreleased data) |
-| `archive/make_augmentation_dataset_b.py` | Create augmentation dataset step 2 (unreleased data) |
-| `archive/test_s2aff.py` | Test S2 affiliation matching (internal) |
-| `archive/sota.py` | Historical state-of-the-art results table script from the paper |
-| `archive/make_s2and_mini_dataset.py` | Historical mini-dataset creation utility |
-| `archive/make_s2and_name_tuples.py` | Historical name tuples creation (superseded; don't rerun) |
-| `archive/LLM_based_filtering_of_name_tuples.py` | Historical Gemini-based name-tuple filtering helper (costs money to re-run) |
-| `archive/paper_experiments.sh` | Historical paper-era command set; reproduce from the `s2and_paper` branch instead of current `main` |
-| `archive/find_largest_block.py` | Scan dataset signature files and find the single largest block |
-| `archive/blog_post_eval.py` | Min edit distance numbers for blog post (Python-only legacy) |
-| `archive/claims_cluster_eval.py` | Evaluate on S2 corrections data (Python-only legacy) |
-| `archive/transform_all_datasets.py` | Transform old dataset format to final |
-| `archive/make_claims_dataset.py` | Create S2 corrections evaluation dataset (internal data) |
-| `archive/test_specter2.ipynb` | Historical notebook comparing SPECTER1 and SPECTER2 embeddings |
-
 ## Notes
+
+Historical one-off scripts are intentionally not retained on the current branch. Use the
+`s2and_paper` branch for paper-era reproduction, or locate an older tool with
+`git log --all -- scripts/` and inspect it with `git show <commit>:<path>`.
 
 **`transfer_experiment_seed_paper.py`**: Uses `main_data_dir` from `s2and/data/path_config.json` (or set the `S2AND_PATH_CONFIG` env var to point elsewhere). For one-shot large runs, leave `--use_cache` off unless you expect to rerun the same workload and reuse cached pair features. With `--use_cache`, S2AND writes the SQLite-backed pair-feature cache, and a loaded pair-feature cache is also kept in process memory, so it can add IO and RAM pressure when the cache will not be reused.
 

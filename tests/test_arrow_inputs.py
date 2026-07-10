@@ -352,6 +352,21 @@ def test_manifest_backed_validation_does_not_watch_later_rewrites(tmp_path: Path
     )
 
 
+def test_prediction_validation_rejects_legacy_name_counts_arrow_path(tmp_path: Path) -> None:
+    for legacy_key in ("name_counts", "name_counts_index_dir"):
+        paths = _write_valid_prediction_bundle(tmp_path)
+        legacy_path = tmp_path / legacy_key
+        legacy_path.touch()
+        paths[legacy_key] = str(legacy_path)
+
+        with pytest.raises(MissingArrowArtifactError, match="use name_counts_index"):
+            validate_arrow_prediction_artifacts(
+                paths,
+                require_specter=False,
+                require_name_counts_index=False,
+            )
+
+
 def test_require_arrow_artifacts_reports_missing_keys_and_files(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     signatures_path.touch()

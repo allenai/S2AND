@@ -145,7 +145,6 @@ because files are present on disk. The mapping uses these keys:
 | `altered_cluster_signatures` | Path to `altered_cluster_signatures.arrow` when altered claimed profiles are present |
 | `clusters` | Path to eval-only ground-truth clusters JSON |
 | `name_counts_index` | Required manifest-declared shared/global name-count index directory when the selected model uses `name_counts` |
-| `name_counts` | Optional long-form Arrow name-count table for generation/inspection/parity, not preferred on the hot path |
 | `signatures_batch_index` | S2AND-generated lookup index for `signatures.arrow`; required for production filtered reads |
 | `papers_batch_index` | S2AND-generated lookup index for `papers.arrow`; required for production filtered reads |
 | `paper_authors_batch_index` | S2AND-generated lookup index for `paper_authors.arrow`; required for production filtered reads |

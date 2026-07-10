@@ -747,10 +747,6 @@ def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    s2and_rust = pytest.importorskip("s2and_rust")
-    if not hasattr(s2and_rust, "RawBlockQueryCandidatePlanner"):
-        raise pytest.skip.Exception("raw Arrow incremental candidate planning is unavailable")
-
     from s2and.eval import b3_precision_recall_fscore
     from s2and.incremental_linking.feature_block import write_cluster_seeds_arrow
     from s2and.production_model import load_production_model

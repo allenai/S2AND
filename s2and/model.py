@@ -6,7 +6,6 @@ import logging
 import math
 import threading
 import time
-import warnings
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -19,7 +18,6 @@ import lightgbm as lgb
 import numpy as np
 from hyperopt import Trials, fmin, hp, space_eval, tpe
 from sklearn.base import clone
-from sklearn.exceptions import EfficiencyWarning
 from tqdm import tqdm
 
 from s2and import memory_budget
@@ -4415,10 +4413,7 @@ class Clusterer:
         cluster_model = clone(self.cluster_model)
         params = {k: intify(v) for k, v in (cluster_model_params or {}).items()}
         cluster_model.set_params(**params)
-        with warnings.catch_warnings():
-            # annoying sparse matrix not sorted warning
-            warnings.simplefilter("ignore", category=EfficiencyWarning)
-            cluster_model.fit(dist_matrix)
+        cluster_model.fit(dist_matrix)
         labels = cluster_model.labels_
         max_label = labels.max()
         # In HDBSCAN, label -1 denotes outliers.

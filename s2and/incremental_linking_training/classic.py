@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +13,6 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
-from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -32,10 +30,6 @@ from s2and.incremental_linking.logistic_gate import (
     load_logistic_gate_config,
     logistic_gate_config,
     outcome_labels,
-)
-from s2and.incremental_linking_training.query_support import (
-    FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY,
-    FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME,
 )
 from s2and.thread_config import resolve_n_jobs
 
@@ -893,10 +887,10 @@ def _fit_multiclass_logistic_gate(
     """Fit the sklearn calibration model and return the filled raw matrix."""
 
     raw_matrix = np.asarray(matrix, dtype=np.float64)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        medians = np.nanmedian(np.where(np.isfinite(raw_matrix), raw_matrix, np.nan), axis=0)
-    medians = np.where(np.isfinite(medians), medians, 0.0)
+    finite = np.isfinite(raw_matrix)
+    medians = np.zeros(raw_matrix.shape[1], dtype=np.float64)
+    for column_index in np.flatnonzero(finite.any(axis=0)):
+        medians[column_index] = np.median(raw_matrix[finite[:, column_index], column_index])
     filled = raw_matrix.copy()
     invalid = ~np.isfinite(filled)
     if np.any(invalid):
@@ -904,17 +898,14 @@ def _fit_multiclass_logistic_gate(
         filled[row_indices, col_indices] = medians[col_indices]
     scaler = StandardScaler()
     scaled = scaler.fit_transform(filled)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=ConvergenceWarning)
-        warnings.simplefilter("ignore", category=FutureWarning)
-        model = LogisticRegression(
-            C=float(c_value),
-            penalty="l2",
-            solver="lbfgs",
-            max_iter=4000,
-            random_state=20260517,
-        )
-        model.fit(scaled, labels)
+    model = LogisticRegression(
+        C=float(c_value),
+        penalty="l2",
+        solver="lbfgs",
+        max_iter=4000,
+        random_state=20260517,
+    )
+    model.fit(scaled, labels)
     return model, scaler, medians
 
 
@@ -1938,8 +1929,6 @@ def run_classic(
 PROMOTED_PAIRWISE_COLUMNS = promoted_pairwise_aggregate_columns()
 PROMOTED_NON_PAIRWISE_COLUMNS = tuple(PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS)
 SUPPORTED_PROMOTED_FEATURE_COLUMNS = frozenset(PROMOTED_NON_PAIRWISE_COLUMNS) | frozenset(PROMOTED_PAIRWISE_COLUMNS)
-FROZEN_RETRIEVAL_POLICY = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY
-FROZEN_RETRIEVAL_POLICY_NAME = FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME
 WEIGHTED_ERROR_WEIGHTS = {
     "false_abstain_error_rate": float(LOGISTIC_GATE_ERROR_WEIGHTS["false_abstain"]),
     "false_link_error_rate": float(LOGISTIC_GATE_ERROR_WEIGHTS["false_link"]),

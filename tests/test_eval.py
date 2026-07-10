@@ -230,7 +230,7 @@ class TestShapIntegration(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_pr.png")))
             self.assertTrue(os.path.exists(os.path.join(td, "wrapped_shap.png")))
 
-    def test_pairwise_eval_suppresses_feature_name_warning(self):
+    def test_pairwise_eval_validates_fitted_feature_names(self):
         import pandas as pd
         from lightgbm import LGBMClassifier
 
@@ -250,13 +250,25 @@ class TestShapIntegration(unittest.TestCase):
                     y=y,
                     classifier=classifier,
                     figs_path=td,
-                    title="Warning Suppressed",
-                    shap_feature_names=["a", "b", "c"],
+                    title="Feature Schema",
+                    shap_feature_names=["f0", "f1", "f2"],
                     skip_shap=True,
                 )
 
         leaked = [w for w in caught if "X does not have valid feature names" in str(w.message)]
         self.assertEqual(leaked, [])
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(ValueError, "feature names do not match fitted schema"):
+                pairwise_eval(
+                    X=X,
+                    y=y,
+                    classifier=classifier,
+                    figs_path=td,
+                    title="Feature Schema Mismatch",
+                    shap_feature_names=["f1", "f0", "f2"],
+                    skip_shap=True,
+                )
 
     # -------------------- shap_utils.compute_shap_summary_plots tests --------------------
 

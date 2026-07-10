@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+import s2and_rust
 from s2and.incremental_linking.feature_block import (
     feature_block_signature_order_from_raw_candidate_plan,
     write_arrow_batch_lookup_index,
@@ -33,18 +34,6 @@ from s2and.incremental_linking.runtime import (
 from tests.helpers import build_cluster_summary, build_query_features, tiny_name_counts_provenance
 
 pa = pytest.importorskip("pyarrow")
-s2and_rust = pytest.importorskip("s2and_rust", reason="s2and_rust is unavailable")
-_MISSING_RUST_RAW_APIS = [name for name in ("RawBlockQueryCandidatePlanner",) if not hasattr(s2and_rust, name)]
-_RUST_FEATURIZER = getattr(s2and_rust, "RustFeaturizer", None)
-if _RUST_FEATURIZER is None:
-    _MISSING_RUST_RAW_APIS.append("RustFeaturizer")
-elif not hasattr(_RUST_FEATURIZER, "from_arrow_paths"):
-    _MISSING_RUST_RAW_APIS.append("RustFeaturizer.from_arrow_paths")
-if _MISSING_RUST_RAW_APIS:
-    _missing_rust_raw_api_message = f"s2and_rust is missing required raw Arrow APIs: {_MISSING_RUST_RAW_APIS}"
-    if os.environ.get("S2AND_BACKEND") == "python":
-        raise pytest.skip.Exception(_missing_rust_raw_api_message, allow_module_level=True)
-    raise AssertionError(_missing_rust_raw_api_message)
 
 _FNV64_OFFSET = 14695981039346656037
 _FNV64_PRIME = 1099511628211
@@ -1830,8 +1819,6 @@ def test_raw_arrow_plan_bundle_derives_signature_order_from_rust_plan(tmp_path: 
 
 
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:
-    if not hasattr(s2and_rust, "raw_arrow_labeled_candidate_plan"):
-        raise pytest.skip.Exception("raw_arrow_labeled_candidate_plan is unavailable")
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
 
@@ -1862,8 +1849,6 @@ def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_see
 
 
 def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_df(tmp_path: Path) -> None:
-    if not hasattr(s2and_rust, "raw_arrow_labeled_candidate_plan"):
-        raise pytest.skip.Exception("raw_arrow_labeled_candidate_plan is unavailable")
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
     component_members = {"c_match": ["s1"], "c_other": ["s2"]}
@@ -1897,8 +1882,6 @@ def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_d
 
 
 def test_raw_arrow_labeled_candidate_plan_initial_view_keeps_full_first_token(tmp_path: Path) -> None:
-    if not hasattr(s2and_rust, "raw_arrow_labeled_candidate_plan"):
-        raise pytest.skip.Exception("raw_arrow_labeled_candidate_plan is unavailable")
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
 
@@ -1937,8 +1920,6 @@ def test_raw_arrow_candidate_plan_initial_view_keeps_full_first_token(tmp_path: 
 
 
 def test_raw_arrow_labeled_candidate_plan_applies_block_local_members(tmp_path: Path) -> None:
-    if not hasattr(s2and_rust, "raw_arrow_labeled_candidate_plan"):
-        raise pytest.skip.Exception("raw_arrow_labeled_candidate_plan is unavailable")
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
     signatures = pa.table(
@@ -2095,92 +2076,24 @@ def test_rust_featurizer_missing_name_counts_presence_is_consistent(
     assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
 
 
-def test_rust_featurizer_from_arrow_paths_uses_name_counts_index(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    index_paths = _base_arrow_paths(tmp_path / "index")
-    index_paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
-    arrow_paths = _base_arrow_paths(tmp_path / "arrow")
-    arrow_paths["name_counts"] = _write_ipc(
-        tmp_path / "arrow" / "name_counts.arrow",
-        pa.table(
-            {
-                "kind": pa.array(
-                    [
-                        "first",
-                        "last",
-                        "first_last",
-                        "last_first_initial",
-                        "first",
-                        "last",
-                        "first_last",
-                        "last_first_initial",
-                    ],
-                    type=pa.string(),
-                ),
-                "name": pa.array(
-                    ["alice", "wang", "alice wang", "wang a", "bob", "jones", "bob jones", "jones b"],
-                    type=pa.string(),
-                ),
-                "count": pa.array([10.0, 20.0, 5.0, 8.0, 30.0, 40.0, 6.0, 9.0], type=pa.float64()),
-            }
-        ),
-    )
-    arrow_paths["name_counts_index"] = index_paths["name_counts_index"]
-    signature_ids = ["q1", "s1", "s2"]
-    pairs = [("q1", "s1"), ("q1", "s2")]
-
-    from_index = s2and_rust.RustFeaturizer.from_arrow_paths(
-        index_paths,
-        signature_ids,
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
-    from_arrow = s2and_rust.RustFeaturizer.from_arrow_paths(
-        arrow_paths,
-        signature_ids,
-        set(),
-        True,
-        0.0,
-        10000.0,
-        1,
-    )
-
-    np.testing.assert_allclose(
-        _indexed_pair_matrix(from_index, pairs),
-        _indexed_pair_matrix(from_arrow, pairs),
-        equal_nan=True,
-    )
-
-    arrow_only_paths = dict(arrow_paths)
-    del arrow_only_paths["name_counts_index"]
-    with pytest.raises(ValueError, match="requires name_counts_index"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            arrow_only_paths,
-            signature_ids,
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
+def test_rust_featurizer_from_arrow_paths_rejects_legacy_name_count_paths(tmp_path: Path) -> None:
+    for legacy_key in ("name_counts", "name_counts_index_dir"):
+        arrow_paths = _base_arrow_paths(tmp_path / legacy_key)
+        arrow_paths[legacy_key] = _write_ipc(
+            tmp_path / legacy_key / "legacy.arrow",
+            pa.table({"count": [1.0]}),
         )
 
-    alias_only_paths = dict(arrow_paths)
-    alias_only_paths["name_counts_index_dir"] = alias_only_paths.pop("name_counts_index")
-    with pytest.raises(ValueError, match="requires name_counts_index"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            alias_only_paths,
-            signature_ids,
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-        )
+        with pytest.raises(ValueError, match="use name_counts_index"):
+            s2and_rust.RustFeaturizer.from_arrow_paths(
+                arrow_paths,
+                ["q1", "s1", "s2"],
+                set(),
+                True,
+                0.0,
+                10000.0,
+                1,
+            )
 
 
 def test_rust_featurizer_rejects_unsorted_name_counts_index(

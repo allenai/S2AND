@@ -19,7 +19,6 @@ Public semantics:
 Important nuance:
 
 - `use_cache` does not disable same-process Rust featurizer reuse.
-- `use_cache` does not disable the artifact download cache used by `s2and.file_cache.cached_path`.
 - Direct Arrow/Rust production prediction paths bypass the persistent pair-feature SQLite cache; `use_cache` only affects
   prediction paths that materialize pair features through the Python cache-aware featurization layer.
 
@@ -30,7 +29,6 @@ Important nuance:
 | Pair-feature cache | Yes | Reuse computed pairwise feature rows across repeated featurization/prediction | `<S2AND_CACHE>/<dataset>/<featurizer_version>/pair_features.sqlite3` |
 | Rust featurizer in-memory reuse | No | Reuse an already-built Rust featurizer within the current Python process | memory only |
 | Direct Arrow/Rust prediction inputs | No | Read request/runtime Arrow artifacts directly without pair-feature SQLite caching | request or bundle artifact paths |
-| Artifact download cache | No | Avoid re-downloading remote artifacts fetched through `cached_path()` | `<S2AND_CACHE>/artifacts` |
 
 `S2AND_CACHE` defaults to `~/.s2and`.
 
@@ -99,19 +97,6 @@ The verified-generation hot-cache check is fixed request/build overhead, not a
 pair-loop operation. The current local benchmark is 12.76 microseconds per hit
 (78.4k checks/s), including the exact material binding and mutation watch, with
 no retained duplicate artifact payload.
-
-## Artifact Download Cache
-
-`s2and.file_cache.cached_path()` stores downloaded remote artifacts under:
-
-```text
-<S2AND_CACHE>/artifacts
-```
-
-This cache is separate from `use_cache`. It is an input-artifact cache, not a featurization cache.
-
-Remote artifacts are keyed by URL plus the server validator. Validators are namespaced as
-`etag:<value>` or `last-modified:<value>` before hashing.
 
 ## Interaction with Rust Batch Featurization
 

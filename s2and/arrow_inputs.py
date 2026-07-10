@@ -772,6 +772,12 @@ def _validate_complete_arrow_artifacts(
     normalized, invalid_paths = _normalize_arrow_path_values(arrow_paths)
     for key in UNSUPPORTED_ARROW_NAME_ALIAS_KEYS.intersection(normalized):
         invalid_paths[key] = "name aliases must be supplied via the name_tuples argument, not Arrow path bundles"
+    if "name_counts" in normalized:
+        invalid_paths["name_counts"] = "legacy name_counts Arrow tables are unsupported; use name_counts_index"
+    if "name_counts_index_dir" in normalized:
+        invalid_paths["name_counts_index_dir"] = (
+            "legacy name-count index aliases are unsupported; use name_counts_index"
+        )
 
     if require_specter and "specter" not in normalized and "specter2" in normalized:
         normalized["specter"] = normalized["specter2"]

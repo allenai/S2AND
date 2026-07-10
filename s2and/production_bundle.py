@@ -20,6 +20,7 @@ from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer, _selected_feature_indices
+from s2and.model_pairwise import _validated_classifier_features
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
     PAIRWISE_METADATA_SCHEMA_VERSION,
@@ -109,7 +110,10 @@ def _predict_proba(model: Any, features: np.ndarray) -> np.ndarray:
     matrix = np.asarray(features, dtype=np.float64, order="C")
     predict_proba = getattr(model, "predict_proba", None)
     if callable(predict_proba):
-        probabilities = np.asarray(predict_proba(matrix), dtype=np.float64)
+        probabilities = np.asarray(
+            predict_proba(_validated_classifier_features(model, matrix)),
+            dtype=np.float64,
+        )
     else:
         positive = np.asarray(_booster_from_model(model).predict(matrix), dtype=np.float64).reshape(-1)
         probabilities = np.column_stack((1.0 - positive, positive))

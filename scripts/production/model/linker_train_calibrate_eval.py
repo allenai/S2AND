@@ -41,6 +41,7 @@ for extra_path in (REPO_ROOT, REPO_ROOT / "scripts"):
         sys.path.insert(0, str(extra_path))
 
 import s2and.incremental_linking.query_adapter as retrieval  # noqa: E402
+import s2and_rust  # noqa: E402
 from s2and import feature_port  # noqa: E402
 from s2and import text as s2and_text  # noqa: E402
 from s2and.arrow_inputs import validate_arrow_prediction_artifacts  # noqa: E402
@@ -64,8 +65,6 @@ from s2and.incremental_linking.retrieval import RAW_CANDIDATE_PLAN_ROW_SIGNAL_FI
 from s2and.incremental_linking.row_features import build_promoted_non_pairwise_row_features  # noqa: E402
 from s2and.incremental_linking.runtime import compute_candidate_batch_pairwise_model_and_aggregate_stats  # noqa: E402
 from s2and.incremental_linking_training.classic import (  # noqa: E402
-    FROZEN_RETRIEVAL_POLICY,
-    FROZEN_RETRIEVAL_POLICY_NAME,
     NAN_POLICY_CHOICES,
     PROMOTED_NON_PAIRWISE_COLUMNS,
     PROMOTED_PAIRWISE_COLUMNS,
@@ -1258,7 +1257,7 @@ def _build_minimal_raw_dataset_context(
     )
     rust_hybrid_centroid_retriever = build_rust_hybrid_centroid_retriever(
         list(full_summary_cache.values()),
-        include_exemplars=FROZEN_RETRIEVAL_POLICY.uses_exemplar_scoring(),
+        include_exemplars=True,
     )
     max_block_component_size = max((summary.size for summary in full_summary_cache.values()), default=0)
     summary_seconds = float(time.perf_counter() - summary_started)
@@ -1269,7 +1268,7 @@ def _build_minimal_raw_dataset_context(
                 "dataset": dataset_name,
                 "components": int(len(component_details)),
                 "specter_embeddings": int(len(dataset.specter_embeddings or {})),
-                "retrieval_policy": FROZEN_RETRIEVAL_POLICY_NAME,
+                "retrieval_policy": s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
                 "component_scope": "block-local",
                 "row_component_scope": row_component_scope,
                 "pairwise_component_scope": pairwise_component_scope,
@@ -1631,8 +1630,6 @@ def _score_candidate_summaries_with_frozen_rust_policy(
         component_keys=component_keys,
         override_summary=override_summary,
         num_threads=max(1, int(n_jobs)),
-        weights=FROZEN_RETRIEVAL_POLICY.weights_for_query(query),
-        scoring_config=FROZEN_RETRIEVAL_POLICY.scoring_config_for_query(query),
     )
     return {str(summary.component_key): round(float(score), 6) for score, summary in ranked}
 
@@ -2759,7 +2756,7 @@ def _materialize_minimal_raw_dataset_rows(
         "pairwise_component_scope": context.pairwise_component_scope,
         "full_summary_cache_size": int(len(full_summary_cache)),
         "residual_summary_cache_size": int(len(residual_summary_cache)),
-        "retrieval_policy": FROZEN_RETRIEVAL_POLICY_NAME,
+        "retrieval_policy": s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
         "retrieval_max_block_component_size": int(context.max_block_component_size),
         "specter_embeddings": int(len(dataset.specter_embeddings or {})),
         "pairwise_model_nan_value": "nan"
@@ -2920,7 +2917,7 @@ def _materialize_arrow_rust_dataset_rows(
         "pairwise_component_scope": context.pairwise_component_scope,
         "full_summary_cache_size": 0,
         "residual_summary_cache_size": 0,
-        "retrieval_policy": FROZEN_RETRIEVAL_POLICY_NAME,
+        "retrieval_policy": s2and_rust.DEFAULT_HYBRID_CENTROID_POLICY_NAME,
         "retrieval_max_block_component_size": int(context.max_block_component_size),
         "specter_embeddings": int(raw_plan_telemetry.get("specter_count", 0) or 0),
         "pairwise_model_nan_value": "nan"

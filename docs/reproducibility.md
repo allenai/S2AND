@@ -13,7 +13,7 @@ git checkout s2and_paper
 uv venv --python 3.7.9
 ```
 
-Then install the pinned environment from `paper_experiments_env.txt` inside that isolated environment and rerun the paper experiment command set from the `s2and_paper` branch. The repository keeps a reference copy at `scripts/archive/paper_experiments.sh`, but that file is historical and not the supported entrypoint for current development.
+Then install the pinned environment from `paper_experiments_env.txt` inside that isolated environment and rerun the paper experiment command set from the `s2and_paper` branch. Current `main` intentionally does not retain a second copy of those historical scripts; use the branch directly or Git history when reproducing paper-era results.
 
 ## Paper-era released artifacts
 

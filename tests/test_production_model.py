@@ -22,6 +22,7 @@ from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.model import Clusterer, FastCluster, _ensure_lightgbm_fitted, _selected_feature_indices
+from s2and.model_pairwise import _validated_classifier_features
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
 from s2and.production_model import (
     NativeLightGBMBinaryClassifier,
@@ -250,10 +251,12 @@ def test_synthetic_native_pairwise_models_match_source_boosters(
     nameless_width = len(_selected_feature_indices(source_clusterer.nameless_featurizer_info))
     main_features = rng.normal(size=(8, main_width))
     nameless_features = rng.normal(size=(8, nameless_width))
+    source_main_features = _validated_classifier_features(source_clusterer.classifier, main_features)
+    source_nameless_features = _validated_classifier_features(source_clusterer.nameless_classifier, nameless_features)
 
     np.testing.assert_allclose(
         native_clusterer.classifier.predict_proba(main_features)[:, 1],
-        source_clusterer.classifier.predict_proba(main_features)[:, 1],
+        source_clusterer.classifier.predict_proba(source_main_features)[:, 1],
         rtol=1e-10,
         atol=1e-10,
     )
@@ -267,7 +270,7 @@ def test_synthetic_native_pairwise_models_match_source_boosters(
     assert source_clusterer.nameless_classifier is not None
     np.testing.assert_allclose(
         native_clusterer.nameless_classifier.predict_proba(nameless_features)[:, 1],
-        source_clusterer.nameless_classifier.predict_proba(nameless_features)[:, 1],
+        source_clusterer.nameless_classifier.predict_proba(source_nameless_features)[:, 1],
         rtol=1e-10,
         atol=1e-10,
     )

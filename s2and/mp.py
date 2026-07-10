@@ -141,9 +141,3 @@ class UniversalPool:
 
     def __exit__(self, exc_type, exc, tb):
         self._pool.shutdown(wait=True)
-
-
-# convenience factory
-def get_pool(processes: int | None = None, threads: bool | None = None) -> UniversalPool:
-    """Get a pool that works on all platforms with optimal performance."""
-    return UniversalPool(processes, use_threads=threads)

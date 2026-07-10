@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import warnings
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -13,7 +13,50 @@ from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
 
-from s2and.warnings_utils import suppress_sklearn_feature_name_warnings
+
+def _validated_classifier_features(
+    classifier: Any,
+    features: Any,
+    *,
+    feature_names: Sequence[str] | None = None,
+) -> Any:
+    """Return classifier input after validating its fitted feature schema."""
+
+    values = np.asarray(features)
+    if values.ndim != 2:
+        raise ValueError(f"Classifier features must be 2D, got shape={values.shape}")
+
+    expected_count = getattr(classifier, "n_features_in_", None)
+    if expected_count is not None and int(expected_count) != values.shape[1]:
+        raise ValueError(
+            "Classifier feature count does not match fitted schema: " f"{values.shape[1]} != {int(expected_count)}"
+        )
+
+    supplied_names = tuple(str(name) for name in feature_names) if feature_names is not None else None
+    if supplied_names is not None and len(supplied_names) != values.shape[1]:
+        raise ValueError(
+            "Classifier feature names do not match matrix width: " f"{len(supplied_names)} != {values.shape[1]}"
+        )
+
+    fitted_names_raw = getattr(classifier, "feature_names_in_", None)
+    if fitted_names_raw is None:
+        return values
+    fitted_names = tuple(str(name) for name in fitted_names_raw)
+    actual_names = supplied_names
+    if actual_names is None:
+        columns = getattr(features, "columns", None)
+        if columns is not None:
+            actual_names = tuple(str(name) for name in columns)
+    if actual_names is not None and actual_names != fitted_names:
+        raise ValueError(
+            "Classifier feature names do not match fitted schema: " f"{actual_names!r} != {fitted_names!r}"
+        )
+    if getattr(features, "columns", None) is not None:
+        return features
+
+    import pandas as pd
+
+    return pd.DataFrame(values, columns=fitted_names, copy=False)
 
 
 def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
@@ -32,9 +75,7 @@ def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray
     if callable(predict_proba_positive):
         return 1.0 - np.asarray(predict_proba_positive(features_2d), dtype=np.float64).reshape(-1)
 
-    with warnings.catch_warnings():
-        suppress_sklearn_feature_name_warnings()
-        probabilities = classifier.predict_proba(features_2d)
+    probabilities = classifier.predict_proba(_validated_classifier_features(classifier, features_2d))
     return np.asarray(probabilities, dtype=np.float64)[:, 0]
 
 
@@ -172,9 +213,7 @@ class PairwiseModeler:
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         assert self.classifier is not None, "You need to call fit first"
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return self.classifier.predict_proba(X)
+        return self.classifier.predict_proba(_validated_classifier_features(self.classifier, X))
 
 
 def intify(x):
@@ -390,9 +429,7 @@ class VotingClassifier:
 
     def _collect_probas(self, X):
         """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return np.asarray([clf.predict_proba(X) for clf in self.estimators])
+        return np.asarray([clf.predict_proba(_validated_classifier_features(clf, X)) for clf in self.estimators])
 
     def predict_proba(self, X):
         """
@@ -440,6 +477,4 @@ class VotingClassifier:
 
     def _predict(self, X):
         """Collect results from clf.predict calls."""
-        with warnings.catch_warnings():
-            suppress_sklearn_feature_name_warnings()
-            return np.asarray([clf.predict(X) for clf in self.estimators]).T
+        return np.asarray([clf.predict(_validated_classifier_features(clf, X)) for clf in self.estimators]).T

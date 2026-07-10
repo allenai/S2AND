@@ -53,19 +53,22 @@ pub(crate) struct RetrievalHybridWeights {
     pub(crate) first_name: f64,
 }
 
-pub(crate) const RETRIEVAL_FEATURE_ORDER: [&str; 5] = [
-    "centroid",
-    "coauthor",
-    "affiliation",
-    "middle",
-    "first_name",
-];
 pub(crate) const DEFAULT_HYBRID_CENTROID_POLICY_NAME: &str = "h_wang_any_input_v2";
-pub(crate) const DEFAULT_HYBRID_CENTROID_WEIGHTS: [f64; 5] =
-    [0.527232, 0.223412, 0.146909, 0.009439, 0.093007];
-pub(crate) const DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS: [f64; 5] =
-    [0.520012, 0.220264, 0.109278, 0.150447, 0.0];
-pub(crate) const DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS: [f64; 5] = [0.40, 0.23, 0.12, 0.05, 0.07];
+const DEFAULT_HYBRID_CENTROID_WEIGHTS: RetrievalHybridWeights = RetrievalHybridWeights {
+    centroid: 0.527232,
+    coauthor: 0.223412,
+    affiliation: 0.146909,
+    middle: 0.009439,
+    first_name: 0.093007,
+};
+const DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS: RetrievalHybridWeights =
+    RetrievalHybridWeights {
+        centroid: 0.520012,
+        coauthor: 0.220264,
+        affiliation: 0.109278,
+        middle: 0.150447,
+        first_name: 0.0,
+    };
 pub(crate) const INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS: [&str; 1] = ["row_orcid_match"];
 pub(crate) const INCREMENTAL_LINKING_PAIR_PLAN_SUPPORTED_KWARGS: [&str; 5] = [
     "num_threads",
@@ -84,20 +87,8 @@ pub(crate) const RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE: f64 = -0.25;
 pub(crate) const RETRIEVAL_YEAR_SCORE_DECAY_YEARS: f64 = 15.0;
 pub(crate) const RETRIEVAL_YEAR_SCORE_RANGE_GAP: i64 = 10;
 pub(crate) const RETRIEVAL_YEAR_SCORE_RANGE_PENALTY: f64 = 0.15;
-pub(crate) const RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP: i64 = 35;
+const RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP: i64 = 35;
 pub(crate) const RETRIEVAL_MEGA_AUTHOR_THRESHOLD: usize = 50;
-
-impl RetrievalHybridWeights {
-    fn from_array(weights: [f64; 5]) -> Self {
-        Self {
-            centroid: weights[0],
-            coauthor: weights[1],
-            affiliation: weights[2],
-            middle: weights[3],
-            first_name: weights[4],
-        }
-    }
-}
 
 pub(crate) fn filter_excluded_candidate_indices(
     indices: Vec<usize>,
@@ -134,12 +125,6 @@ pub(crate) enum RetrievalFirstNameMode {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum RetrievalSpecterMode {
-    Centroid,
-    MaxOfCentroidExemplar,
-}
-
-#[derive(Clone, Copy)]
 pub(crate) struct RetrievalOverlapConfig {
     pub(crate) use_idf: bool,
     pub(crate) per_term_cap: Option<f64>,
@@ -147,17 +132,6 @@ pub(crate) struct RetrievalOverlapConfig {
     pub(crate) min_token_count: u8,
     pub(crate) unigram_weight: f64,
     pub(crate) multi_token_weight: f64,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RetrievalExperimentalConfig {
-    pub(crate) first_name_mode: RetrievalFirstNameMode,
-    pub(crate) specter_mode: RetrievalSpecterMode,
-    pub(crate) coauthor: RetrievalOverlapConfig,
-    pub(crate) drop_candidate_mega_coauthors: bool,
-    pub(crate) mega_coauthor_rescue_query_coverage: Option<f64>,
-    pub(crate) mega_coauthor_rescue_min_shared_blocks: usize,
-    pub(crate) affiliation: RetrievalOverlapConfig,
 }
 
 #[pyclass]
@@ -265,41 +239,6 @@ pub(crate) struct RetrievalCandidateSelection {
 }
 
 impl RustHybridCentroidRetriever {
-    pub(crate) fn default_hybrid_weights_for_query(
-        query_data: &RetrievalQueryData,
-    ) -> RetrievalHybridWeights {
-        if query_data.has_full_first {
-            RetrievalHybridWeights::from_array(DEFAULT_HYBRID_CENTROID_WEIGHTS)
-        } else {
-            RetrievalHybridWeights::from_array(DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS)
-        }
-    }
-
-    pub(crate) fn default_experimental_config_for_query(
-        query_data: &RetrievalQueryData,
-    ) -> RetrievalExperimentalConfig {
-        RetrievalExperimentalConfig {
-            first_name_mode: if query_data.has_full_first {
-                RetrievalFirstNameMode::ExactThenPrefixHalf
-            } else {
-                RetrievalFirstNameMode::Prefix
-            },
-            specter_mode: RetrievalSpecterMode::MaxOfCentroidExemplar,
-            coauthor: RetrievalOverlapConfig {
-                use_idf: true,
-                per_term_cap: Some(0.35),
-                ..default_overlap_config()
-            },
-            drop_candidate_mega_coauthors: true,
-            mega_coauthor_rescue_query_coverage: Some(0.995),
-            mega_coauthor_rescue_min_shared_blocks: 3,
-            affiliation: RetrievalOverlapConfig {
-                use_idf: true,
-                ..default_overlap_config()
-            },
-        }
-    }
-
     fn summary_for_candidate_index<'a>(
         &'a self,
         idx: usize,
@@ -364,8 +303,6 @@ impl RustHybridCentroidRetriever {
         override_index: Option<usize>,
         override_summary: Option<&RetrievalSummaryData>,
     ) -> Vec<(usize, f32)> {
-        let weights = Self::default_hybrid_weights_for_query(query_data);
-        let config = Self::default_experimental_config_for_query(query_data);
         let mut scored = candidate_indices
             .iter()
             .map(|idx| {
@@ -373,11 +310,9 @@ impl RustHybridCentroidRetriever {
                     self.summary_for_candidate_index(*idx, override_index, override_summary);
                 (
                     *idx,
-                    score_experimental_hybrid_centroid_query(
+                    score_hybrid_centroid_query(
                         query_data,
                         summary,
-                        weights,
-                        config,
                         &self.coauthor_cluster_df,
                         &self.non_mega_coauthor_cluster_df,
                         &self.affiliation_cluster_df,
@@ -692,7 +627,7 @@ impl RustHybridCentroidRetriever {
         Ok(out)
     }
 
-    fn score_top_k_candidate_indices_experimental(
+    fn score_top_k_candidate_indices_default(
         &self,
         py: Python<'_>,
         query_data: &RetrievalQueryData,
@@ -701,8 +636,6 @@ impl RustHybridCentroidRetriever {
         num_threads: Option<usize>,
         override_index: Option<usize>,
         override_summary: Option<&RetrievalSummaryData>,
-        weights: RetrievalHybridWeights,
-        config: RetrievalExperimentalConfig,
     ) -> PyResult<(Vec<String>, Vec<f32>)> {
         if candidate_indices.is_empty() {
             return Ok((Vec::new(), Vec::new()));
@@ -720,11 +653,9 @@ impl RustHybridCentroidRetriever {
                         );
                         (
                             *idx,
-                            score_experimental_hybrid_centroid_query(
+                            score_hybrid_centroid_query(
                                 query_data,
                                 summary,
-                                weights,
-                                config,
                                 &self.coauthor_cluster_df,
                                 &self.non_mega_coauthor_cluster_df,
                                 &self.affiliation_cluster_df,
@@ -1113,114 +1044,23 @@ pub(crate) fn extract_retrieval_query(obj: &Bound<'_, PyAny>) -> PyResult<Retrie
     })
 }
 
-pub(crate) fn extract_retrieval_weights(weights: Vec<f64>) -> PyResult<RetrievalHybridWeights> {
-    if weights.len() != 5 {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Expected 5 retrieval weights, got {}",
-            weights.len()
-        )));
-    }
-    if weights.iter().any(|value| !value.is_finite()) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "Retrieval weights must all be finite",
-        ));
-    }
-    Ok(RetrievalHybridWeights::from_array([
-        weights[0], weights[1], weights[2], weights[3], weights[4],
-    ]))
-}
+const COAUTHOR_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
+    use_idf: true,
+    per_term_cap: Some(0.35),
+    total_cap: None,
+    min_token_count: 1,
+    unigram_weight: 1.0,
+    multi_token_weight: 1.0,
+};
 
-pub(crate) fn default_overlap_config() -> RetrievalOverlapConfig {
-    RetrievalOverlapConfig {
-        use_idf: false,
-        per_term_cap: None,
-        total_cap: None,
-        min_token_count: 1,
-        unigram_weight: 1.0,
-        multi_token_weight: 1.0,
-    }
-}
-
-pub(crate) fn parse_first_name_mode(mode: &str) -> PyResult<RetrievalFirstNameMode> {
-    match mode {
-        "prefix" => Ok(RetrievalFirstNameMode::Prefix),
-        "exact_then_prefix_half" => Ok(RetrievalFirstNameMode::ExactThenPrefixHalf),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unknown first_name_mode: {mode}"
-        ))),
-    }
-}
-
-pub(crate) fn parse_specter_mode(mode: &str) -> PyResult<RetrievalSpecterMode> {
-    match mode {
-        "centroid" => Ok(RetrievalSpecterMode::Centroid),
-        "max_centroid_exemplar" => Ok(RetrievalSpecterMode::MaxOfCentroidExemplar),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unknown specter_mode: {mode}"
-        ))),
-    }
-}
-
-pub(crate) fn build_experimental_config(
-    first_name_mode: &str,
-    specter_mode: &str,
-    coauthor_use_idf: bool,
-    coauthor_per_term_cap: Option<f64>,
-    coauthor_total_cap: Option<f64>,
-    drop_candidate_mega_coauthors: bool,
-    mega_coauthor_rescue_query_coverage: Option<f64>,
-    mega_coauthor_rescue_min_shared_blocks: usize,
-    affiliation_use_idf: bool,
-    affiliation_per_term_cap: Option<f64>,
-    affiliation_total_cap: Option<f64>,
-    affiliation_min_token_count: usize,
-    affiliation_unigram_weight: f64,
-    affiliation_multi_token_weight: f64,
-) -> PyResult<RetrievalExperimentalConfig> {
-    if affiliation_min_token_count == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "affiliation_min_token_count must be positive",
-        ));
-    }
-    if !affiliation_unigram_weight.is_finite() || !affiliation_multi_token_weight.is_finite() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "Affiliation structure weights must be finite",
-        ));
-    }
-    if let Some(coverage) = mega_coauthor_rescue_query_coverage {
-        if !coverage.is_finite() || coverage <= 0.0 || coverage > 1.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "mega_coauthor_rescue_query_coverage must be in (0, 1]",
-            ));
-        }
-    }
-    if mega_coauthor_rescue_min_shared_blocks == 0 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "mega_coauthor_rescue_min_shared_blocks must be positive",
-        ));
-    }
-    Ok(RetrievalExperimentalConfig {
-        first_name_mode: parse_first_name_mode(first_name_mode)?,
-        specter_mode: parse_specter_mode(specter_mode)?,
-        coauthor: RetrievalOverlapConfig {
-            use_idf: coauthor_use_idf,
-            per_term_cap: coauthor_per_term_cap,
-            total_cap: coauthor_total_cap,
-            ..default_overlap_config()
-        },
-        drop_candidate_mega_coauthors,
-        mega_coauthor_rescue_query_coverage,
-        mega_coauthor_rescue_min_shared_blocks,
-        affiliation: RetrievalOverlapConfig {
-            use_idf: affiliation_use_idf,
-            per_term_cap: affiliation_per_term_cap,
-            total_cap: affiliation_total_cap,
-            min_token_count: affiliation_min_token_count.min(u8::MAX as usize) as u8,
-            unigram_weight: affiliation_unigram_weight,
-            multi_token_weight: affiliation_multi_token_weight,
-        },
-    })
-}
+const AFFILIATION_OVERLAP_CONFIG: RetrievalOverlapConfig = RetrievalOverlapConfig {
+    use_idf: true,
+    per_term_cap: None,
+    total_cap: None,
+    min_token_count: 1,
+    unigram_weight: 1.0,
+    multi_token_weight: 1.0,
+};
 
 pub(crate) fn specter_exemplar_score(
     query: &RetrievalQueryData,
@@ -1259,14 +1099,7 @@ pub(crate) fn query_counter_overlap_count(
 pub(crate) fn should_rescue_candidate_mega_coauthors(
     query: &RetrievalQueryData,
     summary: &RetrievalSummaryData,
-    config: RetrievalExperimentalConfig,
 ) -> bool {
-    if !config.drop_candidate_mega_coauthors {
-        return false;
-    }
-    let Some(min_query_coverage) = config.mega_coauthor_rescue_query_coverage else {
-        return false;
-    };
     if summary.max_paper_author_count < RETRIEVAL_MEGA_AUTHOR_THRESHOLD
         || query.coauthor_terms.is_empty()
     {
@@ -1274,7 +1107,7 @@ pub(crate) fn should_rescue_candidate_mega_coauthors(
     }
 
     let full_overlap = query_counter_overlap_count(&query.coauthor_terms, &summary.coauthor_counts);
-    if full_overlap < config.mega_coauthor_rescue_min_shared_blocks {
+    if full_overlap < 3 {
         return false;
     }
     let filtered_overlap =
@@ -1283,22 +1116,25 @@ pub(crate) fn should_rescue_candidate_mega_coauthors(
         return false;
     }
 
-    (full_overlap as f64) / (query.coauthor_terms.len() as f64) >= min_query_coverage
+    (full_overlap as f64) / (query.coauthor_terms.len() as f64) >= 0.995
 }
 
-pub(crate) fn score_experimental_hybrid_centroid_query(
+pub(crate) fn score_hybrid_centroid_query(
     query: &RetrievalQueryData,
     summary: &RetrievalSummaryData,
-    weights: RetrievalHybridWeights,
-    config: RetrievalExperimentalConfig,
     coauthor_cluster_df: &HashMap<u64, usize>,
     non_mega_coauthor_cluster_df: &HashMap<u64, usize>,
     affiliation_cluster_df: &HashMap<u64, usize>,
     total_summary_count: usize,
 ) -> f32 {
-    let use_non_mega_coauthor_counter = config.drop_candidate_mega_coauthors
-        && summary.max_paper_author_count >= RETRIEVAL_MEGA_AUTHOR_THRESHOLD
-        && !should_rescue_candidate_mega_coauthors(query, summary, config);
+    let weights = if query.has_full_first {
+        DEFAULT_HYBRID_CENTROID_WEIGHTS
+    } else {
+        DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS
+    };
+    let use_non_mega_coauthor_counter = summary.max_paper_author_count
+        >= RETRIEVAL_MEGA_AUTHOR_THRESHOLD
+        && !should_rescue_candidate_mega_coauthors(query, summary);
     let (coauthor_counts, coauthor_df) = if use_non_mega_coauthor_counter {
         (
             &summary.non_mega_coauthor_counts,
@@ -1313,7 +1149,7 @@ pub(crate) fn score_experimental_hybrid_centroid_query(
         summary.size,
         coauthor_df,
         total_summary_count,
-        config.coauthor,
+        COAUTHOR_OVERLAP_CONFIG,
     );
     let affiliation_score = weighted_counter_query_overlap(
         &query.affiliation_terms,
@@ -1321,7 +1157,7 @@ pub(crate) fn score_experimental_hybrid_centroid_query(
         summary.size,
         affiliation_cluster_df,
         total_summary_count,
-        config.affiliation,
+        AFFILIATION_OVERLAP_CONFIG,
     );
     let middle_score = middle_initial_score_hashes(
         &query.middle_initial_hashes,
@@ -1332,7 +1168,11 @@ pub(crate) fn score_experimental_hybrid_centroid_query(
         &query.first,
         &summary.first_name_counts,
         summary.size,
-        config.first_name_mode,
+        if query.has_full_first {
+            RetrievalFirstNameMode::ExactThenPrefixHalf
+        } else {
+            RetrievalFirstNameMode::Prefix
+        },
     );
     let centroid_score = match (
         query.specter.as_ref(),
@@ -1346,10 +1186,7 @@ pub(crate) fn score_experimental_hybrid_centroid_query(
         _ => 0.0,
     };
     let exemplar_score = specter_exemplar_score(query, summary);
-    let specter_score = match config.specter_mode {
-        RetrievalSpecterMode::Centroid => centroid_score,
-        RetrievalSpecterMode::MaxOfCentroidExemplar => centroid_score.max(exemplar_score),
-    };
+    let specter_score = centroid_score.max(exemplar_score);
     (weights.centroid * specter_score
         + weights.coauthor * coauthor_score
         + weights.affiliation * affiliation_score
@@ -1813,74 +1650,19 @@ impl RustHybridCentroidRetriever {
         Ok(payload.unbind())
     }
 
-    #[pyo3(
-        signature = (
-            query,
-            component_keys,
-            top_k,
-            weights,
-            first_name_mode = "prefix",
-            specter_mode = "centroid",
-            coauthor_use_idf = false,
-            coauthor_per_term_cap = None,
-            coauthor_total_cap = None,
-            drop_candidate_mega_coauthors = false,
-            mega_coauthor_rescue_query_coverage = None,
-            mega_coauthor_rescue_min_shared_blocks = 3,
-            affiliation_use_idf = false,
-            affiliation_per_term_cap = None,
-            affiliation_total_cap = None,
-            affiliation_min_token_count = 1,
-            affiliation_unigram_weight = 1.0,
-            affiliation_multi_token_weight = 1.0,
-            num_threads = None,
-            override_summary = None
-        )
-    )]
-    fn top_k_experimental_weighted_hybrid_centroid_subset(
+    #[pyo3(signature = (query, component_keys, top_k, num_threads = None, override_summary = None))]
+    fn top_k_hybrid_centroid_subset(
         &self,
         py: Python<'_>,
         query: &Bound<'_, PyAny>,
         component_keys: &Bound<'_, PyAny>,
         top_k: usize,
-        weights: Vec<f64>,
-        first_name_mode: &str,
-        specter_mode: &str,
-        coauthor_use_idf: bool,
-        coauthor_per_term_cap: Option<f64>,
-        coauthor_total_cap: Option<f64>,
-        drop_candidate_mega_coauthors: bool,
-        mega_coauthor_rescue_query_coverage: Option<f64>,
-        mega_coauthor_rescue_min_shared_blocks: usize,
-        affiliation_use_idf: bool,
-        affiliation_per_term_cap: Option<f64>,
-        affiliation_total_cap: Option<f64>,
-        affiliation_min_token_count: usize,
-        affiliation_unigram_weight: f64,
-        affiliation_multi_token_weight: f64,
         num_threads: Option<usize>,
         override_summary: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<(Vec<String>, Vec<f32>)> {
         validate_positive_top_k(top_k)?;
 
         let query_data = extract_retrieval_query(query)?;
-        let weights_data = extract_retrieval_weights(weights)?;
-        let config = build_experimental_config(
-            first_name_mode,
-            specter_mode,
-            coauthor_use_idf,
-            coauthor_per_term_cap,
-            coauthor_total_cap,
-            drop_candidate_mega_coauthors,
-            mega_coauthor_rescue_query_coverage,
-            mega_coauthor_rescue_min_shared_blocks,
-            affiliation_use_idf,
-            affiliation_per_term_cap,
-            affiliation_total_cap,
-            affiliation_min_token_count,
-            affiliation_unigram_weight,
-            affiliation_multi_token_weight,
-        )?;
         let mut candidate_indices = Vec::new();
         for item in PyIterator::from_object(component_keys)? {
             let component_key: String = item?.extract()?;
@@ -1893,12 +1675,7 @@ impl RustHybridCentroidRetriever {
         }
 
         let override_data = override_summary
-            .map(|value| {
-                extract_retrieval_summary(
-                    value,
-                    !matches!(config.specter_mode, RetrievalSpecterMode::Centroid),
-                )
-            })
+            .map(|value| extract_retrieval_summary(value, true))
             .transpose()?;
         let override_index = if let Some(override_summary_data) = override_data.as_ref() {
             let Some(candidate_index) = self
@@ -1921,7 +1698,7 @@ impl RustHybridCentroidRetriever {
             None
         };
 
-        self.score_top_k_candidate_indices_experimental(
+        self.score_top_k_candidate_indices_default(
             py,
             &query_data,
             &candidate_indices,
@@ -1929,8 +1706,6 @@ impl RustHybridCentroidRetriever {
             num_threads,
             override_index,
             override_data.as_ref(),
-            weights_data,
-            config,
         )
     }
 }

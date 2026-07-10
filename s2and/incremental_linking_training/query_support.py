@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-import s2and.incremental_linking_training.retrieval_policy as retrieval_policy
+import s2and_rust
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import (
     ClusterSummary,
@@ -24,124 +23,6 @@ from s2and.subblocking import make_subblocks_with_telemetry
 from s2and.text import normalize_text
 
 DEFAULT_CHOOSER_CACHE_MAX_TOP_K = 25
-FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME = "h_wang_any_input_v2"
-
-
-@dataclass(frozen=True)
-class RustHybridCentroidScoringConfig:
-    """Optional experimental scoring controls for the Rust retriever."""
-
-    first_name_mode: str = "prefix"
-    specter_mode: str = "centroid"
-    coauthor_use_idf: bool = False
-    coauthor_per_term_cap: float | None = None
-    coauthor_total_cap: float | None = None
-    drop_candidate_mega_coauthors: bool = False
-    mega_coauthor_rescue_query_coverage: float | None = None
-    mega_coauthor_rescue_min_shared_blocks: int = 3
-    affiliation_use_idf: bool = False
-    affiliation_per_term_cap: float | None = None
-    affiliation_total_cap: float | None = None
-    affiliation_min_token_count: int = 1
-    affiliation_unigram_weight: float = 1.0
-    affiliation_multi_token_weight: float = 1.0
-
-    def to_kwargs(self) -> dict[str, Any]:
-        """Return keyword args expected by the Rust experimental scorer."""
-
-        return {
-            "first_name_mode": str(self.first_name_mode),
-            "specter_mode": str(self.specter_mode),
-            "coauthor_use_idf": bool(self.coauthor_use_idf),
-            "coauthor_per_term_cap": self.coauthor_per_term_cap,
-            "coauthor_total_cap": self.coauthor_total_cap,
-            "drop_candidate_mega_coauthors": bool(self.drop_candidate_mega_coauthors),
-            "mega_coauthor_rescue_query_coverage": self.mega_coauthor_rescue_query_coverage,
-            "mega_coauthor_rescue_min_shared_blocks": int(self.mega_coauthor_rescue_min_shared_blocks),
-            "affiliation_use_idf": bool(self.affiliation_use_idf),
-            "affiliation_per_term_cap": self.affiliation_per_term_cap,
-            "affiliation_total_cap": self.affiliation_total_cap,
-            "affiliation_min_token_count": int(self.affiliation_min_token_count),
-            "affiliation_unigram_weight": float(self.affiliation_unigram_weight),
-            "affiliation_multi_token_weight": float(self.affiliation_multi_token_weight),
-        }
-
-
-@dataclass(frozen=True)
-class FrozenRustHybridCentroidPolicy:
-    """Frozen tuned Rust retriever policy used for promoted row generation."""
-
-    full_weights: tuple[float, ...]
-    initial_only_weights: tuple[float, ...]
-    full_scoring_config: RustHybridCentroidScoringConfig | None = None
-    initial_only_scoring_config: RustHybridCentroidScoringConfig | None = None
-    full_candidate_strategy: str = "global"
-
-    def weights_for_query(self, query: QueryFeatures) -> tuple[float, ...]:
-        """Return the weights for the current masked query view."""
-
-        return self.full_weights if bool(query.has_full_first) else self.initial_only_weights
-
-    def scoring_config_for_query(self, query: QueryFeatures) -> RustHybridCentroidScoringConfig | None:
-        """Return the scoring config for the current masked query view."""
-
-        return self.full_scoring_config if bool(query.has_full_first) else self.initial_only_scoring_config
-
-    def uses_exemplar_scoring(self) -> bool:
-        """Return whether either query-view scorer needs exemplar vectors."""
-
-        configs = (self.full_scoring_config, self.initial_only_scoring_config)
-        return any(config is not None and str(config.specter_mode) != "centroid" for config in configs)
-
-    def to_summary_payload(self, *, policy_name: str) -> dict[str, Any]:
-        """Serialize the fixed policy into a reproducible summary payload."""
-
-        return {
-            "policy_name": str(policy_name),
-            "feature_order": list(retrieval_policy.HYBRID_FEATURE_ORDER),
-            "full_candidate_strategy": str(self.full_candidate_strategy),
-            "full_weights": {
-                name: round(float(value), 6)
-                for name, value in zip(retrieval_policy.HYBRID_FEATURE_ORDER, self.full_weights, strict=True)
-            },
-            "initial_only_weights": {
-                name: round(float(value), 6)
-                for name, value in zip(retrieval_policy.HYBRID_FEATURE_ORDER, self.initial_only_weights, strict=True)
-            },
-            "full_scoring_config": (
-                self.full_scoring_config.to_kwargs() if self.full_scoring_config is not None else None
-            ),
-            "initial_only_scoring_config": (
-                self.initial_only_scoring_config.to_kwargs() if self.initial_only_scoring_config is not None else None
-            ),
-        }
-
-
-FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY = FrozenRustHybridCentroidPolicy(
-    full_weights=(0.527232, 0.223412, 0.146909, 0.009439, 0.093007),
-    initial_only_weights=(0.520012, 0.220264, 0.109278, 0.150447, 0.0),
-    full_scoring_config=RustHybridCentroidScoringConfig(
-        first_name_mode="exact_then_prefix_half",
-        specter_mode="max_centroid_exemplar",
-        coauthor_use_idf=True,
-        coauthor_per_term_cap=0.35,
-        drop_candidate_mega_coauthors=True,
-        mega_coauthor_rescue_query_coverage=0.995,
-        mega_coauthor_rescue_min_shared_blocks=3,
-        affiliation_use_idf=True,
-    ),
-    initial_only_scoring_config=RustHybridCentroidScoringConfig(
-        first_name_mode="prefix",
-        specter_mode="max_centroid_exemplar",
-        coauthor_use_idf=True,
-        coauthor_per_term_cap=0.35,
-        drop_candidate_mega_coauthors=True,
-        mega_coauthor_rescue_query_coverage=0.995,
-        mega_coauthor_rescue_min_shared_blocks=3,
-        affiliation_use_idf=True,
-    ),
-    full_candidate_strategy="name_compat_plus_global_backfill5",
-)
 
 
 @dataclass(frozen=True)
@@ -308,7 +189,7 @@ def middle_initial_compatibility(query: QueryFeatures, summary: ClusterSummary) 
             sum(float(summary.middle_initial_counts[value]) / float(summary.size) for value in overlap)
             / float(len(query.middle_initials))
         )
-    return retrieval_policy.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
+    return s2and_rust.RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE
 
 
 def year_compatibility(query_year: int | None, summary: ClusterSummary) -> float:
@@ -317,13 +198,13 @@ def year_compatibility(query_year: int | None, summary: ClusterSummary) -> float
     if query_year is None or summary.year_mean is None:
         return 0.0
     distance = abs(float(query_year) - float(summary.year_mean))
-    score = max(0.0, 1.0 - (distance / retrieval_policy.RETRIEVAL_YEAR_SCORE_DECAY_YEARS))
+    score = max(0.0, 1.0 - (distance / s2and_rust.RETRIEVAL_YEAR_SCORE_DECAY_YEARS))
     if summary.year_min is not None and summary.year_max is not None:
         if (
-            query_year < int(summary.year_min) - retrieval_policy.RETRIEVAL_YEAR_SCORE_RANGE_GAP
-            or query_year > int(summary.year_max) + retrieval_policy.RETRIEVAL_YEAR_SCORE_RANGE_GAP
+            query_year < int(summary.year_min) - s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP
+            or query_year > int(summary.year_max) + s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_GAP
         ):
-            score -= retrieval_policy.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY
+            score -= s2and_rust.RETRIEVAL_YEAR_SCORE_RANGE_PENALTY
     return float(score)
 
 
@@ -352,47 +233,24 @@ def specter_exemplar_similarity(query: QueryFeatures, summary: ClusterSummary) -
     return float(best)
 
 
-def _resolve_rust_num_threads(num_threads: int | None) -> int | None:
-    if num_threads is not None:
-        return max(1, int(num_threads))
-    for env_var in ("RAYON_NUM_THREADS", "OMP_NUM_THREADS"):
-        raw_value = os.environ.get(env_var)
-        if raw_value is None or not str(raw_value).strip():
-            continue
-        try:
-            parsed = int(raw_value)
-        except ValueError:
-            continue
-        if parsed > 0:
-            return int(parsed)
-    return None
-
-
 def rank_top_summaries_rust_hybrid_centroid(
     *,
     query: QueryFeatures,
     retriever: RustHybridCentroidRetrieverHandle,
     component_keys: list[str],
+    num_threads: int,
     override_summary: ClusterSummary | None = None,
-    num_threads: int | None = None,
-    weights: tuple[float, ...] | list[float],
-    scoring_config: RustHybridCentroidScoringConfig | None,
 ) -> list[tuple[float, ClusterSummary]]:
     """Score a known component subset with the frozen Rust hybrid-centroid path."""
 
     if not component_keys:
         return []
-    if scoring_config is None:
-        raise ValueError("scoring_config is required")
-    resolved_num_threads = _resolve_rust_num_threads(num_threads)
-    ranked_component_keys, scores = retriever.retriever.top_k_experimental_weighted_hybrid_centroid_subset(
+    ranked_component_keys, scores = retriever.retriever.top_k_hybrid_centroid_subset(
         query,
         component_keys,
         top_k=len(component_keys),
-        weights=[float(value) for value in weights],
-        num_threads=resolved_num_threads,
+        num_threads=max(1, int(num_threads)),
         override_summary=override_summary,
-        **scoring_config.to_kwargs(),
     )
     return [
         (
@@ -409,11 +267,7 @@ def rank_top_summaries_rust_hybrid_centroid(
 
 __all__ = [
     "DEFAULT_CHOOSER_CACHE_MAX_TOP_K",
-    "FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY",
-    "FROZEN_BEST_RUST_HYBRID_CENTROID_POLICY_NAME",
     "ClusterProfile",
-    "FrozenRustHybridCentroidPolicy",
-    "RustHybridCentroidScoringConfig",
     "build_cluster_profile",
     "build_cluster_summary",
     "build_labeled_retrieval_subblock_index",

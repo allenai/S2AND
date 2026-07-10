@@ -897,22 +897,9 @@ mod tests {
 #[pymodule]
 fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("RETRIEVAL_FEATURE_ORDER", RETRIEVAL_FEATURE_ORDER.to_vec())?;
     m.add(
         "DEFAULT_HYBRID_CENTROID_POLICY_NAME",
         DEFAULT_HYBRID_CENTROID_POLICY_NAME,
-    )?;
-    m.add(
-        "DEFAULT_HYBRID_CENTROID_WEIGHTS",
-        DEFAULT_HYBRID_CENTROID_WEIGHTS.to_vec(),
-    )?;
-    m.add(
-        "DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS",
-        DEFAULT_INITIAL_ONLY_HYBRID_CENTROID_WEIGHTS.to_vec(),
-    )?;
-    m.add(
-        "DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS",
-        DEFAULT_HYBRID_EXEMPLAR_4_WEIGHTS.to_vec(),
     )?;
     m.add(
         "RETRIEVAL_MIDDLE_INITIAL_CONFLICT_SCORE",
@@ -929,10 +916,6 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "RETRIEVAL_YEAR_SCORE_RANGE_PENALTY",
         RETRIEVAL_YEAR_SCORE_RANGE_PENALTY,
-    )?;
-    m.add(
-        "RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP",
-        RETRIEVAL_HARD_FILTER_MAX_YEAR_GAP,
     )?;
     m.add(
         "INCREMENTAL_LINKING_PAIR_PLAN_ROW_SIGNALS",

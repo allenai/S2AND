@@ -829,11 +829,8 @@ def _linkage_from_cached_distance(
 ) -> Any | None:
     """Build the FastCluster linkage tree once for a cached distance vector."""
 
-    import warnings
-
     import numpy as np
     from fastcluster import linkage
-    from sklearn.exceptions import EfficiencyWarning
 
     from s2and.model_pairwise import FastCluster
 
@@ -861,9 +858,7 @@ def _linkage_from_cached_distance(
         len(signature_ids),
     )
     started = time.perf_counter()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=EfficiencyWarning)
-        linkage_matrix = linkage(dist_array, linkage_method, preserve_input=True)
+    linkage_matrix = linkage(dist_array, linkage_method, preserve_input=True)
     logging.info(
         "Finished linkage build for block %s using %s in %.3fs",
         block_key,

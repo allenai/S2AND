@@ -20,7 +20,22 @@ pub(crate) fn extract_path_mapping_string(
 }
 
 pub(crate) fn extract_name_counts_index_path(paths: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    extract_path_mapping_string(paths, "name_counts_index", false)
+    let dict = paths.downcast::<PyDict>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("Arrow path bundle must be a dict-like mapping")
+    })?;
+    reject_legacy_name_counts_path(dict)?;
+    optional_name_counts_index_path_from_py_dict(dict)
+}
+
+fn reject_legacy_name_counts_path(paths: &Bound<'_, PyDict>) -> PyResult<()> {
+    for key in ["name_counts", "name_counts_index_dir"] {
+        if matches!(paths.get_item(key)?, Some(value) if !value.is_none()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "legacy Arrow path key '{key}' is unsupported; use name_counts_index"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn required_path_from_py_dict(paths: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
@@ -55,7 +70,6 @@ pub(crate) struct RawArrowPlannerPaths {
     pub(crate) cluster_seeds_path: String,
     pub(crate) cluster_seed_disallows_path: Option<String>,
     pub(crate) specter_path: Option<String>,
-    pub(crate) name_counts_arrow_path: Option<String>,
     pub(crate) name_counts_index_path: Option<String>,
     pub(crate) signatures_batch_index_path: Option<String>,
     pub(crate) papers_batch_index_path: Option<String>,
@@ -75,6 +89,7 @@ impl RawArrowPlannerPaths {
         paths: &Bound<'_, PyDict>,
         cluster_seeds_path: Option<String>,
     ) -> PyResult<Self> {
+        reject_legacy_name_counts_path(paths)?;
         Ok(Self {
             signatures_path: required_path_from_py_dict(paths, "signatures")?,
             papers_path: required_path_from_py_dict(paths, "papers")?,
@@ -85,7 +100,6 @@ impl RawArrowPlannerPaths {
                 "cluster_seed_disallows",
             )?,
             specter_path: optional_path_from_py_dict(paths, "specter")?,
-            name_counts_arrow_path: optional_path_from_py_dict(paths, "name_counts")?,
             name_counts_index_path: optional_name_counts_index_path_from_py_dict(paths)?,
             signatures_batch_index_path: optional_path_from_py_dict(
                 paths,

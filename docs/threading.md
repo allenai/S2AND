@@ -11,6 +11,9 @@ This doc describes the intended “single knob” behavior and the practical rul
 
 Within the Python API, treat `n_jobs` as the canonical concurrency setting for a run:
 
+`n_jobs=None` selects one worker. Negative integers follow sklearn semantics
+(`-1` means all CPUs); zero, booleans, strings, and floats are rejected.
+
 - **Rust Arrow routes**: Python passes `num_threads=n_jobs` into the Rust extension for batch constraints + featurization.
 - **LightGBM inference**: `Clusterer.n_jobs` propagates into the underlying estimators; prediction uses the
   estimator's configured threading rather than passing a separate `num_threads` override to `predict_proba()`.

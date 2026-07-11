@@ -14,6 +14,101 @@ from s2and.incremental_linking.feature_block import (
 )
 
 
+def _write_tiny_index(tmp_path: Path) -> tuple[str, Path]:
+    pa = pytest.importorskip("pyarrow")
+    path = write_arrow_ipc_table(
+        pa.table({"signature_id": pa.array(["s1", "s2", "s3"], type=pa.string())}),
+        tmp_path / "signatures.arrow",
+        max_record_batch_rows=1,
+    )
+    index_path = tmp_path / "signatures.signatures_batch_index.bin"
+    write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
+    return path, index_path
+
+
+@pytest.mark.parametrize("mutation", ["truncated", "trailing"])
+def test_validation_rejects_inexact_batch_index_body_length(tmp_path: Path, mutation: str) -> None:
+    path, index_path = _write_tiny_index(tmp_path)
+    payload = index_path.read_bytes()
+    if mutation == "truncated":
+        index_path.write_bytes(payload[:-1])
+    else:
+        index_path.write_bytes(payload + b"\x00")
+
+    with pytest.raises(ValueError, match="does not match expected length"):
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+
+
+def test_validation_rejects_decreasing_batch_index_hashes(tmp_path: Path) -> None:
+    path, index_path = _write_tiny_index(tmp_path)
+    payload = bytearray(index_path.read_bytes())
+    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
+    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
+    records = [
+        bytes(payload[offset : offset + record_struct.size])
+        for offset in range(header_size, len(payload), record_struct.size)
+    ]
+    assert record_struct.unpack(records[0])[0] < record_struct.unpack(records[-1])[0]
+    payload[header_size:] = b"".join(reversed(records))
+    index_path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match="key hashes are not nondecreasing"):
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+
+
+def test_validation_rejects_out_of_bounds_record_batch_index(tmp_path: Path) -> None:
+    path, index_path = _write_tiny_index(tmp_path)
+    payload = bytearray(index_path.read_bytes())
+    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
+    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
+    key_hash, _batch_index, reserved = record_struct.unpack_from(payload, header_size)
+    record_struct.pack_into(payload, header_size, key_hash, 3, reserved)
+    index_path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match="batch index 3 is out of bounds"):
+        validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_error"),
+    [
+        ("truncated", "does not match expected length"),
+        ("decreasing_hashes", "key hashes are not nondecreasing"),
+        ("out_of_bounds_batch", "batch index 3 is out of bounds"),
+    ],
+)
+def test_write_reuse_rejects_corrupt_batch_index(
+    tmp_path: Path,
+    corruption: str,
+    expected_error: str,
+) -> None:
+    path, index_path = _write_tiny_index(tmp_path)
+    payload = bytearray(index_path.read_bytes())
+    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
+    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
+    if corruption == "truncated":
+        payload = payload[:-1]
+    elif corruption == "decreasing_hashes":
+        records = [
+            bytes(payload[offset : offset + record_struct.size])
+            for offset in range(header_size, len(payload), record_struct.size)
+        ]
+        payload[header_size:] = b"".join(reversed(records))
+    else:
+        key_hash, _batch_index, reserved = record_struct.unpack_from(payload, header_size)
+        record_struct.pack_into(payload, header_size, key_hash, 3, reserved)
+    index_path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match=expected_error):
+        write_arrow_batch_lookup_index(
+            path,
+            index_path,
+            key_column="signature_id",
+            table_name="signatures",
+            overwrite=False,
+        )
+
+
 def test_raw_planner_index_rejects_same_size_unsampled_middle_rewrite_python(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
 

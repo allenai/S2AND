@@ -40,6 +40,7 @@ fn source_file_fingerprint(path: &str, source_size: u64) -> PyResult<u64> {
 struct ArrowBatchLookupIndex {
     bytes: Box<[u8]>,
     record_count: usize,
+    max_batch_index: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,10 +164,32 @@ impl ArrowBatchLookupIndex {
                 bytes.len()
             )));
         }
-        Ok(Self {
+        let mut index = Self {
             bytes,
             record_count,
-        })
+            max_batch_index: None,
+        };
+        let mut previous_hash = None;
+        for record_index in 0..record_count {
+            let record_hash = index.record_hash(record_index);
+            if let Some(previous_hash) = previous_hash {
+                if record_hash < previous_hash {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Arrow batch lookup index '{path}' record hashes are not monotonic at \
+                         records {} and {record_index}: {previous_hash} > {record_hash}",
+                        record_index - 1
+                    )));
+                }
+            }
+            previous_hash = Some(record_hash);
+            let batch_index = index.record_batch_index(record_index);
+            index.max_batch_index = Some(
+                index
+                    .max_batch_index
+                    .map_or(batch_index, |current| current.max(batch_index)),
+            );
+        }
+        Ok(index)
     }
 
     fn record_offset(&self, index: usize) -> usize {
@@ -226,6 +249,23 @@ impl ArrowBatchLookupIndex {
         }
         out
     }
+
+    fn validate_batch_indices(
+        &self,
+        index_path: &str,
+        source_arrow_path: &str,
+        source_batch_count: usize,
+    ) -> PyResult<()> {
+        if let Some(batch_index) = self.max_batch_index {
+            if batch_index as usize >= source_batch_count {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Arrow batch lookup index '{index_path}' references record batch {batch_index}, \
+                     but Arrow IPC file '{source_arrow_path}' contains {source_batch_count} record batches"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn validate_arrow_batch_lookup_index(
@@ -233,7 +273,17 @@ pub(crate) fn validate_arrow_batch_lookup_index(
     source_arrow_path: &str,
     key_column: &str,
 ) -> PyResult<()> {
-    ArrowBatchLookupIndex::open(path, source_arrow_path, key_column).map(|_| ())
+    let index = ArrowBatchLookupIndex::open(path, source_arrow_path, key_column)?;
+    let file = File::open(source_arrow_path)
+        .map_err(|err| io_error_to_py("failed to open Arrow IPC file", source_arrow_path, err))?;
+    let reader = ArrowFileReader::try_new(file, None).map_err(|err| {
+        arrow_error_to_py(
+            "failed to read Arrow IPC schema from",
+            source_arrow_path,
+            err,
+        )
+    })?;
+    index.validate_batch_indices(path, source_arrow_path, reader.num_batches())
 }
 
 #[derive(Clone, Copy, Default)]
@@ -259,6 +309,7 @@ pub(crate) fn read_indexed_arrow_batches(
         .map_err(|err| io_error_to_py("failed to open Arrow IPC file", path, err))?;
     let mut reader = ArrowFileReader::try_new(file, None)
         .map_err(|err| arrow_error_to_py("failed to read Arrow IPC schema from", path, err))?;
+    index.validate_batch_indices(index_path, path, reader.num_batches())?;
     let mut batches = Vec::with_capacity(batch_indices.len());
     let mut rows_scanned = 0usize;
     for batch_index in batch_indices {
@@ -363,6 +414,62 @@ mod tests {
         assert!(py_err_message(error).contains("is stale"));
         ArrowBatchLookupIndex::open_for_request(index_path_str, &source_path_str, "signature_id")
             .expect("request-time source-size validation should avoid full-file fingerprinting");
+
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn arrow_batch_lookup_index_rejects_decreasing_record_hashes() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "s2and_arrow_index_order_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp test dir");
+        let source_path = temp_root.join("source.arrow");
+        let index_path = temp_root.join("source.index.bin");
+        let source_bytes = b"test Arrow source";
+        fs::write(&source_path, source_bytes).expect("write source bytes");
+        let source_path_str = source_path
+            .to_str()
+            .expect("temp path should be valid unicode")
+            .to_string();
+        let source_fingerprint =
+            source_file_fingerprint(&source_path_str, source_bytes.len() as u64)
+                .expect("hash source");
+        fs::write(
+            &index_path,
+            ARROW_BATCH_LOOKUP_INDEX_MAGIC
+                .iter()
+                .copied()
+                .chain(2_u64.to_le_bytes())
+                .chain((source_bytes.len() as u64).to_le_bytes())
+                .chain(fnv64(b"signature_id").to_le_bytes())
+                .chain(source_fingerprint.to_le_bytes())
+                .chain(20_u64.to_le_bytes())
+                .chain(0_u32.to_le_bytes())
+                .chain(0_u32.to_le_bytes())
+                .chain(10_u64.to_le_bytes())
+                .chain(1_u32.to_le_bytes())
+                .chain(0_u32.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )
+        .expect("write index bytes");
+
+        let error = match ArrowBatchLookupIndex::open(
+            index_path
+                .to_str()
+                .expect("temp path should be valid unicode"),
+            &source_path_str,
+            "signature_id",
+        ) {
+            Ok(_) => panic!("decreasing record hashes must be rejected"),
+            Err(err) => err,
+        };
+        assert!(py_err_message(error).contains("record hashes are not monotonic"));
 
         fs::remove_dir_all(&temp_root).ok();
     }

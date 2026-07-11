@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import s2and.arrow_inputs as arrow_inputs_module
+import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
     ValidatedArrowInputs,
@@ -15,6 +16,7 @@ from s2and.arrow_inputs import (
     require_arrow_artifacts,
     require_filtered_arrow_batch_indexes,
     validate_arrow_prediction_artifacts,
+    validate_arrow_publication_artifacts,
     verified_arrow_artifact_generation,
 )
 from s2and.incremental_linking.feature_block import (
@@ -266,7 +268,7 @@ def test_retained_validated_profile_projects_all_unused_specter_paths(
         require_specter=True,
         require_name_counts_index=False,
     )
-    with_aliases = ValidatedArrowInputs(
+    with_aliases = ValidatedArrowInputs._from_verified(
         paths={
             **validated,
             "specter2": validated["specter"],
@@ -274,6 +276,7 @@ def test_retained_validated_profile_projects_all_unused_specter_paths(
         },
         generation_id=validated.generation_id,
         normalization_version=validated.normalization_version,
+        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
     monkeypatch.setattr(
         arrow_inputs_module,
@@ -310,6 +313,24 @@ def test_validated_arrow_inputs_mapping_is_immutable(tmp_path: Path) -> None:
     original_signature_path = validated["signatures"]
     paths["signatures"] = "other.arrow"
     assert validated["signatures"] == original_signature_path
+
+
+def test_validated_arrow_inputs_rejects_direct_or_uncapable_construction() -> None:
+    with pytest.raises(TypeError, match="cannot be constructed directly"):
+        ValidatedArrowInputs(
+            paths={"signatures": "unverified.arrow"},
+            generation_id="forged-generation",
+            normalization_version="canonical_v2",
+        )
+    with pytest.raises(TypeError, match="internal verified capability"):
+        ValidatedArrowInputs._from_verified(
+            paths={"signatures": "unverified.arrow"},
+            generation_id="forged-generation",
+            normalization_version="canonical_v2",
+            capability=object(),
+        )
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+        type("ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
 
 
 def test_normalize_arrow_paths_resolves_relative_paths_at_boundary(
@@ -461,6 +482,25 @@ def test_repeated_raw_validation_rechecks_generation_integrity(tmp_path: Path) -
             require_name_counts_index=False,
         )
     assert verified_arrow_artifact_generation(validated) == validated.generation_id
+
+
+def test_publication_validation_rejects_checksummed_semantically_invalid_batch_index(tmp_path: Path) -> None:
+    paths = _write_valid_prediction_bundle(tmp_path)
+    index_path = Path(paths["signatures_batch_index"])
+    payload = bytearray(index_path.read_bytes())
+    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
+    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
+    key_hash, _batch_index, reserved = record_struct.unpack_from(payload, header_size)
+    record_struct.pack_into(payload, header_size, key_hash, 1, reserved)
+    index_path.write_bytes(payload)
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+
+    with pytest.raises(ValueError, match="batch index 1 is out of bounds"):
+        validate_arrow_publication_artifacts(
+            paths,
+            require_specter=False,
+            require_name_counts_index=False,
+        )
 
 
 def test_prediction_validation_rejects_legacy_name_counts_arrow_path(tmp_path: Path) -> None:

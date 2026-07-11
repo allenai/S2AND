@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -18,6 +19,40 @@ def test_maybe_load_list_empty_file_returns_empty_list(tmp_path):
     empty_path.write_text("", encoding="utf-8")
 
     assert ANDData.maybe_load_list(str(empty_path)) == []
+
+
+def test_maybe_load_json_reads_utf8_text(tmp_path):
+    json_path = tmp_path / "unicode.json"
+    json_path.write_text(json.dumps({"name": "José"}, ensure_ascii=False), encoding="utf-8")
+
+    assert ANDData.maybe_load_json(str(json_path)) == {"name": "José"}
+
+
+def test_maybe_load_list_reads_utf8_text(tmp_path):
+    list_path = tmp_path / "unicode.txt"
+    list_path.write_text("José\nZoë", encoding="utf-8")
+
+    assert ANDData.maybe_load_list(str(list_path)) == ["José", "Zoë"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {1: np.asarray([1.0]), "1": np.asarray([2.0])},
+        (np.asarray([[1.0], [2.0]]), [1, "1"]),
+    ],
+)
+def test_maybe_load_specter_rejects_keys_that_collide_as_strings(payload):
+    with pytest.raises(ValueError, match="collide after string normalization"):
+        ANDData.maybe_load_specter(payload)
+
+
+def test_maybe_load_specter_normalizes_tuple_keys_to_strings():
+    loaded = ANDData.maybe_load_specter((np.asarray([[1.0, 2.0], [3.0, 4.0]]), [1, 2]))
+
+    assert loaded is not None
+    assert set(loaded) == {"1", "2"}
+    np.testing.assert_array_equal(loaded["1"], np.asarray([1.0, 2.0]))
 
 
 def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
@@ -304,6 +339,38 @@ class TestData(unittest.TestCase):
         assert len(train_pairs) == 1000
         assert len(val_pairs) == 500
         assert len(test_pairs) == 7244
+
+    def test_split_cluster_signatures_accepts_float_ratios_close_to_one(self):
+        self.qian_dataset.train_ratio = 0.7
+        self.qian_dataset.val_ratio = 0.2
+        self.qian_dataset.test_ratio = 0.1
+
+        train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures()
+
+        self.assertEqual(
+            set(train_blocks) | set(val_blocks) | set(test_blocks),
+            set(self.qian_dataset.get_blocks()),
+        )
+
+    def test_split_cluster_signatures_rejects_out_of_range_ratios(self):
+        self.qian_dataset.train_ratio = 1.1
+        self.qian_dataset.val_ratio = -0.1
+        self.qian_dataset.test_ratio = 0.0
+
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            self.qian_dataset.split_cluster_signatures()
+
+    def test_fixed_block_split_allows_empty_partitions(self):
+        block_ids = list(self.qian_dataset.get_blocks())
+        self.qian_dataset.train_blocks = block_ids
+        self.qian_dataset.val_blocks = []
+        self.qian_dataset.test_blocks = []
+
+        train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures_fixed()
+
+        self.assertEqual(set(train_blocks), set(block_ids))
+        self.assertEqual(val_blocks, {})
+        self.assertEqual(test_blocks, {})
 
     def test_split_pairs_global_balanced_classes_uses_split_signatures(self):
         self.qian_dataset.pair_sampling_mode = "global_balanced_classes"
@@ -618,3 +685,30 @@ def test_fixed_pairs_does_not_mutate_source_dataframes():
 
     all_labels = [int(pair[2]) for pair in train_pairs + val_pairs + test_pairs]
     assert set(all_labels).issubset({0, 1})
+
+
+@pytest.mark.parametrize("invalid_split", ["train", "val", "test"])
+def test_fixed_pairs_rejects_unknown_labels(invalid_split):
+    pair_frames = {
+        split_name: pd.DataFrame(
+            [(f"{split_name}1", f"{split_name}2", "YES")],
+            columns=["signature_id_1", "signature_id_2", "label"],
+        )
+        for split_name in ("train", "val", "test")
+    }
+    pair_frames[invalid_split].loc[0, "label"] = "MAYBE"
+    dataset = ANDData(
+        signatures={},
+        papers={},
+        name="fixed_pairs_invalid_label",
+        mode="train",
+        clusters=None,
+        train_pairs=pair_frames["train"],
+        val_pairs=pair_frames["val"],
+        test_pairs=pair_frames["test"],
+        name_counts_index=None,
+        preprocess=False,
+    )
+
+    with pytest.raises(ValueError, match=rf"Unknown fixed-pair labels.*{invalid_split}.*MAYBE"):
+        dataset.fixed_pairs()

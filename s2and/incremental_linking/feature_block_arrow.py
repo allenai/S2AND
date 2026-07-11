@@ -24,7 +24,9 @@ from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
+    MissingArrowArtifactError,
     normalize_arrow_paths,
+    require_name_counts_index_artifact,
 )
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
@@ -703,7 +705,7 @@ def validate_arrow_batch_lookup_index(
     key_column: str,
     expected_row_count: int | None = None,
 ) -> dict[str, int | str]:
-    """Validate an existing batch lookup index without scanning Arrow record batches."""
+    """Validate an index and its record-batch references without reading Arrow rows."""
 
     arrow_path_obj = Path(arrow_path)
     index_path_obj = Path(index_path)
@@ -731,10 +733,51 @@ def validate_arrow_batch_lookup_index(
             f"index has {int(header['record_count'])} records, expected {int(expected_row_count)}. "
             "Rebuild it with overwrite=True."
         )
+    record_count = int(header["record_count"])
+    expected_length = (
+        _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
+    )
+    observed_length = index_path_obj.stat().st_size
+    if observed_length != expected_length:
+        raise ValueError(
+            f"Arrow batch lookup index '{index_path_obj!s}' length {observed_length} does not match "
+            f"expected length {expected_length} (record_count={record_count})"
+        )
+
+    import pyarrow as pa
+
+    with pa.memory_map(str(arrow_path_obj), "r") as source:
+        record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
+    if not _source_snapshot_matches_stat(source_snapshot, arrow_path_obj.stat()):
+        _raise_arrow_source_changed(arrow_path_obj, context="validating batch lookup index")
+
+    previous_hash: int | None = None
+    with index_path_obj.open("rb") as infile:
+        with mmap.mmap(infile.fileno(), 0, access=mmap.ACCESS_READ) as index_mmap:
+            for record_index in range(record_count):
+                offset = (
+                    _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size
+                    + record_index * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
+                )
+                key_hash, batch_index, _reserved = _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(
+                    index_mmap,
+                    offset,
+                )
+                if previous_hash is not None and key_hash < previous_hash:
+                    raise ValueError(
+                        f"Arrow batch lookup index '{index_path_obj!s}' key hashes are not nondecreasing "
+                        f"at record {record_index}: {key_hash} follows {previous_hash}"
+                    )
+                if batch_index >= record_batch_count:
+                    raise ValueError(
+                        f"Arrow batch lookup index '{index_path_obj!s}' batch index {batch_index} is out of "
+                        f"bounds at record {record_index} for {record_batch_count} Arrow record batches"
+                    )
+                previous_hash = int(key_hash)
     return {
         "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": str(header["magic"]),
-        "record_count": int(header["record_count"]),
+        "record_count": record_count,
         "source_size": int(header["source_size"]),
         "key_column_hash": int(header["key_column_hash"]),
         "source_fingerprint": int(header["source_fingerprint"]),
@@ -828,6 +871,12 @@ def write_arrow_batch_lookup_index(
                 f"index has {int(index_header['record_count'])} records, "
                 f"Arrow file has {int(layout['row_count'])} rows. Rebuild it with overwrite=True."
             )
+        validate_arrow_batch_lookup_index(
+            arrow_path_obj,
+            output_path,
+            key_column=key_column,
+            expected_row_count=int(layout["row_count"]),
+        )
         return str(output_path), {
             "reused": True,
             "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
@@ -1468,8 +1517,13 @@ def _name_counts_index_complete(
     expected_fingerprint: int,
     expected_source_provenance: Mapping[str, Any],
 ) -> bool:
-    manifest_paths = _name_counts_index_manifest_paths(index_dir)
-    if manifest_paths is None or not all(path.exists() for path in manifest_paths.values()):
+    try:
+        require_name_counts_index_artifact(
+            index_dir,
+            context="reusing name-count index",
+            producer_hint="rebuild the name-count index",
+        )
+    except MissingArrowArtifactError:
         return False
     manifest_path = index_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

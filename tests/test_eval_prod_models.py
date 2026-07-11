@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 
+import s2and.arrow_inputs as arrow_inputs_module
 import scripts.eval_prod_models as eval_prod_models
 from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.consts import NORMALIZATION_VERSION
@@ -333,10 +334,11 @@ def test_arrow_training_feature_splits_loads_selected_name_counts(monkeypatch, n
         return FakeRustFeaturizer()
 
     monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_paths", fake_build)
-    validated_paths = ValidatedArrowInputs(
+    validated_paths = ValidatedArrowInputs._from_verified(
         paths={"signatures": "signatures.arrow", "name_counts_index": "name_counts_index"},
         generation_id="generation",
         normalization_version=NORMALIZATION_VERSION,
+        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
     splits = eval_prod_models.PairwiseTrainingSplits([], [], [], {}, {}, {}, {})
 
@@ -596,7 +598,7 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
     )
     monkeypatch.setattr(eval_prod_models, "read_signature_to_cluster_id", lambda _path: {"s1": "truth"})
 
-    arrow_paths = ValidatedArrowInputs(
+    arrow_paths = ValidatedArrowInputs._from_verified(
         paths={
             "signatures": "signatures.arrow",
             "papers": "papers.arrow",
@@ -608,6 +610,7 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
         },
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
+        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
     eval_prod_models.cluster_eval_arrow(
         arrow_paths,

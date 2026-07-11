@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+import s2and.arrow_inputs as arrow_inputs_module
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.arrow_inputs import MissingArrowArtifactError, ValidatedArrowInputs
 from s2and.consts import NORMALIZATION_VERSION
@@ -311,10 +312,11 @@ def _raw_plan() -> dict[str, Any]:
 
 
 def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
-    return ValidatedArrowInputs(
+    return ValidatedArrowInputs._from_verified(
         paths={},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
+        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
 
 

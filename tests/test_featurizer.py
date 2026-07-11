@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import s2and.feature_port as feature_port
+import s2and.featurizer as featurizer_module
 import s2and.memory_budget as memory_budget
 from s2and.consts import LARGE_INTEGER
 from s2and.data import ANDData
@@ -123,6 +124,80 @@ def test_malformed_emails_produce_only_missing_features() -> None:
 
     assert features.shape == (1, 2)
     assert np.isnan(features).all()
+
+
+@pytest.mark.parametrize("zero_embedding", [[0.0, 0.0], np.asarray([0.0, 0.0])])
+def test_zero_specter_embedding_is_missing_for_lists_and_arrays(zero_embedding) -> None:
+    dataset = _dummy_dataset("dummy_zero_specter")
+    paper_id_0 = str(dataset.signatures["0"].paper_id)
+    paper_id_1 = str(dataset.signatures["1"].paper_id)
+    dataset.specter_embeddings = {
+        paper_id_0: zero_embedding,
+        paper_id_1: [1.0, 0.0],
+    }
+    featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
+
+    features, _labels, _ = many_pairs_featurize(
+        [("0", "1", 0)],
+        dataset,
+        featurizer,
+        n_jobs=1,
+        use_cache=False,
+        chunk_size=1,
+        nan_value=np.nan,
+    )
+
+    assert features.shape == (1, 1)
+    assert np.isnan(features[0, 0])
+
+
+def test_specter_embedding_must_be_one_dimensional() -> None:
+    dataset = _dummy_dataset("dummy_invalid_specter")
+    paper_id_0 = str(dataset.signatures["0"].paper_id)
+    paper_id_1 = str(dataset.signatures["1"].paper_id)
+    dataset.specter_embeddings = {
+        paper_id_0: [[1.0, 0.0]],
+        paper_id_1: [1.0, 0.0],
+    }
+    featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
+
+    with pytest.raises(ValueError, match="one-dimensional"):
+        many_pairs_featurize(
+            [("0", "1", 0)],
+            dataset,
+            featurizer,
+            n_jobs=1,
+            use_cache=False,
+            chunk_size=1,
+            nan_value=np.nan,
+        )
+
+
+def test_numeric_specter_tuple_keys_are_available_to_pair_featurization() -> None:
+    dataset = ANDData(
+        "tests/dummy/signatures.json",
+        "tests/dummy/papers.json",
+        clusters="tests/dummy/clusters.json",
+        specter_embeddings=(
+            np.asarray([[1.0, 0.0], [1.0, 0.0]]),
+            [53235312, 27077319],
+        ),
+        name="dummy_numeric_specter_keys",
+        name_counts_index=None,
+    )
+    featurizer = FeaturizationInfo(features_to_use=["embedding_similarity"])
+
+    features, _labels, _ = many_pairs_featurize(
+        [("0", "1", 0)],
+        dataset,
+        featurizer,
+        n_jobs=1,
+        use_cache=False,
+        chunk_size=1,
+        nan_value=np.nan,
+    )
+
+    np.testing.assert_array_equal(features, np.asarray([[2.0]]))
 
 
 def test_empty_python_pair_featurization_does_not_mark_missing_ngrams_ready() -> None:
@@ -267,6 +342,67 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
 
     assert state["prewarm_called"] is True
     assert state["rss_called"] is True
+
+
+def test_ineligible_rust_calibration_does_not_consume_process_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(featurizer_module, "_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES", None)
+    monkeypatch.setattr(featurizer_module, "_RUST_BATCH_CALIBRATION_ATTEMPTED", False)
+    monkeypatch.setattr(
+        featurizer_module,
+        "_rust_batch_probe_row_counts",
+        lambda total_pairs, **_kwargs: [] if total_pairs < 3 else [1, 2, 3],
+    )
+    monkeypatch.setattr(memory_budget, "current_rss_bytes_best_effort", lambda _total_ram: (0, "test"))
+
+    class FakeRustFeaturizer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def featurize_pairs_matrix_indexed(
+            self,
+            pairs: list[tuple[int, int]],
+            selected_indices: list[int] | None,
+            num_threads: int,
+            nan_value: float,
+        ) -> np.ndarray:
+            del num_threads, nan_value
+            self.calls += 1
+            width = NUM_FEATURES if selected_indices is None else len(selected_indices)
+            return np.zeros((len(pairs), width), dtype=np.float64)
+
+    rust_featurizer = FakeRustFeaturizer()
+    kwargs = {
+        "rust_featurizer": rust_featurizer,
+        "signature_id_to_index": {"a": 0, "b": 1},
+        "rust_selected_indices": [0],
+        "selected_feature_count": 1,
+        "nameless_feature_count": 0,
+        "row_overhead_bytes": 0,
+        "persistent_row_overhead_bytes": 0,
+        "configured_fixed_overhead_bytes": 0,
+        "num_threads": 1,
+        "total_ram_for_stage": 1024,
+        "run_id": "test-calibration",
+    }
+
+    result = featurizer_module._maybe_calibrate_rust_batch_fixed_overhead_bytes(
+        pieces_of_work=[(("a", "b"), 0)],
+        **kwargs,
+    )
+
+    assert result is None
+    assert featurizer_module._RUST_BATCH_CALIBRATION_ATTEMPTED is False
+
+    result = featurizer_module._maybe_calibrate_rust_batch_fixed_overhead_bytes(
+        pieces_of_work=[(("a", "b"), index) for index in range(3)],
+        **kwargs,
+    )
+
+    assert result is None
+    assert rust_featurizer.calls == 3
+    assert featurizer_module._RUST_BATCH_CALIBRATION_ATTEMPTED is True
 
 
 def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(

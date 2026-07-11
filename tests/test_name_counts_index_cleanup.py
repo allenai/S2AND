@@ -59,6 +59,40 @@ def test_write_name_counts_index_keeps_manifest_absent_when_marker_write_fails(t
     assert generations == []
 
 
+@pytest.mark.parametrize("corruption", ("published_marker", "byte_count", "sha256", "manifest_shape"))
+def test_write_name_counts_index_rebuilds_corrupted_matching_generation(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    provenance = tiny_name_counts_provenance()
+    index_path, _metrics = write_name_counts_index(tmp_path, mappings, provenance)
+    index_dir = Path(index_path)
+    manifest_path = index_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_first_path = str(manifest["files"]["first"]["path"])
+    first_path = index_dir / original_first_path
+
+    if corruption == "published_marker":
+        (first_path.parent / ".published").unlink()
+    elif corruption == "byte_count":
+        manifest["files"]["first"]["byte_count"] += 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif corruption == "sha256":
+        payload = bytearray(first_path.read_bytes())
+        payload[-1] ^= 1
+        first_path.write_bytes(payload)
+    else:
+        manifest_path.write_text("[]", encoding="utf-8")
+
+    _index_path, rebuilt_metrics = write_name_counts_index(tmp_path, mappings, provenance)
+
+    rebuilt_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rebuilt_metrics["reused"] is False
+    assert rebuilt_manifest["files"]["first"]["path"] != original_first_path
+    assert write_name_counts_index(tmp_path, mappings, provenance)[1] == {"reused": True}
+
+
 def test_cleanup_stale_name_counts_generations_keeps_manifest_generation(tmp_path: Path) -> None:
     index_dir = tmp_path / "name_counts_index"
     _write_generation(index_dir, "gen-old")

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 import s2and.featurizer as featurizer_mod
+from s2and.consts import LARGE_INTEGER
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from tests.helpers import build_dummy_dataset
 
@@ -73,6 +74,21 @@ def test_load_cache_rejects_incompatible_feature_count_metadata(tmp_path: Path) 
 
     with pytest.raises(RuntimeError, match="Unsupported pair-feature cache feature count"):
         featurizer_info.load_cache("dataset", ["a___b"])
+
+
+def test_write_cache_rejects_existing_incompatible_schema(tmp_path: Path) -> None:
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    cache_db_path = _patch_pair_cache_paths(featurizer_info, tmp_path / "pair_cache")
+    feature_vector = np.zeros(featurizer_mod.NUM_FEATURES, dtype=np.float64)
+    featurizer_info.write_cache({"old-key": feature_vector}, "dataset")
+    with sqlite3.connect(cache_db_path) as connection:
+        connection.execute(
+            "UPDATE cache_metadata SET value = ? WHERE key = ?",
+            (str(featurizer_mod.PAIR_FEATURE_CACHE_SCHEMA_VERSION - 1), "schema_version"),
+        )
+
+    with pytest.raises(RuntimeError, match="Unsupported pair-feature cache schema version"):
+        featurizer_info.write_cache({"new-key": feature_vector}, "dataset")
 
 
 @pytest.mark.parametrize("metadata_key", ["schema_version", "feature_count"])
@@ -145,8 +161,58 @@ def test_many_pairs_featurize_reuses_persisted_pair_feature_cache(
     assert int(call_count["count"]) == first_run_call_count
 
 
-def test_pair_feature_cache_lookup_probes_reverse_for_legacy_rows() -> None:
-    assert FeaturizationInfo.feature_cache_lookup_keys(("a", "b")) == ("a___b", "b___a")
+def test_pair_feature_cache_keys_are_injective_and_probe_reverse() -> None:
+    first = FeaturizationInfo.feature_cache_key(("a___b", "c"))
+    second = FeaturizationInfo.feature_cache_key(("a", "b___c"))
+
+    assert first != second
+    assert FeaturizationInfo.feature_cache_lookup_keys(("a", "b")) == (
+        FeaturizationInfo.feature_cache_key(("a", "b")),
+        FeaturizationInfo.feature_cache_key(("b", "a")),
+    )
+
+
+def test_many_pairs_featurize_reads_nan_label_cache_but_skips_negative_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    monkeypatch.setattr(featurizer_mod, "CACHE_ROOT", tmp_path)
+    dataset = build_dummy_dataset("pair_feature_cache_nan_label", name_counts_index=True)
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    nan_pair = ("0", "1", np.nan)
+    negative_pair = ("0", "2", -1.0)
+    year_index = featurizer_info.feature_group_to_index["year_diff"][0]
+    cached_nan_vector = np.zeros(featurizer_mod.NUM_FEATURES, dtype=np.float64)
+    cached_nan_vector[year_index] = 42.0
+    cached_negative_vector = np.ones(featurizer_mod.NUM_FEATURES, dtype=np.float64)
+    featurizer_info.write_cache(
+        {
+            featurizer_info.feature_cache_key(nan_pair): cached_nan_vector,
+            featurizer_info.feature_cache_key(negative_pair): cached_negative_vector,
+        },
+        dataset.name,
+    )
+
+    def fail_if_computed(*_args, **_kwargs):
+        raise AssertionError("NaN-labeled inference pair should have been loaded from cache")
+
+    monkeypatch.setattr(featurizer_mod, "_single_pair_featurize", fail_if_computed)
+
+    features, labels, _ = many_pairs_featurize(
+        [nan_pair, negative_pair],
+        dataset,
+        featurizer_info,
+        n_jobs=1,
+        use_cache=True,
+        chunk_size=1,
+        nan_value=np.nan,
+    )
+
+    assert features[0, 0] == 42.0
+    assert features[1, 0] == -LARGE_INTEGER
+    assert np.isnan(labels[0])
+    assert labels[1] == -1.0
 
 
 def test_many_pairs_featurize_with_use_cache_false_does_not_write_pair_feature_cache(

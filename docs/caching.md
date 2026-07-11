@@ -55,6 +55,11 @@ The SQLite database stores:
 - the full `NUM_FEATURES` feature vector as a float64 blob
 - required schema-version and feature-width metadata
 
+Schema version 2 uses length-prefixed signature IDs for collision-free pair keys.
+Schema-version-1 databases are rejected on both reads and writes so ambiguous
+legacy rows cannot be reused. Delete the affected dataset/featurizer cache
+directory and rerun with `use_cache=True` to rebuild it.
+
 Operational behavior:
 
 - writes upsert only rows computed by the current call, so write cost scales with newly computed
@@ -92,6 +97,9 @@ Current implications:
   boundary; internal builders receive the resulting immutable
   `ValidatedArrowInputs` value instead of consulting process-global validation
   caches or rechecking the same generation
+- `ValidatedArrowInputs` is not publicly constructible; callers obtain it from
+  `validate_arrow_prediction_artifacts`, `validate_arrow_training_artifacts`, or
+  `validate_arrow_publication_artifacts`
 - request-local sidecars are deliberately excluded from the immutable
   generation and are validated separately under the request boundary
 

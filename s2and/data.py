@@ -1,12 +1,13 @@
 import json
 import logging
+import math
 import os
 import pickle
 import platform
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping
-from functools import partial, reduce
+from collections.abc import Callable, Iterable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
 
@@ -80,6 +81,83 @@ _PAIR_SAMPLING_MODES: frozenset[str] = frozenset(
         "global_balanced_classes",
     }
 )
+
+
+def _normalize_specter_keys(embeddings: Iterable[tuple[Any, Any]]) -> dict[str, Any]:
+    """Return SPECTER embeddings keyed by collision-free string paper IDs.
+
+    Args:
+        embeddings: Raw paper ID and embedding pairs.
+
+    Returns:
+        The embeddings indexed by string paper ID.
+
+    Raises:
+        ValueError: If distinct raw keys collapse to the same string key.
+    """
+
+    normalized: dict[str, Any] = {}
+    raw_key_by_normalized_key: dict[str, Any] = {}
+    for raw_key, embedding in embeddings:
+        normalized_key = str(raw_key)
+        if normalized_key in normalized:
+            previous_raw_key = raw_key_by_normalized_key[normalized_key]
+            raise ValueError(
+                "SPECTER embedding keys collide after string normalization: "
+                f"{previous_raw_key!r} and {raw_key!r} both map to {normalized_key!r}"
+            )
+        normalized[normalized_key] = embedding
+        raw_key_by_normalized_key[normalized_key] = raw_key
+    return normalized
+
+
+def _validate_split_ratios(train_ratio: float, val_ratio: float, test_ratio: float) -> None:
+    """Validate train, validation, and test split ratios.
+
+    Args:
+        train_ratio: Fraction assigned to training.
+        val_ratio: Fraction assigned to validation.
+        test_ratio: Fraction assigned to testing.
+
+    Raises:
+        ValueError: If a ratio is outside ``[0, 1]`` or the ratios do not sum
+            to one within floating-point tolerance.
+    """
+
+    ratios = (train_ratio, val_ratio, test_ratio)
+    if any(not 0.0 <= ratio <= 1.0 for ratio in ratios):
+        raise ValueError(
+            "train/val/test ratios must each be between 0 and 1; "
+            f"got train={train_ratio}, val={val_ratio}, test={test_ratio}"
+        )
+    if not math.isclose(sum(ratios), 1.0):
+        raise ValueError(
+            f"train/val/test ratios must add to 1; got train={train_ratio}, val={val_ratio}, test={test_ratio}"
+        )
+
+
+def _map_fixed_pair_labels(pair_frame: pd.DataFrame, split_name: str) -> pd.DataFrame:
+    """Copy a fixed-pair frame and map its labels to binary integers.
+
+    Args:
+        pair_frame: Input frame containing a ``label`` column.
+        split_name: Human-readable split name for validation errors.
+
+    Returns:
+        A copy of ``pair_frame`` with mapped integer labels.
+
+    Raises:
+        ValueError: If any label is outside the fixed-pair label vocabulary.
+    """
+
+    output = pair_frame.copy()
+    mapped_labels = output["label"].map(_PAIR_LABEL_MAP)
+    unknown_mask = mapped_labels.isna()
+    if bool(unknown_mask.any()):
+        unknown_labels = pd.unique(output.loc[unknown_mask, "label"]).tolist()
+        raise ValueError(f"Unknown fixed-pair labels in {split_name} split: {unknown_labels!r}")
+    output.loc[:, "label"] = mapped_labels
+    return output
 
 
 def _validate_pair_sampling_mode(mode: str) -> PairSamplingMode:
@@ -482,8 +560,8 @@ class ANDData:
             self.specter_embeddings = {}
         else:
             # Only keep embeddings for papers we retained
-            needed_keys = set(self.papers.keys())
-            self.specter_embeddings = {k: v for k, v in self.specter_embeddings.items() if str(k) in needed_keys}
+            needed_keys = {str(paper_id) for paper_id in self.papers}
+            self.specter_embeddings = {k: v for k, v in self.specter_embeddings.items() if k in needed_keys}
         logger.info("loaded specter, loading cluster seeds")
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
@@ -981,7 +1059,7 @@ class ANDData:
         either the loaded json, or the passed in object
         """
         if isinstance(path_or_json, str):
-            with open(path_or_json) as _json_file:
+            with open(path_or_json, encoding="utf-8") as _json_file:
                 output = json.load(_json_file)
             return output
         else:
@@ -1002,7 +1080,7 @@ class ANDData:
         either the loaded list, or the passed in object
         """
         if isinstance(path_or_list, str):
-            with open(path_or_list) as f:
+            with open(path_or_list, encoding="utf-8") as f:
                 contents = f.read().strip()
                 if not contents:
                     return []
@@ -1051,15 +1129,15 @@ class ANDData:
         else:
             loaded = path_or_pickle
 
-        if loaded is None or isinstance(loaded, dict):
-            return loaded
+        if loaded is None:
+            return None
+
+        if isinstance(loaded, dict):
+            return _normalize_specter_keys(loaded.items())
 
         if isinstance(loaded, tuple) and len(loaded) == 2:
             matrix, keys = loaded
-            specter_by_key: dict[Any, Any] = {}
-            for i, key in enumerate(keys):
-                specter_by_key[key] = matrix[i, :]
-            return specter_by_key
+            return _normalize_specter_keys((key, matrix[i, :]) for i, key in enumerate(keys))
 
         raise TypeError(f"Unsupported specter pickle payload type: {type(loaded)}")
 
@@ -1348,8 +1426,8 @@ class ANDData:
         -------
         train/val/test block dictionaries
         """
+        _validate_split_ratios(self.train_ratio, self.val_ratio, self.test_ratio)
         blocks = self.get_blocks()
-        assert self.train_ratio + self.val_ratio + self.test_ratio == 1, "train/val/test ratio should add to 1"
 
         if self.unit_of_data_split == "signatures":
             signature_keys = list(self.signatures.keys())
@@ -1444,9 +1522,9 @@ class ANDData:
 
         logger.info(f"shuffled train/val/test {len(train_block_dict), len(val_block_dict), len(test_block_dict)}")
 
-        train_set = set(reduce(lambda x, y: x + y, train_block_dict.values()))
-        val_set = set(reduce(lambda x, y: x + y, val_block_dict.values()))
-        test_set = set(reduce(lambda x, y: x + y, test_block_dict.values()))
+        train_set = {signature for signatures in train_block_dict.values() for signature in signatures}
+        val_set = {signature for signatures in val_block_dict.values() for signature in signatures}
+        test_set = {signature for signatures in test_block_dict.values() for signature in signatures}
         intersection_1 = train_set.intersection(test_set)
         intersection_2 = train_set.intersection(val_set)
         intersection_3 = val_set.intersection(test_set)
@@ -1605,11 +1683,9 @@ class ANDData:
         assert (
             self.train_pairs is not None and self.test_pairs is not None
         ), "You need to pass in train and test pairs to use this function"
-        train_pairs_df = self.train_pairs.copy()
-        train_pairs_df.loc[:, "label"] = train_pairs_df["label"].map(_PAIR_LABEL_MAP)
+        train_pairs_df = _map_fixed_pair_labels(self.train_pairs, "train")
         if self.val_pairs is not None:
-            val_pairs_df = self.val_pairs.copy()
-            val_pairs_df.loc[:, "label"] = val_pairs_df["label"].map(_PAIR_LABEL_MAP)
+            val_pairs_df = _map_fixed_pair_labels(self.val_pairs, "val")
             train_pairs = list(train_pairs_df.to_records(index=False))
             val_pairs = list(val_pairs_df.to_records(index=False))
         else:
@@ -1619,8 +1695,7 @@ class ANDData:
             msk = np.random.rand(len(train_pairs_df)) < train_prob
             train_pairs = list(train_pairs_df[msk].to_records(index=False))
             val_pairs = list(train_pairs_df[~msk].to_records(index=False))
-        test_pairs_df = self.test_pairs.copy()
-        test_pairs_df.loc[:, "label"] = test_pairs_df["label"].map(_PAIR_LABEL_MAP)
+        test_pairs_df = _map_fixed_pair_labels(self.test_pairs, "test")
         test_pairs = list(test_pairs_df.to_records(index=False))
 
         return train_pairs, val_pairs, test_pairs

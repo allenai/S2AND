@@ -231,7 +231,6 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
             return int(_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES)
         if _RUST_BATCH_CALIBRATION_ATTEMPTED:
             return None
-        _RUST_BATCH_CALIBRATION_ATTEMPTED = True
 
     probe_rows = _rust_batch_probe_row_counts(
         len(pieces_of_work),
@@ -242,6 +241,15 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
         return None
     if total_ram_for_stage is None:
         return None
+
+    # Reserve the process-wide attempt only after this job is eligible. The
+    # second locked check prevents concurrent eligible jobs from calibrating.
+    with _RUST_BATCH_CALIBRATION_LOCK:
+        if _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES is not None:
+            return int(_RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES)
+        if _RUST_BATCH_CALIBRATION_ATTEMPTED:
+            return None
+        _RUST_BATCH_CALIBRATION_ATTEMPTED = True
 
     fixed_samples: list[int] = []
     chunk_feature_count = max(1, int(selected_feature_count) + int(nameless_feature_count))
@@ -575,7 +583,7 @@ def _write_feature_row(
 
 # ── constants for cache writes ───────────────────────────
 PAIR_FEATURE_CACHE_DB_FILENAME = "pair_features.sqlite3"
-PAIR_FEATURE_CACHE_SCHEMA_VERSION = 1
+PAIR_FEATURE_CACHE_SCHEMA_VERSION = 2
 PAIR_FEATURE_CACHE_READ_BATCH_SIZE = 900
 PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES = 3
 PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS = 30.0
@@ -777,19 +785,18 @@ class FeaturizationInfo:
 
     @staticmethod
     def feature_cache_key(signature_pair: tuple[Any, ...]) -> str:
-        """
-        returns the key in the feature cache dictionary for a signature pair
+        """Return an injective cache key for a pair of signature IDs.
 
-        Parameters
-        ----------
-        signature_pair: Tuple[string]
-            pair of signature ids
+        Args:
+            signature_pair: Pair whose first two elements are signature IDs.
 
-        Returns
-        -------
-        string: the cache key
+        Returns:
+            A length-prefixed encoding of the two canonical string IDs.
         """
-        return f"{signature_pair[0]}___{signature_pair[1]}"
+
+        signature_id_1 = str(signature_pair[0])
+        signature_id_2 = str(signature_pair[1])
+        return f"{len(signature_id_1)}:{signature_id_1}{len(signature_id_2)}:{signature_id_2}"
 
     @staticmethod
     def feature_cache_lookup_keys(signature_pair: tuple[Any, ...]) -> tuple[str, ...]:
@@ -959,6 +966,10 @@ class FeaturizationInfo:
             try:
                 with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
                     self._initialize_pair_feature_cache_schema(connection)
+                    metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
+                    has_feature_rows = connection.execute("SELECT 1 FROM pair_features LIMIT 1").fetchone() is not None
+                    if metadata_rows or has_feature_rows:
+                        self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
                     with connection:
                         connection.execute(
                             """
@@ -1008,6 +1019,31 @@ class FeaturizationInfo:
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
+
+
+def _specter_vector_or_none(embedding: Any, *, paper_id: str) -> np.ndarray | None:
+    """Normalize one SPECTER embedding and treat an all-zero vector as missing.
+
+    Args:
+        embedding: Array-like embedding payload.
+        paper_id: Paper ID used to contextualize validation failures.
+
+    Returns:
+        A one-dimensional float vector, or ``None`` for an all-zero vector.
+
+    Raises:
+        ValueError: If the embedding is non-numeric or not one-dimensional.
+    """
+
+    try:
+        vector = np.asarray(embedding, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"SPECTER embedding for paper {paper_id!r} must be numeric") from exc
+    if vector.ndim != 1:
+        raise ValueError(f"SPECTER embedding for paper {paper_id!r} must be one-dimensional; got shape={vector.shape}")
+    if np.all(vector == 0):
+        return None
+    return vector
 
 
 def _single_pair_featurize(
@@ -1193,13 +1229,15 @@ def _single_pair_featurize(
     specter_2 = None
     if english_or_unknown_count == 2 and dataset.specter_embeddings is not None:
         if str(paper_id_1) in dataset.specter_embeddings:
-            specter_1 = dataset.specter_embeddings[str(paper_id_1)]
-            if np.all(specter_1 == 0):
-                specter_1 = None
+            specter_1 = _specter_vector_or_none(
+                dataset.specter_embeddings[str(paper_id_1)],
+                paper_id=str(paper_id_1),
+            )
         if str(paper_id_2) in dataset.specter_embeddings:
-            specter_2 = dataset.specter_embeddings[str(paper_id_2)]
-            if np.all(specter_2 == 0):
-                specter_2 = None
+            specter_2 = _specter_vector_or_none(
+                dataset.specter_embeddings[str(paper_id_2)],
+                paper_id=str(paper_id_2),
+            )
 
     if specter_1 is not None and specter_2 is not None:
         specter_sim = cosine_sim(specter_1, specter_2) + 1
@@ -1583,6 +1621,22 @@ def _execute_rust_batch_featurization_phase(
     )
 
 
+def _is_partial_supervision_label(label: int | float) -> bool:
+    """Return whether a pair label encodes a partial-supervision constraint.
+
+    Negative labels are constraints. ``NaN`` labels represent unlabeled
+    inference pairs and therefore remain eligible for cache reads and compute.
+
+    Args:
+        label: Pair label supplied to featurization.
+
+    Returns:
+        ``True`` only for negative labels.
+    """
+
+    return bool(label < 0)
+
+
 def many_pairs_featurize(
     signature_pairs: list[tuple[str, str, int | float]],
     dataset: ANDData,
@@ -1691,7 +1745,7 @@ def many_pairs_featurize(
         requested_cache_keys = {
             cache_key
             for pair in signature_pairs
-            if pair[2] >= 0
+            if not _is_partial_supervision_label(pair[2])
             for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1]))
         }
         cached_features = featurizer_info.load_cache(dataset.name, requested_cache_keys)
@@ -1758,7 +1812,7 @@ def many_pairs_featurize(
         labels[i] = pair[2]
 
         # negative labels are an indication of partial supervision
-        if pair[2] < 0:
+        if _is_partial_supervision_label(pair[2]):
             continue
 
         if use_cache:

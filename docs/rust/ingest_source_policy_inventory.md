@@ -24,7 +24,7 @@ Rust constructor input.
 | Policy | Arrow | Python `ANDData` |
 |---|---|---|
 | Unidecode | Eagerly preloads a char map for selected signatures, needed papers, and paper authors through `ensure_unidecode_for_raw_arrow_inputs(...)`; Rust owns production text normalization. | Lazily preloads only when existing preprocessed fields or counters are missing and must be recomputed. |
-| Language | Detects locally from raw title when `predicted_language` is null. A non-null `predicted_language` is a producer-owned cached/compatibility override; missing `is_reliable` defaults to `false`. | Preserves existing `predicted_language`; detects only for in-signature papers missing language. |
+| Language | Detects locally from raw title when `predicted_language` is null. A non-null `predicted_language` is a producer-owned cached/compatibility override that requires non-null `is_reliable` and `language_reliability`; partial overrides are rejected. | Preserves existing `predicted_language`; detects only for in-signature papers missing language. |
 | Name normalization | Recomputes first, middle, and last normalization from Arrow name inputs through shared stage helpers. | Reads normalized name fields from Python objects and recomputes only missing pieces. |
 | Name counts | Uses `name_counts_index` when present; legacy `name_counts` Arrow mappings are rejected. | Opens the same validated shared index, performs bounded native batch lookup during preprocessing, then reads the attached four-scalar `author_info_name_counts`. |
 | Name tuples | Uses the explicit Python `name_tuples` argument/default text file; Arrow path-bundle alias overrides are rejected by production validation. | Reads `dataset.name_tuples`. |

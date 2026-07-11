@@ -405,12 +405,14 @@ def facet_eval(
             homonymity_f1[np.round(homonymity[signature_key] / denominator[signature_key], 2)].append(f1)
             _signature_dict["homonymity"] = np.round(homonymity[signature_key] / denominator[signature_key], 2)
         else:
+            homonymity_f1[0].append(f1)
             _signature_dict["homonymity"] = 0
 
         if synonymity[signature_key] > 0:
             synonymity_f1[np.round(synonymity[signature_key] / denominator[signature_key], 2)].append(f1)
             _signature_dict["synonymity"] = np.round(synonymity[signature_key] / denominator[signature_key], 2)
         else:
+            synonymity_f1[0].append(f1)
             _signature_dict["synonymity"] = 0
 
         _signature_dict["signature_id"] = signature_key

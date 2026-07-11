@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import warnings
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
@@ -14,6 +15,7 @@ from s2and.eval import (
     b3_precision_recall_fscore,
     claims_eval,
     f1_score,
+    facet_eval,
     pairwise_eval,
 )
 
@@ -56,6 +58,40 @@ class TestB3AndF1(unittest.TestCase):
         self.assertEqual(f1_score(0, 1), 0.0)
         self.assertEqual(f1_score(1, 0), 0.0)
         self.assertAlmostEqual(f1_score(0.5, 0.5), 0.5)
+
+
+def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:
+    signature = SimpleNamespace(
+        paper_id="p1",
+        author_info_given_block="block",
+        author_info_block="block",
+        author_info_full_name="alice smith",
+        author_info_estimated_gender=None,
+        author_info_estimated_ethnicity=None,
+        author_info_first="Alice",
+        author_info_affiliations=[],
+        author_info_email=None,
+        author_info_coauthors=[],
+    )
+    paper = SimpleNamespace(
+        authors=[SimpleNamespace(author_name="Alice Smith")],
+        year=2020,
+        has_abstract=False,
+        venue="",
+        journal_name="",
+    )
+    dataset = SimpleNamespace(
+        get_original_blocks=lambda: {"block": ["s1"]},
+        clusters={"c1": {"signature_ids": ["s1"]}},
+        signature_to_cluster_id={"s1": "c1"},
+        signatures={"s1": signature},
+        papers={"p1": paper},
+    )
+
+    result = facet_eval(dataset, {"s1": (0.8, 0.6, 0.7)})
+
+    assert result.homonymity_f1 == {0: [0.7]}
+    assert result.synonymity_f1 == {0: [0.7]}
 
 
 class TestShapIntegration(unittest.TestCase):

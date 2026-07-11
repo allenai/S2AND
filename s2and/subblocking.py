@@ -1664,36 +1664,51 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
         ]
     )
 
-    try:
-        # same for the co-author blocks
-        X = MultiLabelBinarizer(sparse_output=True).fit_transform(
-            [
-                _signature_coauthor_blocks_for_specter(anddata.signatures[i], anddata, compute_block_fn)
-                for i in signature_ids
-            ]
+    coauthor_values = [
+        _signature_coauthor_blocks_for_specter(anddata.signatures[i], anddata, compute_block_fn) for i in signature_ids
+    ]
+    affiliation_values = [signature_affiliation_feature_keys(anddata.signatures[i]) for i in signature_ids]
+    if not any(coauthor_values) or not any(affiliation_values):
+        logger.warning(
+            "SPECTER subblocking auxiliary features are unavailable; using embeddings only "
+            "(signature_count=%d has_coauthor_evidence=%s has_affiliation_evidence=%s)",
+            len(signature_ids),
+            any(coauthor_values),
+            any(affiliation_values),
         )
-        X_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(X)
-
-        # same for affiliations
-        X = TfidfVectorizer(preprocessor=None, analyzer=lambda x: x).fit_transform(
-            [signature_affiliation_feature_keys(anddata.signatures[i]) for i in signature_ids]
-        )
-        X_svd2 = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(X)
-
-        # all together now
-        X = X_specter + np.mean([X_svd, X_svd2], axis=0)
-    except Exception:
         X = X_specter
+    else:
+        coauthor_matrix = MultiLabelBinarizer(sparse_output=True).fit_transform(coauthor_values)
+        affiliation_matrix = TfidfVectorizer(preprocessor=None, analyzer=lambda x: x).fit_transform(affiliation_values)
+        if min(coauthor_matrix.shape) < SPECTER_DIM or min(affiliation_matrix.shape) < SPECTER_DIM:
+            logger.warning(
+                "SPECTER subblocking auxiliary matrices are too small; using embeddings only "
+                "(signature_count=%d coauthor_shape=%s affiliation_shape=%s required_components=%d)",
+                len(signature_ids),
+                coauthor_matrix.shape,
+                affiliation_matrix.shape,
+                SPECTER_DIM,
+            )
+            X = X_specter
+        else:
+            coauthor_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(coauthor_matrix)
+            affiliation_svd = TruncatedSVD(n_components=SPECTER_DIM).fit_transform(affiliation_matrix)
+            X = X_specter + np.mean([coauthor_svd, affiliation_svd], axis=0)
 
     # how many subblocks do we want given this data and target subblock size?
     # should be at least 2 if we end up here otherwise there is no point
     num_desired_subblocks = int(np.ceil(len(signature_ids) / target_subblock_size))
 
-    # this can fail when X are all zeros
-    try:
+    if np.any(X):
         g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01)
         labels = g.fit_predict(X)
-    except Exception:
+    else:
+        logger.warning(
+            "SPECTER subblocking has no nonzero evidence; using deterministic capacity splitting "
+            "(signature_count=%d target_subblock_size=%d)",
+            len(signature_ids),
+            target_subblock_size,
+        )
         labels = np.zeros(len(signature_ids), dtype=int)
 
     subblocks = defaultdict(list)
@@ -1720,9 +1735,9 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
 def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
     """Helper function to subdivide a list of names into subblocks of maximum_size.
     Uses the first k letters of the names to subdivide. If the subblocks are still too big,
-    then it will subdivide further by increasing k. Keeps going until the maximum_size is reached.
-    If the maximum_size is reached and there are still some names left over, then those names
-    will be put into their own subblock and returned separately.
+    then it will subdivide further by increasing k. It keeps going until each prefix bucket fits
+    ``maximum_size`` or every available name character has been consumed. Remaining identical
+    full-name groups are returned separately for the next fallback stage.
 
     Args:
         names (list of strings): the names to subdivide
@@ -1742,9 +1757,7 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         return {}, {}
     output = {}
     output_cant_subdivide = {}
-    k = starting_k
     max_len = max([len(name) for name in names])
-    clean_break = False
     for k in range(starting_k, max_len + 1):
         # note: any time we take something like XYZ and make it into XYZA, XYZB, ...
         # we will have some leftover ones that are just XYZ. those will end up in their own subblock
@@ -1754,27 +1767,22 @@ def subdivide_helper(names, signature_ids, maximum_size, starting_k=2):
         # find the ones that are a good size, and then take the rest and subdivide further
         good_size_flag = counts_up_to_k <= maximum_size
         counts_up_to_k_good_size = counts_up_to_k[good_size_flag]
-        # the case where at this point *all* the newly made subblocks are too big
-        # so it is a dead-end
-        if counts_up_to_k_good_size.empty:
-            for name in counts_up_to_k.index:
-                flag = names_up_to_k == name
-                output_cant_subdivide[name] = signature_ids[flag]
-            clean_break = True
-            break
         # store each subblock in output
         for name in counts_up_to_k_good_size.index:
             flag = names_up_to_k == name
             output[name] = signature_ids[flag]
         # take the rest and subdivide further
         bad_names = set(counts_up_to_k[counts_up_to_k > maximum_size].index)
-        bad_size_flag = np.array([i[0:k] in bad_names for i in names])
+        bad_size_flag = np.array([i[0:k] in bad_names for i in names], dtype=bool)
         names = names[bad_size_flag]
         signature_ids = signature_ids[bad_size_flag]
-        k += 1
+        if len(names) == 0:
+            break
     # last ditch clean-up in case things didn't work out
-    if len(names) > 0 and not clean_break:
-        output_cant_subdivide["final"] = signature_ids
+    if len(names) > 0:
+        for full_name in pd.Series(names).value_counts().index:
+            flag = names == full_name
+            output_cant_subdivide[f"full={full_name}"] = signature_ids[flag]
     # assert that the combo of the output and output_cant_subdivide is a complete clustering of the input signature_ids
     assert (
         sum(len(subblock) for subblock in output.values())

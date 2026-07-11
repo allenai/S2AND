@@ -624,6 +624,73 @@ def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Pat
         reusable_planner.plan_query_signatures()
 
 
+@pytest.mark.parametrize(
+    ("table_name", "expected_error"),
+    [
+        ("papers", r"signatures reference missing paper_id 'p1' in papers Arrow input"),
+        ("paper_authors", r"paper_authors Arrow input is missing rows for paper_id 'p1'"),
+    ],
+)
+def test_raw_arrow_candidate_planner_requires_seed_paper_metadata(
+    tmp_path: Path,
+    table_name: str,
+    expected_error: str,
+) -> None:
+    paths = _base_arrow_paths(tmp_path, with_indexes=False)
+    with pa.memory_map(paths[table_name], "r") as source:
+        table = pa.ipc.open_file(source).read_all()
+    keep_mask = pa.array([paper_id != "p1" for paper_id in table["paper_id"].to_pylist()])
+    paths[table_name] = _write_ipc(
+        tmp_path / f"{table_name}_without_seed_paper.arrow",
+        table.filter(keep_mask),
+    )
+    indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+
+    with pytest.raises(ValueError, match=expected_error):
+        _raw_candidate_planner_from_query_signatures(
+            indexed_paths,
+            ["q1"],
+            top_k=2,
+            query_view="full",
+            orcid_enabled=False,
+            num_threads=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("table_name", "expected_error"),
+    [
+        ("papers", r"signatures reference missing paper_id 'p_q' in papers Arrow input"),
+        ("paper_authors", r"paper_authors Arrow input is missing rows for paper_id 'p_q'"),
+    ],
+)
+def test_raw_arrow_candidate_planner_requires_query_paper_metadata(
+    tmp_path: Path,
+    table_name: str,
+    expected_error: str,
+) -> None:
+    paths = _base_arrow_paths(tmp_path, with_indexes=False)
+    with pa.memory_map(paths[table_name], "r") as source:
+        table = pa.ipc.open_file(source).read_all()
+    keep_mask = pa.array([paper_id != "p_q" for paper_id in table["paper_id"].to_pylist()])
+    paths[table_name] = _write_ipc(
+        tmp_path / f"{table_name}_without_query_paper.arrow",
+        table.filter(keep_mask),
+    )
+    indexed_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+    planner = _raw_candidate_planner_from_query_signatures(
+        indexed_paths,
+        ["q1"],
+        top_k=2,
+        query_view="full",
+        orcid_enabled=False,
+        num_threads=1,
+    )
+
+    with pytest.raises(ValueError, match=expected_error):
+        planner.plan(["q1"])
+
+
 def test_raw_arrow_candidate_planner_rejects_duplicate_query_signature_request_rows(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     query_signatures_path = tmp_path / "duplicate_incremental_query_signatures.arrow"
@@ -1010,6 +1077,21 @@ def test_raw_arrow_candidate_plan_extra_hash_selected_batch_is_exact_filtered(tm
     assert plan["right_signature_ids"] == ["s1", "s2"]
     assert plan["telemetry"]["signature_count"] == 3
     assert plan["telemetry"]["signature_rows_scanned"] == 4
+
+
+def test_raw_arrow_candidate_plan_rejects_out_of_range_batch_index(tmp_path: Path) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    _append_batch_index_record(paths["signatures_batch_index"], key="q1", batch_index=999)
+
+    with pytest.raises(ValueError, match="references record batch 999"):
+        _raw_candidate_planner_from_query_signatures(
+            paths,
+            ["q1"],
+            top_k=2,
+            query_view="full",
+            orcid_enabled=False,
+            num_threads=1,
+        )
 
 
 def test_rust_featurizer_from_arrow_paths_empty_indexed_keep_set_skips_stale_validation(tmp_path: Path) -> None:

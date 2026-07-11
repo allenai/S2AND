@@ -240,7 +240,9 @@ The batch-index format is S2AND-owned. Current writers and readers require
 full-file source fingerprint in addition to key-to-batch records. Each record maps a
 64-bit FNV-1a hash of the lookup key to an IPC record-batch index; the Rust
 reader verifies exact ids after loading the selected batches, so hash collisions
-do not change results.
+do not change results. The file body must contain exactly the header-declared
+record count, records must be ordered by nondecreasing key hash, and every stored
+batch index must be smaller than the Arrow file's IPC record-batch count.
 
 ---
 
@@ -332,16 +334,20 @@ One row per paper referenced by `signatures.arrow`. Columns:
 | `journal_name` | `string` | yes | Journal text used as runtime preprocessing input |
 | `year` | `int64` | yes | Optional publication year |
 | `predicted_language` | `string` | yes | Optional cached/compatibility language override |
-| `is_reliable` | `bool` | yes | Optional cached/compatibility reliability override paired with `predicted_language` |
+| `is_reliable` | `bool` | yes | Cached/compatibility reliability flag; required with a non-null `predicted_language` and paired with `language_reliability` |
+| `language_reliability` | `float64` | yes | Cached detector confidence in `[0.0, 1.0]`; required with a non-null `predicted_language` and paired with `is_reliable` |
 
 Production `papers.arrow` should keep source/raw title, venue, and journal
 text. Consumers must not assume these text fields are already normalized. If
 `predicted_language` is null, Rust detects language locally from the raw title.
 If `predicted_language` is non-null, Rust treats it as a producer-owned
-precomputed override and uses `is_reliable` when present, defaulting a missing
-`is_reliable` to `false`. Offline compatibility bundles may contain these
-precomputed fields, but production producers should leave them null unless the
-same approved local detector already produced them before Arrow handoff.
+precomputed override. Such an override is complete only when `is_reliable` and
+`language_reliability` are also non-null; consumers reject partial overrides.
+`language_reliability` must be finite and in `[0.0, 1.0]`, and it must be exactly
+`0.0` when `is_reliable` is `false`. Offline compatibility bundles may contain
+the complete override triple, but production producers should leave all three
+fields null unless the same approved local detector already produced them before
+Arrow handoff.
 
 ### `paper_authors.arrow`
 

@@ -32,7 +32,14 @@ class _VerifiedArrowArtifactGeneration:
     normalization_version: str | None
 
 
-@dataclass(frozen=True)
+class _VerifiedArrowInputsCapability:
+    """Unexported authority to create an already-verified Arrow path set."""
+
+
+_VERIFIED_ARROW_INPUTS_CAPABILITY = _VerifiedArrowInputsCapability()
+
+
+@dataclass(frozen=True, init=False)
 class ValidatedArrowInputs(Mapping[str, str]):
     """Immutable, integrity-checked Arrow paths for one artifact generation."""
 
@@ -40,8 +47,32 @@ class ValidatedArrowInputs(Mapping[str, str]):
     generation_id: str
     normalization_version: str
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "paths", MappingProxyType(dict(self.paths)))
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError(
+            "ValidatedArrowInputs cannot be constructed directly; use an Arrow artifact validation function"
+        )
+
+    def __init_subclass__(cls, **_kwargs: Any) -> None:
+        raise TypeError("ValidatedArrowInputs cannot be subclassed")
+
+    @classmethod
+    def _from_verified(
+        cls,
+        *,
+        paths: Mapping[str, str],
+        generation_id: str,
+        normalization_version: str,
+        capability: object,
+    ) -> ValidatedArrowInputs:
+        """Create an instance after a trusted internal validation or projection."""
+
+        if capability is not _VERIFIED_ARROW_INPUTS_CAPABILITY:
+            raise TypeError("ValidatedArrowInputs creation requires the internal verified capability")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
+        object.__setattr__(instance, "generation_id", str(generation_id))
+        object.__setattr__(instance, "normalization_version", str(normalization_version))
+        return instance
 
     def __getitem__(self, key: str) -> str:
         return self.paths[key]
@@ -56,10 +87,11 @@ class ValidatedArrowInputs(Mapping[str, str]):
         """Return this verified generation without request-local path entries."""
 
         removed = set(keys)
-        return ValidatedArrowInputs(
+        return self._from_verified(
             paths={key: value for key, value in self.paths.items() if key not in removed},
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
+            capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
         )
 
     def with_request_sidecars(
@@ -90,10 +122,11 @@ class ValidatedArrowInputs(Mapping[str, str]):
             )
         paths = dict(self.paths)
         paths.update(normalized)
-        return ValidatedArrowInputs(
+        return self._from_verified(
             paths=paths,
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
+            capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
         )
 
 
@@ -386,6 +419,8 @@ def _name_counts_index_error(path: Path) -> str | None:
         manifest = json.loads(manifest_bytes)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return f"{manifest_path} (invalid manifest: {exc})"
+    if not isinstance(manifest, Mapping):
+        return f"{manifest_path} (invalid manifest: expected a JSON object)"
     manifest_stat_token = (
         int(manifest_stat_after.st_dev),
         int(manifest_stat_after.st_ino),
@@ -811,10 +846,11 @@ def _validate_complete_arrow_artifacts(
             canonical_paths.pop("specter2", None)
             canonical_paths.pop("specter2_batch_index", None)
             if canonical_paths != dict(arrow_paths):
-                profiled_paths = ValidatedArrowInputs(
+                profiled_paths = ValidatedArrowInputs._from_verified(
                     paths=canonical_paths,
                     generation_id=arrow_paths.generation_id,
                     normalization_version=arrow_paths.normalization_version,
+                    capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
                 )
         elif _SPECTER_PATH_KEYS.intersection(arrow_paths):
             profiled_paths = arrow_paths.without(*_SPECTER_PATH_KEYS)
@@ -936,10 +972,11 @@ def _validate_complete_arrow_artifacts(
         producer_hint=producer_hint,
     )
     _validate_batch_indexes(normalized)
-    return ValidatedArrowInputs(
+    return ValidatedArrowInputs._from_verified(
         paths=normalized,
         generation_id=verified.generation_id,
         normalization_version=verified.normalization_version,
+        capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
     )
 
 

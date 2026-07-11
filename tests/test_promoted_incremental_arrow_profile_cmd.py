@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import s2and.arrow_inputs as arrow_inputs_module
 from scripts import rust_suite
 from scripts._rust_suite import promoted_incremental_arrow_profile_cmd as cmd
 
@@ -83,10 +84,11 @@ def test_run_uses_direct_arrow_api_and_forwards_batching_threshold(
         def __exit__(self, *_args):
             return False
 
-    arrow_paths = cmd.ValidatedArrowInputs(
+    arrow_paths = cmd.ValidatedArrowInputs._from_verified(
         paths={"signatures": str(tmp_path / "signatures.arrow"), "clusters": str(tmp_path / "clusters.json")},
         generation_id="test-generation",
         normalization_version="test-normalization",
+        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
     rows = [
         cmd.ArrowSignatureRow("seed", "p1", "block", "A", "", "Name", None),

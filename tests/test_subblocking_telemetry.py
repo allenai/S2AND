@@ -155,6 +155,107 @@ def test_subdivide_helper_accepts_prefix_exactly_at_capacity() -> None:
     }
 
 
+def test_subdivide_helper_advances_past_an_oversized_shared_prefix() -> None:
+    names = np.array(["anna", "anne", "anny"])
+    signature_ids = np.array(["s1", "s2", "s3"])
+
+    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=1, starting_k=2)
+
+    assert dead_ends == {}
+    assert {key: values.tolist() for key, values in output.items()} == {
+        "anna": ["s1"],
+        "anne": ["s2"],
+        "anny": ["s3"],
+    }
+
+
+def test_subdivide_helper_keeps_distinct_unsplittable_full_names_separate() -> None:
+    names = np.array(["anna", "anna", "anne", "anne"])
+    signature_ids = np.array(["s1", "s2", "s3", "s4"])
+
+    output, dead_ends = subblocking.subdivide_helper(names, signature_ids, maximum_size=1, starting_k=2)
+
+    assert output == {}
+    assert {key: values.tolist() for key, values in dead_ends.items()} == {
+        "full=anna": ["s1", "s2"],
+        "full=anne": ["s3", "s4"],
+    }
+
+
+def test_make_subblocks_does_not_fallback_when_longer_name_prefixes_fit(monkeypatch) -> None:
+    dataset = SimpleNamespace(
+        signatures={
+            "s1": _signature("s1", first="anna"),
+            "s2": _signature("s2", first="anne"),
+            "s3": _signature("s3", first="anny"),
+        },
+        random_seed=0,
+    )
+
+    def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("name-prefix subdivision should avoid fallback")
+
+    monkeypatch.setattr(subblocking, "cluster_with_specter", _fail_if_called)
+
+    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
+        ["s1", "s2", "s3"],
+        dataset,
+        maximum_size=1,
+        first_k_letter_counts_sorted={},
+    )
+
+    assert sorted(subblocks.values()) == [["s1"], ["s2"], ["s3"]]
+    assert telemetry["first_name_dead_end_signature_count"] == 0
+    assert telemetry["specter_invocation_count"] == 0
+
+
+def test_cluster_with_specter_surfaces_unexpected_auxiliary_feature_failures(monkeypatch) -> None:
+    first_signature = _signature("s1", first="anna")._replace(
+        author_info_coauthor_blocks=["a smith"],
+        author_info_affiliations=["alpha laboratory"],
+    )
+    second_signature = _signature("s2", first="anne")._replace(
+        author_info_coauthor_blocks=["b smith"],
+        author_info_affiliations=["beta laboratory"],
+    )
+    dataset = SimpleNamespace(
+        signatures={
+            "s1": first_signature,
+            "s2": second_signature,
+        },
+        papers={},
+        specter_embeddings={},
+        random_seed=0,
+    )
+
+    def _raise_unexpected(_self, _values):
+        raise RuntimeError("unexpected auxiliary failure")
+
+    monkeypatch.setattr(subblocking.MultiLabelBinarizer, "fit_transform", _raise_unexpected)
+
+    with pytest.raises(RuntimeError, match="unexpected auxiliary failure"):
+        subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
+
+
+def test_cluster_with_specter_logs_expected_degenerate_auxiliary_fallback(caplog) -> None:
+    dataset = SimpleNamespace(
+        signatures={
+            "s1": _signature("s1", first="anna"),
+            "s2": _signature("s2", first="anne"),
+        },
+        papers={},
+        specter_embeddings={},
+        random_seed=0,
+    )
+
+    with caplog.at_level("WARNING", logger="s2and"):
+        output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
+
+    assert sorted(output.values()) == [["s1"], ["s2"]]
+    assert "auxiliary features are unavailable" in caplog.text
+    assert "no nonzero evidence" in caplog.text
+
+
 def test_union_find_find_compresses_long_parent_chain_without_recursion() -> None:
     union_find = subblocking._UnionFind(1500)  # noqa: SLF001
     union_find.parent = list(range(1, 1500)) + [1499]

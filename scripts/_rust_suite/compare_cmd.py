@@ -1,10 +1,12 @@
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from _rust_suite.common import (  # type: ignore  # noqa: E402
+    PROJECT_ROOT,
     ProcessTreeRSSMonitor,
     build_run_metadata,
     collect_rust_extension_identity,
@@ -28,16 +31,19 @@ LANGUAGE_FEATURE_NAMES = {
     "same_language",
     "language_reliability_min",
 }
+PYTHON_EXECUTION_ROUTE = "ANDData.many_pairs_featurize"
+RUST_EXECUTION_ROUTE = "RustFeaturizer.from_arrow_paths.featurize_pairs_matrix_indexed"
+DEFAULT_JSON_DATA_ROOT = PROJECT_ROOT / "s2and" / "data-backup"
 
 
 def _load_dataset_inputs(
     dataset: str,
     limit: int | None,
-    project_root: str,
+    data_root: str | Path,
     *,
     force_paths: bool = False,
 ) -> tuple[Any, Any, tempfile.TemporaryDirectory[str] | None]:
-    dataset_dir = Path(project_root) / "data" / dataset
+    dataset_dir = Path(data_root) / dataset
     signatures_path = dataset_dir / f"{dataset}_signatures.json"
     papers_path = dataset_dir / f"{dataset}_papers.json"
 
@@ -86,6 +92,103 @@ def _make_pairs(signature_ids: list[str], pair_count: int, seed: int) -> list[tu
     return pairs
 
 
+def _identity_digest(values: Any) -> str:
+    payload = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bounded_name_count_mappings(
+    signatures: Mapping[str, Any],
+) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
+    """Count canonical name keys in the exact bounded comparison payload."""
+
+    from scripts.arrow_conversion_helpers import bounded_name_count_mappings_from_signature_payloads
+
+    return bounded_name_count_mappings_from_signature_payloads(signatures)
+
+
+def _write_bounded_name_counts_index(
+    signatures: Mapping[str, Any],
+    output_dir: str | Path,
+) -> tuple[str, str]:
+    """Write a current canonical name-count index and return its logical digest."""
+
+    from scripts.arrow_conversion_helpers import write_bounded_name_counts_index
+
+    return write_bounded_name_counts_index(signatures, output_dir)
+
+
+def _validate_bounded_args(args: argparse.Namespace) -> None:
+    if args.limit is None or int(args.limit) <= 0:
+        raise ValueError("--limit must be a positive integer; unbounded compare runs are not supported")
+    if int(args.pair_count) < 0:
+        raise ValueError("--pair-count must be non-negative")
+
+
+def _write_arrow_artifact_manifest(paths: dict[str, str], output_dir: str | Path) -> Path:
+    from s2and.arrow_inputs import _build_arrow_artifact_generation
+    from s2and.consts import NORMALIZATION_VERSION
+
+    root = Path(output_dir)
+    manifest_path = root / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "normalization_version": NORMALIZATION_VERSION,
+                "paths": dict(paths),
+                "artifact_generation": _build_arrow_artifact_generation(paths, root),
+            },
+            f,
+            sort_keys=True,
+        )
+    return manifest_path
+
+
+def _selected_feature_indices(featurizer_info: Any) -> list[int]:
+    return sorted(
+        {
+            feature_index
+            for feature_group in featurizer_info.features_to_use
+            for feature_index in featurizer_info.feature_group_to_index[feature_group]
+        }
+    )
+
+
+def _featurize_pairs_with_rust(
+    rust_featurizer: Any,
+    pairs: list[tuple[str, str, float]],
+    selected_feature_indices: list[int],
+    *,
+    n_jobs: int,
+) -> np.ndarray:
+    signature_id_to_index = {
+        str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
+    }
+    missing_signature_ids = sorted(
+        {
+            signature_id
+            for left_signature_id, right_signature_id, _label in pairs
+            for signature_id in (left_signature_id, right_signature_id)
+            if signature_id not in signature_id_to_index
+        }
+    )
+    if missing_signature_ids:
+        raise ValueError("Arrow Rust featurizer is missing sampled signature ids: " f"{missing_signature_ids[:10]}")
+    indexed_pairs = [
+        (signature_id_to_index[left_signature_id], signature_id_to_index[right_signature_id])
+        for left_signature_id, right_signature_id, _label in pairs
+    ]
+    return np.asarray(
+        rust_featurizer.featurize_pairs_matrix_indexed(
+            indexed_pairs,
+            selected_feature_indices,
+            int(n_jobs),
+            np.nan,
+        ),
+        dtype=np.float64,
+    )
+
+
 def _set_backend_env(
     backend: str,
     n_jobs: int,
@@ -125,10 +228,11 @@ def _collect_rust_package_info(require_non_dev_rust: bool, require_rust_release:
 
 
 def _run_single(args: argparse.Namespace) -> dict[str, Any]:
-    from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
+    from s2and.consts import NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.featurizer import DEFAULT_FEATURE_GROUPS, FeaturizationInfo, many_pairs_featurize
 
+    _validate_bounded_args(args)
     _set_backend_env(
         args.backend,
         args.n_jobs,
@@ -141,16 +245,27 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             bool(args.require_rust_release),
         )
 
-    # Rust comparison keeps file-backed inputs for compatibility baselines, even on limited fixtures.
-    force_path_inputs = args.backend == "rust"
     signatures_input, papers_input, _tmpdir = _load_dataset_inputs(
         args.dataset,
         args.limit,
-        PROJECT_ROOT_PATH,
-        force_paths=force_path_inputs,
+        args.data_root,
+    )
+    records_sha256 = _identity_digest(
+        {
+            "signatures": signatures_input,
+            "papers": papers_input,
+        }
     )
     total_start = time.perf_counter()
     with ProcessTreeRSSMonitor(interval_seconds=0.05) as rss_monitor:
+        name_counts_start = time.perf_counter()
+        name_counts_tmpdir = tempfile.TemporaryDirectory(prefix=f"s2and_compare_{args.dataset}_name_counts_")
+        name_counts_index_path, name_counts_sha256 = _write_bounded_name_counts_index(
+            signatures_input,
+            name_counts_tmpdir.name,
+        )
+        name_counts_prepare_seconds = time.perf_counter() - name_counts_start
+
         anddata_start = time.perf_counter()
         dataset = ANDData(
             signatures=signatures_input,
@@ -168,7 +283,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             val_pairs_size=1000,
             test_pairs_size=1000,
             n_jobs=args.n_jobs,
-            name_counts_index=NAME_COUNTS_INDEX_PATH,
+            name_counts_index=name_counts_index_path,
             preprocess=True,
             random_seed=42,
             name_tuples="filtered",
@@ -179,19 +294,74 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
         signature_ids = list(dataset.signatures.keys())
         pairs = _make_pairs(signature_ids, args.pair_count, args.seed)
         featurizer_info = FeaturizationInfo(features_to_use=list(DEFAULT_FEATURE_GROUPS))
-        featurize_start = time.perf_counter()
-        features, _labels, _nameless_features = many_pairs_featurize(
-            pairs,
-            dataset,
-            featurizer_info,
-            n_jobs=args.n_jobs,
-            use_cache=False,
-            chunk_size=args.chunk_size,
-            nameless_featurizer_info=None,
-            nan_value=np.nan,
-            delete_training_data=False,
-        )
-        featurize_seconds = time.perf_counter() - featurize_start
+        arrow_prepare_seconds = 0.0
+        rust_featurizer_build_seconds = 0.0
+        if args.backend == "python":
+            execution_route = PYTHON_EXECUTION_ROUTE
+            featurize_start = time.perf_counter()
+            features, _labels, _nameless_features = many_pairs_featurize(
+                pairs,
+                dataset,
+                featurizer_info,
+                n_jobs=args.n_jobs,
+                use_cache=False,
+                chunk_size=args.chunk_size,
+                nameless_featurizer_info=None,
+                nan_value=np.nan,
+                delete_training_data=False,
+            )
+            featurize_seconds = time.perf_counter() - featurize_start
+        else:
+            from s2and.arrow_inputs import validate_arrow_prediction_artifacts
+            from s2and.feature_port import build_rust_featurizer_from_arrow_paths
+            from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
+            from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
+
+            execution_route = RUST_EXECUTION_ROUTE
+            with tempfile.TemporaryDirectory(prefix=f"s2and_compare_{args.dataset}_arrow_") as arrow_tmpdir:
+                arrow_prepare_start = time.perf_counter()
+                arrow_paths = write_feature_block_arrow_from_anddata(
+                    dataset,
+                    arrow_tmpdir,
+                    signature_ids=signature_ids,
+                    include_specter=False,
+                )
+                arrow_paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(
+                    arrow_paths,
+                    arrow_tmpdir,
+                )
+                arrow_paths["name_counts_index"] = name_counts_index_path
+                manifest_path = _write_arrow_artifact_manifest(arrow_paths, arrow_tmpdir)
+                arrow_paths["manifest"] = str(manifest_path)
+                validated_arrow_paths = validate_arrow_prediction_artifacts(
+                    arrow_paths,
+                    require_specter=False,
+                    require_name_counts_index=True,
+                    expected_normalization_version=NORMALIZATION_VERSION,
+                    context="rust-suite compare",
+                )
+                arrow_prepare_seconds = time.perf_counter() - arrow_prepare_start
+
+                rust_featurizer_build_start = time.perf_counter()
+                rust_featurizer = build_rust_featurizer_from_arrow_paths(
+                    validated_arrow_paths,
+                    expected_normalization_version=NORMALIZATION_VERSION,
+                    signature_ids=signature_ids,
+                    name_tuples=getattr(dataset, "name_tuples", "filtered"),
+                    load_name_counts=True,
+                    preprocess=True,
+                    num_threads=args.n_jobs,
+                )
+                rust_featurizer_build_seconds = time.perf_counter() - rust_featurizer_build_start
+
+                featurize_start = time.perf_counter()
+                features = _featurize_pairs_with_rust(
+                    rust_featurizer,
+                    pairs,
+                    _selected_feature_indices(featurizer_info),
+                    n_jobs=args.n_jobs,
+                )
+                featurize_seconds = time.perf_counter() - featurize_start
 
     total_seconds = time.perf_counter() - total_start
     output_features_path = Path(args.output_features_path)
@@ -201,14 +371,23 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "backend": args.backend,
         "dataset": args.dataset,
+        "data_root": str(Path(args.data_root).resolve()),
         "limit": args.limit,
         "pair_count_requested": args.pair_count,
         "pair_count_featurized": len(pairs),
         "n_jobs": args.n_jobs,
         "chunk_size": args.chunk_size,
         "seed": args.seed,
+        "execution_route": execution_route,
+        "records_sha256": records_sha256,
+        "name_counts_sha256": name_counts_sha256,
+        "signature_ids_sha256": _identity_digest(signature_ids),
+        "pairs_sha256": _identity_digest(pairs),
         "total_runtime_seconds": round(total_seconds, 3),
         "anddata_build_seconds": round(anddata_seconds, 3),
+        "name_counts_prepare_seconds": round(name_counts_prepare_seconds, 3),
+        "arrow_prepare_seconds": round(arrow_prepare_seconds, 3),
+        "rust_featurizer_build_seconds": round(rust_featurizer_build_seconds, 3),
         "featurize_seconds": round(featurize_seconds, 3),
         "peak_rss_gb": round(rss_monitor.peak_gb, 3),
         "feature_shape": [int(features.shape[0]), int(features.shape[1])],
@@ -330,6 +509,8 @@ def _run_subprocess_once(
         backend,
         "--dataset",
         args.dataset,
+        "--data-root",
+        str(args.data_root),
         "--limit",
         str(args.limit),
         "--pair-count",
@@ -347,11 +528,20 @@ def _run_subprocess_once(
         "--output-features-path",
         str(features_npy_path),
     ]
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        stdout_tail = (exc.stdout or "")[-2000:]
+        stderr_tail = (exc.stderr or "")[-4000:]
+        raise RuntimeError(
+            f"{backend} comparison subprocess failed with exit code {exc.returncode}; "
+            f"stdout_tail={stdout_tail!r}; stderr_tail={stderr_tail!r}"
+        ) from exc
     return _extract_single_result(completed.stdout)
 
 
 def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
+    _validate_bounded_args(args)
     script_path = Path(__file__).resolve()
     with tempfile.TemporaryDirectory(prefix="s2and_compare_") as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -370,6 +560,15 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
             features_npy_path=rust_features_path,
             args=args,
         )
+
+        if python_result["records_sha256"] != rust_result["records_sha256"]:
+            raise RuntimeError("Python and Rust runs did not use the same bounded records")
+        if python_result["name_counts_sha256"] != rust_result["name_counts_sha256"]:
+            raise RuntimeError("Python and Rust runs did not use the same bounded name counts")
+        if python_result["signature_ids_sha256"] != rust_result["signature_ids_sha256"]:
+            raise RuntimeError("Python and Rust runs did not use the same bounded signature ids")
+        if python_result["pairs_sha256"] != rust_result["pairs_sha256"]:
+            raise RuntimeError("Python and Rust runs did not featurize the same sampled pairs")
 
         python_features = np.load(python_result["features_npy_path"])
         rust_features = np.load(rust_result["features_npy_path"])
@@ -399,6 +598,7 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
 
     summary = {
         "dataset": args.dataset,
+        "data_root": str(Path(args.data_root).resolve()),
         "limit": args.limit,
         "pair_count": args.pair_count,
         "n_jobs": args.n_jobs,
@@ -410,6 +610,13 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
             None if rss_reduction_fraction is None else round(rss_reduction_fraction, 6)
         ),
         "feature_parity": parity,
+        "input_identity": {
+            "records_sha256": python_result["records_sha256"],
+            "name_counts_sha256": python_result["name_counts_sha256"],
+            "signature_ids_sha256": python_result["signature_ids_sha256"],
+            "pairs_sha256": python_result["pairs_sha256"],
+            "pass": True,
+        },
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
     }
 
@@ -445,13 +652,18 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare all-python path vs max-rust path on total runtime, process-tree peak RSS, "
+            "Compare Python reference featurization with the Arrow/Rust route on total runtime, process-tree peak RSS, "
             "and strict feature parity."
         )
     )
     parser.add_argument("--mode", choices=["compare", "single"], default="compare")
     parser.add_argument("--backend", choices=["python", "rust"], default="python")
-    parser.add_argument("--dataset", default="inspire", help="Dataset directory name under s2and/data/")
+    parser.add_argument("--dataset", default="qian", help="Legacy JSON dataset directory name")
+    parser.add_argument(
+        "--data-root",
+        default=str(DEFAULT_JSON_DATA_ROOT),
+        help="Root containing per-dataset legacy JSON directories",
+    )
     parser.add_argument("--limit", type=int, default=5000, help="Signature limit for quick stage checks")
     parser.add_argument("--pair-count", type=int, default=5000, help="Random pair count for featurization parity")
     parser.add_argument("--n-jobs", type=int, default=4, help="n_jobs for ANDData and featurization")

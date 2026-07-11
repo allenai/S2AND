@@ -1,8 +1,10 @@
 # Subblocking
 
-Subblocking is used by full-block `Clusterer.predict(...)` to keep pairwise distance construction bounded for large
-blocks. The core boundary is `make_subblocks_with_telemetry(...)`; `make_subblocks(...)` returns only the final
-subblock dictionary.
+Subblocking is used by the Python/`ANDData` call
+`Clusterer.predict(..., batching_threshold=N)` to keep pairwise distance
+construction bounded for large blocks. The core boundary is
+`make_subblocks_with_telemetry(...)`; `make_subblocks(...)` returns only the
+final subblock dictionary.
 
 For `Clusterer.predict(..., batching_threshold=N)`, `N` becomes the maximum subblock size. Every emitted subblock is
 expected to have at most `N` signatures.
@@ -14,8 +16,7 @@ Subblocking uses graph fallback for oversized groups that cannot be split by nam
 - Prefix and middle-name splitting still define the main subblock structure.
 - Oversized groups that cannot be split by names call the graph fallback instead of the old SPECTER fallback.
 - For Python/`ANDData` graph fallback, graph preparation or fallback-call IO failures run the old Python
-  `cluster_with_specter(...)` path for that fallback group. Arrow-backed Rust production graph failures raise instead
-  of falling back to `ANDData`.
+  `cluster_with_specter(...)` path for that fallback group.
 
 The graph configuration is available on `Clusterer`:
 
@@ -86,42 +87,39 @@ Default `GraphSubblockingConfig` behavior:
   bounded coauthor-posting edges after projection edges have been scored.
 - Adaptive projection, aggregate packing, and local moves are still experimental knobs and are off by default.
 
-When Arrow paths are available, the graph fallback is Arrow-backed. Before fallback calls, `prepare(...)` receives the
-actual fallback-signature groups and loads the union of required `signatures`, `paper_authors`, and selected embedding rows
-into memory through the raw-planner batch lookup indexes. Each fallback call then slices that in-memory evidence for
-its group. Arrow graph subblocking refuses filtered full scans: `signatures_batch_index`,
+The internal Arrow graph helper loads the union of required `signatures`,
+`paper_authors`, and selected embedding rows through raw-planner batch lookup
+indexes, then slices that in-memory evidence for each fallback group. It
+refuses filtered full scans: `signatures_batch_index`,
 `paper_authors_batch_index`, and the selected embedding index (`specter_batch_index` or `specter2_batch_index`) must be
-present, and malformed Arrow schemas or declared missing artifacts raise before graph clustering starts. Without Arrow
-paths, the graph fallback uses the active `ANDData` object.
+present, and malformed Arrow schemas or declared missing artifacts raise before
+graph clustering starts. This helper is not selected by the public
+Python/`ANDData` `Clusterer.predict(...)` route.
 
 For Python/`ANDData` fallback, graph fallback is intentionally wrapped with the old Python SPECTER fallback. Graph
 failures are not swallowed: warnings are logged, telemetry records the failure, and then
-`cluster_with_specter(...)` runs for the affected group. Arrow-backed Rust production graph fallback does not use this
-legacy recovery path; Arrow graph read/prepare/call failures propagate.
+`cluster_with_specter(...)` runs for the affected group. The internal Arrow
+graph helper does not use this legacy recovery path; Arrow
+read/prepare/call failures propagate.
 
 ## Python and Rust routing
 
-Subblocking has two supported routes:
+The public routes are method-based:
 
-- **Pure Python.** Direct calls to `make_subblocks(...)` and `make_subblocks_with_telemetry(...)` use the original
-  Python implementation.
-- **Arrow-native Rust.** `Clusterer.predict(...)` can route oversized blocks to Rust when
-  the call's resolved backend is Rust and indexed Arrow signature rows are available.
+- **Python subblocking.** Call
+  `Clusterer.predict(blocks, dataset, batching_threshold=N)`. This method takes
+  `ANDData`, has no `backend` keyword, and rejects a Rust runtime context.
+  Oversized fallback groups call the Python graph fallback.
+- **Rust Arrow prediction.** Call
+  `Clusterer.predict_from_arrow_paths(blocks, arrow_paths,
+  total_ram_bytes=...)`. This validates the indexed Arrow generation and builds
+  the Rust featurizer directly; it does not route through `Clusterer.predict`.
 
-For `Clusterer.predict(...)` with Arrow paths and a Rust-resolved backend, Rust Arrow subblocking is strict and always
-uses the native graph fallback. It is used only when all of these are true:
-
-- `Clusterer.predict(..., backend="rust")` is used, or its `runtime_context` resolves to Rust.
-- `arrow_paths["signatures"]` is present.
-- `arrow_paths["signatures_batch_index"]` is present.
-
-That path calls `_make_subblocks_with_telemetry_arrow_rust(...)`, so Rust loads the name and ORCID rows needed for subblocking from
-Arrow. If an Arrow-backed Rust production prediction is missing either artifact, prediction raises a structured
-missing-artifact error instead of silently using `ANDData` partitioning. Python subblocking orchestration remains
-available through explicit Python/compatibility routes and direct `make_subblocks(...)` calls.
-
-In Python orchestration, oversized fallback groups call the Python graph fallback callable. In Arrow-native Rust
-orchestration, oversized fallback groups are handled inside Rust; Rust does not call back into Python.
+`predict_from_arrow_paths` does not currently expose `batching_threshold` and
+does not invoke the Python subblocking orchestration. `total_ram_bytes` controls
+pair-batch sizing and allocation checks; it is not a block partitioning knob.
+Missing required Arrow tables or batch indexes raise a structured artifact
+error instead of falling back to `ANDData`.
 
 ## Telemetry
 
@@ -134,8 +132,8 @@ orchestration, oversized fallback groups are handled inside Rust; Rust does not 
 - ORCID repair capacity skips
 - final SPECTER-labeled subblock counts
 
-`Clusterer.predict(...)` also records graph hook telemetry on `_last_graph_subblocking_telemetry` and
-`_last_arrow_graph_subblocking_telemetry`:
+Python `Clusterer.predict(..., batching_threshold=N)` also records graph hook
+telemetry on `_last_graph_subblocking_telemetry`:
 
 - `enabled`, `mode`, `source`, and `candidate_signature_count`
 - `arrow_load_seconds` and `arrow_load_metrics`

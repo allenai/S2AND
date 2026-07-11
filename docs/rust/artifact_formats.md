@@ -82,7 +82,9 @@ It writes bounded Arrow IPC file-format tables, regenerates current raw-planner
 batch-index sidecars (`S2ABI002`), records physical-layout metrics, and writes
 dataset manifests. `scripts/verification/compare_full_predict_arrow_parity.py`
 is the reference bounded parity writer and follows the same table and sidecar
-helpers for temporary verification artifacts.
+helpers for temporary verification artifacts. It also binds those files and
+the selected canonical name-count index into an immutable artifact-generation
+manifest before calling a production validator.
 
 New scripts that create S2AND runtime Arrow files should use
 `scripts.arrow_conversion_helpers.write_feature_block_arrow_from_anddata(...)`

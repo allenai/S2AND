@@ -65,6 +65,7 @@ from s2and.incremental_linking.policy import (
     request_cluster_seed_disallow_parts,
     require_dataset_name_counts_binding_for_clusterer,
     require_rust_featurizer_name_counts_binding_for_clusterer,
+    resolve_load_name_counts_policy,
 )
 from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
@@ -3646,11 +3647,15 @@ class Clusterer:
             runtime_context = build_runtime_context("cluster_predict_from_arrow_paths", backend="rust")
         elif not stage_uses_rust(runtime_context):
             raise ValueError("Clusterer.predict_from_arrow_paths requires a Rust runtime context")
-        require_name_counts_index = clusterer_uses_name_count_features(self) or load_name_counts is True
+        resolved_load_name_counts = resolve_load_name_counts_policy(
+            self,
+            load_name_counts,
+            context="Clusterer.predict_from_arrow_paths",
+        )
         arrow_path_payload = validate_arrow_prediction_artifacts(
             arrow_paths,
             require_specter=clusterer_uses_embedding_features(self),
-            require_name_counts_index=require_name_counts_index,
+            require_name_counts_index=resolved_load_name_counts,
             expected_normalization_version=_resolve_clusterer_normalization_version(self),
             context="Clusterer.predict_from_arrow_paths",
             producer_hint=(
@@ -3685,9 +3690,7 @@ class Clusterer:
             expected_normalization_version=_resolve_clusterer_normalization_version(self),
             signature_ids=signature_ids,
             name_tuples=name_tuples,
-            load_name_counts=bool(
-                clusterer_uses_name_count_features(self) if load_name_counts is None else load_name_counts
-            ),
+            load_name_counts=resolved_load_name_counts,
             preprocess=True,
             num_threads=self.n_jobs,
         )

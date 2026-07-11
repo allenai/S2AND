@@ -922,6 +922,10 @@ def arrow_training_feature_splits(
         predict_arrow_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         name_tuples="filtered",
+        load_name_counts=(
+            "name_counts" in featurizer_info.features_to_use
+            or (nameless_featurizer_info is not None and "name_counts" in nameless_featurizer_info.features_to_use)
+        ),
         num_threads=n_jobs,
     )
     return (

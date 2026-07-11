@@ -37,6 +37,7 @@ def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> Non
     monkeypatch.setenv("S2AND_BACKEND", "python")
     monkeypatch.setattr(run_ci, "sync_deps", lambda *, lock_present: None)
     monkeypatch.setattr(run_ci, "ensure_rust_on_path", lambda: lifecycle.append("ensure-rust"))
+    monkeypatch.setattr(run_ci, "run_native_rust_checks", lambda: lifecycle.append("check-rust"))
     monkeypatch.setattr(run_ci, "run_maturin_develop_with_retries", lambda: lifecycle.append("build-rust"))
     monkeypatch.setattr(run_ci, "run_ty_checks", lambda: lifecycle.append("typecheck"))
     monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
@@ -45,7 +46,7 @@ def test_typecheck_and_test_job_builds_required_rust_runtime(monkeypatch) -> Non
 
     pytest_calls = [args for args, _env in calls if args[:3] == ["run", "--no-sync", "pytest"]]
     assert len(pytest_calls) == len(run_ci.RUST_PARITY_TESTS) + 1
-    assert lifecycle == ["ensure-rust", "build-rust", "typecheck"]
+    assert lifecycle == ["ensure-rust", "check-rust", "build-rust", "typecheck"]
     assert calls[0][0] == ["run", "--no-sync", "python", "scripts/verification/smoke_installed_rust_api.py"]
     assert calls[0][1] is not None
     assert calls[0][1]["S2AND_TEST_REQUIRE_RUST"] == "1"
@@ -76,6 +77,57 @@ def test_rust_parity_test_paths_exist() -> None:
 
     for relative_path in run_ci.RUST_PARITY_TESTS:
         assert (run_ci.REPO / relative_path).is_file(), relative_path
+
+
+def test_native_rust_checks_match_hosted_ci_and_bind_root_python(monkeypatch, tmp_path: Path) -> None:
+    run_ci = _load_run_ci_locally()
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+    python_path = tmp_path / "python"
+
+    monkeypatch.setattr(run_ci, "pyo3_python_path", lambda: str(python_path))
+    monkeypatch.setattr(run_ci, "run_uv", lambda args, *, env=None: calls.append((args, env)))
+
+    run_ci.run_native_rust_checks()
+
+    assert [args for args, _env in calls] == [
+        [
+            "run",
+            "--no-sync",
+            "cargo",
+            "fmt",
+            "--manifest-path",
+            "s2and_rust/Cargo.toml",
+            "--",
+            "--check",
+        ],
+        [
+            "run",
+            "--no-sync",
+            "cargo",
+            "clippy",
+            "--manifest-path",
+            "s2and_rust/Cargo.toml",
+            "--lib",
+            "--no-deps",
+            "--",
+            "-D",
+            "clippy::correctness",
+            "-D",
+            "clippy::suspicious",
+        ],
+        [
+            "run",
+            "--no-sync",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "s2and_rust/Cargo.toml",
+            "--lib",
+        ],
+    ]
+    for _args, env in calls:
+        assert env is not None
+        assert env["PYO3_PYTHON"] == str(python_path)
 
 
 def test_sync_deps_uses_only_defined_dev_extra(monkeypatch) -> None:

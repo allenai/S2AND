@@ -1021,6 +1021,25 @@ def test_predict_from_arrow_paths_reports_structured_missing_artifacts(tmp_path)
     assert "producer hint" in str(error)
 
 
+def test_predict_from_arrow_paths_rejects_disabling_model_required_name_counts() -> None:
+    clusterer = Clusterer(
+        featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]),
+        classifier=None,
+        cluster_model=None,
+        n_jobs=1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot run with load_name_counts=False when the clusterer selects name_counts features",
+    ):
+        clusterer.predict_from_arrow_paths(
+            {"block": ["0", "1"]},
+            {},
+            load_name_counts=False,
+        )
+
+
 def test_predict_from_arrow_paths_rejects_declared_missing_optional_sidecar(tmp_path):
     arrow_paths = {}
     for key, filename in {

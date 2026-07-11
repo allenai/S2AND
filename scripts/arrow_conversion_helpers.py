@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -11,6 +14,7 @@ import numpy as np
 from s2and.incremental_linking.feature_block_arrow import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     write_feature_block_arrow_tables,
+    write_name_counts_index,
 )
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
@@ -23,6 +27,78 @@ from s2and.incremental_linking.feature_block_contract import (
     _strict_string_tuple,
     filter_cluster_seed_disallows_for_signature_subset,
 )
+
+
+def bounded_name_count_mappings_from_signature_payloads(
+    signatures: Mapping[str, Any],
+) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
+    """Count canonical name keys in one exact bounded signature payload."""
+
+    from s2and.text import canonical_name_count_keys, canonicalize_name_parts
+
+    counters: dict[str, Counter[str]] = {
+        key: Counter() for key in ("first", "last", "first_last", "last_first_initial")
+    }
+    for signature in signatures.values():
+        if not isinstance(signature, Mapping):
+            raise TypeError("bounded signatures must contain object records")
+        author_info = signature.get("author_info") or {}
+        if not isinstance(author_info, Mapping):
+            raise TypeError("bounded signature author_info must be an object")
+        keys = canonical_name_count_keys(
+            canonicalize_name_parts(
+                author_info.get("first"),
+                author_info.get("middle"),
+                author_info.get("last"),
+            )
+        )
+        for key, value in keys.items():
+            if value is not None:
+                counters[key][value] += 1
+    return (
+        dict(counters["first"]),
+        dict(counters["last"]),
+        dict(counters["first_last"]),
+        dict(counters["last_first_initial"]),
+    )
+
+
+def write_bounded_name_counts_index(
+    signatures: Mapping[str, Any],
+    output_dir: str | Path,
+) -> tuple[str, str]:
+    """Write a canonical bounded name-count index and return its logical digest."""
+
+    from s2and.consts import NORMALIZATION_VERSION
+
+    mappings = bounded_name_count_mappings_from_signature_payloads(signatures)
+    encoded_signatures = json.dumps(signatures, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    records_sha256 = hashlib.sha256(encoded_signatures).hexdigest()
+    provenance = {
+        "schema_version": "name_counts_provenance_v1",
+        "normalization_version": NORMALIZATION_VERSION,
+        "generation_id": f"bounded-{records_sha256[:16]}",
+        "source_snapshot_id": f"bounded-json-{records_sha256[:16]}",
+        "source_kind": "verification:bounded-json",
+        "source_query_sha256": hashlib.sha256(b"bounded-name-counts-v1").hexdigest(),
+        "selected_rows_sha256": records_sha256,
+        "selected_row_count": len(signatures),
+        "source_row_count": len(signatures),
+        "pickle_sha256": records_sha256,
+    }
+    index_path, _metrics = write_name_counts_index(
+        output_dir,
+        mappings,
+        provenance,
+        overwrite=True,
+    )
+    logical_payload = json.dumps(
+        {"mappings": mappings, "provenance": provenance},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return index_path, hashlib.sha256(logical_payload).hexdigest()
 
 
 def write_feature_block_arrow_from_anddata(

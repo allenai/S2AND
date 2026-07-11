@@ -265,8 +265,9 @@ That writer returns table paths and does not write `manifest.json`; manifests
 are producer-owned. `scripts/convert_to_arrow.py` is the reference producer for
 deployable manifest shape and current batch-index sidecars.
 `scripts/verification/compare_full_predict_arrow_parity.py` is the reference
-bounded parity producer and also writes current batch-index sidecars for its
-temporary Arrow bundle. An independent assembly pipeline is fine, but
+bounded parity producer: it writes current batch-index sidecars, resolves a
+canonical name-count index, and publishes an artifact-generation manifest for
+its temporary Arrow bundle before validation. An independent assembly pipeline is fine, but
 production producers should send source/raw text and name inputs plus the same
 manifest contract as this document. Parity is measured after Rust preprocessing,
 not by requiring producer-side Python preprocessing before Arrow construction.

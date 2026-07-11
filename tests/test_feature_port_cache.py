@@ -540,7 +540,12 @@ def test_rust_featurizer_cache_rejects_invalid_cluster_seed_version():
     assert _cache_size() == 1
 
 
-def test_build_rust_featurizer_from_arrow_paths_accepts_validated_inputs(monkeypatch, tmp_path):
+@pytest.mark.parametrize("load_name_counts", [False, True])
+def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy(
+    monkeypatch,
+    tmp_path,
+    load_name_counts: bool,
+):
     calls: list[dict[str, Any]] = []
 
     class ArrowRustFeaturizer(DummyRustFeaturizer):
@@ -582,13 +587,18 @@ def test_build_rust_featurizer_from_arrow_paths_accepts_validated_inputs(monkeyp
     result = feature_port.build_rust_featurizer_from_arrow_paths(
         validated_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
-        load_name_counts=True,
+        load_name_counts=load_name_counts,
     )
 
     assert result.dataset_name == "arrow"
+    expected_paths = (
+        complete_paths
+        if load_name_counts
+        else {key: value for key, value in complete_paths.items() if key != "name_counts_index"}
+    )
     assert calls == [
         {
-            "paths": complete_paths,
+            "paths": expected_paths,
         }
     ]
 

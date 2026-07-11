@@ -85,7 +85,8 @@ def test_feature_parity_requires_exact_discrete_values() -> None:
 
 def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
     dataset = "mini"
-    dataset_dir = tmp_path / "data" / dataset
+    data_root = tmp_path / "data"
+    dataset_dir = data_root / dataset
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     signatures = {
@@ -107,7 +108,7 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
     signatures_input, papers_input, tmpdir = compare_cmd._load_dataset_inputs(
         dataset,
         limit=2,
-        project_root=str(tmp_path),
+        data_root=data_root,
         force_paths=True,
     )
 
@@ -126,6 +127,14 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
 
     assert len(signatures_limited) == 2
     assert set(papers_limited.keys()) == {"1", "2"}
+
+
+def test_compare_parser_defaults_to_checked_in_legacy_json_root() -> None:
+    args = compare_cmd._build_parser().parse_args([])
+
+    assert args.dataset == "qian"
+    assert Path(args.data_root) == compare_cmd.DEFAULT_JSON_DATA_ROOT
+    assert (Path(args.data_root) / args.dataset / f"{args.dataset}_signatures.json").is_file()
 
 
 def test_rust_suite_requires_subcommand():

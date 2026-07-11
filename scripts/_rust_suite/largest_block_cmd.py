@@ -10,20 +10,25 @@ This script:
 6. Outputs JSON results and cProfile text files
 
 Production-style profiling is ``--mode single --backend rust --input-format arrow``.
-Compare mode uses legacy JSON/ANDData paths for reference parity only.
+Compare mode runs the Python JSON/ANDData reference against the maintained
+Arrow/Rust route on the same bounded signature sequence.
 
 Usage:
     # Legacy JSON/ANDData reference compare:
     uv run python scripts/rust_suite.py largest-block --mode compare \
-        --model-path scratch/production_model_vX.Y
+        --model-path scratch/production_model_vX.Y \
+        --arrow-data-root /path/to/current/canonical_arrow_release
 
     # Specify dataset and block manually:
     uv run python scripts/rust_suite.py largest-block --mode compare \
-        --model-path scratch/production_model_vX.Y --dataset aminer --block "j wang"
+        --model-path scratch/production_model_vX.Y \
+        --arrow-data-root /path/to/current/canonical_arrow_release \
+        --dataset aminer --block "j wang"
 
     # Production-style Arrow/Rust single backend run:
     uv run python scripts/rust_suite.py largest-block --mode single \
         --model-path scratch/production_model_vX.Y \
+        --arrow-data-root /path/to/current/canonical_arrow_release \
         --backend rust --input-format arrow --dataset aminer --block "j wang"
 
     # Limit block size (use first N signatures from the block):
@@ -35,10 +40,9 @@ Usage:
         --model-path scratch/production_model_vX.Y \
         --dataset aminer --block "j wang" --quality-check
 
-    # Sample constraint parity (python vs rust constraints on the same dataset instance):
-    uv run python scripts/rust_suite.py largest-block --mode compare \
-        --model-path scratch/production_model_vX.Y \
-        --dataset aminer --block "j wang" --constraint-sample 50000 --constraint-sample-seed 43
+Constraint parity belongs in
+``scripts/verification/compare_full_predict_arrow_parity.py``, which can build
+both representations from one bounded payload.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +74,7 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
     PROJECT_ROOT,
     ProcessTreeRSSMonitor,
     build_run_metadata,
+    canonical_sha256,
     collect_rust_extension_identity,
     extract_marked_json_payload,
     get_result_markers,
@@ -81,8 +87,7 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 )
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("largest_block")
-DATA_DIR = PROJECT_ROOT / "s2and" / "data"
-DEFAULT_ARROW_DATA_ROOT = str(DATA_DIR)
+JSON_DATA_DIR = PROJECT_ROOT / "s2and" / "data-backup"
 DEFAULT_SPECTER_SUFFIX = "_specter2.pkl"
 DEFAULT_ARROW_TOTAL_RAM_BYTES = 1_000_000_000_000
 
@@ -187,9 +192,9 @@ def _pairwise_precision_recall_fscore_with_singleton_fix(
 # ---------------------------------------------------------------------------
 
 
-def _find_signatures_file(dataset_name: str) -> Path | None:
+def _find_signatures_file(dataset_name: str, data_root: str | Path = JSON_DATA_DIR) -> Path | None:
     """Find the signatures JSON file for a dataset."""
-    p = DATA_DIR / dataset_name / f"{dataset_name}_signatures.json"
+    p = Path(data_root) / dataset_name / f"{dataset_name}_signatures.json"
     if p.exists():
         return p
     return None
@@ -206,14 +211,21 @@ def _scan_blocks(sig_path: Path) -> Counter:
     return block_counts
 
 
-def find_largest_block() -> tuple[str, str, int]:
+def _bounded_block_signature_ids(signature_ids: Sequence[Any], max_block_size: int) -> list[str]:
+    """Return one deterministic signature order shared by JSON and Arrow routes."""
+
+    ordered = sorted(str(signature_id) for signature_id in signature_ids)
+    return ordered[:max_block_size] if max_block_size > 0 else ordered
+
+
+def find_largest_block(data_root: str | Path = JSON_DATA_DIR) -> tuple[str, str, int]:
     """Scan all datasets and return (dataset_name, block_key, block_size)."""
     best_dataset = ""
     best_block = ""
     best_count = 0
 
     for name in DATASET_CANDIDATES:
-        sig_path = _find_signatures_file(name)
+        sig_path = _find_signatures_file(name, data_root)
         if sig_path is None:
             continue
         bc = _scan_blocks(sig_path)
@@ -312,7 +324,7 @@ def _run_single(
     n_jobs: int,
     profile_output_path: str,
     model_path: str,
-    data_root: str = str(DATA_DIR),
+    data_root: str = str(JSON_DATA_DIR),
     max_block_size: int = 0,
     run_label: str = "",
     quality_check: bool = False,
@@ -321,7 +333,7 @@ def _run_single(
     emit_signature_map: bool = False,
     require_rust_release: bool = False,
     input_format: str = "json",
-    arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
+    arrow_data_root: str = "",
     specter_suffix: str = DEFAULT_SPECTER_SUFFIX,
 ) -> dict[str, Any]:
     """Run prediction on a single block and return metrics."""
@@ -345,6 +357,8 @@ def _run_single(
         )
     if input_format != "json":
         raise ValueError(f"Unsupported input_format: {input_format}")
+    if backend == "rust":
+        raise ValueError("--backend rust requires --input-format arrow; JSON/ANDData is the Python reference route")
 
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
     os.environ["S2AND_BACKEND"] = backend
@@ -411,12 +425,12 @@ def _run_single(
                 f"Available blocks ({len(all_blocks)}): {sorted(all_blocks.keys())[:10]}..."
             )
 
-        block_sigs = all_blocks[block_key]
-        original_block_size = len(block_sigs)
+        raw_block_sigs = all_blocks[block_key]
+        original_block_size = len(raw_block_sigs)
+        block_sigs = _bounded_block_signature_ids(raw_block_sigs, max_block_size)
 
         # Optionally limit block size
-        if max_block_size > 0 and len(block_sigs) > max_block_size:
-            block_sigs = sorted(block_sigs)[:max_block_size]
+        if len(block_sigs) < original_block_size:
             print(f"[{backend}] Trimmed block from {original_block_size} to {max_block_size} signatures")
 
         block_size = len(block_sigs)
@@ -606,6 +620,7 @@ def _run_single(
         "assigned_signatures": assigned_sigs,
         "cluster_sizes_top10": cluster_sizes[:10],
         "cluster_membership_digest": cluster_membership_digest,
+        "input_signature_ids_digest": canonical_sha256([str(signature_id) for signature_id in block_sigs]),
         "signature_to_cluster_fingerprint": signature_to_cluster_fingerprint,
         "quality_metrics": quality_metrics,
         "constraint_parity": constraint_parity,
@@ -635,6 +650,8 @@ def _run_single_arrow(
 ) -> dict[str, Any]:
     if backend != "rust":
         raise ValueError("--input-format arrow requires --backend rust")
+    if not str(arrow_data_root).strip():
+        raise ValueError("--input-format arrow requires an explicit --arrow-data-root")
     if constraint_sample > 0:
         raise ValueError("--constraint-sample requires JSON/ANDData input")
 
@@ -674,10 +691,10 @@ def _run_single_arrow(
                 f"Available blocks ({len(all_blocks)}): {sorted(all_blocks.keys())[:10]}..."
             )
 
-        block_sigs = all_blocks[block_key]
-        original_block_size = len(block_sigs)
-        if max_block_size > 0 and len(block_sigs) > max_block_size:
-            block_sigs = sorted(block_sigs)[:max_block_size]
+        raw_block_sigs = all_blocks[block_key]
+        original_block_size = len(raw_block_sigs)
+        block_sigs = _bounded_block_signature_ids(raw_block_sigs, max_block_size)
+        if len(block_sigs) < original_block_size:
             print(f"[{backend}] Trimmed block from {original_block_size} to {max_block_size} signatures")
         arrow_block_load_seconds = time.perf_counter() - block_load_start
 
@@ -746,6 +763,7 @@ def _run_single_arrow(
         "assigned_signatures": sum(cluster_sizes),
         "cluster_sizes_top10": cluster_sizes[:10],
         "cluster_membership_digest": cluster_membership_digest,
+        "input_signature_ids_digest": canonical_sha256([str(signature_id) for signature_id in block_sigs]),
         "signature_to_cluster_fingerprint": signature_to_cluster_fingerprint,
         "quality_metrics": quality_metrics,
         "constraint_parity": None,
@@ -759,6 +777,48 @@ def _run_single_arrow(
 # ---------------------------------------------------------------------------
 # Compare mode: runs Python and Rust in subprocesses
 # ---------------------------------------------------------------------------
+
+
+def _assert_comparison_inputs_identical(
+    python_result: dict[str, Any],
+    rust_result: dict[str, Any],
+    *,
+    max_block_size: int,
+) -> None:
+    """Require both comparison routes to consume the same bounded block input."""
+
+    if max_block_size <= 0:
+        raise ValueError("--mode compare requires a positive --max-block-size")
+
+    observed_routes = (
+        (python_result.get("backend"), python_result.get("input_format")),
+        (rust_result.get("backend"), rust_result.get("input_format")),
+    )
+    expected_routes = (("python", "json"), ("rust", "arrow"))
+    if observed_routes != expected_routes:
+        raise AssertionError(f"Comparison routes differ from Python/JSON versus Rust/Arrow: {observed_routes}")
+
+    identity_fields = (
+        "dataset",
+        "block_key",
+        "original_block_size",
+        "effective_block_size",
+        "num_pairs",
+        "input_signature_ids_digest",
+    )
+    mismatches = {
+        field: {"python": python_result.get(field), "rust": rust_result.get(field)}
+        for field in identity_fields
+        if python_result.get(field) != rust_result.get(field)
+    }
+    if mismatches:
+        raise AssertionError(f"Python/Arrow comparison inputs differ: {mismatches}")
+
+    effective_block_size = int(python_result["effective_block_size"])
+    if effective_block_size > max_block_size:
+        raise AssertionError(
+            "Comparison input exceeded --max-block-size: " f"effective={effective_block_size} limit={max_block_size}"
+        )
 
 
 def _run_single_subprocess(
@@ -778,7 +838,7 @@ def _run_single_subprocess(
     emit_signature_map: bool,
     require_rust_release: bool,
     input_format: str = "json",
-    arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
+    arrow_data_root: str = "",
     specter_suffix: str = DEFAULT_SPECTER_SUFFIX,
 ) -> dict[str, Any]:
     """Run a single backend in a subprocess (isolation for RSS measurement)."""
@@ -891,13 +951,20 @@ def _compare_runs(args: argparse.Namespace) -> None:
     timeout_seconds = args.timeout_hours * 3600
     resolved_model_path = _resolve_path(args.model_path)
     resolved_data_root = _resolve_path(args.data_root)
-    if args.input_format != "json":
-        raise ValueError("--mode compare requires --input-format json")
+    if int(args.max_block_size) <= 0:
+        raise ValueError("--mode compare requires a positive --max-block-size")
+    if not str(args.arrow_data_root).strip():
+        raise ValueError("--mode compare requires an explicit --arrow-data-root")
+    if int(args.constraint_sample) > 0:
+        raise ValueError(
+            "--constraint-sample is not supported in compare mode; use "
+            "scripts/verification/compare_full_predict_arrow_parity.py"
+        )
 
     # Auto-detect largest block if not specified
     if not dataset_name or not block_key:
         print("Scanning all datasets for the largest block...")
-        dataset_name, block_key, block_size = find_largest_block()
+        dataset_name, block_key, block_size = find_largest_block(resolved_data_root)
         print(f"\nLargest block: {block_key!r} in {dataset_name} ({block_size:,} signatures)")
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -917,7 +984,7 @@ def _compare_runs(args: argparse.Namespace) -> None:
         run_label="python",
         timeout_seconds=timeout_seconds,
         quality_check=bool(args.quality_check),
-        constraint_sample=int(args.constraint_sample),
+        constraint_sample=0,
         constraint_sample_seed=int(args.constraint_sample_seed),
         emit_signature_map=True,
         require_rust_release=bool(args.require_rust_release),
@@ -941,7 +1008,15 @@ def _compare_runs(args: argparse.Namespace) -> None:
         constraint_sample_seed=int(args.constraint_sample_seed),
         emit_signature_map=True,
         require_rust_release=bool(args.require_rust_release),
-        input_format="json",
+        input_format="arrow",
+        arrow_data_root=args.arrow_data_root,
+        specter_suffix=args.specter_suffix,
+    )
+
+    _assert_comparison_inputs_identical(
+        python_result,
+        rust_result,
+        max_block_size=int(args.max_block_size),
     )
 
     cluster_equivalent = (
@@ -1009,13 +1084,12 @@ def _compare_runs(args: argparse.Namespace) -> None:
 
     rows.append(
         (
-            "ANDData build (s)",
+            "Input load/build (s)",
             f"{python_result['anddata_build_seconds']:.3f}",
-            f"{rust_result['anddata_build_seconds']:.3f}",
-            _delta(python_result["anddata_build_seconds"], rust_result["anddata_build_seconds"]),
+            f"{rust_result['arrow_block_load_seconds']:.3f}",
+            _delta(python_result["anddata_build_seconds"], rust_result["arrow_block_load_seconds"]),
         )
     )
-    rows.append(("Rust warm (s)", "N/A", f"{rust_result['warm_rust_featurizer_seconds']:.3f}", ""))
     rows.append(
         (
             "Predict (s)",
@@ -1118,6 +1192,8 @@ def _compare_runs(args: argparse.Namespace) -> None:
             "num_pairs": python_result["num_pairs"],
             "n_jobs": args.n_jobs,
             "data_root": _resolve_path(args.data_root),
+            "arrow_data_root": _resolve_path(args.arrow_data_root),
+            "specter_suffix": args.specter_suffix,
             "model_path": _resolve_path(args.model_path),
             "max_block_size_limit": args.max_block_size,
             "timeout_hours": args.timeout_hours,
@@ -1152,7 +1228,9 @@ def main() -> None:
         "--mode",
         choices=["compare", "single"],
         default="compare",
-        help="'compare' runs legacy JSON/ANDData reference subprocesses; 'single' runs one route in-process.",
+        help=(
+            "'compare' runs Python JSON/ANDData versus Rust Arrow subprocesses; " "'single' runs one route in-process."
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -1175,7 +1253,7 @@ def main() -> None:
         "--max-block-size",
         type=int,
         default=1000,
-        help="Limit block to first N signatures (default: 1000; pass 0 explicitly to use the full block).",
+        help=("Limit block to first N signatures (default: 1000). " "Compare mode requires a positive bound."),
     )
     parser.add_argument(
         "--model-path",
@@ -1184,8 +1262,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--data-root",
-        default=str(DATA_DIR),
-        help="Dataset root directory containing per-dataset files.",
+        default=str(JSON_DATA_DIR),
+        help="JSON dataset root containing per-dataset files.",
     )
     parser.add_argument(
         "--input-format",
@@ -1193,13 +1271,13 @@ def main() -> None:
         default="json",
         help=(
             "Input route for --mode single; production-style Rust profiling should use arrow. "
-            "Compare mode requires json."
+            "Compare mode always uses JSON for Python and Arrow for Rust."
         ),
     )
     parser.add_argument(
         "--arrow-data-root",
-        default=DEFAULT_ARROW_DATA_ROOT,
-        help="Arrow release root containing per-dataset manifests.",
+        default="",
+        help="Current canonical Arrow release root; required by compare mode and Arrow single runs.",
     )
     parser.add_argument(
         "--specter-suffix",
@@ -1237,7 +1315,10 @@ def main() -> None:
         "--constraint-sample",
         type=int,
         default=0,
-        help="Sample N random pairs from the block and compare python vs rust constraint outputs.",
+        help=(
+            "Sample N random pairs for --mode single with JSON input. Compare mode rejects this; "
+            "use compare_full_predict_arrow_parity.py for cross-representation constraint parity."
+        ),
     )
     parser.add_argument(
         "--constraint-sample-seed",

@@ -6,11 +6,11 @@
 
 | Script | What it does | Key output |
 |---|---|---|
-| `rust_suite.py compare` | Featurize random pairs on one dataset, compare Python vs Rust outputs | Feature parity report, runtime speedup, RSS reduction |
+| `rust_suite.py compare` | Load a bounded legacy JSON subset, featurize it with Python, materialize the same records as validated temporary Arrow, and featurize them with Rust | Input-identity digests, feature parity report, runtime speedup, RSS reduction |
 | `rust_suite.py transfer-mini` | Smoke-scale KISTI transfer run by default; pass the full preset for the historical 3-dataset reduced-scale run | Per-stage timing, peak RSS, clustering quality (python vs rust) |
 | `rust_suite.py prod-inference` | Run Arrow `predict_from_arrow_paths` inference with the pre-trained prod model + cProfile; legacy JSON/ANDData baselines are opt-in | Function-level hotspots, latency, RSS, clustering metrics |
 | `rust_suite.py featurizer-reuse` | Repeated production-model predictions through Arrow by default; `--input-format json` keeps the legacy same-object vs re-instantiated `ANDData` cache check | Per-iteration timing, RSS, Arrow telemetry or legacy featurizer cache counts |
-| `rust_suite.py largest-block` | Profile one large block; `--mode single --backend rust --input-format arrow` uses Arrow `predict_from_arrow_paths`, while compare/constraint parity remain JSON reference workflows | Partition diff (digest + per-signature), latency, RSS; optional `--quality-check` + JSON-only `--constraint-sample` |
+| `rust_suite.py largest-block` | Profile one bounded large block; compare mode requires a current Arrow release and runs Python/JSON against Rust/Arrow on an identity-checked signature sequence | Partition diff (digest + per-signature), latency, RSS; optional `--quality-check`; cross-representation constraint parity uses the dedicated full-predict verifier |
 | `rust_suite.py promoted-incremental-arrow-profile` | Arrow-only promoted Rust `predict_incremental` profiling against the canonical `s2and_and_big_blocks_linker_dataset_20260525` bundle | Per-run wall time, p50 latency, peak RSS, promoted incremental telemetry, Arrow planner/summary timings |
 | `rust_suite.py stress-rebuild` | Repeat Arrow Rust featurizer construction to stress lifecycle stability | Per-iteration elapsed + RSS peaks, RSS growth fraction, failure payloads |
 | `rust_suite.py calibrate-phase-a` | Calibrate memory estimates for phase-A accumulator from memory telemetry JSONL | Per-entry byte overhead percentiles |
@@ -51,14 +51,14 @@
 |---|---|
 | `eval_prod_models.py` | Evaluate production models (SPECTER1 vs SPECTER2) on full, inventors_s2and, or mini datasets; non-training evals use Arrow automatically when complete Arrow artifacts exist |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
-| `verification/compare_full_predict_arrow_parity.py` | Build a bounded Arrow parity artifact, including current raw-planner batch-index sidecars, and compare incumbent full predict against direct Arrow/Rust full predict |
+| `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |
 
 ### CI & release
 
 | Script | What it does |
 |---|---|
-| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync check, lint, one required Rust build, ABI/parity guardrails, ty, and Python-backend pytest coverage |
+| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync, lint, Rust fmt/Clippy/native tests, one required extension build, ABI/parity guardrails, ty, and Python-backend pytest coverage |
 | `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
 
 ### Archived historical artifacts

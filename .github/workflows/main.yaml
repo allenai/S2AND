@@ -123,6 +123,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo build
         uses: actions/cache@v5
@@ -157,6 +159,19 @@ jobs:
             # No lock present; resolve once, then install
             uv sync --extra dev --no-install-package s2and-rust
           fi
+
+      - name: Rust format
+        run: uv run --no-sync cargo fmt --manifest-path s2and_rust/Cargo.toml -- --check
+
+      - name: Rust clippy
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: uv run --no-sync cargo clippy --manifest-path s2and_rust/Cargo.toml --lib --no-deps -- -D clippy::correctness -D clippy::suspicious
+
+      - name: Rust native tests
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib
 
       # Canonical-v2 uses the native name-count index even with Python orchestration.
       - name: Build required Rust extension

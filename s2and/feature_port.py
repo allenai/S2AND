@@ -473,6 +473,8 @@ def build_rust_featurizer_from_arrow_paths(
     normalized_paths = dict(paths)
     normalized_paths.pop("query_signatures", None)
     normalized_paths.pop("manifest", None)
+    if not load_name_counts:
+        normalized_paths.pop("name_counts_index", None)
     resolved_name_tuples = name_tuples
     if name_tuples is None or name_tuples == "filtered":
         # Package data is immutable for the process lifetime. Reuse only the

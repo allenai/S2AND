@@ -1,33 +1,69 @@
 # Training and Evaluation
 
-This document expands the root README's training example with the main steps for training, evaluating, saving, and reloading a model.
+This document expands the root README's Arrow-native training example with the
+main steps for training, evaluating, and publishing a model.
 
-## Load a dataset in training mode
+## Build a Rust-backed training dataset
+
+The maintained training constructor consumes a manifest-backed Arrow
+generation. Ground-truth clusters remain JSON by design, but signatures,
+papers, paper authors, embeddings, batch indexes, and name counts come from the
+same immutable Arrow bundle.
+
+The example below expects a canonical training generation produced by the
+current `scripts/convert_to_arrow.py` contract. This migration branch does not
+bundle one. Older Arrow directories without `normalization_version` and the
+content-addressed `artifact_generation` inventory are intentionally rejected.
 
 ```python
-from os.path import join
+import json
+from pathlib import Path
 
-from s2and.data import ANDData
+from s2and.arrow_training import build_training_anddata_from_arrow
+from s2and.consts import NORMALIZATION_VERSION
 
-dataset_name = "pubmed"
-parent_dir = f"s2and/data/{dataset_name}"
+bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
+manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+manifest_paths = manifest["paths"]
+embedding_key = next(key for key in ("specter", "specter2") if key in manifest_paths)
+embedding_index_key = next(
+    key for key in ("specter_batch_index", "specter2_batch_index") if key in manifest_paths
+)
+training_keys = [
+    "signatures",
+    "signatures_batch_index",
+    "papers",
+    "papers_batch_index",
+    "paper_authors",
+    "paper_authors_batch_index",
+    "name_counts_index",
+    embedding_key,
+    embedding_index_key,
+]
+arrow_paths = {
+    key: str((bundle_dir / manifest_paths[key]).resolve())
+    for key in training_keys
+}
 
-dataset = ANDData(
-    signatures=join(parent_dir, f"{dataset_name}_signatures.json"),
-    papers=join(parent_dir, f"{dataset_name}_papers.json"),
-    clusters=join(parent_dir, f"{dataset_name}_clusters.json"),
-    specter_embeddings=join(parent_dir, f"{dataset_name}_specter.pickle"),
-    mode="train",
+dataset = build_training_anddata_from_arrow(
+    arrow_paths,
+    "pubmed",
+    expected_normalization_version=NORMALIZATION_VERSION,
+    clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
     block_type="s2",
-    train_pairs_size=100000,
-    val_pairs_size=10000,
-    test_pairs_size=10000,
-    name=dataset_name,
-    n_jobs=8,
+    train_pairs_size=1000,
+    val_pairs_size=200,
+    test_pairs_size=200,
+    n_jobs=4,
 )
 ```
 
-Training-mode preprocessing can take a while, especially on larger datasets.
+Set `bundle_dir` to a canonical training generation with this manifest
+contract. The constructor validates required tables,
+raw-planner batch indexes, checksums, normalization provenance, and the
+name-count index before it samples any pairs. It always selects the Rust
+training runtime, regardless of `S2AND_BACKEND`. The requested pair counts are
+upper bounds when a split contains fewer eligible within-block pairs.
 
 ## Featurize pairs and train the pairwise model
 
@@ -36,7 +72,7 @@ from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import PairwiseModeler
 
 featurization_info = FeaturizationInfo()
-train, val, test = featurize(dataset, featurization_info, n_jobs=8, use_cache=True)
+train, val, test = featurize(dataset, featurization_info, n_jobs=4, use_cache=False)
 X_train, y_train = train
 X_val, y_val = val
 X_test, y_test = test
@@ -48,10 +84,12 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-Why `use_cache=True` is often useful here:
+Set `use_cache=True` when repeated experiments intentionally reuse the same
+pair rows. The persistent cache and the in-process Rust featurizer cache are
+separate:
 
-- repeated training or evaluation runs often revisit the same pair sets
-- the pair-feature cache avoids recomputing those rows
+- the persistent pair-feature cache can reuse previously computed pair rows
+- the Rust featurizer can be reused in-process even when `use_cache=False`
 
 See [caching.md](caching.md) for the exact cache semantics.
 
@@ -104,42 +142,34 @@ print(metrics)
 
 `metrics_per_signature` is useful when you want to slice performance by signature properties.
 
-## Save and reload a trained model
+## Publish and reload a trained model
 
-Save:
+Do not publish a pickle. The public loader accepts only a complete canonical
+native bundle containing the pairwise boosters, clusterer configuration,
+promoted linker, reproducibility target, and checksummed manifest. The
+production training scripts write a pairwise-only staging bundle and then
+atomically finalize a complete bundle; see
+[production_inference.md](production_inference.md#atomic-publication) for the
+exact commands and release gates.
+
+After a bundle passes those gates, reload it explicitly:
 
 ```python
-import pickle
+from s2and.production_model import load_production_model
 
-with open("saved_model.pkl", "wb") as handle:
-    pickle.dump(clusterer, handle)
-```
-
-Reload and predict:
-
-```python
-import pickle
-
-from s2and.data import ANDData
-
-with open("saved_model.pkl", "rb") as handle:
-    clusterer = pickle.load(handle)
-
-anddata = ANDData(
-    signatures="path/to/signatures.json",
-    papers="path/to/papers.json",
-    specter_embeddings="path/to/specter_embeddings.pkl",
-    name="your_name_here",
-    mode="inference",
-    block_type="s2",
+clusterer = load_production_model("/path/to/production_model_vX.Y")
+pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
+    blocks,
+    arrow_paths,
+    total_ram_bytes=32 * 1024**3,
 )
-
-pred_clusters, pred_distance_matrices = clusterer.predict(anddata.get_blocks(), anddata)
 ```
 
-`pred_distance_matrices` may be `None` when memory-optimized fused clustering paths are active.
+`pred_distance_matrices` may be `None` when the fused clustering path is active.
 
 ## Reference scripts
 
+- `scripts/production/model/train_pairwise.py`: pairwise production-bundle stage
+- `scripts/production/model/train_linker_and_finalize.py`: complete native-bundle finalization
 - `scripts/tutorial_for_predicting_with_the_prod_model.py`: released-model inference example
 - `scripts/README.md`: script catalog

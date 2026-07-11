@@ -110,35 +110,53 @@ Full inference and bundle publication details are in
 Minimal training flow:
 
 ```python
-from os.path import join
+import json
+from pathlib import Path
 
 from hyperopt import hp
 
-from s2and.consts import NAME_COUNTS_INDEX_PATH
-from s2and.data import ANDData
+from s2and.arrow_training import build_training_anddata_from_arrow
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import Clusterer, FastCluster, PairwiseModeler
 
-dataset_name = "pubmed"
-parent_dir = f"s2and/data/{dataset_name}"
+bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
+manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+manifest_paths = manifest["paths"]
+embedding_key = next(key for key in ("specter", "specter2") if key in manifest_paths)
+embedding_index_key = next(
+    key for key in ("specter_batch_index", "specter2_batch_index") if key in manifest_paths
+)
+training_keys = [
+    "signatures",
+    "signatures_batch_index",
+    "papers",
+    "papers_batch_index",
+    "paper_authors",
+    "paper_authors_batch_index",
+    "name_counts_index",
+    embedding_key,
+    embedding_index_key,
+]
+arrow_paths = {
+    key: str((bundle_dir / manifest_paths[key]).resolve())
+    for key in training_keys
+}
 
-dataset = ANDData(
-    signatures=join(parent_dir, f"{dataset_name}_signatures.json"),
-    papers=join(parent_dir, f"{dataset_name}_papers.json"),
-    clusters=join(parent_dir, f"{dataset_name}_clusters.json"),
-    specter_embeddings=join(parent_dir, f"{dataset_name}_specter.pickle"),
-    mode="train",
+dataset = build_training_anddata_from_arrow(
+    arrow_paths,
+    "pubmed",
+    expected_normalization_version=NORMALIZATION_VERSION,
+    clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
     block_type="s2",
-    train_pairs_size=100000,
-    val_pairs_size=10000,
-    test_pairs_size=10000,
-    n_jobs=8,
-    name=dataset_name,
-    name_counts_index=NAME_COUNTS_INDEX_PATH,
+    train_pairs_size=1000,
+    val_pairs_size=200,
+    test_pairs_size=200,
+    n_jobs=4,
 )
 
 featurization_info = FeaturizationInfo()
-train, val, test = featurize(dataset, featurization_info, n_jobs=8, use_cache=True)
+train, val, test = featurize(dataset, featurization_info, n_jobs=4, use_cache=False)
 X_train, y_train = train
 X_val, y_val = val
 
@@ -154,12 +172,19 @@ clusterer = Clusterer(
     cluster_model=FastCluster(linkage="average"),
     search_space={"eps": hp.uniform("eps", 0, 1)},
     n_iter=25,
-    n_jobs=8,
+    n_jobs=4,
 )
 clusterer.fit(dataset)
 ```
 
-For evaluation and model serialization guidance, see [docs/training.md](docs/training.md).
+Point `bundle_dir` at a manifest-backed canonical Arrow dataset generation.
+The constructor validates its tables, batch indexes, checksums, normalization
+version, and name-count index before training; an older Arrow directory without
+the current `artifact_generation` inventory is rejected. This migration branch
+does not bundle a full training generation.
+
+For evaluation and native-bundle publication guidance, see
+[docs/training.md](docs/training.md).
 
 ## Runtime and Scaling
 
@@ -229,7 +254,8 @@ uv run python scripts/run_ci_locally.py
 `scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
 - lint job (`scripts/sync_version.py --check`, `ruff check`, and `ruff format --check`)
 - one required-runtime `typecheck-and-test` job
-- Rust ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
+- native Rust formatting, Clippy correctness/suspicious lints, and library tests
+- Rust extension ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
 
 Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The local and
 hosted runners therefore build the extension once, require it to import, and use `S2AND_BACKEND=python` for full-suite

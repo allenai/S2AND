@@ -8,6 +8,7 @@ Execution order:
      - version sync check
      - ruff check / format checks
   2) typecheck-and-test job:
+     - run Rust formatting, Clippy, and native unit tests
      - build the required Rust extension
      - run Rust parity guardrails
      - run the full suite with Python orchestration
@@ -66,6 +67,7 @@ TY_SCRIPT_EXTRA_IGNORES = [
 ]
 MATURIN_RETRY_ATTEMPTS_WINDOWS = 3
 MATURIN_RETRY_BACKOFF_SECONDS = 2.0
+RUST_MANIFEST = "s2and_rust/Cargo.toml"
 
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -107,6 +109,49 @@ def ensure_rust_on_path() -> None:
             os.environ["PATH"] = f"{candidate}{os.pathsep}{os.environ.get('PATH', '')}"
             if shutil.which("cargo") or shutil.which("rustc"):
                 return
+
+
+def pyo3_python_path() -> str:
+    """Return the root uv environment's Python executable for PyO3 builds."""
+
+    relative_path = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+    candidate = (REPO / ".venv" / relative_path).resolve()
+    if not candidate.is_file():
+        raise FileNotFoundError(
+            f"PyO3 requires the root uv environment's Python executable, but it is missing: {candidate}"
+        )
+    return str(candidate)
+
+
+def run_native_rust_checks() -> None:
+    """Run the native Rust gates enforced by hosted CI."""
+
+    rust_env = os.environ.copy()
+    rust_env["PYO3_PYTHON"] = pyo3_python_path()
+    run_uv(
+        uv_run_args("cargo", "fmt", "--manifest-path", RUST_MANIFEST, "--", "--check"),
+        env=rust_env,
+    )
+    run_uv(
+        uv_run_args(
+            "cargo",
+            "clippy",
+            "--manifest-path",
+            RUST_MANIFEST,
+            "--lib",
+            "--no-deps",
+            "--",
+            "-D",
+            "clippy::correctness",
+            "-D",
+            "clippy::suspicious",
+        ),
+        env=rust_env,
+    )
+    run_uv(
+        uv_run_args("cargo", "test", "--manifest-path", RUST_MANIFEST, "--lib"),
+        env=rust_env,
+    )
 
 
 def top_level_script_files() -> list[str]:
@@ -209,6 +254,7 @@ def run_typecheck_and_test_job(*, lock_present: bool) -> None:
     sync_deps(lock_present=lock_present)
 
     ensure_rust_on_path()
+    run_native_rust_checks()
     run_maturin_develop_with_retries()
     required_rust_env = os.environ.copy()
     required_rust_env["S2AND_TEST_REQUIRE_RUST"] = "1"

@@ -15,6 +15,9 @@ from scripts.verification.verify_production_model_distributions import verify_pr
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-rust.yml"
 MAIN_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "main.yaml"
+README_PATH = REPO_ROOT / "README.md"
+TRAINING_DOC_PATH = REPO_ROOT / "docs" / "training.md"
+SUBBLOCKING_DOC_PATH = REPO_ROOT / "docs" / "subblocking.md"
 
 
 def _workflow_job_condition(workflow: str, job_name: str) -> str:
@@ -90,6 +93,34 @@ def test_required_rust_ci_cannot_convert_import_failures_to_skips() -> None:
     assert guardrail_paths
     for relative_path in guardrail_paths:
         assert (REPO_ROOT / relative_path).is_file(), relative_path
+
+
+def test_main_ci_runs_native_rust_quality_gates() -> None:
+    main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "components: rustfmt, clippy" in main_workflow
+    assert "PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python" in main_workflow
+    assert "uv run --no-sync cargo fmt --manifest-path s2and_rust/Cargo.toml -- --check" in main_workflow
+    assert (
+        "uv run --no-sync cargo clippy --manifest-path s2and_rust/Cargo.toml "
+        "--lib --no-deps -- -D clippy::correctness -D clippy::suspicious"
+    ) in main_workflow
+    assert "uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib" in main_workflow
+
+
+def test_quickstart_docs_use_current_arrow_method_boundaries() -> None:
+    readme = README_PATH.read_text(encoding="utf-8")
+    training_doc = TRAINING_DOC_PATH.read_text(encoding="utf-8")
+    subblocking_doc = SUBBLOCKING_DOC_PATH.read_text(encoding="utf-8")
+
+    for source in (readme, training_doc):
+        assert "build_training_anddata_from_arrow" in source
+        assert 'bundle_dir = Path("tests/fixtures/arrow/pubmed_specter2' not in source
+        assert "_signatures.json" not in source
+        assert "_specter.pickle" not in source
+    assert "pickle.dump" not in training_doc
+    assert 'predict(..., backend="rust")' not in subblocking_doc
+    assert "Clusterer.predict_from_arrow_paths" in subblocking_doc
 
 
 def test_release_workflow_uses_uv_and_has_no_false_default_model() -> None:

@@ -317,6 +317,48 @@ def test_feature_tuple_from_rust_featurizer_uses_selected_feature_groups() -> No
     assert nameless.tolist() == [[1.0]]
 
 
+@pytest.mark.parametrize("name_counts_owner", ["main", "nameless"])
+def test_arrow_training_feature_splits_loads_selected_name_counts(monkeypatch, name_counts_owner: str) -> None:
+    from s2and import feature_port
+
+    captured: dict[str, Any] = {}
+
+    class FakeRustFeaturizer:
+        def signature_ids(self) -> list[str]:
+            return []
+
+    def fake_build(paths, **kwargs):
+        captured["paths"] = paths
+        captured["kwargs"] = kwargs
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_paths", fake_build)
+    validated_paths = ValidatedArrowInputs(
+        paths={"signatures": "signatures.arrow", "name_counts_index": "name_counts_index"},
+        generation_id="generation",
+        normalization_version=NORMALIZATION_VERSION,
+    )
+    splits = eval_prod_models.PairwiseTrainingSplits([], [], [], {}, {}, {}, {})
+
+    eval_prod_models.arrow_training_feature_splits(
+        validated_paths,
+        splits,
+        featurizer_info=SimpleNamespace(
+            features_to_use=["name_counts"] if name_counts_owner == "main" else [],
+            feature_group_to_index={"name_counts": [0]},
+        ),
+        nameless_featurizer_info=(
+            SimpleNamespace(features_to_use=["name_counts"], feature_group_to_index={"name_counts": [0]})
+            if name_counts_owner == "nameless"
+            else None
+        ),
+        n_jobs=1,
+        nan_value=float("nan"),
+    )
+
+    assert captured["kwargs"]["load_name_counts"] is True
+
+
 @pytest.mark.parametrize("block_count", [1, 2, 4])
 def test_split_blocks_like_anddata_rejects_tiny_smoke_datasets_like_anddata(block_count: int) -> None:
     blocks = {f"b{index}": [f"s{index}"] for index in range(block_count)}

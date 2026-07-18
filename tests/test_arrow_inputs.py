@@ -186,6 +186,63 @@ def test_generation_manifest_rejects_request_sidecars_in_immutable_inventory(tmp
         verified_arrow_artifact_generation(paths)
 
 
+def test_artifact_generation_writer_rejects_path_outside_manifest_directory(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_path = tmp_path / "outside.arrow"
+    outside_path.write_bytes(b"outside")
+
+    with pytest.raises(ValueError, match="must remain within manifest directory"):
+        arrow_inputs_module._build_arrow_artifact_generation(
+            {"signatures": outside_path},
+            bundle_dir,
+        )
+
+
+@pytest.mark.parametrize("declared_path_kind", ("absolute", "parent_escape"))
+def test_generation_manifest_rejects_paths_outside_manifest_authority(
+    tmp_path: Path,
+    declared_path_kind: str,
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    outside_path = tmp_path / "outside.arrow"
+    outside_path.write_bytes(b"outside")
+    declared_path = str(outside_path.resolve()) if declared_path_kind == "absolute" else "../outside.arrow"
+    files = {
+        "signatures": {
+            "path": declared_path,
+            "kind": "file",
+            "byte_count": outside_path.stat().st_size,
+            "sha256": hashlib.sha256(outside_path.read_bytes()).hexdigest(),
+        }
+    }
+    generation_id = hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    manifest_path = bundle_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "normalization_version": "canonical_v2",
+                "artifact_generation": {
+                    "schema_version": "s2and_arrow_artifact_generation_v1",
+                    "generation_id": generation_id,
+                    "files": files,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    expected_message = "must be manifest-relative" if declared_path_kind == "absolute" else "escapes"
+    with pytest.raises(ValueError, match=expected_message):
+        verified_arrow_artifact_generation(
+            {
+                "manifest": str(manifest_path),
+                "signatures": str(outside_path),
+            }
+        )
+
+
 def test_retained_generation_is_returned_without_rehashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

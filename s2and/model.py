@@ -87,6 +87,7 @@ from s2and.rust_calls import (
 )
 from s2and.subblocking import (
     GraphSubblockingConfig,
+    _resolve_graph_subblocking_config,
     cluster_with_specter,
     make_arrow_graph_subblocking_cluster_fn,
     make_dataset_graph_subblocking_cluster_fn,
@@ -174,13 +175,41 @@ def _is_recoverable_graph_subblocking_error(exc: Exception) -> bool:
 class _GraphSubblockingFallbackWithLegacyFallback:
     """Call graph subblocking first, then fall back to the legacy SPECTER path."""
 
-    def __init__(self, graph_fallback: Callable[..., dict[str, list[str]]], *, source: str) -> None:
+    def __init__(
+        self,
+        graph_fallback: Callable[..., dict[str, list[str]]],
+        *,
+        source: str,
+        candidate_signature_count: int = 0,
+    ) -> None:
         self.graph_fallback = graph_fallback
         self.source = source
-        self.legacy_fallback_invocation_count = 0
-        self.graph_prepare_failed = False
-        self.graph_prepare_error: dict[str, Any] | None = None
-        self.graph_fallback_errors: list[dict[str, Any]] = []
+        self.telemetry: dict[str, Any] = {
+            "enabled": 1,
+            "mode": "graph",
+            "source": source,
+            "candidate_signature_count": int(candidate_signature_count),
+            "legacy_fallback_invocation_count": 0,
+            "graph_prepare_failed": 0,
+            "graph_prepare_error": None,
+            "graph_fallback_errors": [],
+        }
+
+    @property
+    def legacy_fallback_invocation_count(self) -> int:
+        return int(self.telemetry["legacy_fallback_invocation_count"])
+
+    @property
+    def graph_prepare_failed(self) -> bool:
+        return bool(self.telemetry["graph_prepare_failed"])
+
+    @property
+    def graph_prepare_error(self) -> dict[str, Any] | None:
+        return cast(dict[str, Any] | None, self.telemetry["graph_prepare_error"])
+
+    @property
+    def graph_fallback_errors(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self.telemetry["graph_fallback_errors"])
 
     @property
     def stats(self) -> list[dict[str, Any]]:
@@ -213,8 +242,8 @@ class _GraphSubblockingFallbackWithLegacyFallback:
                 raise
             if self.source == "arrow":
                 raise
-            self.graph_prepare_failed = True
-            self.graph_prepare_error = self._error_payload(
+            self.telemetry["graph_prepare_failed"] = 1
+            self.telemetry["graph_prepare_error"] = self._error_payload(
                 exc,
                 stage="prepare",
                 group_count=group_count,
@@ -271,7 +300,7 @@ class _GraphSubblockingFallbackWithLegacyFallback:
         target_subblock_size: int,
         **kwargs: Any,
     ) -> dict[str, list[str]]:
-        self.legacy_fallback_invocation_count += 1
+        self.telemetry["legacy_fallback_invocation_count"] = self.legacy_fallback_invocation_count + 1
         return cluster_with_specter(
             signature_ids,
             anddata,
@@ -3936,17 +3965,7 @@ class Clusterer:
         return block_dict_subblocked
 
     def _subblocking_graph_config(self) -> GraphSubblockingConfig:
-        raw_config = getattr(self, "subblocking_graph_config", None)
-        if raw_config is None:
-            return GraphSubblockingConfig()
-        if isinstance(raw_config, GraphSubblockingConfig):
-            return raw_config
-        if isinstance(raw_config, Mapping):
-            return GraphSubblockingConfig(**dict(raw_config))
-        raise ValueError(
-            "subblocking_graph_config must be a GraphSubblockingConfig, mapping, or None; "
-            f"got {type(raw_config).__name__}"
-        )
+        return _resolve_graph_subblocking_config(getattr(self, "subblocking_graph_config", None))
 
     def _subblocking_specter_cluster_fn(
         self,
@@ -3965,18 +3984,14 @@ class Clusterer:
         else:
             fallback = make_dataset_graph_subblocking_cluster_fn(config=self._subblocking_graph_config())
             source = "anddata"
-        self._last_graph_subblocking_telemetry = {
-            "enabled": 1,
-            "mode": "graph",
-            "source": source,
-            "candidate_signature_count": candidate_signature_count,
-            "legacy_fallback_invocation_count": 0,
-            "graph_prepare_failed": 0,
-            "graph_prepare_error": None,
-            "graph_fallback_errors": [],
-        }
+        adapter = _GraphSubblockingFallbackWithLegacyFallback(
+            fallback,
+            source=source,
+            candidate_signature_count=candidate_signature_count,
+        )
+        self._last_graph_subblocking_telemetry = adapter.telemetry
         self._last_arrow_graph_subblocking_telemetry = self._last_graph_subblocking_telemetry
-        return _GraphSubblockingFallbackWithLegacyFallback(fallback, source=source)
+        return adapter
 
     def _partition_subblocked_first_name_groups(
         self,

@@ -123,6 +123,7 @@ def test_native_rust_checks_match_hosted_ci_and_bind_root_python(monkeypatch, tm
             "--manifest-path",
             "s2and_rust/Cargo.toml",
             "--lib",
+            "--no-default-features",
         ],
     ]
     for _args, env in calls:

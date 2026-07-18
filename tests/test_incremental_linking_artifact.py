@@ -4,6 +4,8 @@ import copy
 import hashlib
 import json
 import pickle
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 
@@ -187,6 +189,48 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
             audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
         )
     assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
+
+
+def test_concurrent_identical_artifact_publication_is_idempotent(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifact"
+    staging_dirs = (tmp_path / "staging-a", tmp_path / "staging-b")
+    for staging_dir in staging_dirs:
+        staging_dir.mkdir()
+        (staging_dir / "payload").write_bytes(b"identical")
+    start = threading.Barrier(len(staging_dirs))
+
+    def publish(staging_dir: Path) -> None:
+        start.wait(timeout=5.0)
+        artifact_module._publish_immutable_artifact(staging_dir, artifact_dir)
+
+    with ThreadPoolExecutor(max_workers=len(staging_dirs)) as executor:
+        list(executor.map(publish, staging_dirs))
+
+    assert (artifact_dir / "payload").read_bytes() == b"identical"
+
+
+def test_concurrent_conflicting_artifact_publication_has_one_immutable_winner(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifact"
+    staging_dirs = (tmp_path / "staging-a", tmp_path / "staging-b")
+    payloads = (b"first", b"second")
+    for staging_dir, payload in zip(staging_dirs, payloads, strict=True):
+        staging_dir.mkdir()
+        (staging_dir / "payload").write_bytes(payload)
+    start = threading.Barrier(len(staging_dirs))
+
+    def publish(staging_dir: Path) -> str:
+        start.wait(timeout=5.0)
+        try:
+            artifact_module._publish_immutable_artifact(staging_dir, artifact_dir)
+        except FileExistsError:
+            return "conflict"
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=len(staging_dirs)) as executor:
+        outcomes = list(executor.map(publish, staging_dirs))
+
+    assert sorted(outcomes) == ["conflict", "published"]
+    assert (artifact_dir / "payload").read_bytes() in payloads
 
 
 def test_save_incremental_linking_artifact_requires_lightgbm_version(

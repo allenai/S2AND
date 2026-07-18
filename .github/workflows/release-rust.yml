@@ -171,7 +171,7 @@ jobs:
     name: s2and sdist+wheel
     runs-on: ubuntu-latest
     needs: [detect-versions]
-    if: (github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true') || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
+    if: (github.event_name == 'pull_request' && (needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true')) || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
     steps:
       - uses: actions/checkout@v5
         with:
@@ -204,7 +204,7 @@ jobs:
     name: wheels (windows, py${{ matrix.py }})
     runs-on: windows-latest
     needs: [detect-versions]
-    if: (github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true') || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
+    if: (github.event_name == 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true')) || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
     strategy:
       fail-fast: false
       matrix:
@@ -247,7 +247,7 @@ jobs:
     name: wheels (macos universal2, py${{ matrix.py }})
     runs-on: macos-latest
     needs: [detect-versions]
-    if: (github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true') || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
+    if: (github.event_name == 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true')) || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
     strategy:
       fail-fast: false
       matrix:
@@ -296,7 +296,7 @@ jobs:
     name: wheels (linux ${{ matrix.platform.name }})
     runs-on: ubuntu-latest
     needs: [detect-versions]
-    if: (github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true') || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
+    if: (github.event_name == 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true')) || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
     strategy:
       fail-fast: false
       matrix:
@@ -336,7 +336,7 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     needs: [detect-versions]
-    if: (github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true') || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
+    if: (github.event_name == 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true')) || (github.event_name != 'pull_request' && (needs.detect-versions.outputs.rust_changed == 'true' || needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_rust == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
     steps:
       - uses: actions/checkout@v5
 
@@ -355,7 +355,7 @@ jobs:
 
   release-smoke:
     name: clean installed-artifact smoke
-    if: (github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true') || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.s2and_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
+    if: (github.event_name == 'pull_request' && (needs.detect-versions.outputs.s2and_changed == 'true' || needs.detect-versions.outputs.force_build == 'true')) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-versions.outputs.s2and_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (needs.detect-versions.outputs.force_build == 'true' || needs.detect-versions.outputs.publish_s2and == 'true'))
     needs: [detect-versions, s2and-dist, wheels-linux]
     runs-on: ubuntu-latest
     steps:

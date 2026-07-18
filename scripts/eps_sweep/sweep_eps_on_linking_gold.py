@@ -364,17 +364,12 @@ def _make_arrow_specter_cluster_fn(
 ) -> Any:
     """Return the Arrow-backed graph fallback used by S2AND subblocking."""
 
-    from s2and.subblocking import GraphSubblockingConfig, make_arrow_graph_subblocking_cluster_fn
+    from s2and.subblocking import (
+        _resolve_graph_subblocking_config,
+        make_arrow_graph_subblocking_cluster_fn,
+    )
 
-    raw_config = getattr(clusterer, "subblocking_graph_config", None)
-    if raw_config is None and hasattr(clusterer, "_subblocking_graph_config"):
-        config = clusterer._subblocking_graph_config()  # noqa: SLF001
-    elif isinstance(raw_config, GraphSubblockingConfig):
-        config = raw_config
-    elif isinstance(raw_config, Mapping):
-        config = GraphSubblockingConfig(**dict(raw_config))
-    else:
-        config = GraphSubblockingConfig()
+    config = _resolve_graph_subblocking_config(getattr(clusterer, "subblocking_graph_config", None))
     return make_arrow_graph_subblocking_cluster_fn(
         arrow_paths,
         signature_ids,

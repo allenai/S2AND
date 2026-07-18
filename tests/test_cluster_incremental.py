@@ -1761,6 +1761,91 @@ def test_graph_subblocking_falls_back_to_legacy_specter_for_missing_files(cluste
             "signature_count": 3,
         }
     ]
+    assert clusterer._last_graph_subblocking_telemetry["legacy_fallback_invocation_count"] == 1
+    assert clusterer._last_graph_subblocking_telemetry["graph_fallback_errors"] == fallback.graph_fallback_errors
+
+
+def test_predict_subblocked_publishes_graph_fallback_telemetry(clusterer_dataset_factory, monkeypatch):
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_graph_fallback_telemetry")
+
+    class FailingFallback:
+        load_seconds = 0.0
+        load_metrics = {}
+        stats: list[dict[str, Any]] = []
+
+        def __call__(self, *_args: object, **_kwargs: object) -> dict[str, list[str]]:
+            raise FileNotFoundError("missing graph sidecar")
+
+    monkeypatch.setattr(
+        model_module,
+        "make_dataset_graph_subblocking_cluster_fn",
+        lambda *, config: FailingFallback(),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "cluster_with_specter",
+        lambda signature_ids, _anddata, target_subblock_size=10000, **_kwargs: {
+            f"legacy_{index}": list(signature_ids[start : start + target_subblock_size])
+            for index, start in enumerate(range(0, len(signature_ids), target_subblock_size))
+        },
+    )
+
+    def fake_make_subblocks(
+        signatures,
+        anddata,
+        maximum_size=7500,
+        first_k_letter_counts_sorted=None,
+        *,
+        specter_cluster_fn,
+        **_kwargs,
+    ):
+        del first_k_letter_counts_sorted
+        return specter_cluster_fn(
+            signatures,
+            anddata,
+            target_subblock_size=maximum_size,
+        )
+
+    def fake_predict_helper(
+        self,
+        block_dict,
+        dataset,
+        dists=None,
+        cluster_model_params=None,
+        partial_supervision=None,
+        use_s2_clusters=False,
+        incremental_dont_use_cluster_seeds=False,
+        runtime_context=None,
+        total_ram_bytes=None,
+    ):
+        del self, dataset, dists, cluster_model_params, partial_supervision
+        del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context, total_ram_bytes
+        block_key, signature_ids = next(iter(block_dict.items()))
+        return {block_key: list(signature_ids)}, None
+
+    monkeypatch.setattr(model_module, "make_subblocks", fake_make_subblocks)
+    monkeypatch.setattr(model_module, "_signature_first_for_rules", lambda _: "john")
+    monkeypatch.setattr(Clusterer, "predict_helper", fake_predict_helper)
+
+    clusterer.predict({"block": ["3", "4", "5"]}, dataset, batching_threshold=2)
+
+    assert clusterer._last_graph_subblocking_telemetry == {
+        "enabled": 1,
+        "mode": "graph",
+        "source": "anddata",
+        "candidate_signature_count": 3,
+        "legacy_fallback_invocation_count": 1,
+        "graph_prepare_failed": 0,
+        "graph_prepare_error": None,
+        "graph_fallback_errors": [
+            {
+                "stage": "call",
+                "type": "FileNotFoundError",
+                "message": "missing graph sidecar",
+                "signature_count": 3,
+            }
+        ],
+    }
 
 
 def test_arrow_graph_subblocking_io_errors_do_not_fall_back_to_legacy(clusterer_dataset_factory, monkeypatch):

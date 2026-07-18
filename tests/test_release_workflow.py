@@ -55,12 +55,25 @@ def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> 
     assert "github.event_name == 'pull_request'" in workflow
     assert "needs.detect-versions.outputs.force_build == 'true'" in workflow
     assert workflow.count("scripts/verification/smoke_installed_rust_api.py") >= 2
-    pr_force_build = "github.event_name == 'pull_request' && needs.detect-versions.outputs.force_build == 'true'"
-    for job_name in ("s2and-dist", "wheels-windows", "wheels-macos", "wheels-linux", "sdist"):
+    pr_s2and_build = (
+        "github.event_name == 'pull_request' && "
+        "(needs.detect-versions.outputs.s2and_changed == 'true' || "
+        "needs.detect-versions.outputs.force_build == 'true')"
+    )
+    pr_rust_build = (
+        "github.event_name == 'pull_request' && "
+        "(needs.detect-versions.outputs.rust_changed == 'true' || "
+        "needs.detect-versions.outputs.s2and_changed == 'true' || "
+        "needs.detect-versions.outputs.force_build == 'true')"
+    )
+    assert _workflow_job_condition(workflow, "s2and-dist").startswith(
+        f"({pr_s2and_build}) || (github.event_name != 'pull_request' &&"
+    )
+    for job_name in ("wheels-windows", "wheels-macos", "wheels-linux", "sdist"):
         condition = _workflow_job_condition(workflow, job_name)
-        assert condition.startswith(f"({pr_force_build}) || (github.event_name != 'pull_request' &&")
+        assert condition.startswith(f"({pr_rust_build}) || (github.event_name != 'pull_request' &&")
     release_smoke_condition = _workflow_job_condition(workflow, "release-smoke")
-    assert release_smoke_condition.startswith(f"({pr_force_build}) || (github.event_name == 'push' &&")
+    assert release_smoke_condition.startswith(f"({pr_s2and_build}) || (github.event_name == 'push' &&")
     for job_name in ("publish-s2and", "publish-rust"):
         publish_condition = _workflow_job_condition(workflow, job_name)
         assert "pull_request" not in publish_condition
@@ -97,6 +110,7 @@ def test_required_rust_ci_cannot_convert_import_failures_to_skips() -> None:
 
 def test_main_ci_runs_native_rust_quality_gates() -> None:
     main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
+    cargo_config = tomllib.loads((REPO_ROOT / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8"))
 
     assert "components: rustfmt, clippy" in main_workflow
     assert "PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python" in main_workflow
@@ -105,7 +119,12 @@ def test_main_ci_runs_native_rust_quality_gates() -> None:
         "uv run --no-sync cargo clippy --manifest-path s2and_rust/Cargo.toml "
         "--lib --no-deps -- -D clippy::correctness -D clippy::suspicious"
     ) in main_workflow
-    assert "uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib" in main_workflow
+    assert (
+        "uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml " "--lib --no-default-features"
+    ) in main_workflow
+    assert cargo_config["features"]["default"] == ["extension-module"]
+    assert cargo_config["features"]["extension-module"] == ["pyo3/extension-module"]
+    assert "features" not in cargo_config["dependencies"]["pyo3"]
 
 
 def test_quickstart_docs_use_current_arrow_method_boundaries() -> None:
@@ -146,6 +165,7 @@ def test_python_package_data_is_explicit() -> None:
 
     assert config["tool"]["setuptools"]["include-package-data"] is False
     package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
+    assert "arrow_schema_contract.json" in package_data
     assert all("production_model" not in pattern for pattern in package_data)
 
 

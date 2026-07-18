@@ -193,12 +193,17 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _manifest_relative_path(path_value: Any, manifest_dir: Path) -> str:
-    path = Path(os.fspath(path_value))
+def _manifest_relative_path(path_value: Any, manifest_dir: Path, *, artifact_key: str) -> str:
+    path = Path(os.fspath(path_value)).resolve()
+    root = manifest_dir.resolve()
     try:
-        return os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))
-    except ValueError:
-        return str(path)
+        relative_path = path.relative_to(root)
+    except ValueError as exc:
+        shared_name_counts_path = root.parent / "name_counts_index"
+        if artifact_key == "name_counts_index" and path == shared_name_counts_path:
+            return os.fspath(Path("..") / "name_counts_index")
+        raise ValueError(f"Arrow artifact path must remain within manifest directory: path={path} root={root}") from exc
+    return os.fspath(relative_path)
 
 
 def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str | Path) -> dict[str, Any]:
@@ -219,7 +224,7 @@ def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str
         if not artifact_path.is_file():
             raise FileNotFoundError(f"cannot inventory Arrow artifact {key}={artifact_path}")
         files[key] = {
-            "path": _manifest_relative_path(declared_path, root),
+            "path": _manifest_relative_path(declared_path, root, artifact_key=key),
             "kind": "directory_manifest" if declared_path.is_dir() else "file",
             "byte_count": artifact_path.stat().st_size,
             "sha256": _sha256_file(artifact_path),
@@ -360,9 +365,27 @@ def _verified_arrow_artifact_manifest(
             raise ValueError(f"Arrow artifact generation files.{key}.path is invalid: {manifest_path}")
         supplied_path = Path(os.path.abspath(os.fspath(paths[key])))
         declared_path = Path(raw_declared_path)
-        if not declared_path.is_absolute():
-            declared_path = manifest_path.parent / declared_path
-        declared_path = declared_path.resolve()
+        if declared_path.is_absolute():
+            raise ValueError(
+                f"Arrow artifact generation files.{key}.path must be manifest-relative: {raw_declared_path!r}"
+            )
+        manifest_root = manifest_path.parent.resolve()
+        declared_path = (manifest_root / declared_path).resolve()
+        try:
+            declared_path.relative_to(manifest_root)
+        except ValueError as exc:
+            shared_name_counts_path = manifest_root.parent / "name_counts_index"
+            if (
+                key == "name_counts_index"
+                and Path(raw_declared_path) == Path("..") / "name_counts_index"
+                and declared_path == shared_name_counts_path
+            ):
+                pass
+            else:
+                raise ValueError(
+                    f"Arrow artifact generation files.{key}.path escapes the manifest directory: "
+                    f"{raw_declared_path!r}"
+                ) from exc
         actual_path = supplied_path.resolve()
         if declared_path != actual_path:
             raise ValueError(

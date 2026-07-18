@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from collections import Counter, defaultdict
@@ -363,14 +364,24 @@ def _write_compact_json(path: Path, payload: Mapping[str, object]) -> tuple[str,
 
 
 def _pointer_generation_id(path: Path) -> str | None:
+    """Return the referenced generation, or ``None`` only when no pointer exists."""
+
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pointer_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
+    except OSError as error:
+        raise OSError(f"Unable to read published ORCID prefix-count pointer {path}: {error}") from error
+    try:
+        payload = json.loads(pointer_text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Published ORCID prefix-count pointer is invalid JSON: {path}") from error
     if not isinstance(payload, dict):
-        return None
+        raise ValueError(f"Published ORCID prefix-count pointer must contain a JSON object: {path}")
     generation_id = payload.get("generation_id")
-    return str(generation_id) if isinstance(generation_id, str) else None
+    if not isinstance(generation_id, str) or not generation_id:
+        raise ValueError(f"Published ORCID prefix-count pointer has no valid generation_id: {path}")
+    return generation_id
 
 
 def _validate_counts_for_publication(counts: Mapping[str, Mapping[str, int]]) -> tuple[int, int]:
@@ -480,15 +491,26 @@ def publish_generation(
             fsync_directory(output_dir)
         return pointer_path
     finally:
+        publication_error = sys.exception()
         if pointer_tmp is not None:
             pointer_tmp.unlink(missing_ok=True)
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir)
         if final_dir_published and final_dir.exists():
             with _publish_lock(output_dir):
-                if _pointer_generation_id(pointer_path) != generation_id:
-                    shutil.rmtree(final_dir)
-                    fsync_directory(output_dir)
+                try:
+                    referenced_generation_id = _pointer_generation_id(pointer_path)
+                except (OSError, ValueError) as cleanup_error:
+                    if publication_error is None:
+                        raise
+                    publication_error.add_note(
+                        f"Retained generation {final_dir} because the published pointer "
+                        f"could not be inspected during cleanup: {cleanup_error}"
+                    )
+                else:
+                    if referenced_generation_id != generation_id:
+                        shutil.rmtree(final_dir)
+                        fsync_directory(output_dir)
 
 
 def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]:

@@ -7,6 +7,7 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
+import s2and.subblocking as subblocking
 from scripts.eps_sweep import sweep_eps_on_linking_gold
 
 
@@ -197,3 +198,56 @@ def test_validate_args_requires_limit_or_full_run_for_compute_missing() -> None:
         ["--dataset", "dummy", "--model-path", "model", "--compute-missing-dists", "--allow-full-run"]
     )
     sweep_eps_on_linking_gold._validate_args(full_run_args)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("raw_config", "expected_neighbors", "expect_same_instance"),
+    [
+        (None, 16, False),
+        ({"neighbors": 7}, 7, False),
+        (subblocking.GraphSubblockingConfig(neighbors=5), 5, True),
+    ],
+)
+def test_eps_sweep_uses_strict_shared_graph_config_resolver(
+    monkeypatch,
+    raw_config: object,
+    expected_neighbors: int,
+    expect_same_instance: bool,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(
+        arrow_paths: object,
+        signature_ids: object,
+        *,
+        config: subblocking.GraphSubblockingConfig,
+        random_seed: int,
+    ) -> object:
+        del arrow_paths, signature_ids, random_seed
+        captured["config"] = config
+        return object()
+
+    monkeypatch.setattr(subblocking, "make_arrow_graph_subblocking_cluster_fn", fake_factory)
+    clusterer = SimpleNamespace(subblocking_graph_config=raw_config, random_state=3)
+
+    sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
+        clusterer,
+        {"signatures": "signatures.arrow"},
+        ["s1"],
+    )
+
+    config = captured["config"]
+    assert config.neighbors == expected_neighbors
+    if expect_same_instance:
+        assert config is raw_config
+
+
+def test_eps_sweep_rejects_invalid_graph_config_type() -> None:
+    clusterer = SimpleNamespace(subblocking_graph_config="invalid")
+
+    with pytest.raises(ValueError, match="GraphSubblockingConfig, mapping, or None"):
+        sweep_eps_on_linking_gold._make_arrow_specter_cluster_fn(
+            clusterer,
+            {"signatures": "signatures.arrow"},
+            ["s1"],
+        )

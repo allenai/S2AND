@@ -10,6 +10,7 @@ import os
 import pickle
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from collections import Counter
@@ -151,14 +152,24 @@ def _fsync_file(path: Path) -> None:
 
 
 def _manifest_generation_id(path: Path) -> str | None:
+    """Return the referenced generation, or ``None`` only when no manifest exists."""
+
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        manifest_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
+    except OSError as error:
+        raise OSError(f"Unable to read published name-count manifest {path}: {error}") from error
+    try:
+        payload = json.loads(manifest_text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Published name-count manifest is invalid JSON: {path}") from error
     if not isinstance(payload, dict):
-        return None
+        raise ValueError(f"Published name-count manifest must contain a JSON object: {path}")
     generation_id = payload.get("generation_id")
-    return str(generation_id) if isinstance(generation_id, str) else None
+    if not isinstance(generation_id, str) or not generation_id:
+        raise ValueError(f"Published name-count manifest has no valid generation_id: {path}")
+    return generation_id
 
 
 @contextmanager
@@ -255,14 +266,25 @@ def publish_name_counts(
             fsync_directory(root)
         return {**metadata, "manifest_path": str(manifest_path.resolve())}
     finally:
+        publication_error = sys.exception()
         manifest_tmp.unlink(missing_ok=True)
         if staging.exists():
             shutil.rmtree(staging)
         if published_generation and final_generation.exists():
             with _publish_lock(root):
-                if _manifest_generation_id(manifest_path) != generation_id:
-                    shutil.rmtree(final_generation)
-                    fsync_directory(generations)
+                try:
+                    referenced_generation_id = _manifest_generation_id(manifest_path)
+                except (OSError, ValueError) as cleanup_error:
+                    if publication_error is None:
+                        raise
+                    publication_error.add_note(
+                        f"Retained generation {final_generation} because the published manifest "
+                        f"could not be inspected during cleanup: {cleanup_error}"
+                    )
+                else:
+                    if referenced_generation_id != generation_id:
+                        shutil.rmtree(final_generation)
+                        fsync_directory(generations)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

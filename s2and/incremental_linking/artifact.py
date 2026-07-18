@@ -17,6 +17,7 @@ from typing import Any
 import lightgbm as lgb
 import numpy as np
 
+from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.incremental_linking.contracts import (
     ARTIFACT_SCHEMA_VERSION,
     DEFAULT_RETRIEVAL_TOP_K,
@@ -473,25 +474,22 @@ def _fsync_artifact_stage(root: Path) -> None:
 
 
 def _publish_immutable_artifact(staging_dir: Path, artifact_dir: Path) -> None:
-    if artifact_dir.exists():
-        if not artifact_dir.is_dir():
-            raise FileExistsError(f"Incremental linker artifact target is not a directory: {artifact_dir}")
-        existing_hashes = _artifact_tree_hashes(artifact_dir)
-        if existing_hashes:
-            if existing_hashes != _artifact_tree_hashes(staging_dir):
-                raise FileExistsError(
-                    "Incremental linker artifacts are immutable; existing target differs from staged artifact: "
-                    f"{artifact_dir}"
-                )
-            return
-        artifact_dir.rmdir()
-    os.replace(staging_dir, artifact_dir)
-    if os.name != "nt":
-        descriptor = os.open(artifact_dir.parent, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    lock_path = artifact_dir.parent / f".{artifact_dir.name}.publish.lock"
+    with exclusive_file_lock(lock_path):
+        if artifact_dir.exists():
+            if not artifact_dir.is_dir():
+                raise FileExistsError(f"Incremental linker artifact target is not a directory: {artifact_dir}")
+            existing_hashes = _artifact_tree_hashes(artifact_dir)
+            if existing_hashes:
+                if existing_hashes != _artifact_tree_hashes(staging_dir):
+                    raise FileExistsError(
+                        "Incremental linker artifacts are immutable; existing target differs from staged artifact: "
+                        f"{artifact_dir}"
+                    )
+                return
+            artifact_dir.rmdir()
+        os.replace(staging_dir, artifact_dir)
+        fsync_directory(artifact_dir.parent)
 
 
 def _required_lightgbm_version() -> str:

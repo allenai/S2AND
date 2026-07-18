@@ -168,3 +168,94 @@ def test_failed_manifest_replace_removes_only_the_uncommitted_generation(
     assert json.loads((root / "manifest.json").read_text(encoding="utf-8")) == original_manifest
     generations = [path for path in (root / "generations").iterdir() if path.is_dir()]
     assert [path.name for path in generations] == [original_manifest["generation_id"]]
+
+
+@pytest.mark.parametrize("failure_kind", ["read_error", "malformed_json"])
+def test_post_replace_manifest_inspection_failure_retains_published_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    metrics = {
+        "source_row_count": 1,
+        "selected_row_count": 1,
+        "selected_rows_sha256": "b" * 64,
+        "rejected_row_count": 0,
+    }
+    manifest_path = tmp_path / "name_counts" / "manifest.json"
+    if failure_kind == "read_error":
+        original_read_text = Path.read_text
+
+        def fail_published_manifest_read(path: Path, *args: object, **kwargs: object) -> str:
+            if path == manifest_path and path.exists():
+                raise OSError("injected post-replace read failure")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_published_manifest_read)
+        expected_error = OSError
+        expected_message = "Unable to read published name-count manifest"
+    else:
+        original_replace = Path.replace
+
+        def corrupt_replaced_manifest(path: Path, target: Path) -> Path:
+            result = original_replace(path, target)
+            if Path(target) == manifest_path and path.name.startswith(".manifest."):
+                Path(target).write_text("{", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(Path, "replace", corrupt_replaced_manifest)
+        expected_error = ValueError
+        expected_message = "manifest is invalid JSON"
+
+    with pytest.raises(expected_error, match=expected_message):
+        generate_name_counts.publish_name_counts(
+            mappings,
+            output_dir=tmp_path,
+            source_snapshot_id="fixture",
+            source_kind="fixture",
+            query_digest="a" * 64,
+            row_metrics=metrics,
+            overwrite=False,
+        )
+
+    generations = list((tmp_path / "name_counts" / "generations").iterdir())
+    assert len(generations) == 1
+    assert generations[0].is_dir()
+    assert manifest_path.is_file()
+
+
+def test_invalid_manifest_during_failed_publication_does_not_mask_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "name_counts"
+    root.mkdir()
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text("{", encoding="utf-8")
+    original_replace = Path.replace
+
+    def fail_manifest_replace(path: Path, target: Path) -> Path:
+        if Path(target) == manifest_path and path.name.startswith(".manifest."):
+            raise OSError("injected primary replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_manifest_replace)
+    with pytest.raises(OSError, match="injected primary replace failure") as exc_info:
+        generate_name_counts.publish_name_counts(
+            ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1}),
+            output_dir=tmp_path,
+            source_snapshot_id="fixture",
+            source_kind="fixture",
+            query_digest="a" * 64,
+            row_metrics={
+                "source_row_count": 1,
+                "selected_row_count": 1,
+                "selected_rows_sha256": "b" * 64,
+                "rejected_row_count": 0,
+            },
+            overwrite=True,
+        )
+
+    assert "Retained generation" in "\n".join(exc_info.value.__notes__)
+    assert len(list((root / "generations").iterdir())) == 1

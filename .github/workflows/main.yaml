@@ -171,7 +171,7 @@ jobs:
       - name: Rust native tests
         env:
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib
+        run: uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-features
 
       # Canonical-v2 uses the native name-count index even with Python orchestration.
       - name: Build required Rust extension

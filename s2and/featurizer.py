@@ -17,6 +17,7 @@ import numpy as np
 from tqdm import tqdm
 
 from s2and import feature_port, memory_budget
+from s2and._atomic_io import exclusive_file_lock
 from s2and.consts import (
     CACHE_ROOT,
     DEFAULT_CHUNK_SIZE,
@@ -921,12 +922,18 @@ class FeaturizationInfo:
                 f"path={db_path} expected={NUM_FEATURES} got={feature_count}"
             )
 
+    @staticmethod
+    def _pair_feature_cache_initialization_lock_path(db_path: str) -> str:
+        return f"{db_path}.initialize.lock"
+
     def _load_sqlite_cache(self, db_path: str, cache_keys: Iterable[str]) -> dict[str, np.ndarray]:
         cached_features: dict[str, np.ndarray] = {}
+        lock_path = self._pair_feature_cache_initialization_lock_path(db_path)
         with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
-            self._initialize_pair_feature_cache_schema(connection)
-            metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
-            self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
+            with exclusive_file_lock(lock_path):
+                self._initialize_pair_feature_cache_schema(connection)
+                metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
+                self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
             cache_key_iterator = (str(cache_key) for cache_key in cache_keys)
             while key_batch := tuple(islice(cache_key_iterator, PAIR_FEATURE_CACHE_READ_BATCH_SIZE)):
                 placeholders = ",".join("?" for _ in key_batch)
@@ -962,60 +969,64 @@ class FeaturizationInfo:
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
         db_path = self.cache_db_path(dataset_name)
-        for attempt in range(PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES):
-            try:
-                with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
-                    self._initialize_pair_feature_cache_schema(connection)
-                    metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
-                    has_feature_rows = connection.execute("SELECT 1 FROM pair_features LIMIT 1").fetchone() is not None
-                    if metadata_rows or has_feature_rows:
-                        self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
-                    with connection:
-                        connection.execute(
-                            """
-                            INSERT OR REPLACE INTO cache_metadata(key, value)
-                            VALUES (?, ?)
-                            """,
-                            (_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION, str(PAIR_FEATURE_CACHE_SCHEMA_VERSION)),
+        lock_path = self._pair_feature_cache_initialization_lock_path(db_path)
+        with exclusive_file_lock(lock_path):
+            for attempt in range(PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES):
+                try:
+                    with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
+                        self._initialize_pair_feature_cache_schema(connection)
+                        metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
+                        has_feature_rows = (
+                            connection.execute("SELECT 1 FROM pair_features LIMIT 1").fetchone() is not None
                         )
-                        connection.execute(
-                            """
-                            INSERT OR REPLACE INTO cache_metadata(key, value)
-                            VALUES (?, ?)
-                            """,
-                            (_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT, str(NUM_FEATURES)),
-                        )
-                        connection.executemany(
-                            """
-                            INSERT INTO pair_features(cache_key, feature_blob)
-                            VALUES(?, ?)
-                            ON CONFLICT(cache_key) DO UPDATE SET feature_blob=excluded.feature_blob
-                            """,
-                            (
+                        if metadata_rows or has_feature_rows:
+                            self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
+                        with connection:
+                            connection.execute(
+                                """
+                                INSERT OR REPLACE INTO cache_metadata(key, value)
+                                VALUES (?, ?)
+                                """,
+                                (_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION, str(PAIR_FEATURE_CACHE_SCHEMA_VERSION)),
+                            )
+                            connection.execute(
+                                """
+                                INSERT OR REPLACE INTO cache_metadata(key, value)
+                                VALUES (?, ?)
+                                """,
+                                (_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT, str(NUM_FEATURES)),
+                            )
+                            connection.executemany(
+                                """
+                                INSERT INTO pair_features(cache_key, feature_blob)
+                                VALUES(?, ?)
+                                ON CONFLICT(cache_key) DO UPDATE SET feature_blob=excluded.feature_blob
+                                """,
                                 (
-                                    str(cache_key),
-                                    self._sqlite_feature_blob(feature_output),
-                                )
-                                for cache_key, feature_output in features.items()
-                            ),
+                                    (
+                                        str(cache_key),
+                                        self._sqlite_feature_blob(feature_output),
+                                    )
+                                    for cache_key, feature_output in features.items()
+                                ),
+                            )
+                    return
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower() and attempt < PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES - 1:
+                        logger.warning(
+                            "Pair-feature cache write attempt %d failed due to SQLite lock; retrying path=%s",
+                            attempt + 1,
+                            db_path,
                         )
-                return
-            except sqlite3.OperationalError as exc:
-                if "locked" in str(exc).lower() and attempt < PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES - 1:
-                    logger.warning(
-                        "Pair-feature cache write attempt %d failed due to SQLite lock; retrying path=%s",
+                        time.sleep(PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS * (attempt + 1))
+                        continue
+                    logger.error(
+                        "Pair-feature cache write failed after %d attempts path=%s error=%s",
                         attempt + 1,
                         db_path,
+                        exc,
                     )
-                    time.sleep(PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS * (attempt + 1))
-                    continue
-                logger.error(
-                    "Pair-feature cache write failed after %d attempts path=%s error=%s",
-                    attempt + 1,
-                    db_path,
-                    exc,
-                )
-                raise
+                    raise
 
 
 NUM_FEATURES = FeaturizationInfo().number_of_features

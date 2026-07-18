@@ -112,6 +112,98 @@ def _write_minimal_paper_authors_table(path: Path, paper_ids: list[str | None]) 
     )
 
 
+def _replace_arrow_column(path: Path, column_name: str, values: Any) -> None:
+    with pa.memory_map(str(path), "r") as source:
+        table = pa.ipc.open_file(source).read_all()
+        arrays = [
+            values if field.name == column_name else pa.array(table[field.name].to_pylist(), type=field.type)
+            for field in table.schema
+        ]
+        column_names = list(table.schema.names)
+    del table
+    write_arrow_ipc_table(pa.Table.from_arrays(arrays, names=column_names), path)
+
+
+@pytest.mark.parametrize(
+    ("column_name", "values", "expected_type"),
+    [
+        ("signature_id", pa.array([1], type=pa.int64()), "string"),
+        ("author_affiliations", pa.array(["Institute"], type=pa.string()), r"list<string>"),
+        ("author_position", pa.array([0], type=pa.int32()), "int64"),
+    ],
+)
+def test_arrow_training_rejects_noncanonical_signature_physical_types(
+    tmp_path: Path,
+    column_name: str,
+    values: Any,
+    expected_type: str,
+) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_minimal_signatures_table(signatures_path, ["s1"])
+    _replace_arrow_column(signatures_path, column_name, values)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"signatures column '{column_name}' expected {expected_type}",
+    ):
+        load_signatures_dict_from_arrow(signatures_path)
+
+
+def test_arrow_training_rejects_noncanonical_paper_id_physical_type(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1"])
+    _write_minimal_paper_authors_table(authors_path, ["p1"])
+    _replace_arrow_column(papers_path, "paper_id", pa.array([1], type=pa.int64()))
+
+    with pytest.raises(ValueError, match="papers column 'paper_id' expected string"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+
+def test_arrow_training_rejects_noncanonical_paper_author_position_type(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1"])
+    _write_minimal_paper_authors_table(authors_path, ["p1"])
+    _replace_arrow_column(authors_path, "position", pa.array([0], type=pa.int32()))
+
+    with pytest.raises(ValueError, match="paper_authors column 'position' expected int64"):
+        load_papers_dict_from_arrow(papers_path, authors_path)
+
+
+@pytest.mark.parametrize(
+    ("column_name", "values", "expected_type"),
+    [
+        ("paper_id", pa.array([1], type=pa.int64()), "string"),
+        ("embedding", pa.array([[1.0, 0.0]], type=pa.list_(pa.float32())), r"fixed_size_list<float32>"),
+        ("embedding", pa.array([[1.0, 0.0]], type=pa.list_(pa.float64(), 2)), r"fixed_size_list<float32>"),
+    ],
+)
+def test_arrow_training_rejects_noncanonical_specter_physical_types(
+    tmp_path: Path,
+    column_name: str,
+    values: Any,
+    expected_type: str,
+) -> None:
+    specter_path = tmp_path / "specter.arrow"
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "embedding": pa.array([[1.0, 0.0]], type=pa.list_(pa.float32(), 2)),
+            }
+        ),
+        specter_path,
+    )
+    _replace_arrow_column(specter_path, column_name, values)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"specter column '{column_name}' expected {expected_type}",
+    ):
+        load_specter_tuple_from_arrow(specter_path)
+
+
 def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
 

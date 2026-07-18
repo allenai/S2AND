@@ -7,8 +7,12 @@ edition = "2021"
 name = "_s2and_rust"
 crate-type = ["cdylib"]
 
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.24.2", features = ["extension-module"] }
+pyo3 = { version = "0.24.2" }
 numpy = "0.24"
 rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }

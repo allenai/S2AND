@@ -201,7 +201,7 @@ uv run --no-sync ruff format --check .
 uv run --no-sync ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 $env:PYO3_PYTHON=(Resolve-Path '.venv\Scripts\python.exe').Path
 uv run --no-sync cargo fmt --manifest-path s2and_rust/Cargo.toml -- --check
-uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib
+uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-features
 git diff --check
 ```
 

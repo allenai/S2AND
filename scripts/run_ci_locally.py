@@ -149,7 +149,14 @@ def run_native_rust_checks() -> None:
         env=rust_env,
     )
     run_uv(
-        uv_run_args("cargo", "test", "--manifest-path", RUST_MANIFEST, "--lib"),
+        uv_run_args(
+            "cargo",
+            "test",
+            "--manifest-path",
+            RUST_MANIFEST,
+            "--lib",
+            "--no-default-features",
+        ),
         env=rust_env,
     )
 

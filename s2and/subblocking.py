@@ -346,6 +346,21 @@ class GraphSubblockingConfig:
     adaptive_projection_window: int = 24
 
 
+def _resolve_graph_subblocking_config(raw_config: object) -> GraphSubblockingConfig:
+    """Resolve one strict graph-subblocking configuration value."""
+
+    if raw_config is None:
+        return GraphSubblockingConfig()
+    if isinstance(raw_config, GraphSubblockingConfig):
+        return raw_config
+    if isinstance(raw_config, Mapping):
+        return GraphSubblockingConfig(**dict(raw_config))
+    raise ValueError(
+        "subblocking_graph_config must be a GraphSubblockingConfig, mapping, or None; "
+        f"got {type(raw_config).__name__}"
+    )
+
+
 class _UnionFind:
     """Capacity-constrained union find for graph components."""
 

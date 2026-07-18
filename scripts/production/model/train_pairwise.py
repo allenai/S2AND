@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from hyperopt import hp
 from tqdm import tqdm
 
@@ -37,6 +38,14 @@ from s2and.featurizer import (  # noqa: E402
     featurize,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
+from s2and.pairwise_training import (  # noqa: E402
+    BIG_LINKER_SOURCE_DOMAINS,
+    GOLD_BASE_SOURCE_DOMAINS,
+    AdditiveLinkerRecipe,
+    PairAssemblyResult,
+    PairwiseTrainingRecipe,
+    resolve_pairwise_training_recipe,
+)
 from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
 
 logger = logging.getLogger("s2and")
@@ -51,6 +60,23 @@ DEFAULT_VAL_TEST_SIZE = 10_000
 DEFAULT_N_ITER = 50
 DEFAULT_N_JOBS = 25
 DEFAULT_CHUNK_SIZE = 100
+DEFAULT_PAIR_SAMPLING_SEED = 1111
+
+# Canonical recipe selected by the pair-source ablations for the next release.
+# The legacy train_pairwise_bundle path below does not yet consume a canonical
+# pair catalog, so it must not claim this recipe in bundle metadata until the
+# updated, production-valid Arrow inputs are available.
+PRODUCTION_PAIRWISE_RECIPE = PairwiseTrainingRecipe(
+    name="big7_1250_v1",
+    uniform_source_domains=GOLD_BASE_SOURCE_DOMAINS,
+    uniform_pairs_per_domain=100_000,
+    pair_sampling_seed=DEFAULT_PAIR_SAMPLING_SEED,
+    additive_linker=AdditiveLinkerRecipe(
+        source_set="big7",
+        source_domains=BIG_LINKER_SOURCE_DOMAINS,
+        linker_pairs_per_domain=1_250,
+    ),
+)
 
 
 def _search_space() -> dict[str, Any]:
@@ -58,6 +84,18 @@ def _search_space() -> dict[str, Any]:
         "eps": hp.uniform("eps", 0, 1),
         "linkage": hp.choice("linkage", ["average"]),
     }
+
+
+def resolve_production_pair_recipe(catalog: pd.DataFrame) -> PairAssemblyResult:
+    """Resolve the canonical release recipe from an explicit pair catalog.
+
+    The selected rows returned here must be the exact rows sent to
+    featurization.  Keeping resolution separate from the legacy trainer makes
+    it impossible for an internally sampled model to be mislabeled as
+    ``big7_1250_v1``.
+    """
+
+    return resolve_pairwise_training_recipe(catalog, PRODUCTION_PAIRWISE_RECIPE)
 
 
 def _dataset_names(*, include_augmented: bool, selected_datasets: list[str] | None = None) -> list[str]:

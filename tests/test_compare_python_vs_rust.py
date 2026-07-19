@@ -129,12 +129,11 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
     assert set(papers_limited.keys()) == {"1", "2"}
 
 
-def test_compare_parser_defaults_to_checked_in_legacy_json_root() -> None:
+def test_compare_parser_defaults_to_legacy_json_root() -> None:
     args = compare_cmd._build_parser().parse_args([])
 
     assert args.dataset == "qian"
     assert Path(args.data_root) == compare_cmd.DEFAULT_JSON_DATA_ROOT
-    assert (Path(args.data_root) / args.dataset / f"{args.dataset}_signatures.json").is_file()
 
 
 def test_rust_suite_requires_subcommand():

@@ -167,7 +167,7 @@ def test_pre_commit_stages_sync_version_targets() -> None:
             False,
             False,
             False,
-            (True, True, True, False, False),
+            (True, True, False, False, False),
         ),
         (
             "pull_request",

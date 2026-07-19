@@ -11,6 +11,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from s2and import production_model as production_model_module
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking_training.classic import load_bundle
@@ -22,6 +23,10 @@ requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
     reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
 )
+_SYNTHETIC_ARTIFACT_HASHES = {
+    "name_tuples_data_sha256": "1" * 64,
+    "orcid_prefix_counts_data_sha256": "2" * 64,
+}
 
 
 def _run_cli(
@@ -31,8 +36,16 @@ def _run_cli(
     timeout: int = 300,
     env_overrides: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    bootstrap = (
+        "import json, runpy, sys; "
+        "from s2and import production_model; "
+        "artifact_hashes = json.loads(sys.argv.pop(1)); "
+        "production_model.canonical_artifact_hashes = lambda: dict(artifact_hashes); "
+        "sys.argv = sys.argv[1:]; "
+        "runpy.run_path(sys.argv[0], run_name='__main__')"
+    )
     completed = subprocess.run(
-        [sys.executable, *args],
+        [sys.executable, "-c", bootstrap, json.dumps(_SYNTHETIC_ARTIFACT_HASHES), *args],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -256,7 +269,12 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
 
 
 @requires_rust_lightgbm
-def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
+def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        production_model_module,
+        "canonical_artifact_hashes",
+        lambda: dict(_SYNTHETIC_ARTIFACT_HASHES),
+    )
     repo_root = Path(__file__).resolve().parents[1]
     pairwise_bundle_dir = tmp_path / "pairwise_stage" / "production_model_v9.8"
     bundle_dir = tmp_path / "final" / "production_model_v9.8"

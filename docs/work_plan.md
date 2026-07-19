@@ -154,7 +154,7 @@ The generation contract and acceptance thresholds are in
 | C9 | Retrain | Run the pinned Sinonym/fastText/reference-feature ablation and quality comparison on v1.3; do not restore features without measured gate failure. |
 | C10 | Done | README, data/environment/caching/production/Rust/release docs and this ledger describe the current single-mode, artifact-blocked state. |
 | C11 | Done | Release commands obey the repository `uv` contract; executable raw `python`/`pip` workflow calls are removed. |
-| C12 | Done | Rust CI fails hard if the native module or required ABI is absent. Windows/macOS jobs exercise the wheels they built, and version-changing PRs run the clean installed-wheel Arrow smoke. |
+| C12 | Done | Rust CI fails hard if the native module or required ABI is absent. Windows/macOS jobs exercise the wheels they built. Version-changing PRs build every distribution; the `force-build` label opts into the combined clean installed-wheel Arrow smoke, which remains mandatory before Python publication. |
 
 ## Performance and memory evidence collected so far
 

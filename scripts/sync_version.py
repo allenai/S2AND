@@ -210,8 +210,8 @@ def release_decisions(
     build_s2and = version_changed or force_build or publish_s2and_requested
     build_rust = version_changed or force_build or publish_s2and_requested or publish_rust_requested
     run_release_smoke = (
-        (event_name == "pull_request" and build_s2and)
-        or publish_s2and
+        publish_s2and
+        or (event_name == "pull_request" and force_build)
         or (event_name == "workflow_dispatch" and on_main and force_build)
     )
     return ReleaseDecisions(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import struct
@@ -241,6 +242,7 @@ def _swap_first_two_name_count_records(index_root: str | Path, kind: str) -> Non
     payload[first_start:second_start] = second_record
     payload[second_start:third_start] = first_record
     record_path.write_bytes(payload)
+    _refresh_name_count_file_manifest(index_root, kind, record_path)
 
 
 def _corrupt_first_name_count_record_name_range(index_root: str | Path, kind: str) -> None:
@@ -251,6 +253,15 @@ def _corrupt_first_name_count_record_name_range(index_root: str | Path, kind: st
     struct.pack_into("<Q", payload, first_start + 16, blob_len)
     struct.pack_into("<I", payload, first_start + 24, 1)
     record_path.write_bytes(payload)
+    _refresh_name_count_file_manifest(index_root, kind, record_path)
+
+
+def _refresh_name_count_file_manifest(index_root: str | Path, kind: str, record_path: Path) -> None:
+    manifest_path = Path(index_root) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][kind]["byte_count"] = record_path.stat().st_size
+    manifest["files"][kind]["sha256"] = hashlib.sha256(record_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _name_count_record_path(index_root: str | Path, kind: str) -> Path:

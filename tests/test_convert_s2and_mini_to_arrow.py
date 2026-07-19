@@ -13,6 +13,7 @@ import scripts.convert_to_arrow as convert_to_arrow
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from scripts.convert_to_arrow import RuntimeDatasetSources
+from tests.helpers import tiny_name_counts_provenance
 
 
 def _fake_sources(tmp_path: Path, dataset: str) -> RuntimeDatasetSources:
@@ -89,10 +90,10 @@ def test_arrow_artifact_generation_excludes_request_local_sidecars(tmp_path: Pat
         **{key: str(path) for key, path in sidecar_paths.items()},
     }
 
-    first = convert_to_arrow._arrow_artifact_generation(paths, tmp_path)
+    first = convert_to_arrow.build_arrow_artifact_manifest(paths, tmp_path)["artifact_generation"]
     for path in sidecar_paths.values():
         path.write_bytes(b"request-local replacement")
-    second = convert_to_arrow._arrow_artifact_generation(paths, tmp_path)
+    second = convert_to_arrow.build_arrow_artifact_manifest(paths, tmp_path)["artifact_generation"]
 
     assert set(first["files"]) == {"signatures"}
     assert second == first
@@ -854,7 +855,7 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
             {
                 "schema_version": "name_counts_index_v1",
                 "normalization_version": NORMALIZATION_VERSION,
-                "source_provenance": {"normalization_version": NORMALIZATION_VERSION},
+                "source_provenance": tiny_name_counts_provenance(),
                 "files": {"first": {"path": "missing-first.bin"}},
             }
         ),
@@ -864,7 +865,7 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
     _write_papers_table(pa, papers_path, ["p1"])
     _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
 
-    with pytest.raises(ValueError, match="missing files.first.path target"):
+    with pytest.raises(ValueError, match=r"files\.first\.path target"):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
                 "normalization_version": NORMALIZATION_VERSION,

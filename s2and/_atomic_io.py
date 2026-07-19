@@ -15,9 +15,6 @@ def exclusive_file_lock(path: str | Path) -> Iterator[None]:
     lock_path = Path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_file:
-        if os.fstat(lock_file.fileno()).st_size == 0:
-            lock_file.write(b"\0")
-            lock_file.flush()
         lock_file.seek(0)
         if os.name == "nt":
             import msvcrt

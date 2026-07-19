@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -20,16 +21,62 @@ def _write_generation(index_dir: Path, generation_name: str) -> None:
     (generation_dir / ".published").write_text("", encoding="utf-8")
 
 
-def test_write_name_counts_index_does_not_delete_previous_published_generation(tmp_path, monkeypatch) -> None:
+def test_write_name_counts_index_retains_committed_generation_after_superseding_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
     provenance = tiny_name_counts_provenance()
+    index_dir = tmp_path / "name_counts_index"
+    manifest_path = index_dir / "manifest.json"
+    original_replace = Path.replace
+    committed_generation_name: str | None = None
+    superseding_generation_name = "gen-superseding"
 
-    index_path, _first_metrics = write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
-    _index_path, _second_metrics = write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
+    def replace_then_supersede(path: Path, target: str | Path) -> Path:
+        nonlocal committed_generation_name
+        result = original_replace(path, target)
+        if Path(target) != manifest_path or not path.name.startswith(".manifest."):
+            return result
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        committed_generation_name = Path(manifest["files"]["first"]["path"]).parts[1]
+        shutil.copytree(
+            index_dir / "generations" / committed_generation_name,
+            index_dir / "generations" / superseding_generation_name,
+        )
+        for entry in manifest["files"].values():
+            entry["path"] = f"generations/{superseding_generation_name}/{Path(entry['path']).name}"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return result
 
-    generations = [path for path in (Path(index_path) / "generations").iterdir() if path.is_dir()]
-    assert len(generations) == 2
-    assert all((path / ".published").exists() for path in generations)
+    monkeypatch.setattr(Path, "replace", replace_then_supersede)
+    write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
+
+    assert committed_generation_name is not None
+    assert (index_dir / "generations" / committed_generation_name).is_dir()
+    assert (index_dir / "generations" / superseding_generation_name).is_dir()
+
+
+def test_write_name_counts_index_removes_generation_when_manifest_commit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    provenance = tiny_name_counts_provenance()
+    manifest_path = tmp_path / "name_counts_index" / "manifest.json"
+    original_replace = Path.replace
+
+    def fail_manifest_replace(path: Path, target: str | Path) -> Path:
+        if Path(target) == manifest_path and path.name.startswith(".manifest."):
+            raise OSError("injected manifest replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_manifest_replace)
+    with pytest.raises(OSError, match="injected manifest replace failure"):
+        write_name_counts_index(tmp_path, mappings, provenance, overwrite=True)
+
+    assert not manifest_path.exists()
+    assert list((manifest_path.parent / "generations").iterdir()) == []
 
 
 def test_write_name_counts_index_keeps_manifest_absent_when_marker_write_fails(tmp_path, monkeypatch) -> None:

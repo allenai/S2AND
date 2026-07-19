@@ -142,33 +142,18 @@ print(metrics)
 
 `metrics_per_signature` is useful when you want to slice performance by signature properties.
 
-## Canonical next-release pair recipe
+## Production pair selection
 
-The selected pairwise recipe is declared as
-`PRODUCTION_PAIRWISE_RECIPE` in
-`scripts/production/model/train_pairwise.py`. Its resolved name is
-`big7_1250_v1`:
+The existing `train_pairwise_bundle` implementation samples internally from
+legacy JSON/pickle `ANDData` inputs. It does not consume the explicit pair
+catalogs produced by the pair-source experiments and therefore does not declare
+or claim a prospective experiment recipe.
 
-- sample 100,000 uniform within-block pairs from each of `aminer`,
-  `arnetminer`, `inspire`, `kisti`, `pubmed`, `qian`, and `zbmath`;
-- preserve those 700,000 base rows unchanged;
-- add 1,250 linker-derived pairs from each of `a_khan`, `a_silva`,
-  `h_wang`, `j_smith`, `s_gupta`, `s_lee`, and `s_park`;
-- select at most 625 positive and 625 negative linker pairs per domain,
-  using deterministic hash-ranked prefixes with no majority-class backfill;
-- remove linker rows overlapping the base before selection.
-
-With complete sources, the nominal training set contains 708,750 rows.
-`s2and.pairwise_training.resolve_pairwise_training_recipe` fails unless every
-base and linker quota is satisfied and returns the selected rows together with
-their source counts, selection audit, and identity digest.
-
-The existing `train_pairwise_bundle` implementation still samples internally
-from legacy JSON/pickle `ANDData` inputs and therefore does **not** apply or
-claim this recipe. The next release must route the exact resolved rows through
-the maintained Arrow featurizer once the updated canonical datasets and
-name-count generation are available. Do not label a legacy trainer output as
-`big7_1250_v1`.
+Before promoting an experiment result, route its exact selected rows through
+the maintained Arrow featurizer and record the realized source counts,
+selection audit, and pair-identity digest in the production training summary.
+A tiny end-to-end test must prove that the resolved rows are the rows actually
+used for training before running the full production job.
 
 ## Publish and reload a trained model
 

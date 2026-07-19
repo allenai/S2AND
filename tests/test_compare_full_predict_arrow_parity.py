@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 
@@ -19,7 +18,6 @@ from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E4
     _jsonable,
     _load_cluster_seeds_require,
     _numeric_report,
-    _requested_name_counts_index,
     _write_arrow_artifact_manifest,
     _write_raw_planner_indexes_and_layout,
 )
@@ -171,7 +169,6 @@ def test_parity_parser_compares_features_by_default(tmp_path) -> None:
 
     assert args.compare_features is True
     assert args.name_counts_index is None
-    assert args.name_artifact_dir is None
 
     args = _build_arg_parser().parse_args(
         [
@@ -192,7 +189,29 @@ def test_parity_parser_compares_features_by_default(tmp_path) -> None:
     assert args.compare_features is False
 
 
-def test_parity_parser_rejects_two_name_count_sources(tmp_path) -> None:
+def test_parity_parser_accepts_direct_name_counts_index(tmp_path) -> None:
+    index_path = tmp_path / "index"
+    args = _build_arg_parser().parse_args(
+        [
+            "--fixture-dir",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--output-json",
+            str(tmp_path / "out.json"),
+            "--model-path",
+            str(tmp_path / "model"),
+            "--block-size",
+            "2",
+            "--name-counts-index",
+            str(index_path),
+        ]
+    )
+
+    assert args.name_counts_index == index_path
+
+
+def test_parity_parser_rejects_removed_name_artifact_dir(tmp_path) -> None:
     with pytest.raises(SystemExit):
         _build_arg_parser().parse_args(
             [
@@ -208,19 +227,8 @@ def test_parity_parser_rejects_two_name_count_sources(tmp_path) -> None:
                 "2",
                 "--name-artifact-dir",
                 str(tmp_path / "legacy"),
-                "--name-counts-index",
-                str(tmp_path / "index"),
             ]
         )
-
-
-def test_parity_legacy_name_artifact_dir_resolves_its_index(tmp_path) -> None:
-    assert _requested_name_counts_index(
-        argparse.Namespace(name_artifact_dir=tmp_path / "legacy", name_counts_index=None)
-    ) == (tmp_path / "legacy" / "name_counts_index")
-    assert _requested_name_counts_index(
-        argparse.Namespace(name_artifact_dir=None, name_counts_index=tmp_path / "direct")
-    ) == (tmp_path / "direct")
 
 
 def test_parity_main_writes_output_json_before_asserting_mismatch(tmp_path, monkeypatch) -> None:

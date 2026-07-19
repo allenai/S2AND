@@ -128,8 +128,13 @@ def _write_synthetic_bundle(root: Path) -> Path:
         "normalization_version": NORMALIZATION_VERSION,
     }
     clusterer.best_params = {"eps": 0.5, "linkage": "average"}
-    bundle_dir = root / "production_model_v0.0"
-    write_pairwise_production_bundle(clusterer, bundle_dir, bundle_version="0.0", source_model_version="0.0")
+    pairwise_bundle_dir = root / "pairwise_stage" / "production_model_v0.0"
+    write_pairwise_production_bundle(
+        clusterer,
+        pairwise_bundle_dir,
+        bundle_version="0.0",
+        source_model_version="0.0",
+    )
 
     feature_count = len(promoted_linker_feature_columns())
     linker = _fit_binary_classifier(feature_count, seed=103)
@@ -147,12 +152,13 @@ def _write_synthetic_bundle(root: Path) -> Path:
         linker_dir,
         prediction_fixture_matrix=fixture,
         gate_config=gate_config,
-        audit_metadata={"pairwise_bundle_binding": pairwise_bundle_binding(bundle_dir)},
+        audit_metadata={"pairwise_bundle_binding": pairwise_bundle_binding(pairwise_bundle_dir)},
     )
     target_json = root / "incremental_linker_training_target.json"
     target_json.write_text("{}\n", encoding="utf-8")
+    bundle_dir = root / "production_model_v0.0"
     finalize_production_bundle(
-        pairwise_bundle_dir=bundle_dir,
+        pairwise_bundle_dir=pairwise_bundle_dir,
         output_bundle_dir=bundle_dir,
         incremental_linker_artifact_dir=linker_dir,
         target_json=target_json,

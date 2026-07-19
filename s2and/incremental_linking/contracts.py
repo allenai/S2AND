@@ -192,7 +192,10 @@ def validate_artifact_contract_metadata(metadata: Mapping[str, Any]) -> None:
         raise ValueError("Incremental linker artifact pairwise_bundle_binding is missing or malformed")
     if binding["normalization_version"] != NORMALIZATION_VERSION:
         raise ValueError("Incremental linker artifact normalization_version mismatch")
-    if int(binding["featurizer_version"]) != FEATURIZER_VERSION:
+    binding_featurizer_version = binding["featurizer_version"]
+    if not isinstance(binding_featurizer_version, int) or isinstance(binding_featurizer_version, bool):
+        raise ValueError("Incremental linker artifact featurizer_version must be an integer")
+    if binding_featurizer_version != FEATURIZER_VERSION:
         raise ValueError("Incremental linker artifact featurizer_version mismatch")
     for field in ("ordered_feature_contract_digest", "main_booster_sha256", "nameless_booster_sha256"):
         digest = binding[field]

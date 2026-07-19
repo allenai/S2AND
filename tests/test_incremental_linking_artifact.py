@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.artifact as artifact_module
+from s2and.consts import FEATURIZER_VERSION
 from s2and.incremental_linking.artifact import (
     BOOSTER_FILENAME,
     METADATA_FILENAME,
@@ -304,6 +305,18 @@ def test_metadata_v3_rejects_unknown_top_level_fields() -> None:
     payload["future_implicit_default"] = True
 
     with pytest.raises(ValueError, match="unknown=.*future_implicit_default"):
+        IncrementalLinkingArtifactMetadata.from_mapping(payload)
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    (str(FEATURIZER_VERSION), float(FEATURIZER_VERSION), True, False),
+)
+def test_metadata_rejects_non_integer_pairwise_featurizer_version(invalid_value: object) -> None:
+    payload = _valid_metadata_payload()
+    payload["pairwise_bundle_binding"]["featurizer_version"] = invalid_value
+
+    with pytest.raises(ValueError, match="featurizer_version must be an integer"):
         IncrementalLinkingArtifactMetadata.from_mapping(payload)
 
 

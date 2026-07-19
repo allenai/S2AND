@@ -121,6 +121,7 @@ _CLUSTER_SEED_DISALLOWS_ARROW_CACHE: OrderedDict[
     tuple[tuple[str, str], ...],
 ] = OrderedDict()
 _CLUSTER_SEEDS_ARROW_CACHE_LOCK = threading.Lock()
+_ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -582,25 +583,68 @@ def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
     return len(_selected_feature_indices(featurizer_info))
 
 
-def _read_cluster_seeds_arrow(path: Path) -> dict[str, str]:
-    cache_key = _path_cache_fingerprint(path)
-    with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
-        cached_items = _CLUSTER_SEEDS_ARROW_CACHE.get(cache_key)
-        if cached_items is not None:
-            _CLUSTER_SEEDS_ARROW_CACHE.move_to_end(cache_key)
-            return dict(cached_items)
+def _read_consistent_cached_arrow_pairs(
+    path: Path,
+    *,
+    cache: OrderedDict[_PATH_CACHE_KEY, tuple[tuple[str, str], ...]],
+    reader: Callable[[Path], Iterable[tuple[str, str]]],
+    max_entries: int,
+    cache_name: str,
+) -> tuple[tuple[str, str], ...]:
+    """Read and cache an Arrow sidecar only under its observed content key."""
 
-    cluster_seeds_require = _read_cluster_seeds_arrow_file(path)
-    with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
-        cached_items = _CLUSTER_SEEDS_ARROW_CACHE.get(cache_key)
-        if cached_items is not None:
-            _CLUSTER_SEEDS_ARROW_CACHE.move_to_end(cache_key)
-            return dict(cached_items)
-        _CLUSTER_SEEDS_ARROW_CACHE[cache_key] = tuple(cluster_seeds_require.items())
-        _CLUSTER_SEEDS_ARROW_CACHE.move_to_end(cache_key)
-        while len(_CLUSTER_SEEDS_ARROW_CACHE) > _CLUSTER_SEEDS_ARROW_CACHE_MAX_ENTRIES:
-            _CLUSTER_SEEDS_ARROW_CACHE.popitem(last=False)
-    return cluster_seeds_require
+    for attempt in range(1, _ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS + 1):
+        cache_key = _path_cache_fingerprint(path)
+        with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
+            cached_items = cache.get(cache_key)
+            if cached_items is not None:
+                cache.move_to_end(cache_key)
+                return cached_items
+
+        parsed_items = tuple(reader(path))
+        observed_after_read = _path_cache_fingerprint(path)
+        if observed_after_read != cache_key:
+            logger.warning(
+                "Arrow sidecar changed during cache read; retrying cache=%s attempt=%d/%d path=%s",
+                cache_name,
+                attempt,
+                _ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS,
+                path,
+            )
+            continue
+
+        with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
+            cached_items = cache.get(cache_key)
+            if cached_items is not None:
+                cache.move_to_end(cache_key)
+                return cached_items
+            cache[cache_key] = parsed_items
+            cache.move_to_end(cache_key)
+            while len(cache) > max_entries:
+                cache.popitem(last=False)
+        return parsed_items
+
+    logger.error(
+        "Arrow sidecar remained unstable after cache read retries cache=%s attempts=%d path=%s",
+        cache_name,
+        _ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS,
+        path,
+    )
+    raise RuntimeError(
+        f"{cache_name} Arrow sidecar changed during all "
+        f"{_ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS} read attempts: {path}"
+    )
+
+
+def _read_cluster_seeds_arrow(path: Path) -> dict[str, str]:
+    cached_items = _read_consistent_cached_arrow_pairs(
+        path,
+        cache=_CLUSTER_SEEDS_ARROW_CACHE,
+        reader=lambda source: _read_cluster_seeds_arrow_file(source).items(),
+        max_entries=_CLUSTER_SEEDS_ARROW_CACHE_MAX_ENTRIES,
+        cache_name="cluster_seeds",
+    )
+    return dict(cached_items)
 
 
 def _cluster_seeds_require_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> dict[str, str]:
@@ -870,24 +914,14 @@ def _cluster_seeds_require_inverse(
 
 
 def _read_cluster_seed_disallows_arrow(path: Path) -> set[tuple[str, str]]:
-    cache_key = _path_cache_fingerprint(path)
-    with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
-        cached_items = _CLUSTER_SEED_DISALLOWS_ARROW_CACHE.get(cache_key)
-        if cached_items is not None:
-            _CLUSTER_SEED_DISALLOWS_ARROW_CACHE.move_to_end(cache_key)
-            return set(cached_items)
-
-    disallow_pairs = set(read_cluster_seed_disallows_arrow(path))
-    with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
-        cached_items = _CLUSTER_SEED_DISALLOWS_ARROW_CACHE.get(cache_key)
-        if cached_items is not None:
-            _CLUSTER_SEED_DISALLOWS_ARROW_CACHE.move_to_end(cache_key)
-            return set(cached_items)
-        _CLUSTER_SEED_DISALLOWS_ARROW_CACHE[cache_key] = tuple(disallow_pairs)
-        _CLUSTER_SEED_DISALLOWS_ARROW_CACHE.move_to_end(cache_key)
-        while len(_CLUSTER_SEED_DISALLOWS_ARROW_CACHE) > _CLUSTER_SEED_DISALLOWS_ARROW_CACHE_MAX_ENTRIES:
-            _CLUSTER_SEED_DISALLOWS_ARROW_CACHE.popitem(last=False)
-    return disallow_pairs
+    cached_items = _read_consistent_cached_arrow_pairs(
+        path,
+        cache=_CLUSTER_SEED_DISALLOWS_ARROW_CACHE,
+        reader=read_cluster_seed_disallows_arrow,
+        max_entries=_CLUSTER_SEED_DISALLOWS_ARROW_CACHE_MAX_ENTRIES,
+        cache_name="cluster_seed_disallows",
+    )
+    return set(cached_items)
 
 
 def _cluster_seed_disallows_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> set[tuple[str, str]]:

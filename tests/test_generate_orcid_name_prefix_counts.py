@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import multiprocessing
+import shutil
 import threading
 import tomllib
 from collections.abc import Iterator
@@ -278,54 +279,45 @@ def test_publish_lock_serializes_real_processes(tmp_path: Path) -> None:
     assert len(list(tmp_path.glob("orcid-prefix-counts-*"))) == 1
 
 
-@pytest.mark.parametrize("failure_kind", ["read_error", "malformed_json"])
-def test_post_replace_pointer_inspection_failure_retains_published_generation(
+def test_committed_generation_is_retained_after_a_superseding_pointer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_kind: str,
 ) -> None:
     module = _load_module()
     pointer_path = tmp_path / "first_k_letter_counts_from_orcid.manifest.json"
-    if failure_kind == "read_error":
-        original_read_text = Path.read_text
+    original_replace = module.os.replace
+    committed_generation_dir: Path | None = None
+    superseding_generation_id = "superseding"
+    superseding_generation_dir = tmp_path / f"orcid-prefix-counts-{superseding_generation_id}"
 
-        def fail_published_pointer_read(path: Path, *args: object, **kwargs: object) -> str:
-            if path == pointer_path and path.exists():
-                raise OSError("injected post-replace read failure")
-            return original_read_text(path, *args, **kwargs)
+    def replace_then_supersede(source: Path, target: Path) -> None:
+        nonlocal committed_generation_dir
+        original_replace(source, target)
+        if Path(target) != pointer_path:
+            return
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        committed_generation_dir = tmp_path / pointer["generation_dir"]
+        shutil.copytree(committed_generation_dir, superseding_generation_dir)
+        pointer["generation_id"] = superseding_generation_id
+        pointer["generation_dir"] = superseding_generation_dir.name
+        pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
 
-        monkeypatch.setattr(Path, "read_text", fail_published_pointer_read)
-        expected_error = OSError
-        expected_message = "Unable to read published ORCID prefix-count pointer"
-    else:
-        original_replace = module.os.replace
+    monkeypatch.setattr(module.os, "replace", replace_then_supersede)
+    module.publish_generation(
+        {"al": {"am": 7}},
+        output_dir=tmp_path,
+        source_snapshot_id="fixture",
+        source_digest="a" * 64,
+        metrics={"source_rows": 2},
+        overwrite=False,
+    )
 
-        def corrupt_replaced_pointer(source: Path, target: Path) -> None:
-            original_replace(source, target)
-            if Path(target) == pointer_path:
-                Path(target).write_text("{", encoding="utf-8")
-
-        monkeypatch.setattr(module.os, "replace", corrupt_replaced_pointer)
-        expected_error = ValueError
-        expected_message = "pointer is invalid JSON"
-
-    with pytest.raises(expected_error, match=expected_message):
-        module.publish_generation(
-            {"al": {"am": 7}},
-            output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_digest="a" * 64,
-            metrics={"source_rows": 2},
-            overwrite=False,
-        )
-
-    generation_dirs = list(tmp_path.glob("orcid-prefix-counts-*"))
-    assert len(generation_dirs) == 1
-    assert generation_dirs[0].is_dir()
-    assert pointer_path.is_file()
+    assert committed_generation_dir is not None
+    assert committed_generation_dir.is_dir()
+    assert superseding_generation_dir.is_dir()
 
 
-def test_invalid_pointer_during_failed_publication_does_not_mask_primary_error(
+def test_failed_publication_cleans_uncommitted_generation_without_reading_pointer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,8 +342,8 @@ def test_invalid_pointer_during_failed_publication_does_not_mask_primary_error(
             overwrite=True,
         )
 
-    assert "Retained generation" in "\n".join(exc_info.value.__notes__)
-    assert len(list(tmp_path.glob("orcid-prefix-counts-*"))) == 1
+    assert not getattr(exc_info.value, "__notes__", [])
+    assert list(tmp_path.glob("orcid-prefix-counts-*")) == []
 
 
 def test_streaming_source_digest_covers_selected_row_content() -> None:

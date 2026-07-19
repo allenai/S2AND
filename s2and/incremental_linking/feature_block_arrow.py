@@ -1656,6 +1656,8 @@ def write_name_counts_index(
     tmp_generation_dir = Path(tempfile.mkdtemp(prefix=f".{generation_name}.", dir=str(generations_dir)))
     generation_dir = generations_dir / generation_name
     tmp_manifest_path = index_dir / f".manifest.{generation_name}.json"
+    generation_renamed = False
+    manifest_committed = False
     try:
         for kind, mapping in named_mappings:
             filename = f"{kind}.bin"
@@ -1712,23 +1714,23 @@ def write_name_counts_index(
             ):
                 return str(index_dir), {"reused": True}
             tmp_generation_dir.rename(generation_dir)
+            generation_renamed = True
             fsync_directory(generations_dir)
             for entry in manifest_files.values():
                 path = index_dir / str(entry["path"])
                 if not path.exists():
                     raise FileNotFoundError(f"name-count index generation is incomplete: {path}")
             tmp_manifest_path.replace(manifest_path)
+            manifest_committed = True
             fsync_directory(index_dir)
     finally:
         if tmp_manifest_path.exists():
             tmp_manifest_path.unlink()
         if tmp_generation_dir.exists():
             shutil.rmtree(tmp_generation_dir)
-        if generation_dir.exists():
-            with _exclusive_name_counts_publish_lock(index_dir):
-                if _current_name_counts_generation_name(index_dir) != generation_name:
-                    shutil.rmtree(generation_dir)
-                    fsync_directory(generations_dir)
+        if generation_renamed and not manifest_committed and generation_dir.exists():
+            shutil.rmtree(generation_dir)
+            fsync_directory(generations_dir)
     metrics["row_count"] = total_records
     metrics["byte_count"] = total_bytes
     return str(index_dir), metrics

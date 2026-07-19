@@ -314,6 +314,16 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
     if status not in {"pairwise_only", "complete"}:
         raise ValueError(f"Unsupported production model bundle_status={status!r}")
     complete = status == "complete"
+    for version_field in ("bundle_version", "pairwise_model_version"):
+        version = manifest.get(version_field)
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError(f"Production model bundle {version_field} must be a nonempty string")
+    incremental_linker_version = manifest.get("incremental_linker_version")
+    if complete:
+        if not isinstance(incremental_linker_version, str) or not incremental_linker_version.strip():
+            raise ValueError("Complete production model bundle incremental_linker_version must be a nonempty string")
+    elif incremental_linker_version is not None:
+        raise ValueError("Pairwise-only production model bundle incremental_linker_version must be null")
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise ValueError("Production model bundle manifest must contain a files object")
@@ -370,8 +380,6 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
             f"missing={sorted(required_hashed_files - runtime_files)} "
             f"extra={sorted(runtime_files - required_hashed_files)}"
         )
-    if complete != bool(manifest.get("incremental_linker_version")):
-        raise ValueError("Production model bundle status and incremental_linker_version disagree")
     return manifest
 
 

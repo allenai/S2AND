@@ -1168,7 +1168,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         if unassigned_signature_ids:
             raw_window_start = time.perf_counter()
             raw_request_planner = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner.from_auto_queries(  # noqa: SLF001
-                arrow_path_payload,
+                dict(arrow_path_payload),
                 top_k=retrieval_top_k,
                 orcid_enabled=bool(orcid_enabled),
                 num_threads=clusterer.n_jobs,

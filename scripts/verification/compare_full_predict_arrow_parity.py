@@ -404,18 +404,6 @@ def _resolve_parity_name_counts_index(
     return index_path, logical_sha256, "bounded_generated"
 
 
-def _requested_name_counts_index(args: argparse.Namespace) -> Path | None:
-    """Resolve the direct or legacy CLI name-count source without loading data."""
-
-    if args.name_artifact_dir is not None and args.name_counts_index is not None:
-        raise ValueError("pass at most one of --name-artifact-dir and --name-counts-index")
-    if args.name_counts_index is not None:
-        return Path(args.name_counts_index)
-    if args.name_artifact_dir is not None:
-        return Path(args.name_artifact_dir) / "name_counts_index"
-    return None
-
-
 def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
@@ -469,11 +457,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     start = time.perf_counter()
-    supplied_name_counts_index = _requested_name_counts_index(args)
     name_counts_index_path, name_counts_sha256, name_counts_source = _resolve_parity_name_counts_index(
         filtered_signatures,
         output_dir=args.output_dir / "name_artifacts",
-        supplied_index=supplied_name_counts_index,
+        supplied_index=args.name_counts_index,
     )
     timings["prepare_name_counts_index_seconds"] = time.perf_counter() - start
 
@@ -656,14 +643,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixture-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
-    name_counts_group = parser.add_mutually_exclusive_group()
-    name_counts_group.add_argument(
-        "--name-artifact-dir",
-        type=Path,
-        default=None,
-        help="Legacy root containing an existing canonical name_counts_index subdirectory.",
-    )
-    name_counts_group.add_argument(
+    parser.add_argument(
         "--name-counts-index",
         type=Path,
         default=None,

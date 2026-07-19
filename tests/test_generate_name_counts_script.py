@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -170,11 +171,9 @@ def test_failed_manifest_replace_removes_only_the_uncommitted_generation(
     assert [path.name for path in generations] == [original_manifest["generation_id"]]
 
 
-@pytest.mark.parametrize("failure_kind", ["read_error", "malformed_json"])
-def test_post_replace_manifest_inspection_failure_retains_published_generation(
+def test_committed_generation_is_retained_after_a_superseding_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_kind: str,
 ) -> None:
     mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
     metrics = {
@@ -183,49 +182,46 @@ def test_post_replace_manifest_inspection_failure_retains_published_generation(
         "selected_rows_sha256": "b" * 64,
         "rejected_row_count": 0,
     }
+    root = tmp_path / "name_counts"
     manifest_path = tmp_path / "name_counts" / "manifest.json"
-    if failure_kind == "read_error":
-        original_read_text = Path.read_text
+    original_replace = Path.replace
+    committed_generation_id: str | None = None
+    superseding_generation_id = "superseding"
 
-        def fail_published_manifest_read(path: Path, *args: object, **kwargs: object) -> str:
-            if path == manifest_path and path.exists():
-                raise OSError("injected post-replace read failure")
-            return original_read_text(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "read_text", fail_published_manifest_read)
-        expected_error = OSError
-        expected_message = "Unable to read published name-count manifest"
-    else:
-        original_replace = Path.replace
-
-        def corrupt_replaced_manifest(path: Path, target: Path) -> Path:
-            result = original_replace(path, target)
-            if Path(target) == manifest_path and path.name.startswith(".manifest."):
-                Path(target).write_text("{", encoding="utf-8")
+    def replace_then_supersede(path: Path, target: str | Path) -> Path:
+        nonlocal committed_generation_id
+        result = original_replace(path, target)
+        if Path(target) != manifest_path or not path.name.startswith(".manifest."):
             return result
-
-        monkeypatch.setattr(Path, "replace", corrupt_replaced_manifest)
-        expected_error = ValueError
-        expected_message = "manifest is invalid JSON"
-
-    with pytest.raises(expected_error, match=expected_message):
-        generate_name_counts.publish_name_counts(
-            mappings,
-            output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_kind="fixture",
-            query_digest="a" * 64,
-            row_metrics=metrics,
-            overwrite=False,
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        committed_generation_id = manifest["generation_id"]
+        shutil.copytree(
+            root / "generations" / committed_generation_id,
+            root / "generations" / superseding_generation_id,
         )
+        manifest["generation_id"] = superseding_generation_id
+        for key, relative_path in manifest["files"].items():
+            manifest["files"][key] = f"generations/{superseding_generation_id}/{Path(relative_path).name}"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return result
 
-    generations = list((tmp_path / "name_counts" / "generations").iterdir())
-    assert len(generations) == 1
-    assert generations[0].is_dir()
-    assert manifest_path.is_file()
+    monkeypatch.setattr(Path, "replace", replace_then_supersede)
+    generate_name_counts.publish_name_counts(
+        mappings,
+        output_dir=tmp_path,
+        source_snapshot_id="fixture",
+        source_kind="fixture",
+        query_digest="a" * 64,
+        row_metrics=metrics,
+        overwrite=False,
+    )
+
+    assert committed_generation_id is not None
+    assert (root / "generations" / committed_generation_id).is_dir()
+    assert (root / "generations" / superseding_generation_id).is_dir()
 
 
-def test_invalid_manifest_during_failed_publication_does_not_mask_primary_error(
+def test_failed_publication_cleans_uncommitted_generation_without_reading_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,5 +253,5 @@ def test_invalid_manifest_during_failed_publication_does_not_mask_primary_error(
             overwrite=True,
         )
 
-    assert "Retained generation" in "\n".join(exc_info.value.__notes__)
-    assert len(list((root / "generations").iterdir())) == 1
+    assert not getattr(exc_info.value, "__notes__", [])
+    assert list((root / "generations").iterdir()) == []

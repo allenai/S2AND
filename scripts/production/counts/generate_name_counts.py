@@ -10,11 +10,10 @@ import os
 import pickle
 import re
 import shutil
-import sys
 import tempfile
 import uuid
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -29,6 +28,13 @@ select concat(concat(nvl(first_name, ''), '|||'), nvl(last_name, '')) as concat,
 from content.authors
 group by concat(concat(nvl(first_name, ''), '|||'), nvl(last_name, ''))
 """.strip()
+
+NameCountMappings = tuple[
+    Mapping[str, int],
+    Mapping[str, int],
+    Mapping[str, int],
+    Mapping[str, int],
+]
 
 
 def _query_text(limit: int | None) -> str:
@@ -96,10 +102,10 @@ def _fixture_rows(path: Path, limit: int | None) -> Iterator[tuple[str, int]]:
 
 def build_name_count_dicts(
     rows: Iterable[tuple[str, int]],
-) -> tuple[tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]], dict[str, int]]:
+) -> tuple[NameCountMappings, dict[str, int | str]]:
     """Canonicalize source rows and return the four filtered lookup mappings."""
 
-    counters = [Counter(), Counter(), Counter(), Counter()]
+    counters: list[Counter[str]] = [Counter(), Counter(), Counter(), Counter()]
     key_names = ("first", "last", "first_last", "last_first_initial")
     source_rows = 0
     rejected_rows = 0
@@ -151,27 +157,6 @@ def _fsync_file(path: Path) -> None:
         os.fsync(source.fileno())
 
 
-def _manifest_generation_id(path: Path) -> str | None:
-    """Return the referenced generation, or ``None`` only when no manifest exists."""
-
-    try:
-        manifest_text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        raise OSError(f"Unable to read published name-count manifest {path}: {error}") from error
-    try:
-        payload = json.loads(manifest_text)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Published name-count manifest is invalid JSON: {path}") from error
-    if not isinstance(payload, dict):
-        raise ValueError(f"Published name-count manifest must contain a JSON object: {path}")
-    generation_id = payload.get("generation_id")
-    if not isinstance(generation_id, str) or not generation_id:
-        raise ValueError(f"Published name-count manifest has no valid generation_id: {path}")
-    return generation_id
-
-
 @contextmanager
 def _publish_lock(root: Path) -> Iterator[None]:
     with exclusive_file_lock(root / ".publish.lock"):
@@ -179,13 +164,13 @@ def _publish_lock(root: Path) -> Iterator[None]:
 
 
 def publish_name_counts(
-    mappings: tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]],
+    mappings: NameCountMappings,
     *,
     output_dir: Path,
     source_snapshot_id: str,
     source_kind: str,
     query_digest: str,
-    row_metrics: dict[str, int],
+    row_metrics: Mapping[str, int | str],
     overwrite: bool,
 ) -> dict[str, Any]:
     """Publish one immutable generation and replace its manifest last."""
@@ -208,7 +193,8 @@ def publish_name_counts(
     final_generation = generations / generation_id
     manifest_path = root / "manifest.json"
     manifest_tmp = root / f".manifest.{generation_id}.json"
-    published_generation = False
+    generation_renamed = False
+    manifest_committed = False
     try:
         pickle_path = staging / "name_counts.pickle"
         with pickle_path.open("wb") as output:
@@ -260,31 +246,19 @@ def publish_name_counts(
             if manifest_path.exists() and not overwrite:
                 raise FileExistsError(f"published manifest already exists: {manifest_path}; pass --overwrite")
             staging.rename(final_generation)
-            published_generation = True
+            generation_renamed = True
             fsync_directory(generations)
             manifest_tmp.replace(manifest_path)
+            manifest_committed = True
             fsync_directory(root)
         return {**metadata, "manifest_path": str(manifest_path.resolve())}
     finally:
-        publication_error = sys.exception()
         manifest_tmp.unlink(missing_ok=True)
         if staging.exists():
             shutil.rmtree(staging)
-        if published_generation and final_generation.exists():
-            with _publish_lock(root):
-                try:
-                    referenced_generation_id = _manifest_generation_id(manifest_path)
-                except (OSError, ValueError) as cleanup_error:
-                    if publication_error is None:
-                        raise
-                    publication_error.add_note(
-                        f"Retained generation {final_generation} because the published manifest "
-                        f"could not be inspected during cleanup: {cleanup_error}"
-                    )
-                else:
-                    if referenced_generation_id != generation_id:
-                        shutil.rmtree(final_generation)
-                        fsync_directory(generations)
+        if generation_renamed and not manifest_committed and final_generation.exists():
+            shutil.rmtree(final_generation)
+            fsync_directory(generations)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

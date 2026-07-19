@@ -385,6 +385,66 @@ def test_manifest_rejects_paths_outside_bundle(
         _load_pairwise_staging_model(bundle_dir)
 
 
+@pytest.mark.parametrize("field_name", ("bundle_version", "pairwise_model_version"))
+def test_manifest_requires_nonempty_string_model_versions(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    field_name: str,
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    manifest_path = bundle_dir / "manifest.json"
+    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for invalid_value in (None, False, 0, {}, [], "", "   ", True, 1, 1.5):
+        manifest = copy.deepcopy(original_manifest)
+        manifest[field_name] = invalid_value
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=rf"{field_name} must be a nonempty string"):
+            production_model_module._validate_manifest(bundle_dir)
+
+
+def test_pairwise_only_manifest_requires_null_incremental_linker_version(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    manifest_path = bundle_dir / "manifest.json"
+    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for invalid_value in (False, 0, {}, [], "", True, 1, 1.5):
+        manifest = copy.deepcopy(original_manifest)
+        manifest["incremental_linker_version"] = invalid_value
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="Pairwise-only.*incremental_linker_version must be null"):
+            production_model_module._validate_manifest(bundle_dir)
+
+
+def test_complete_manifest_requires_nonempty_string_incremental_linker_version(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    pairwise_bundle, _ = synthetic_pairwise_bundle
+    complete_bundle = tmp_path / "production_model_v9.8"
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(pairwise_bundle, linker_dir)
+    finalize_production_bundle(
+        pairwise_bundle_dir=pairwise_bundle,
+        output_bundle_dir=complete_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        bundle_version="9.8",
+        pairwise_model_version="9.9",
+        incremental_linker_version="9.9",
+    )
+    manifest_path = complete_bundle / "manifest.json"
+    original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for invalid_value in (None, False, 0, {}, [], "", "   ", True, 1, 1.5):
+        manifest = copy.deepcopy(original_manifest)
+        manifest["incremental_linker_version"] = invalid_value
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="Complete.*incremental_linker_version must be a nonempty string"):
+            production_model_module._validate_manifest(complete_bundle)
+
+
 def test_manifest_requires_complete_checksum_coverage(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:

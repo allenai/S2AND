@@ -49,6 +49,9 @@ classic `ANDData` does not acquire an Arrow route after construction.
 The `*_from_arrow_paths` methods validate the prediction artifact profile and
 construct the Rust featurizer directly. Missing model-required artifacts,
 invalid Arrow schemas, or native execution errors are surfaced to the caller.
+Models and artifacts must explicitly declare the package's
+`canonical_v2` normalization contract. Missing or legacy declarations are not
+executable runtime modes.
 
 Arrow generations are treated as immutable. Process-local Rust featurizer
 reuse is keyed by the validated artifact generation and build settings; it is

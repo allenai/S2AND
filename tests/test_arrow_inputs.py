@@ -409,14 +409,14 @@ def test_normalize_arrow_paths_resolves_relative_paths_at_boundary(
     assert resolved.read_bytes() == b"source"
 
 
-def test_manifest_normalization_is_checked_without_name_counts(tmp_path: Path) -> None:
+def test_legacy_manifest_is_rejected_without_name_counts(tmp_path: Path) -> None:
     paths = _write_valid_prediction_bundle(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["normalization_version"] = "legacy_compat"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(MissingArrowArtifactError, match="normalization_version mismatch"):
+    with pytest.raises(ValueError, match="normalization_version is invalid"):
         validate_arrow_prediction_artifacts(
             paths,
             require_specter=False,
@@ -425,7 +425,7 @@ def test_manifest_normalization_is_checked_without_name_counts(tmp_path: Path) -
         )
 
 
-def test_name_counts_normalization_is_bound_to_generation_without_model_expectation(tmp_path: Path) -> None:
+def test_legacy_name_counts_are_rejected_without_model_expectation(tmp_path: Path) -> None:
     paths = _write_valid_prediction_bundle(tmp_path, include_name_counts=True)
     name_counts_manifest_path = Path(paths["name_counts_index"]) / "manifest.json"
     name_counts_manifest = json.loads(name_counts_manifest_path.read_text(encoding="utf-8"))
@@ -434,7 +434,7 @@ def test_name_counts_normalization_is_bound_to_generation_without_model_expectat
     name_counts_manifest_path.write_text(json.dumps(name_counts_manifest), encoding="utf-8")
     write_test_arrow_artifact_manifest(tmp_path, paths)
 
-    with pytest.raises(MissingArrowArtifactError, match="normalization_version mismatch"):
+    with pytest.raises(MissingArrowArtifactError, match="invalid normalization_version"):
         validate_arrow_prediction_artifacts(
             paths,
             require_specter=False,

@@ -265,7 +265,6 @@ def build_arrow_training_dataset(
         test_pairs_size=int(getattr(dataset, "test_pairs_size", 5_000)),
         random_seed=int(getattr(dataset, "random_seed", 1111)),
         n_jobs=int(getattr(dataset, "n_jobs", 1)),
-        preprocess=bool(getattr(dataset, "preprocess", True)),
         name_tuples=name_tuples,
     )
     # Parity tests intentionally exercise Python reference methods on the same

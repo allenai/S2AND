@@ -13,14 +13,7 @@ use crate::{
 };
 
 const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v1";
-
-// Manifest "normalization_version" values accepted by this crate. An absent
-// field means the artifact predates the canonical_v2 migration and carries
-// legacy_compat keys. The crate does not hard-fail on legacy_compat here:
-// Python asserts model-vs-artifact normalization compatibility upstream; this
-// gate only rejects unknown values, like the schema_version gate.
-const NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT: &str = "legacy_compat";
-const NAME_COUNTS_NORMALIZATION_CANONICAL_V2: &str = "canonical_v2";
+const NAME_COUNTS_NORMALIZATION_VERSION: &str = "canonical_v2";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NameCountsData {
@@ -822,31 +815,29 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
             NAME_COUNTS_INDEX_SCHEMA_VERSION
         )));
     }
-    let normalization_version = match manifest.get("normalization_version") {
-        // Artifacts written before the canonical_v2 migration carry no
-        // normalization_version field and are legacy_compat by definition.
-        None => NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT.to_string(),
-        Some(value) => {
-            let version = value.as_str().ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "name-count index manifest {} has non-string normalization_version",
-                    manifest_path.display()
-                ))
-            })?;
-            if version != NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT
-                && version != NAME_COUNTS_NORMALIZATION_CANONICAL_V2
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "name-count index manifest {} has unsupported normalization_version {:?}; expected {:?} or {:?}",
-                    manifest_path.display(),
-                    version,
-                    NAME_COUNTS_NORMALIZATION_LEGACY_COMPAT,
-                    NAME_COUNTS_NORMALIZATION_CANONICAL_V2
-                )));
-            }
-            version.to_string()
-        }
-    };
+    let normalization_version = manifest
+        .get("normalization_version")
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index manifest {} is missing normalization_version",
+                manifest_path.display()
+            ))
+        })?
+        .as_str()
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index manifest {} has non-string normalization_version",
+                manifest_path.display()
+            ))
+        })?;
+    if normalization_version != NAME_COUNTS_NORMALIZATION_VERSION {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "name-count index manifest {} has unsupported normalization_version {:?}; expected {:?}",
+            manifest_path.display(),
+            normalization_version,
+            NAME_COUNTS_NORMALIZATION_VERSION
+        )));
+    }
     let files = manifest
         .get("files")
         .and_then(serde_json::Value::as_object)
@@ -866,15 +857,15 @@ fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountInd
             files,
             "last_first_initial",
         )?,
-        normalization_version,
+        normalization_version: normalization_version.to_string(),
         provenance_binding,
     })
 }
 
 /// Return the validated `normalization_version` recorded in a name-count index
-/// manifest without opening the index files ("legacy_compat" when the field is
-/// absent). Exposed to Python so callers can assert artifact-vs-model
-/// normalization compatibility before loading the index.
+/// manifest without opening the index files. Exposed to Python so callers can
+/// assert artifact-vs-model normalization compatibility before loading the
+/// index.
 #[pyfunction]
 pub(crate) fn read_name_counts_index_normalization_version(path: &str) -> PyResult<String> {
     Ok(resolve_name_counts_index_paths(path)?.normalization_version)
@@ -1246,11 +1237,14 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn absent_normalization_version_defaults_to_legacy_compat() {
+    fn absent_normalization_version_is_rejected() {
         let dir = write_artifact(None);
-        let version = read_version(&dir).expect("manifest without version is valid");
+        let error = read_version(&dir).expect_err("manifest without version must fail");
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(version, "legacy_compat");
+        assert!(
+            py_err_message(error).contains("missing normalization_version"),
+            "missing version must be explicit"
+        );
     }
 
     #[test]
@@ -1259,6 +1253,19 @@ mod name_counts_tests {
         let version = read_version(&dir).expect("canonical_v2 is a supported version");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(version, "canonical_v2");
+    }
+
+    #[test]
+    fn legacy_compat_normalization_version_is_rejected() {
+        let dir = write_artifact(Some(r#""legacy_compat""#));
+        let error = read_version(&dir).expect_err("legacy compatibility mode must fail");
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = py_err_message(error);
+        assert!(
+            message.contains("unsupported normalization_version"),
+            "{message}"
+        );
+        assert!(message.contains("legacy_compat"), "{message}");
     }
 
     #[test]

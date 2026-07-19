@@ -257,12 +257,13 @@ def test_subblocking_membership_parity_python_vs_rust():
     assert clusters_python == clusters_rust
 
 
-def test_rust_inference_without_arrow_featurizer_runs_python_paper_preprocess():
+def test_classic_inference_uses_python_preprocessing_even_when_env_requests_rust():
     with _temporary_env("S2AND_BACKEND", "rust"):
         dataset_inference = build_dummy_dataset("dummy_signature_preprocess_minimal_papers", mode="inference")
 
     paper_id = next(iter(dataset_inference.papers.keys()))
     inference_paper = dataset_inference.papers[paper_id]
 
+    assert dataset_inference.runtime_context.backend == "python"
     assert inference_paper.title_ngrams_chars is not None
     assert inference_paper.title_ngrams_words is not None

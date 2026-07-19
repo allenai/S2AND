@@ -160,12 +160,15 @@ class LinkerRetrievalBatch:
 
 @dataclass(frozen=True)
 class RawArrowPlanBundle:
-    """Validated raw plan with an owned, normalized linker-bridge payload."""
+    """Owned, validated raw-plan values used by the linker runtime."""
 
-    plan: Mapping[str, Any]
     signature_order: FeatureBlockSignatureOrder
     query_signature_ids: tuple[str, ...]
     query_views: tuple[QueryView, ...]
+    query_authors: tuple[str, ...]
+    seed_signature_ids: tuple[str, ...] | None
+    component_members: Mapping[str, tuple[str, ...]]
+    telemetry: Mapping[str, Any] | None
     row_count: int
     pair_count: int
     row_query_offsets: np.ndarray
@@ -180,7 +183,134 @@ class RawArrowPlanBundle:
     def to_mutable_mapping(self) -> dict[str, Any]:
         """Return a detached mutable plan for the public mapping API."""
 
-        return {key: _mutable_plan_value(value) for key, value in self.plan.items()}
+        plan: dict[str, Any] = {
+            "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
+            "row_count": self.row_count,
+            "pair_count": self.pair_count,
+            "query_signature_ids": self.query_signature_ids,
+            "query_views": self.query_views,
+            "query_authors": self.query_authors,
+        }
+        if self.seed_signature_ids is not None:
+            plan["seed_signature_ids"] = self.seed_signature_ids
+        plan["component_members"] = self.component_members
+        plan.update(
+            {
+                "left_signature_ids": self.left_signature_ids,
+                "right_signature_ids": self.right_signature_ids,
+                "pair_row_indices": self.pair_row_indices,
+                "row_query_signature_indices": self.row_query_offsets,
+                "row_component_keys": self.row_component_keys,
+                "retrieval_scores": self.retrieval_scores,
+                "retrieval_ranks": self.retrieval_ranks,
+            }
+        )
+        for raw_key, signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+            plan[raw_key] = self.row_signals[signal_key]
+        if self.telemetry is not None:
+            plan["telemetry"] = self.telemetry
+        return {key: _mutable_plan_value(value) for key, value in plan.items()}
+
+    @classmethod
+    def _from_normalized_values(
+        cls,
+        *,
+        query_signature_ids: Sequence[Any],
+        query_views: Sequence[QueryView],
+        query_authors: Sequence[Any],
+        seed_signature_ids: Sequence[Any] | None,
+        component_members: Mapping[Any, Sequence[Any]],
+        telemetry: Mapping[Any, Any] | None,
+        row_query_offsets: Any,
+        left_signature_ids: Sequence[Any],
+        right_signature_ids: Sequence[Any],
+        pair_row_indices: Any,
+        row_component_keys: Sequence[Any],
+        retrieval_scores: Any,
+        retrieval_ranks: Any,
+        normalized_row_signals: Mapping[str, Any],
+    ) -> RawArrowPlanBundle:
+        """Own normalized values and derive the runtime-only views once."""
+
+        owned_query_signature_ids = tuple(str(value) for value in query_signature_ids)
+        owned_query_views = tuple(query_views)
+        owned_query_authors = tuple(str(value or "") for value in query_authors)
+        owned_row_query_offsets = _owned_readonly_array(row_query_offsets, dtype=np.uint32)
+        owned_left_signature_ids = tuple(str(value) for value in left_signature_ids)
+        owned_right_signature_ids = tuple(str(value) for value in right_signature_ids)
+        owned_pair_row_indices = _owned_readonly_array(pair_row_indices, dtype=np.uint32)
+        owned_row_component_keys = tuple(str(value) for value in row_component_keys)
+        owned_retrieval_scores = _owned_readonly_array(retrieval_scores, dtype=np.float32)
+        owned_retrieval_ranks = _owned_readonly_array(retrieval_ranks, dtype=np.uint16)
+        owned_normalized_row_signals = {
+            signal_key: _owned_readonly_array(values) for signal_key, values in normalized_row_signals.items()
+        }
+        row_query_views = _owned_readonly_array(
+            [owned_query_views[int(offset)] for offset in owned_row_query_offsets],
+            dtype=object,
+        )
+        row_query_authors = _owned_readonly_array(
+            [owned_query_authors[int(offset)] for offset in owned_row_query_offsets],
+            dtype=object,
+        )
+        row_signals = {
+            "retrieval_score": owned_retrieval_scores,
+            "retrieval_rank": owned_retrieval_ranks,
+            "candidate_component_key": _owned_readonly_array(owned_row_component_keys, dtype=object),
+            "query_view": row_query_views,
+            "query_author": row_query_authors,
+            "first_name_bucket": _owned_readonly_array(
+                first_name_bucket_array(owned_normalized_row_signals["query_first_token"], row_query_views),
+                dtype=object,
+            ),
+            **owned_normalized_row_signals,
+        }
+
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for value in (
+            *owned_query_signature_ids,
+            *owned_left_signature_ids,
+            *owned_right_signature_ids,
+        ):
+            if value in seen:
+                continue
+            seen.add(value)
+            ordered_ids.append(value)
+
+        return cls(
+            signature_order=FeatureBlockSignatureOrder(
+                signature_ids=tuple(ordered_ids),
+                query_signature_ids=owned_query_signature_ids,
+            ),
+            query_signature_ids=owned_query_signature_ids,
+            query_views=owned_query_views,
+            query_authors=owned_query_authors,
+            seed_signature_ids=(
+                None if seed_signature_ids is None else tuple(str(value) for value in seed_signature_ids)
+            ),
+            component_members=MappingProxyType(
+                {
+                    str(component_key): tuple(str(member) for member in members)
+                    for component_key, members in component_members.items()
+                }
+            ),
+            telemetry=(
+                None
+                if telemetry is None
+                else MappingProxyType({str(key): _owned_plan_value(value) for key, value in telemetry.items()})
+            ),
+            row_count=len(owned_row_query_offsets),
+            pair_count=len(owned_pair_row_indices),
+            row_query_offsets=owned_row_query_offsets,
+            left_signature_ids=owned_left_signature_ids,
+            right_signature_ids=owned_right_signature_ids,
+            pair_row_indices=owned_pair_row_indices,
+            row_component_keys=owned_row_component_keys,
+            retrieval_scores=owned_retrieval_scores,
+            retrieval_ranks=owned_retrieval_ranks,
+            row_signals=MappingProxyType(row_signals),
+        )
 
     @classmethod
     def from_mapping(cls, plan: Mapping[str, Any]) -> RawArrowPlanBundle:
@@ -211,6 +341,9 @@ class RawArrowPlanBundle:
         component_members = _required_raw_plan_value(plan, "component_members")
         if not isinstance(component_members, Mapping):
             raise ValueError("raw candidate plan component_members must be a mapping")
+        telemetry = plan.get("telemetry")
+        if telemetry is not None and not isinstance(telemetry, Mapping):
+            raise ValueError("raw candidate plan telemetry must be a mapping")
         legacy_pair_index_keys = sorted(
             key for key in ("left_signature_indices", "right_signature_indices") if key in plan
         )
@@ -270,69 +403,13 @@ class RawArrowPlanBundle:
             signal_key: _raw_plan_array(plan, raw_key, dtype, row_count)
             for raw_key, signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
         }
-        row_query_views = _owned_readonly_array(
-            [query_views[int(offset)] for offset in row_query_offsets],
-            dtype=object,
-        )
-        row_query_authors = _owned_readonly_array(
-            [query_authors[int(offset)] for offset in row_query_offsets],
-            dtype=object,
-        )
-        row_component_key_array = _owned_readonly_array(row_component_keys, dtype=object)
-        row_signals = {
-            "retrieval_score": retrieval_scores,
-            "retrieval_rank": retrieval_ranks,
-            "candidate_component_key": row_component_key_array,
-            "query_view": row_query_views,
-            "query_author": row_query_authors,
-            "first_name_bucket": _owned_readonly_array(
-                first_name_bucket_array(normalized_row_signals["query_first_token"], row_query_views),
-                dtype=object,
-            ),
-        }
-        row_signals.update(normalized_row_signals)
-
-        normalized_plan_values: dict[str, Any] = {
-            "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
-            "query_signature_ids": query_signature_ids,
-            "query_views": query_views,
-            "query_authors": query_authors,
-            "row_count": row_count,
-            "pair_count": pair_count,
-            "row_query_signature_indices": row_query_offsets,
-            "row_component_keys": row_component_keys,
-            "retrieval_scores": retrieval_scores,
-            "retrieval_ranks": retrieval_ranks,
-            "pair_row_indices": pair_row_indices,
-            "left_signature_ids": left_signature_ids,
-            "right_signature_ids": right_signature_ids,
-        }
-        for raw_key, signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-            normalized_plan_values[raw_key] = normalized_row_signals[signal_key]
-        owned_plan = _owned_plan_mapping(plan, normalized_values=normalized_plan_values)
-
-        ordered_ids: list[str] = []
-        seen: set[str] = set()
-        for value in (
-            *query_signature_ids,
-            *left_signature_ids,
-            *right_signature_ids,
-        ):
-            if value in seen:
-                continue
-            seen.add(value)
-            ordered_ids.append(value)
-
-        return cls(
-            plan=owned_plan,
-            signature_order=FeatureBlockSignatureOrder(
-                signature_ids=tuple(ordered_ids),
-                query_signature_ids=query_signature_ids,
-            ),
+        return cls._from_normalized_values(
             query_signature_ids=query_signature_ids,
             query_views=query_views,
-            row_count=row_count,
-            pair_count=pair_count,
+            query_authors=query_authors,
+            seed_signature_ids=plan.get("seed_signature_ids"),
+            component_members=component_members,
+            telemetry=telemetry,
             row_query_offsets=row_query_offsets,
             left_signature_ids=left_signature_ids,
             right_signature_ids=right_signature_ids,
@@ -340,7 +417,7 @@ class RawArrowPlanBundle:
             row_component_keys=row_component_keys,
             retrieval_scores=retrieval_scores,
             retrieval_ranks=retrieval_ranks,
-            row_signals=MappingProxyType(row_signals),
+            normalized_row_signals=normalized_row_signals,
         )
 
 
@@ -451,19 +528,6 @@ def _owned_plan_value(value: Any) -> Any:
     return value
 
 
-def _owned_plan_mapping(
-    plan: Mapping[str, Any],
-    *,
-    normalized_values: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    return MappingProxyType(
-        {
-            key: normalized_values[key] if key in normalized_values else _owned_plan_value(value)
-            for key, value in plan.items()
-        }
-    )
-
-
 def _mutable_plan_value(value: Any) -> Any:
     """Recursively copy a bundle plan value back to mutable containers."""
 
@@ -492,7 +556,7 @@ def _raw_plan_array(plan: Mapping[str, Any], key: str, dtype: Any, expected_leng
         values = np.asarray(_required_raw_plan_value(plan, key), dtype=dtype)
     if values.ndim != 1 or len(values) != int(expected_length):
         raise ValueError(f"raw candidate plan key {key!r} must be 1D with length {expected_length}, got {values.shape}")
-    return _owned_readonly_array(values, dtype=values.dtype)
+    return values
 
 
 def _raw_plan_retrieval_ranks(plan: Mapping[str, Any], expected_length: int) -> np.ndarray:
@@ -504,7 +568,7 @@ def _raw_plan_retrieval_ranks(plan: Mapping[str, Any], expected_length: int) -> 
         raise ValueError(
             "raw candidate plan key 'retrieval_ranks' must be 1D with length " f"{expected_length}, got {ranks.shape}"
         )
-    return _owned_readonly_array(ranks, dtype=np.uint16)
+    return ranks
 
 
 def _raw_plan_id_tuple(plan: Mapping[str, Any], key: str, expected_length: int) -> tuple[str, ...]:
@@ -620,21 +684,6 @@ def build_linker_retrieval_batch_from_raw_plan_bundle(
         retrieval_ranks=bundle.retrieval_ranks,
     )
     return LinkerRetrievalBatch(candidate_batch=candidate_batch, row_signals=dict(bundle.row_signals))
-
-
-def build_linker_retrieval_batch_from_raw_candidate_plan(
-    plan: Mapping[str, Any],
-    *,
-    signature_id_to_index: Mapping[str, int] | None = None,
-    feature_block_signature_order: FeatureBlockSignatureOrder | Sequence[Any] | None = None,
-) -> LinkerRetrievalBatch:
-    """Validate and convert a raw id-based candidate plan at the public boundary."""
-
-    return build_linker_retrieval_batch_from_raw_plan_bundle(
-        RawArrowPlanBundle.from_mapping(plan),
-        signature_id_to_index=signature_id_to_index,
-        feature_block_signature_order=feature_block_signature_order,
-    )
 
 
 def build_linker_retrieval_batch_rust(

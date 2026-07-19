@@ -178,17 +178,10 @@ Incrementation history
 """
 FEATURIZER_VERSION = 10
 
-# Name-normalization contract (docs/normalization_migration_blocked.md, OD4 single-mode
-# cutover). NORMALIZATION_VERSION declares which normalization policy THIS code
-# implements. Model bundles record theirs in feature_contract["normalization_version"];
-# data artifacts record theirs in the name_counts_index/ and Arrow dataset manifests.
-# An absent field means "legacy_compat" (artifacts and bundles that predate the
-# contract). Mismatches fail fast: rollback is redeploying the previous package +
-# artifact set, never a runtime compatibility mode.
-NORMALIZATION_VERSION_LEGACY_COMPAT = "legacy_compat"
-NORMALIZATION_VERSION_CANONICAL_V2 = "canonical_v2"
-VALID_NORMALIZATION_VERSIONS = frozenset({NORMALIZATION_VERSION_LEGACY_COMPAT, NORMALIZATION_VERSION_CANONICAL_V2})
-NORMALIZATION_VERSION = NORMALIZATION_VERSION_CANONICAL_V2
+# Name-normalization contract (docs/normalization_migration_blocked.md, OD4
+# single-mode cutover). Code, models, and data artifacts must all declare this
+# exact policy; rollback deploys the previous package and artifact set together.
+NORMALIZATION_VERSION = "canonical_v2"
 
 # important constant values
 NUMPY_NAN = np.nan

@@ -36,7 +36,7 @@ from s2and.runtime import (
     build_runtime_context,
     stage_uses_rust,
 )
-from s2and.rust_lifecycle import build_rust_lifecycle_policy
+from s2and.rust_lifecycle import PYTHON_ONLY_POLICY, RUST_ARROW_TRAINING_POLICY
 from s2and.sampling import random_sampling, sampling
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
@@ -406,6 +406,8 @@ class ANDData:
         rust_arrow_featurization: bool = False,
     ):
         init_start = time.perf_counter()
+        if rust_arrow_featurization and (mode != "train" or not preprocess):
+            raise ValueError("Rust Arrow training requires mode='train' and preprocess=True")
         self.runtime_context = build_runtime_context(
             "dataset_build",
             backend="rust" if rust_arrow_featurization else "python",
@@ -427,12 +429,7 @@ class ANDData:
         self.arrow_paths: Mapping[str, str] | None = None
         self.arrow_artifact_generation: str | None = None
         self.compute_block_fn = compute_block_fn
-        self.rust_lifecycle_policy = build_rust_lifecycle_policy(
-            backend=self.runtime_context.backend,
-            mode=mode,
-            preprocess=preprocess,
-            arrow_featurization=rust_arrow_featurization,
-        )
+        self.rust_lifecycle_policy = RUST_ARROW_TRAINING_POLICY if rust_arrow_featurization else PYTHON_ONLY_POLICY
         pair_sampling_mode = _validate_pair_sampling_mode(pair_sampling_mode)
 
         if mode == "train":

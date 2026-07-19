@@ -62,8 +62,9 @@ Set `bundle_dir` to a canonical training generation with this manifest
 contract. The constructor validates required tables,
 raw-planner batch indexes, checksums, normalization provenance, and the
 name-count index before it samples any pairs. It always selects the Rust
-training runtime, regardless of `S2AND_BACKEND`. The requested pair counts are
-upper bounds when a split contains fewer eligible within-block pairs.
+training runtime and pins canonical preprocessing, regardless of
+`S2AND_BACKEND`. The requested pair counts are upper bounds when a split
+contains fewer eligible within-block pairs.
 
 ## Featurize pairs and train the pairwise model
 

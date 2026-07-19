@@ -11,15 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION
-from s2and.text import canonical_name_tuple_pair, canonicalize_name_text, same_prefix_tokens
+from s2and.text import canonicalize_name_text, same_prefix_tokens
 
-NAME_TUPLE_ARTIFACT_SCHEMA_VERSION = "s2and_name_tuples_v1"
-NAME_TUPLE_ARTIFACT_VERSION = 1
+NAME_TUPLE_ARTIFACT_SCHEMA_VERSION = "s2and_name_tuples_v2"
+NAME_TUPLE_ARTIFACT_VERSION = 2
 NAME_TUPLE_ARTIFACT_SEMANTICS: dict[str, Any] = {
     "encoding": "utf-8",
     "line_format": "name_a,name_b",
     "row_order": "lexicographic_by_fields_unique",
-    "directionality": "symmetric_directed_rows",
+    "pair_order": "name_a_lexicographically_less_than_name_b",
+    "directionality": "canonical_unordered_rows",
     "runtime_pair_semantics": "unordered",
     "canonicalizer": "canonicalize_name_text",
     "drop_identity": True,
@@ -37,8 +38,7 @@ class NameTupleArtifactIdentity:
     data_filename: str
     data_sha256: str
     data_size_bytes: int
-    directed_pair_count: int
-    unordered_pair_count: int
+    pair_count: int
     source_filename: str
     source_sha256: str
     source_size_bytes: int
@@ -87,8 +87,7 @@ def build_name_tuple_artifact_metadata(
     source_bytes: bytes,
     data_filename: str,
     data_bytes: bytes,
-    directed_pair_count: int,
-    unordered_pair_count: int,
+    pair_count: int,
     generated_at: str,
     input_pair_count: int,
     dropped_identity: int,
@@ -111,8 +110,7 @@ def build_name_tuple_artifact_metadata(
             "filename": data_filename,
             "sha256": _sha256_bytes(data_bytes),
             "size_bytes": len(data_bytes),
-            "directed_pair_count": directed_pair_count,
-            "unordered_pair_count": unordered_pair_count,
+            "pair_count": pair_count,
         },
         "semantics": dict(NAME_TUPLE_ARTIFACT_SEMANTICS),
         "generation_counts": {
@@ -128,12 +126,10 @@ def _parse_and_validate_pairs(
     data_bytes: bytes,
     *,
     data_path: Path,
-    expected_directed_count: int,
-    expected_unordered_count: int,
+    expected_pair_count: int,
 ) -> frozenset[tuple[str, str]]:
-    unordered_pairs: set[tuple[str, str]] = set()
+    pairs: set[tuple[str, str]] = set()
     previous: tuple[str, str] | None = None
-    directed_pair_count = 0
     for line_number, raw_line in enumerate(io.BytesIO(data_bytes), start=1):
         raw_line = raw_line.removesuffix(b"\n").removesuffix(b"\r")
         try:
@@ -154,27 +150,21 @@ def _parse_and_validate_pairs(
             raise ValueError(f"Invalid noncanonical name tuple at {data_path}:{line_number}")
         if first_a == first_b:
             raise ValueError(f"Invalid identity name tuple at {data_path}:{line_number}")
+        if first_a > first_b:
+            raise ValueError(
+                f"Invalid name tuple field order at {data_path}:{line_number}: "
+                "name_a must be lexicographically less than name_b"
+            )
         if same_prefix_tokens(first_a, first_b):
             raise ValueError(f"Invalid prefix-compatible name tuple at {data_path}:{line_number}")
-        unordered_pairs.add(canonical_name_tuple_pair(first_a, first_b))
-        directed_pair_count += 1
+        pairs.add(pair)
 
-    if directed_pair_count != expected_directed_count:
+    if len(pairs) != expected_pair_count:
         raise ValueError(
-            f"Name-tuple artifact {data_path} directed_pair_count mismatch: "
-            f"metadata={expected_directed_count} actual={directed_pair_count}"
+            f"Name-tuple artifact {data_path} pair_count mismatch: "
+            f"metadata={expected_pair_count} actual={len(pairs)}"
         )
-    # Sorted uniqueness plus non-identity means an unordered pair has at most
-    # two directed rows. Equality proves both directions exist without keeping
-    # a second full directed-row representation in memory.
-    if directed_pair_count != 2 * len(unordered_pairs):
-        raise ValueError(f"Name-tuple artifact {data_path} is missing reverse rows for one or more pairs")
-    if len(unordered_pairs) != expected_unordered_count:
-        raise ValueError(
-            f"Name-tuple artifact {data_path} unordered_pair_count mismatch: "
-            f"metadata={expected_unordered_count} actual={len(unordered_pairs)}"
-        )
-    return frozenset(unordered_pairs)
+    return frozenset(pairs)
 
 
 def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
@@ -255,12 +245,7 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
         raise ValueError(
             f"Name-tuple artifact {data_path} SHA-256 mismatch: metadata={data_sha256} actual={actual_sha256}"
         )
-    directed_pair_count = _require_nonnegative_int(
-        data.get("directed_pair_count"), field="data.directed_pair_count", metadata_path=metadata_path
-    )
-    unordered_pair_count = _require_nonnegative_int(
-        data.get("unordered_pair_count"), field="data.unordered_pair_count", metadata_path=metadata_path
-    )
+    pair_count = _require_nonnegative_int(data.get("pair_count"), field="data.pair_count", metadata_path=metadata_path)
 
     semantics = _require_object(metadata.get("semantics"), field="semantics", metadata_path=metadata_path)
     if semantics != NAME_TUPLE_ARTIFACT_SEMANTICS:
@@ -279,8 +264,7 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
     pairs = _parse_and_validate_pairs(
         data_bytes,
         data_path=data_path,
-        expected_directed_count=directed_pair_count,
-        expected_unordered_count=unordered_pair_count,
+        expected_pair_count=pair_count,
     )
     identity = NameTupleArtifactIdentity(
         schema_version=schema_version,
@@ -289,8 +273,7 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
         data_filename=data_filename,
         data_sha256=data_sha256,
         data_size_bytes=data_size_bytes,
-        directed_pair_count=directed_pair_count,
-        unordered_pair_count=unordered_pair_count,
+        pair_count=pair_count,
         source_filename=source_filename,
         source_sha256=source_sha256,
         source_size_bytes=source_size_bytes,

@@ -1,13 +1,12 @@
 {
-  "artifact_version": 1,
+  "artifact_version": 2,
   "data": {
-    "directed_pair_count": 7368,
     "filename": "s2and_name_tuples_canonical.txt",
-    "sha256": "8d05d28eb88c9b84b6f281765841ab5201b6ab829874b250a5fb69a3784dc9b7",
-    "size_bytes": 114096,
-    "unordered_pair_count": 3684
+    "pair_count": 3684,
+    "sha256": "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b",
+    "size_bytes": 57048
   },
-  "generated_at": "2026-07-09T18:00:32.740594+00:00",
+  "generated_at": "2026-07-19T04:03:33.421567+00:00",
   "generation_counts": {
     "dropped_empty": 0,
     "dropped_identity": 1385,
@@ -15,14 +14,15 @@
     "input_pair_count": 9925
   },
   "normalization_version": "canonical_v2",
-  "schema_version": "s2and_name_tuples_v1",
+  "schema_version": "s2and_name_tuples_v2",
   "semantics": {
     "canonicalizer": "canonicalize_name_text",
-    "directionality": "symmetric_directed_rows",
+    "directionality": "canonical_unordered_rows",
     "drop_identity": true,
     "drop_prefix_compatible": true,
     "encoding": "utf-8",
     "line_format": "name_a,name_b",
+    "pair_order": "name_a_lexicographically_less_than_name_b",
     "row_order": "lexicographic_by_fields_unique",
     "runtime_pair_semantics": "unordered"
   },

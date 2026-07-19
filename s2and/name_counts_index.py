@@ -8,6 +8,7 @@ import os
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -19,6 +20,7 @@ from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_count_binding import NameCountsBinding
 
 _INDEX_CACHE: weakref.WeakValueDictionary[tuple[str, str], NameCountsIndex] = weakref.WeakValueDictionary()
+_INDEX_OPENINGS: dict[tuple[str, str], Future[NameCountsIndex]] = {}
 _INDEX_CACHE_LOCK = threading.Lock()
 
 
@@ -199,14 +201,18 @@ class NameCountsIndex:
     def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
         """Verify and share the exact manifest generation at ``path``."""
 
-        normalized_path = require_name_counts_index_artifact(
-            path,
-            context="Python name-count index",
-            producer_hint="publish a manifest-backed name_counts_index directory",
-        )
-        resolved_path = str(Path(normalized_path).resolve())
+        path_text = os.fspath(path)
+        resolved_path = str(Path(path_text).resolve())
         manifest_path = Path(resolved_path) / "manifest.json"
-        manifest_bytes = manifest_path.read_bytes()
+        try:
+            manifest_bytes = manifest_path.read_bytes()
+        except OSError:
+            require_name_counts_index_artifact(
+                path_text,
+                context="Python name-count index",
+                producer_hint="publish a manifest-backed name_counts_index directory",
+            )
+            raise
         manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         cache_key = (resolved_path, manifest_sha256)
 
@@ -214,11 +220,18 @@ class NameCountsIndex:
             cached = _INDEX_CACHE.get(cache_key)
             if cached is not None:
                 return cached
+            opening = _INDEX_OPENINGS.get(cache_key)
+            if opening is None:
+                opening = Future()
+                _INDEX_OPENINGS[cache_key] = opening
+                open_generation = True
+            else:
+                open_generation = False
 
-            # Bind the verification pass to the exact manifest bytes used by
-            # both Python and the native opener. A pointer replacement between
-            # the first validation and our read must not authorize an unchecked
-            # generation at the same directory path.
+        if not open_generation:
+            return opening.result()
+
+        try:
             require_name_counts_index_artifact(
                 resolved_path,
                 context="Python name-count index",
@@ -252,8 +265,17 @@ class NameCountsIndex:
                 normalization_version=str(normalization_version),
                 source_provenance=provenance,
             )
+        except BaseException as exc:
+            with _INDEX_CACHE_LOCK:
+                _INDEX_OPENINGS.pop(cache_key, None)
+            opening.set_exception(exc)
+            raise
+
+        with _INDEX_CACHE_LOCK:
             _INDEX_CACHE[cache_key] = opened
-            return opened
+            _INDEX_OPENINGS.pop(cache_key, None)
+        opening.set_result(opened)
+        return opened
 
     def lookup_many(
         self,

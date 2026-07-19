@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import s2and.name_counts_index as name_counts_index_module
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
@@ -28,6 +31,60 @@ def test_name_counts_index_open_is_shared_for_one_manifest_generation(tmp_path: 
 
     assert first is second
     assert first.source_provenance["generation_id"] == "generation-one"
+
+
+def test_name_counts_index_cache_hit_skips_material_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one")
+    real_validator = name_counts_index_module.require_name_counts_index_artifact
+    validation_count = 0
+
+    def count_validation(*args, **kwargs):
+        nonlocal validation_count
+        validation_count += 1
+        return real_validator(*args, **kwargs)
+
+    monkeypatch.setattr(name_counts_index_module, "require_name_counts_index_artifact", count_validation)
+
+    first = NameCountsIndex.open(path)
+    second = NameCountsIndex.open(path)
+
+    assert first is second
+    assert validation_count == 1
+
+
+def test_name_counts_index_concurrent_open_validates_generation_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one")
+    real_validator = name_counts_index_module.require_name_counts_index_artifact
+    validation_started = threading.Event()
+    release_validation = threading.Event()
+    validation_count = 0
+
+    def block_validation(*args, **kwargs):
+        nonlocal validation_count
+        validation_count += 1
+        validation_started.set()
+        if not release_validation.wait(timeout=10):
+            raise TimeoutError("test did not release name-count validation")
+        return real_validator(*args, **kwargs)
+
+    monkeypatch.setattr(name_counts_index_module, "require_name_counts_index_artifact", block_validation)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(NameCountsIndex.open, path)
+        assert validation_started.wait(timeout=10)
+        second_future = pool.submit(NameCountsIndex.open, path)
+        release_validation.set()
+        first = first_future.result(timeout=10)
+        second = second_future.result(timeout=10)
+
+    assert first is second
+    assert validation_count == 1
 
 
 def test_name_counts_index_manifest_replacement_opens_new_generation(tmp_path: Path) -> None:

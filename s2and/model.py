@@ -31,8 +31,6 @@ from s2and.consts import (
     LARGE_DISTANCE,
     LARGE_INTEGER,
     NORMALIZATION_VERSION,
-    NORMALIZATION_VERSION_LEGACY_COMPAT,
-    VALID_NORMALIZATION_VERSIONS,
 )
 from s2and.data import (
     NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
@@ -1431,19 +1429,15 @@ def _propagate_n_jobs(estimator: Any, n_jobs: int) -> None:
 
 
 def _resolve_clusterer_normalization_version(clusterer: Any) -> str:
-    """Resolve the normalization policy a model was trained under.
-
-    Absent feature_contract["normalization_version"] means the model predates the
-    normalization contract and implies "legacy_compat". Invalid tokens raise.
-    """
+    """Require the package's canonical normalization policy on a model."""
 
     contract = getattr(clusterer, "feature_contract", None)
-    value = NORMALIZATION_VERSION_LEGACY_COMPAT
-    if isinstance(contract, dict):
-        value = contract.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
-    if value not in VALID_NORMALIZATION_VERSIONS:
-        raise ValueError(f"Invalid clusterer feature_contract['normalization_version'] value: {value!r}")
-    return str(value)
+    value = contract.get("normalization_version") if isinstance(contract, Mapping) else None
+    if value != NORMALIZATION_VERSION:
+        raise ValueError(
+            "Clusterer feature_contract requires " f"normalization_version={NORMALIZATION_VERSION!r}, got {value!r}"
+        )
+    return NORMALIZATION_VERSION
 
 
 def _predict_class0_with_runtime(
@@ -3831,9 +3825,9 @@ class Clusterer:
                 f"observed={sorted(repr(value) for value in dataset_normalization_versions)}"
             )
         training_normalization_version = next(iter(dataset_normalization_versions))
-        if training_normalization_version not in VALID_NORMALIZATION_VERSIONS:
+        if training_normalization_version != NORMALIZATION_VERSION:
             raise ValueError(
-                "Clusterer.fit requires explicit valid dataset normalization provenance; "
+                f"Clusterer.fit requires dataset normalization_version={NORMALIZATION_VERSION!r}; "
                 f"observed={training_normalization_version!r}"
             )
         contract = getattr(self, "feature_contract", None)

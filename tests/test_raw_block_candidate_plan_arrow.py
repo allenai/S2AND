@@ -24,12 +24,11 @@ from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
-    build_linker_retrieval_batch_from_raw_candidate_plan,
     build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.runtime import (
     _merge_raw_arrow_planner_build_telemetry,
-    _raw_candidate_plan_seed_setup,
+    _seed_setup_from_component_members,
     subset_raw_candidate_plan_for_query_ids,
     subset_raw_plan_bundle_for_query_ids,
 )
@@ -133,12 +132,7 @@ def test_raw_candidate_plan_seed_setup_rejects_duplicate_seed_signature() -> Non
     raw_plan = {"component_members": {"c1": ["s1", "s2"], "c2": ["s1"]}}
 
     with pytest.raises(ValueError, match="assigns signature_id 's1' to multiple components"):
-        _raw_candidate_plan_seed_setup(raw_plan)
-
-
-def test_raw_candidate_plan_seed_setup_requires_component_members() -> None:
-    with pytest.raises(ValueError, match="must include component_members"):
-        _raw_candidate_plan_seed_setup({"row_component_keys": ["c1"]})
+        _seed_setup_from_component_members(raw_plan["component_members"])
 
 
 def test_raw_candidate_plan_schema_requires_component_members() -> None:
@@ -146,14 +140,14 @@ def test_raw_candidate_plan_schema_requires_component_members() -> None:
     raw_plan.pop("component_members")
 
     with pytest.raises(KeyError, match="component_members"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(raw_plan)
+        RawArrowPlanBundle.from_mapping(raw_plan)
 
 
 def test_raw_candidate_plan_schema_rejects_non_mapping_component_members() -> None:
     raw_plan = _minimal_raw_candidate_plan(component_members=[])
 
     with pytest.raises(ValueError, match="component_members must be a mapping"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(raw_plan)
+        RawArrowPlanBundle.from_mapping(raw_plan)
 
 
 def _fnv64_bytes(value: bytes) -> int:
@@ -1736,6 +1730,7 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
         orcid_enabled=False,
         num_threads=1,
     )
+    assert subset_plan.keys() == raw_plan.keys()
     for key in (
         "query_signature_ids",
         "query_views",
@@ -1886,8 +1881,8 @@ def test_raw_arrow_candidate_plan_bridge_maps_signature_ids_to_linker_indices(tm
         orcid_enabled=False,
         num_threads=1,
     )
-    retrieval_batch = build_linker_retrieval_batch_from_raw_candidate_plan(
-        raw_plan,
+    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
+        RawArrowPlanBundle.from_mapping(raw_plan),
         signature_id_to_index={"q1": 7, "s1": 11, "s2": 13},
     )
 
@@ -1985,7 +1980,7 @@ def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest
     assert retrieval_batch.row_signals["cluster_size"].tolist() == pytest.approx([3.0])
 
 
-def test_raw_arrow_plan_bundle_owns_plan_used_by_subset_consumer() -> None:
+def test_raw_arrow_plan_bundle_owns_typed_values_used_by_subset_consumer() -> None:
     raw_plan = _minimal_raw_candidate_plan(
         row_count=1,
         pair_count=1,
@@ -2011,16 +2006,18 @@ def test_raw_arrow_plan_bundle_owns_plan_used_by_subset_consumer() -> None:
     subset_bundle = subset_raw_plan_bundle_for_query_ids(bundle, ["q0"])
 
     assert subset_bundle.query_signature_ids == ("q0",)
-    assert subset_bundle.plan["row_component_keys"] == ("c0",)
-    assert subset_bundle.plan["left_signature_ids"] == ("q0",)
-    assert subset_bundle.plan["right_signature_ids"] == ("s0",)
-    assert subset_bundle.plan["component_members"]["c0"] == ("s0",)
-    assert subset_bundle.plan["telemetry"]["seed_signature_count"] == 1
-    assert subset_bundle.plan["telemetry"]["timings"]["total_secs"] == pytest.approx(0.5)
+    assert not hasattr(subset_bundle, "plan")
+    assert subset_bundle.row_component_keys == ("c0",)
+    assert subset_bundle.left_signature_ids == ("q0",)
+    assert subset_bundle.right_signature_ids == ("s0",)
+    assert subset_bundle.component_members["c0"] == ("s0",)
+    assert subset_bundle.telemetry is not None
+    assert subset_bundle.telemetry["seed_signature_count"] == 1
+    assert subset_bundle.telemetry["timings"]["total_secs"] == pytest.approx(0.5)
 
     mutable_plan = subset_bundle.to_mutable_mapping()
     mutable_plan["component_members"]["c0"][0] = "mutated-copy"
-    assert subset_bundle.plan["component_members"]["c0"] == ("s0",)
+    assert subset_bundle.component_members["c0"] == ("s0",)
 
 
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:

@@ -357,7 +357,6 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
             expected_normalization_version=NORMALIZATION_VERSION,
             clusters=str(DUMMY_DIR / "clusters.json"),
             block_type="s2",
-            preprocess=True,
             random_seed=42,
             n_jobs=1,
         )
@@ -442,7 +441,6 @@ def test_arrow_ingestion_canonicalizes_specter2_alias_paths(training_bundle: dic
         expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         block_type="s2",
-        preprocess=True,
         random_seed=42,
         n_jobs=1,
     )
@@ -468,7 +466,6 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
         expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
         block_type="s2",
-        preprocess=True,
         random_seed=42,
         n_jobs=1,
     )
@@ -543,7 +540,6 @@ def test_featurize_end_to_end_with_fixed_pairs(
         "dummy_arrow_fixed_pairs",
         expected_normalization_version=NORMALIZATION_VERSION,
         block_type="s2",
-        preprocess=True,
         random_seed=42,
         n_jobs=1,
         **pair_kwargs,

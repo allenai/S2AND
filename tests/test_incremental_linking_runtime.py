@@ -31,7 +31,7 @@ from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
-    build_linker_retrieval_batch_from_raw_candidate_plan,
+    build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.runtime import (
     CandidateBatchPairwiseModelResult,
@@ -194,13 +194,11 @@ def test_distance_row_signals_distinguish_top3_and_top5_means() -> None:
 def test_raw_candidate_plan_telemetry_preserves_seed_counts_for_window_reuse() -> None:
     fields = runtime_module._raw_candidate_plan_telemetry_fields(  # noqa: SLF001
         {
-            "telemetry": {
-                "window_plan_reused": 1,
-                "signature_count": 9,
-                "seed_signature_count": 4,
-                "cluster_count": 2,
-                "timings": {"total_secs": 0.5},
-            }
+            "window_plan_reused": 1,
+            "signature_count": 9,
+            "seed_signature_count": 4,
+            "cluster_count": 2,
+            "timings": {"total_secs": 0.5},
         }
     )
 
@@ -271,8 +269,8 @@ def test_raw_candidate_plan_rejects_legacy_numeric_pair_indices() -> None:
     raw_plan = _minimal_raw_candidate_plan(left_signature_indices=np.asarray([0], dtype=np.uint32))
 
     with pytest.raises(ValueError, match="legacy numeric pair indices"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(
-            raw_plan,
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(raw_plan),
             signature_id_to_index={"q0": 0, "s1": 1},
         )
 
@@ -281,8 +279,8 @@ def test_raw_candidate_plan_rejects_pair_left_id_that_disagrees_with_row_query()
     raw_plan = _minimal_raw_candidate_plan(left_signature_ids=["other-query"])
 
     with pytest.raises(ValueError, match="left_signature_ids must match"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(
-            raw_plan,
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(raw_plan),
             signature_id_to_index={"q0": 0, "other-query": 1, "s1": 2},
         )
 
@@ -291,8 +289,8 @@ def test_raw_candidate_plan_rejects_row_query_index_outside_query_count() -> Non
     raw_plan = _minimal_raw_candidate_plan(row_query_signature_indices=np.asarray([1], dtype=np.uint32))
 
     with pytest.raises(ValueError, match="row_query_signature_indices.*query_signature_ids length=1"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(
-            raw_plan,
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(raw_plan),
             signature_id_to_index={"q0": 0, "s1": 1},
         )
 
@@ -319,15 +317,18 @@ def test_raw_candidate_plan_rejects_invalid_retrieval_rank(retrieval_rank: int) 
         raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
 
     with pytest.raises(ValueError, match="retrieval_ranks"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(raw_plan, signature_id_to_index={"q0": 0, "s1": 1})
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(raw_plan),
+            signature_id_to_index={"q0": 0, "s1": 1},
+        )
 
 
 def test_raw_candidate_plan_rejects_invalid_uint8_flag() -> None:
     raw_plan = _minimal_raw_candidate_plan(row_query_year_missing=[-1])
 
     with pytest.raises(ValueError, match="row_query_year_missing.*non-0/1"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(
-            raw_plan,
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(raw_plan),
             signature_id_to_index={"q0": 0, "s1": 1},
         )
 

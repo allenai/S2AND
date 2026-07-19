@@ -10,9 +10,8 @@ Policy:
   canonical tokens: apostrophe-like marks deleted, dash-like characters uniform
   separators, transliterated). Aliases are complete first-name strings, so the
   first/middle split does not apply.
-- Pairs are emitted symmetrically (both directions), deduplicated, and sorted.
-  ``insert_name_tuple_alias`` in s2and_rust/src/ingest_dataset.rs is directional
-  and relies on both directions being present.
+- Each unordered pair is emitted once with its fields in lexicographic order.
+  Consumers construct any symmetric runtime lookup when loading the artifact.
 - Pairs that collapse to identity or become prefix-compatible under
   ``same_prefix_tokens`` are dropped: the runtime checks prefix compatibility
   before consulting tuples, so such entries are dead weight.
@@ -21,7 +20,7 @@ Usage:
     uv run python scripts/production/generate_canonical_name_tuples.py [--output PATH]
 
 Default output is ``s2and/data/s2and_name_tuples_canonical.txt`` with a JSON
-provenance sidecar under the strict ``s2and_name_tuples_v1`` contract. Data is
+provenance sidecar under the strict ``s2and_name_tuples_v2`` contract. Data is
 replaced first and the fsynced sidecar last as the generation commit marker.
 Ship both in the same release unit as the other canonical_v2 artifacts; the
 loader keeps the "name1,name2" line format. Generate into an offline staging
@@ -42,7 +41,7 @@ from pathlib import Path
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import _PACKAGE_DATA_DIR
 from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
-from s2and.text import canonicalize_name_text, same_prefix_tokens
+from s2and.text import canonical_name_tuple_pair, canonicalize_name_text, same_prefix_tokens
 
 SOURCE_FILENAME = "s2and_unnormalized_filtered_name_tuples.txt"
 DEFAULT_OUTPUT_FILENAME = "s2and_name_tuples_canonical.txt"
@@ -99,8 +98,7 @@ def regenerate(source_path: str, output_path: str) -> dict:
         if same_prefix_tokens(name_a, name_b):
             dropped_prefix_compatible += 1
             continue
-        canonical_pairs.add((name_a, name_b))
-        canonical_pairs.add((name_b, name_a))
+        canonical_pairs.add(canonical_name_tuple_pair(name_a, name_b))
 
     ordered_pairs = sorted(canonical_pairs)
     data_bytes = "".join(f"{name_a},{name_b}\n" for name_a, name_b in ordered_pairs).encode("utf-8")
@@ -109,8 +107,7 @@ def regenerate(source_path: str, output_path: str) -> dict:
         source_bytes=source_bytes,
         data_filename=output.name,
         data_bytes=data_bytes,
-        directed_pair_count=len(ordered_pairs),
-        unordered_pair_count=len(ordered_pairs) // 2,
+        pair_count=len(ordered_pairs),
         generated_at=datetime.datetime.now(datetime.UTC).isoformat(),
         input_pair_count=len(raw_pairs),
         dropped_identity=dropped_identity,

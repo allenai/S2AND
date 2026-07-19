@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from s2and.consts import NORMALIZATION_VERSION_LEGACY_COMPAT, VALID_NORMALIZATION_VERSIONS
+from s2and.consts import NORMALIZATION_VERSION
 
 
 @dataclass(frozen=True)
@@ -321,8 +321,11 @@ def _verified_arrow_artifact_manifest(
     if not isinstance(manifest, Mapping):
         raise ValueError(f"Arrow artifact manifest must be a JSON object: {manifest_path}")
     normalization_version = manifest.get("normalization_version")
-    if normalization_version is not None and normalization_version not in VALID_NORMALIZATION_VERSIONS:
-        raise ValueError(f"Arrow artifact manifest normalization_version is invalid: {normalization_version!r}")
+    if normalization_version is not None and normalization_version != NORMALIZATION_VERSION:
+        raise ValueError(
+            f"Arrow artifact manifest normalization_version is invalid: {normalization_version!r}; "
+            f"expected {NORMALIZATION_VERSION!r}"
+        )
     generation = manifest.get("artifact_generation")
     if generation is None:
         return None
@@ -465,17 +468,16 @@ def _name_counts_index_error(path: Path) -> str | None:
             f"{manifest_path} (unsupported schema_version {schema_version!r}; "
             f"expected {NAME_COUNTS_INDEX_SCHEMA_VERSION!r})"
         )
-    normalization_version = manifest.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
-    if normalization_version not in VALID_NORMALIZATION_VERSIONS:
+    normalization_version = manifest.get("normalization_version")
+    if normalization_version != NORMALIZATION_VERSION:
         return (
             f"{manifest_path} (invalid normalization_version {normalization_version!r}; "
-            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)})"
+            f"expected {NORMALIZATION_VERSION!r})"
         )
     source_provenance = manifest.get("source_provenance")
-    strict_integrity = isinstance(source_provenance, Mapping)
-    if not strict_integrity and normalization_version != NORMALIZATION_VERSION_LEGACY_COMPAT:
+    if not isinstance(source_provenance, Mapping):
         return f"{manifest_path} (missing source_provenance mapping)"
-    if strict_integrity and source_provenance.get("normalization_version") != normalization_version:
+    if source_provenance.get("normalization_version") != normalization_version:
         return f"{manifest_path} (source_provenance normalization_version mismatch)"
     files = manifest.get("files")
     if not isinstance(files, Mapping):
@@ -501,12 +503,12 @@ def _name_counts_index_error(path: Path) -> str | None:
         byte_count = entry.get("byte_count")
         if isinstance(byte_count, int) and file_stat.st_size != byte_count:
             return f"{resolved} (files.{file_key}.byte_count mismatch)"
-        if strict_integrity and (not isinstance(byte_count, int) or byte_count < 0):
+        if not isinstance(byte_count, int) or byte_count < 0:
             return f"{manifest_path} (missing files.{file_key}.byte_count)"
         expected_sha256 = entry.get("sha256")
-        if strict_integrity and (not isinstance(expected_sha256, str) or len(expected_sha256) != 64):
+        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
             return f"{manifest_path} (missing files.{file_key}.sha256)"
-        if strict_integrity and not (resolved.parent / ".published").is_file():
+        if not (resolved.parent / ".published").is_file():
             return f"{resolved.parent / '.published'} (missing published-generation marker)"
         verified_files.append(
             (
@@ -529,8 +531,6 @@ def _name_counts_index_error(path: Path) -> str | None:
         for file_stat in (resolved.stat(),)
     )
     for resolved, expected_sha256, expected_bytes in verified_files:
-        if not strict_integrity:
-            continue
         token = _stable_file_digest_token(resolved)
         if token[1] != expected_bytes or token[3] != expected_sha256:
             return f"{resolved} (declared SHA-256 mismatch)"
@@ -568,17 +568,15 @@ def _name_counts_index_error(path: Path) -> str | None:
 def read_name_counts_index_normalization_version(path: Any) -> str:
     """Read the normalization_version recorded in a name_counts_index/ manifest.
 
-    An absent field means the artifact predates the normalization contract and is
-    treated as "legacy_compat". Invalid tokens raise ValueError.
+    Only the package's current canonical normalization contract is executable.
     """
 
     manifest_path = Path(os.fspath(path)) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    value = manifest.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
-    if value not in VALID_NORMALIZATION_VERSIONS:
+    value = manifest.get("normalization_version")
+    if value != NORMALIZATION_VERSION:
         raise ValueError(
-            f"{manifest_path} has invalid normalization_version {value!r}; "
-            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
+            f"{manifest_path} has invalid normalization_version {value!r}; " f"expected {NORMALIZATION_VERSION!r}"
         )
     return str(value)
 
@@ -610,14 +608,11 @@ def _require_name_counts_index_normalization(
 
 
 def require_normalization_version(value: Any, *, context: str) -> str:
-    """Return an explicitly declared, supported normalization version."""
+    """Return the explicitly declared canonical normalization version."""
 
-    if not isinstance(value, str) or value not in VALID_NORMALIZATION_VERSIONS:
-        raise ValueError(
-            f"{context} requires normalization_version to be one of "
-            f"{sorted(VALID_NORMALIZATION_VERSIONS)}, got {value!r}"
-        )
-    return value
+    if value != NORMALIZATION_VERSION:
+        raise ValueError(f"{context} requires normalization_version={NORMALIZATION_VERSION!r}, got {value!r}")
+    return NORMALIZATION_VERSION
 
 
 def require_feature_contract_normalization_version(owner: Any, *, context: str) -> str:

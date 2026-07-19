@@ -528,7 +528,6 @@ def _single_run(
                     val_pairs_size=N_VAL_TEST_SIZE,
                     test_pairs_size=N_VAL_TEST_SIZE,
                     n_jobs=n_jobs,
-                    preprocess=PREPROCESS,
                     random_seed=random_seed,
                     name_tuples="filtered",
                 )

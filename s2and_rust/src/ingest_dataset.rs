@@ -675,8 +675,8 @@ pub(crate) fn default_name_tuples_path(py: Python<'_>) -> PyResult<String> {
     path_obj.call_method0("as_posix")?.extract()
 }
 
-const NAME_TUPLE_ARTIFACT_SCHEMA_VERSION: &str = "s2and_name_tuples_v1";
-const NAME_TUPLE_ARTIFACT_VERSION: u64 = 1;
+const NAME_TUPLE_ARTIFACT_SCHEMA_VERSION: &str = "s2and_name_tuples_v2";
+const NAME_TUPLE_ARTIFACT_VERSION: u64 = 2;
 const NAME_TUPLE_NORMALIZATION_VERSION: &str = "canonical_v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,8 +687,7 @@ struct NameTupleArtifactIdentity {
     data_filename: String,
     data_sha256: String,
     data_size_bytes: u64,
-    directed_pair_count: u64,
-    unordered_pair_count: u64,
+    pair_count: u64,
     source_filename: String,
     source_sha256: String,
     source_size_bytes: u64,
@@ -922,22 +921,15 @@ fn validated_name_tuple_artifact(
             format!("data SHA-256 mismatch: metadata={data_sha256} actual={actual_sha256}"),
         ));
     }
-    let directed_pair_count = required_name_tuple_u64(
-        data.get("directed_pair_count"),
-        "data.directed_pair_count",
-        &metadata_path,
-    )?;
-    let unordered_pair_count = required_name_tuple_u64(
-        data.get("unordered_pair_count"),
-        "data.unordered_pair_count",
-        &metadata_path,
-    )?;
+    let pair_count =
+        required_name_tuple_u64(data.get("pair_count"), "data.pair_count", &metadata_path)?;
 
     let expected_semantics = serde_json::json!({
         "encoding": "utf-8",
         "line_format": "name_a,name_b",
         "row_order": "lexicographic_by_fields_unique",
-        "directionality": "symmetric_directed_rows",
+        "pair_order": "name_a_lexicographically_less_than_name_b",
+        "directionality": "canonical_unordered_rows",
         "runtime_pair_semantics": "unordered",
         "canonicalizer": "canonicalize_name_text",
         "drop_identity": true,
@@ -972,7 +964,7 @@ fn validated_name_tuple_artifact(
     })?;
     let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
     let mut previous: Option<(&str, &str)> = None;
-    let mut actual_directed_pair_count = 0usize;
+    let mut actual_pair_count = 0usize;
     for (line_index, line) in text.lines().enumerate() {
         let mut fields = line.split(',');
         let first_a = fields.next().unwrap_or_default();
@@ -1009,6 +1001,13 @@ fn validated_name_tuple_artifact(
                 line_index + 1
             )));
         }
+        if first_a > first_b {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid name tuple field order at {}:{}: name_a must be lexicographically less than name_b",
+                effective_path.display(),
+                line_index + 1
+            )));
+        }
         if same_prefix_tokens(first_a, first_b) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "invalid prefix-compatible name tuple at {}:{}",
@@ -1016,48 +1015,15 @@ fn validated_name_tuple_artifact(
                 line_index + 1
             )));
         }
-        // The artifact contract requires both directions as distinct sorted
-        // rows, so retain the directional representation while validating.
-        // Once reverse completeness is proven below, this is already the
-        // symmetric runtime map and needs no second relation allocation.
-        aliases
-            .entry(first_a.to_string())
-            .or_default()
-            .insert(first_b.to_string());
-        actual_directed_pair_count += 1;
+        insert_name_tuple_alias(&mut aliases, first_a.to_string(), first_b.to_string());
+        actual_pair_count += 1;
     }
-    if actual_directed_pair_count as u64 != directed_pair_count {
+    if actual_pair_count as u64 != pair_count {
         return Err(name_tuple_value_error(
             &metadata_path,
             format!(
-                "directed_pair_count mismatch: metadata={directed_pair_count} actual={}",
-                actual_directed_pair_count
-            ),
-        ));
-    }
-    for (first_a, aliases_for_first) in &aliases {
-        for first_b in aliases_for_first {
-            if !aliases
-                .get(first_b)
-                .is_some_and(|reverse_aliases| reverse_aliases.contains(first_a))
-            {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "name tuple artifact {} is missing reverse row {:?},{:?}",
-                    effective_path.display(),
-                    first_b,
-                    first_a
-                )));
-            }
-        }
-    }
-    if actual_directed_pair_count % 2 != 0
-        || (actual_directed_pair_count / 2) as u64 != unordered_pair_count
-    {
-        return Err(name_tuple_value_error(
-            &metadata_path,
-            format!(
-                "unordered_pair_count mismatch: metadata={unordered_pair_count} actual={}",
-                actual_directed_pair_count / 2
+                "pair_count mismatch: metadata={pair_count} actual={}",
+                actual_pair_count
             ),
         ));
     }
@@ -1068,8 +1034,7 @@ fn validated_name_tuple_artifact(
         data_filename,
         data_sha256,
         data_size_bytes,
-        directed_pair_count,
-        unordered_pair_count,
+        pair_count,
         source_filename,
         source_sha256,
         source_size_bytes,
@@ -1105,8 +1070,7 @@ pub(crate) fn read_name_tuple_artifact_identity(
     output.set_item("data_filename", identity.data_filename)?;
     output.set_item("data_sha256", identity.data_sha256)?;
     output.set_item("data_size_bytes", identity.data_size_bytes)?;
-    output.set_item("directed_pair_count", identity.directed_pair_count)?;
-    output.set_item("unordered_pair_count", identity.unordered_pair_count)?;
+    output.set_item("pair_count", identity.pair_count)?;
     output.set_item("source_filename", identity.source_filename)?;
     output.set_item("source_sha256", identity.source_sha256)?;
     output.set_item("source_size_bytes", identity.source_size_bytes)?;
@@ -1182,7 +1146,7 @@ mod name_counts_empty_surname_tests {
                 .expect("write index header");
         }
         let manifest = concat!(
-            r#"{"schema_version":"name_counts_index_v1","files":{"#,
+            r#"{"schema_version":"name_counts_index_v1","normalization_version":"canonical_v2","files":{"#,
             r#""first":{"path":"first.bin"},"last":{"path":"last.bin"},"#,
             r#""first_last":{"path":"first_last.bin"},"#,
             r#""last_first_initial":{"path":"last_first_initial.bin"}}}"#,
@@ -1292,18 +1256,12 @@ mod name_tuple_artifact_tests {
         ))
     }
 
-    fn write_artifact(
-        py: Python<'_>,
-        path: &Path,
-        data: &str,
-        directed_pair_count: u64,
-        unordered_pair_count: u64,
-    ) {
+    fn write_artifact(py: Python<'_>, path: &Path, data: &str, pair_count: u64) {
         let digest = python_sha256_hex(py, data.as_bytes()).expect("hash fixture");
         fs::write(path, data).expect("write tuple fixture");
         let metadata = serde_json::json!({
-            "schema_version": "s2and_name_tuples_v1",
-            "artifact_version": 1,
+            "schema_version": "s2and_name_tuples_v2",
+            "artifact_version": 2,
             "normalization_version": "canonical_v2",
             "generated_at": "2026-07-10T00:00:00+00:00",
             "source": {
@@ -1315,14 +1273,14 @@ mod name_tuple_artifact_tests {
                 "filename": path.file_name().unwrap().to_str().unwrap(),
                 "sha256": digest,
                 "size_bytes": data.len(),
-                "directed_pair_count": directed_pair_count,
-                "unordered_pair_count": unordered_pair_count,
+                "pair_count": pair_count,
             },
             "semantics": {
                 "encoding": "utf-8",
                 "line_format": "name_a,name_b",
                 "row_order": "lexicographic_by_fields_unique",
-                "directionality": "symmetric_directed_rows",
+                "pair_order": "name_a_lexicographically_less_than_name_b",
+                "directionality": "canonical_unordered_rows",
                 "runtime_pair_semantics": "unordered",
                 "canonicalizer": "canonicalize_name_text",
                 "drop_identity": true,
@@ -1373,12 +1331,12 @@ mod name_tuple_artifact_tests {
                 "s2and-valid-name-tuples-{}.txt",
                 std::process::id()
             ));
-            write_artifact(py, &valid, "alice,ally\nally,alice\n", 2, 1);
+            write_artifact(py, &valid, "alice,ally\n", 1);
             let aliases = load_name_tuples_from_text_path(py, valid.to_str())
                 .expect("valid strict artifact loads");
             assert!(aliases.get("alice").unwrap().contains("ally"));
             assert!(aliases.get("ally").unwrap().contains("alice"));
-            fs::write(&valid, "alica,ally\nally,alice\n").expect("tamper tuple fixture");
+            fs::write(&valid, "alica,ally\n").expect("tamper tuple fixture");
             let tamper_error = load_name_tuples_from_text_path(py, valid.to_str())
                 .expect_err("tampered tuple bytes must fail");
             assert!(tamper_error
@@ -1393,7 +1351,7 @@ mod name_tuple_artifact_tests {
                 "s2and-invalid-name-tuples-{}.txt",
                 std::process::id()
             ));
-            write_artifact(py, &invalid, "alice,bob,carol\n", 1, 0);
+            write_artifact(py, &invalid, "alice,bob,carol\n", 1);
             let invalid_error = load_name_tuples_from_text_path(py, invalid.to_str())
                 .expect_err("invalid tuple rows must fail");
             remove_artifact(&invalid);
@@ -1403,6 +1361,21 @@ mod name_tuple_artifact_tests {
                 .unwrap()
                 .to_string()
                 .contains("expected two nonempty fields"));
+
+            let reversed = std::env::temp_dir().join(format!(
+                "s2and-reversed-name-tuples-{}.txt",
+                std::process::id()
+            ));
+            write_artifact(py, &reversed, "ally,alice\n", 1);
+            let reversed_error = load_name_tuples_from_text_path(py, reversed.to_str())
+                .expect_err("reversed tuple fields must fail");
+            remove_artifact(&reversed);
+            assert!(reversed_error
+                .value(py)
+                .str()
+                .unwrap()
+                .to_string()
+                .contains("name_a must be lexicographically less than name_b"));
         });
     }
 }

@@ -1,6 +1,5 @@
 import json
 import unittest
-from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
@@ -10,7 +9,6 @@ import pytest
 import s2and.data as data_module
 from s2and.data import ANDData
 from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
-from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
 from tests.helpers import tiny_name_counts_provenance
 
 
@@ -143,8 +141,7 @@ def test_name_tuple_loader_rejects_invalid_rows_with_valid_binding_metadata(
         source_bytes=b"source\n",
         data_filename="invalid.txt",
         data_bytes=data_bytes,
-        directed_pair_count=1,
-        unordered_pair_count=0,
+        pair_count=1,
         generated_at="2026-07-10T00:00:00+00:00",
         input_pair_count=1,
         dropped_identity=0,
@@ -202,62 +199,29 @@ def test_signature_full_name_uses_only_canonical_fields() -> None:
     assert dataset.papers["1"].title_ngrams_words["1"] == 1
 
 
-def test_anddata_passes_arrow_featurization_to_rust_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        data_module,
-        "build_runtime_context",
-        lambda _operation, **_kwargs: SimpleNamespace(
-            backend="rust",
-            run_id="test-run",
-        ),
-    )
-
-    def _capture_lifecycle_policy(**kwargs: Any):
-        captured.update(kwargs)
-        return PYTHON_ONLY_POLICY
-
-    monkeypatch.setattr(data_module, "build_rust_lifecycle_policy", _capture_lifecycle_policy)
-
-    ANDData(
-        signatures={
-            "s1": {
-                "signature_id": "s1",
-                "paper_id": 1,
-                "author_info": {
-                    "position": 0,
-                    "block": "a lovelace",
-                    "first": "Ada",
-                    "middle": "",
-                    "last": "Lovelace",
-                    "suffix": None,
-                    "email": None,
-                    "affiliations": [],
-                },
-            }
-        },
-        papers={
-            "1": {
-                "paper_id": 1,
-                "title": "Notes",
-                "abstract": "",
-                "journal_name": "",
-                "venue": "",
-                "year": 1843,
-                "authors": [{"position": 0, "author_name": "Ada Lovelace"}],
-                "references": [],
-            }
-        },
-        name="rust_lifecycle_capability",
-        mode="inference",
-        name_counts_index=None,
-        preprocess=False,
-        name_tuples=set(),
-        rust_arrow_featurization=True,
-    )
-
-    assert captured["backend"] == "rust"
-    assert captured["arrow_featurization"] is True
+@pytest.mark.parametrize(
+    ("mode", "preprocess"),
+    [
+        ("inference", True),
+        ("train", False),
+    ],
+)
+def test_anddata_rejects_arrow_featurization_outside_fixed_training_route(
+    mode: str,
+    preprocess: bool,
+) -> None:
+    with pytest.raises(ValueError, match="requires mode='train' and preprocess=True"):
+        ANDData(
+            signatures={},
+            papers={},
+            clusters={} if mode == "train" else None,
+            name="invalid_arrow_training_route",
+            mode=mode,
+            name_counts_index=None,
+            preprocess=preprocess,
+            name_tuples=set(),
+            rust_arrow_featurization=True,
+        )
 
 
 class TestData(unittest.TestCase):

@@ -20,7 +20,6 @@ from s2and.arrow_inputs import (
 from s2and.consts import LARGE_DISTANCE, LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.array_validation import as_uint32_1d
 from s2and.incremental_linking.artifact import IncrementalLinkingArtifact
 from s2and.incremental_linking.feature_block import (
     read_incremental_query_signatures_arrow,
@@ -51,8 +50,7 @@ from s2and.incremental_linking.policy import (
     resolve_load_name_counts_policy as _resolve_load_name_counts_policy,
 )
 from s2and.incremental_linking.retrieval import (
-    RAW_CANDIDATE_PLAN_PAIR_ID_KEYS,
-    RAW_CANDIDATE_PLAN_ROW_KEYS,
+    RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
     _query_author_for_retrieval_row_signal,
@@ -2000,9 +1998,8 @@ def _identity_seed_setup(
     return (normalized, recluster_map, inverse)
 
 
-def _raw_candidate_plan_telemetry_fields(raw_candidate_plan: Mapping[str, Any]) -> dict[str, int | float | str]:
-    telemetry = raw_candidate_plan.get("telemetry")
-    if not isinstance(telemetry, Mapping):
+def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) -> dict[str, int | float | str]:
+    if telemetry is None:
         return {}
     fields: dict[str, int | float | str] = {}
     window_plan_reused = bool(telemetry.get("window_plan_reused", 0))
@@ -2091,18 +2088,6 @@ def _merge_raw_arrow_planner_build_telemetry(
     telemetry["planner_seed_state_built"] = 1
 
 
-def _subset_sequence_or_array(values: Any, mask: np.ndarray) -> Any:
-    if isinstance(values, np.ndarray):
-        return values[mask]
-    return [value for value, keep in zip(values, mask, strict=True) if bool(keep)]
-
-
-def _slice_sequence_or_array(values: Any, start: int, stop: int) -> Any:
-    if isinstance(values, np.ndarray):
-        return values[start:stop]
-    return list(values[start:stop])
-
-
 def _zero_raw_plan_timings(telemetry: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(telemetry)
     timings = out.get("timings")
@@ -2130,9 +2115,10 @@ def subset_raw_plan_bundle_for_query_ids(
     raw-plan contract.
     """
 
-    raw_candidate_plan = raw_plan_bundle.plan
     requested_query_ids = tuple(str(signature_id) for signature_id in query_signature_ids)
-    plan_query_ids = tuple(str(signature_id) for signature_id in raw_candidate_plan["query_signature_ids"])
+    plan_query_ids = raw_plan_bundle.query_signature_ids
+    if not requested_query_ids:
+        raise ValueError("raw candidate plan query_signature_ids must be non-empty")
 
     def duplicate_ids(values: Sequence[str]) -> list[str]:
         seen: set[str] = set()
@@ -2143,9 +2129,6 @@ def subset_raw_plan_bundle_for_query_ids(
             seen.add(value)
         return sorted(duplicates)
 
-    duplicate_plan_query_ids = duplicate_ids(plan_query_ids)
-    if duplicate_plan_query_ids:
-        raise ValueError(f"raw candidate plan query_signature_ids must be unique: {duplicate_plan_query_ids[:10]}")
     duplicate_requested_query_ids = duplicate_ids(requested_query_ids)
     if duplicate_requested_query_ids:
         raise ValueError(f"requested query_signature_ids must be unique: {duplicate_requested_query_ids[:10]}")
@@ -2154,114 +2137,66 @@ def subset_raw_plan_bundle_for_query_ids(
     if missing:
         raise ValueError(f"raw candidate plan is missing requested query_signature_ids: {missing[:10]}")
 
-    old_query_offsets = np.asarray([query_offset_by_id[signature_id] for signature_id in requested_query_ids])
+    old_query_offsets = np.asarray(
+        [query_offset_by_id[signature_id] for signature_id in requested_query_ids],
+        dtype=np.uint32,
+    )
     old_to_new_query_offset = {
         int(old_query_offset): int(new_query_offset)
         for new_query_offset, old_query_offset in enumerate(old_query_offsets)
     }
-    row_query_offsets = as_uint32_1d(
-        "row_query_signature_indices",
-        raw_candidate_plan["row_query_signature_indices"],
-    )
-    pair_row_indices = as_uint32_1d("pair_row_indices", raw_candidate_plan["pair_row_indices"])
-    contiguous_query_offsets = len(old_query_offsets) > 0 and np.array_equal(
-        old_query_offsets,
-        np.arange(
-            int(old_query_offsets[0]),
-            int(old_query_offsets[0]) + len(old_query_offsets),
-            dtype=old_query_offsets.dtype,
-        ),
-    )
-    sorted_row_offsets = len(row_query_offsets) < 2 or bool(np.all(row_query_offsets[:-1] <= row_query_offsets[1:]))
-    sorted_pair_rows = len(pair_row_indices) < 2 or bool(np.all(pair_row_indices[:-1] <= pair_row_indices[1:]))
-    if contiguous_query_offsets and sorted_row_offsets and sorted_pair_rows:
-        old_query_start = int(old_query_offsets[0])
-        old_query_stop = old_query_start + len(old_query_offsets)
-        row_start = int(np.searchsorted(row_query_offsets, old_query_start, side="left"))
-        row_stop = int(np.searchsorted(row_query_offsets, old_query_stop, side="left"))
-        pair_start = int(np.searchsorted(pair_row_indices, row_start, side="left"))
-        pair_stop = int(np.searchsorted(pair_row_indices, row_stop, side="left"))
-
-        out = dict(raw_candidate_plan)
-        out["query_signature_ids"] = list(requested_query_ids)
-        out["query_views"] = [
-            raw_candidate_plan["query_views"][query_offset_by_id[signature_id]] for signature_id in requested_query_ids
-        ]
-        out["query_authors"] = [
-            raw_candidate_plan["query_authors"][query_offset_by_id[signature_id]]
-            for signature_id in requested_query_ids
-        ]
-        out["row_count"] = int(row_stop - row_start)
-        out["pair_count"] = int(pair_stop - pair_start)
-
-        for key in RAW_CANDIDATE_PLAN_ROW_KEYS:
-            if key == "row_query_signature_indices":
-                out[key] = (row_query_offsets[row_start:row_stop] - old_query_start).astype(np.uint32, copy=False)
-            else:
-                out[key] = _slice_sequence_or_array(raw_candidate_plan[key], row_start, row_stop)
-
-        out["pair_row_indices"] = (pair_row_indices[pair_start:pair_stop] - row_start).astype(np.uint32, copy=False)
-        for key in RAW_CANDIDATE_PLAN_PAIR_ID_KEYS:
-            out[key] = _slice_sequence_or_array(raw_candidate_plan[key], pair_start, pair_stop)
-
-        component_members = raw_candidate_plan.get("component_members")
-        if isinstance(component_members, Mapping):
-            out["component_members"] = {
-                str(component_key): list(members) for component_key, members in component_members.items()
-            }
-
-        telemetry = raw_candidate_plan.get("telemetry")
-        if isinstance(telemetry, Mapping):
-            out["telemetry"] = _zero_raw_plan_timings(telemetry) if zero_plan_timings else dict(telemetry)
-            out["telemetry"]["query_signature_count"] = int(len(requested_query_ids))
-            if len(plan_query_ids) != len(requested_query_ids):
-                out["telemetry"]["window_plan_reused"] = 1
-        return RawArrowPlanBundle.from_mapping(out)
-
-    row_mask = np.isin(row_query_offsets, old_query_offsets)
+    row_mask = np.isin(raw_plan_bundle.row_query_offsets, old_query_offsets)
     old_row_indices = np.flatnonzero(row_mask)
-    old_row_to_new = np.full(int(raw_candidate_plan["row_count"]), -1, dtype=np.int64)
+    old_row_to_new = np.full(raw_plan_bundle.row_count, -1, dtype=np.int64)
     old_row_to_new[old_row_indices] = np.arange(len(old_row_indices), dtype=np.int64)
-
-    pair_mask = old_row_to_new[pair_row_indices] >= 0
-
-    out = dict(raw_candidate_plan)
-    out["query_signature_ids"] = list(requested_query_ids)
-    out["query_views"] = [
-        raw_candidate_plan["query_views"][query_offset_by_id[signature_id]] for signature_id in requested_query_ids
-    ]
-    out["query_authors"] = [
-        raw_candidate_plan["query_authors"][query_offset_by_id[signature_id]] for signature_id in requested_query_ids
-    ]
-    out["row_count"] = int(len(old_row_indices))
-    out["pair_count"] = int(np.count_nonzero(pair_mask))
-
-    for key in RAW_CANDIDATE_PLAN_ROW_KEYS:
-        if key == "row_query_signature_indices":
-            out[key] = np.asarray(
-                [old_to_new_query_offset[int(value)] for value in row_query_offsets[row_mask]],
-                dtype=np.uint32,
-            )
-        else:
-            out[key] = _subset_sequence_or_array(raw_candidate_plan[key], row_mask)
-
-    out["pair_row_indices"] = old_row_to_new[pair_row_indices[pair_mask]].astype(np.uint32, copy=False)
-    for key in RAW_CANDIDATE_PLAN_PAIR_ID_KEYS:
-        out[key] = _subset_sequence_or_array(raw_candidate_plan[key], pair_mask)
-
-    component_members = raw_candidate_plan.get("component_members")
-    if isinstance(component_members, Mapping):
-        out["component_members"] = {
-            str(component_key): list(members) for component_key, members in component_members.items()
-        }
-
-    telemetry = raw_candidate_plan.get("telemetry")
-    if isinstance(telemetry, Mapping):
-        out["telemetry"] = _zero_raw_plan_timings(telemetry) if zero_plan_timings else dict(telemetry)
-        out["telemetry"]["query_signature_count"] = int(len(requested_query_ids))
+    pair_mask = old_row_to_new[raw_plan_bundle.pair_row_indices] >= 0
+    telemetry = (
+        None
+        if raw_plan_bundle.telemetry is None
+        else (
+            _zero_raw_plan_timings(raw_plan_bundle.telemetry) if zero_plan_timings else dict(raw_plan_bundle.telemetry)
+        )
+    )
+    if telemetry is not None:
+        telemetry["query_signature_count"] = int(len(requested_query_ids))
         if len(plan_query_ids) != len(requested_query_ids):
-            out["telemetry"]["window_plan_reused"] = 1
-    return RawArrowPlanBundle.from_mapping(out)
+            telemetry["window_plan_reused"] = 1
+
+    return RawArrowPlanBundle._from_normalized_values(
+        query_signature_ids=requested_query_ids,
+        query_views=tuple(
+            raw_plan_bundle.query_views[query_offset_by_id[signature_id]] for signature_id in requested_query_ids
+        ),
+        query_authors=tuple(
+            raw_plan_bundle.query_authors[query_offset_by_id[signature_id]] for signature_id in requested_query_ids
+        ),
+        seed_signature_ids=raw_plan_bundle.seed_signature_ids,
+        component_members=raw_plan_bundle.component_members,
+        telemetry=telemetry,
+        row_query_offsets=np.asarray(
+            [old_to_new_query_offset[int(value)] for value in raw_plan_bundle.row_query_offsets[row_mask]],
+            dtype=np.uint32,
+        ),
+        left_signature_ids=tuple(
+            value for value, keep in zip(raw_plan_bundle.left_signature_ids, pair_mask, strict=True) if bool(keep)
+        ),
+        right_signature_ids=tuple(
+            value for value, keep in zip(raw_plan_bundle.right_signature_ids, pair_mask, strict=True) if bool(keep)
+        ),
+        pair_row_indices=old_row_to_new[raw_plan_bundle.pair_row_indices[pair_mask]].astype(
+            np.uint32,
+            copy=False,
+        ),
+        row_component_keys=tuple(
+            value for value, keep in zip(raw_plan_bundle.row_component_keys, row_mask, strict=True) if bool(keep)
+        ),
+        retrieval_scores=raw_plan_bundle.retrieval_scores[row_mask],
+        retrieval_ranks=raw_plan_bundle.retrieval_ranks[row_mask],
+        normalized_row_signals={
+            signal_key: raw_plan_bundle.row_signals[signal_key][row_mask]
+            for _raw_key, signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
+        },
+    )
 
 
 def subset_raw_candidate_plan_for_query_ids(
@@ -2280,12 +2215,9 @@ def subset_raw_candidate_plan_for_query_ids(
     return bundle.to_mutable_mapping()
 
 
-def _raw_candidate_plan_seed_setup(
-    raw_candidate_plan: Mapping[str, Any],
+def _seed_setup_from_component_members(
+    component_members: Mapping[str, Sequence[str]],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
-    component_members = raw_candidate_plan.get("component_members")
-    if not isinstance(component_members, Mapping):
-        raise ValueError("raw candidate plan must include component_members")
     cluster_seeds_require: dict[str, str] = {}
     for component_key, members in component_members.items():
         for signature_id in members:
@@ -2302,13 +2234,10 @@ def _raw_candidate_plan_seed_setup(
     return _identity_seed_setup(cluster_seeds_require)
 
 
-def _raw_candidate_plan_query_placeholders(
-    raw_candidate_plan: Mapping[str, Any],
+def _query_placeholders_from_authors(
+    query_authors: Sequence[str],
     query_signature_ids: Sequence[str],
 ) -> tuple[SimpleNamespace, ...]:
-    query_authors = raw_candidate_plan.get("query_authors")
-    if not isinstance(query_authors, Sequence) or isinstance(query_authors, str | bytes):
-        raise ValueError("raw Arrow candidate plan must include query_authors")
     if len(query_authors) != len(query_signature_ids):
         raise ValueError(
             "raw Arrow candidate plan query_authors length must match query_signature_ids: "
@@ -2467,12 +2396,14 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         signature_id_to_index=featurizer_signature_id_to_index,
     )
     stage_start = time.perf_counter()
-    query_placeholders = _raw_candidate_plan_query_placeholders(raw_plan_bundle.plan, query_signature_id_strings)
-    seed_setup = _raw_candidate_plan_seed_setup(raw_plan_bundle.plan)
+    query_placeholders = _query_placeholders_from_authors(
+        raw_plan_bundle.query_authors,
+        query_signature_id_strings,
+    )
+    seed_setup = _seed_setup_from_component_members(raw_plan_bundle.component_members)
     seed_signature_count = sum(len(members) for members in seed_setup[2].values())
-    plan_telemetry = raw_plan_bundle.plan.get("telemetry")
-    if seed_signature_count == 0 and isinstance(plan_telemetry, Mapping):
-        seed_signature_count = int(plan_telemetry.get("seed_signature_count", 0) or 0)
+    if seed_signature_count == 0 and raw_plan_bundle.telemetry is not None:
+        seed_signature_count = int(raw_plan_bundle.telemetry.get("seed_signature_count", 0) or 0)
     seed_component_count = len(seed_setup[1])
     raw_arrow_signal_seconds = time.perf_counter() - stage_start
 
@@ -2496,7 +2427,7 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         cluster_seed_disallow_partner_ids=cluster_seed_disallow_partner_ids,
         cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
     )
-    raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.plan)
+    raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.telemetry)
     telemetry = {
         **result.telemetry,
         **raw_plan_telemetry_fields,

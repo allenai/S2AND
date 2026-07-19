@@ -45,7 +45,7 @@ from s2and.incremental_linking.features import LinkerFeatureMatrix
 from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
-    build_linker_retrieval_batch_from_raw_candidate_plan,
+    build_linker_retrieval_batch_from_raw_plan_bundle,
 )
 from s2and.incremental_linking.runtime import (
     CandidateBatchPairwiseModelResult,
@@ -1641,8 +1641,8 @@ def test_feature_block_signature_order_rejects_empty_raw_plan() -> None:
 def test_raw_candidate_plan_bridge_accepts_feature_block_signature_order() -> None:
     order = feature_block_signature_order_from_raw_candidate_plan(_raw_plan())
 
-    retrieval_batch = build_linker_retrieval_batch_from_raw_candidate_plan(
-        _raw_plan(),
+    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
+        RawArrowPlanBundle.from_mapping(_raw_plan()),
         feature_block_signature_order=order,
     )
 
@@ -1656,8 +1656,8 @@ def test_raw_candidate_plan_bridge_accepts_feature_block_signature_order() -> No
 
 def test_raw_candidate_plan_bridge_reports_missing_signature_id() -> None:
     with pytest.raises(KeyError, match="right_signature_ids contains signature_id not present"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(
-            _raw_plan(),
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(_raw_plan()),
             signature_id_to_index={"q": 0, "s1": 1, "s2": 2},
         )
 
@@ -2252,8 +2252,8 @@ def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
     import s2and.incremental_linking.runtime as runtime_module
 
     order = feature_block_signature_order_from_raw_candidate_plan(_raw_plan())
-    retrieval_batch = build_linker_retrieval_batch_from_raw_candidate_plan(
-        _raw_plan(),
+    retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
+        RawArrowPlanBundle.from_mapping(_raw_plan()),
         feature_block_signature_order=order,
     )
 
@@ -2336,7 +2336,7 @@ def test_raw_candidate_plan_bridge_rejects_missing_schema_version() -> None:
     del raw_plan["schema_version"]
 
     with pytest.raises(KeyError, match="schema_version"):
-        build_linker_retrieval_batch_from_raw_candidate_plan(
-            raw_plan,
+        build_linker_retrieval_batch_from_raw_plan_bundle(
+            RawArrowPlanBundle.from_mapping(raw_plan),
             feature_block_signature_order=feature_block_signature_order_from_raw_candidate_plan(_raw_plan()),
         )

@@ -24,18 +24,16 @@ HAS_RUST_IDENTITY, RUST_MODULE = import_s2and_rust()
 
 def _write_artifact(
     path: Path,
-    data: bytes = b"alice,ally\nally,alice\n",
+    data: bytes = b"alice,ally\n",
     *,
-    directed_pair_count: int = 2,
-    unordered_pair_count: int = 1,
+    pair_count: int = 1,
 ) -> dict:
     metadata = build_name_tuple_artifact_metadata(
         source_filename="source.txt",
         source_bytes=b"Alice,Ally\n",
         data_filename=path.name,
         data_bytes=data,
-        directed_pair_count=directed_pair_count,
-        unordered_pair_count=unordered_pair_count,
+        pair_count=pair_count,
         generated_at="2026-07-10T00:00:00+00:00",
         input_pair_count=1,
         dropped_identity=0,
@@ -51,8 +49,8 @@ def test_checked_in_canonical_name_tuple_identity_matches_unchanged_data() -> No
     artifact = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt")
 
     assert len(artifact.pairs) == 3684
-    assert artifact.identity.directed_pair_count == 7368
-    assert artifact.identity.data_sha256 == "8d05d28eb88c9b84b6f281765841ab5201b6ab829874b250a5fb69a3784dc9b7"
+    assert artifact.identity.pair_count == 3684
+    assert artifact.identity.data_sha256 == "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b"
     assert artifact.identity.source_sha256 == "68f0c70fcf138d08656eaa39e485ba0d513ce6da6ce1164a3cc8bb2c680430f2"
 
 
@@ -69,7 +67,7 @@ def test_packaged_artifact_cache_is_immutable_and_avoids_rehashing() -> None:
 
 def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path) -> None:
     artifact_path = tmp_path / "aliases.txt"
-    artifact_path.write_text("alice,ally\nally,alice\n", encoding="utf-8")
+    artifact_path.write_text("alice,ally\n", encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="aliases.txt.meta.json"):
         load_name_tuple_artifact(artifact_path)
 
@@ -77,7 +75,7 @@ def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path
     artifact = load_name_tuple_artifact(artifact_path)
     assert artifact.pairs == frozenset({("alice", "ally")})
 
-    artifact_path.write_bytes(b"alica,ally\nally,alice\n")
+    artifact_path.write_bytes(b"alica,ally\n")
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         load_name_tuple_artifact(artifact_path)
 
@@ -86,7 +84,7 @@ def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path
     ("mutation", "message"),
     [
         (lambda metadata: metadata.update(schema_version="unknown"), "schema_version"),
-        (lambda metadata: metadata["data"].update(directed_pair_count=4), "directed_pair_count mismatch"),
+        (lambda metadata: metadata["data"].update(pair_count=4), "pair_count mismatch"),
         (lambda metadata: metadata["semantics"].update(directionality="one_way"), "unsupported semantics"),
     ],
 )
@@ -104,16 +102,15 @@ def test_metadata_contract_rejects_schema_cardinality_and_semantic_drift(
         load_name_tuple_artifact(artifact_path)
 
 
-def test_loader_rejects_asymmetric_rows_even_with_matching_metadata(tmp_path: Path) -> None:
+def test_loader_rejects_noncanonical_field_order_even_with_matching_metadata(tmp_path: Path) -> None:
     artifact_path = tmp_path / "aliases.txt"
     _write_artifact(
         artifact_path,
-        b"alice,ally\nbob,robert\n",
-        directed_pair_count=2,
-        unordered_pair_count=1,
+        b"ally,alice\n",
+        pair_count=1,
     )
 
-    with pytest.raises(ValueError, match="missing reverse row"):
+    with pytest.raises(ValueError, match="name_a must be lexicographically less than name_b"):
         load_name_tuple_artifact(artifact_path)
 
 

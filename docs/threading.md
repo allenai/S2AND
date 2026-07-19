@@ -59,7 +59,8 @@ Conditions for the bypass:
 
 - The dataset is constructed by the fixed Rust-training constructor,
   `build_training_anddata_from_arrow(...)`.
-- `preprocess=True`.
+- The constructor pins `preprocess=True`; callers cannot select a partial
+  preprocessing lifecycle for this route.
 
 The constructor selects Rust explicitly and binds one immutable
 `dataset.arrow_paths` mapping. Classic `ANDData` construction remains on the

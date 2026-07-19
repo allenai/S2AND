@@ -33,11 +33,7 @@ from s2and.arrow_inputs import (  # noqa: E402
     _build_arrow_artifact_generation,
     require_name_counts_index_artifact,
 )
-from s2and.consts import (  # noqa: E402
-    NORMALIZATION_VERSION,
-    NORMALIZATION_VERSION_LEGACY_COMPAT,
-    VALID_NORMALIZATION_VERSIONS,
-)
+from s2and.consts import NORMALIZATION_VERSION  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1421,11 +1417,11 @@ def validate_arrow_dataset_manifest(
 ) -> dict[str, Any]:
     """Validate the generated Arrow tables and return compact audit metrics."""
 
-    manifest_normalization = manifest.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
-    if manifest_normalization not in VALID_NORMALIZATION_VERSIONS:
+    manifest_normalization = manifest.get("normalization_version")
+    if manifest_normalization != NORMALIZATION_VERSION:
         raise ValueError(
             f"manifest has invalid normalization_version {manifest_normalization!r}; "
-            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
+            f"expected {NORMALIZATION_VERSION!r}"
         )
     if not isinstance(manifest.get("paths"), Mapping):
         raise ValueError("manifest is missing paths")

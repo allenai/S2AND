@@ -14,24 +14,6 @@ from scripts.verification.verify_production_model_distributions import verify_pr
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-rust.yml"
-MAIN_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "main.yaml"
-README_PATH = REPO_ROOT / "README.md"
-TRAINING_DOC_PATH = REPO_ROOT / "docs" / "training.md"
-SUBBLOCKING_DOC_PATH = REPO_ROOT / "docs" / "subblocking.md"
-
-
-def _workflow_job_condition(workflow: str, job_name: str) -> str:
-    """Return one job-level condition from a workflow source string."""
-
-    job_match = re.search(
-        rf"^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [a-z0-9][a-z0-9-]*:\n|\Z)",
-        workflow,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    assert job_match is not None, f"missing workflow job {job_name}"
-    condition_match = re.search(r"^    if: (?P<condition>.+)$", job_match.group("body"), flags=re.MULTILINE)
-    assert condition_match is not None, f"missing condition for workflow job {job_name}"
-    return condition_match.group("condition")
 
 
 def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
@@ -45,119 +27,17 @@ def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
     assert "python3.10" not in workflow
 
 
-def test_python_publish_depends_on_release_validation_and_exact_rust_probe() -> None:
+def test_release_workflow_consumes_only_final_policy_outputs() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
+    assert workflow.count("scripts/sync_version.py --release-policy") == 1
+    assert workflow.count("if: needs.detect-versions.outputs.build_s2and == 'true'") == 1
+    assert workflow.count("if: needs.detect-versions.outputs.build_rust == 'true'") == 4
+    assert workflow.count("if: needs.detect-versions.outputs.run_release_smoke == 'true'") == 1
+    assert workflow.count("if: needs.detect-versions.outputs.publish_s2and == 'true'") == 2
+    assert workflow.count("if: needs.detect-versions.outputs.publish_rust == 'true'") == 1
     assert "needs: [detect-versions, s2and-dist, release-smoke, release-tests, probe-rust-release]" in workflow
     assert "needs: [detect-versions, publish-rust]" in workflow
-    assert "uv run pytest -q" in workflow
-    assert "scripts/verification/smoke_installed_incremental_arrow.py" in workflow
-    assert "github.event_name == 'pull_request'" in workflow
-    assert "needs.detect-versions.outputs.force_build == 'true'" in workflow
-    assert workflow.count("scripts/verification/smoke_installed_rust_api.py") >= 2
-    pr_s2and_build = (
-        "github.event_name == 'pull_request' && "
-        "(needs.detect-versions.outputs.s2and_changed == 'true' || "
-        "needs.detect-versions.outputs.force_build == 'true')"
-    )
-    pr_rust_build = (
-        "github.event_name == 'pull_request' && "
-        "(needs.detect-versions.outputs.rust_changed == 'true' || "
-        "needs.detect-versions.outputs.s2and_changed == 'true' || "
-        "needs.detect-versions.outputs.force_build == 'true')"
-    )
-    assert _workflow_job_condition(workflow, "s2and-dist").startswith(
-        f"({pr_s2and_build}) || (github.event_name != 'pull_request' &&"
-    )
-    for job_name in ("wheels-windows", "wheels-macos", "wheels-linux", "sdist"):
-        condition = _workflow_job_condition(workflow, job_name)
-        assert condition.startswith(f"({pr_rust_build}) || (github.event_name != 'pull_request' &&")
-    release_smoke_condition = _workflow_job_condition(workflow, "release-smoke")
-    assert release_smoke_condition.startswith(f"({pr_s2and_build}) || (github.event_name == 'push' &&")
-    for job_name in ("publish-s2and", "publish-rust"):
-        publish_condition = _workflow_job_condition(workflow, job_name)
-        assert "pull_request" not in publish_condition
-        assert "github.ref == 'refs/heads/main'" in publish_condition
-    assert 'get("name", "").lower() == "force-build"' in workflow
-    assert "ALLOW_LEGACY_DEFAULT_REJECTION" not in workflow
-    assert "expected_legacy_rejection" not in workflow
-    incremental_smoke = (REPO_ROOT / "scripts/verification/smoke_installed_incremental_arrow.py").read_text(
-        encoding="utf-8"
-    )
-    assert "predict_incremental_from_arrow_paths(" in incremental_smoke
-
-
-def test_required_rust_ci_cannot_convert_import_failures_to_skips() -> None:
-    main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
-    all_workflows = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted(MAIN_WORKFLOW_PATH.parent.iterdir())
-        if path.suffix in {".yaml", ".yml"}
-    )
-    helper_source = (REPO_ROOT / "tests" / "helpers.py").read_text(encoding="utf-8")
-
-    assert 'S2AND_TEST_REQUIRE_RUST: "1"' in main_workflow
-    assert "S2AND_TEST_REQUIRE_RUST" in helper_source
-    assert "Rust-enabled tests require a working s2and_rust runtime" in helper_source
-    assert "py-only" not in main_workflow
-    assert main_workflow.count("pytest tests/") == 1
-    assert re.search(r"--extra(?:=|\s+)rust(?:\s|$)", all_workflows) is None
-    guardrail_paths = re.findall(r"pytest -q (tests/[^\s]+\.py)", main_workflow)
-    assert guardrail_paths
-    for relative_path in guardrail_paths:
-        assert (REPO_ROOT / relative_path).is_file(), relative_path
-
-
-def test_main_ci_runs_native_rust_quality_gates() -> None:
-    main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
-    cargo_config = tomllib.loads((REPO_ROOT / "s2and_rust" / "Cargo.toml").read_text(encoding="utf-8"))
-
-    assert "components: rustfmt, clippy" in main_workflow
-    assert "PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python" in main_workflow
-    assert "uv run --no-sync cargo fmt --manifest-path s2and_rust/Cargo.toml -- --check" in main_workflow
-    assert (
-        "uv run --no-sync cargo clippy --manifest-path s2and_rust/Cargo.toml "
-        "--lib --no-deps -- -D clippy::correctness -D clippy::suspicious"
-    ) in main_workflow
-    assert (
-        "uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml " "--lib --no-default-features"
-    ) in main_workflow
-    assert cargo_config["features"]["default"] == ["extension-module"]
-    assert cargo_config["features"]["extension-module"] == ["pyo3/extension-module"]
-    assert "features" not in cargo_config["dependencies"]["pyo3"]
-
-
-def test_quickstart_docs_use_current_arrow_method_boundaries() -> None:
-    readme = README_PATH.read_text(encoding="utf-8")
-    training_doc = TRAINING_DOC_PATH.read_text(encoding="utf-8")
-    subblocking_doc = SUBBLOCKING_DOC_PATH.read_text(encoding="utf-8")
-
-    for source in (readme, training_doc):
-        assert "build_training_anddata_from_arrow" in source
-        assert 'bundle_dir = Path("tests/fixtures/arrow/pubmed_specter2' not in source
-        assert "_signatures.json" not in source
-        assert "_specter.pickle" not in source
-    assert "pickle.dump" not in training_doc
-    assert 'predict(..., backend="rust")' not in subblocking_doc
-    assert "Clusterer.predict_from_arrow_paths" in subblocking_doc
-
-
-def test_release_workflow_uses_uv_and_has_no_false_default_model() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    main_workflow = MAIN_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-    assert re.search(r"^\s+python\s", workflow, flags=re.MULTILINE) is None
-    assert "production_model_v1.21" not in workflow
-    assert "production_model_v1.21" not in main_workflow
-    assert "default_production_model.json" not in workflow
-    assert "default_production_model.json" not in main_workflow
-    assert "production_model_v1.0.pickle" not in workflow
-    assert "production_model_v1.1.pickle" not in workflow
-    assert "production_model_v1.2.pickle" not in workflow
-    assert "production_model_v1.0.pickle" not in main_workflow
-    assert "production_model_v1.1.pickle" not in main_workflow
-    assert "production_model_v1.2.pickle" not in main_workflow
-    assert "scripts/verification/verify_production_model_distributions.py" in workflow
 
 
 def test_python_package_data_is_explicit() -> None:

@@ -1,11 +1,4 @@
-"""normalization_version fail-fast contract (docs/normalization_migration_blocked.md, OD4).
-
-Model bundles record the normalization policy they were trained under in
-feature_contract["normalization_version"]; data artifacts record theirs in the
-name_counts_index/ manifest and the Arrow dataset manifest. Absent fields mean
-"legacy_compat" (pre-contract artifacts). Mismatches fail fast — there is no
-runtime compatibility mode.
-"""
+"""Single-mode canonical normalization contract."""
 
 from __future__ import annotations
 
@@ -17,22 +10,14 @@ import pytest
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
     read_name_counts_index_normalization_version,
+    require_feature_contract_normalization_version,
     require_name_counts_index_artifact,
-    validate_arrow_prediction_artifacts,
+    require_normalization_version,
 )
-from s2and.consts import (
-    NORMALIZATION_VERSION,
-    NORMALIZATION_VERSION_CANONICAL_V2,
-    NORMALIZATION_VERSION_LEGACY_COMPAT,
-    VALID_NORMALIZATION_VERSIONS,
-)
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.model import _resolve_clusterer_normalization_version
 from s2and.production_model import _require_bundle_normalization_version
-from tests.helpers import (
-    tiny_name_counts_provenance,
-    write_minimal_arrow_prediction_bundle,
-    write_test_arrow_artifact_manifest,
-)
+from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
 def _write_minimal_name_counts_index(root: Path, *, normalization_version: str | None) -> Path:
@@ -51,56 +36,26 @@ def _write_minimal_name_counts_index(root: Path, *, normalization_version: str |
     return index_dir
 
 
-def test_package_normalization_version_is_valid_token():
-    assert NORMALIZATION_VERSION in VALID_NORMALIZATION_VERSIONS
+def test_package_has_one_normalization_version() -> None:
+    assert NORMALIZATION_VERSION == "canonical_v2"
 
 
-def test_absent_manifest_field_defaults_to_legacy_compat(tmp_path):
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=None)
-    assert read_name_counts_index_normalization_version(index_dir) == NORMALIZATION_VERSION_LEGACY_COMPAT
-
-
-def test_explicit_manifest_field_is_read_back(tmp_path):
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION_CANONICAL_V2)
-    assert read_name_counts_index_normalization_version(index_dir) == NORMALIZATION_VERSION_CANONICAL_V2
-
-
-def test_invalid_manifest_token_is_rejected_by_reader(tmp_path):
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version="bogus_v9")
+@pytest.mark.parametrize("value", [None, "legacy_compat", "bogus_v9"])
+def test_name_count_manifest_reader_rejects_noncanonical_versions(tmp_path: Path, value: str | None) -> None:
+    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=value)
     with pytest.raises(ValueError, match="invalid normalization_version"):
         read_name_counts_index_normalization_version(index_dir)
 
 
-def test_invalid_manifest_token_fails_artifact_validation(tmp_path):
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version="bogus_v9")
+def test_name_count_manifest_reader_accepts_explicit_canonical_version(tmp_path: Path) -> None:
+    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION)
+    assert read_name_counts_index_normalization_version(index_dir) == NORMALIZATION_VERSION
+
+
+def test_legacy_manifest_fails_artifact_validation(tmp_path: Path) -> None:
+    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version="legacy_compat")
     with pytest.raises(MissingArrowArtifactError, match="invalid normalization_version"):
         require_name_counts_index_artifact(index_dir, context="test", producer_hint="test")
-
-
-def test_prediction_validation_rejects_artifact_model_version_mismatch(tmp_path):
-    paths = write_minimal_arrow_prediction_bundle(tmp_path)
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT)
-    paths["name_counts_index"] = str(index_dir)
-    manifest_path = write_test_arrow_artifact_manifest(tmp_path, paths)
-
-    with pytest.raises(MissingArrowArtifactError, match="normalization_version mismatch"):
-        validate_arrow_prediction_artifacts(
-            paths,
-            require_specter=False,
-            require_name_counts_index=True,
-            expected_normalization_version=NORMALIZATION_VERSION_CANONICAL_V2,
-        )
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["normalization_version"] = NORMALIZATION_VERSION_LEGACY_COMPAT
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    validated = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=False,
-        require_name_counts_index=True,
-        expected_normalization_version=NORMALIZATION_VERSION_LEGACY_COMPAT,
-    )
-    assert validated.normalization_version == NORMALIZATION_VERSION_LEGACY_COMPAT
 
 
 class _ContractOnly:
@@ -108,42 +63,43 @@ class _ContractOnly:
         self.feature_contract = feature_contract
 
 
-def test_clusterer_resolution_defaults_and_validates():
-    assert _resolve_clusterer_normalization_version(_ContractOnly({})) == NORMALIZATION_VERSION_LEGACY_COMPAT
-    assert (
-        _resolve_clusterer_normalization_version(
-            _ContractOnly({"normalization_version": NORMALIZATION_VERSION_CANONICAL_V2})
-        )
-        == NORMALIZATION_VERSION_CANONICAL_V2
-    )
-    with pytest.raises(ValueError, match="normalization_version"):
-        _resolve_clusterer_normalization_version(_ContractOnly({"normalization_version": "bogus"}))
+@pytest.mark.parametrize("feature_contract", [{}, {"normalization_version": "legacy_compat"}])
+def test_public_arrow_contracts_reject_missing_or_legacy_model_version(feature_contract: dict) -> None:
+    owner = _ContractOnly(feature_contract)
+    with pytest.raises(ValueError, match="normalization_version='canonical_v2'"):
+        _resolve_clusterer_normalization_version(owner)
+    with pytest.raises(ValueError, match="normalization_version='canonical_v2'"):
+        require_feature_contract_normalization_version(owner, context="prediction")
 
 
-def test_bundle_gate_accepts_matching_and_rejects_mismatching(tmp_path):
-    # This package is canonical_v2: a matching bundle loads; a pre-contract
-    # bundle (absent field implies legacy_compat) and an explicit legacy bundle
-    # fail fast; invalid tokens fail with a distinct message.
+def test_public_arrow_contracts_accept_canonical_model_version() -> None:
+    owner = _ContractOnly({"normalization_version": NORMALIZATION_VERSION})
+    assert _resolve_clusterer_normalization_version(owner) == NORMALIZATION_VERSION
+    assert require_feature_contract_normalization_version(owner, context="prediction") == NORMALIZATION_VERSION
+    assert require_normalization_version(NORMALIZATION_VERSION, context="training") == NORMALIZATION_VERSION
+
+
+@pytest.mark.parametrize("value", [None, "legacy_compat", "bogus_v9"])
+def test_runtime_normalization_gate_rejects_noncanonical_versions(value: str | None) -> None:
+    with pytest.raises(ValueError, match="normalization_version='canonical_v2'"):
+        require_normalization_version(value, context="training")
+
+
+def test_bundle_gate_accepts_canonical_and_rejects_other_versions(tmp_path: Path) -> None:
     _require_bundle_normalization_version(tmp_path, {"normalization_version": NORMALIZATION_VERSION})
-    other = (
-        NORMALIZATION_VERSION_CANONICAL_V2
-        if NORMALIZATION_VERSION == NORMALIZATION_VERSION_LEGACY_COMPAT
-        else NORMALIZATION_VERSION_LEGACY_COMPAT
-    )
-    with pytest.raises(ValueError, match="release unit"):
-        _require_bundle_normalization_version(tmp_path, {})
-    with pytest.raises(ValueError, match="release unit"):
-        _require_bundle_normalization_version(tmp_path, {"normalization_version": other})
-    with pytest.raises(ValueError, match="invalid"):
-        _require_bundle_normalization_version(tmp_path, {"normalization_version": "bogus"})
+    for feature_contract in ({}, {"normalization_version": "legacy_compat"}, {"normalization_version": "bogus"}):
+        with pytest.raises(ValueError, match="release unit"):
+            _require_bundle_normalization_version(tmp_path, feature_contract)
 
 
-def test_name_counts_index_writer_stamps_package_version(tmp_path, monkeypatch):
+def test_name_counts_index_writer_stamps_package_version(tmp_path: Path) -> None:
     from s2and.incremental_linking import feature_block_arrow
 
-    seeded = ({"anna": 2.0}, {"smith": 3.0}, {"anna smith": 2.0}, {"smith a": 2.0})
     index_dir, _ = feature_block_arrow.write_name_counts_index(
-        tmp_path, seeded, tiny_name_counts_provenance(), overwrite=True
+        tmp_path,
+        tiny_name_counts_tuple(),
+        tiny_name_counts_provenance(),
+        overwrite=True,
     )
     manifest = json.loads((Path(index_dir) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["normalization_version"] == NORMALIZATION_VERSION

@@ -17,9 +17,9 @@ What stays outside Arrow, by design:
   dataset whose insertion order differed. Feature values for any given pair are
   parity-gated identical (tests/test_arrow_training_ingestion.py).
 
-Text columns hold ANDData-preprocessed values; re-ingesting with
-``preprocess=True`` relies on the same normalize-idempotency contract the
-Rust Arrow readers already assume (docs/rust/ingest_source_policy_inventory.md).
+Text columns hold ANDData-preprocessed values. The fixed constructor always
+uses the canonical preprocessing contract that the Rust Arrow readers assume
+(docs/rust/ingest_source_policy_inventory.md).
 """
 
 from __future__ import annotations
@@ -327,7 +327,6 @@ def build_training_anddata_from_arrow(
     test_pairs_size: int = 5_000,
     random_seed: int = 1111,
     n_jobs: int = 1,
-    preprocess: bool = True,
     name_tuples: set[tuple[str, str]] | str | None = "filtered",
 ) -> ANDData:
     """Build a fully initialized Rust-backed train ``ANDData``.
@@ -379,7 +378,7 @@ def build_training_anddata_from_arrow(
         test_pairs_size=test_pairs_size,
         random_seed=random_seed,
         n_jobs=n_jobs,
-        preprocess=preprocess,
+        preprocess=True,
         name_tuples=name_tuples,
     )
     _bind_training_arrow_paths(dataset, normalized_arrow_paths)

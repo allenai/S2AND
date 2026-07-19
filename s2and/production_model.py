@@ -15,8 +15,6 @@ import numpy as np
 from s2and.consts import (
     FEATURIZER_VERSION,
     NORMALIZATION_VERSION,
-    NORMALIZATION_VERSION_LEGACY_COMPAT,
-    VALID_NORMALIZATION_VERSIONS,
 )
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import IncrementalLinkingArtifact, load_incremental_linking_artifact
@@ -592,12 +590,7 @@ def _validate_incremental_linker_metadata(linker_dir: Path) -> IncrementalLinkin
 def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Mapping[str, Any]) -> None:
     """Require the one normalization contract implemented by this package."""
 
-    bundle_version = feature_contract.get("normalization_version", NORMALIZATION_VERSION_LEGACY_COMPAT)
-    if bundle_version not in VALID_NORMALIZATION_VERSIONS:
-        raise ValueError(
-            f"Production bundle {bundle_dir} has invalid normalization_version {bundle_version!r}; "
-            f"expected one of {sorted(VALID_NORMALIZATION_VERSIONS)}"
-        )
+    bundle_version = feature_contract.get("normalization_version")
     if bundle_version != NORMALIZATION_VERSION:
         raise ValueError(
             f"Production bundle {bundle_dir} was built with normalization_version {bundle_version!r} "

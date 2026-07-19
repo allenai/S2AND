@@ -100,8 +100,12 @@ Current implications:
 - `ValidatedArrowInputs` is not publicly constructible; callers obtain it from
   `validate_arrow_prediction_artifacts`, `validate_arrow_training_artifacts`, or
   `validate_arrow_publication_artifacts`
-- request-local sidecars are deliberately excluded from the immutable
-  generation and are validated separately under the request boundary
+- request-local seed require/disallow sidecars are deliberately excluded from
+  the immutable generation; each public request parses them once into
+  normalized request-local state and passes that state downward
+- there is no process-global parsed seed-sidecar cache; altered-presplit cache
+  identity still uses full-file digests for mutable disallow and
+  altered-profile inputs
 
 ## Interaction with Rust Batch Featurization
 

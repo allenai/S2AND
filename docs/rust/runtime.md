@@ -70,7 +70,7 @@ Build the pinned extension and run the focused routing tests:
 
 ```bash
 uv run maturin develop -m s2and_rust/Cargo.toml --release
-uv run pytest -q tests/test_runtime.py tests/test_rust_lifecycle.py tests/test_arrow_training_ingestion.py
+uv run pytest -q tests/test_runtime.py tests/test_data.py tests/test_arrow_training_ingestion.py
 ```
 
 The broader Rust quality, latency, and memory checks are the canonical

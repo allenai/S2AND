@@ -24,6 +24,10 @@ not a releasable production package yet:
 - Name-count, Arrow-index, model, linker, and mutable-sidecar provenance is
   content-verified. The new ORCID prefix-count path requires a versioned
   canonical generation and has no legacy JSON fallback.
+- Production pairwise contracts bind the exact canonical name-tuple and ORCID
+  prefix-count data hashes. Training records them; export and load compare them
+  to the installed artifacts; the linker binding covers them through the
+  ordered feature-contract digest.
 - Models using global name counts bind the exact generation, source identity,
   source snapshot, and selected-row digest at every Python, Arrow, and
   prebuilt-Rust-featurizer boundary before feature work. The Rust binding is
@@ -55,8 +59,6 @@ measured artifact set.
   quality re-baselining.
 - **Measure:** synthetic/local evidence exists, but release-scale runtime and
   peak-RSS evidence still must be captured.
-- **Partial:** the safe artifact-independent subset is implemented, but a
-  separately authorized public schema/serialization decision remains.
 - **Held:** intentionally not changed because another explicit requirement
   would be violated.
 
@@ -68,19 +70,15 @@ These are the only tasks blocked on the pending names/datasets/artifacts:
    `name_counts_index` from the reviewed source snapshot.
 2. Generate the canonical versioned ORCID prefix-count generation and publish
    its pointer manifest.
-3. Approve and implement v1.3 bundle-schema/runtime ownership for the verified
-   ORCID and canonical name-tuple identities. Also decide whether future tuple
-   regeneration moves to generation-directory/pointer publication; the current
-   same-path data+sidecar writer is fail-closed but cannot be crash-atomic.
-4. Audit nullable `signatures.author_position` in every intended release
+3. Audit nullable `signatures.author_position` in every intended release
    dataset, then either repair the source rows or activate the non-null schema.
-5. Re-export benchmark names by signature-ID join and report join/divergence
+4. Re-export benchmark names by signature-ID join and report join/divergence
    counts.
-6. Retrain and bundle v1.3 pairwise and promoted-linker models from exactly
+5. Retrain and bundle v1.3 pairwise and promoted-linker models from exactly
    those immutable artifacts.
-7. Run pairwise, clustering, subblocking, parity, quality, throughput, and
+6. Run pairwise, clustering, subblocking, parity, quality, throughput, and
    peak-RSS gates on the release candidate.
-8. Package the complete v1.3 bundle and run the installed-wheel pairwise and
+7. Package the complete v1.3 bundle and run the installed-wheel pairwise and
    incremental smoke against its explicit path.
 
 The generation contract and acceptance thresholds are in
@@ -98,12 +96,12 @@ The generation contract and acceptance thresholds are in
 | A6 | Done | Public Arrow training/featurizer construction requires an explicit expected normalization version; absence and mismatch fail before feature work. |
 | A7 | Done | Bundle export requires source normalization provenance and cannot relabel a legacy model canonical. |
 | A8 | Done + Retrain | Linker metadata is bound to the pairwise boosters, ordered feature contract, normalization, and featurizer version; finalization and load both enforce it. |
-| A9 | Partial + Artifact | ORCID counts load lazily from a contained immutable generation with verified manifest, metadata/data checksums, normalization, pair semantics, source identity, and cardinality. No unversioned fallback remains. Bundles do not yet serialize/route this binding; that public bundle-schema decision needs separate approval with the real artifact. |
+| A9 | Done + Artifact + Retrain | ORCID counts load lazily from a contained immutable generation with verified manifest, metadata/data checksums, normalization, pair semantics, source identity, and cardinality. No unversioned fallback remains. Production contracts bind the exact data SHA-256, and export/load compare it to the packaged priors. The real generation is pending. |
 | A10 | Done + Artifact | Dataset/count/model/linker authorities compare exact versions and content identities before feature work, including already-built Rust featurizers. Every present Arrow/count-index input has SHA/size coverage. Final cross-artifact equality needs the real release unit. |
 | A11 | Done | Immutable Arrow generations are full-digest validated once and then trusted by exact generation identity. Same-path mutation is unsupported; changed content is published as a new generation. |
 | A12 | Done | Pairwise and complete-bundle writers use validated sibling staging. Finalization copies the pairwise source into a complete staging tree and renames it once to a nonexistent final path; no bundle is completed in place. |
 | A13 | Done + Retrain | Missing, nonfinite, or regressed metrics fail before promotion. `--allow-metric-drift` is rejected up front with promotion flags. Real gates await v1.3. |
-| A14 | Partial + Artifact | Omitted `name_tuples` selects a strict metadata/SHA/cardinality/semantics-verified canonical artifact; only an explicit empty set disables aliases. Python/Rust expose the identity, but v1.3 bundles do not yet bind it. Same-path regeneration is offline/fail-closed, not crash-atomic, until a generation-pointer schema is approved. |
+| A14 | Done + Artifact + Retrain | Omitted `name_tuples` selects a strict metadata/SHA/cardinality/semantics-verified canonical artifact; only an explicit empty set disables aliases. Production contracts bind its exact data SHA-256, while Python and Rust retain one strict validation policy rather than parallel identity APIs. Same-path regeneration is offline/fail-closed, not crash-atomic, until a generation-pointer schema is approved. |
 | A15 | Done | Missing, unreadable, or invalid tuple artifacts fail in Python and Rust instead of becoming an empty alias policy. |
 | A16 | Done | Bundle schemas require exact checksummed runtime files and reject traversal, absolute paths, symlink escapes, duplicates, and undeclared files. |
 | A17 | Done + Retrain | Pairwise metadata, clusterer config, and actual Rust booster feature counts must agree before prediction. |
@@ -119,7 +117,7 @@ The generation contract and acceptance thresholds are in
 | B1 | Done + Retrain | Initial decisions are scored in bounded batches and globally ordered by require/score/signature ID. A conflicted lower-priority query is rebuilt and rescored from its complete single-query plan with the winner excluded; compact query replay state is gone. Outcome telemetry is request-invariant. |
 | B2 | Done + Measure | Query/window limits refresh after planner, featurizer, and scorer allocations; oversized queued work is discarded, re-sliced, and re-planned before scoring. Planning uses the loaded model's exact final/pairwise/aggregate widths (currently 53/35/18), not stale generic constants. Release-scale evidence remains. |
 | B3 | Done | Featurizer reuse is keyed by exact normalized material paths, validated full-digest generation, non-seed settings, and seed version. The validated immutable generation is trusted without filesystem watchers; request-local sidecars remain outside its identity. |
-| B4 | Done | Mutable sidecars use stable full-file digests with bounded stat/hash/stat retry; unstable rewrites bypass reuse or fail. |
+| B4 | Done | Seed require/disallow sidecars are parsed once into request-local state with no process-global parsed cache. Altered-presplit cache identity still uses stable full-file digests for mutable disallow and altered-profile inputs. |
 | B5 | Done | Name-count generation writes/fsyncs a published generation, serializes pointer replacement, and never restores stale manifest text after a competing writer succeeds. |
 | B6 | Done + Artifact + Retrain | ORCID prefix pairs are canonical unordered keys in generation and lookup; reverse input/subblock order is equivalent. |
 | B7 | Done | Alias pairs are unordered/deduplicated in Python and Rust, including custom one-direction inputs. |

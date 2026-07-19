@@ -141,24 +141,23 @@ def test_write_name_counts_index_rebuilds_corrupted_matching_generation(
 
 
 def test_cleanup_stale_name_counts_generations_keeps_manifest_generation(tmp_path: Path) -> None:
-    index_dir = tmp_path / "name_counts_index"
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        mappings,
+        tiny_name_counts_provenance(),
+        overwrite=True,
+    )
+    index_dir = Path(index_path)
     _write_generation(index_dir, "gen-old")
-    _write_generation(index_dir, "gen-current")
-    manifest = {
-        "files": {
-            "first": {"path": "generations/gen-current/first.bin"},
-            "last": {"path": "generations/gen-current/last.bin"},
-            "first_last": {"path": "generations/gen-current/first_last.bin"},
-            "last_first_initial": {"path": "generations/gen-current/last_first_initial.bin"},
-        }
-    }
-    (index_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
+    current_generation = (index_dir / manifest["files"]["first"]["path"]).parent
 
     metrics = cleanup_stale_name_counts_generations(index_dir)
 
     assert metrics == {"removed_generation_count": 1}
     assert not (index_dir / "generations" / "gen-old").exists()
-    assert (index_dir / "generations" / "gen-current").exists()
+    assert current_generation.exists()
 
 
 def test_cleanup_stale_name_counts_generations_refuses_missing_manifest(tmp_path: Path) -> None:
@@ -172,23 +171,24 @@ def test_cleanup_stale_name_counts_generations_refuses_missing_manifest(tmp_path
 
 
 def test_cleanup_stale_name_counts_generations_refuses_manifest_outside_generations(tmp_path: Path) -> None:
-    index_dir = tmp_path / "name_counts_index"
+    mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        mappings,
+        tiny_name_counts_provenance(),
+        overwrite=True,
+    )
+    index_dir = Path(index_path)
     _write_generation(index_dir, "gen-old")
     external = tmp_path / "external"
     external.mkdir()
     for filename in ("first.bin", "last.bin", "first_last.bin", "last_first_initial.bin"):
         (external / filename).write_bytes(b"index")
-    manifest = {
-        "files": {
-            "first": {"path": str(external / "first.bin")},
-            "last": {"path": str(external / "last.bin")},
-            "first_last": {"path": str(external / "first_last.bin")},
-            "last_first_initial": {"path": str(external / "last_first_initial.bin")},
-        }
-    }
+    manifest = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest["files"]["first"]["path"] = str(external / "first.bin")
     (index_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="without a resolvable current manifest"):
+    with pytest.raises(ValueError, match="escapes the name_counts_index directory"):
         cleanup_stale_name_counts_generations(index_dir)
 
     assert (index_dir / "generations" / "gen-old").exists()

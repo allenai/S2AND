@@ -162,8 +162,13 @@ def test_run_single_rust_uses_arrow_native_featurizer(monkeypatch, tmp_path: Pat
         lambda paths, _output_dir: (paths, {}),
     )
     monkeypatch.setattr(
-        compare_cmd,
-        "_write_arrow_artifact_manifest",
+        arrow_inputs,
+        "build_arrow_artifact_manifest",
+        lambda _paths, _output_dir: {"manifest": "built"},
+    )
+    monkeypatch.setattr(
+        arrow_inputs,
+        "write_arrow_artifact_manifest",
         lambda _paths, output_dir: Path(output_dir) / "manifest.json",
     )
     validated_paths = object()

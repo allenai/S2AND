@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -18,64 +16,29 @@ import numpy as np
 from s2and.arrow_inputs import require_name_counts_index_artifact
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_count_binding import NameCountsBinding
+from s2and.name_counts_manifest import (
+    ValidatedNameCountsManifest,
+    readonly_name_counts_provenance,
+    validated_name_counts_provenance,
+)
 
 _INDEX_CACHE: weakref.WeakValueDictionary[tuple[str, str], NameCountsIndex] = weakref.WeakValueDictionary()
 _INDEX_OPENINGS: dict[tuple[str, str], Future[NameCountsIndex]] = {}
 _INDEX_CACHE_LOCK = threading.Lock()
 
 
-def _require_lowercase_sha256(value: Any, *, context: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"{context} requires a lowercase hexadecimal SHA-256")
-    return value
+def _load_validated_name_counts_manifest(
+    path: str,
+    *,
+    manifest_bytes: bytes,
+) -> ValidatedNameCountsManifest:
+    """Verify one uncached manifest generation with the canonical parser."""
 
-
-def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, Any]:
-    """Return one validated v1 source-provenance payload."""
-
-    if not isinstance(value, Mapping) or value.get("schema_version") != "name_counts_provenance_v1":
-        raise ValueError(f"{context} requires name_counts_provenance_v1 provenance")
-    if value.get("normalization_version") != NORMALIZATION_VERSION:
-        raise ValueError(
-            f"{context} normalization_version={value.get('normalization_version')!r}; "
-            f"expected {NORMALIZATION_VERSION!r}"
-        )
-    for field in ("generation_id", "source_snapshot_id", "source_kind"):
-        if not isinstance(value.get(field), str) or not value[field]:
-            raise ValueError(f"{context} provenance requires {field}")
-    # pickle_sha256 remains the v1 source-lineage identity until the next model
-    # feature-contract schema. Runtime lookup never opens or unpickles that file.
-    for field in ("pickle_sha256", "source_query_sha256", "selected_rows_sha256"):
-        _require_lowercase_sha256(value.get(field), context=f"{context} provenance {field}")
-    selected_row_count = value.get("selected_row_count")
-    if not isinstance(selected_row_count, int) or selected_row_count < 0:
-        raise ValueError(f"{context} provenance requires a nonnegative selected_row_count")
-    if value.get("source_row_count") != selected_row_count:
-        raise ValueError(f"{context} provenance selected_row_count/source_row_count mismatch")
-    return dict(value)
-
-
-def _readonly_value(value: Any) -> Any:
-    if isinstance(value, MappingProxyType):
-        return value
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: _readonly_value(item) for key, item in value.items()})
-    if isinstance(value, list | tuple):
-        return tuple(_readonly_value(item) for item in value)
-    return value
-
-
-def readonly_name_counts_provenance(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Recursively freeze one already-validated provenance payload."""
-
-    frozen = _readonly_value(value)
-    if not isinstance(frozen, Mapping):  # pragma: no cover - helper invariant
-        raise TypeError("name-count provenance must remain a mapping")
-    return frozen
+    return ValidatedNameCountsManifest.load(
+        path,
+        context="Python name-count index",
+        manifest_bytes=manifest_bytes,
+    )
 
 
 def _lookup_many_deduplicated(
@@ -232,26 +195,9 @@ class NameCountsIndex:
             return opening.result()
 
         try:
-            require_name_counts_index_artifact(
+            manifest = _load_validated_name_counts_manifest(
                 resolved_path,
-                context="Python name-count index",
-                producer_hint="publish a manifest-backed name_counts_index directory",
-            )
-            if manifest_path.read_bytes() != manifest_bytes:
-                raise RuntimeError(f"name-count index manifest changed during validation: {manifest_path}")
-
-            manifest = json.loads(manifest_bytes)
-            if not isinstance(manifest, Mapping):
-                raise TypeError(f"name-count index manifest must contain an object: {manifest_path}")
-            normalization_version = manifest.get("normalization_version")
-            if normalization_version != NORMALIZATION_VERSION:
-                raise ValueError(
-                    f"name-count index normalization_version={normalization_version!r}; "
-                    f"expected {NORMALIZATION_VERSION!r}: {manifest_path}"
-                )
-            provenance = validated_name_counts_provenance(
-                manifest.get("source_provenance"),
-                context=f"{manifest_path} source_provenance",
+                manifest_bytes=manifest_bytes,
             )
             from s2and.runtime import load_s2and_rust_extension
 
@@ -261,9 +207,9 @@ class NameCountsIndex:
             opened = cls(
                 native=native,
                 path=resolved_path,
-                manifest_sha256=manifest_sha256,
-                normalization_version=str(normalization_version),
-                source_provenance=provenance,
+                manifest_sha256=manifest.manifest_sha256,
+                normalization_version=manifest.normalization_version,
+                source_provenance=manifest.source_provenance,
             )
         except BaseException as exc:
             with _INDEX_CACHE_LOCK:

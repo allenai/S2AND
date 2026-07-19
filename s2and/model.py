@@ -4,11 +4,9 @@ import copy
 import hashlib
 import logging
 import math
-import threading
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from pathlib import Path
@@ -23,6 +21,7 @@ from tqdm import tqdm
 from s2and import memory_budget
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
+    ValidatedArrowInputs,
     normalize_arrow_paths,
     validate_arrow_prediction_artifacts,
 )
@@ -32,11 +31,7 @@ from s2and.consts import (
     LARGE_INTEGER,
     NORMALIZATION_VERSION,
 )
-from s2and.data import (
-    NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-    ANDData,
-    _load_name_tuples_from_file,
-)
+from s2and.data import ANDData, _load_name_tuples_from_file
 from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_featurizer,
@@ -48,7 +43,6 @@ from s2and.incremental_linking.feature_block import (
     cluster_seed_disallows_path_from_arrow_paths,
     normalize_cluster_seed_disallow_pairs,
     read_cluster_seed_disallows_arrow,
-    temporary_arrow_paths_with_cluster_seeds,
 )
 from s2and.incremental_linking.feature_block import (
     read_altered_cluster_signatures_arrow as _read_altered_cluster_signatures_arrow_file,
@@ -107,19 +101,7 @@ IncrementalDistStats = tuple[float, int, float]
 _TReturn = TypeVar("_TReturn")
 _MISSING = object()
 _ALTERED_PRESPLIT_CACHE_MAX_ENTRIES = 128
-_CLUSTER_SEEDS_ARROW_CACHE_MAX_ENTRIES = 16
 _PATH_CACHE_KEY: TypeAlias = tuple[str, int | None, int | None, Any]
-_CLUSTER_SEEDS_ARROW_CACHE: OrderedDict[
-    _PATH_CACHE_KEY,
-    tuple[tuple[str, str], ...],
-] = OrderedDict()
-_CLUSTER_SEED_DISALLOWS_ARROW_CACHE_MAX_ENTRIES = 16
-_CLUSTER_SEED_DISALLOWS_ARROW_CACHE: OrderedDict[
-    _PATH_CACHE_KEY,
-    tuple[tuple[str, str], ...],
-] = OrderedDict()
-_CLUSTER_SEEDS_ARROW_CACHE_LOCK = threading.Lock()
-_ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -142,6 +124,7 @@ class _ArrowIncrementalPredictionDataset:
         arrow_paths: Mapping[str, Any],
         name_tuples: set[tuple[str, str]] | str | None,
         cluster_seeds_require: Mapping[Any, Any] | None,
+        cluster_seeds_source: Literal["dataset", "arrow"],
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None,
         altered_cluster_signatures: Sequence[Any] | None,
         max_seed_cluster_id: int,
@@ -150,6 +133,7 @@ class _ArrowIncrementalPredictionDataset:
         self.arrow_paths = dict(arrow_paths)
         self.name_tuples = _name_tuples_for_incremental_rules(name_tuples)
         self.cluster_seeds_require = _normalize_cluster_seeds_require(cluster_seeds_require or {})
+        self._cluster_seeds_source = cluster_seeds_source
         self.cluster_seeds_disallow = (
             normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow)
             if cluster_seeds_disallow is not None
@@ -581,68 +565,10 @@ def _count_selected_features(featurizer_info: FeaturizationInfo) -> int:
     return len(_selected_feature_indices(featurizer_info))
 
 
-def _read_consistent_cached_arrow_pairs(
-    path: Path,
-    *,
-    cache: OrderedDict[_PATH_CACHE_KEY, tuple[tuple[str, str], ...]],
-    reader: Callable[[Path], Iterable[tuple[str, str]]],
-    max_entries: int,
-    cache_name: str,
-) -> tuple[tuple[str, str], ...]:
-    """Read and cache an Arrow sidecar only under its observed content key."""
-
-    for attempt in range(1, _ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS + 1):
-        cache_key = _path_cache_fingerprint(path)
-        with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
-            cached_items = cache.get(cache_key)
-            if cached_items is not None:
-                cache.move_to_end(cache_key)
-                return cached_items
-
-        parsed_items = tuple(reader(path))
-        observed_after_read = _path_cache_fingerprint(path)
-        if observed_after_read != cache_key:
-            logger.warning(
-                "Arrow sidecar changed during cache read; retrying cache=%s attempt=%d/%d path=%s",
-                cache_name,
-                attempt,
-                _ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS,
-                path,
-            )
-            continue
-
-        with _CLUSTER_SEEDS_ARROW_CACHE_LOCK:
-            cached_items = cache.get(cache_key)
-            if cached_items is not None:
-                cache.move_to_end(cache_key)
-                return cached_items
-            cache[cache_key] = parsed_items
-            cache.move_to_end(cache_key)
-            while len(cache) > max_entries:
-                cache.popitem(last=False)
-        return parsed_items
-
-    logger.error(
-        "Arrow sidecar remained unstable after cache read retries cache=%s attempts=%d path=%s",
-        cache_name,
-        _ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS,
-        path,
-    )
-    raise RuntimeError(
-        f"{cache_name} Arrow sidecar changed during all "
-        f"{_ARROW_SIDECAR_STABLE_READ_MAX_ATTEMPTS} read attempts: {path}"
-    )
-
-
 def _read_cluster_seeds_arrow(path: Path) -> dict[str, str]:
-    cached_items = _read_consistent_cached_arrow_pairs(
-        path,
-        cache=_CLUSTER_SEEDS_ARROW_CACHE,
-        reader=lambda source: _read_cluster_seeds_arrow_file(source).items(),
-        max_entries=_CLUSTER_SEEDS_ARROW_CACHE_MAX_ENTRIES,
-        cache_name="cluster_seeds",
-    )
-    return dict(cached_items)
+    """Read cluster seeds for the current request."""
+
+    return dict(_read_cluster_seeds_arrow_file(path))
 
 
 def _cluster_seeds_require_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> dict[str, str]:
@@ -912,14 +838,9 @@ def _cluster_seeds_require_inverse(
 
 
 def _read_cluster_seed_disallows_arrow(path: Path) -> set[tuple[str, str]]:
-    cached_items = _read_consistent_cached_arrow_pairs(
-        path,
-        cache=_CLUSTER_SEED_DISALLOWS_ARROW_CACHE,
-        reader=read_cluster_seed_disallows_arrow,
-        max_entries=_CLUSTER_SEED_DISALLOWS_ARROW_CACHE_MAX_ENTRIES,
-        cache_name="cluster_seed_disallows",
-    )
-    return set(cached_items)
+    """Read seed disallow pairs for the current request."""
+
+    return set(read_cluster_seed_disallows_arrow(path))
 
 
 def _cluster_seed_disallows_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> set[tuple[str, str]]:
@@ -938,23 +859,6 @@ def _cluster_seed_disallows_for_request(
         _cluster_seed_disallows_from_arrow_paths(arrow_paths),
     )
     return request_disallows
-
-
-def _temporary_arrow_paths_with_current_cluster_seeds(
-    dataset: Any,
-    arrow_paths: Mapping[str, Any],
-    *,
-    reuse_existing_cluster_seeds_when_empty: bool = True,
-) -> AbstractContextManager[dict[str, str]]:
-    """Yield request-scoped Arrow paths whose seed table mirrors current dataset seeds."""
-
-    return temporary_arrow_paths_with_cluster_seeds(
-        arrow_paths,
-        getattr(dataset, "cluster_seeds_require", {}) or {},
-        prefix="s2and_arrow_cluster_seeds_",
-        reuse_existing_cluster_seeds_when_empty=reuse_existing_cluster_seeds_when_empty,
-        cluster_seeds_disallow=_cluster_seed_disallows_for_request(dataset, arrow_paths),
-    )
 
 
 def _partial_supervision_with_cluster_seed_disallows(
@@ -1219,12 +1123,14 @@ def _load_name_tuples_for_incremental_rules() -> frozenset[tuple[str, str]]:
 
 
 def _name_tuples_for_incremental_rules(
-    name_tuples: set[tuple[str, str]] | str | None,
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | str | None,
 ) -> set[tuple[str, str]] | frozenset[tuple[str, str]]:
+    if isinstance(name_tuples, frozenset):
+        return name_tuples
     if isinstance(name_tuples, set):
         return {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
     if name_tuples not in {None, "filtered"}:
-        raise ValueError("name_tuples must be None, 'filtered', or a set of (first_a, first_b) tuples")
+        raise ValueError("name_tuples must be None, 'filtered', or a set/frozenset of (first_a, first_b) tuples")
     return _load_name_tuples_for_incremental_rules()
 
 
@@ -2387,13 +2293,10 @@ class Clusterer:
         else:
             self.search_space = search_space
 
-        self.feature_contract = {
-            "name_counts_last_first_initial_semantics": NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR,
-            # A freshly constructed clusterer is born from this package, so it
-            # inherits the package's normalization policy. Loaded bundles carry
-            # their own recorded value instead.
-            "normalization_version": NORMALIZATION_VERSION,
-        }
+        # A freshly constructed clusterer is born from this package, so it
+        # inherits the package's normalization policy. Loaded bundles carry
+        # their own recorded value instead.
+        self.feature_contract = {"normalization_version": NORMALIZATION_VERSION}
         self.hyperopt_trials_store: Trials | list[Trials] | None = None
         self.best_params: dict[Any, Any] | None = None
         self.batch_size = batch_size
@@ -3833,7 +3736,6 @@ class Clusterer:
         contract = getattr(self, "feature_contract", None)
         if not isinstance(contract, dict):
             contract = {}
-        contract["name_counts_last_first_initial_semantics"] = NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR
         contract["normalization_version"] = training_normalization_version
         if clusterer_uses_name_count_features(self):
             count_provenances = [
@@ -4720,6 +4622,7 @@ class Clusterer:
         runtime_context: RuntimeContext,
         total_ram_bytes: int | None = None,
         arrow_paths: Mapping[str, Any] | None = None,
+        cluster_seed_disallows: set[tuple[str, str]] | None = None,
     ) -> tuple[
         dict[str, int | str],
         dict[int | str, int | str],
@@ -4737,7 +4640,9 @@ class Clusterer:
         recluster_map: dict[int | str, int | str] = {}
         cluster_seeds_require: dict[str, int | str] = {}
         source_cluster_seeds_require = copy.deepcopy(getattr(dataset, "cluster_seeds_require", {}) or {})
-        source_cluster_seeds_origin = "dataset" if source_cluster_seeds_require else "empty"
+        source_cluster_seeds_origin = (
+            str(getattr(dataset, "_cluster_seeds_source", "dataset")) if source_cluster_seeds_require else "empty"
+        )
         if not source_cluster_seeds_require:
             source_cluster_seeds_require = _cluster_seeds_require_from_arrow_paths(arrow_paths)
             if source_cluster_seeds_require:
@@ -4747,7 +4652,11 @@ class Clusterer:
         cluster_seeds_require_inverse = _cluster_seeds_require_inverse(cluster_seeds_require)
 
         altered_cluster_signatures = _dataset_altered_cluster_signatures(dataset, arrow_paths)
-        request_cluster_seed_disallows = _cluster_seed_disallows_for_request(dataset, arrow_paths)
+        request_cluster_seed_disallows = (
+            _cluster_seed_disallows_for_request(dataset, arrow_paths)
+            if cluster_seed_disallows is None
+            else set(normalize_cluster_seed_disallow_pairs(cluster_seed_disallows))
+        )
         # Split altered claimed profiles once so incremental assignment can map back to original cluster IDs.
         # Claimed profiles from production can be "unnatural" with respect to S2AND constraints;
         # this pre-split step aligns them to natural-looking clusters before adding new signatures.
@@ -4772,11 +4681,21 @@ class Clusterer:
             altered_cluster_count = len(sorted_altered_cluster_nums)
             model_cache_fingerprint = _model_presplit_cache_fingerprint(self)
             name_tuples = getattr(dataset, "name_tuples", "filtered")
-            presplit_arrow_paths = (
-                normalize_arrow_paths({key: value for key, value in arrow_paths.items() if str(key) != "cluster_seeds"})
-                if arrow_paths is not None
-                else None
-            )
+            if isinstance(arrow_paths, ValidatedArrowInputs):
+                presplit_arrow_paths: Mapping[str, Any] | None = arrow_paths.without(
+                    "cluster_seeds",
+                    "cluster_seed_disallows",
+                )
+            elif arrow_paths is not None:
+                presplit_arrow_paths = normalize_arrow_paths(
+                    {
+                        key: value
+                        for key, value in arrow_paths.items()
+                        if str(key) not in {"cluster_seeds", "cluster_seed_disallows"}
+                    }
+                )
+            else:
+                presplit_arrow_paths = None
             reclustered_by_cluster_num: dict[int | str, list[list[str]]] = defaultdict(list)
             presplit_jobs: list[_AlteredPresplitJob] = []
             for altered_index, altered_cluster_num in enumerate(sorted_altered_cluster_nums):
@@ -4856,6 +4775,7 @@ class Clusterer:
                     total_ram_bytes=total_ram_bytes,
                     load_name_counts=clusterer_uses_name_count_features(self),
                     name_tuples=name_tuples,
+                    cluster_seeds_disallow=request_cluster_seed_disallows,
                 )
                 altered_presplit_predict_seconds += time.perf_counter() - presplit_start
                 for new_cluster_of_signatures in reclustered_output.values():
@@ -4954,6 +4874,7 @@ class Clusterer:
         total_ram_bytes: int | None = None,
         arrow_paths: Mapping[str, Any] | None = None,
         split_cluster_seeds_require_inverse: Mapping[int | str, Sequence[str]] | None = None,
+        cluster_seed_disallows: set[tuple[str, str]] | None = None,
     ) -> dict[str, list[str]]:
         """Apply supplied seed-link decisions, then recluster abstained signatures."""
 
@@ -5020,6 +4941,20 @@ class Clusterer:
             else:
                 pred_clusters[f"{best_cluster_id}"].append(unassigned_signature)
 
+        request_cluster_seed_disallows = (
+            _cluster_seed_disallows_for_request(dataset, arrow_paths)
+            if cluster_seed_disallows is None
+            else set(normalize_cluster_seed_disallow_pairs(cluster_seed_disallows))
+        )
+        if isinstance(arrow_paths, ValidatedArrowInputs):
+            residual_arrow_paths: Mapping[str, Any] | None = arrow_paths.without("cluster_seed_disallows")
+        elif arrow_paths is not None:
+            residual_arrow_paths = {
+                key: value for key, value in arrow_paths.items() if str(key) != "cluster_seed_disallows"
+            }
+        else:
+            residual_arrow_paths = None
+
         residual_groups: list[list[str]] = []
         # all remaining singletons are reclustered together
         if len(singleton_signatures) > 0:
@@ -5055,7 +4990,7 @@ class Clusterer:
                 if len(residual_group) == 1:
                     reclustered_output = {"singleton": [residual_group[0]]}
                 else:
-                    if arrow_paths is None:
+                    if residual_arrow_paths is None:
                         reclustered_output, _ = self.predict_helper(
                             {"block": residual_group},
                             dataset,
@@ -5068,7 +5003,7 @@ class Clusterer:
                             residual_group,
                             dataset,
                             partial_supervision,
-                            arrow_paths=arrow_paths,
+                            cluster_seed_disallows=request_cluster_seed_disallows,
                         )
                         logger.info(
                             "Running incremental residual Phase B through Arrow/Rust paths: residual_signatures=%d",
@@ -5076,12 +5011,13 @@ class Clusterer:
                         )
                         reclustered_output, _ = self.predict_from_arrow_paths(
                             {"block": residual_group},
-                            arrow_paths,
+                            residual_arrow_paths,
                             partial_supervision=residual_partial_supervision,
                             runtime_context=runtime_context,
                             total_ram_bytes=total_ram_bytes,
                             load_name_counts=clusterer_uses_name_count_features(self),
                             name_tuples=getattr(dataset, "name_tuples", "filtered"),
+                            cluster_seeds_disallow=request_cluster_seed_disallows,
                         )
                 for new_cluster in reclustered_output.values():
                     new_cluster_id = _next_unused_cluster_id(pred_clusters, new_cluster_id)
@@ -5259,6 +5195,7 @@ class Clusterer:
                     arrow_paths=arrow_path_payload,
                     name_tuples=name_tuples,
                     cluster_seeds_require=explicit_cluster_seeds_require,
+                    cluster_seeds_source="dataset",
                     cluster_seeds_disallow=cluster_seeds_disallow,
                     altered_cluster_signatures=altered_cluster_signatures,
                     max_seed_cluster_id=0,
@@ -5308,7 +5245,8 @@ class Clusterer:
         request_dataset = _ArrowIncrementalPredictionDataset(
             arrow_paths=arrow_path_payload,
             name_tuples=name_tuples,
-            cluster_seeds_require=explicit_cluster_seeds_require,
+            cluster_seeds_require=seed_signature_to_cluster,
+            cluster_seeds_source=("dataset" if explicit_cluster_seeds_require else "arrow"),
             cluster_seeds_disallow=cluster_seeds_disallow,
             altered_cluster_signatures=altered_cluster_signatures,
             max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),

@@ -25,6 +25,13 @@ uv run python scripts/run_ci_locally.py
 - one required-runtime `typecheck-and-test` job
 - Rust ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
 
+Hosted CI invokes this same script. Run one job independently with:
+
+```bash
+uv run python scripts/run_ci_locally.py lint
+uv run python scripts/run_ci_locally.py typecheck-and-test
+```
+
 Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
 exactly `s2and-rust==0.60.0` once, requires it to import, and then runs full-suite coverage of the Python route.
 

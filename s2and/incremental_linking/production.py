@@ -661,6 +661,7 @@ def _finish_incremental_with_optional_split_inverse(
     total_ram_bytes: int | None,
     arrow_paths: Mapping[str, Any] | None = None,
     split_cluster_seeds_require_inverse: Mapping[str, Sequence[str]] | None = None,
+    cluster_seed_disallows: set[tuple[str, str]] | None = None,
 ) -> dict[str, list[str]]:
     method = clusterer._finish_incremental_with_seed_links
     kwargs: dict[str, Any] = {"total_ram_bytes": total_ram_bytes}
@@ -668,6 +669,8 @@ def _finish_incremental_with_optional_split_inverse(
         kwargs["arrow_paths"] = arrow_paths
     if split_cluster_seeds_require_inverse is not None:
         kwargs["split_cluster_seeds_require_inverse"] = split_cluster_seeds_require_inverse
+    if cluster_seed_disallows is not None:
+        kwargs["cluster_seed_disallows"] = cluster_seed_disallows
     return method(
         unassigned_signature_ids,
         dataset,
@@ -1021,6 +1024,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         )
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
     base_arrow_path_payload = arrow_paths
+    request_disallows, dataset_disallows, arrow_disallows = _request_cluster_seed_disallows(
+        dataset,
+        base_arrow_path_payload,
+    )
     if hasattr(dataset, "name_counts_provenance"):
         require_dataset_name_counts_binding_for_clusterer(
             clusterer,
@@ -1039,6 +1046,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             runtime_context,
             total_ram_bytes=resolved_total_ram_bytes,
             arrow_paths=base_arrow_path_payload,
+            cluster_seed_disallows=request_disallows,
         )
     )
     seed_setup_telemetry = dict(getattr(clusterer, "_last_incremental_seed_setup_telemetry", {}) or {})
@@ -1100,10 +1108,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         )
         if unassigned_signature_ids
         else ""
-    )
-    request_disallows, dataset_disallows, arrow_disallows = _request_cluster_seed_disallows(
-        dataset,
-        base_arrow_path_payload,
     )
     query_disallow_partners = _query_disallow_partner_ids(
         unassigned_signature_ids,
@@ -1539,6 +1543,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             total_ram_bytes=resolved_total_ram_bytes,
             arrow_paths=arrow_path_payload,
             split_cluster_seeds_require_inverse=split_cluster_seeds_require_inverse,
+            cluster_seed_disallows=request_disallows,
         )
         finish_seconds = time.perf_counter() - finish_start
         residual_phase_b_telemetry = dict(getattr(clusterer, "_last_incremental_residual_phase_b_telemetry", {}) or {})

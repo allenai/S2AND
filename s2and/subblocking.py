@@ -143,8 +143,8 @@ def _require_sha256(value: Any, *, field: str) -> str:
 
 def _load_canonical_orcid_prefix_count_artifact(
     data_dir: str | Path = _PACKAGE_DATA_DIR,
-) -> tuple[dict[str, dict[str, int]], dict[str, Any]]:
-    """Load counts plus the exact immutable-generation binding after full verification."""
+) -> tuple[dict[str, dict[str, int]], str]:
+    """Load counts and their content hash after full artifact verification."""
 
     root = Path(data_dir).resolve()
     pointer_path = root / _ORCID_PREFIX_MANIFEST_FILENAME
@@ -234,26 +234,13 @@ def _load_canonical_orcid_prefix_count_artifact(
         raise ValueError("Canonical ORCID prefix-count outer_key_cardinality does not match the data")
     if pair_key_cardinality != pair_count:
         raise ValueError("Canonical ORCID prefix-count pair_key_cardinality does not match the data")
-    binding = {
-        "schema_version": "s2and_orcid_prefix_counts_binding_v1",
-        "normalization_version": NORMALIZATION_VERSION,
-        "pair_key_semantics": _ORCID_PREFIX_PAIR_KEY_SEMANTICS,
-        "generation_id": generation_id,
-        "source_snapshot_id": source_snapshot_id,
-        "source_digest": str(metadata["source_digest"]),
-        "metadata_sha256": expected_metadata_sha256,
-        "data_sha256": expected_data_sha256,
-        "data_byte_count": expected_data_byte_count,
-        "outer_key_cardinality": outer_key_cardinality,
-        "pair_key_cardinality": pair_key_cardinality,
-    }
-    return raw_counts, binding
+    return raw_counts, expected_data_sha256
 
 
 def _load_canonical_orcid_prefix_counts(data_dir: str | Path = _PACKAGE_DATA_DIR) -> dict[str, dict[str, int]]:
     """Load and fully verify the immutable canonical ORCID prefix-count generation."""
 
-    counts, _binding = _load_canonical_orcid_prefix_count_artifact(data_dir)
+    counts, _data_sha256 = _load_canonical_orcid_prefix_count_artifact(data_dir)
     return counts
 
 
@@ -263,7 +250,7 @@ class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
         self._loaded: dict[str, dict[str, int]] | None = None
-        self._binding: dict[str, Any] | None = None
+        self._data_sha256: str | None = None
         self._load_lock = threading.Lock()
 
     def load(self) -> dict[str, dict[str, int]]:
@@ -273,19 +260,19 @@ class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
         with self._load_lock:
             loaded = self._loaded
             if loaded is None:
-                loaded, binding = _load_canonical_orcid_prefix_count_artifact(self._data_dir)
-                self._binding = binding
+                loaded, data_sha256 = _load_canonical_orcid_prefix_count_artifact(self._data_dir)
+                self._data_sha256 = data_sha256
                 self._loaded = loaded
             return loaded
 
-    def binding(self) -> dict[str, Any]:
-        """Return a copy of the verified immutable generation identity."""
+    def data_sha256(self) -> str:
+        """Return the verified count-data content hash."""
 
         self.load()
-        binding = self._binding
-        if binding is None:
-            raise RuntimeError("Canonical ORCID prefix-count binding was not retained after loading")
-        return dict(binding)
+        data_sha256 = self._data_sha256
+        if data_sha256 is None:
+            raise RuntimeError("Canonical ORCID prefix-count data hash was not retained after loading")
+        return data_sha256
 
     def __getitem__(self, key: str) -> Mapping[str, int]:
         return self.load()[key]
@@ -303,7 +290,13 @@ def _resolved_orcid_prefix_counts(
     return counts.load() if isinstance(counts, _LazyCanonicalOrcidPrefixCounts) else counts
 
 
-FIRST_K_LETTER_COUNTS: Mapping[str, Mapping[str, int]] = _LazyCanonicalOrcidPrefixCounts(_PACKAGE_DATA_DIR)
+FIRST_K_LETTER_COUNTS = _LazyCanonicalOrcidPrefixCounts(_PACKAGE_DATA_DIR)
+
+
+def canonical_orcid_prefix_counts_data_sha256() -> str:
+    """Return the content hash of the verified packaged ORCID priors."""
+
+    return FIRST_K_LETTER_COUNTS.data_sha256()
 
 
 def normalize_orcid_for_subblocking(value: Any) -> str | None:

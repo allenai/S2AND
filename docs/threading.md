@@ -50,7 +50,9 @@ Benchmark script:
 Arrow-backed Rust training:
 
 When training/eval runs use Arrow-backed Rust featurization, paper preprocessing can be deferred to Rust
-(see `docs/rust/runtime.md` section "Arrow Training Deferred Preprocessing"). In that mode,
+(see `docs/rust/runtime.md` section "Arrow contract"). The fixed constructor
+binds verified `dataset.arrow_paths` before preprocessing; no lifecycle flag
+controls this route. In that mode,
 `preprocess_papers_parallel` is **skipped entirely**, and Rust Arrow readers handle paper normalization,
 ngrams, and language detection via Rayon parallelism, making the Python parallelism discussion above moot
 for those runs.

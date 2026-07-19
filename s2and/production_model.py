@@ -12,6 +12,7 @@ from typing import Any, cast
 import lightgbm as lgb
 import numpy as np
 
+from s2and.arrow_inputs import require_normalization_version
 from s2and.consts import (
     FEATURIZER_VERSION,
     NORMALIZATION_VERSION,
@@ -27,6 +28,7 @@ from s2and.model import (
     _selected_feature_indices,
 )
 from s2and.name_count_binding import NameCountsBinding
+from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
     PAIRWISE_METADATA_SCHEMA_VERSION,
@@ -36,10 +38,15 @@ from s2and.production_bundle_contract import (
     production_manifest_files,
 )
 from s2and.runtime import load_s2and_rust_extension
+from s2and.subblocking import canonical_orcid_prefix_counts_data_sha256
 from s2and.thread_config import resolve_n_jobs
 
 _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
+_CANONICAL_ARTIFACT_HASH_FIELDS = (
+    "name_tuples_data_sha256",
+    "orcid_prefix_counts_data_sha256",
+)
 _CLUSTERER_CONFIG_FIELDS = frozenset(
     {
         "batch_size",
@@ -417,6 +424,37 @@ def _require_finite_number(value: Any, *, field: str) -> float:
     return number
 
 
+def canonical_artifact_hashes() -> dict[str, str]:
+    """Return content hashes for the canonical artifacts used by production."""
+
+    return {
+        "name_tuples_data_sha256": load_packaged_name_tuple_artifact().data_sha256,
+        "orcid_prefix_counts_data_sha256": canonical_orcid_prefix_counts_data_sha256(),
+    }
+
+
+def require_canonical_artifact_hashes(feature_contract: Mapping[str, Any], *, context: str) -> None:
+    """Require a contract to match this package's two canonical data artifacts."""
+
+    observed: dict[str, str] = {}
+    for field in _CANONICAL_ARTIFACT_HASH_FIELDS:
+        value = feature_contract.get(field)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"{context} requires lowercase SHA-256 field {field!r}")
+        observed[field] = value
+    expected = canonical_artifact_hashes()
+    for field in _CANONICAL_ARTIFACT_HASH_FIELDS:
+        if observed[field] != expected[field]:
+            raise ValueError(
+                f"{context} {field} does not match the canonical artifact installed with this package: "
+                f"contract={observed[field]} package={expected[field]}"
+            )
+
+
 def _validate_clusterer_config(payload: dict[str, Any]) -> None:
     if payload.get("schema_version") != CLUSTERER_CONFIG_SCHEMA_VERSION:
         raise ValueError(f"Unsupported clusterer config schema_version={payload.get('schema_version')!r}")
@@ -482,6 +520,11 @@ def _validate_clusterer_config(payload: dict[str, Any]) -> None:
     feature_contract = payload["feature_contract"]
     if not isinstance(feature_contract, Mapping) or not feature_contract:
         raise ValueError("Production model config feature_contract must be a nonempty object")
+    require_normalization_version(
+        feature_contract.get("normalization_version"),
+        context="Production model config feature_contract",
+    )
+    require_canonical_artifact_hashes(feature_contract, context="Production model config feature_contract")
 
 
 def _validate_pairwise_metadata(

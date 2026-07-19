@@ -306,6 +306,9 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path) -> None:
 
     pairwise_manifest = json.loads((pairwise_bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert pairwise_manifest["bundle_status"] == "pairwise_only"
+    pairwise_config = json.loads((pairwise_bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
+    for field in ("name_tuples_data_sha256", "orcid_prefix_counts_data_sha256"):
+        assert len(pairwise_config["feature_contract"][field]) == 64
     with pytest.raises(ValueError, match="Expected a complete"):
         load_production_model(pairwise_bundle_dir)
     assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"

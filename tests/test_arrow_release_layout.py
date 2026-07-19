@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from s2and.arrow_inputs import _build_arrow_artifact_generation, require_name_counts_index_artifact
-from s2and.consts import NORMALIZATION_VERSION
+from s2and.arrow_inputs import build_arrow_artifact_manifest, require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
     write_arrow_ipc_table,
@@ -153,24 +152,22 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
         dataset_root / "specter2.specter_batch_index.bin",
         key_column="paper_id",
     )
-    dataset_manifest = {
-        "normalization_version": NORMALIZATION_VERSION,
-        "signature_count": 1,
-        "paper_count": 1,
-        "paths": {
-            "signatures": "signatures.arrow",
-            "papers": "papers.arrow",
-            "paper_authors": "paper_authors.arrow",
-            "specter2": "specter2.arrow",
-            "name_counts_index": "../name_counts_index",
-            "signatures_batch_index": "signatures.signatures_batch_index.bin",
-            "papers_batch_index": "papers.papers_batch_index.bin",
-            "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-            "specter_batch_index": "specter2.specter_batch_index.bin",
-        },
+    generation_paths = {
+        "signatures": str(dataset_root / "signatures.arrow"),
+        "papers": str(dataset_root / "papers.arrow"),
+        "paper_authors": str(dataset_root / "paper_authors.arrow"),
+        "specter2": str(dataset_root / "specter2.arrow"),
+        "name_counts_index": str(release_root / "name_counts_index"),
+        "signatures_batch_index": str(dataset_root / "signatures.signatures_batch_index.bin"),
+        "papers_batch_index": str(dataset_root / "papers.papers_batch_index.bin"),
+        "paper_authors_batch_index": str(dataset_root / "paper_authors.paper_authors_batch_index.bin"),
+        "specter_batch_index": str(dataset_root / "specter2.specter_batch_index.bin"),
     }
-    generation_paths = {key: str((dataset_root / value).resolve()) for key, value in dataset_manifest["paths"].items()}
-    dataset_manifest["artifact_generation"] = _build_arrow_artifact_generation(generation_paths, dataset_root)
+    dataset_manifest = build_arrow_artifact_manifest(
+        generation_paths,
+        dataset_root,
+        metadata={"signature_count": 1, "paper_count": 1},
+    )
     _touch_json(dataset_root / "manifest.json", dataset_manifest)
     _write_root_manifest(release_root, dataset_name)
     return release_root, dataset_name

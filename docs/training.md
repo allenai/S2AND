@@ -65,6 +65,10 @@ name-count index before it samples any pairs. It always selects the Rust
 training runtime and pins canonical preprocessing, regardless of
 `S2AND_BACKEND`. The requested pair counts are upper bounds when a split
 contains fewer eligible within-block pairs.
+The returned dataset's Python-visible signatures and papers are reconstructed
+from the validated Arrow bundle; the constructor never injects pre-conversion
+source objects. Keep source and reconstructed datasets separate in parity
+checks.
 
 ## Featurize pairs and train the pairwise model
 
@@ -165,6 +169,12 @@ production training scripts write a pairwise-only staging bundle and then
 atomically finalize a complete bundle; see
 [production_inference.md](production_inference.md#atomic-publication) for the
 exact commands and release gates.
+
+Pairwise production training also verifies that every dataset uses the packaged
+canonical name tuples and records two data hashes in `feature_contract`:
+`name_tuples_data_sha256` and `orcid_prefix_counts_data_sha256`. Bundle export
+does not synthesize missing hashes. Export and load both compare the recorded
+values with the canonical artifacts installed in the package.
 
 After a bundle passes those gates, reload it explicitly:
 

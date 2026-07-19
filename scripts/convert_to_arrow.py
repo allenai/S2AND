@@ -30,8 +30,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from s2and.arrow_inputs import (  # noqa: E402
-    _build_arrow_artifact_generation,
+    build_arrow_artifact_manifest,
     require_name_counts_index_artifact,
+    write_arrow_artifact_manifest,
 )
 from s2and.consts import NORMALIZATION_VERSION  # noqa: E402
 
@@ -103,22 +104,12 @@ def _manifest_relative_path(path_value: Any, manifest_dir: Path) -> str:
         return str(path)
 
 
-def _portable_manifest_paths(paths: Mapping[str, Any], manifest_dir: Path) -> dict[str, str]:
-    return {str(key): _manifest_relative_path(value, manifest_dir) for key, value in paths.items()}
-
-
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as infile:
         for chunk in iter(lambda: infile.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: Path) -> dict[str, Any]:
-    """Build a content-addressed inventory for every Rust-consumed artifact."""
-
-    return _build_arrow_artifact_generation(paths, manifest_dir)
 
 
 def _git_output(args: Sequence[str]) -> str | None:
@@ -1075,10 +1066,8 @@ def convert_service_json_to_arrow(
         write_name_counts_index_seconds = time.perf_counter() - start
         paths["name_counts_index"] = name_counts_index_path
 
-    manifest_paths = _portable_manifest_paths(paths, output_dir)
-    manifest = {
+    manifest_metadata = {
         "schema": FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-        "normalization_version": NORMALIZATION_VERSION,
         "dataset": dataset_name,
         "source_path": str(input_json),
         "conversion_kind": "service-json",
@@ -1089,8 +1078,6 @@ def convert_service_json_to_arrow(
         "cluster_seeds_disallow_count": len(dataset.cluster_seeds_disallow),
         "altered_cluster_signature_count": len(altered),
         "altered_cluster_signatures": altered,
-        "paths": manifest_paths,
-        "artifact_generation": _arrow_artifact_generation(paths, output_dir),
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
         "name_counts_index": name_counts_index_metrics,
@@ -1103,6 +1090,7 @@ def convert_service_json_to_arrow(
             "write_name_counts_index_seconds": write_name_counts_index_seconds,
         },
     }
+    manifest = build_arrow_artifact_manifest(paths, output_dir, metadata=manifest_metadata)
     if validate:
         manifest["validation"] = validate_arrow_dataset_manifest(
             manifest,
@@ -1110,7 +1098,7 @@ def convert_service_json_to_arrow(
             require_name_counts_index=not skip_name_counts_index,
             base_dir=output_dir,
         )
-    _replace_json(output_dir / "manifest.json", manifest)
+    write_arrow_artifact_manifest(manifest, output_dir)
     _upsert_root_manifest(output_root, dataset_name=dataset_name, dataset_dir=output_dir)
     return manifest
 
@@ -1242,18 +1230,14 @@ def convert_runtime_dataset_to_arrow(
         write_name_counts_index_seconds = time.perf_counter() - start
         paths["name_counts_index"] = name_counts_index_path
 
-    manifest_paths = _portable_manifest_paths(paths, output_dir)
-    manifest = {
+    manifest_metadata = {
         "schema": FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION,
-        "normalization_version": NORMALIZATION_VERSION,
         "dataset": dataset_name,
         "source_dir": str(sources.source_dir),
         "conversion_kind": "table-runtime",
         "signature_count": len(dataset.signatures),
         "paper_count": len(dataset.papers),
         "cluster_count": len(dataset.clusters or {}),
-        "paths": manifest_paths,
-        "artifact_generation": _arrow_artifact_generation(paths, output_dir),
         "specter": specter_reports,
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
@@ -1266,6 +1250,7 @@ def convert_runtime_dataset_to_arrow(
             "write_name_counts_index_seconds": write_name_counts_index_seconds,
         },
     }
+    manifest = build_arrow_artifact_manifest(paths, output_dir, metadata=manifest_metadata)
     if validate:
         manifest["validation"] = validate_arrow_dataset_manifest(
             manifest,
@@ -1273,7 +1258,7 @@ def convert_runtime_dataset_to_arrow(
             require_name_counts_index=not skip_name_counts_index,
             base_dir=output_dir,
         )
-    _replace_json(output_dir / "manifest.json", manifest)
+    write_arrow_artifact_manifest(manifest, output_dir)
     _upsert_root_manifest(root_manifest_dir, dataset_name=dataset_name, dataset_dir=output_dir)
     return manifest
 

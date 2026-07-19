@@ -29,27 +29,11 @@ NAME_TUPLE_ARTIFACT_SEMANTICS: dict[str, Any] = {
 
 
 @dataclass(frozen=True)
-class NameTupleArtifactIdentity:
-    """Immutable identity fields safe to retain with a loaded artifact."""
-
-    schema_version: str
-    artifact_version: int
-    normalization_version: str
-    data_filename: str
-    data_sha256: str
-    data_size_bytes: int
-    pair_count: int
-    source_filename: str
-    source_sha256: str
-    source_size_bytes: int
-
-
-@dataclass(frozen=True)
 class NameTupleArtifact:
     """Validated immutable alias pairs and their content identity."""
 
     pairs: frozenset[tuple[str, str]]
-    identity: NameTupleArtifactIdentity
+    data_sha256: str
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -220,11 +204,9 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
     _require_string(metadata.get("generated_at"), field="generated_at", metadata_path=metadata_path)
 
     source = _require_object(metadata.get("source"), field="source", metadata_path=metadata_path)
-    source_filename = _require_string(source.get("filename"), field="source.filename", metadata_path=metadata_path)
-    source_sha256 = _require_sha256(source.get("sha256"), field="source.sha256", metadata_path=metadata_path)
-    source_size_bytes = _require_nonnegative_int(
-        source.get("size_bytes"), field="source.size_bytes", metadata_path=metadata_path
-    )
+    _require_string(source.get("filename"), field="source.filename", metadata_path=metadata_path)
+    _require_sha256(source.get("sha256"), field="source.sha256", metadata_path=metadata_path)
+    _require_nonnegative_int(source.get("size_bytes"), field="source.size_bytes", metadata_path=metadata_path)
 
     data = _require_object(metadata.get("data"), field="data", metadata_path=metadata_path)
     data_filename = _require_string(data.get("filename"), field="data.filename", metadata_path=metadata_path)
@@ -266,26 +248,14 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
         data_path=data_path,
         expected_pair_count=pair_count,
     )
-    identity = NameTupleArtifactIdentity(
-        schema_version=schema_version,
-        artifact_version=artifact_version,
-        normalization_version=normalization_version,
-        data_filename=data_filename,
-        data_sha256=data_sha256,
-        data_size_bytes=data_size_bytes,
-        pair_count=pair_count,
-        source_filename=source_filename,
-        source_sha256=source_sha256,
-        source_size_bytes=source_size_bytes,
-    )
-    return NameTupleArtifact(pairs=pairs, identity=identity)
+    return NameTupleArtifact(pairs=pairs, data_sha256=data_sha256)
 
 
 @lru_cache(maxsize=1)
 def load_packaged_name_tuple_artifact() -> NameTupleArtifact:
     """Validate and retain the immutable packaged canonical artifact once.
 
-    The cached value contains only frozen pairs and a frozen identity. This is
+    The cached value contains only frozen pairs and their content hash. This is
     for installed package data, which is immutable for the process lifetime;
     custom paths deliberately use the uncached loader so mutations are always
     revalidated.

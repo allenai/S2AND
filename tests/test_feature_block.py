@@ -57,7 +57,7 @@ from s2and.incremental_linking.runtime import (
 )
 from s2and.model import Clusterer
 from scripts.arrow_conversion_helpers import feature_block_from_anddata, write_feature_block_arrow_from_anddata
-from tests.helpers import tiny_name_counts_provenance, write_test_arrow_artifact_manifest
+from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple, write_test_arrow_artifact_manifest
 
 
 def _raw_test_clusterer(
@@ -1055,31 +1055,23 @@ def test_filter_arrow_table_by_values_rejects_post_cast_duplicates() -> None:
 
 
 def test_name_counts_generation_cleanup_skips_unpublished_generation(tmp_path: Path) -> None:
-    generations_dir = tmp_path / "name_counts_index" / "generations"
-    current = generations_dir / "gen-current"
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        tiny_name_counts_tuple(),
+        tiny_name_counts_provenance(),
+        overwrite=True,
+    )
+    index_dir = Path(index_path)
+    manifest = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
+    current = index_dir / Path(manifest["files"]["first"]["path"]).parent
+    generations_dir = index_dir / "generations"
     unpublished = generations_dir / "gen-unpublished"
     old_published = generations_dir / "gen-old"
-    current.mkdir(parents=True)
     unpublished.mkdir()
     old_published.mkdir()
-    for name in ("first.bin", "last.bin", "first_last.bin", "last_first_initial.bin"):
-        (current / name).write_bytes(b"index")
-    (tmp_path / "name_counts_index" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "files": {
-                    "first": {"path": "generations/gen-current/first.bin"},
-                    "last": {"path": "generations/gen-current/last.bin"},
-                    "first_last": {"path": "generations/gen-current/first_last.bin"},
-                    "last_first_initial": {"path": "generations/gen-current/last_first_initial.bin"},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
     (old_published / ".published").write_text("", encoding="utf-8")
 
-    feature_block_arrow_module.cleanup_stale_name_counts_generations(tmp_path / "name_counts_index")
+    feature_block_arrow_module.cleanup_stale_name_counts_generations(index_dir)
 
     assert current.exists()
     assert unpublished.exists()

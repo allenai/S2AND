@@ -139,24 +139,26 @@ def _build_labeled_pairs(sig_ids, count=20, seed=123):
 
 
 @pytest.fixture(scope="session")
-def dataset(tmp_path_factory):
+def source_dataset():
     with _temporary_env(S2AND_BACKEND="python"):
         # Avoid reusing stale process-level env caches between parity fixtures.
         _reset_featurizer_env_caches()
 
         data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-        ds = _load_dataset_from_dir(data_dir, "dummy_parity_session")
-        ds = _attach_fake_specter_embeddings(ds)
-        # Rust featurizers build exclusively from Arrow artifacts; spool the
-        # dataset to a bundle sharing the same tiny name counts as the Python side.
-        ds = build_arrow_training_dataset(ds, tmp_path_factory.mktemp("parity_session_bundle"))
-    return ds
+        return _attach_fake_specter_embeddings(_load_dataset_from_dir(data_dir, "dummy_parity_session"))
 
 
 @pytest.fixture(scope="session")
-def sample_pairs(dataset):
+def arrow_dataset(source_dataset, tmp_path_factory):
+    # Rust featurizers build exclusively from Arrow artifacts. Keep this
+    # reconstructed object distinct from the Python reference dataset.
+    return build_arrow_training_dataset(source_dataset, tmp_path_factory.mktemp("parity_session_bundle"))
+
+
+@pytest.fixture(scope="session")
+def sample_pairs(source_dataset):
     rng = random.Random(123)
-    sig_ids = list(dataset.signatures.keys())
+    sig_ids = list(source_dataset.signatures.keys())
     pairs = []
     while len(pairs) < 10:
         s1 = rng.choice(sig_ids)
@@ -168,19 +170,19 @@ def sample_pairs(dataset):
 
 
 @pytest.fixture(scope="session")
-def constraint_pairs(dataset, sample_pairs):
+def constraint_pairs(source_dataset, sample_pairs):
     pairs = list(sample_pairs)
     seen = set(pairs)
 
     # Add a few disallow pairs if present
-    for a, b in list(dataset.cluster_seeds_disallow)[:5]:
+    for a, b in list(source_dataset.cluster_seeds_disallow)[:5]:
         if (a, b) not in seen and (b, a) not in seen and a != b:
             pairs.append((a, b))
             seen.add((a, b))
 
     # Add a few require pairs (same cluster id) and cross-cluster pairs
     by_cluster = defaultdict(list)
-    for sig_id, cluster_id in dataset.cluster_seeds_require.items():
+    for sig_id, cluster_id in source_dataset.cluster_seeds_require.items():
         by_cluster[cluster_id].append(sig_id)
 
     for sigs in by_cluster.values():
@@ -201,6 +203,14 @@ def constraint_pairs(dataset, sample_pairs):
 
 def test_rust_extension_available():
     assert HAS_RUST, f"s2and_rust not available: {_RUST_IMPORT_ERROR}"
+
+
+def test_arrow_training_helper_does_not_reuse_source_records(source_dataset, arrow_dataset):
+    signature_id = next(iter(source_dataset.signatures))
+    paper_id = str(source_dataset.signatures[signature_id].paper_id)
+
+    assert arrow_dataset.signatures[signature_id] is not source_dataset.signatures[signature_id]
+    assert arrow_dataset.papers[paper_id] is not source_dataset.papers[paper_id]
 
 
 def test_rust_featurizer_supports_string_paper_ids(tmp_path):
@@ -379,9 +389,9 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
         name_tuples="filtered",
         use_orcid_id=True,
     )
-    ds = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
+    arrow_dataset = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")
     ref_features, _ = _single_pair_featurize(("s1", "s2"), dataset=ds)
-    rust_features = _featurize_pair_indexed_rust(ds, "s1", "s2")
+    rust_features = _featurize_pair_indexed_rust(arrow_dataset, "s1", "s2")
     feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
 
     assert ds.get_constraint("s1", "s2") is None
@@ -391,10 +401,10 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
         assert equalish(ref_features[idx], rust_features[idx])
 
 
-def test_indexed_pair_matrix_rust_parity(dataset, sample_pairs):
+def test_indexed_pair_matrix_rust_parity(source_dataset, arrow_dataset, sample_pairs):
     for s1, s2 in sample_pairs:
-        ref_features, _ = _single_pair_featurize((s1, s2), dataset=dataset)
-        rust_features = _featurize_pair_indexed_rust(dataset, s1, s2)
+        ref_features, _ = _single_pair_featurize((s1, s2), dataset=source_dataset)
+        rust_features = _featurize_pair_indexed_rust(arrow_dataset, s1, s2)
         assert len(ref_features) == len(rust_features)
         for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
             assert equalish(ref_val, got_val), (
@@ -419,14 +429,14 @@ def test_language_reliability_min_is_pair_order_invariant_in_python_and_rust(tmp
         is_reliable=True,
         language_reliability=0.75,
     )
-    dataset = build_arrow_training_dataset(dataset, tmp_path)
+    arrow_dataset = build_arrow_training_dataset(dataset, tmp_path)
     feature_names = featurizer_mod.FeaturizationInfo().get_feature_names()
     reliability_index = feature_names.index("language_reliability_min")
 
     python_forward, _ = _single_pair_featurize((signature_id_1, signature_id_2), dataset=dataset)
     python_reverse, _ = _single_pair_featurize((signature_id_2, signature_id_1), dataset=dataset)
-    rust_forward = _featurize_pair_indexed_rust(dataset, signature_id_1, signature_id_2)
-    rust_reverse = _featurize_pair_indexed_rust(dataset, signature_id_2, signature_id_1)
+    rust_forward = _featurize_pair_indexed_rust(arrow_dataset, signature_id_1, signature_id_2)
+    rust_reverse = _featurize_pair_indexed_rust(arrow_dataset, signature_id_2, signature_id_1)
 
     observed = [
         python_forward[reliability_index],
@@ -481,24 +491,30 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
 
 def test_indexed_constraint_rust_ignores_reliable_language_mismatch(tmp_path):
     data_dir = os.path.join(PROJECT_ROOT_PATH, "tests", "dummy")
-    ds = _load_dataset_from_dir(data_dir, "dummy_language_constraint_removed")
+    source_dataset = _load_dataset_from_dir(data_dir, "dummy_language_constraint_removed")
 
     s1 = "0"
     s2 = "2"
-    paper_id_1 = str(ds.signatures[s1].paper_id)
-    paper_id_2 = str(ds.signatures[s2].paper_id)
+    paper_id_1 = str(source_dataset.signatures[s1].paper_id)
+    paper_id_2 = str(source_dataset.signatures[s2].paper_id)
 
-    ds.papers[paper_id_1] = ds.papers[paper_id_1]._replace(predicted_language="en", is_reliable=True)
-    ds.papers[paper_id_2] = ds.papers[paper_id_2]._replace(predicted_language="fr", is_reliable=True)
-    ds = build_arrow_training_dataset(ds, tmp_path)
+    source_dataset.papers[paper_id_1] = source_dataset.papers[paper_id_1]._replace(
+        predicted_language="en",
+        is_reliable=True,
+    )
+    source_dataset.papers[paper_id_2] = source_dataset.papers[paper_id_2]._replace(
+        predicted_language="fr",
+        is_reliable=True,
+    )
+    arrow_dataset = build_arrow_training_dataset(source_dataset, tmp_path)
 
-    ref_val = ds.get_constraint(s1, s2)
-    got_val = _constraint_indexed_rust(ds, s1, s2)
+    ref_val = source_dataset.get_constraint(s1, s2)
+    got_val = _constraint_indexed_rust(arrow_dataset, s1, s2)
 
     assert ref_val is None
     assert got_val is None
 
-    rust_featurizer = _get_rust_featurizer(ds)
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_ids = list(rust_featurizer.signature_ids())
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
 
@@ -599,13 +615,13 @@ def test_indexed_constraint_rust_uses_dataset_name_tuple_aliases(tmp_path):
     assert indexed_values == [None]
 
 
-def test_get_constraints_matrix_indexed_rust_parity(dataset, constraint_pairs):
-    rust_featurizer = _get_rust_featurizer(dataset)
+def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_dataset, constraint_pairs):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_ids = list(rust_featurizer.signature_ids())
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
     indexed_pairs = [(signature_index[s1], signature_index[s2]) for s1, s2 in constraint_pairs]
 
-    expected = [dataset.get_constraint(s1, s2) for s1, s2 in constraint_pairs]
+    expected = [source_dataset.get_constraint(s1, s2) for s1, s2 in constraint_pairs]
     indexed_values = get_constraints_matrix_indexed_rust(indexed_pairs, featurizer=rust_featurizer)
     assert len(indexed_values) == len(expected)
     for pair, ref_val, indexed_val in zip(
@@ -619,8 +635,8 @@ def test_get_constraints_matrix_indexed_rust_parity(dataset, constraint_pairs):
         ), f"Batch indexed constraint mismatch for pair {pair}: ref={ref_val}, indexed={indexed_val}"
 
 
-def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(dataset, constraint_pairs):
-    rust_featurizer = _get_rust_featurizer(dataset)
+def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(arrow_dataset, constraint_pairs):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_ids = list(rust_featurizer.signature_ids())
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}
     base_pairs = list(constraint_pairs)
@@ -648,8 +664,8 @@ def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(d
     np.testing.assert_allclose(got_labels, expected_labels, equal_nan=True)
 
 
-def test_linker_pair_distance_accumulators_match_python_large(dataset):
-    rust_featurizer = _get_rust_featurizer(dataset)
+def test_linker_pair_distance_accumulators_match_python_large(arrow_dataset):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
     rng = np.random.default_rng(20260509)
     row_count = 503
     pair_count = 12000
@@ -699,9 +715,14 @@ def test_linker_pair_distance_accumulators_match_python_large(dataset):
         {"incremental_dont_use_cluster_seeds": True},
     ],
 )
-def test_get_constraints_matrix_indexed_rust_flag_parity(dataset, constraint_pairs, constraint_kwargs):
-    rust_featurizer = _get_rust_featurizer(dataset)
-    expected = [dataset.get_constraint(s1, s2, **constraint_kwargs) for s1, s2 in constraint_pairs]
+def test_get_constraints_matrix_indexed_rust_flag_parity(
+    source_dataset,
+    arrow_dataset,
+    constraint_pairs,
+    constraint_kwargs,
+):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
+    expected = [source_dataset.get_constraint(s1, s2, **constraint_kwargs) for s1, s2 in constraint_pairs]
 
     signature_ids = list(rust_featurizer.signature_ids())
     signature_index = {sig_id: idx for idx, sig_id in enumerate(signature_ids)}

@@ -37,7 +37,9 @@ from s2and.featurizer import (  # noqa: E402
     featurize,
 )
 from s2and.model import Clusterer, FastCluster, PairwiseModeler  # noqa: E402
+from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact  # noqa: E402
 from s2and.production_bundle import write_pairwise_production_bundle  # noqa: E402
+from s2and.production_model import canonical_artifact_hashes  # noqa: E402
 
 logger = logging.getLogger("s2and")
 
@@ -142,6 +144,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
 
     os.environ["OMP_NUM_THREADS"] = str(max(1, int(args.n_jobs)))
 
+    canonical_name_tuples = load_packaged_name_tuple_artifact()
+    artifact_hashes = canonical_artifact_hashes()
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir or data_dir / f"production_model_v{args.production_version}")
     featurizer_info = FeaturizationInfo(
@@ -210,6 +214,8 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
         )
+        if anddata.name_tuples != canonical_name_tuples.pairs:
+            raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
 
         train, val, test = featurize(
             anddata,
@@ -279,6 +285,7 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         nameless_classifier=nameless_union_classifier.classifier,
         nameless_featurizer_info=nameless_featurizer_info,
     )
+    union_clusterer.feature_contract.update(artifact_hashes)
     union_clusterer.fit(anddatas)
     best_params = union_clusterer.best_params
     if best_params is None:

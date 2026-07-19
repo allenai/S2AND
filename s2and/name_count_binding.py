@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from s2and.name_counts_manifest import ValidatedNameCountsManifest, validated_name_counts_provenance
 
 _FEATURE_CONTRACT_FIELDS = (
     "name_counts_generation_id",
@@ -87,41 +88,21 @@ class NameCountsBinding:
     def from_provenance(cls, provenance: Any, *, context: str) -> NameCountsBinding:
         """Read the corresponding identity directly from verified source provenance."""
 
-        if not isinstance(provenance, Mapping) or provenance.get("schema_version") != "name_counts_provenance_v1":
-            raise ValueError(f"{context} requires name_counts_provenance_v1 provenance")
+        provenance = validated_name_counts_provenance(provenance, context=context)
         return cls(
-            generation_id=_nonempty_string(
-                provenance.get("generation_id"),
-                field="generation_id",
-                context=context,
-            ),
-            pickle_sha256=_sha256(
-                provenance.get("pickle_sha256"),
-                field="pickle_sha256",
-                context=context,
-            ),
-            source_snapshot_id=_nonempty_string(
-                provenance.get("source_snapshot_id"),
-                field="source_snapshot_id",
-                context=context,
-            ),
-            selected_rows_sha256=_sha256(
-                provenance.get("selected_rows_sha256"),
-                field="selected_rows_sha256",
-                context=context,
-            ),
+            generation_id=provenance["generation_id"],
+            pickle_sha256=provenance["pickle_sha256"],
+            source_snapshot_id=provenance["source_snapshot_id"],
+            selected_rows_sha256=provenance["selected_rows_sha256"],
         )
 
     @classmethod
     def from_arrow_name_counts_index(cls, index_dir: str | Path, *, context: str) -> NameCountsBinding:
         """Read the binding from a validated Arrow name-count index manifest."""
 
-        manifest_path = Path(index_dir) / "manifest.json"
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping) or payload.get("schema_version") != "name_counts_index_v1":
-            raise ValueError(f"{context} requires a name_counts_index_v1 manifest: {manifest_path}")
+        manifest = ValidatedNameCountsManifest.load(index_dir, context=context)
         return cls.from_provenance(
-            payload.get("source_provenance"),
+            manifest.source_provenance,
             context=f"{context} source_provenance",
         )
 

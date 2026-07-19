@@ -24,9 +24,7 @@ from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_BATCH_INDEX_KEYS,
     RAW_PLANNER_ARROW_KEY_COLUMNS,
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
-    MissingArrowArtifactError,
     normalize_arrow_paths,
-    require_name_counts_index_artifact,
 )
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
@@ -42,8 +40,12 @@ from s2and.incremental_linking.feature_block_contract import (
     filter_cluster_seed_disallows_for_signature_subset,
     normalize_cluster_seed_disallow_pairs,
 )
+from s2and.name_counts_manifest import (
+    NAME_COUNTS_INDEX_SCHEMA_VERSION,
+    ValidatedNameCountsManifest,
+    validated_name_counts_provenance,
+)
 
-NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v1"
 NAME_COUNTS_ARROW_MANIFEST_SCHEMA_VERSION = "name_counts_arrow_v1"
 ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
 ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION = "arrow_batch_lookup_index"
@@ -1073,8 +1075,6 @@ def write_name_counts_arrow(
 
     import pyarrow as pa
 
-    from s2and.name_counts_index import validated_name_counts_provenance
-
     output_root = Path(output_dir)
     logical_output_path = output_root / "name_counts.arrow"
     source_provenance = validated_name_counts_provenance(
@@ -1495,20 +1495,8 @@ def _name_counts_index_manifest_paths(index_dir: Path) -> dict[str, Path] | None
     manifest_path = index_dir / "manifest.json"
     if not manifest_path.exists():
         return None
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, Mapping):
-        raise TypeError(f"name-count index manifest must contain an object: {manifest_path}")
-    files = manifest.get("files")
-    if not isinstance(files, Mapping):
-        raise ValueError(f"name-count index manifest is missing files: {manifest_path}")
-    resolved: dict[str, Path] = {}
-    for kind in ("first", "last", "first_last", "last_first_initial"):
-        entry = files.get(kind)
-        if not isinstance(entry, Mapping) or entry.get("path") is None:
-            raise ValueError(f"name-count index manifest is missing files.{kind}.path: {manifest_path}")
-        raw_path = Path(str(entry["path"]))
-        resolved[kind] = raw_path if raw_path.is_absolute() else index_dir / raw_path
-    return resolved
+    manifest = ValidatedNameCountsManifest.load(index_dir, context="name-count index generation")
+    return {kind: entry.path for kind, entry in manifest.files.items()}
 
 
 def _name_counts_index_complete(
@@ -1518,23 +1506,17 @@ def _name_counts_index_complete(
     expected_source_provenance: Mapping[str, Any],
 ) -> bool:
     try:
-        require_name_counts_index_artifact(
+        manifest = ValidatedNameCountsManifest.load(
             index_dir,
             context="reusing name-count index",
-            producer_hint="rebuild the name-count index",
         )
-    except MissingArrowArtifactError:
+    except (OSError, RuntimeError, TypeError, ValueError):
         return False
-    manifest_path = index_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, Mapping):
+    if "fingerprint" not in manifest.payload:
         return False
-    if manifest.get("schema_version") != NAME_COUNTS_INDEX_SCHEMA_VERSION:
-        return False
-    if "fingerprint" not in manifest:
-        return False
-    return manifest.get("fingerprint") == expected_fingerprint and manifest.get("source_provenance") == dict(
-        expected_source_provenance
+    return (
+        manifest.payload.get("fingerprint") == expected_fingerprint
+        and manifest.source_provenance == expected_source_provenance
     )
 
 
@@ -1602,8 +1584,6 @@ def write_name_counts_index(
     overwrite: bool = False,
 ) -> tuple[str, dict[str, int | bool]]:
     """Write the global name-count lookup as exact-verified sorted binary indexes."""
-
-    from s2and.name_counts_index import validated_name_counts_provenance
 
     index_dir = Path(output_dir) / "name_counts_index"
     manifest_path = index_dir / "manifest.json"

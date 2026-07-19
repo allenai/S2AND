@@ -679,20 +679,6 @@ const NAME_TUPLE_ARTIFACT_SCHEMA_VERSION: &str = "s2and_name_tuples_v2";
 const NAME_TUPLE_ARTIFACT_VERSION: u64 = 2;
 const NAME_TUPLE_NORMALIZATION_VERSION: &str = "canonical_v2";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NameTupleArtifactIdentity {
-    schema_version: String,
-    artifact_version: u64,
-    normalization_version: String,
-    data_filename: String,
-    data_sha256: String,
-    data_size_bytes: u64,
-    pair_count: u64,
-    source_filename: String,
-    source_sha256: String,
-    source_size_bytes: u64,
-}
-
 fn name_tuple_value_error(metadata_path: &Path, message: impl AsRef<str>) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(format!(
         "invalid name-tuple metadata {}: {}",
@@ -775,7 +761,7 @@ fn python_sha256_hex(py: Python<'_>, payload: &[u8]) -> PyResult<String> {
 fn validated_name_tuple_artifact(
     py: Python<'_>,
     effective_path: &Path,
-) -> PyResult<(HashMap<String, HashSet<String>>, NameTupleArtifactIdentity)> {
+) -> PyResult<HashMap<String, HashSet<String>>> {
     if !effective_path.is_file() {
         return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
             "name tuples path does not exist: {}",
@@ -873,11 +859,9 @@ fn validated_name_tuple_artifact(
     required_name_tuple_string(root.get("generated_at"), "generated_at", &metadata_path)?;
 
     let source = required_name_tuple_object(&metadata, "source", &metadata_path)?;
-    let source_filename =
-        required_name_tuple_string(source.get("filename"), "source.filename", &metadata_path)?;
-    let source_sha256 =
-        required_name_tuple_sha256(source.get("sha256"), "source.sha256", &metadata_path)?;
-    let source_size_bytes = required_name_tuple_u64(
+    required_name_tuple_string(source.get("filename"), "source.filename", &metadata_path)?;
+    required_name_tuple_sha256(source.get("sha256"), "source.sha256", &metadata_path)?;
+    required_name_tuple_u64(
         source.get("size_bytes"),
         "source.size_bytes",
         &metadata_path,
@@ -1027,19 +1011,7 @@ fn validated_name_tuple_artifact(
             ),
         ));
     }
-    let identity = NameTupleArtifactIdentity {
-        schema_version,
-        artifact_version,
-        normalization_version,
-        data_filename,
-        data_sha256,
-        data_size_bytes,
-        pair_count,
-        source_filename,
-        source_sha256,
-        source_size_bytes,
-    };
-    Ok((aliases, identity))
+    Ok(aliases)
 }
 
 pub(crate) fn load_name_tuples_from_text_path(
@@ -1050,31 +1022,7 @@ pub(crate) fn load_name_tuples_from_text_path(
         Some(value) => value.to_string(),
         None => default_name_tuples_path(py)?,
     };
-    Ok(validated_name_tuple_artifact(py, Path::new(&effective_path))?.0)
-}
-
-#[pyfunction(signature = (path=None))]
-pub(crate) fn read_name_tuple_artifact_identity(
-    py: Python<'_>,
-    path: Option<&str>,
-) -> PyResult<Py<PyDict>> {
-    let effective_path = match path {
-        Some(value) => value.to_string(),
-        None => default_name_tuples_path(py)?,
-    };
-    let identity = validated_name_tuple_artifact(py, Path::new(&effective_path))?.1;
-    let output = PyDict::new(py);
-    output.set_item("schema_version", identity.schema_version)?;
-    output.set_item("artifact_version", identity.artifact_version)?;
-    output.set_item("normalization_version", identity.normalization_version)?;
-    output.set_item("data_filename", identity.data_filename)?;
-    output.set_item("data_sha256", identity.data_sha256)?;
-    output.set_item("data_size_bytes", identity.data_size_bytes)?;
-    output.set_item("pair_count", identity.pair_count)?;
-    output.set_item("source_filename", identity.source_filename)?;
-    output.set_item("source_sha256", identity.source_sha256)?;
-    output.set_item("source_size_bytes", identity.source_size_bytes)?;
-    Ok(output.unbind())
+    validated_name_tuple_artifact(py, Path::new(&effective_path))
 }
 
 pub(crate) fn has_name_counts_artifact(raw_name_counts: &RawNameCountMaps) -> bool {
@@ -1114,7 +1062,7 @@ pub(crate) fn build_name_counts_data_from_artifact(
 
 #[cfg(test)]
 mod name_counts_empty_surname_tests {
-    use crate::name_counts::{RawNameCountIndex, RawNameCountMaps};
+    use crate::name_counts::{python_sha256_file, RawNameCountIndex, RawNameCountMaps};
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1139,19 +1087,45 @@ mod name_counts_empty_surname_tests {
         );
         let dir = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&dir).expect("create temp index dir");
+        let mut files = serde_json::Map::new();
         for name in ["first", "last", "first_last", "last_first_initial"] {
-            let mut file =
-                std::fs::File::create(dir.join(format!("{name}.bin"))).expect("create index file");
+            let path = dir.join(format!("{name}.bin"));
+            let mut file = std::fs::File::create(&path).expect("create index file");
             file.write_all(&empty_index_bytes())
                 .expect("write index header");
+            drop(file);
+            files.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "path": path.file_name().expect("file name").to_str().expect("utf-8 file name"),
+                    "byte_count": path.metadata().expect("file metadata").len(),
+                    "sha256": python_sha256_file(&path).expect("hash fixture"),
+                }),
+            );
         }
-        let manifest = concat!(
-            r#"{"schema_version":"name_counts_index_v1","normalization_version":"canonical_v2","files":{"#,
-            r#""first":{"path":"first.bin"},"last":{"path":"last.bin"},"#,
-            r#""first_last":{"path":"first_last.bin"},"#,
-            r#""last_first_initial":{"path":"last_first_initial.bin"}}}"#,
-        );
-        std::fs::write(dir.join("manifest.json"), manifest).expect("write manifest");
+        std::fs::write(dir.join(".published"), []).expect("write published marker");
+        let manifest = serde_json::json!({
+            "schema_version": "name_counts_index_v1",
+            "normalization_version": "canonical_v2",
+            "source_provenance": {
+                "schema_version": "name_counts_provenance_v1",
+                "normalization_version": "canonical_v2",
+                "generation_id": "empty-test-generation",
+                "pickle_sha256": "0".repeat(64),
+                "source_snapshot_id": "empty-test-snapshot",
+                "source_kind": "test-fixture",
+                "source_query_sha256": "1".repeat(64),
+                "selected_rows_sha256": "2".repeat(64),
+                "selected_row_count": 0,
+                "source_row_count": 0,
+            },
+            "files": files,
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
         dir
     }
 

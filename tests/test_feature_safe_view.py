@@ -109,22 +109,22 @@ def test_get_constraint_suppress_orcid_python() -> None:
 
 def test_get_constraint_suppress_orcid_rust_parity(tmp_path) -> None:
     _require_rust()
-    dataset = _feature_safe_dataset()
-    dataset = build_arrow_training_dataset(dataset, tmp_path, name_counts="empty")
+    source_dataset = _feature_safe_dataset()
+    arrow_dataset = build_arrow_training_dataset(source_dataset, tmp_path, name_counts="empty")
     clear_rust_featurizer_cache()
-    rust_featurizer = _get_rust_featurizer(dataset)
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
     signature_index = {str(sig_id): idx for idx, sig_id in enumerate(rust_featurizer.signature_ids())}
     indexed_pairs = [(signature_index["same_a"], signature_index["same_b"])]
 
     assert get_constraints_matrix_indexed_rust(
         indexed_pairs,
         featurizer=rust_featurizer,
-    ) == [dataset.get_constraint("same_a", "same_b")]
+    ) == [source_dataset.get_constraint("same_a", "same_b")]
     assert get_constraints_matrix_indexed_rust(
         indexed_pairs,
         featurizer=rust_featurizer,
         suppress_orcid=True,
-    ) == [dataset.get_constraint("same_a", "same_b", suppress_orcid=True)]
+    ) == [source_dataset.get_constraint("same_a", "same_b", suppress_orcid=True)]
 
 
 def test_cached_rust_featurizer_respects_suppress_orcid_per_call(tmp_path) -> None:

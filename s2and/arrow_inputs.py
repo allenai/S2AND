@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from s2and.consts import NORMALIZATION_VERSION
+from s2and.name_counts_manifest import ValidatedNameCountsManifest
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
     paths: Mapping[str, str]
     generation_id: str
     normalization_version: str
+    name_counts_manifest: ValidatedNameCountsManifest | None
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError(
@@ -63,6 +66,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         generation_id: str,
         normalization_version: str,
         capability: object,
+        name_counts_manifest: ValidatedNameCountsManifest | None = None,
     ) -> ValidatedArrowInputs:
         """Create an instance after a trusted internal validation or projection."""
 
@@ -72,6 +76,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
         object.__setattr__(instance, "generation_id", str(generation_id))
         object.__setattr__(instance, "normalization_version", str(normalization_version))
+        object.__setattr__(instance, "name_counts_manifest", name_counts_manifest)
         return instance
 
     def __getitem__(self, key: str) -> str:
@@ -91,6 +96,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
             paths={key: value for key, value in self.paths.items() if key not in removed},
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
+            name_counts_manifest=(None if "name_counts_index" in removed else self.name_counts_manifest),
             capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
         )
 
@@ -126,6 +132,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
             paths=paths,
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
+            name_counts_manifest=self.name_counts_manifest,
             capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
         )
 
@@ -154,9 +161,14 @@ DECLARED_ARROW_SIDECAR_KEYS = (
 )
 UNSUPPORTED_ARROW_NAME_ALIAS_KEYS = frozenset({"name_pairs", "name_tuples"})
 DIRECTORY_ARTIFACT_KEYS = frozenset({"name_counts_index"})
-NAME_COUNTS_INDEX_MANIFEST_FILES = ("first", "last", "first_last", "last_first_initial")
-NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v1"
 ARROW_ARTIFACT_GENERATION_SCHEMA_VERSION = "s2and_arrow_artifact_generation_v1"
+_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS = frozenset(
+    {
+        "normalization_version",
+        "paths",
+        "artifact_generation",
+    }
+)
 _ARROW_REQUEST_SIDECAR_KEYS = frozenset(
     {
         "query_signatures",
@@ -235,6 +247,69 @@ def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str
         "generation_id": hashlib.sha256(encoded_files).hexdigest(),
         "files": files,
     }
+
+
+def build_arrow_artifact_manifest(
+    paths: Mapping[str, Any],
+    manifest_dir: str | Path,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one canonical, portable Arrow artifact manifest.
+
+    ``metadata`` may add dataset- or command-specific fields, but the runtime
+    contract fields are owned here so every producer emits the same paths,
+    normalization version, and immutable-generation inventory.
+    """
+
+    root = Path(manifest_dir)
+    canonical_paths = {str(key): value for key, value in paths.items() if str(key) != "manifest"}
+    extra = {} if metadata is None else dict(metadata)
+    conflicting_fields = sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS.intersection(extra))
+    if conflicting_fields:
+        raise ValueError("Arrow artifact manifest metadata cannot override canonical fields: " f"{conflicting_fields}")
+    return {
+        **extra,
+        "normalization_version": NORMALIZATION_VERSION,
+        "paths": {
+            key: _manifest_relative_path(value, root, artifact_key=key)
+            for key, value in sorted(canonical_paths.items())
+        },
+        "artifact_generation": _build_arrow_artifact_generation(canonical_paths, root),
+    }
+
+
+def write_arrow_artifact_manifest(
+    manifest: Mapping[str, Any],
+    manifest_dir: str | Path,
+) -> Path:
+    """Atomically publish a manifest built by :func:`build_arrow_artifact_manifest`."""
+
+    root = Path(manifest_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / "manifest.json"
+    missing_fields = sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS.difference(manifest))
+    if missing_fields:
+        raise ValueError(f"Arrow artifact manifest is missing canonical fields: {missing_fields}")
+    encoded = json.dumps(dict(manifest), indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=root,
+            prefix=f".{manifest_path.name}.",
+            suffix=".tmp",
+            encoding="utf-8",
+            delete=False,
+        ) as output:
+            output.write(encoded)
+            temporary_path = Path(output.name)
+        temporary_path.replace(manifest_path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+    return manifest_path
 
 
 def _stable_file_digest_token(path: Path) -> tuple[str, int, int, str]:
@@ -439,129 +514,9 @@ def _name_counts_index_error(path: Path) -> str | None:
     if not manifest_path.is_file():
         return f"{manifest_path} (missing manifest.json)"
     try:
-        manifest_stat_before = manifest_path.stat()
-        manifest_bytes = manifest_path.read_bytes()
-        manifest_stat_after = manifest_path.stat()
-        manifest = json.loads(manifest_bytes)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return f"{manifest_path} (invalid manifest: {exc})"
-    if not isinstance(manifest, Mapping):
-        return f"{manifest_path} (invalid manifest: expected a JSON object)"
-    manifest_stat_token = (
-        int(manifest_stat_after.st_dev),
-        int(manifest_stat_after.st_ino),
-        int(manifest_stat_after.st_size),
-        int(manifest_stat_after.st_mtime_ns),
-        int(manifest_stat_after.st_ctime_ns),
-    )
-    if manifest_stat_token != (
-        int(manifest_stat_before.st_dev),
-        int(manifest_stat_before.st_ino),
-        int(manifest_stat_before.st_size),
-        int(manifest_stat_before.st_mtime_ns),
-        int(manifest_stat_before.st_ctime_ns),
-    ):
-        return f"{manifest_path} (manifest changed while reading)"
-    schema_version = manifest.get("schema_version")
-    if schema_version != NAME_COUNTS_INDEX_SCHEMA_VERSION:
-        return (
-            f"{manifest_path} (unsupported schema_version {schema_version!r}; "
-            f"expected {NAME_COUNTS_INDEX_SCHEMA_VERSION!r})"
-        )
-    normalization_version = manifest.get("normalization_version")
-    if normalization_version != NORMALIZATION_VERSION:
-        return (
-            f"{manifest_path} (invalid normalization_version {normalization_version!r}; "
-            f"expected {NORMALIZATION_VERSION!r})"
-        )
-    source_provenance = manifest.get("source_provenance")
-    if not isinstance(source_provenance, Mapping):
-        return f"{manifest_path} (missing source_provenance mapping)"
-    if source_provenance.get("normalization_version") != normalization_version:
-        return f"{manifest_path} (source_provenance normalization_version mismatch)"
-    files = manifest.get("files")
-    if not isinstance(files, Mapping):
-        return f"{manifest_path} (missing files mapping)"
-    verified_files: list[tuple[Path, str, int]] = []
-    for file_key in NAME_COUNTS_INDEX_MANIFEST_FILES:
-        entry = files.get(file_key)
-        if not isinstance(entry, Mapping):
-            return f"{manifest_path} (missing files.{file_key})"
-        path_value = entry.get("path")
-        if not isinstance(path_value, str) or not path_value.strip():
-            return f"{manifest_path} (missing files.{file_key}.path)"
-        resolved = Path(path_value)
-        if not resolved.is_absolute():
-            resolved = path / resolved
-        try:
-            resolved.resolve().relative_to(path.resolve())
-        except ValueError:
-            return f"{resolved} (files.{file_key}.path escapes the name_counts_index directory)"
-        if not resolved.is_file():
-            return f"{resolved} (missing files.{file_key}.path target)"
-        file_stat = resolved.stat()
-        byte_count = entry.get("byte_count")
-        if isinstance(byte_count, int) and file_stat.st_size != byte_count:
-            return f"{resolved} (files.{file_key}.byte_count mismatch)"
-        if not isinstance(byte_count, int) or byte_count < 0:
-            return f"{manifest_path} (missing files.{file_key}.byte_count)"
-        expected_sha256 = entry.get("sha256")
-        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
-            return f"{manifest_path} (missing files.{file_key}.sha256)"
-        if not (resolved.parent / ".published").is_file():
-            return f"{resolved.parent / '.published'} (missing published-generation marker)"
-        verified_files.append(
-            (
-                resolved,
-                expected_sha256 if isinstance(expected_sha256, str) else "",
-                int(file_stat.st_size),
-            )
-        )
-
-    material_stat_tokens = tuple(
-        (
-            str(resolved.resolve()),
-            int(file_stat.st_dev),
-            int(file_stat.st_ino),
-            int(file_stat.st_size),
-            int(file_stat.st_mtime_ns),
-            int(file_stat.st_ctime_ns),
-        )
-        for resolved, _expected_sha256, _expected_bytes in verified_files
-        for file_stat in (resolved.stat(),)
-    )
-    for resolved, expected_sha256, expected_bytes in verified_files:
-        token = _stable_file_digest_token(resolved)
-        if token[1] != expected_bytes or token[3] != expected_sha256:
-            return f"{resolved} (declared SHA-256 mismatch)"
-    try:
-        if manifest_path.read_bytes() != manifest_bytes:
-            return f"{manifest_path} (manifest changed during verification)"
-    except OSError as exc:
-        return f"{manifest_path} (manifest changed during verification: {exc})"
-    final_manifest_stat = manifest_path.stat()
-    if manifest_stat_token != (
-        int(final_manifest_stat.st_dev),
-        int(final_manifest_stat.st_ino),
-        int(final_manifest_stat.st_size),
-        int(final_manifest_stat.st_mtime_ns),
-        int(final_manifest_stat.st_ctime_ns),
-    ):
-        return f"{manifest_path} (manifest metadata changed during verification)"
-    final_material_stat_tokens = tuple(
-        (
-            str(resolved.resolve()),
-            int(file_stat.st_dev),
-            int(file_stat.st_ino),
-            int(file_stat.st_size),
-            int(file_stat.st_mtime_ns),
-            int(file_stat.st_ctime_ns),
-        )
-        for resolved, _expected_sha256, _expected_bytes in verified_files
-        for file_stat in (resolved.stat(),)
-    )
-    if final_material_stat_tokens != material_stat_tokens:
-        return f"{manifest_path} (name-count index files changed during verification)"
+        ValidatedNameCountsManifest.load(path, context="name-count index")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return str(exc)
     return None
 
 
@@ -571,40 +526,10 @@ def read_name_counts_index_normalization_version(path: Any) -> str:
     Only the package's current canonical normalization contract is executable.
     """
 
-    manifest_path = Path(os.fspath(path)) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    value = manifest.get("normalization_version")
-    if value != NORMALIZATION_VERSION:
-        raise ValueError(
-            f"{manifest_path} has invalid normalization_version {value!r}; " f"expected {NORMALIZATION_VERSION!r}"
-        )
-    return str(value)
-
-
-def _require_name_counts_index_normalization(
-    paths: Mapping[str, str],
-    *,
-    expected_normalization_version: str | None,
-    context: str,
-    required_keys: Sequence[str],
-    producer_hint: str,
-) -> None:
-    if expected_normalization_version is None or "name_counts_index" not in paths:
-        return
-    artifact_version = read_name_counts_index_normalization_version(paths["name_counts_index"])
-    if artifact_version != expected_normalization_version:
-        raise MissingArrowArtifactError(
-            context=context,
-            required_keys=required_keys,
-            missing_keys=(),
-            missing_files={
-                "name_counts_index": (
-                    f"normalization_version mismatch: artifact is {artifact_version!r} but the model "
-                    f"feature contract requires {expected_normalization_version!r}"
-                )
-            },
-            producer_hint=producer_hint,
-        )
+    return ValidatedNameCountsManifest.load(
+        Path(os.fspath(path)),
+        context="name-count index normalization",
+    ).normalization_version
 
 
 def require_normalization_version(value: Any, *, context: str) -> str:
@@ -868,6 +793,7 @@ def _validate_complete_arrow_artifacts(
                     paths=canonical_paths,
                     generation_id=arrow_paths.generation_id,
                     normalization_version=arrow_paths.normalization_version,
+                    name_counts_manifest=arrow_paths.name_counts_manifest,
                     capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
                 )
         elif _SPECTER_PATH_KEYS.intersection(arrow_paths):
@@ -963,7 +889,25 @@ def _validate_complete_arrow_artifacts(
         for key in normalized
         if key in required or key.endswith("_batch_index") or key in _ARROW_REQUEST_SIDECAR_KEYS
     }
-    missing_files = _missing_or_wrong_kind_artifacts(normalized, required_or_declared_keys)
+    missing_files = _missing_or_wrong_kind_artifacts(
+        normalized,
+        required_or_declared_keys.difference({"name_counts_index"}),
+    )
+    name_counts_manifest: ValidatedNameCountsManifest | None = None
+    if "name_counts_index" in normalized:
+        index_path = Path(normalized["name_counts_index"])
+        if not index_path.exists():
+            missing_files["name_counts_index"] = str(index_path)
+        elif not index_path.is_dir():
+            missing_files["name_counts_index"] = f"{index_path} (expected directory)"
+        else:
+            try:
+                name_counts_manifest = ValidatedNameCountsManifest.load(
+                    index_path,
+                    context=f"{context} name_counts_index",
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                missing_files["name_counts_index"] = str(exc)
     missing_files.update(invalid_paths)
     if missing_keys or missing_files:
         raise MissingArrowArtifactError(
@@ -982,18 +926,29 @@ def _validate_complete_arrow_artifacts(
     )
     if verified.normalization_version is None:  # pragma: no cover - manifest validation rejects this
         raise RuntimeError("validated Arrow artifact generation is missing normalization_version")
-    _require_name_counts_index_normalization(
-        normalized,
-        expected_normalization_version=verified.normalization_version,
-        context=context,
-        required_keys=sorted(required),
-        producer_hint=producer_hint,
-    )
+    if (
+        name_counts_manifest is not None
+        and name_counts_manifest.normalization_version != verified.normalization_version
+    ):
+        raise MissingArrowArtifactError(
+            context=context,
+            required_keys=sorted(required),
+            missing_keys=(),
+            missing_files={
+                "name_counts_index": (
+                    "normalization_version mismatch: artifact is "
+                    f"{name_counts_manifest.normalization_version!r} but the Arrow generation "
+                    f"requires {verified.normalization_version!r}"
+                )
+            },
+            producer_hint=producer_hint,
+        )
     _validate_batch_indexes(normalized)
     return ValidatedArrowInputs._from_verified(
         paths=normalized,
         generation_id=verified.generation_id,
         normalization_version=verified.normalization_version,
+        name_counts_manifest=name_counts_manifest,
         capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
     )
 

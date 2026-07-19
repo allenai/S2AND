@@ -26,30 +26,8 @@ jobs:
             ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
-      # Sync environment from lock if present so tool versions come from pyproject.toml/uv.lock
-      - name: Sync deps (locked if available)
-        shell: bash
-        run: |
-          if [[ -f uv.lock ]]; then
-            uv sync --extra dev --frozen --no-install-package s2and-rust
-          else
-            uv sync --extra dev --no-install-package s2and-rust
-          fi
-
-      - name: version sync check
-        run: uv run --no-sync python scripts/sync_version.py --check
-      - name: ruff check
-        run: uv run --no-sync ruff check s2and scripts tests
-      - name: ruff format (s2and/)
-        run: uv run --no-sync ruff format --check s2and
-      - name: ruff format (scripts/*.py)
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(scripts/*.py)
-          if (( ${#files[@]} )); then
-            uv run --no-sync ruff format --check "${files[@]}"
-          fi
+      - name: Run shared lint policy
+        run: uv run --no-project python scripts/run_ci_locally.py lint
 
   typecheck-and-test:
     runs-on: ubuntu-latest
@@ -149,73 +127,5 @@ jobs:
             uv-venv-${{ runner.os }}-py311-
             uv-venv-
 
-      # Sync environment from lock if present (fast; no network if cached)
-      - name: Sync deps (locked if available)
-        shell: bash
-        run: |
-          if [[ -f uv.lock ]]; then
-            uv sync --extra dev --frozen --no-install-package s2and-rust
-          else
-            # No lock present; resolve once, then install
-            uv sync --extra dev --no-install-package s2and-rust
-          fi
-
-      - name: Rust format
-        run: uv run --no-sync cargo fmt --manifest-path s2and_rust/Cargo.toml -- --check
-
-      - name: Rust clippy
-        env:
-          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: uv run --no-sync cargo clippy --manifest-path s2and_rust/Cargo.toml --lib --no-deps -- -D clippy::correctness -D clippy::suspicious
-
-      - name: Rust native tests
-        env:
-          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: uv run --no-sync cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-features
-
-      # Canonical-v2 uses the native name-count index even with Python orchestration.
-      - name: Build required Rust extension
-        run: uv run --no-sync --with maturin maturin develop -m s2and_rust/Cargo.toml
-
-      - name: Fail-hard Rust API smoke
-        run: uv run --no-sync python scripts/verification/smoke_installed_rust_api.py
-
-      - name: "Rust parity guardrail: feature parity"
-        run: uv run --no-sync pytest -q tests/test_feature_port_parity.py
-
-      - name: "Rust parity guardrail: signature preprocess parity"
-        run: uv run --no-sync pytest -q tests/test_rust_signature_preprocess.py
-
-      - name: "Rust parity guardrail: batch chunking/fallback parity"
-        run: uv run --no-sync pytest -q tests/test_rust_batch_chunking.py
-
-      # Type checking (ty with tuned migration rules)
-      - name: ty (s2and)
-        run: |
-          uv run --no-sync ty check s2and \
-            --ignore unresolved-import \
-            --ignore unused-type-ignore-comment \
-            --ignore possibly-missing-attribute \
-            --ignore unresolved-global
-      - name: ty (scripts)
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(scripts/*.py)
-          if (( ${#files[@]} )); then
-            uv run --no-sync ty check "${files[@]}" \
-              --ignore unresolved-import \
-              --ignore unused-type-ignore-comment \
-              --ignore possibly-missing-attribute \
-              --ignore unresolved-global \
-              --ignore unresolved-reference \
-              --ignore unresolved-attribute
-          fi
-
-      - name: pytest (coverage, Python backend)
-        env:
-          # Python orchestration still uses the required native name-count index.
-          S2AND_BACKEND: python
-        run: |
-          uv run --no-sync pytest tests/ \
-            --cov=s2and --cov-report=term-missing --cov-fail-under=40
+      - name: Run shared typecheck-and-test policy
+        run: uv run --no-project python scripts/run_ci_locally.py typecheck-and-test

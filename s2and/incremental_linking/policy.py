@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from s2and.arrow_inputs import require_name_counts_index_artifact
+from s2and.arrow_inputs import ValidatedArrowInputs, require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
 from s2and.name_count_binding import NameCountsBinding
 
@@ -37,6 +37,10 @@ def existing_name_counts_index_path(paths: Mapping[str, Any]) -> str | None:
 
     path_value = paths.get("name_counts_index")
     if path_value is not None:
+        if isinstance(paths, ValidatedArrowInputs):
+            if paths.name_counts_manifest is None:  # pragma: no cover - validated-input invariant
+                raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
+            return str(path_value)
         return require_name_counts_index_artifact(
             path_value,
             context="Arrow name-count index",
@@ -74,10 +78,19 @@ def require_arrow_name_counts_index_for_clusterer(
     )
     if expected is None:
         return
-    observed = NameCountsBinding.from_arrow_name_counts_index(
-        index_path,
-        context=f"{context} Arrow name_counts_index",
-    )
+    if isinstance(arrow_paths, ValidatedArrowInputs):
+        manifest = arrow_paths.name_counts_manifest
+        if manifest is None:  # pragma: no cover - existing path invariant
+            raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
+        observed = NameCountsBinding.from_provenance(
+            manifest.source_provenance,
+            context=f"{context} Arrow name_counts_index source_provenance",
+        )
+    else:
+        observed = NameCountsBinding.from_arrow_name_counts_index(
+            index_path,
+            context=f"{context} Arrow name_counts_index",
+        )
     expected.require_matches(
         observed,
         context=context,

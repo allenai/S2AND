@@ -459,6 +459,23 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("S2AND_BACKEND", "python")
+    original_preprocess_signatures = ANDData.preprocess_signatures
+    observed_generation: list[str] = []
+
+    def record_initial_arrow_state(dataset: ANDData) -> None:
+        assert dataset.arrow_paths is not None
+        assert dataset.arrow_artifact_generation == dataset.arrow_paths.generation_id
+        assert dataset.name_counts_provenance is not None
+        assert isinstance(dataset.name_tuples, frozenset)
+        observed_generation.append(dataset.arrow_artifact_generation)
+        original_preprocess_signatures(dataset)
+
+    monkeypatch.setattr(ANDData, "preprocess_signatures", record_initial_arrow_state)
+    monkeypatch.setattr(
+        feature_port,
+        "evict_rust_featurizer",
+        lambda _dataset: pytest.fail("a new Arrow-training dataset cannot have a cached featurizer"),
+    )
 
     arrow_dataset = build_training_anddata_from_arrow(
         training_bundle["arrow_paths"],
@@ -475,6 +492,7 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.name_counts_index is None
     assert arrow_dataset.arrow_paths is not None
     assert arrow_dataset.arrow_artifact_generation
+    assert observed_generation == [arrow_dataset.arrow_artifact_generation]
 
 
 def _fixed_pair_frames(json_dataset: ANDData) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

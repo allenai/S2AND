@@ -248,21 +248,13 @@ uv run ty check s2and
 ```
 
 To run the entire CI suite mimicking the GH Actions:
+
 ```bash
 uv run python scripts/run_ci_locally.py
 ```
-`scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
-- lint job (`scripts/sync_version.py --check`, `ruff check`, and `ruff format --check`)
-- one required-runtime `typecheck-and-test` job
-- native Rust formatting, Clippy correctness/suspicious lints, and library tests
-- Rust extension ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
 
-Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The local and
-hosted runners therefore build the extension once, require it to import, and use `S2AND_BACKEND=python` for full-suite
-coverage of the Python route.
-
-By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
-To override platform emulation locally, set `S2AND_CI_TY_PLATFORM` (for example, `windows`).
+See [docs/development.md](docs/development.md#local-ci-mirror) for the shared
+hosted/local job policy and individual-job commands.
 
 To run static CI checks locally without Rust extension compilation (faster iteration):
 ```bash

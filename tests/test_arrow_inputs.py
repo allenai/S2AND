@@ -12,12 +12,14 @@ import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_modu
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
     ValidatedArrowInputs,
+    build_arrow_artifact_manifest,
     normalize_arrow_paths,
     require_arrow_artifacts,
     require_filtered_arrow_batch_indexes,
     validate_arrow_prediction_artifacts,
     validate_arrow_publication_artifacts,
     verified_arrow_artifact_generation,
+    write_arrow_artifact_manifest,
 )
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
@@ -193,9 +195,31 @@ def test_artifact_generation_writer_rejects_path_outside_manifest_directory(tmp_
     outside_path.write_bytes(b"outside")
 
     with pytest.raises(ValueError, match="must remain within manifest directory"):
-        arrow_inputs_module._build_arrow_artifact_generation(
+        build_arrow_artifact_manifest(
             {"signatures": outside_path},
             bundle_dir,
+        )
+
+
+def test_canonical_manifest_builder_owns_runtime_fields_and_publication(tmp_path: Path) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+    signatures_path.write_bytes(b"signatures")
+
+    manifest = build_arrow_artifact_manifest(
+        {"signatures": signatures_path},
+        tmp_path,
+        metadata={"dataset": "tiny"},
+    )
+    manifest_path = write_arrow_artifact_manifest(manifest, tmp_path)
+
+    assert manifest["normalization_version"] == "canonical_v2"
+    assert manifest["paths"] == {"signatures": "signatures.arrow"}
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+    with pytest.raises(ValueError, match="cannot override canonical fields"):
+        build_arrow_artifact_manifest(
+            {"signatures": signatures_path},
+            tmp_path,
+            metadata={"paths": {}},
         )
 
 
@@ -281,15 +305,16 @@ def test_retained_validated_profile_reuses_in_memory_contract_without_io(
         require_name_counts_index=True,
         expected_normalization_version="canonical_v2",
     )
+    assert validated.name_counts_manifest is not None
 
     def fail_io(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("retained validation performed filesystem I/O")
 
+    monkeypatch.setattr(arrow_inputs_module.ValidatedNameCountsManifest, "load", fail_io)
     for helper_name in (
         "_missing_or_wrong_kind_artifacts",
         "_name_counts_index_error",
         "_normalize_arrow_path_values",
-        "_require_name_counts_index_normalization",
         "_sha256_file",
         "_validate_batch_indexes",
         "_verified_arrow_artifact_manifest",

@@ -354,31 +354,6 @@ def _write_raw_planner_indexes_and_layout(
     return indexed_paths, index_metrics, raw_planner_arrow_physical_layout(indexed_paths)
 
 
-def _write_arrow_artifact_manifest(
-    arrow_paths: dict[str, str],
-    output_dir: Path,
-    *,
-    normalization_version: str,
-) -> Path:
-    """Bind the generated parity tables to one validated Arrow generation."""
-
-    from s2and.arrow_inputs import _build_arrow_artifact_generation
-
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "normalization_version": normalization_version,
-                "paths": dict(arrow_paths),
-                "artifact_generation": _build_arrow_artifact_generation(arrow_paths, output_dir),
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    return manifest_path
-
-
 def _resolve_parity_name_counts_index(
     signatures: Mapping[str, Any],
     *,
@@ -408,7 +383,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     os.environ.setdefault("S2AND_BACKEND", "rust")
     os.environ.setdefault("OMP_NUM_THREADS", str(args.n_jobs))
 
-    from s2and.arrow_inputs import validate_arrow_prediction_artifacts
+    from s2and.arrow_inputs import (
+        build_arrow_artifact_manifest,
+        validate_arrow_prediction_artifacts,
+        write_arrow_artifact_manifest,
+    )
     from s2and.consts import NORMALIZATION_VERSION
     from s2and.data import ANDData
     from s2and.feature_port import (
@@ -511,13 +490,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     timings["write_name_counts_index_seconds"] = 0.0
 
     start = time.perf_counter()
-    arrow_paths["manifest"] = str(
-        _write_arrow_artifact_manifest(
-            arrow_paths,
-            args.output_dir,
-            normalization_version=NORMALIZATION_VERSION,
-        )
-    )
+    arrow_manifest = build_arrow_artifact_manifest(arrow_paths, args.output_dir)
+    arrow_paths["manifest"] = str(write_arrow_artifact_manifest(arrow_manifest, args.output_dir))
     timings["write_arrow_manifest_seconds"] = time.perf_counter() - start
 
     arrow_paths = validate_arrow_prediction_artifacts(

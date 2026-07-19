@@ -266,7 +266,7 @@ def test_model_presplit_cache_fingerprint_drops_cluster_model_identity() -> None
     )
 
 
-def test_sidecar_cache_fingerprint_hashes_full_content_at_equal_size_and_mtime(tmp_path: Path) -> None:
+def test_altered_presplit_path_fingerprint_hashes_full_content_at_equal_size_and_mtime(tmp_path: Path) -> None:
     path = tmp_path / "cluster_seeds.arrow"
     path.write_bytes(b"a" * (1024 * 1024))
     original_stat = path.stat()
@@ -552,7 +552,8 @@ def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_datas
     assert captured["clusterer"] is clusterer
     assert captured["block_signatures"] == block
     assert not isinstance(captured["dataset"], ANDData)
-    assert captured["dataset"].cluster_seeds_require == {}
+    assert captured["dataset"].cluster_seeds_require == {"3": "0", "4": "0"}
+    assert captured["dataset"]._cluster_seeds_source == "arrow"
     assert captured["dataset"].name_tuples == {("al", "alex")}
     assert captured["dataset"].arrow_paths["cluster_seeds"] == str(cluster_seeds_path)
     assert captured["arrow_paths"]["cluster_seeds"] == str(cluster_seeds_path)
@@ -597,6 +598,7 @@ def test_predict_incremental_from_arrow_paths_accepts_explicit_seed_mapping(
 
     assert result["clusters"] == {"0": ["3", "4", "5"]}
     assert captured["dataset"].cluster_seeds_require == {"3": "0", "4": "0"}
+    assert captured["dataset"]._cluster_seeds_source == "dataset"
     assert captured["metadata_signature_ids"] == ("5",)
 
 
@@ -906,6 +908,7 @@ def test_cached_incremental_name_tuples_are_immutable(monkeypatch: pytest.Monkey
         assert default_name_tuples is name_tuples
         assert loaded == ["s2and_name_tuples_canonical.txt"]
         assert model_module._load_name_tuples_for_incremental_rules() is name_tuples
+        assert model_module._name_tuples_for_incremental_rules(name_tuples) is name_tuples
         assert not hasattr(name_tuples, "add")
     finally:
         model_module._load_name_tuples_for_incremental_rules.cache_clear()
@@ -1018,6 +1021,13 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
         "cluster_seed_disallows": str(disallow_path),
         "altered_cluster_signatures": str(altered_path),
     }
+    disallow_read_count = 0
+    original_disallow_reader = production_module.cluster_seed_disallows_from_arrow_paths
+
+    def counting_disallow_reader(paths: Mapping[str, Any]) -> set[tuple[str, str]]:
+        nonlocal disallow_read_count
+        disallow_read_count += 1
+        return set(original_disallow_reader(paths))
 
     class FakeClusterer:
         n_jobs = 1
@@ -1029,6 +1039,7 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
         def _build_incremental_seed_setup(self, dataset: Any, *_args: object, **kwargs: object):
             seed_arrow_paths = cast(Mapping[str, Any], kwargs["arrow_paths"])
             captured["seed_setup_arrow_paths"] = dict(seed_arrow_paths)
+            captured["seed_setup_disallows"] = set(kwargs["cluster_seed_disallows"])
             captured["altered_from_arrow"] = model_module._dataset_altered_cluster_signatures(
                 dataset,
                 seed_arrow_paths,
@@ -1038,6 +1049,7 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
 
         def _finish_incremental_with_seed_links(self, *_args: object, **kwargs: object):
             captured["finish_arrow_paths"] = dict(cast(Mapping[str, Any], kwargs["arrow_paths"]))
+            captured["finish_disallows"] = set(kwargs["cluster_seed_disallows"])
             return {"c_seed": ["seed", "query"]}
 
     def fake_raw_arrow_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
@@ -1061,6 +1073,11 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
         production_module.runtime_module,
         "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
         fake_raw_arrow_linker,
+    )
+    monkeypatch.setattr(
+        production_module,
+        "cluster_seed_disallows_from_arrow_paths",
+        counting_disallow_reader,
     )
     _patch_fake_raw_arrow_planner(monkeypatch, captured=captured)
 
@@ -1095,7 +1112,10 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
     assert raw_kwargs["arrow_paths"]["cluster_seed_disallows"] == str(disallow_path)
     assert raw_kwargs["arrow_paths"]["altered_cluster_signatures"] == str(altered_path)
     assert captured["altered_from_arrow"] == ["seed"]
+    assert captured["seed_setup_disallows"] == {("query", "seed")}
+    assert captured["finish_disallows"] == {("query", "seed")}
     assert captured["finish_arrow_paths"]["cluster_seeds"] == str(cluster_seeds_path)
+    assert disallow_read_count == 1
     assert captured["planner_inits"] == [()]
     assert captured["planner_plans"] == [("query",)]
     assert result["clusters"] == {"c_seed": ["seed", "query"]}
@@ -1999,6 +2019,7 @@ def test_finish_incremental_with_seed_links_reclusters_abstains_from_arrow_paths
         captured["block_dict"] = dict(block_dict)
         captured["arrow_paths"] = dict(arrow_paths)
         captured["partial_supervision"] = dict(kwargs["partial_supervision"])
+        captured["cluster_seeds_disallow"] = set(kwargs["cluster_seeds_disallow"])
         captured["runtime_context"] = kwargs["runtime_context"]
         captured["total_ram_bytes"] = kwargs["total_ram_bytes"]
         return {"residual_cluster": list(block_dict["block"])}, None
@@ -2035,6 +2056,7 @@ def test_finish_incremental_with_seed_links_reclusters_abstains_from_arrow_paths
     assert captured["block_dict"] == {"block": ["u2", "u3"]}
     assert captured["arrow_paths"] == arrow_paths
     assert captured["partial_supervision"] == {("u2", "u3"): LARGE_DISTANCE}
+    assert captured["cluster_seeds_disallow"] == {("u2", "u3")}
     assert captured["runtime_context"] is runtime_context
     assert captured["total_ram_bytes"] == 123_456
 
@@ -2166,6 +2188,7 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
         captured["block_dict"] = dict(block_dict)
         captured["arrow_paths"] = dict(arrow_paths)
         captured["partial_supervision"] = dict(kwargs["partial_supervision"])
+        captured["cluster_seeds_disallow"] = set(kwargs["cluster_seeds_disallow"])
         captured["incremental_dont_use_cluster_seeds"] = kwargs["incremental_dont_use_cluster_seeds"]
         captured["runtime_context"] = kwargs["runtime_context"]
         captured["total_ram_bytes"] = kwargs["total_ram_bytes"]
@@ -2217,6 +2240,11 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
     assert captured["partial_supervision"] == {
         ("seed0", "seed1"): LARGE_DISTANCE,
         ("seed2", "seed3"): LARGE_DISTANCE,
+    }
+    assert captured["cluster_seeds_disallow"] == {
+        ("seed0", "seed1"),
+        ("seed2", "seed3"),
+        ("seed3", "seed4"),
     }
     assert captured["incremental_dont_use_cluster_seeds"] is True
     assert captured["runtime_context"] is runtime_context
@@ -2343,10 +2371,9 @@ def test_build_incremental_seed_setup_loads_seed_and_altered_signatures_from_arr
     assert cluster_seeds_require_inverse == {"7": ["seed0", "seed1"], "8": ["seed2"]}
 
 
-def test_cluster_seeds_arrow_read_cache_reuses_parse_and_returns_copy(monkeypatch, tmp_path: Path):
+def test_cluster_seeds_arrow_read_is_request_local(monkeypatch, tmp_path: Path):
     import pyarrow as pa
 
-    model_module._CLUSTER_SEEDS_ARROW_CACHE.clear()
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
     write_cluster_seeds_arrow(cluster_seeds_path, {"seed0": "7", "seed1": "7"})
 
@@ -2360,111 +2387,33 @@ def test_cluster_seeds_arrow_read_cache_reuses_parse_and_returns_copy(monkeypatc
 
     monkeypatch.setattr(pa.ipc, "open_file", counting_open_file)
 
-    def fail_read_bytes(self: Path):
-        raise AssertionError(f"cache fingerprint should not read Arrow bytes: {self}")
-
-    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
-
     first = model_module._cluster_seeds_require_from_arrow_paths({"cluster_seeds": str(cluster_seeds_path)})
     first["seed0"] = "mutated"
     second = model_module._cluster_seeds_require_from_arrow_paths({"cluster_seeds": str(cluster_seeds_path)})
 
     assert second == {"seed0": "7", "seed1": "7"}
-    assert open_file_call_count == 1
+    assert open_file_call_count == 2
 
 
-def test_cluster_seeds_arrow_cache_does_not_poison_prior_content_key(monkeypatch, tmp_path: Path) -> None:
-    model_module._CLUSTER_SEEDS_ARROW_CACHE.clear()
-    cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
-    replacement_path = tmp_path / "replacement_cluster_seeds.arrow"
-    write_cluster_seeds_arrow(cluster_seeds_path, {"seed0": "7"})
-    write_cluster_seeds_arrow(replacement_path, {"seed0": "8"})
-    original_bytes = cluster_seeds_path.read_bytes()
-    replacement_bytes = replacement_path.read_bytes()
-    original_stat = cluster_seeds_path.stat()
-    original_reader = model_module._read_cluster_seeds_arrow_file
-    read_count = 0
-
-    def rewrite_before_first_parse(path: Path) -> dict[str, str]:
-        nonlocal read_count
-        read_count += 1
-        if read_count == 1:
-            path.write_bytes(replacement_bytes)
-        return original_reader(path)
-
-    monkeypatch.setattr(model_module, "_read_cluster_seeds_arrow_file", rewrite_before_first_parse)
-
-    assert model_module._read_cluster_seeds_arrow(cluster_seeds_path) == {"seed0": "8"}
-    assert read_count == 2
-
-    cluster_seeds_path.write_bytes(original_bytes)
-    os.utime(cluster_seeds_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-    assert model_module._read_cluster_seeds_arrow(cluster_seeds_path) == {"seed0": "7"}
-    assert read_count == 3
-
-
-def test_cluster_seed_disallows_arrow_cache_does_not_poison_prior_content_key(
+def test_cluster_seed_disallows_arrow_read_is_request_local(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    model_module._CLUSTER_SEED_DISALLOWS_ARROW_CACHE.clear()
     disallow_path = tmp_path / "cluster_seed_disallows.arrow"
-    replacement_path = tmp_path / "replacement_cluster_seed_disallows.arrow"
     write_cluster_seed_disallows_arrow(disallow_path, [("seed0", "seed1")])
-    write_cluster_seed_disallows_arrow(replacement_path, [("seed0", "seed2")])
-    original_bytes = disallow_path.read_bytes()
-    replacement_bytes = replacement_path.read_bytes()
-    original_stat = disallow_path.stat()
     original_reader = model_module.read_cluster_seed_disallows_arrow
     read_count = 0
 
-    def rewrite_before_first_parse(path: Path) -> tuple[tuple[str, str], ...]:
+    def counting_reader(path: Path) -> tuple[tuple[str, str], ...]:
         nonlocal read_count
         read_count += 1
-        if read_count == 1:
-            path.write_bytes(replacement_bytes)
         return original_reader(path)
 
-    monkeypatch.setattr(model_module, "read_cluster_seed_disallows_arrow", rewrite_before_first_parse)
+    monkeypatch.setattr(model_module, "read_cluster_seed_disallows_arrow", counting_reader)
 
-    assert model_module._read_cluster_seed_disallows_arrow(disallow_path) == {("seed0", "seed2")}
-    assert read_count == 2
-
-    disallow_path.write_bytes(original_bytes)
-    os.utime(disallow_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     assert model_module._read_cluster_seed_disallows_arrow(disallow_path) == {("seed0", "seed1")}
-    assert read_count == 3
-
-
-def test_arrow_sidecar_cache_read_fails_after_bounded_rewrites(monkeypatch, tmp_path: Path) -> None:
-    model_module._CLUSTER_SEEDS_ARROW_CACHE.clear()
-    path = tmp_path / "cluster_seeds.arrow"
-    fingerprint_count = 0
-    read_count = 0
-
-    def changing_fingerprint(_path: Path) -> tuple[str, int, int, str]:
-        nonlocal fingerprint_count
-        fingerprint_count += 1
-        return str(path), 1, fingerprint_count, f"digest-{fingerprint_count}"
-
-    def count_read(_path: Path) -> tuple[tuple[str, str], ...]:
-        nonlocal read_count
-        read_count += 1
-        return (("seed0", "7"),)
-
-    monkeypatch.setattr(model_module, "_path_cache_fingerprint", changing_fingerprint)
-
-    with pytest.raises(RuntimeError, match=r"changed during all 3 read attempts"):
-        model_module._read_consistent_cached_arrow_pairs(
-            path,
-            cache=model_module._CLUSTER_SEEDS_ARROW_CACHE,
-            reader=count_read,
-            max_entries=model_module._CLUSTER_SEEDS_ARROW_CACHE_MAX_ENTRIES,
-            cache_name="cluster_seeds",
-        )
-
-    assert fingerprint_count == 6
-    assert read_count == 3
+    assert model_module._read_cluster_seed_disallows_arrow(disallow_path) == {("seed0", "seed1")}
+    assert read_count == 2
 
 
 def test_arrow_paths_need_current_cluster_seeds_rewrites_missing_seed_sidecar(tmp_path: Path):

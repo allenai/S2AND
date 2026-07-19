@@ -33,6 +33,7 @@ from s2and.production_model import (
     _load_pairwise_staging_model,
     load_production_model,
     pairwise_bundle_binding,
+    require_canonical_artifact_hashes,
 )
 
 PAIRWISE_FIXTURE_SEED = 921
@@ -162,6 +163,7 @@ def _clusterer_config_payload(
             "Production bundle normalization_version mismatch: "
             f"source={source_normalization_version!r} package={NORMALIZATION_VERSION!r}"
         )
+    require_canonical_artifact_hashes(feature_contract, context="Production bundle export feature_contract")
     return {
         "batch_size": int(getattr(clusterer, "batch_size", 1_000_000)),
         "cluster_model": _cluster_model_payload(clusterer),

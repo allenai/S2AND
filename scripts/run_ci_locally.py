@@ -2,7 +2,7 @@
 """
 Run local CI with close parity to `.github/workflows/main.yaml`.
 
-Execution order:
+With no argument, execution order is:
   1) lint job:
      - uv sync --extra dev [--frozen if uv.lock exists]
      - version sync check
@@ -12,8 +12,11 @@ Execution order:
      - build the required Rust extension
      - run Rust parity guardrails
      - run the full suite with Python orchestration
+
+Pass ``lint`` or ``typecheck-and-test`` to run only one hosted-CI job.
 """
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -48,6 +51,7 @@ def repo_root() -> Path:
 
 REPO = repo_root()
 RUST_PARITY_TESTS = [
+    "tests/test_name_counts_manifest.py",
     "tests/test_feature_port_parity.py",
     "tests/test_rust_signature_preprocess.py",
     "tests/test_rust_batch_chunking.py",
@@ -289,10 +293,20 @@ def run_typecheck_and_test_job(*, lock_present: bool) -> None:
     )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "job",
+        nargs="?",
+        choices=("lint", "typecheck-and-test"),
+        help="run one CI job instead of the complete local mirror",
+    )
+    args = parser.parse_args(argv)
     lock_present = (REPO / "uv.lock").exists()
-    run_lint_job(lock_present=lock_present)
-    run_typecheck_and_test_job(lock_present=lock_present)
+    if args.job in (None, "lint"):
+        run_lint_job(lock_present=lock_present)
+    if args.job in (None, "typecheck-and-test"):
+        run_typecheck_and_test_job(lock_present=lock_present)
     print("\nALL CHECKS PASSED")
 
 

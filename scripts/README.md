@@ -58,7 +58,7 @@
 
 | Script | What it does |
 |---|---|
-| `run_ci_locally.py` | Run CI locally with parity to `.github/workflows/main.yaml`: version sync, lint, Rust fmt/Clippy/native tests, one required extension build, ABI/parity guardrails, ty, and Python-backend pytest coverage |
+| `run_ci_locally.py` | Shared hosted/local CI policy. With no argument it runs both jobs; pass `lint` or `typecheck-and-test` to run one job. |
 | `sync_version.py` | Sync VERSION file into pyproject.toml + Cargo.toml |
 
 ### Archived historical artifacts

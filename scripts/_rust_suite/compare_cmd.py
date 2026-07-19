@@ -125,25 +125,6 @@ def _validate_bounded_args(args: argparse.Namespace) -> None:
         raise ValueError("--pair-count must be non-negative")
 
 
-def _write_arrow_artifact_manifest(paths: dict[str, str], output_dir: str | Path) -> Path:
-    from s2and.arrow_inputs import _build_arrow_artifact_generation
-    from s2and.consts import NORMALIZATION_VERSION
-
-    root = Path(output_dir)
-    manifest_path = root / "manifest.json"
-    with manifest_path.open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "normalization_version": NORMALIZATION_VERSION,
-                "paths": dict(paths),
-                "artifact_generation": _build_arrow_artifact_generation(paths, root),
-            },
-            f,
-            sort_keys=True,
-        )
-    return manifest_path
-
-
 def _selected_feature_indices(featurizer_info: Any) -> list[int]:
     return sorted(
         {
@@ -312,7 +293,11 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             )
             featurize_seconds = time.perf_counter() - featurize_start
         else:
-            from s2and.arrow_inputs import validate_arrow_prediction_artifacts
+            from s2and.arrow_inputs import (
+                build_arrow_artifact_manifest,
+                validate_arrow_prediction_artifacts,
+                write_arrow_artifact_manifest,
+            )
             from s2and.feature_port import build_rust_featurizer_from_arrow_paths
             from s2and.incremental_linking.feature_block_arrow import write_raw_arrow_batch_lookup_indexes
             from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
@@ -331,7 +316,8 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
                     arrow_tmpdir,
                 )
                 arrow_paths["name_counts_index"] = name_counts_index_path
-                manifest_path = _write_arrow_artifact_manifest(arrow_paths, arrow_tmpdir)
+                manifest = build_arrow_artifact_manifest(arrow_paths, arrow_tmpdir)
+                manifest_path = write_arrow_artifact_manifest(manifest, arrow_tmpdir)
                 arrow_paths["manifest"] = str(manifest_path)
                 validated_arrow_paths = validate_arrow_prediction_artifacts(
                     arrow_paths,

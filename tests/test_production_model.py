@@ -35,6 +35,11 @@ from s2and.production_model import (
 from tests.helpers import tiny_name_counts_index
 from tests.promoted_linking_helpers import build_tiny_promoted_booster
 
+_TEST_CANONICAL_ARTIFACT_HASHES = {
+    "name_tuples_data_sha256": "a" * 64,
+    "orcid_prefix_counts_data_sha256": "b" * 64,
+}
+
 
 class _PythonLightGBMScorer:
     """Test double for the Rust scorer that executes the same saved model."""
@@ -84,6 +89,11 @@ def synthetic_pairwise_bundle(
 ) -> tuple[Path, Clusterer]:
     monkeypatch.setattr(production_model_module, "_load_rust_lightgbm_booster", _PythonLightGBMScorer)
     monkeypatch.setattr(incremental_artifact_module, "_load_rust_lightgbm_booster", _PythonLightGBMScorer)
+    monkeypatch.setattr(
+        production_model_module,
+        "canonical_artifact_hashes",
+        lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
+    )
     main_info = FeaturizationInfo(["name_similarity"], featurizer_version=FEATURIZER_VERSION)
     nameless_info = FeaturizationInfo(["year_diff"], featurizer_version=FEATURIZER_VERSION)
     source_clusterer = Clusterer(
@@ -96,8 +106,8 @@ def synthetic_pairwise_bundle(
         batch_size=100,
     )
     source_clusterer.feature_contract = {
-        "name_counts_last_first_initial_semantics": "initial_char",
         "normalization_version": NORMALIZATION_VERSION,
+        **_TEST_CANONICAL_ARTIFACT_HASHES,
     }
     source_clusterer.best_params = {"eps": 0.5, "linkage": "average"}
     bundle_dir = tmp_path / "production_model_v9.9"
@@ -193,6 +203,9 @@ def test_native_production_bundle_loads_as_mutable_clusterer(
     assert clusterer.classifier.n_jobs == 7
     assert clusterer.nameless_classifier.n_jobs == 7
     assert clusterer.cluster_model.eps == 0.5
+    assert {
+        field: clusterer.feature_contract[field] for field in _TEST_CANONICAL_ARTIFACT_HASHES
+    } == _TEST_CANONICAL_ARTIFACT_HASHES
 
 
 def test_production_name_count_model_requires_exact_binding(
@@ -368,6 +381,107 @@ def test_bundle_export_rejects_missing_normalization_provenance(
             tmp_path / "missing-provenance",
             bundle_version="10.0",
         )
+
+
+@pytest.mark.parametrize("field", tuple(_TEST_CANONICAL_ARTIFACT_HASHES))
+@pytest.mark.parametrize("invalid", (None, "f" * 63, "F" * 64, "c" * 64))
+def test_canonical_artifact_hash_contract_rejects_missing_malformed_or_mismatched_values(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    invalid: str | None,
+) -> None:
+    monkeypatch.setattr(
+        production_model_module,
+        "canonical_artifact_hashes",
+        lambda: dict(_TEST_CANONICAL_ARTIFACT_HASHES),
+    )
+    feature_contract = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
+    if invalid is None:
+        feature_contract.pop(field)
+    else:
+        feature_contract[field] = invalid
+
+    with pytest.raises(ValueError, match=field):
+        production_model_module.require_canonical_artifact_hashes(
+            feature_contract,
+            context="test feature_contract",
+        )
+
+
+def test_bundle_export_rejects_missing_canonical_artifact_hash(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    _, source_clusterer = synthetic_pairwise_bundle
+    source_clusterer.feature_contract.pop("name_tuples_data_sha256")
+
+    with pytest.raises(ValueError, match="name_tuples_data_sha256"):
+        write_pairwise_production_bundle(
+            source_clusterer,
+            tmp_path / "missing-name-tuples-hash",
+            bundle_version="10.0",
+        )
+
+
+def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    config_path = bundle_dir / "clusterer.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    field = "orcid_prefix_counts_data_sha256"
+    config["feature_contract"][field] = "c" * 64
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(bundle_dir, "clusterer.json")
+
+    with pytest.raises(ValueError, match=rf"{field} does not match"):
+        _load_pairwise_staging_model(bundle_dir)
+
+
+@pytest.mark.parametrize(
+    ("path", "schema_version"),
+    (
+        ("manifest.json", "s2and_production_model_bundle_v2"),
+        ("clusterer.json", "s2and_clusterer_config_v2"),
+    ),
+)
+def test_bundle_rejects_previous_schema_versions(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    path: str,
+    schema_version: str,
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    artifact_path = bundle_dir / path
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = schema_version
+    artifact_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if path == "clusterer.json":
+        _refresh_manifest_checksum(bundle_dir, path)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        _load_pairwise_staging_model(bundle_dir)
+
+
+@pytest.mark.parametrize("field", tuple(_TEST_CANONICAL_ARTIFACT_HASHES))
+def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    field: str,
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    original_binding = pairwise_bundle_binding(bundle_dir)
+    changed_hashes = dict(_TEST_CANONICAL_ARTIFACT_HASHES)
+    changed_hashes[field] = "c" * 64
+    monkeypatch.setattr(production_model_module, "canonical_artifact_hashes", lambda: dict(changed_hashes))
+
+    config_path = bundle_dir / "clusterer.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["feature_contract"][field] = changed_hashes[field]
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(bundle_dir, "clusterer.json")
+
+    changed_binding = pairwise_bundle_binding(bundle_dir)
+    assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
 @pytest.mark.parametrize("unsafe_path", ("../clusterer.json", "/tmp/clusterer.json", "pairwise\\main.lgb"))

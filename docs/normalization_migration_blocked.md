@@ -30,20 +30,21 @@ when they do not directly alter normalization.
 2. **Pending:** validate the canonical `name_counts_index/` cardinalities,
    digests, exact lookup parity, Python preprocessing latency, and peak RSS.
    Python and Rust runtime paths consume only this index.
-3. **Runtime validation complete; generation and bundle binding pending:**
+3. **Runtime validation and bundle binding complete; generation pending:**
    regenerate the canonical versioned ORCID prefix-count generation and publish
    `first_k_letter_counts_from_orcid.manifest.json`. Runtime loading is lazy but
    requires the manifest, immutable generation, matching normalization/pair
    semantics, source digest, metadata/data checksums, and exact cardinalities;
-   the unversioned JSON is no longer a fallback. Before v1.3 release, approve a
-   bundle schema that declares this verified generation and routes its loaded
-   dictionary into subblocking instead of resolving package-global state.
-4. **Artifact validation complete; bundle binding pending:** deterministically
+   the unversioned JSON is no longer a fallback. Production training records
+   its exact data SHA-256 in `feature_contract`; export and load require that
+   hash to match the packaged priors used by default subblocking.
+4. **Artifact validation and bundle binding complete:** deterministically
    regenerate and package `s2and/data/s2and_name_tuples_canonical.txt` with its
    strict source/data checksum, cardinality, normalization, and semantics
-   metadata. Python and Rust verify and expose the same identity. Before v1.3,
-   bind that identity into the release unit; future crash-atomic regeneration
-   requires an approved generation-pointer layout rather than same-path files.
+   metadata. Python and Rust enforce the same validation. Production training
+   records the exact tuple-data SHA-256, and export/load compare it to the
+   packaged aliases. Future crash-atomic regeneration requires an approved
+   generation-pointer layout rather than same-path files.
 5. **Pending:** re-export benchmark training names by signature-ID join, report
    join/divergence metrics, and retrain the production v1.3 pairwise and
    incremental-linker bundle.
@@ -241,12 +242,12 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
   in staging and validate before promoting the package. A crash-preserving live
   rollback would require a generation-directory/pointer layout and therefore a
   separately approved artifact schema/layout change.
-- Tuple identity inspection: `s2and.name_tuple_artifact.load_name_tuple_artifact`
-  in Python and `s2and_rust.read_name_tuple_artifact_identity` in Rust.
-  Validation occurs when the artifact/featurizer is built, outside pair-scoring
-  loops. This loader contract does not by itself bind a future v1.3 model bundle
-  to a tuple digest; the release bundle must declare and validate that identity
-  before the artifact-dependent migration can be called complete.
+- Tuple binding: `s2and.name_tuple_artifact.load_name_tuple_artifact` retains
+  the validated pairs and their data SHA-256. Rust applies the same strict
+  sidecar and row validation while loading aliases, without maintaining a
+  second identity-inspection API. Production `feature_contract` contains
+  `name_tuples_data_sha256` and `orcid_prefix_counts_data_sha256`; bundle export
+  and load require both to match the installed canonical data.
 - Frozen examples: `tests/fixtures/canonical_name_examples.json` and
   `tests/test_canonical_name_examples.py`.
 - Version-contract tests: `tests/test_normalization_version_contract.py`.

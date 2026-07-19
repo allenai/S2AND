@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from s2and.arrow_inputs import (
-    ValidatedArrowInputs,
     require_normalization_version,
     validate_arrow_training_artifacts,
 )
@@ -45,7 +44,6 @@ from s2and.incremental_linking.feature_block_arrow import (
     _read_arrow_ipc_table,
     _require_arrow_columns,
 )
-from s2and.name_counts_index import validated_name_counts_provenance
 
 logger = logging.getLogger("s2and")
 
@@ -289,29 +287,6 @@ def load_specter_tuple_from_arrow(path: str | Path) -> tuple[np.ndarray, list[st
     return matrix, keys
 
 
-def _bind_training_arrow_paths(
-    dataset: ANDData,
-    normalized_paths: ValidatedArrowInputs,
-) -> None:
-    """Bind one already-verified immutable generation to an ``ANDData``."""
-
-    normalized = normalized_paths.without("query_signatures")
-    index_manifest = json.loads((Path(normalized["name_counts_index"]) / "manifest.json").read_text(encoding="utf-8"))
-    dataset.name_counts_provenance = validated_name_counts_provenance(
-        index_manifest.get("source_provenance"),
-        context="arrow-native training name_counts_index",
-    )
-    # Rust consumes aliases while building. Freezing provides mutation safety
-    # and an O(1) repeat fingerprint for the native featurizer cache.
-    if isinstance(getattr(dataset, "name_tuples", None), set):
-        dataset.name_tuples = frozenset(dataset.name_tuples)
-    from s2and import feature_port
-
-    feature_port.evict_rust_featurizer(dataset)
-    dataset.arrow_paths = normalized
-    dataset.arrow_artifact_generation = normalized.generation_id
-
-
 def build_training_anddata_from_arrow(
     arrow_paths: Mapping[str, Any],
     name: str,
@@ -357,18 +332,20 @@ def build_training_anddata_from_arrow(
         _validate_canonical_arrow_file_schema(normalized_arrow_paths[table_name], table_name=table_name)
     if "specter" in normalized_arrow_paths:
         _validate_canonical_arrow_file_schema(normalized_arrow_paths["specter"], table_name="specter")
-    signatures = load_signatures_dict_from_arrow(normalized_arrow_paths["signatures"])
-    papers = load_papers_dict_from_arrow(normalized_arrow_paths["papers"], normalized_arrow_paths["paper_authors"])
+    training_arrow_paths = normalized_arrow_paths.without("query_signatures")
+    signatures = load_signatures_dict_from_arrow(training_arrow_paths["signatures"])
+    papers = load_papers_dict_from_arrow(training_arrow_paths["papers"], training_arrow_paths["paper_authors"])
+    name_counts_manifest = training_arrow_paths.name_counts_manifest
+    if name_counts_manifest is None:  # pragma: no cover - required profile invariant
+        raise RuntimeError("validated Arrow training inputs are missing their name-count manifest")
 
-    dataset = ANDData(
+    dataset = ANDData._from_validated_arrow_training(
         signatures=signatures,
         papers=papers,
         name=name,
-        mode="train",
+        arrow_paths=training_arrow_paths,
+        name_counts_provenance=name_counts_manifest.source_provenance,
         clusters=clusters,
-        specter_embeddings=None,
-        name_counts_index=None,
-        rust_arrow_featurization=True,
         train_pairs=train_pairs,
         val_pairs=val_pairs,
         test_pairs=test_pairs,
@@ -378,15 +355,13 @@ def build_training_anddata_from_arrow(
         test_pairs_size=test_pairs_size,
         random_seed=random_seed,
         n_jobs=n_jobs,
-        preprocess=True,
         name_tuples=name_tuples,
     )
-    _bind_training_arrow_paths(dataset, normalized_arrow_paths)
     logger.debug(
         "Telemetry stage: stage=arrow_training_ingest seconds=%.3f signatures=%d papers=%d specter=%s",
         time.perf_counter() - ingest_start,
         len(signatures),
         len(papers),
-        "yes" if normalized_arrow_paths.get("specter") else "no",
+        "yes" if training_arrow_paths.get("specter") else "no",
     )
     return dataset

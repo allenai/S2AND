@@ -19,6 +19,10 @@
   dependency. Production Rust featurization and ingest enter through validated
   Arrow IPC artifacts; classic JSON/`ANDData` remains a Python compatibility
   and reference surface.
+- Breaking: `NameTupleArtifact.identity` and
+  `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
+  retains only validated alias pairs plus `data_sha256`; Rust validates the same
+  artifact directly at ingest.
 - Promoted query-disallow resolution is request-global and deterministic:
   require-forced decisions first, then descending initial score, then signature
   ID. Component-aware packing and complete single-query rescoring preserve
@@ -33,15 +37,16 @@
 - Name-count pickle, binary index, Arrow inputs, pairwise boosters, and linker
   metadata now carry and verify normalization, generation, size, SHA-256, and
   feature-contract provenance. Manifest-relative paths cannot escape their
-  authority or depend on process CWD. Equal-size/equal-mtime source and sidecar
-  mutation is detected before cache reuse. Models selecting name-count features
+  authority or depend on process CWD. Equal-size/equal-mtime mutation of
+  altered-profile/disallow inputs is detected before altered-presplit reuse.
+  Models selecting name-count features
   compare the exact four-field generation binding at Python, Arrow, and
   prebuilt-Rust-featurizer boundaries before feature work.
 - Arrow production inputs require a canonical content-addressed generation
   manifest. Immutable dataset files and indexes are inventoried centrally;
-  request-local seed/query sidecars are kept outside that identity. Hot cache
-  checks bind exact paths and filesystem mutation watches without hashing files
-  again on a hit.
+  request-local seed/query sidecars are kept outside that identity and parsed
+  once per request. Hot featurizer-cache checks bind exact immutable paths and
+  generation identity without rehashing files on a hit.
 - Stored language evidence is now an all-or-nothing triple with finite
   reliability in `[0,1]`; unreliable rows must carry zero. Python and Rust
   reject partial/malformed values and agree across pair order. Raw candidate
@@ -58,7 +63,12 @@
   finalization use validated staging and manifest-last commits. Metric promotion
   rejects missing/nonfinite values, and diagnostic metric-drift overrides cannot
   promote artifacts. Wheel/sdist validation rejects undeclared production
-  assets and checks the single declared default.
+  assets and checks the single declared default. Production training records the
+  canonical name-tuple and ORCID prefix-count data SHA-256 values in the existing
+  feature contract; bundle export and load require exact matches, and the linker
+  binding covers both through its ordered feature-contract digest. The
+  production-bundle and clusterer-config schemas are version 3; version 2
+  bundles are rejected rather than adapted.
 - The release workflow builds and installs the exact Python and Rust wheels
   outside the source tree. A synthetic public
   `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the
@@ -74,10 +84,8 @@
   `signatures.author_position` is not made non-null until the new datasets are
   audited, and `backend="python"` still uses the native scorer because the true
   zero-Rust scorer measured about 27% lower throughput. The latter is not being
-  changed under the no-throughput-regression requirement. Verified ORCID and
-  canonical tuple identities are exposed but not yet serialized/routed by
-  production bundles; those v1.3 bundle-schema decisions require owner
-  approval. Canonical tuple regeneration is metadata-last and fail-closed, but
+  changed under the no-throughput-regression requirement. Canonical tuple
+  regeneration is metadata-last and fail-closed, but
   true crash-atomic replacement would also require a generation-pointer layout.
   Python `ANDData` now accepts a validated `name_counts_index` path or shared
   immutable `NameCountsIndex` handle. The caller-owned dictionary seam, legacy

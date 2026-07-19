@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +9,20 @@ import pytest
 import s2and.incremental_linking.policy as policy_module
 import s2and.model as model_module
 from s2and import feature_port
+from s2and.arrow_inputs import validate_arrow_prediction_artifacts
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.model import Clusterer
 from s2and.runtime import build_runtime_context
-from tests.helpers import build_arrow_training_dataset, build_dummy_dataset, tiny_name_counts_provenance
+from tests.helpers import (
+    build_arrow_training_dataset,
+    build_dummy_dataset,
+    tiny_name_counts_provenance,
+    tiny_name_counts_tuple,
+    write_minimal_arrow_prediction_bundle,
+    write_test_arrow_artifact_manifest,
+)
 
 
 class _ConstantClassifier:
@@ -26,7 +34,6 @@ class _ConstantClassifier:
 def _feature_contract(provenance: dict[str, Any]) -> dict[str, Any]:
     return {
         "normalization_version": NORMALIZATION_VERSION,
-        "name_counts_last_first_initial_semantics": "initial_char",
         "name_counts_generation_id": provenance["generation_id"],
         "name_counts_pickle_sha256": provenance["pickle_sha256"],
         "name_counts_source_snapshot_id": provenance["source_snapshot_id"],
@@ -46,16 +53,13 @@ def _name_count_clusterer(provenance: dict[str, Any]) -> Clusterer:
 
 
 def _write_index_manifest(index_dir: Path, provenance: dict[str, Any]) -> None:
-    index_dir.mkdir()
-    (index_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "name_counts_index_v1",
-                "source_provenance": provenance,
-            }
-        ),
-        encoding="utf-8",
+    written_path, _metrics = write_name_counts_index(
+        index_dir.parent,
+        tiny_name_counts_tuple(),
+        provenance,
+        overwrite=True,
     )
+    assert Path(written_path) == index_dir
 
 
 def _binding_tuple(provenance: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -176,6 +180,46 @@ def test_arrow_prediction_checks_exact_name_count_binding_before_featurizer_buil
         with pytest.raises(ValueError, match="name-count binding mismatch.*name_counts_index"):
             clusterer.predict_from_arrow_paths({"block": ["1"]}, arrow_paths)
         assert build_calls == []
+
+
+def test_validated_arrow_binding_reuses_retained_name_count_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provenance = tiny_name_counts_provenance()
+    clusterer = _name_count_clusterer(provenance)
+    paths = write_minimal_arrow_prediction_bundle(tmp_path)
+    index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        tiny_name_counts_tuple(),
+        provenance,
+        overwrite=True,
+    )
+    paths["name_counts_index"] = index_path
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+    validated = validate_arrow_prediction_artifacts(
+        paths,
+        require_specter=False,
+        require_name_counts_index=True,
+        expected_normalization_version=NORMALIZATION_VERSION,
+    )
+    assert validated.name_counts_manifest is not None
+
+    def fail_revalidation(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("retained name-count manifest was revalidated")
+
+    monkeypatch.setattr(policy_module, "require_name_counts_index_artifact", fail_revalidation)
+    monkeypatch.setattr(
+        policy_module.NameCountsBinding,
+        "from_arrow_name_counts_index",
+        fail_revalidation,
+    )
+
+    policy_module.require_arrow_name_counts_index_for_clusterer(
+        clusterer,
+        validated,
+        context="retained manifest test",
+    )
 
 
 def test_prebuilt_rust_featurizer_prediction_checks_binding_once_per_request(

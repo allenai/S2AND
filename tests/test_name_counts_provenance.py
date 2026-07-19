@@ -38,7 +38,7 @@ def test_name_counts_index_cache_hit_skips_material_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
-    real_validator = name_counts_index_module.require_name_counts_index_artifact
+    real_validator = name_counts_index_module._load_validated_name_counts_manifest
     validation_count = 0
 
     def count_validation(*args, **kwargs):
@@ -46,7 +46,7 @@ def test_name_counts_index_cache_hit_skips_material_validation(
         validation_count += 1
         return real_validator(*args, **kwargs)
 
-    monkeypatch.setattr(name_counts_index_module, "require_name_counts_index_artifact", count_validation)
+    monkeypatch.setattr(name_counts_index_module, "_load_validated_name_counts_manifest", count_validation)
 
     first = NameCountsIndex.open(path)
     second = NameCountsIndex.open(path)
@@ -60,7 +60,7 @@ def test_name_counts_index_concurrent_open_validates_generation_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
-    real_validator = name_counts_index_module.require_name_counts_index_artifact
+    real_validator = name_counts_index_module._load_validated_name_counts_manifest
     validation_started = threading.Event()
     release_validation = threading.Event()
     validation_count = 0
@@ -73,7 +73,7 @@ def test_name_counts_index_concurrent_open_validates_generation_once(
             raise TimeoutError("test did not release name-count validation")
         return real_validator(*args, **kwargs)
 
-    monkeypatch.setattr(name_counts_index_module, "require_name_counts_index_artifact", block_validation)
+    monkeypatch.setattr(name_counts_index_module, "_load_validated_name_counts_manifest", block_validation)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(NameCountsIndex.open, path)

@@ -17,6 +17,7 @@ from sklearn.cluster import KMeans
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
+from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.consts import (
     _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
@@ -36,7 +37,6 @@ from s2and.runtime import (
     build_runtime_context,
     stage_uses_rust,
 )
-from s2and.rust_lifecycle import PYTHON_ONLY_POLICY, RUST_ARROW_TRAINING_POLICY
 from s2and.sampling import random_sampling, sampling
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
@@ -65,8 +65,6 @@ CHUNK_SIZE = 1000  # for multiprocessing imap chunks
 _PAIR_LABEL_MAP: dict[str | int, int] = {"NO": 0, "YES": 1, "0": 0, 0: 0, "1": 1, 1: 1}
 
 SIGNATURE_PREPROCESS_BATCH_SIZE = 2048
-# Canonical artifacts use ``<last> <first initial>`` for this count key.
-NAME_COUNTS_LAST_FIRST_INITIAL_INITIAL_CHAR = "initial_char"
 PairSamplingMode = Literal[
     "within_block_random",
     "within_block_balanced_classes",
@@ -361,10 +359,46 @@ class ANDData:
             set to disable aliases, or a set of pairs; pair order is ignored.
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
-        rust_arrow_featurization: set by s2and.arrow_training when this dataset's Rust
-            featurizer is built from Arrow IPC artifacts; defers paper preprocessing and
-            signature n-gram/field materialization to the Rust Arrow readers
     """
+
+    @classmethod
+    def _from_validated_arrow_training(
+        cls,
+        signatures: dict,
+        papers: dict,
+        name: str,
+        *,
+        arrow_paths: ValidatedArrowInputs,
+        name_counts_provenance: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> "ANDData":
+        """Construct a Rust-training dataset from one verified Arrow generation.
+
+        Args:
+            signatures: Signature rows reconstructed from the Arrow bundle.
+            papers: Paper rows reconstructed from the Arrow bundle.
+            name: Dataset name used for feature-cache identity.
+            arrow_paths: Fully verified immutable Arrow artifact paths.
+            name_counts_provenance: Verified provenance for the bound name-count index.
+            **kwargs: Remaining train-mode ``ANDData`` construction arguments.
+
+        Returns:
+            A train-mode dataset whose Arrow state is available throughout
+            initialization.
+        """
+
+        return cls(
+            signatures=signatures,
+            papers=papers,
+            name=name,
+            mode="train",
+            specter_embeddings=None,
+            name_counts_index=None,
+            preprocess=True,
+            _validated_arrow_inputs=arrow_paths,
+            _arrow_name_counts_provenance=name_counts_provenance,
+            **kwargs,
+        )
 
     def __init__(
         self,
@@ -403,14 +437,20 @@ class ANDData:
         name_tuples: set[tuple[str, str]] | str | None = "filtered",
         use_orcid_id: bool = True,
         compute_block_fn: Callable[[str], str] = compute_block,
-        rust_arrow_featurization: bool = False,
+        _validated_arrow_inputs: ValidatedArrowInputs | None = None,
+        _arrow_name_counts_provenance: Mapping[str, Any] | None = None,
     ):
         init_start = time.perf_counter()
-        if rust_arrow_featurization and (mode != "train" or not preprocess):
-            raise ValueError("Rust Arrow training requires mode='train' and preprocess=True")
+        if (_validated_arrow_inputs is None) != (_arrow_name_counts_provenance is None):
+            raise ValueError("Arrow training paths and name-count provenance must be supplied together")
+        if _validated_arrow_inputs is not None:
+            if mode != "train" or not preprocess:
+                raise ValueError("Arrow training requires mode='train' and preprocess=True")
+            if specter_embeddings is not None or name_counts_index is not None:
+                raise ValueError("Arrow training reads SPECTER and name counts directly from its verified paths")
         self.runtime_context = build_runtime_context(
             "dataset_build",
-            backend="rust" if rust_arrow_featurization else "python",
+            backend="rust" if _validated_arrow_inputs is not None else "python",
         )
         self.original_signatures_path = signatures if isinstance(signatures, str) else None
         self.original_papers_path = papers if isinstance(papers, str) else None
@@ -424,12 +464,11 @@ class ANDData:
         self.clusters_path = clusters if isinstance(clusters, str) else None
         self.cluster_seeds_path = cluster_seeds if isinstance(cluster_seeds, str) else None
         self.specter_embeddings_path = specter_embeddings if isinstance(specter_embeddings, str) else None
-        # Explicit Arrow prediction artifacts; populated by s2and.arrow_training
-        # when the dataset is built from an Arrow bundle.
-        self.arrow_paths: Mapping[str, str] | None = None
-        self.arrow_artifact_generation: str | None = None
+        self.arrow_paths = _validated_arrow_inputs
+        self.arrow_artifact_generation = (
+            _validated_arrow_inputs.generation_id if _validated_arrow_inputs is not None else None
+        )
         self.compute_block_fn = compute_block_fn
-        self.rust_lifecycle_policy = RUST_ARROW_TRAINING_POLICY if rust_arrow_featurization else PYTHON_ONLY_POLICY
         pair_sampling_mode = _validate_pair_sampling_mode(pair_sampling_mode)
 
         if mode == "train":
@@ -637,6 +676,8 @@ class ANDData:
         self.normalization_version = NORMALIZATION_VERSION
         self._name_counts_provenance: Mapping[str, Any] | None = None
         self.name_counts_index: NameCountsIndex | None = None
+        if _arrow_name_counts_provenance is not None:
+            self.name_counts_provenance = _arrow_name_counts_provenance
         if name_counts_index is not None:
             logger.info("opening name-count index (generation-cached)")
             self.name_counts_index = (
@@ -664,10 +705,10 @@ class ANDData:
             resolved_name_tuples = {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
         else:
             raise ValueError("name_tuples must be None, 'filtered', or a set of canonical (first_a, first_b) tuples")
-        self.name_tuples = resolved_name_tuples
+        self.name_tuples = frozenset(resolved_name_tuples) if self.arrow_paths is not None else resolved_name_tuples
 
         preprocess_papers_stage_start = time.perf_counter()
-        if self.rust_lifecycle_policy.skip_python_paper_preprocess:
+        if self.arrow_paths is not None:
             # Rust paper preprocessing will fill missing fields in the build path; avoid duplicate Python work.
             logger.info("Rust deferred paper preprocessing active: skipping Python paper preprocessing")
         else:
@@ -785,8 +826,8 @@ class ANDData:
         use_rust_backend = _signature_preprocess_backend_decision(runtime_context)
         use_rust_featurizer = use_rust_backend
         rust_module_available = use_rust_backend
-        defer_signature_ngrams_to_rust = self.rust_lifecycle_policy.defer_signature_ngrams_to_rust
-        defer_signature_fields_to_rust = self.rust_lifecycle_policy.defer_signature_fields_to_rust
+        defer_signature_ngrams_to_rust = self.arrow_paths is not None
+        defer_signature_fields_to_rust = self.arrow_paths is not None
         logger.info(
             "Signature preprocessing backend decision: backend=%s use_rust_featurizer=%s rust_module_available=%s "
             "defer_signature_ngrams_to_rust=%s defer_signature_fields_to_rust=%s "

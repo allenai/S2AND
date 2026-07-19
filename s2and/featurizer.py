@@ -133,8 +133,7 @@ def _ensure_python_pair_signature_ngrams(
 ) -> None:
     if _use_rust_featurizer(runtime_context, dataset):
         return
-    rust_lifecycle_policy = getattr(dataset, "rust_lifecycle_policy", None)
-    if bool(getattr(rust_lifecycle_policy, "defer_signature_fields_to_rust", False)) and signature_pairs:
+    if getattr(dataset, "arrow_paths", None) and signature_pairs:
         raise RuntimeError(
             "Python featurization cannot run on a dataset built with normalized signature fields deferred to Rust. "
             "Rebuild the dataset with S2AND_BACKEND=python/backend='python', or keep Rust featurization active with "

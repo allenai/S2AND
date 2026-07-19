@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import json
 import math
 import os
 import shutil
@@ -20,23 +19,10 @@ from s2and.runtime import load_s2and_rust_extension
 def write_test_arrow_artifact_manifest(bundle_dir: Any, paths: dict[str, str]) -> Path:
     """Write the canonical manifest required by production Arrow boundaries."""
 
-    from s2and.arrow_inputs import _build_arrow_artifact_generation
-    from s2and.consts import NORMALIZATION_VERSION
+    from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
 
-    root = Path(bundle_dir)
-    manifest_path = root / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "normalization_version": NORMALIZATION_VERSION,
-                "paths": dict(paths),
-                "artifact_generation": _build_arrow_artifact_generation(paths, root),
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-    return manifest_path
+    manifest = build_arrow_artifact_manifest(paths, bundle_dir)
+    return write_arrow_artifact_manifest(manifest, bundle_dir)
 
 
 def write_minimal_arrow_prediction_bundle(
@@ -254,7 +240,7 @@ def build_arrow_training_dataset(
     name_tuples = getattr(dataset, "name_tuples", "filtered")
     if isinstance(name_tuples, frozenset):
         name_tuples = set(name_tuples)
-    arrow_dataset = build_training_anddata_from_arrow(
+    return build_training_anddata_from_arrow(
         arrow_paths,
         f"{dataset.name}_arrow",
         expected_normalization_version=NORMALIZATION_VERSION,
@@ -267,16 +253,6 @@ def build_arrow_training_dataset(
         n_jobs=int(getattr(dataset, "n_jobs", 1)),
         name_tuples=name_tuples,
     )
-    # Parity tests intentionally exercise Python reference methods on the same
-    # object. Keep that already-materialized reference view; Rust consumes only
-    # the immutable Arrow generation created above.
-    arrow_dataset.signatures = dict(dataset.signatures)
-    arrow_dataset.papers = dict(dataset.papers)
-    arrow_dataset.specter_embeddings = dict(getattr(dataset, "specter_embeddings", {}) or {})
-    arrow_dataset.signature_to_block = dict(getattr(dataset, "signature_to_block", {}))
-    arrow_dataset.cluster_seeds_require = dict(getattr(dataset, "cluster_seeds_require", {}))
-    arrow_dataset.cluster_seeds_disallow = set(getattr(dataset, "cluster_seeds_disallow", set()))
-    return arrow_dataset
 
 
 def build_dummy_dataset(

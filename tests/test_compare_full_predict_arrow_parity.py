@@ -8,6 +8,10 @@ import pytest
 
 pa = pytest.importorskip("pyarrow")
 
+from s2and.arrow_inputs import (  # noqa: E402
+    build_arrow_artifact_manifest,
+    write_arrow_artifact_manifest,
+)
 from scripts.verification import compare_full_predict_arrow_parity as parity_module  # noqa: E402
 from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E402
     _assert_exact,
@@ -18,7 +22,6 @@ from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E4
     _jsonable,
     _load_cluster_seeds_require,
     _numeric_report,
-    _write_arrow_artifact_manifest,
     _write_raw_planner_indexes_and_layout,
 )
 
@@ -333,13 +336,8 @@ def test_parity_arrow_writer_publishes_validator_compatible_manifest(tmp_path) -
         arrow_paths,
         tmp_path,
     )
-    arrow_paths["manifest"] = str(
-        _write_arrow_artifact_manifest(
-            arrow_paths,
-            tmp_path,
-            normalization_version=NORMALIZATION_VERSION,
-        )
-    )
+    manifest = build_arrow_artifact_manifest(arrow_paths, tmp_path)
+    arrow_paths["manifest"] = str(write_arrow_artifact_manifest(manifest, tmp_path))
 
     validated = validate_arrow_prediction_artifacts(
         arrow_paths,

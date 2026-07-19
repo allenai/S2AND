@@ -263,9 +263,14 @@ Use the script-only `FeatureBlock` conversion writer as the reference
 implementation for Arrow physical layout and for benchmark/replay bundles whose
 inputs are derived from `ANDData`:
 `scripts.arrow_conversion_helpers.write_feature_block_arrow_from_anddata`.
-That writer returns table paths and does not write `manifest.json`; manifests
-are producer-owned. `scripts/convert_to_arrow.py` is the reference producer for
-deployable manifest shape and current batch-index sidecars.
+That writer returns table paths and does not write `manifest.json`. All in-repo
+producers pass those paths through
+`s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
+`write_arrow_artifact_manifest(...)`, which own the portable paths,
+normalization, immutable-generation inventory, and publication format.
+Producer-specific metadata cannot override those canonical fields.
+`scripts/convert_to_arrow.py` is the reference producer for deployable
+dataset metadata and current batch-index sidecars.
 `scripts/verification/compare_full_predict_arrow_parity.py` is the reference
 bounded parity producer: it writes current batch-index sidecars, resolves a
 canonical name-count index, and publishes an artifact-generation manifest for
@@ -517,6 +522,7 @@ Required fields for every semantic Arrow manifest:
 ```json
 {
   "schema": "feature_block_arrow_v2",
+  "normalization_version": "canonical_v2",
   "dataset": "dataset_name",
   "signature_count": 0,
   "paper_count": 0,
@@ -524,6 +530,11 @@ Required fields for every semantic Arrow manifest:
     "signatures": "signatures.arrow",
     "papers": "papers.arrow",
     "paper_authors": "paper_authors.arrow"
+  },
+  "artifact_generation": {
+    "schema_version": "s2and_arrow_artifact_generation_v1",
+    "generation_id": "sha256-of-canonical-file-inventory",
+    "files": {}
   },
   "name_tuples": "default packaged filtered aliases"
 }
@@ -534,6 +545,10 @@ is exposed as
 `s2and.incremental_linking.feature_block.FEATURE_BLOCK_ARROW_MANIFEST_SCHEMA_VERSION`.
 Do not use the in-memory `FeatureBlock` schema constant for manifest
 validation.
+
+The canonical manifest builder supplies `normalization_version`, `paths`, and
+`artifact_generation`. Dataset producers supply fields such as `schema`,
+`dataset`, and row counts as metadata.
 
 Conditional `paths` entries:
 

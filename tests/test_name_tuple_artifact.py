@@ -4,7 +4,6 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -17,9 +16,6 @@ from s2and.name_tuple_artifact import (
     load_packaged_name_tuple_artifact,
 )
 from scripts.production import generate_canonical_name_tuples
-from tests.helpers import import_s2and_rust
-
-HAS_RUST_IDENTITY, RUST_MODULE = import_s2and_rust()
 
 
 def _write_artifact(
@@ -45,13 +41,11 @@ def _write_artifact(
     return metadata
 
 
-def test_checked_in_canonical_name_tuple_identity_matches_unchanged_data() -> None:
+def test_checked_in_canonical_name_tuple_hash_matches_unchanged_data() -> None:
     artifact = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt")
 
     assert len(artifact.pairs) == 3684
-    assert artifact.identity.pair_count == 3684
-    assert artifact.identity.data_sha256 == "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b"
-    assert artifact.identity.source_sha256 == "68f0c70fcf138d08656eaa39e485ba0d513ce6da6ce1164a3cc8bb2c680430f2"
+    assert artifact.data_sha256 == "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b"
 
 
 def test_packaged_artifact_cache_is_immutable_and_avoids_rehashing() -> None:
@@ -153,15 +147,4 @@ def test_concurrent_generators_leave_one_complete_loadable_artifact(tmp_path: Pa
         frozenset({("alice", "ally")}),
         frozenset({("bob", "robert")}),
     )
-    assert artifact.identity.source_sha256 in {item["source"]["sha256"] for item in metadata}
-
-
-@pytest.mark.skipif(not HAS_RUST_IDENTITY, reason="current Rust extension lacks tuple identity reader")
-def test_python_and_rust_validate_the_same_artifact_identity(tmp_path: Path) -> None:
-    artifact_path = tmp_path / "aliases.txt"
-    _write_artifact(artifact_path)
-
-    python_identity = asdict(load_name_tuple_artifact(artifact_path).identity)
-    rust_identity = dict(RUST_MODULE.read_name_tuple_artifact_identity(str(artifact_path)))
-
-    assert rust_identity == python_identity
+    assert artifact.data_sha256 in {item["data"]["sha256"] for item in metadata}

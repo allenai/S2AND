@@ -240,7 +240,7 @@ def test_python_pair_featurization_rejects_rust_deferred_signature_fields() -> N
         ANDData,
         SimpleNamespace(
             signatures={},
-            rust_lifecycle_policy=SimpleNamespace(defer_signature_fields_to_rust=True),
+            arrow_paths={"signatures": "signatures.arrow"},
         ),
     )
 

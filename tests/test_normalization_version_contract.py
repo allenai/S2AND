@@ -15,24 +15,27 @@ from s2and.arrow_inputs import (
     require_normalization_version,
 )
 from s2and.consts import NORMALIZATION_VERSION
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.model import _resolve_clusterer_normalization_version
 from s2and.production_model import _require_bundle_normalization_version
 from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
 def _write_minimal_name_counts_index(root: Path, *, normalization_version: str | None) -> Path:
-    index_dir = root / "name_counts_index"
-    data_dir = index_dir / "generations" / "gen-test"
-    data_dir.mkdir(parents=True)
-    files = {}
-    for kind in ("first", "last", "first_last", "last_first_initial"):
-        payload = data_dir / f"{kind}.bin"
-        payload.write_bytes(b"")
-        files[kind] = {"path": f"generations/gen-test/{kind}.bin"}
-    manifest: dict = {"schema_version": "name_counts_index_v1", "files": files}
-    if normalization_version is not None:
+    index_path, _metrics = write_name_counts_index(
+        root,
+        tiny_name_counts_tuple(),
+        tiny_name_counts_provenance(),
+        overwrite=True,
+    )
+    index_dir = Path(index_path)
+    manifest_path = index_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if normalization_version is None:
+        manifest.pop("normalization_version")
+    else:
         manifest["normalization_version"] = normalization_version
-    (index_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return index_dir
 
 

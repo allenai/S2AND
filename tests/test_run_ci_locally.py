@@ -90,19 +90,15 @@ def test_native_rust_checks_match_hosted_ci_and_bind_root_python(monkeypatch, tm
     run_ci.run_native_rust_checks()
 
     assert [args for args, _env in calls] == [
-        [
-            "run",
-            "--no-sync",
+        run_ci.uv_run_args(
             "cargo",
             "fmt",
             "--manifest-path",
             "s2and_rust/Cargo.toml",
             "--",
             "--check",
-        ],
-        [
-            "run",
-            "--no-sync",
+        ),
+        run_ci.uv_run_args(
             "cargo",
             "clippy",
             "--manifest-path",
@@ -114,17 +110,15 @@ def test_native_rust_checks_match_hosted_ci_and_bind_root_python(monkeypatch, tm
             "clippy::correctness",
             "-D",
             "clippy::suspicious",
-        ],
-        [
-            "run",
-            "--no-sync",
+        ),
+        run_ci.uv_run_args(
             "cargo",
             "test",
             "--manifest-path",
             "s2and_rust/Cargo.toml",
             "--lib",
             "--no-default-features",
-        ],
+        ),
     ]
     for _args, env in calls:
         assert env is not None
@@ -144,3 +138,22 @@ def test_sync_deps_uses_only_defined_dev_extra(monkeypatch) -> None:
         ["sync", "--extra", "dev", "--frozen", "--no-install-package", "s2and-rust"],
         ["sync", "--extra", "dev", "--no-install-package", "s2and-rust"],
     ]
+
+
+def test_main_can_run_each_hosted_job_independently(monkeypatch) -> None:
+    run_ci = _load_run_ci_locally()
+    calls: list[str] = []
+
+    monkeypatch.setattr(run_ci, "run_lint_job", lambda *, lock_present: calls.append("lint"))
+    monkeypatch.setattr(
+        run_ci,
+        "run_typecheck_and_test_job",
+        lambda *, lock_present: calls.append("typecheck-and-test"),
+    )
+
+    run_ci.main(["lint"])
+    assert calls == ["lint"]
+
+    calls.clear()
+    run_ci.main(["typecheck-and-test"])
+    assert calls == ["typecheck-and-test"]

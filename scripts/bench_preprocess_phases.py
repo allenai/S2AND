@@ -288,13 +288,12 @@ def _bench_signatures_preprocess(
     from s2and.data import ANDData
     from s2and.mp import UniversalPool
     from s2and.runtime import build_runtime_context
-    from s2and.rust_lifecycle import PYTHON_ONLY_POLICY
     from s2and.text import compute_block
 
     def _make_ds(signatures: dict[str, Any]) -> Any:
         ds = ANDData.__new__(ANDData)
         ds.runtime_context = build_runtime_context("bench_preprocess_signatures")
-        ds.rust_lifecycle_policy = PYTHON_ONLY_POLICY
+        ds.arrow_paths = None
         ds.preprocess = True
         ds.signatures = signatures
         ds.papers = papers

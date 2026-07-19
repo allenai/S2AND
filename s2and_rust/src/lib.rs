@@ -956,7 +956,6 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         read_name_counts_index_normalization_version,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(read_name_tuple_artifact_identity, m)?)?;
     promoted_linker::add_to_module(m)?;
     lightgbm_booster::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(

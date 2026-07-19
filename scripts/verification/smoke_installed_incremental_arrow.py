@@ -12,7 +12,7 @@ import lightgbm as lgb
 import numpy as np
 import pyarrow as pa
 
-from s2and.arrow_inputs import _build_arrow_artifact_generation
+from s2and.arrow_inputs import build_arrow_artifact_manifest, write_arrow_artifact_manifest
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.artifact import save_incremental_linking_artifact
@@ -22,7 +22,7 @@ from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.model import Clusterer, FastCluster
 from s2and.production_bundle import finalize_production_bundle, write_pairwise_production_bundle
-from s2and.production_model import load_production_model, pairwise_bundle_binding
+from s2and.production_model import canonical_artifact_hashes, load_production_model, pairwise_bundle_binding
 from s2and.runtime import build_runtime_context
 
 
@@ -96,18 +96,8 @@ def _write_arrow_request(root: Path) -> dict[str, str]:
     cluster_seeds_path = root / "cluster_seeds.arrow"
     write_cluster_seeds_arrow(cluster_seeds_path, {"s1": "c_match", "s2": "c_other"})
     paths["cluster_seeds"] = str(cluster_seeds_path)
-    manifest_path = root / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "normalization_version": NORMALIZATION_VERSION,
-                "paths": {key: str(Path(value).relative_to(root)) for key, value in paths.items()},
-                "artifact_generation": _build_arrow_artifact_generation(paths, root),
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    manifest = build_arrow_artifact_manifest(paths, root)
+    manifest_path = write_arrow_artifact_manifest(manifest, root)
     paths["manifest"] = str(manifest_path)
     return paths
 
@@ -124,8 +114,8 @@ def _write_synthetic_bundle(root: Path) -> Path:
         batch_size=32,
     )
     clusterer.feature_contract = {
-        "name_counts_last_first_initial_semantics": "initial_char",
         "normalization_version": NORMALIZATION_VERSION,
+        **canonical_artifact_hashes(),
     }
     clusterer.best_params = {"eps": 0.5, "linkage": "average"}
     pairwise_bundle_dir = root / "pairwise_stage" / "production_model_v0.0"

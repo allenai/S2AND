@@ -30,18 +30,27 @@ The preferred production publication layout is:
 s2and/data/name_counts_index/
   manifest.json
   generations/<generation-id>/
+    .published
     first.bin
     last.bin
     first_last.bin
     last_first_initial.bin
 ```
 
-`manifest.json` must have `schema_version: "name_counts_index_v1"` and a
-`files` object with `first`, `last`, `first_last`, and `last_first_initial`
-entries. Each entry contains a `path`, `record_count`, and `byte_count`; new
-writers set each `path` to `generations/<generation-id>/<kind>.bin`. Current
-packaged artifacts may still use direct manifest-relative paths such as
-`first.bin`; readers follow the manifest and accept both shapes.
+`manifest.json` must have `schema_version: "name_counts_index_v1"`,
+`normalization_version: "canonical_v2"`, a complete
+`name_counts_provenance_v1` `source_provenance`, and a `files` object with
+`first`, `last`, `first_last`, and `last_first_initial` entries. Each entry
+requires a nonempty contained `path`, unsigned `byte_count`, and lowercase
+SHA-256. The declared size and digest must match the file, and the file's
+directory must contain `.published`. A `record_count` may be descriptive but
+is not the acceptance authority. New writers set each path to
+`generations/<generation-id>/<kind>.bin`; direct manifest-relative paths such
+as `first.bin` remain valid when they satisfy the same contract.
+
+Python's `ValidatedNameCountsManifest` and the native Rust opener independently
+enforce this same acceptance contract. Cross-runtime mutation tests cover every
+required provenance and file-integrity field.
 
 Writers publish by writing every binary file into a temporary generation
 directory, renaming that directory into `generations/`, validating that every
@@ -77,7 +86,13 @@ old `name_counts_index_dir` alias.
 
 ## Arrow Runtime Writers
 
-`scripts/convert_to_arrow.py` is the reference deployable Arrow-bundle writer.
+`s2and.arrow_inputs.build_arrow_artifact_manifest(...)` and
+`write_arrow_artifact_manifest(...)` are the in-repo authority for portable
+paths, normalization, immutable-generation inventory, serialization, and
+publication. Producer-specific metadata may be added, but cannot override
+`normalization_version`, `paths`, or `artifact_generation`.
+
+`scripts/convert_to_arrow.py` is the reference deployable Arrow-bundle producer.
 It writes bounded Arrow IPC file-format tables, regenerates current raw-planner
 batch-index sidecars (`S2ABI002`), records physical-layout metrics, and writes
 dataset manifests. `scripts/verification/compare_full_predict_arrow_parity.py`

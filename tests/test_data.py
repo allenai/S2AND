@@ -199,31 +199,6 @@ def test_signature_full_name_uses_only_canonical_fields() -> None:
     assert dataset.papers["1"].title_ngrams_words["1"] == 1
 
 
-@pytest.mark.parametrize(
-    ("mode", "preprocess"),
-    [
-        ("inference", True),
-        ("train", False),
-    ],
-)
-def test_anddata_rejects_arrow_featurization_outside_fixed_training_route(
-    mode: str,
-    preprocess: bool,
-) -> None:
-    with pytest.raises(ValueError, match="requires mode='train' and preprocess=True"):
-        ANDData(
-            signatures={},
-            papers={},
-            clusters={} if mode == "train" else None,
-            name="invalid_arrow_training_route",
-            mode=mode,
-            name_counts_index=None,
-            preprocess=preprocess,
-            name_tuples=set(),
-            rust_arrow_featurization=True,
-        )
-
-
 class TestData(unittest.TestCase):
     def setUp(self):
         super().setUp()

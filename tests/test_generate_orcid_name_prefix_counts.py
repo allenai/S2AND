@@ -175,12 +175,14 @@ def test_runtime_loader_is_lazy_and_verifies_the_published_generation(tmp_path: 
     )
     assert _load_canonical_orcid_prefix_counts(tmp_path) == {"al": {"am": 7}}
     assert dict(lazy_counts) == {"al": {"am": 7}}
-    binding = lazy_counts.binding()
-    assert binding["schema_version"] == "s2and_orcid_prefix_counts_binding_v1"
-    assert binding["generation_id"].startswith("fixture-")
-    assert binding["data_sha256"]
 
     pointer = json.loads((tmp_path / "first_k_letter_counts_from_orcid.manifest.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.meta.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert lazy_counts.data_sha256() == metadata["data_sha256"]
     data_path = tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.json"
     data_path.write_text('{"al":{"az":9}}', encoding="utf-8")
     with pytest.raises(ValueError, match="data SHA-256"):

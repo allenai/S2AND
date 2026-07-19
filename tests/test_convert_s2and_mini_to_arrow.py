@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import scripts.convert_to_arrow as convert_to_arrow
+from s2and.consts import NORMALIZATION_VERSION
 from s2and.incremental_linking.feature_block import write_arrow_ipc_table
 from scripts.convert_to_arrow import RuntimeDatasetSources
 
@@ -540,6 +541,7 @@ def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_p
     )
 
     manifest = {
+        "normalization_version": NORMALIZATION_VERSION,
         "paths": {
             "signatures": str(signatures_path),
             "papers": str(papers_path),
@@ -582,12 +584,13 @@ def test_validate_arrow_dataset_manifest_accepts_specter2_only_manifest(tmp_path
 
     metrics = convert_to_arrow.validate_arrow_dataset_manifest(
         {
+            "normalization_version": NORMALIZATION_VERSION,
             "paths": {
                 "signatures": str(signatures_path),
                 "papers": str(papers_path),
                 "paper_authors": str(paper_authors_path),
                 "specter2": str(specter2_path),
-            }
+            },
         },
         require_embeddings=True,
         require_name_counts_index=False,
@@ -674,12 +677,13 @@ def test_validate_arrow_dataset_manifest_rejects_missing_contract_required_colum
     with pytest.raises(KeyError, match=missing_column):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
+                "normalization_version": NORMALIZATION_VERSION,
                 "paths": {
                     "signatures": str(signatures_path),
                     "papers": str(papers_path),
                     "paper_authors": str(paper_authors_path),
                     "specter2": str(specter2_path),
-                }
+                },
             },
             require_embeddings=require_embeddings,
             require_name_counts_index=False,
@@ -710,11 +714,12 @@ def test_validate_arrow_dataset_manifest_rejects_null_or_empty_required_strings(
     with pytest.raises(ValueError, match=message):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
+                "normalization_version": NORMALIZATION_VERSION,
                 "paths": {
                     "signatures": str(signatures_path),
                     "papers": str(papers_path),
                     "paper_authors": str(paper_authors_path),
-                }
+                },
             },
             require_embeddings=False,
             require_name_counts_index=False,
@@ -742,6 +747,7 @@ def test_validate_manifest_can_require_complete_specter_rows(tmp_path: Path) -> 
     )
 
     manifest = {
+        "normalization_version": NORMALIZATION_VERSION,
         "paths": {
             "signatures": str(signatures_path),
             "papers": str(papers_path),
@@ -844,7 +850,14 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
     name_counts_index = tmp_path / "name_counts_index"
     name_counts_index.mkdir()
     (name_counts_index / "manifest.json").write_text(
-        json.dumps({"schema_version": "name_counts_index_v1", "files": {"first": {"path": "missing-first.bin"}}}),
+        json.dumps(
+            {
+                "schema_version": "name_counts_index_v1",
+                "normalization_version": NORMALIZATION_VERSION,
+                "source_provenance": {"normalization_version": NORMALIZATION_VERSION},
+                "files": {"first": {"path": "missing-first.bin"}},
+            }
+        ),
         encoding="utf-8",
     )
     _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
@@ -854,12 +867,13 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
     with pytest.raises(ValueError, match="missing files.first.path target"):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
+                "normalization_version": NORMALIZATION_VERSION,
                 "paths": {
                     "signatures": str(signatures_path),
                     "papers": str(papers_path),
                     "paper_authors": str(paper_authors_path),
                     "name_counts_index": str(name_counts_index),
-                }
+                },
             },
             require_embeddings=False,
             require_name_counts_index=True,
@@ -895,11 +909,12 @@ def test_validate_arrow_dataset_manifest_rejects_integer_id_columns(tmp_path: Pa
     with pytest.raises(ValueError, match="expected string"):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
+                "normalization_version": NORMALIZATION_VERSION,
                 "paths": {
                     "signatures": str(signatures_path),
                     "papers": str(papers_path),
                     "paper_authors": str(paper_authors_path),
-                }
+                },
             },
             require_embeddings=False,
             require_name_counts_index=False,
@@ -915,6 +930,7 @@ def test_validate_arrow_dataset_manifest_requires_batch_index_sidecar(tmp_path: 
     _write_papers_table(pa, papers_path, ["p1"])
     _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
     manifest = {
+        "normalization_version": NORMALIZATION_VERSION,
         "paths": {
             "signatures": str(signatures_path),
             "papers": str(papers_path),

@@ -22,6 +22,7 @@
     "specter": "specter2"
   },
   "name_tuples": "default packaged filtered aliases",
+  "normalization_version": "canonical_v2",
   "paper_count": 2871,
   "paths": {
     "clusters": "pubmed_clusters.json",

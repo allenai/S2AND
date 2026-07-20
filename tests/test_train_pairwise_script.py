@@ -5,6 +5,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from scripts.production.model import train_pairwise
 
 
 def _import_train_pairwise(env: dict[str, str], repo_root: Path) -> dict[str, str]:
@@ -62,3 +67,26 @@ def test_train_pairwise_respects_existing_cache_and_backend_overrides(tmp_path: 
     assert Path(payload["env"]).resolve() == override_cache_root.resolve()
     assert Path(payload["cache_root"]).resolve() == override_cache_root.resolve()
     assert payload["backend"] == "python"
+
+
+def test_train_pairwise_rejects_existing_output_before_loading_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "production_model_v9.9"
+    output_dir.mkdir()
+    monkeypatch.setattr(
+        train_pairwise,
+        "load_packaged_name_tuple_artifact",
+        lambda: pytest.fail("artifact work started before output validation"),
+    )
+
+    with pytest.raises(SystemExit, match="must name a new directory"):
+        train_pairwise.train_pairwise_bundle(
+            SimpleNamespace(
+                run_full=True,
+                data_dir=tmp_path,
+                output_dir=output_dir,
+                production_version="9.9",
+            )
+        )

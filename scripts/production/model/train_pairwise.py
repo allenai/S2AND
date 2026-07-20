@@ -142,12 +142,15 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     if not args.run_full:
         raise SystemExit("pairwise production training is unbounded; pass --run-full explicitly")
 
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir or data_dir / f"production_model_v{args.production_version}")
+    if output_dir.exists():
+        raise SystemExit(f"--output-dir must name a new directory: {output_dir}")
+
     os.environ["OMP_NUM_THREADS"] = str(max(1, int(args.n_jobs)))
 
     canonical_name_tuples = load_packaged_name_tuple_artifact()
     artifact_hashes = canonical_artifact_hashes()
-    data_dir = Path(args.data_dir)
-    output_dir = Path(args.output_dir or data_dir / f"production_model_v{args.production_version}")
     featurizer_info = FeaturizationInfo(
         features_to_use=list(DEFAULT_FEATURE_GROUPS),
         featurizer_version=FEATURIZER_VERSION,

@@ -1,6 +1,8 @@
 import contextlib
 import functools
 import gc
+import hashlib
+import json
 import logging
 import os
 import platform
@@ -27,6 +29,7 @@ from s2and.consts import (
 )
 from s2and.data import ANDData
 from s2and.mp import UniversalPool
+from s2and.name_count_binding import NameCountsBinding
 from s2and.runtime import RuntimeContext, build_runtime_context, dataset_stage_uses_rust, stage_uses_rust
 from s2and.text import (
     TEXT_FUNCTIONS,
@@ -1647,6 +1650,33 @@ def _is_partial_supervision_label(label: int | float) -> bool:
     return bool(label < 0)
 
 
+def _pair_feature_cache_binding(dataset: ANDData) -> str:
+    """Hash the names/counts inputs embedded in persistent pair features."""
+
+    provenance = getattr(dataset, "name_counts_provenance", None)
+    payload = {
+        "schema": "s2and-pair-feature-inputs-v1",
+        "normalization_version": getattr(dataset, "normalization_version", None),
+        "arrow_artifact_generation": getattr(dataset, "arrow_artifact_generation", None),
+        "name_counts": (
+            None
+            if provenance is None
+            else NameCountsBinding.from_provenance(
+                provenance,
+                context="pair-feature cache",
+            ).feature_contract_fields()
+        ),
+        "name_tuples": sorted(getattr(dataset, "name_tuples", ())),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _bound_pair_feature_cache_key(binding: str, cache_key: str) -> str:
+    """Bind one pair ID key to the exact feature inputs used to compute it."""
+
+    return f"{binding}:{cache_key}"
+
+
 def many_pairs_featurize(
     signature_pairs: list[tuple[str, str, int | float]],
     dataset: ANDData,
@@ -1709,6 +1739,7 @@ def many_pairs_featurize(
 
     cached_features: dict[str, np.ndarray] = {}
     new_features: dict[str, np.ndarray] = {}
+    cache_binding = _pair_feature_cache_binding(dataset) if use_cache else ""
     cache_changed = False
     new_features_count = 0
     did_rust_batch = False
@@ -1753,7 +1784,7 @@ def many_pairs_featurize(
     if use_cache:
         logger.info("Loading cache...")
         requested_cache_keys = {
-            cache_key
+            _bound_pair_feature_cache_key(cache_binding, cache_key)
             for pair in signature_pairs
             if not _is_partial_supervision_label(pair[2])
             for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1]))
@@ -1828,7 +1859,7 @@ def many_pairs_featurize(
         if use_cache:
             cached_vector = None
             for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1])):
-                cached_vector = cached_features.get(cache_key)
+                cached_vector = cached_features.get(_bound_pair_feature_cache_key(cache_binding, cache_key))
                 if cached_vector is not None:
                     break
             if cached_vector is not None:
@@ -1928,7 +1959,13 @@ def many_pairs_featurize(
 
     if use_cache and cache_changed and new_features:
         logger.info("Writing %d new features to cache", len(new_features))
-        featurizer_info.write_cache(new_features, dataset.name)
+        featurizer_info.write_cache(
+            {
+                _bound_pair_feature_cache_key(cache_binding, cache_key): feature_vector
+                for cache_key, feature_vector in new_features.items()
+            },
+            dataset.name,
+        )
         logger.info("Cache write completed")
     _sample_rust_batch_rss_peak()
 

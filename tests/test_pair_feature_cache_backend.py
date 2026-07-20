@@ -161,6 +161,65 @@ def test_many_pairs_featurize_reuses_persisted_pair_feature_cache(
     assert int(call_count["count"]) == first_run_call_count
 
 
+@pytest.mark.parametrize(
+    "lineage_field",
+    [
+        "name_counts_generation",
+        "normalization_version",
+        "arrow_artifact_generation",
+        "name_tuples",
+    ],
+)
+def test_many_pairs_featurize_recomputes_after_feature_lineage_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lineage_field: str,
+) -> None:
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    monkeypatch.setattr(featurizer_mod, "CACHE_ROOT", tmp_path)
+    dataset = build_dummy_dataset("pair_feature_cache_lineage", name_counts_index=True)
+    featurizer_info = FeaturizationInfo(features_to_use=["name_counts"])
+    pair = [("0", "1", 0.0)]
+    original_single_pair_featurize = featurizer_mod._single_pair_featurize
+    call_count = 0
+
+    def tracked_single_pair_featurize(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_single_pair_featurize(*args, **kwargs)
+
+    def featurize() -> None:
+        many_pairs_featurize(
+            pair,
+            dataset,
+            featurizer_info,
+            n_jobs=1,
+            use_cache=True,
+            chunk_size=1,
+        )
+
+    monkeypatch.setattr(featurizer_mod, "_single_pair_featurize", tracked_single_pair_featurize)
+    for _ in range(2):
+        featurize()
+    assert call_count == 1
+
+    if lineage_field == "name_counts_generation":
+        assert dataset.name_counts_provenance is not None
+        dataset.name_counts_provenance = {
+            **dataset.name_counts_provenance,
+            "generation_id": "updated-name-count-generation",
+        }
+    elif lineage_field == "normalization_version":
+        dataset.normalization_version = "updated-normalization-version"
+    elif lineage_field == "arrow_artifact_generation":
+        dataset.arrow_artifact_generation = "updated-arrow-generation"
+    else:
+        dataset.name_tuples = {*dataset.name_tuples, ("lineage", "variant")}
+    featurize()
+
+    assert call_count == 2
+
+
 def test_pair_feature_cache_keys_are_injective_and_probe_reverse() -> None:
     first = FeaturizationInfo.feature_cache_key(("a___b", "c"))
     second = FeaturizationInfo.feature_cache_key(("a", "b___c"))
@@ -186,10 +245,17 @@ def test_many_pairs_featurize_reads_nan_label_cache_but_skips_negative_labels(
     cached_nan_vector = np.zeros(featurizer_mod.NUM_FEATURES, dtype=np.float64)
     cached_nan_vector[year_index] = 42.0
     cached_negative_vector = np.ones(featurizer_mod.NUM_FEATURES, dtype=np.float64)
+    cache_binding = featurizer_mod._pair_feature_cache_binding(dataset)
     featurizer_info.write_cache(
         {
-            featurizer_info.feature_cache_key(nan_pair): cached_nan_vector,
-            featurizer_info.feature_cache_key(negative_pair): cached_negative_vector,
+            featurizer_mod._bound_pair_feature_cache_key(
+                cache_binding,
+                featurizer_info.feature_cache_key(nan_pair),
+            ): cached_nan_vector,
+            featurizer_mod._bound_pair_feature_cache_key(
+                cache_binding,
+                featurizer_info.feature_cache_key(negative_pair),
+            ): cached_negative_vector,
         },
         dataset.name,
     )

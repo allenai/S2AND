@@ -45,21 +45,15 @@ class NameCountsBinding:
         feature_contract: Mapping[str, Any] | None,
         *,
         context: str,
-        required: bool,
-    ) -> NameCountsBinding | None:
+    ) -> NameCountsBinding:
         """Read one complete binding without copying the feature-contract mapping."""
 
         if not isinstance(feature_contract, Mapping):
-            if required:
-                raise ValueError(f"{context} requires a feature_contract mapping with name-count provenance")
-            return None
-        present_fields = tuple(field for field in _FEATURE_CONTRACT_FIELDS if field in feature_contract)
-        if not present_fields:
-            if required:
-                raise ValueError(f"{context} requires name-count provenance fields {list(_FEATURE_CONTRACT_FIELDS)!r}")
-            return None
-        if len(present_fields) != len(_FEATURE_CONTRACT_FIELDS):
-            missing_fields = [field for field in _FEATURE_CONTRACT_FIELDS if field not in feature_contract]
+            raise ValueError(f"{context} requires a feature_contract mapping with name-count provenance")
+        missing_fields = [field for field in _FEATURE_CONTRACT_FIELDS if field not in feature_contract]
+        if len(missing_fields) == len(_FEATURE_CONTRACT_FIELDS):
+            raise ValueError(f"{context} requires name-count provenance fields {list(_FEATURE_CONTRACT_FIELDS)!r}")
+        if missing_fields:
             raise ValueError(f"{context} has partial name-count provenance; missing={missing_fields!r}")
         return cls(
             generation_id=_nonempty_string(
@@ -141,6 +135,16 @@ class NameCountsBinding:
                 context=context,
             ),
         )
+
+    def feature_contract_fields(self) -> dict[str, str]:
+        """Return the exact fields persisted in a trained model contract."""
+
+        return {
+            "name_counts_generation_id": self.generation_id,
+            "name_counts_pickle_sha256": self.pickle_sha256,
+            "name_counts_source_snapshot_id": self.source_snapshot_id,
+            "name_counts_selected_rows_sha256": self.selected_rows_sha256,
+        }
 
     def require_matches(self, observed: NameCountsBinding, *, context: str, source: str) -> None:
         """Reject a model/artifact generation mismatch before feature computation."""

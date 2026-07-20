@@ -369,7 +369,6 @@ class ANDData:
         name: str,
         *,
         arrow_paths: ValidatedArrowInputs,
-        name_counts_provenance: Mapping[str, Any],
         **kwargs: Any,
     ) -> "ANDData":
         """Construct a Rust-training dataset from one verified Arrow generation.
@@ -379,7 +378,6 @@ class ANDData:
             papers: Paper rows reconstructed from the Arrow bundle.
             name: Dataset name used for feature-cache identity.
             arrow_paths: Fully verified immutable Arrow artifact paths.
-            name_counts_provenance: Verified provenance for the bound name-count index.
             **kwargs: Remaining train-mode ``ANDData`` construction arguments.
 
         Returns:
@@ -396,7 +394,6 @@ class ANDData:
             name_counts_index=None,
             preprocess=True,
             _validated_arrow_inputs=arrow_paths,
-            _arrow_name_counts_provenance=name_counts_provenance,
             **kwargs,
         )
 
@@ -438,16 +435,18 @@ class ANDData:
         use_orcid_id: bool = True,
         compute_block_fn: Callable[[str], str] = compute_block,
         _validated_arrow_inputs: ValidatedArrowInputs | None = None,
-        _arrow_name_counts_provenance: Mapping[str, Any] | None = None,
     ):
         init_start = time.perf_counter()
-        if (_validated_arrow_inputs is None) != (_arrow_name_counts_provenance is None):
-            raise ValueError("Arrow training paths and name-count provenance must be supplied together")
+        arrow_name_counts_provenance: Mapping[str, Any] | None = None
         if _validated_arrow_inputs is not None:
             if mode != "train" or not preprocess:
                 raise ValueError("Arrow training requires mode='train' and preprocess=True")
             if specter_embeddings is not None or name_counts_index is not None:
                 raise ValueError("Arrow training reads SPECTER and name counts directly from its verified paths")
+            name_counts_manifest = _validated_arrow_inputs.name_counts_manifest
+            if name_counts_manifest is None:
+                raise ValueError("Arrow training requires a validated name_counts_index manifest")
+            arrow_name_counts_provenance = name_counts_manifest.source_provenance
         self.runtime_context = build_runtime_context(
             "dataset_build",
             backend="rust" if _validated_arrow_inputs is not None else "python",
@@ -676,8 +675,8 @@ class ANDData:
         self.normalization_version = NORMALIZATION_VERSION
         self._name_counts_provenance: Mapping[str, Any] | None = None
         self.name_counts_index: NameCountsIndex | None = None
-        if _arrow_name_counts_provenance is not None:
-            self.name_counts_provenance = _arrow_name_counts_provenance
+        if arrow_name_counts_provenance is not None:
+            self.name_counts_provenance = arrow_name_counts_provenance
         if name_counts_index is not None:
             logger.info("opening name-count index (generation-cached)")
             self.name_counts_index = (

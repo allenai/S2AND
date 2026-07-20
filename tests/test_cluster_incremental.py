@@ -29,7 +29,9 @@ from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
 )
+from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 from s2and.model import Clusterer, IncrementalDistStats
+from s2and.name_count_binding import NameCountsBinding
 from tests.helpers import (
     tiny_name_counts_index,
     tiny_name_counts_provenance,
@@ -1113,6 +1115,118 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
     assert telemetry["raw_arrow_reusable_planner_enabled"] == 1
 
 
+def test_cross_batch_require_constraint_wins_global_query_disallow_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    query_ids = ["q-require", "q-score"]
+    captured: dict[str, Any] = {"rescored": []}
+
+    class FakeArtifact:
+        artifact_dir = tmp_path
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
+
+    class FakeClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+
+        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
+            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+
+        def _finish_incremental_with_seed_links(self, *args: object, **_kwargs: object):
+            captured["linked"] = dict(cast(Mapping[str, str], args[2]))
+            return {"c_seed": ["seed", *captured["linked"]]}
+
+    class FakeFeaturizer:
+        def __init__(self, signature_ids: tuple[str, ...]) -> None:
+            self._signature_ids = signature_ids
+
+        def signature_ids(self) -> list[str]:
+            return list(self._signature_ids)
+
+    def fake_featurizer(*_args: object, **kwargs: object) -> FakeFeaturizer:
+        return FakeFeaturizer(tuple(cast(Any, kwargs["signature_ids"])))
+
+    def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
+        signature_id = str(cast(list[str], kwargs["query_signature_ids"])[0])
+        featurizer = cast(FakeFeaturizer, kwargs["rust_featurizer"])
+        excluded = kwargs["cluster_seed_disallow_excluded_components"]
+        if excluded is not None:
+            captured["rescored"].append(signature_id)
+            decision = LinkOrAbstainDecision(
+                query_signature_index=featurizer.signature_ids().index(signature_id),
+                action="abstain",
+                row_index=None,
+                component_key=None,
+                score=None,
+                runner_up_score=None,
+                score_margin=None,
+            )
+            require_count = np.asarray([], dtype=np.float32)
+        else:
+            decision = LinkOrAbstainDecision(
+                query_signature_index=featurizer.signature_ids().index(signature_id),
+                action="link",
+                row_index=0,
+                component_key="c_seed",
+                score=0.70 if signature_id == "q-require" else 0.99,
+                runner_up_score=None,
+                score_margin=None,
+            )
+            require_count = np.asarray(
+                [1.0 if signature_id == "q-require" else 0.0],
+                dtype=np.float32,
+            )
+        return SimpleNamespace(
+            compact_result=SimpleNamespace(decisions=(decision,)),
+            pairwise_model_result=SimpleNamespace(row_signals={}),
+            decision_row_signals={"constraint_require_count": require_count},
+            linked_signature_clusters={},
+            telemetry={"query_count": 1, "candidate_row_count": 1, "pair_count": 1},
+        )
+
+    monkeypatch.setattr(
+        production_module,
+        "compute_promoted_incremental_limits",
+        lambda **kwargs: _mock_promoted_limits(query_count=int(kwargs["query_count"]), query_batch_size=1),
+    )
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        fake_linker,
+    )
+    _patch_fake_raw_arrow_planner(monkeypatch, captured=captured)
+    monkeypatch.setattr(
+        production_module.feature_port,
+        "build_rust_featurizer_from_arrow_paths",
+        fake_featurizer,
+    )
+
+    result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
+        FakeClusterer(),
+        ["seed", *query_ids],
+        _direct_arrow_dataset(cluster_seeds_disallow={("q-require", "q-score")}),
+        arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
+        artifact=FakeArtifact(),
+        prevent_new_incompatibilities=False,
+        partial_supervision={},
+        runtime_context=cast(Any, SimpleNamespace(run_id="test")),
+        total_ram_bytes=100_000,
+        batching_threshold=1,
+    )
+
+    assert captured["linked"] == {"q-require": "c_seed"}
+    assert captured["rescored"] == ["q-score"]
+    assert result["clusters"] == {"c_seed": ["seed", "q-require"]}
+    assert result["incremental_linker_telemetry"]["global_query_disallow_rescore_count"] == 1
+
+
 def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1280,6 +1394,12 @@ def test_predict_from_arrow_paths_loads_name_counts_by_default_for_name_count_fe
         featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]),
         classifier=object(),
         n_jobs=1,
+    )
+    clusterer.feature_contract.update(
+        NameCountsBinding.from_provenance(
+            tiny_name_counts_provenance(),
+            context="test clusterer",
+        ).feature_contract_fields()
     )
     name_counts_index, _metrics = write_name_counts_index(
         tmp_path, tiny_name_counts_tuple(), tiny_name_counts_provenance()

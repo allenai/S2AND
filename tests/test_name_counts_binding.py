@@ -88,6 +88,37 @@ class _PrebuiltRustFeaturizer:
         return []
 
 
+def test_name_count_model_without_complete_binding_is_rejected_at_every_runtime_boundary(
+    tmp_path: Path,
+) -> None:
+    provenance = tiny_name_counts_provenance()
+    clusterer = _name_count_clusterer(provenance)
+    clusterer.feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+    dataset = build_dummy_dataset(
+        "name-count-binding-required",
+        mode="inference",
+        name_counts_index=True,
+    )
+    index_dir = tmp_path / "name_counts_index"
+    _write_index_manifest(index_dir, provenance)
+    featurizer = _PrebuiltRustFeaturizer(provenance)
+
+    checks = (
+        lambda: policy_module.require_dataset_name_counts_binding_for_clusterer(
+            clusterer, dataset, context="dataset boundary"
+        ),
+        lambda: policy_module.require_arrow_name_counts_index_for_clusterer(
+            clusterer, {"name_counts_index": str(index_dir)}, context="Arrow boundary"
+        ),
+        lambda: policy_module.require_rust_featurizer_name_counts_binding_for_clusterer(
+            clusterer, featurizer, context="Rust boundary"
+        ),
+    )
+    for check in checks:
+        with pytest.raises(ValueError, match="requires name-count provenance fields"):
+            check()
+
+
 def test_python_prediction_accepts_exact_name_count_binding() -> None:
     provenance = tiny_name_counts_provenance()
     clusterer = _name_count_clusterer(provenance)

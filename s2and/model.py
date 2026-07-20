@@ -68,7 +68,7 @@ from s2and.incremental_linking.production import (
 )
 from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
-from s2and.name_counts_index import validated_name_counts_provenance
+from s2and.name_count_binding import NameCountsBinding
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
@@ -3706,34 +3706,19 @@ class Clusterer:
             contract = {}
         contract["normalization_version"] = training_normalization_version
         if clusterer_uses_name_count_features(self):
-            count_provenances = [
-                validated_name_counts_provenance(
+            count_bindings = {
+                NameCountsBinding.from_provenance(
                     getattr(dataset, "name_counts_provenance", None),
                     context=f"Clusterer.fit dataset={getattr(dataset, 'name', '<unnamed>')}",
                 )
                 for dataset in datasets
-            ]
-            count_versions = {value.get("normalization_version") for value in count_provenances}
-            generation_ids = {value.get("generation_id") for value in count_provenances}
-            pickle_digests = {value.get("pickle_sha256") for value in count_provenances}
-            snapshot_ids = {value.get("source_snapshot_id") for value in count_provenances}
-            selected_row_digests = {value.get("selected_rows_sha256") for value in count_provenances}
-            if (
-                count_versions != {training_normalization_version}
-                or len(generation_ids) != 1
-                or len(pickle_digests) != 1
-                or len(snapshot_ids) != 1
-                or len(selected_row_digests) != 1
-            ):
+            }
+            if len(count_bindings) != 1:
                 raise ValueError(
                     "Clusterer.fit requires one verified name-count generation matching dataset normalization; "
-                    f"versions={count_versions!r} generations={generation_ids!r} digests={pickle_digests!r} "
-                    f"snapshots={snapshot_ids!r} row_digests={selected_row_digests!r}"
+                    f"observed={sorted(repr(binding) for binding in count_bindings)}"
                 )
-            contract["name_counts_generation_id"] = next(iter(generation_ids))
-            contract["name_counts_pickle_sha256"] = next(iter(pickle_digests))
-            contract["name_counts_source_snapshot_id"] = next(iter(snapshot_ids))
-            contract["name_counts_selected_rows_sha256"] = next(iter(selected_row_digests))
+            contract.update(next(iter(count_bindings)).feature_contract_fields())
         self.feature_contract = contract
 
         val_block_dict_list = []

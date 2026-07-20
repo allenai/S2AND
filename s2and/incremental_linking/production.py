@@ -315,7 +315,7 @@ def _scored_query_decisions_from_result(
     """Extract compact query decisions without retaining batch feature matrices."""
 
     expected_ids = {str(signature_id) for signature_id in expected_query_signature_ids}
-    require_counts = result.pairwise_model_result.row_signals.get("constraint_require_count")
+    require_counts = result.decision_row_signals.get("constraint_require_count")
     scored: dict[str, _ScoredQueryDecision] = {}
     for decision in result.compact_result.decisions:
         query_index = int(decision.query_signature_index)

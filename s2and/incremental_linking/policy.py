@@ -74,10 +74,7 @@ def require_arrow_name_counts_index_for_clusterer(
     expected = NameCountsBinding.from_feature_contract(
         getattr(clusterer, "feature_contract", None),
         context=f"{context} model feature_contract",
-        required=False,
     )
-    if expected is None:
-        return
     if isinstance(arrow_paths, ValidatedArrowInputs):
         manifest = arrow_paths.name_counts_manifest
         if manifest is None:  # pragma: no cover - existing path invariant
@@ -111,10 +108,7 @@ def require_dataset_name_counts_binding_for_clusterer(
     expected = NameCountsBinding.from_feature_contract(
         getattr(clusterer, "feature_contract", None),
         context=f"{context} model feature_contract",
-        required=False,
     )
-    if expected is None:
-        return
     observed = NameCountsBinding.from_provenance(
         getattr(dataset, "name_counts_provenance", None),
         context=f"{context} ANDData.name_counts_provenance",
@@ -139,10 +133,7 @@ def require_rust_featurizer_name_counts_binding_for_clusterer(
     expected = NameCountsBinding.from_feature_contract(
         getattr(clusterer, "feature_contract", None),
         context=f"{context} model feature_contract",
-        required=False,
     )
-    if expected is None:
-        return
     observed = NameCountsBinding.from_rust_featurizer(
         rust_featurizer,
         context=f"{context} Rust featurizer",

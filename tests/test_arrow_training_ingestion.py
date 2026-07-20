@@ -79,6 +79,7 @@ def _write_minimal_signatures_table(path: Path, signature_ids: list[str | None])
                 "author_suffix": pa.array([""] * row_count, type=pa.string()),
                 "author_affiliations": pa.array([[] for _ in range(row_count)], type=pa.list_(pa.string())),
                 "author_position": pa.array([0] * row_count, type=pa.int64()),
+                "author_block": pa.array(["lovelace"] * row_count, type=pa.string()),
             }
         ),
         path,
@@ -214,6 +215,34 @@ def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path)
 
     _write_minimal_signatures_table(signatures_path, ["s1", "s1"])
     with pytest.raises(ValueError, match="duplicate signature_id"):
+        load_signatures_dict_from_arrow(signatures_path)
+
+
+@pytest.mark.parametrize("author_block", [None, ""])
+def test_arrow_training_rejects_missing_author_block(tmp_path: Path, author_block: str | None) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_minimal_signatures_table(signatures_path, ["s1"])
+    _replace_arrow_column(signatures_path, "author_block", pa.array([author_block], type=pa.string()))
+
+    with pytest.raises(ValueError, match="(null|empty) author_block"):
+        load_signatures_dict_from_arrow(signatures_path)
+
+
+def test_arrow_training_rejects_absent_author_block_column(tmp_path: Path) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_minimal_signatures_table(signatures_path, ["s1"])
+    with pa.memory_map(str(signatures_path), "r") as source:
+        table = pa.ipc.open_file(source).read_all()
+        retained_fields = [field for field in table.schema if field.name != "author_block"]
+        arrays = [pa.array(table[field.name].to_pylist(), type=field.type) for field in retained_fields]
+    del table
+    table_without_block = pa.Table.from_arrays(
+        arrays,
+        names=[field.name for field in retained_fields],
+    )
+    write_arrow_ipc_table(table_without_block, signatures_path)
+
+    with pytest.raises(ValueError, match="missing loader-required columns.*author_block"):
         load_signatures_dict_from_arrow(signatures_path)
 
 
@@ -459,7 +488,8 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     def record_initial_arrow_state(dataset: ANDData) -> None:
         assert dataset.arrow_paths is not None
         assert dataset.arrow_artifact_generation == dataset.arrow_paths.generation_id
-        assert dataset.name_counts_provenance is not None
+        assert dataset.arrow_paths.name_counts_manifest is not None
+        assert dataset.name_counts_provenance == dataset.arrow_paths.name_counts_manifest.source_provenance
         assert isinstance(dataset.name_tuples, frozenset)
         observed_generation.append(dataset.arrow_artifact_generation)
         original_preprocess_signatures(dataset)

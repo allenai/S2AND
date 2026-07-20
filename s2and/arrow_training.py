@@ -102,6 +102,7 @@ def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any
         "author_suffix",
         "author_affiliations",
         "author_position",
+        "author_block",
     }
     signatures: dict[str, dict[str, Any]] = {}
     for row_index, row in _iter_arrow_rows(
@@ -113,6 +114,7 @@ def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any
         if signature_id in signatures:
             raise ValueError(f"signatures Arrow contains duplicate signature_id={signature_id!r}")
         paper_id = _required_id_value(row.get("paper_id"), "signatures", "paper_id", row_index)
+        author_block = _required_id_value(row.get("author_block"), "signatures", "author_block", row_index)
         orcid = row.get("author_orcid")
         signatures[signature_id] = {
             "signature_id": signature_id,
@@ -125,7 +127,7 @@ def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any
                 "affiliations": list(row["author_affiliations"] or []),
                 "email": row.get("author_email"),
                 "position": row["author_position"],
-                "block": row.get("author_block"),
+                "block": author_block,
                 # ANDData derives author_info_orcid from source_ids +
                 # source_id_source; the Arrow column stores the derived value,
                 # so reconstruct the source shape it expects.
@@ -263,16 +265,12 @@ def build_training_anddata_from_arrow(
     training_arrow_paths = normalized_arrow_paths.without("query_signatures")
     signatures = load_signatures_dict_from_arrow(training_arrow_paths["signatures"])
     papers = load_papers_dict_from_arrow(training_arrow_paths["papers"], training_arrow_paths["paper_authors"])
-    name_counts_manifest = training_arrow_paths.name_counts_manifest
-    if name_counts_manifest is None:  # pragma: no cover - required profile invariant
-        raise RuntimeError("validated Arrow training inputs are missing their name-count manifest")
 
     dataset = ANDData._from_validated_arrow_training(
         signatures=signatures,
         papers=papers,
         name=name,
         arrow_paths=training_arrow_paths,
-        name_counts_provenance=name_counts_manifest.source_provenance,
         clusters=clusters,
         train_pairs=train_pairs,
         val_pairs=val_pairs,

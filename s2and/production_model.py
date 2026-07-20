@@ -650,11 +650,11 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     _require_bundle_normalization_version(bundle_dir, feature_contract)
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_featurizer_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
-    NameCountsBinding.from_feature_contract(
-        feature_contract,
-        context=f"Production bundle {bundle_dir} feature_contract",
-        required=any("name_counts" in info.features_to_use for info in (featurizer_info, nameless_featurizer_info)),
-    )
+    if any("name_counts" in info.features_to_use for info in (featurizer_info, nameless_featurizer_info)):
+        NameCountsBinding.from_feature_contract(
+            feature_contract,
+            context=f"Production bundle {bundle_dir} feature_contract",
+        )
     _require_featurizer_version_match(
         bundle_dir,
         {

@@ -327,6 +327,15 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     pairwise_config = json.loads((pairwise_bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     for field in ("name_tuples_data_sha256", "orcid_prefix_counts_data_sha256"):
         assert len(pairwise_config["feature_contract"][field]) == 64
+    provenance = tiny_name_counts_provenance()
+    expected_name_count_contract = {
+        "name_counts_generation_id": provenance["generation_id"],
+        "name_counts_pickle_sha256": provenance["pickle_sha256"],
+        "name_counts_source_snapshot_id": provenance["source_snapshot_id"],
+        "name_counts_selected_rows_sha256": provenance["selected_rows_sha256"],
+    }
+    for field, expected in expected_name_count_contract.items():
+        assert pairwise_config["feature_contract"][field] == expected
     with pytest.raises(ValueError, match="Expected a complete"):
         load_production_model(pairwise_bundle_dir)
     assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"

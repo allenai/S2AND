@@ -58,7 +58,7 @@ def _parser() -> argparse.ArgumentParser:
         help="local JSON rows with first_name, last_name, and count",
     )
     parser.add_argument("--source-snapshot-id", required=True)
-    parser.add_argument("--limit", type=int, help="bounded source rows; required unless --run-full is explicit")
+    parser.add_argument("--limit", type=int, help="Maximum source rows")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true", help="replace the published manifest pointer")

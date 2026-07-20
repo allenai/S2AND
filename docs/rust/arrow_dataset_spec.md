@@ -252,7 +252,7 @@ Rows must provide the source values needed for the local Rust runtime to produce
 the same feature view that S2AND would expose after normal preprocessing:
 
 - `block_type="s2"`
-- `name_tuples="filtered"`
+- `name_tuples=None`
 - `name_counts_index/` available when the selected model uses name-count features
 
 `author_orcid` is optional. If the column is absent, every signature is treated
@@ -485,10 +485,8 @@ Manifest expectations from this spec:
 1. Provide a shared/global `name_counts_index/` sidecar referenced from
    manifests via the `name_counts_index` path key when the selected model uses
    name-count features.
-2. Keep `name_counts.arrow` only for generation, inspection, and parity
-   debugging; runtime scoring reads `name_counts_index/`.
-3. Do not build a request-time pipeline that loads `name_counts.arrow` into
-   Python dicts/lists. That defeats the purpose of this contract.
+2. Do not build a request-time pipeline that loads legacy name-count artifacts
+   into Python dicts/lists. That defeats the purpose of this contract.
 
 The on-disk layout, manifest schema (`schema_version: "name_counts_index_v1"`),
 binary record format, and immutable-generation publication ritual are owned by
@@ -500,10 +498,10 @@ writers must publish through that contract.
 ## Name Aliases
 
 Production datasets must not contain per-dataset `name_pairs.arrow` files or
-manifest path keys. The runtime default is the packaged filtered alias file:
+manifest path keys. The runtime default is the packaged canonical alias file:
 
 ```text
-s2and_name_tuples_filtered.txt
+s2and_name_tuples_canonical.txt
 ```
 
 If a non-default alias set is ever needed, make it an explicit shared/global
@@ -536,7 +534,7 @@ Required fields for every semantic Arrow manifest:
     "generation_id": "sha256-of-canonical-file-inventory",
     "files": {}
   },
-  "name_tuples": "default packaged filtered aliases"
+  "name_tuples": "default packaged canonical aliases"
 }
 ```
 

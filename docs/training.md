@@ -25,10 +25,8 @@ from s2and.consts import NORMALIZATION_VERSION
 bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
 manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
 manifest_paths = manifest["paths"]
-embedding_key = next(key for key in ("specter", "specter2") if key in manifest_paths)
-embedding_index_key = next(
-    key for key in ("specter_batch_index", "specter2_batch_index") if key in manifest_paths
-)
+embedding_key = "specter"
+embedding_index_key = "specter_batch_index"
 training_keys = [
     "signatures",
     "signatures_batch_index",

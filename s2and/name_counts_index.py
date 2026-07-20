@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 import weakref
@@ -17,7 +18,6 @@ from s2and.arrow_inputs import require_name_counts_index_artifact
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_count_binding import NameCountsBinding
 from s2and.name_counts_manifest import (
-    ValidatedNameCountsManifest,
     readonly_name_counts_provenance,
     validated_name_counts_provenance,
 )
@@ -25,20 +25,6 @@ from s2and.name_counts_manifest import (
 _INDEX_CACHE: weakref.WeakValueDictionary[tuple[str, str], NameCountsIndex] = weakref.WeakValueDictionary()
 _INDEX_OPENINGS: dict[tuple[str, str], Future[NameCountsIndex]] = {}
 _INDEX_CACHE_LOCK = threading.Lock()
-
-
-def _load_validated_name_counts_manifest(
-    path: str,
-    *,
-    manifest_bytes: bytes,
-) -> ValidatedNameCountsManifest:
-    """Verify one uncached manifest generation with the canonical parser."""
-
-    return ValidatedNameCountsManifest.load(
-        path,
-        context="Python name-count index",
-        manifest_bytes=manifest_bytes,
-    )
 
 
 def _lookup_many_deduplicated(
@@ -195,21 +181,20 @@ class NameCountsIndex:
             return opening.result()
 
         try:
-            manifest = _load_validated_name_counts_manifest(
-                resolved_path,
-                manifest_bytes=manifest_bytes,
-            )
             from s2and.runtime import load_s2and_rust_extension
 
             native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
             if manifest_path.read_bytes() != manifest_bytes:
                 raise RuntimeError(f"name-count index manifest changed while opening: {manifest_path}")
+            # Native open is the material-validation authority. Parse the same
+            # validated manifest generation only to retain full provenance.
+            manifest = json.loads(manifest_bytes)
             opened = cls(
                 native=native,
                 path=resolved_path,
-                manifest_sha256=manifest.manifest_sha256,
-                normalization_version=manifest.normalization_version,
-                source_provenance=manifest.source_provenance,
+                manifest_sha256=manifest_sha256,
+                normalization_version=manifest["normalization_version"],
+                source_provenance=manifest["source_provenance"],
             )
         except BaseException as exc:
             with _INDEX_CACHE_LOCK:

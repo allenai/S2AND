@@ -184,7 +184,7 @@ def load_giant_block_dataset(
             ),
             preprocess=True,
             random_seed=int(meta.get("random_seed", 0) if isinstance(meta, dict) else 0),
-            name_tuples="filtered",
+            name_tuples=None,
             use_orcid_id=False,
         )
     finally:

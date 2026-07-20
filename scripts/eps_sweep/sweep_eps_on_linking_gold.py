@@ -708,7 +708,7 @@ def _build_arrow_featurizer(
             context="epsilon sweep Arrow featurizer",
         ),
         signature_ids=signature_ids,
-        name_tuples="filtered",
+        name_tuples=None,
         load_name_counts="name_counts_index" in arrow_paths,
         preprocess=True,
         num_threads=int(clusterer.n_jobs),

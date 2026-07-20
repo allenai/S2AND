@@ -10,7 +10,6 @@ from typing import Any, cast
 
 import pytest
 
-import s2and.arrow_inputs as arrow_inputs_module
 import scripts.eval_prod_models as eval_prod_models
 from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.consts import NORMALIZATION_VERSION
@@ -338,7 +337,6 @@ def test_arrow_training_feature_splits_loads_selected_name_counts(monkeypatch, n
         paths={"signatures": "signatures.arrow", "name_counts_index": "name_counts_index"},
         generation_id="generation",
         normalization_version=NORMALIZATION_VERSION,
-        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
     splits = eval_prod_models.PairwiseTrainingSplits([], [], [], {}, {}, {}, {})
 
@@ -401,7 +399,7 @@ class _ArrowIncrementalFixtureDataset:
         self.cluster_seeds_require: dict[str, str] = {}
         self.cluster_seeds_disallow: set[tuple[str, str]] = set()
         self.altered_cluster_signatures: list[str] = []
-        self.name_tuples = "filtered"
+        self.name_tuples = None
         self.max_seed_cluster_id = 0
         self.name = "pubmed_specter2_arrow_incremental_fixture"
 
@@ -610,7 +608,6 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
         },
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
-        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
     eval_prod_models.cluster_eval_arrow(
         arrow_paths,

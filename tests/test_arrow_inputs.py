@@ -340,7 +340,7 @@ def test_retained_validated_profile_reuses_in_memory_contract_without_io(
         )
 
 
-def test_retained_validated_profile_projects_all_unused_specter_paths(
+def test_retained_validated_profile_projects_unused_specter_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,16 +350,6 @@ def test_retained_validated_profile_projects_all_unused_specter_paths(
         require_specter=True,
         require_name_counts_index=False,
     )
-    with_aliases = ValidatedArrowInputs._from_verified(
-        paths={
-            **validated,
-            "specter2": validated["specter"],
-            "specter2_batch_index": validated["specter_batch_index"],
-        },
-        generation_id=validated.generation_id,
-        normalization_version=validated.normalization_version,
-        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
-    )
     monkeypatch.setattr(
         arrow_inputs_module,
         "_normalize_arrow_path_values",
@@ -367,16 +357,15 @@ def test_retained_validated_profile_projects_all_unused_specter_paths(
     )
 
     projected = validate_arrow_prediction_artifacts(
-        with_aliases,
+        validated,
         require_specter=False,
         require_name_counts_index=False,
     )
 
-    assert not {"specter", "specter_batch_index", "specter2", "specter2_batch_index"}.intersection(projected)
+    assert not {"specter", "specter_batch_index"}.intersection(projected)
     assert projected.generation_id == validated.generation_id
     assert projected.normalization_version == validated.normalization_version
-    assert "specter" in with_aliases
-    assert "specter2" in with_aliases
+    assert "specter" in validated
 
 
 def test_validated_arrow_inputs_mapping_is_immutable(tmp_path: Path) -> None:
@@ -397,19 +386,12 @@ def test_validated_arrow_inputs_mapping_is_immutable(tmp_path: Path) -> None:
     assert validated["signatures"] == original_signature_path
 
 
-def test_validated_arrow_inputs_rejects_direct_or_uncapable_construction() -> None:
+def test_validated_arrow_inputs_rejects_direct_construction_and_subclassing() -> None:
     with pytest.raises(TypeError, match="cannot be constructed directly"):
         ValidatedArrowInputs(
             paths={"signatures": "unverified.arrow"},
             generation_id="forged-generation",
             normalization_version="canonical_v2",
-        )
-    with pytest.raises(TypeError, match="internal verified capability"):
-        ValidatedArrowInputs._from_verified(
-            paths={"signatures": "unverified.arrow"},
-            generation_id="forged-generation",
-            normalization_version="canonical_v2",
-            capability=object(),
         )
     with pytest.raises(TypeError, match="cannot be subclassed"):
         type("ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
@@ -769,51 +751,15 @@ def test_validate_arrow_prediction_artifacts_ignores_unused_specter_path(tmp_pat
     assert "specter_batch_index" not in normalized
 
 
-def test_validate_arrow_prediction_artifacts_accepts_selected_specter2_alias(tmp_path: Path) -> None:
+def test_validate_arrow_prediction_artifacts_rejects_specter2_aliases(tmp_path: Path) -> None:
     paths = _write_valid_prediction_bundle(tmp_path, specter_key="specter2")
 
-    normalized = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=True,
-        require_name_counts_index=False,
-    )
-
-    assert normalized["specter"] == paths["specter2"]
-    assert normalized["specter_batch_index"] == paths["specter2_batch_index"]
-    assert "specter2" not in normalized
-    assert "specter2_batch_index" not in normalized
-
-
-def test_validate_arrow_prediction_artifacts_clears_invalid_legacy_specter_after_alias(tmp_path: Path) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path, specter_key="specter2")
-    paths["specter"] = None  # type: ignore[assignment]
-    paths["specter_batch_index"] = None  # type: ignore[assignment]
-
-    normalized = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=True,
-        require_name_counts_index=False,
-    )
-
-    assert normalized["specter"] == paths["specter2"]
-    assert normalized["specter_batch_index"] == paths["specter2_batch_index"]
-
-
-def test_validate_arrow_prediction_artifacts_clears_invalid_specter2_after_canonical(
-    tmp_path: Path,
-) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path, specter_key="specter")
-    paths["specter2"] = None  # type: ignore[assignment]
-    paths["specter2_batch_index"] = None  # type: ignore[assignment]
-
-    normalized = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=True,
-        require_name_counts_index=False,
-    )
-
-    assert normalized["specter"] == paths["specter"]
-    assert normalized["specter_batch_index"] == paths["specter_batch_index"]
+    with pytest.raises(MissingArrowArtifactError, match="unsupported embedding path key"):
+        validate_arrow_prediction_artifacts(
+            paths,
+            require_specter=True,
+            require_name_counts_index=False,
+        )
 
 
 def test_require_filtered_arrow_batch_indexes_ignores_specter_index_without_specter(tmp_path: Path) -> None:

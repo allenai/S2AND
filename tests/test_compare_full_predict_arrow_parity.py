@@ -140,7 +140,6 @@ def test_cluster_partition_ignores_cluster_labels_and_member_order() -> None:
 
 
 def test_jsonable_converts_validated_arrow_mapping() -> None:
-    import s2and.arrow_inputs as arrow_inputs_module
     from s2and.arrow_inputs import ValidatedArrowInputs
     from s2and.consts import NORMALIZATION_VERSION
 
@@ -148,7 +147,6 @@ def test_jsonable_converts_validated_arrow_mapping() -> None:
         paths={"signatures": "signatures.arrow"},
         generation_id="generation",
         normalization_version=NORMALIZATION_VERSION,
-        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
 
     assert _jsonable(paths) == {"signatures": "signatures.arrow"}

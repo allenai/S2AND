@@ -1,5 +1,6 @@
 import json
 import unittest
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
@@ -95,13 +96,11 @@ def test_preprocess_signatures_drops_empty_normalized_affiliations() -> None:
 
 
 def test_name_tuples_none_uses_canonical_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
-    loaded: list[str] = []
-
-    def fake_load(filename: str) -> set[tuple[str, str]]:
-        loaded.append(filename)
-        return {("bill", "william")}
-
-    monkeypatch.setattr(data_module, "_load_name_tuples_from_file", fake_load)
+    monkeypatch.setattr(
+        data_module,
+        "load_packaged_name_tuple_artifact",
+        lambda: SimpleNamespace(pairs=frozenset({("bill", "william")})),
+    )
     dataset = ANDData(
         signatures={},
         papers={},
@@ -112,8 +111,20 @@ def test_name_tuples_none_uses_canonical_artifact(monkeypatch: pytest.MonkeyPatc
         name_tuples=None,
     )
 
-    assert loaded == ["s2and_name_tuples_canonical.txt"]
     assert dataset.name_tuples == {("bill", "william")}
+
+
+def test_name_tuples_rejects_string_sentinel() -> None:
+    with pytest.raises(TypeError, match="set/frozenset"):
+        ANDData(
+            signatures={},
+            papers={},
+            name="invalid_name_tuple_sentinel",
+            mode="inference",
+            name_counts_index=None,
+            preprocess=False,
+            name_tuples="filtered",  # type: ignore[arg-type]
+        )
 
 
 def test_custom_name_tuples_are_stored_as_unordered_pairs() -> None:

@@ -26,6 +26,7 @@ from s2and.arrow_inputs import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
     normalize_arrow_paths,
 )
+from s2and.arrow_schema import validate_arrow_schema
 from s2and.incremental_linking.feature_block_contract import (
     FeatureBlock,
     FeatureBlockPaper,
@@ -46,7 +47,6 @@ from s2and.name_counts_manifest import (
     validated_name_counts_provenance,
 )
 
-NAME_COUNTS_ARROW_MANIFEST_SCHEMA_VERSION = "name_counts_arrow_v1"
 ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
 ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION = "arrow_batch_lookup_index"
 INCREMENTAL_QUERY_SIGNATURE_VIEWS = frozenset({"auto", "full", "initial_only"})
@@ -119,11 +119,7 @@ def read_incremental_query_signatures_arrow(path: Path) -> tuple[IncrementalQuer
 
     with pa.memory_map(str(path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
-    _require_arrow_string_columns(
-        table,
-        "incremental query signatures",
-        {"signature_id", "query_view", "query_author"},
-    )
+    validate_arrow_schema(table.schema, table_name="incremental_query_signatures")
     return _normalize_incremental_query_signature_requests(
         table["signature_id"].to_pylist(),
         query_views=table["query_view"].to_pylist(),
@@ -235,10 +231,7 @@ def read_cluster_seeds_arrow(path: Path) -> dict[str, str]:
 
     with pa.memory_map(str(path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
-    missing_columns = sorted({"signature_id", "cluster_id"} - set(table.column_names))
-    if missing_columns:
-        raise ValueError(f"cluster seeds Arrow is missing required columns: {missing_columns}")
-    _require_arrow_string_columns(table, "cluster seeds", {"signature_id", "cluster_id"})
+    validate_arrow_schema(table.schema, table_name="cluster_seeds")
     rows: dict[str, str] = {}
     for index in range(table.num_rows):
         signature_value = table["signature_id"][index].as_py()
@@ -286,10 +279,7 @@ def read_cluster_seed_disallows_arrow(path: Path) -> tuple[tuple[str, str], ...]
 
     with pa.memory_map(str(path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
-    missing_columns = sorted({"signature_id_1", "signature_id_2"} - set(table.column_names))
-    if missing_columns:
-        raise ValueError(f"cluster seed disallows Arrow is missing required columns: {missing_columns}")
-    _require_arrow_string_columns(table, "cluster seed disallows", {"signature_id_1", "signature_id_2"})
+    validate_arrow_schema(table.schema, table_name="cluster_seed_disallows")
     rows = []
     seen_pairs: set[tuple[str, str]] = set()
     for left, right in zip(
@@ -330,7 +320,7 @@ def read_altered_cluster_signatures_arrow(path: Path) -> tuple[str, ...]:
 
     with pa.memory_map(str(path), "r") as source:
         table = pa.ipc.open_file(source).read_all()
-    _require_arrow_string_columns(table, "altered cluster signatures", {"signature_id"})
+    validate_arrow_schema(table.schema, table_name="altered_cluster_signatures")
     return _normalize_unique_signature_ids(
         table["signature_id"].to_pylist(),
         table_name="altered cluster signatures",
@@ -1064,175 +1054,12 @@ def write_feature_block_arrow_tables(
     return paths
 
 
-def write_name_counts_arrow(
-    output_dir: str | Path,
-    mappings: tuple[Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any], Mapping[Any, Any]],
-    source_provenance: Mapping[str, Any],
-    *,
-    overwrite: bool = False,
-) -> tuple[str, dict[str, int | bool]]:
-    """Publish the global name-count Arrow table as an immutable generation."""
-
-    import pyarrow as pa
-
-    output_root = Path(output_dir)
-    logical_output_path = output_root / "name_counts.arrow"
-    source_provenance = validated_name_counts_provenance(
-        source_provenance,
-        context="write_name_counts_arrow",
-    )
-    first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
-    fingerprint = _name_counts_arrow_fingerprint(
-        {
-            "first": first_dict,
-            "last": last_dict,
-            "first_last": first_last_dict,
-            "last_first_initial": last_first_initial_dict,
-        }
-    )
-    expected_manifest = {
-        "schema_version": NAME_COUNTS_ARROW_MANIFEST_SCHEMA_VERSION,
-        "fingerprint": fingerprint,
-        "normalization_version": source_provenance["normalization_version"],
-        "source_provenance": source_provenance,
-    }
-    if not overwrite:
-        current_path = _verified_name_counts_arrow_generation(logical_output_path, expected_manifest)
-        if current_path is not None:
-            return str(current_path), {"reused": True}
-
-    metrics: dict[str, int | bool] = {"reused": False}
-    generations_dir = output_root / "name_counts_arrow_generations"
-    generations_dir.mkdir(parents=True, exist_ok=True)
-    generation_name = f"gen-{uuid.uuid4().hex}"
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{generation_name}.", dir=str(generations_dir)))
-    generation_dir = generations_dir / generation_name
-    output_tmp = staging_dir / "name_counts.arrow"
-    manifest_path = _name_artifact_manifest_path(logical_output_path)
-    manifest_tmp = manifest_path.with_name(f".{manifest_path.name}.{generation_name}.tmp")
-    schema = pa.schema((pa.field("kind", pa.string()), pa.field("name", pa.string()), pa.field("count", pa.float64())))
-    row_count = 0
-    batch_size = 100_000
-    try:
-        with pa.OSFile(str(output_tmp), "wb") as sink:
-            with pa.ipc.new_file(sink, schema) as writer:
-                for kind, mapping in (
-                    ("first", first_dict),
-                    ("last", last_dict),
-                    ("first_last", first_last_dict),
-                    ("last_first_initial", last_first_initial_dict),
-                ):
-                    metrics[f"{kind}_count"] = len(mapping)
-                    names: list[str] = []
-                    values: list[float] = []
-                    for raw_name, raw_count in mapping.items():
-                        names.append(str(raw_name))
-                        values.append(float(raw_count))
-                        if len(names) >= batch_size:
-                            writer.write_batch(
-                                pa.record_batch(
-                                    [
-                                        pa.array([kind] * len(names)),
-                                        pa.array(names),
-                                        pa.array(values, type=pa.float64()),
-                                    ],
-                                    schema=schema,
-                                )
-                            )
-                            row_count += len(names)
-                            names.clear()
-                            values.clear()
-                    if names:
-                        writer.write_batch(
-                            pa.record_batch(
-                                [pa.array([kind] * len(names)), pa.array(names), pa.array(values, type=pa.float64())],
-                                schema=schema,
-                            )
-                        )
-                        row_count += len(names)
-        with output_tmp.open("r+b") as output_input:
-            os.fsync(output_input.fileno())
-        arrow_sha256 = _sha256_file(output_tmp)
-        arrow_byte_count = output_tmp.stat().st_size
-        manifest = {
-            **expected_manifest,
-            "generation_id": generation_name,
-            "row_count": row_count,
-            "files": {
-                "arrow": {
-                    "path": f"name_counts_arrow_generations/{generation_name}/name_counts.arrow",
-                    "byte_count": arrow_byte_count,
-                    "sha256": arrow_sha256,
-                }
-            },
-        }
-        manifest_tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with manifest_tmp.open("r+b") as manifest_input:
-            os.fsync(manifest_input.fileno())
-        marker_path = staging_dir / ".published"
-        with marker_path.open("wb") as marker_output:
-            marker_output.flush()
-            os.fsync(marker_output.fileno())
-        with _exclusive_name_counts_publish_lock(output_root):
-            if not overwrite:
-                current_path = _verified_name_counts_arrow_generation(logical_output_path, expected_manifest)
-                if current_path is not None:
-                    return str(current_path), {"reused": True}
-            staging_dir.rename(generation_dir)
-            manifest_tmp.replace(manifest_path)
-    finally:
-        manifest_tmp.unlink(missing_ok=True)
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
-    metrics["row_count"] = row_count
-    return str(generation_dir / "name_counts.arrow"), metrics
-
-
-def _name_artifact_manifest_path(output_path: Path) -> Path:
-    return output_path.with_name(f"{output_path.name}.manifest.json")
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _verified_name_counts_arrow_generation(
-    logical_output_path: Path,
-    expected: Mapping[str, Any],
-) -> Path | None:
-    manifest_path = _name_artifact_manifest_path(logical_output_path)
-    if not manifest_path.exists():
-        return None
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, Mapping):
-        return None
-    if not all(manifest.get(key) == value for key, value in expected.items()):
-        return None
-    files = manifest.get("files")
-    arrow_entry = files.get("arrow") if isinstance(files, Mapping) else None
-    if not isinstance(arrow_entry, Mapping):
-        return None
-    raw_path = arrow_entry.get("path")
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        return None
-    arrow_path = (logical_output_path.parent / raw_path).resolve()
-    try:
-        arrow_path.relative_to(logical_output_path.parent.resolve())
-    except ValueError:
-        return None
-    if not arrow_path.is_file() or not (arrow_path.parent / ".published").is_file():
-        return None
-    expected_bytes = arrow_entry.get("byte_count")
-    expected_sha256 = arrow_entry.get("sha256")
-    if not isinstance(expected_bytes, int) or arrow_path.stat().st_size != expected_bytes:
-        return None
-    if not isinstance(expected_sha256, str) or _sha256_file(arrow_path) != expected_sha256:
-        return None
-    return arrow_path
 
 
 def _fnv64_text(digest: int, value: str) -> int:
@@ -1736,60 +1563,6 @@ def _arrow_rows_by_unique_key(
     return rows_by_key
 
 
-def _require_arrow_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
-    missing_columns = sorted(required_columns.difference(table.column_names))
-    if missing_columns:
-        raise ValueError(f"{table_name} Arrow is missing required columns: {missing_columns}")
-
-
-def _require_arrow_string_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
-    _require_arrow_columns(table, table_name, required_columns)
-    pa = __import__("pyarrow")
-    for column_name in sorted(required_columns):
-        column_type = table[column_name].type
-        if not (pa.types.is_string(column_type) or pa.types.is_large_string(column_type)):
-            raise ValueError(f"{table_name} Arrow column {column_name} expected string, got {column_type}")
-
-
-def _require_arrow_int64_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
-    _require_arrow_columns(table, table_name, required_columns)
-    pa = __import__("pyarrow")
-    for column_name in sorted(required_columns):
-        column_type = table[column_name].type
-        if not pa.types.is_int64(column_type):
-            raise ValueError(f"{table_name} Arrow column {column_name} expected int64, got {column_type}")
-
-
-def _require_arrow_bool_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
-    _require_arrow_columns(table, table_name, required_columns)
-    pa = __import__("pyarrow")
-    for column_name in sorted(required_columns):
-        column_type = table[column_name].type
-        if not pa.types.is_boolean(column_type):
-            raise ValueError(f"{table_name} Arrow column {column_name} expected bool, got {column_type}")
-
-
-def _require_arrow_float_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
-    _require_arrow_columns(table, table_name, required_columns)
-    pa = __import__("pyarrow")
-    for column_name in sorted(required_columns):
-        column_type = table[column_name].type
-        if not (pa.types.is_float32(column_type) or pa.types.is_float64(column_type)):
-            raise ValueError(f"{table_name} Arrow column {column_name} expected float, got {column_type}")
-
-
-def _require_arrow_string_list_columns(table: Any, table_name: str, required_columns: set[str]) -> None:
-    _require_arrow_columns(table, table_name, required_columns)
-    pa = __import__("pyarrow")
-    for column_name in sorted(required_columns):
-        column_type = table[column_name].type
-        value_type = getattr(column_type, "value_type", None)
-        if not (pa.types.is_list(column_type) or pa.types.is_large_list(column_type)) or not (
-            value_type is not None and (pa.types.is_string(value_type) or pa.types.is_large_string(value_type))
-        ):
-            raise ValueError(f"{table_name} Arrow column {column_name} expected list<string>, got {column_type}")
-
-
 def feature_block_from_arrow_paths(
     paths: Mapping[str, Any],
     *,
@@ -1808,25 +1581,7 @@ def feature_block_from_arrow_paths(
     selected_signature_id_set = set(selected_signature_ids)
 
     signatures_table = _read_arrow_ipc_table(pa, paths["signatures"])
-    _require_arrow_string_columns(
-        signatures_table,
-        "signatures",
-        {
-            "signature_id",
-            "paper_id",
-            "author_first",
-            "author_middle",
-            "author_last",
-            "author_suffix",
-        },
-    )
-    _require_arrow_int64_columns(signatures_table, "signatures", {"author_position"})
-    _require_arrow_string_list_columns(signatures_table, "signatures", {"author_affiliations"})
-    for optional_signature_string_column in ("author_block", "author_email", "author_orcid"):
-        if optional_signature_string_column in signatures_table.column_names:
-            _require_arrow_string_columns(signatures_table, "signatures", {optional_signature_string_column})
-    if "source_author_ids" in signatures_table.column_names:
-        _require_arrow_string_list_columns(signatures_table, "signatures", {"source_author_ids"})
+    validate_arrow_schema(signatures_table.schema, table_name="signatures")
     signatures_table = _filter_arrow_table_by_values(pa, pc, signatures_table, "signature_id", selected_signature_ids)
     signatures_by_id = _arrow_rows_by_unique_key(
         signatures_table.to_pylist(),
@@ -1845,16 +1600,7 @@ def feature_block_from_arrow_paths(
 
     paper_ids = tuple(dict.fromkeys(row.paper_id for row in signature_rows))
     papers_table = _read_arrow_ipc_table(pa, paths["papers"])
-    _require_arrow_string_columns(papers_table, "papers", {"journal_name", "paper_id", "title", "venue"})
-    for optional_string_column in ("abstract", "predicted_language"):
-        if optional_string_column in papers_table.column_names:
-            _require_arrow_string_columns(papers_table, "papers", {optional_string_column})
-    if "year" in papers_table.column_names:
-        _require_arrow_int64_columns(papers_table, "papers", {"year"})
-    if "is_reliable" in papers_table.column_names:
-        _require_arrow_bool_columns(papers_table, "papers", {"is_reliable"})
-    if "language_reliability" in papers_table.column_names:
-        _require_arrow_float_columns(papers_table, "papers", {"language_reliability"})
+    validate_arrow_schema(papers_table.schema, table_name="papers")
     papers_table = _filter_arrow_table_by_values(pa, pc, papers_table, "paper_id", paper_ids)
     papers_by_id = _arrow_rows_by_unique_key(
         papers_table.to_pylist(),
@@ -1870,8 +1616,7 @@ def feature_block_from_arrow_paths(
     paper_authors_path = paths.get("paper_authors")
     if paper_authors_path is not None:
         paper_authors_table = _read_arrow_ipc_table(pa, paper_authors_path)
-        _require_arrow_int64_columns(paper_authors_table, "paper_authors", {"position"})
-        _require_arrow_string_columns(paper_authors_table, "paper_authors", {"author_name", "paper_id"})
+        validate_arrow_schema(paper_authors_table.schema, table_name="paper_authors")
         paper_authors_table = _filter_arrow_table_by_values(pa, pc, paper_authors_table, "paper_id", paper_ids)
         paper_author_row_list: list[FeatureBlockPaperAuthor] = []
         seen_paper_author_positions: set[tuple[str, int]] = set()
@@ -1927,8 +1672,7 @@ def feature_block_from_arrow_paths(
     specter_path = paths.get("specter")
     if include_specter and specter_path is not None:
         specter_table = _read_arrow_ipc_table(pa, specter_path)
-        _require_arrow_columns(specter_table, "specter", {"embedding"})
-        _require_arrow_string_columns(specter_table, "specter", {"paper_id"})
+        validate_arrow_schema(specter_table.schema, table_name="specter")
         specter_table = _filter_arrow_table_by_values(pa, pc, specter_table, "paper_id", paper_ids)
         specter_by_id = _arrow_rows_by_unique_key(
             specter_table.to_pylist(),

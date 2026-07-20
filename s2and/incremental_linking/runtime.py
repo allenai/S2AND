@@ -2199,22 +2199,6 @@ def subset_raw_plan_bundle_for_query_ids(
     )
 
 
-def subset_raw_candidate_plan_for_query_ids(
-    raw_candidate_plan: Mapping[str, Any],
-    query_signature_ids: Sequence[Any],
-    *,
-    zero_plan_timings: bool = False,
-) -> dict[str, Any]:
-    """Validate and subset a raw candidate plan at the public mapping boundary."""
-
-    bundle = subset_raw_plan_bundle_for_query_ids(
-        RawArrowPlanBundle.from_mapping(raw_candidate_plan),
-        query_signature_ids,
-        zero_plan_timings=zero_plan_timings,
-    )
-    return bundle.to_mutable_mapping()
-
-
 def _seed_setup_from_component_members(
     component_members: Mapping[str, Sequence[str]],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
@@ -2258,7 +2242,7 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
     total_ram_bytes: int | None = None,
     max_exemplars: int = 4,
     load_name_counts: bool | None = None,
-    name_tuples: set[tuple[str, str]] | str | None = "filtered",
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
     orcid_enabled: bool | None = None,
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
 ) -> LinkOrAbstainProductionResult:

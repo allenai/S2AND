@@ -36,7 +36,7 @@ def _load_json(path: Path) -> Any:
         return json.load(infile)
 
 
-def _resolve_manifest_paths(dataset_dir: Path, *, embedding: str) -> dict[str, str]:
+def _resolve_manifest_paths(dataset_dir: Path) -> dict[str, str]:
     manifest = _load_json(dataset_dir / "manifest.json")
     raw_paths = manifest.get("paths")
     if not isinstance(raw_paths, Mapping):
@@ -47,13 +47,7 @@ def _resolve_manifest_paths(dataset_dir: Path, *, embedding: str) -> dict[str, s
             continue
         path = Path(str(value))
         paths[str(key)] = str((path if path.is_absolute() else dataset_dir / path).resolve())
-    if embedding == "specter2":
-        if "specter2" not in paths:
-            raise ValueError(f"{dataset_dir} manifest has no specter2 path")
-        paths["specter"] = paths["specter2"]
-        if "specter2_batch_index" in paths:
-            paths["specter_batch_index"] = paths["specter2_batch_index"]
-    elif "specter" not in paths:
+    if "specter" not in paths:
         raise ValueError(f"{dataset_dir} manifest has no specter path")
     return paths
 
@@ -235,14 +229,14 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         name_counts_index=NAME_COUNTS_INDEX_PATH,
         preprocess=True,
         random_seed=int(args.seed),
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
     anddata_seconds = time.perf_counter() - started
 
     pairs = _sample_pairs(selected_signature_ids, pair_count=int(args.pair_count), seed=int(args.seed))
     paths = validate_arrow_prediction_artifacts(
-        _resolve_manifest_paths(arrow_dir, embedding=str(args.embedding)),
+        _resolve_manifest_paths(arrow_dir),
         require_specter=True,
         require_name_counts_index=True,
         expected_normalization_version=NORMALIZATION_VERSION,
@@ -272,7 +266,7 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=selected_signature_ids,
-        name_tuples="filtered",
+        name_tuples=None,
         load_name_counts=True,
         preprocess=True,
         num_threads=int(args.n_jobs),

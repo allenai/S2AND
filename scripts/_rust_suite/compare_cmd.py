@@ -267,7 +267,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             name_counts_index=name_counts_index_path,
             preprocess=True,
             random_seed=42,
-            name_tuples="filtered",
+            name_tuples=None,
             use_orcid_id=True,
         )
         anddata_seconds = time.perf_counter() - anddata_start
@@ -333,7 +333,7 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
                     validated_arrow_paths,
                     expected_normalization_version=NORMALIZATION_VERSION,
                     signature_ids=signature_ids,
-                    name_tuples=getattr(dataset, "name_tuples", "filtered"),
+                    name_tuples=getattr(dataset, "name_tuples", None),
                     load_name_counts=True,
                     preprocess=True,
                     num_threads=args.n_jobs,

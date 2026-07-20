@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from itertools import combinations
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -11,7 +10,6 @@ from s2and.arrow_inputs import MissingArrowArtifactError
 from s2and.incremental_linking.feature_block import write_arrow_batch_lookup_index, write_arrow_ipc_table
 from s2and.subblocking import (
     GraphSubblockingConfig,
-    _orcid_prefix_pair_count,
     _projection_neighbor_edge_scores,
     _prune_edge_scores,
     _score_candidate_edge,
@@ -21,66 +19,6 @@ from s2and.subblocking import (
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks_with_telemetry,
 )
-from s2and.text import same_prefix_tokens
-
-
-def _legacy_sorted_subblock_merge_candidates(output, maximum_size, first_k_letter_counts_sorted):
-    small_enough_keys = [k for k, v in output.items() if len(v) < maximum_size]
-    small_enough_pairs_counts = []
-    for pair in list(combinations(small_enough_keys, 2)):
-        if len(output[pair[0]]) + len(output[pair[1]]) <= maximum_size:
-            pair_0_split = pair[0].split("|")
-            pair_1_split = pair[1].split("|")
-
-            first_name_1 = pair_0_split[0]
-            first_name_2 = pair_1_split[0]
-
-            if len(pair_0_split) > 1:
-                middle_name_1 = pair_0_split[1].split("=")[1]
-            else:
-                middle_name_1 = None
-
-            if len(pair_1_split) > 1:
-                middle_name_2 = pair_1_split[1].split("=")[1]
-            else:
-                middle_name_2 = None
-
-            if len(first_name_1) > 1 and len(first_name_2) > 1:
-                name_for_splits_1 = first_name_1
-                name_for_splits_2 = first_name_2
-            elif (
-                len(first_name_1) == 1
-                and len(first_name_2) == 1
-                and middle_name_1 is not None
-                and middle_name_2 is not None
-            ):
-                name_for_splits_1 = middle_name_1
-                name_for_splits_2 = middle_name_2
-            else:
-                continue
-
-            if name_for_splits_1 == name_for_splits_2:
-                if middle_name_1 is not None and middle_name_2 is not None:
-                    score = 0
-                    for i in range(1, len(middle_name_1)):
-                        if middle_name_1[:i] == middle_name_2[:i]:
-                            score = i
-                else:
-                    score = 0
-                small_enough_pairs_counts.append((pair, 1e10 + score))
-            elif same_prefix_tokens(name_for_splits_1, name_for_splits_2):
-                score = min(len(name_for_splits_1), len(name_for_splits_2))
-                small_enough_pairs_counts.append((pair, 1e5 + score))
-            else:
-                # canonical_v2: prefix-count lookups use the full canonical name
-                # string (the legacy first-token reduction is retired).
-                lookup_1 = name_for_splits_1
-                lookup_2 = name_for_splits_2
-                pair_count = _orcid_prefix_pair_count(first_k_letter_counts_sorted, lookup_1, lookup_2)
-                if pair_count is not None:
-                    small_enough_pairs_counts.append((pair, pair_count))
-
-    return sorted(small_enough_pairs_counts, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
 
 def _write_arrow_ipc_batches(path, batches) -> None:
@@ -93,11 +31,10 @@ def _write_arrow_ipc_batches(path, batches) -> None:
 
 
 def _add_graph_batch_indexes(paths: dict[str, Any], tmp_path) -> dict[str, Any]:
-    specter_key = "specter2" if "specter2" in paths and "specter" not in paths else "specter"
     index_specs = (
         ("signatures", "signatures_batch_index", "signature_id"),
         ("paper_authors", "paper_authors_batch_index", "paper_id"),
-        (specter_key, f"{specter_key}_batch_index", "paper_id"),
+        ("specter", "specter_batch_index", "paper_id"),
     )
     for table_key, index_key, key_column in index_specs:
         index_path = tmp_path / f"{table_key}.{index_key}.bin"
@@ -106,7 +43,7 @@ def _add_graph_batch_indexes(paths: dict[str, Any], tmp_path) -> dict[str, Any]:
     return paths
 
 
-def test_sorted_subblock_merge_candidates_matches_legacy_edge_cases() -> None:
+def test_sorted_subblock_merge_candidates_handles_edge_cases() -> None:
     output = {
         "alex": ["a1", "a2"],
         "alex|middle=w": ["a3"],
@@ -121,15 +58,13 @@ def test_sorted_subblock_merge_candidates_matches_legacy_edge_cases() -> None:
     }
     counts = {
         "alex": {"bo": 7},
-        "bo": {"alex": 99},
-        "wei": {"li": 5},
         "li": {"wei": 11},
     }
 
     observed = _sorted_subblock_merge_candidates(output, maximum_size=5, first_k_letter_counts_sorted=counts)
-    expected = _legacy_sorted_subblock_merge_candidates(output, maximum_size=5, first_k_letter_counts_sorted=counts)
 
-    assert observed == expected
+    assert (("alex", "bo"), 7) in observed
+    assert (("a|middle=wei", "a|middle=li"), 11) in observed
     assert (("carol", "david"), 0) not in observed
     assert any(pair == ("a|middle=wei", "a|middle=weijun") for pair, _score in observed)
 
@@ -153,7 +88,7 @@ def test_sorted_subblock_merge_candidates_middle_prefix_score_is_order_invariant
 
 
 def test_sorted_subblock_merge_candidates_orcid_counts_are_order_invariant() -> None:
-    counts = {"wei": {"li": 7}}
+    counts = {"li": {"wei": 7}}
     forward = _sorted_subblock_merge_candidates(
         {"a|middle=wei": ["s1"], "a|middle=li": ["s2"]},
         maximum_size=3,
@@ -245,29 +180,6 @@ def test_prune_edge_scores_tie_breaker_is_independent_of_insertion_order() -> No
 
     assert tuple(forward) == ((0, 1), (0, 2))
     assert tuple(reverse) == tuple(forward)
-
-
-def test_sorted_subblock_merge_candidates_matches_legacy_many_keys() -> None:
-    output = {}
-    counts = {}
-    for index in range(80):
-        if index % 3 == 0:
-            key = f"al{index}"
-        elif index % 3 == 1:
-            key = f"a|middle=mi{index}"
-        else:
-            key = f"bo {index}"
-        output[key] = [f"s{index}_{j}" for j in range(index % 4 + 1)]
-    for left in range(0, 80, 5):
-        # Keyed by the FULL canonical name strings of the "bo {index}" keys so
-        # the prefix-count fallback branch is exercised under canonical lookups.
-        counts.setdefault(f"al{left}", {})[f"bo {left + 2}"] = left + 1
-
-    assert _sorted_subblock_merge_candidates(output, 7, counts) == _legacy_sorted_subblock_merge_candidates(
-        output,
-        7,
-        counts,
-    )
 
 
 def test_arrow_graph_subblocking_fallback_accepts_missing_orcid_and_packs_components(tmp_path) -> None:
@@ -694,7 +606,7 @@ def test_arrow_graph_subblocking_requires_batch_indexes(tmp_path) -> None:
         fallback.prepare([["s1"]])
 
 
-def test_arrow_graph_subblocking_accepts_specter2_with_matching_batch_index(tmp_path) -> None:
+def test_arrow_graph_subblocking_accepts_canonical_key_for_specter2_file(tmp_path) -> None:
     pa = pytest.importorskip("pyarrow")
 
     signatures_path = tmp_path / "signatures.arrow"
@@ -734,11 +646,10 @@ def test_arrow_graph_subblocking_accepts_specter2_with_matching_batch_index(tmp_
         specter2_path,
     )
     paths = _add_graph_batch_indexes(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter2": specter2_path},
+        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter2_path},
         tmp_path,
     )
-    assert "specter2_batch_index" in paths
-    assert "specter_batch_index" not in paths
+    assert "specter_batch_index" in paths
 
     fallback = make_arrow_graph_subblocking_cluster_fn(
         paths,

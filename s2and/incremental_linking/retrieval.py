@@ -180,37 +180,6 @@ class RawArrowPlanBundle:
     retrieval_ranks: np.ndarray
     row_signals: Mapping[str, np.ndarray]
 
-    def to_mutable_mapping(self) -> dict[str, Any]:
-        """Return a detached mutable plan for the public mapping API."""
-
-        plan: dict[str, Any] = {
-            "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
-            "row_count": self.row_count,
-            "pair_count": self.pair_count,
-            "query_signature_ids": self.query_signature_ids,
-            "query_views": self.query_views,
-            "query_authors": self.query_authors,
-        }
-        if self.seed_signature_ids is not None:
-            plan["seed_signature_ids"] = self.seed_signature_ids
-        plan["component_members"] = self.component_members
-        plan.update(
-            {
-                "left_signature_ids": self.left_signature_ids,
-                "right_signature_ids": self.right_signature_ids,
-                "pair_row_indices": self.pair_row_indices,
-                "row_query_signature_indices": self.row_query_offsets,
-                "row_component_keys": self.row_component_keys,
-                "retrieval_scores": self.retrieval_scores,
-                "retrieval_ranks": self.retrieval_ranks,
-            }
-        )
-        for raw_key, signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-            plan[raw_key] = self.row_signals[signal_key]
-        if self.telemetry is not None:
-            plan["telemetry"] = self.telemetry
-        return {key: _mutable_plan_value(value) for key, value in plan.items()}
-
     @classmethod
     def _from_normalized_values(
         cls,
@@ -525,25 +494,6 @@ def _owned_plan_value(value: Any) -> Any:
         return tuple(_owned_plan_value(item) for item in value)
     if isinstance(value, set | frozenset):
         return frozenset(_owned_plan_value(item) for item in value)
-    return value
-
-
-def _mutable_plan_value(value: Any) -> Any:
-    """Recursively copy a bundle plan value back to mutable containers."""
-
-    if isinstance(value, np.ndarray):
-        if value.dtype.hasobject:
-            mutable = np.empty(value.shape, dtype=object)
-            for index, item in np.ndenumerate(value):
-                mutable[index] = _mutable_plan_value(item)
-            return mutable
-        return np.array(value, dtype=value.dtype, copy=True, order="C")
-    if isinstance(value, Mapping):
-        return {key: _mutable_plan_value(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_mutable_plan_value(item) for item in value]
-    if isinstance(value, frozenset):
-        return {_mutable_plan_value(item) for item in value}
     return value
 
 

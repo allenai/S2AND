@@ -24,11 +24,9 @@ uses the canonical preprocessing contract that the Rust Arrow readers assume
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Mapping
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,11 +36,11 @@ from s2and.arrow_inputs import (
     require_normalization_version,
     validate_arrow_training_artifacts,
 )
+from s2and.arrow_schema import validate_arrow_file_schema, validate_arrow_schema
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import (
     _arrow_rows_by_unique_key,
     _read_arrow_ipc_table,
-    _require_arrow_columns,
 )
 
 logger = logging.getLogger("s2and")
@@ -50,79 +48,12 @@ logger = logging.getLogger("s2and")
 if TYPE_CHECKING:
     import pandas as pd
 
-_REQUIRED_TABLE_KEYS = ("signatures", "papers", "paper_authors")
-_ARROW_SCHEMA_CONTRACT_PATH = Path(__file__).with_name("arrow_schema_contract.json")
-
-
-@lru_cache(maxsize=1)
-def _arrow_schema_contract_tables() -> Mapping[str, Any]:
-    """Load the packaged canonical Arrow schema contract."""
-
-    contract = json.loads(_ARROW_SCHEMA_CONTRACT_PATH.read_text(encoding="utf-8"))
-    tables = contract.get("tables") if isinstance(contract, Mapping) else None
-    if not isinstance(tables, Mapping):
-        raise ValueError(f"Arrow schema contract is missing tables: {_ARROW_SCHEMA_CONTRACT_PATH}")
-    return tables
-
-
-def _arrow_type_matches_datatype(data_type: Any, datatype: str) -> bool:
-    """Return whether a PyArrow type matches one canonical contract datatype."""
-
-    import pyarrow as pa
-
-    match datatype:
-        case "string":
-            return bool(pa.types.is_string(data_type))
-        case "int64":
-            return bool(pa.types.is_int64(data_type))
-        case "bool":
-            return bool(pa.types.is_boolean(data_type))
-        case "float64":
-            return bool(pa.types.is_float64(data_type))
-        case "list<string>":
-            return bool(pa.types.is_list(data_type) and pa.types.is_string(data_type.value_type))
-        case "fixed_size_list<float32>":
-            return bool(pa.types.is_fixed_size_list(data_type) and pa.types.is_float32(data_type.value_type))
-        case _:
-            raise ValueError(f"Arrow schema contract contains unsupported datatype {datatype!r}")
-
-
-def _validate_canonical_arrow_schema(schema: Any, *, table_name: str) -> None:
-    """Validate one table schema against the packaged canonical contract."""
-
-    column_specs = _arrow_schema_contract_tables().get(table_name)
-    if not isinstance(column_specs, list):
-        raise ValueError(f"Arrow schema contract is missing table {table_name!r}")
-    for column_spec in column_specs:
-        if not isinstance(column_spec, Mapping):
-            raise ValueError(f"Arrow schema contract has invalid column metadata for {table_name!r}")
-        column_name = str(column_spec["name"])
-        field_index = schema.get_field_index(column_name)
-        if field_index < 0:
-            if bool(column_spec.get("required")):
-                raise ValueError(f"Arrow {table_name} table is missing required column {column_name!r}")
-            continue
-        datatype = str(column_spec["datatype"])
-        actual_type = schema.field(field_index).type
-        if not _arrow_type_matches_datatype(actual_type, datatype):
-            raise ValueError(f"Arrow {table_name} column {column_name!r} expected {datatype}, got {actual_type}")
-
-
-def _validate_canonical_arrow_file_schema(path: str | Path, *, table_name: str) -> None:
-    """Validate an IPC file schema without materializing its rows."""
-
-    import pyarrow as pa
-
-    with pa.memory_map(str(path), "r") as source:
-        reader = pa.ipc.open_file(source)
-        _validate_canonical_arrow_schema(reader.schema, table_name=table_name)
-
 
 def _read_arrow_table(path: str | Path, *, table_name: str) -> Any:
     import pyarrow as pa
 
     table = _read_arrow_ipc_table(pa, path)
-    _validate_canonical_arrow_schema(table.schema, table_name=table_name)
+    validate_arrow_schema(table.schema, table_name=table_name)
     return table
 
 
@@ -138,7 +69,7 @@ def _iter_arrow_rows(
 
     with pa.memory_map(str(path), "r") as source:
         reader = pa.ipc.open_file(source)
-        _validate_canonical_arrow_schema(reader.schema, table_name=table_name)
+        validate_arrow_schema(reader.schema, table_name=table_name)
         missing_from_loader = sorted(required_columns.difference(reader.schema.names))
         if missing_from_loader:
             raise ValueError(f"Arrow {table_name} table is missing loader-required columns: {missing_from_loader}")
@@ -274,7 +205,6 @@ def load_specter_tuple_from_arrow(path: str | Path) -> tuple[np.ndarray, list[st
     """Read ``specter.arrow`` into the ``(matrix, keys)`` tuple ANDData accepts."""
 
     table = _read_arrow_table(path, table_name="specter")
-    _require_arrow_columns(table, "specter", {"paper_id", "embedding"})
     rows = table.to_pylist()
     _arrow_rows_by_unique_key(rows, table_name="specter", key_column="paper_id")
     keys = [str(row["paper_id"]) for row in rows]
@@ -302,7 +232,7 @@ def build_training_anddata_from_arrow(
     test_pairs_size: int = 5_000,
     random_seed: int = 1111,
     n_jobs: int = 1,
-    name_tuples: set[tuple[str, str]] | str | None = "filtered",
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
 ) -> ANDData:
     """Build a fully initialized Rust-backed train ``ANDData``.
 
@@ -319,7 +249,7 @@ def build_training_anddata_from_arrow(
     path_keys = {str(key) for key in arrow_paths}
     normalized_arrow_paths = validate_arrow_training_artifacts(
         arrow_paths,
-        require_specter="specter" in path_keys or "specter2" in path_keys,
+        require_specter="specter" in path_keys,
         require_name_counts_index=True,
         expected_normalization_version=expected_version,
         context="arrow-native training ingestion",
@@ -328,10 +258,8 @@ def build_training_anddata_from_arrow(
             "name_counts_index, and model-required specter"
         ),
     )
-    for table_name in _REQUIRED_TABLE_KEYS:
-        _validate_canonical_arrow_file_schema(normalized_arrow_paths[table_name], table_name=table_name)
     if "specter" in normalized_arrow_paths:
-        _validate_canonical_arrow_file_schema(normalized_arrow_paths["specter"], table_name="specter")
+        validate_arrow_file_schema(normalized_arrow_paths["specter"], table_name="specter")
     training_arrow_paths = normalized_arrow_paths.without("query_signatures")
     signatures = load_signatures_dict_from_arrow(training_arrow_paths["signatures"])
     papers = load_papers_dict_from_arrow(training_arrow_paths["papers"], training_arrow_paths["paper_authors"])

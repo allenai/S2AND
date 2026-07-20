@@ -449,7 +449,7 @@ def build_rust_featurizer_from_arrow_paths(
     *,
     expected_normalization_version: str,
     signature_ids: Sequence[Any] | None = None,
-    name_tuples: Any = "filtered",
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
     load_name_counts: bool = False,
     preprocess: bool = True,
     cluster_seed_require_value: float = 0.0,
@@ -476,7 +476,7 @@ def build_rust_featurizer_from_arrow_paths(
     if not load_name_counts:
         normalized_paths.pop("name_counts_index", None)
     resolved_name_tuples = name_tuples
-    if name_tuples is None or name_tuples == "filtered":
+    if name_tuples is None:
         # Package data is immutable for the process lifetime. Reuse only the
         # frozen validated artifact so repeated Arrow requests do not rehash it.
         resolved_name_tuples = load_packaged_name_tuple_artifact().pairs
@@ -522,7 +522,7 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
             context="Arrow-backed training name-count provenance",
         ),
         signature_ids=None,
-        name_tuples=getattr(dataset, "name_tuples", "filtered"),
+        name_tuples=getattr(dataset, "name_tuples", None),
         load_name_counts=True,
         preprocess=bool(getattr(dataset, "preprocess", True)),
         cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),

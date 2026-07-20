@@ -62,7 +62,7 @@ def _build_from_arrow_paths(
     return build_rust_featurizer_from_arrow_paths(
         paths,
         expected_normalization_version=NORMALIZATION_VERSION,
-        name_tuples="filtered",
+        name_tuples=None,
         load_name_counts=True,
         preprocess=bool(preprocess),
         cluster_seed_require_value=0.0,

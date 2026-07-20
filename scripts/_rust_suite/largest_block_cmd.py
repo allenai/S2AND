@@ -412,7 +412,7 @@ def _run_single(
             name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
             random_seed=42,
-            name_tuples="filtered",
+            name_tuples=None,
             use_orcid_id=True,
         )
         anddata_build_seconds = time.perf_counter() - anddata_start
@@ -715,7 +715,7 @@ def _run_single_arrow(
             predict_arrow_paths,
             total_ram_bytes=DEFAULT_ARROW_TOTAL_RAM_BYTES,
             load_name_counts=True,
-            name_tuples="filtered",
+            name_tuples=None,
         )
         profiler.disable()
         predict_seconds = time.perf_counter() - predict_start

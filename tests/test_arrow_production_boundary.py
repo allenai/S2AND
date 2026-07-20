@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-import s2and.arrow_inputs as arrow_inputs_module
 import s2and.feature_port as feature_port
 import s2and.runtime as runtime
 from s2and.arrow_inputs import ValidatedArrowInputs
@@ -70,7 +69,6 @@ def test_arrow_production_builder_calls_only_arrow_constructor(
         paths=paths,
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
-        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
 
     featurizer = feature_port.build_rust_featurizer_from_arrow_paths(

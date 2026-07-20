@@ -12,6 +12,11 @@
       {"name": "signature_id", "datatype": "string", "required": true},
       {"name": "cluster_id", "datatype": "string", "required": true}
     ],
+    "incremental_query_signatures": [
+      {"name": "signature_id", "datatype": "string", "required": true},
+      {"name": "query_view", "datatype": "string", "required": true},
+      {"name": "query_author", "datatype": "string", "required": true}
+    ],
     "paper_authors": [
       {"name": "paper_id", "datatype": "string", "required": true},
       {"name": "position", "datatype": "int64", "required": true},

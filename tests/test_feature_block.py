@@ -8,7 +8,6 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-import s2and.arrow_inputs as arrow_inputs_module
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
 from s2and.arrow_inputs import MissingArrowArtifactError, ValidatedArrowInputs
 from s2and.consts import NORMALIZATION_VERSION
@@ -36,7 +35,6 @@ from s2and.incremental_linking.feature_block import (
     write_arrow_ipc_table,
     write_feature_block_arrow_tables,
     write_incremental_query_signatures_arrow,
-    write_name_counts_arrow,
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
 )
@@ -316,7 +314,6 @@ def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
         paths={},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
-        capability=arrow_inputs_module._VERIFIED_ARROW_INPUTS_CAPABILITY,  # noqa: SLF001
     )
 
 
@@ -766,7 +763,7 @@ def test_incremental_query_signatures_arrow_rejects_integer_id_columns(tmp_path:
         path,
     )
 
-    with pytest.raises(ValueError, match="signature_id expected string"):
+    with pytest.raises(ValueError, match="column 'signature_id' expected string"):
         read_incremental_query_signatures_arrow(path)
 
 
@@ -850,7 +847,7 @@ def test_read_cluster_seed_disallows_arrow_rejects_integer_id_columns(tmp_path: 
     )
     write_arrow_ipc_table(table, path)
 
-    with pytest.raises(ValueError, match="signature_id_1 expected string"):
+    with pytest.raises(ValueError, match="column 'signature_id_1' expected string"):
         read_cluster_seed_disallows_arrow(path)
 
 
@@ -985,7 +982,7 @@ def test_read_cluster_seeds_arrow_rejects_integer_id_columns(tmp_path: Path) -> 
     )
     write_arrow_ipc_table(table, path)
 
-    with pytest.raises(ValueError, match="signature_id expected string"):
+    with pytest.raises(ValueError, match="column 'signature_id' expected string"):
         read_cluster_seeds_arrow(path)
 
 
@@ -1308,66 +1305,20 @@ def test_raw_planner_index_reuse_rejects_record_count_mismatch(tmp_path: Path) -
         )
 
 
-def test_write_name_artifacts_arrow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    pa = pytest.importorskip("pyarrow")
+def test_write_name_counts_index(tmp_path: Path) -> None:
     mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
     provenance = tiny_name_counts_provenance()
 
-    counts_path, counts_metrics = write_name_counts_arrow(tmp_path, mappings, provenance)
     index_path, index_metrics = write_name_counts_index(tmp_path, mappings, provenance)
 
-    assert counts_metrics == {
-        "reused": False,
-        "first_count": 1,
-        "last_count": 1,
-        "first_last_count": 1,
-        "last_first_initial_count": 1,
-        "row_count": 4,
-    }
     assert index_metrics["reused"] is False
     assert index_metrics["row_count"] == 4
     assert index_metrics["first_count"] == 1
-    arrow_manifest = json.loads((tmp_path / "name_counts.arrow.manifest.json").read_text(encoding="utf-8"))
-    assert arrow_manifest["files"]["arrow"]["path"].startswith("name_counts_arrow_generations/")
-    assert Path(counts_path) == (tmp_path / arrow_manifest["files"]["arrow"]["path"]).resolve()
-    assert (Path(counts_path).parent / ".published").is_file()
-    assert not (tmp_path / "name_counts.arrow").exists()
-    with pa.memory_map(counts_path, "r") as source:
-        counts = pa.ipc.open_file(source).read_all().to_pylist()
     manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "name_counts_index_v1"
     assert manifest["exact_string_verification"] is True
     assert manifest["files"]["first"]["path"].startswith("generations/")
-    assert {"kind": "first", "name": "ada", "count": 3.0} in counts
-    assert write_name_counts_arrow(tmp_path, mappings, provenance)[1] == {"reused": True}
     assert write_name_counts_index(tmp_path, mappings, provenance)[1] == {"reused": True}
-
-
-def test_write_name_counts_arrow_manifest_failure_preserves_previous_generation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-    first_provenance = {**tiny_name_counts_provenance(), "generation_id": "first-generation"}
-    first_path, _metrics = write_name_counts_arrow(tmp_path, first_mappings, first_provenance)
-    manifest_path = tmp_path / "name_counts.arrow.manifest.json"
-    first_manifest = manifest_path.read_bytes()
-
-    second_mappings = ({"grace": 4}, {"hopper": 6}, {"grace hopper": 3}, {"hopper g": 8})
-    second_provenance = {**tiny_name_counts_provenance(), "generation_id": "second-generation"}
-    original_replace = Path.replace
-
-    def fail_manifest_replace(path: Path, target: str | Path) -> Path:
-        if path.name.startswith(".name_counts.arrow.manifest"):
-            raise OSError("injected manifest publication failure")
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", fail_manifest_replace)
-    with pytest.raises(OSError, match="injected manifest publication failure"):
-        write_name_counts_arrow(tmp_path, second_mappings, second_provenance, overwrite=True)
-
-    assert manifest_path.read_bytes() == first_manifest
-    assert Path(first_path).is_file()
 
 
 def test_write_name_counts_index_rebuilds_fingerprintless_manifest(

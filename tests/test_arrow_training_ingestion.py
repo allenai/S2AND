@@ -27,6 +27,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 
 from s2and import feature_port  # noqa: E402
+from s2and.arrow_inputs import MissingArrowArtifactError  # noqa: E402
 from s2and.arrow_training import (  # noqa: E402
     build_training_anddata_from_arrow,
     load_papers_dict_from_arrow,
@@ -430,28 +431,21 @@ def test_arrow_ingestion_reconstructs_training_fields(training_bundle: dict[str,
     assert arrow_dataset.name_counts_loaded is False
 
 
-def test_arrow_ingestion_canonicalizes_specter2_alias_paths(training_bundle: dict[str, Any]) -> None:
+def test_arrow_ingestion_rejects_specter2_alias_paths(training_bundle: dict[str, Any]) -> None:
     alias_paths = dict(training_bundle["arrow_paths"])
     alias_paths["specter2"] = alias_paths.pop("specter")
     alias_paths["specter2_batch_index"] = alias_paths.pop("specter_batch_index")
 
-    alias_dataset = build_training_anddata_from_arrow(
-        alias_paths,
-        "dummy_arrow_specter2_alias",
-        expected_normalization_version=NORMALIZATION_VERSION,
-        clusters=str(DUMMY_DIR / "clusters.json"),
-        block_type="s2",
-        random_seed=42,
-        n_jobs=1,
-    )
-
-    assert alias_dataset.specter_embeddings == {}
-    attached_paths = alias_dataset.arrow_paths
-    assert attached_paths is not None
-    assert "specter" in attached_paths
-    assert "specter_batch_index" in attached_paths
-    with pytest.raises(TypeError):
-        attached_paths["specter"] = "replacement.arrow"  # type: ignore[index]
+    with pytest.raises(MissingArrowArtifactError, match="unsupported embedding path key"):
+        build_training_anddata_from_arrow(
+            alias_paths,
+            "dummy_arrow_specter2_alias",
+            expected_normalization_version=NORMALIZATION_VERSION,
+            clusters=str(DUMMY_DIR / "clusters.json"),
+            block_type="s2",
+            random_seed=42,
+            n_jobs=1,
+        )
 
 
 def test_arrow_training_constructor_is_always_rust_and_never_materializes_python_sidecars(

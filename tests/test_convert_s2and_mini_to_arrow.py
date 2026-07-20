@@ -321,7 +321,7 @@ def test_refresh_root_manifest_enriches_release_and_replay_entries(tmp_path: Pat
             "signatures": "signatures.arrow",
             "papers": "papers.arrow",
             "paper_authors": "paper_authors.arrow",
-            "specter2": "specter2.arrow",
+            "specter": "specter2.arrow",
             "name_counts_index": "../name_counts_index",
             "signatures_batch_index": "signatures.signatures_batch_index.bin",
         },
@@ -341,7 +341,7 @@ def test_refresh_root_manifest_enriches_release_and_replay_entries(tmp_path: Pat
             "signatures": "signatures.arrow",
             "papers": "papers.arrow",
             "paper_authors": "paper_authors.arrow",
-            "specter2": "specter2.arrow",
+            "specter": "specter2.arrow",
             "name_counts_index": "../../../name_counts_index",
         },
         "validation": {"specter_count": 8, "missing_specter_paper_count": 1},
@@ -564,7 +564,7 @@ def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_p
     assert metrics["missing_specter_paper_examples"] == ["p2"]
 
 
-def test_validate_arrow_dataset_manifest_accepts_specter2_only_manifest(tmp_path: Path) -> None:
+def test_validate_arrow_dataset_manifest_accepts_canonical_key_for_specter2_file(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     signatures_path = tmp_path / "signatures.arrow"
     papers_path = tmp_path / "papers.arrow"
@@ -590,7 +590,7 @@ def test_validate_arrow_dataset_manifest_accepts_specter2_only_manifest(tmp_path
                 "signatures": str(signatures_path),
                 "papers": str(papers_path),
                 "paper_authors": str(paper_authors_path),
-                "specter2": str(specter2_path),
+                "specter": str(specter2_path),
             },
         },
         require_embeddings=True,
@@ -606,7 +606,7 @@ def test_validate_arrow_dataset_manifest_accepts_specter2_only_manifest(tmp_path
         ("signatures", "author_first", False),
         ("papers", "journal_name", False),
         ("paper_authors", "author_name", False),
-        ("specter2", "embedding", True),
+        ("specter", "embedding", True),
     ],
 )
 def test_validate_arrow_dataset_manifest_rejects_missing_contract_required_columns(
@@ -670,7 +670,7 @@ def test_validate_arrow_dataset_manifest_rejects_missing_contract_required_colum
             ),
             paper_authors_path,
         )
-    elif table_name == "specter2":
+    elif table_name == "specter":
         write_arrow_ipc_table(pa.table({"paper_id": pa.array(["p1"], type=pa.string())}), specter2_path)
     else:
         raise AssertionError(f"unexpected table_name: {table_name}")
@@ -683,7 +683,7 @@ def test_validate_arrow_dataset_manifest_rejects_missing_contract_required_colum
                     "signatures": str(signatures_path),
                     "papers": str(papers_path),
                     "paper_authors": str(paper_authors_path),
-                    "specter2": str(specter2_path),
+                    "specter": str(specter2_path),
                 },
             },
             require_embeddings=require_embeddings,
@@ -793,40 +793,6 @@ def test_write_specter_arrow_reports_zero_size_vectors(tmp_path: Path, caplog: p
     assert report["row_count"] == 1
     assert report["dropped_empty_embedding_count"] == 1
     assert "zero-size vectors" in caplog.text
-
-
-def test_extra_specter_physical_layout_omits_nonportable_batch_index_path(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    specter_path = tmp_path / "specter2.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(
-                    pa.array([0.1, 0.2, 0.3, 0.4], type=pa.float32()),
-                    2,
-                ),
-            }
-        ),
-        specter_path,
-    )
-    paths = {"specter2": str(specter_path)}
-    raw_planner_index_metrics: dict[str, Any] = {}
-    physical_layout: dict[str, Any] = {"tables": {}}
-
-    convert_to_arrow._add_extra_specter_index_and_layout(
-        paths=paths,
-        raw_planner_index_metrics=raw_planner_index_metrics,
-        physical_layout=physical_layout,
-        table_key="specter2",
-        output_dir=tmp_path,
-        overwrite=True,
-    )
-
-    layout = physical_layout["tables"]["specter2"]
-    assert layout["batch_index_path_key"] == "specter2_batch_index"
-    assert "batch_index_path" not in layout
-    assert Path(paths["specter2_batch_index"]).exists()
 
 
 def test_validate_arrow_dataset_dir_resolves_relative_manifest_paths() -> None:

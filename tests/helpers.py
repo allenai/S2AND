@@ -237,7 +237,7 @@ def build_arrow_training_dataset(
         }
         for cluster_id, signature_ids in members_by_cluster.items()
     }
-    name_tuples = getattr(dataset, "name_tuples", "filtered")
+    name_tuples = getattr(dataset, "name_tuples", None)
     if isinstance(name_tuples, frozenset):
         name_tuples = set(name_tuples)
     return build_training_anddata_from_arrow(

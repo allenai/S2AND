@@ -8,7 +8,7 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +22,6 @@ from s2and.arrow_inputs import (
     ValidatedArrowInputs,
     require_feature_contract_normalization_version,
 )
-from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import (
     cluster_seed_disallows_from_arrow_paths,
     read_cluster_seeds_arrow,
@@ -31,7 +30,6 @@ from s2and.incremental_linking.feature_block import (
 from s2and.incremental_linking.policy import (
     clusterer_uses_name_count_features,
     request_cluster_seed_disallow_parts,
-    require_dataset_name_counts_binding_for_clusterer,
 )
 from s2and.incremental_linking.retrieval import RawArrowPlanBundle
 from s2and.runtime import RuntimeContext
@@ -176,6 +174,50 @@ class _PromotedIncrementalMemoryLayout:
     aggregate_feature_count: int
 
 
+@dataclass(frozen=True)
+class _DirectArrowIncrementalDataset:
+    """Canonical request state for direct Arrow incremental prediction."""
+
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]]
+    cluster_seeds_require: Mapping[str, int | str]
+    _cluster_seeds_source: str
+    cluster_seeds_disallow: Iterable[tuple[str, str]]
+    altered_cluster_signatures: Sequence[str] | None
+    max_seed_cluster_id: int
+    signatures: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _QueryDisallowRescoreContext:
+    """Stable inputs needed to rescore one cross-batch disallow endpoint."""
+
+    clusterer: Any
+    artifact: artifact_module.IncrementalLinkingArtifact
+    arrow_paths: ValidatedArrowInputs
+    raw_request_planner: Any
+    expected_normalization_version: str
+    name_tuples: Any
+    retrieval_top_k: int
+    partial_supervision: dict[tuple[str, str], int | float]
+    runtime_context: RuntimeContext
+    total_ram_bytes: int
+    cluster_seeds_require: Mapping[str, int | str]
+    orcid_fanout_by_query: Mapping[str, tuple[int, int]]
+    component_sizes: Mapping[str, int]
+    memory_layout: _PromotedIncrementalMemoryLayout
+    base_candidate_rows_per_query: int
+    base_pairs_per_query: int
+
+
+@dataclass(frozen=True)
+class _QueryDisallowRescoreOutcome:
+    """Decision, memory limit, and telemetry from one endpoint rescore."""
+
+    decision: _ScoredQueryDecision
+    limits: memory_budget.PromotedPhaseALimits
+    telemetry: Mapping[str, int | float]
+
+
 def _promoted_incremental_memory_layout(
     clusterer: Any,
     artifact: artifact_module.IncrementalLinkingArtifact,
@@ -308,6 +350,75 @@ def _scored_query_decisions_from_result(
     if missing:
         raise ValueError(f"Promoted query result is missing decisions: signature_ids={sorted(missing)!r}")
     return scored
+
+
+def _rescore_query_disallow_endpoint(
+    context: _QueryDisallowRescoreContext,
+    signature_id: str,
+    excluded_components: set[str],
+) -> _QueryDisallowRescoreOutcome:
+    """Plan, featurize, score, and extract one cross-batch disallow endpoint."""
+
+    rescore_started = time.perf_counter()
+    plan_started = time.perf_counter()
+    raw_plan_bundle = RawArrowPlanBundle.from_mapping(context.raw_request_planner.plan([signature_id]))
+    planner_seconds = time.perf_counter() - plan_started
+
+    featurizer_started = time.perf_counter()
+    featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
+        context.arrow_paths,
+        expected_normalization_version=context.expected_normalization_version,
+        signature_ids=raw_plan_bundle.signature_order.signature_ids,
+        name_tuples=context.name_tuples,
+        load_name_counts=clusterer_uses_name_count_features(context.clusterer),
+        preprocess=True,
+        num_threads=context.clusterer.n_jobs,
+    )
+    featurizer_seconds = time.perf_counter() - featurizer_started
+    _, limits = _memory_safe_promoted_query_batch(
+        [signature_id],
+        orcid_fanout_by_query=context.orcid_fanout_by_query,
+        component_sizes=context.component_sizes,
+        retrieval_top_k=context.retrieval_top_k,
+        memory_layout=context.memory_layout,
+        total_ram_bytes=context.total_ram_bytes,
+        base_candidate_rows_per_query=context.base_candidate_rows_per_query,
+        base_pairs_per_query=context.base_pairs_per_query,
+    )
+    result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
+        context.clusterer,
+        context.artifact,
+        arrow_paths=context.arrow_paths,
+        query_signature_ids=[signature_id],
+        top_k=context.retrieval_top_k,
+        partial_supervision=context.partial_supervision,
+        runtime_context=context.runtime_context,
+        n_jobs=context.clusterer.n_jobs,
+        total_ram_bytes=context.total_ram_bytes,
+        raw_plan_bundle=raw_plan_bundle,
+        rust_featurizer=featurizer,
+        raw_arrow_featurizer_source="window",
+        partial_supervision_seed_signature_to_component=context.cluster_seeds_require,
+        cluster_seed_disallow_partner_ids=None,
+        cluster_seed_disallow_excluded_components={signature_id: excluded_components},
+    )
+    decision = _scored_query_decisions_from_result(
+        result,
+        signature_ids_by_index=featurizer.signature_ids(),
+        expected_query_signature_ids=[signature_id],
+    )[signature_id]
+    return _QueryDisallowRescoreOutcome(
+        decision=decision,
+        limits=limits,
+        telemetry={
+            "candidate_rows": int(result.telemetry.get("candidate_row_count", 0)),
+            "pairs": int(result.telemetry.get("pair_count", 0)),
+            "seconds": time.perf_counter() - rescore_started,
+            "planner_seconds": planner_seconds,
+            "featurizer_seconds": featurizer_seconds,
+            "featurizer_signatures": len(raw_plan_bundle.signature_order.signature_ids),
+        },
+    )
 
 
 def _raw_arrow_plan_window_size(
@@ -522,7 +633,7 @@ def _merge_raw_window_plan_telemetry(
 
 
 def _request_cluster_seed_disallows(
-    dataset: ANDData,
+    dataset: _DirectArrowIncrementalDataset,
     arrow_paths: Mapping[str, Any],
 ) -> tuple[set[tuple[str, str]], set[tuple[str, str]], set[tuple[str, str]]]:
     arrow_disallows = cluster_seed_disallows_from_arrow_paths(arrow_paths)
@@ -650,7 +761,7 @@ def _unpack_incremental_seed_setup(
 def _finish_incremental_with_optional_split_inverse(
     clusterer: Any,
     unassigned_signature_ids: list[str],
-    dataset: ANDData,
+    dataset: _DirectArrowIncrementalDataset,
     linked_signature_clusters: Mapping[str, int | str],
     recluster_map: Mapping[str, int | str],
     cluster_seeds_require_inverse: Mapping[str, Sequence[str]],
@@ -692,11 +803,8 @@ def promoted_incremental_component_sizes(cluster_seeds_require: Mapping[str, int
     return component_sizes
 
 
-def _signature_orcid(dataset: ANDData, signature_id: str) -> str | None:
-    signatures = getattr(dataset, "signatures", None)
-    if not isinstance(signatures, Mapping):
-        return None
-    signature = signatures.get(str(signature_id))
+def _signature_orcid(dataset: _DirectArrowIncrementalDataset, signature_id: str) -> str | None:
+    signature = dataset.signatures.get(str(signature_id))
     if signature is None:
         return None
     value = getattr(signature, "author_info_orcid", None)
@@ -704,7 +812,7 @@ def _signature_orcid(dataset: ANDData, signature_id: str) -> str | None:
 
 
 def promoted_incremental_orcid_fanout_by_query(
-    dataset: ANDData,
+    dataset: _DirectArrowIncrementalDataset,
     query_signature_ids: Sequence[str],
     cluster_seeds_require: Mapping[str, int | str],
     *,
@@ -1002,11 +1110,10 @@ def _summarize_query_views(query_views: tuple[str, ...]) -> str:
 def predict_incremental_promoted_linker_from_arrow_paths(
     clusterer: Any,
     block_signatures: list[str],
-    dataset: ANDData,
+    dataset: _DirectArrowIncrementalDataset,
     *,
     arrow_paths: ValidatedArrowInputs,
-    artifact_dir: Path,
-    artifact: artifact_module.IncrementalLinkingArtifact | None = None,
+    artifact: artifact_module.IncrementalLinkingArtifact,
     prevent_new_incompatibilities: bool,
     partial_supervision: dict[tuple[str, str], int | float],
     runtime_context: RuntimeContext,
@@ -1015,25 +1122,12 @@ def predict_incremental_promoted_linker_from_arrow_paths(
 ) -> dict[str, Any]:
     """Run the promoted linker from Arrow artifacts, then finish residuals through the normal path."""
 
-    if artifact is None:
-        artifact = artifact_module.load_incremental_linking_artifact(artifact_dir)
-    elif artifact.artifact_dir.resolve() != Path(artifact_dir).resolve():
-        raise ValueError(
-            "Loaded incremental linker artifact path does not match artifact_dir: "
-            f"loaded={artifact.artifact_dir} requested={artifact_dir}"
-        )
     resolved_total_ram_bytes, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
     base_arrow_path_payload = arrow_paths
     request_disallows, dataset_disallows, arrow_disallows = _request_cluster_seed_disallows(
         dataset,
         base_arrow_path_payload,
     )
-    if hasattr(dataset, "name_counts_provenance"):
-        require_dataset_name_counts_binding_for_clusterer(
-            clusterer,
-            dataset,
-            context="Promoted incremental prediction",
-        )
     (
         cluster_seeds_require,
         recluster_map,
@@ -1060,15 +1154,11 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     retrieval_top_k = int(artifact.metadata.retrieval_top_k)
     memory_layout = _promoted_incremental_memory_layout(clusterer, artifact)
     orcid_enabled = not bool(getattr(clusterer, "suppress_orcid", False))
-    orcid_fanout_by_query = (
-        promoted_incremental_orcid_fanout_by_query(
-            dataset,
-            unassigned_signature_ids,
-            cluster_seeds_require,
-            orcid_enabled=orcid_enabled,
-        )
-        if hasattr(dataset, "signatures")
-        else {}
+    orcid_fanout_by_query = promoted_incremental_orcid_fanout_by_query(
+        dataset,
+        unassigned_signature_ids,
+        cluster_seeds_require,
+        orcid_enabled=orcid_enabled,
     )
     base_candidate_rows_per_query, base_pairs_per_query = _top_k_candidate_floors(component_sizes, retrieval_top_k)
     initial_row_floor, initial_pair_floor = _orcid_fanout_floor_estimates(
@@ -1100,7 +1190,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
     batch_sizes: list[int] = []
     query_batch_size = max(1, int(initial_limits.query_batch_size or 1))
     final_limits = initial_limits
-    name_tuples = getattr(dataset, "name_tuples", "filtered")
+    name_tuples = dataset.name_tuples
     expected_normalization_version: str = (
         require_feature_contract_normalization_version(
             clusterer,
@@ -1415,94 +1505,66 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                     f"missing={sorted(expected_disallow_query_ids - observed_disallow_query_ids)!r} "
                     f"extra={sorted(observed_disallow_query_ids - expected_disallow_query_ids)!r}"
                 )
-            global_rescore_candidate_rows = 0
-            global_rescore_pairs = 0
-            global_rescore_seconds = 0.0
+            if raw_request_planner is None:
+                raise RuntimeError("reusable raw Arrow planner was not initialized")
+            rescore_context = _QueryDisallowRescoreContext(
+                clusterer=clusterer,
+                artifact=artifact,
+                arrow_paths=arrow_path_payload,
+                raw_request_planner=raw_request_planner,
+                expected_normalization_version=expected_normalization_version,
+                name_tuples=name_tuples,
+                retrieval_top_k=retrieval_top_k,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                total_ram_bytes=resolved_total_ram_bytes,
+                cluster_seeds_require=cluster_seeds_require,
+                orcid_fanout_by_query=orcid_fanout_by_query,
+                component_sizes=component_sizes,
+                memory_layout=memory_layout,
+                base_candidate_rows_per_query=base_candidate_rows_per_query,
+                base_pairs_per_query=base_pairs_per_query,
+            )
+            rescore_outcomes: list[_QueryDisallowRescoreOutcome] = []
 
-            def _rescore_query_disallow_endpoint(
+            def _record_rescore(
                 signature_id: str,
                 excluded_components: set[str],
             ) -> _ScoredQueryDecision:
-                nonlocal final_limits
-                nonlocal global_rescore_candidate_rows
-                nonlocal global_rescore_pairs
-                nonlocal global_rescore_seconds
-                nonlocal raw_window_featurizer_count
-                nonlocal raw_window_featurizer_seconds
-                nonlocal raw_window_featurizer_signature_count
-                nonlocal raw_window_planner_batch_plan_count
-                nonlocal raw_window_planner_plan_call_count
-                nonlocal raw_window_planner_plan_seconds
-
-                rescore_started = time.perf_counter()
-                if raw_request_planner is None:
-                    raise RuntimeError("reusable raw Arrow planner was not initialized")
-                plan_started = time.perf_counter()
-                raw_rescore_bundle = RawArrowPlanBundle.from_mapping(raw_request_planner.plan([signature_id]))
-                raw_window_planner_plan_call_count += 1
-                raw_window_planner_batch_plan_count += 1
-                raw_window_planner_plan_seconds += time.perf_counter() - plan_started
-                featurizer_started = time.perf_counter()
-                rescore_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
-                    arrow_path_payload,
-                    expected_normalization_version=expected_normalization_version,
-                    signature_ids=raw_rescore_bundle.signature_order.signature_ids,
-                    name_tuples=name_tuples,
-                    load_name_counts=clusterer_uses_name_count_features(clusterer),
-                    preprocess=True,
-                    num_threads=clusterer.n_jobs,
+                outcome = _rescore_query_disallow_endpoint(
+                    rescore_context,
+                    signature_id,
+                    excluded_components,
                 )
-                raw_window_featurizer_seconds += time.perf_counter() - featurizer_started
-                raw_window_featurizer_count += 1
-                raw_window_featurizer_signature_count += len(raw_rescore_bundle.signature_order.signature_ids)
-                _, final_limits = _memory_safe_promoted_query_batch(
-                    [signature_id],
-                    orcid_fanout_by_query=orcid_fanout_by_query,
-                    component_sizes=component_sizes,
-                    retrieval_top_k=retrieval_top_k,
-                    memory_layout=memory_layout,
-                    total_ram_bytes=resolved_total_ram_bytes,
-                    base_candidate_rows_per_query=base_candidate_rows_per_query,
-                    base_pairs_per_query=base_pairs_per_query,
-                )
-                final_limits_history.append(final_limits)
-                rescore_result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
-                    clusterer,
-                    artifact,
-                    arrow_paths=arrow_path_payload,
-                    query_signature_ids=[signature_id],
-                    top_k=retrieval_top_k,
-                    partial_supervision=partial_supervision,
-                    runtime_context=runtime_context,
-                    n_jobs=clusterer.n_jobs,
-                    total_ram_bytes=resolved_total_ram_bytes,
-                    raw_plan_bundle=raw_rescore_bundle,
-                    rust_featurizer=rescore_featurizer,
-                    raw_arrow_featurizer_source="window",
-                    partial_supervision_seed_signature_to_component=cluster_seeds_require,
-                    cluster_seed_disallow_partner_ids=None,
-                    cluster_seed_disallow_excluded_components={signature_id: excluded_components},
-                )
-                global_rescore_candidate_rows += int(rescore_result.telemetry.get("candidate_row_count", 0))
-                global_rescore_pairs += int(rescore_result.telemetry.get("pair_count", 0))
-                global_rescore_seconds += time.perf_counter() - rescore_started
-                return _scored_query_decisions_from_result(
-                    rescore_result,
-                    signature_ids_by_index=rescore_featurizer.signature_ids(),
-                    expected_query_signature_ids=[signature_id],
-                )[signature_id]
+                rescore_outcomes.append(outcome)
+                return outcome.decision
 
             globally_linked, global_disallow_counts = _resolve_query_disallows_globally(
                 initial_query_disallow_decisions,
                 query_disallow_partners,
-                rescore=_rescore_query_disallow_endpoint,
+                rescore=_record_rescore,
             )
             linked_signature_clusters.update(globally_linked)
+            final_limits_history.extend(outcome.limits for outcome in rescore_outcomes)
+            rescore_totals = (
+                {
+                    key: sum(outcome.telemetry[key] for outcome in rescore_outcomes)
+                    for key in rescore_outcomes[0].telemetry
+                }
+                if rescore_outcomes
+                else {}
+            )
+            raw_window_featurizer_count += len(rescore_outcomes)
+            raw_window_featurizer_seconds += float(rescore_totals.get("featurizer_seconds", 0))
+            raw_window_featurizer_signature_count += int(rescore_totals.get("featurizer_signatures", 0))
+            raw_window_planner_batch_plan_count += len(rescore_outcomes)
+            raw_window_planner_plan_call_count += len(rescore_outcomes)
+            raw_window_planner_plan_seconds += float(rescore_totals.get("planner_seconds", 0))
             global_disallow_telemetry = {
                 **global_disallow_counts,
-                "global_query_disallow_rescore_candidate_row_count": int(global_rescore_candidate_rows),
-                "global_query_disallow_rescore_pair_count": int(global_rescore_pairs),
-                "global_query_disallow_rescore_seconds": float(global_rescore_seconds),
+                "global_query_disallow_rescore_candidate_row_count": int(rescore_totals.get("candidate_rows", 0)),
+                "global_query_disallow_rescore_pair_count": int(rescore_totals.get("pairs", 0)),
+                "global_query_disallow_rescore_seconds": float(rescore_totals.get("seconds", 0)),
                 "global_query_disallow_same_batch_component_count": int(len(same_batch_finalized_disallow_components)),
             }
 
@@ -1558,7 +1620,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             "phase_b_required_bytes": phase_b_required_bytes,
             "phase_b_residual_count": residual_count,
         }
-        payload["incremental_linker_artifact_path"] = str(artifact_dir)
+        payload["incremental_linker_artifact_path"] = str(artifact.artifact_dir)
         payload["incremental_linker_query_view"] = "raw_arrow"
         payload["incremental_linker_telemetry"] = {
             **seed_setup_telemetry,

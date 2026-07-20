@@ -459,7 +459,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         name_counts_index=name_counts_index_path,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
     if cluster_seeds_require:
@@ -484,9 +484,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     timings["write_raw_planner_indexes_seconds"] = time.perf_counter() - start
 
     arrow_paths["name_counts_index"] = name_counts_index_path
-    name_counts_arrow_metrics = {"skipped": True}
     name_counts_index_metrics = {"source": name_counts_source}
-    timings["write_name_counts_arrow_seconds"] = 0.0
     timings["write_name_counts_index_seconds"] = 0.0
 
     start = time.perf_counter()
@@ -520,7 +518,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         arrow_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=selected_signature_ids,
-        name_tuples=getattr(dataset, "name_tuples", "filtered"),
+        name_tuples=getattr(dataset, "name_tuples", None),
         load_name_counts=True,
         preprocess=True,
         num_threads=int(args.n_jobs),
@@ -593,7 +591,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "arrow_paths": dict(arrow_paths),
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
-        "name_counts_arrow_metrics": name_counts_arrow_metrics,
         "name_counts_index_metrics": name_counts_index_metrics,
         "name_counts_sha256": name_counts_sha256,
         "name_counts_source": name_counts_source,

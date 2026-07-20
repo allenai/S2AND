@@ -183,7 +183,7 @@ def _single_run(
             name_counts_index=NAME_COUNTS_INDEX_PATH,
             preprocess=True,
             random_seed=42,
-            name_tuples="filtered",
+            name_tuples=None,
             use_orcid_id=True,
         )
         anddata_seconds = time.perf_counter() - anddata_start

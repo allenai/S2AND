@@ -20,8 +20,6 @@ from s2and.incremental_linking.feature_block import (
     write_raw_arrow_batch_lookup_indexes,
 )
 from s2and.incremental_linking.retrieval import (
-    RAW_CANDIDATE_PLAN_PAIR_KEYS,
-    RAW_CANDIDATE_PLAN_ROW_KEYS,
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
     RawArrowPlanBundle,
@@ -30,7 +28,6 @@ from s2and.incremental_linking.retrieval import (
 from s2and.incremental_linking.runtime import (
     _merge_raw_arrow_planner_build_telemetry,
     _seed_setup_from_component_members,
-    subset_raw_candidate_plan_for_query_ids,
     subset_raw_plan_bundle_for_query_ids,
 )
 from s2and.runtime import load_s2and_rust_extension
@@ -84,7 +81,7 @@ def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
     return plan
 
 
-def test_subset_raw_candidate_plan_rejects_pair_left_id_that_disagrees_with_row_query() -> None:
+def test_raw_arrow_plan_bundle_rejects_pair_left_id_that_disagrees_with_row_query() -> None:
     raw_plan = _minimal_raw_candidate_plan(
         query_signature_ids=["q0", "q1", "q2"],
         query_views=["full", "full", "full"],
@@ -100,10 +97,10 @@ def test_subset_raw_candidate_plan_rejects_pair_left_id_that_disagrees_with_row_
     )
 
     with pytest.raises(ValueError, match="left_signature_ids must match"):
-        subset_raw_candidate_plan_for_query_ids(raw_plan, ["q1"])
+        RawArrowPlanBundle.from_mapping(raw_plan)
 
 
-def test_subset_raw_candidate_plan_rejects_duplicate_query_ids() -> None:
+def test_subset_raw_plan_bundle_rejects_duplicate_query_ids() -> None:
     raw_plan = _minimal_raw_candidate_plan(
         query_signature_ids=["q0", "q0"],
         query_views=["full", "full"],
@@ -111,11 +108,12 @@ def test_subset_raw_candidate_plan_rejects_duplicate_query_ids() -> None:
     )
 
     with pytest.raises(ValueError, match="query_signature_ids must be unique"):
-        subset_raw_candidate_plan_for_query_ids(raw_plan, ["q0"])
+        RawArrowPlanBundle.from_mapping(raw_plan)
 
     raw_plan["query_signature_ids"] = ["q0", "q1"]
+    bundle = RawArrowPlanBundle.from_mapping(raw_plan)
     with pytest.raises(ValueError, match="requested query_signature_ids must be unique"):
-        subset_raw_candidate_plan_for_query_ids(raw_plan, ["q0", "q0"])
+        subset_raw_plan_bundle_for_query_ids(bundle, ["q0", "q0"])
 
 
 def test_raw_arrow_plan_bundle_rejects_duplicate_query_signature_ids() -> None:
@@ -1732,7 +1730,11 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
     assert raw_plan["left_signature_ids"] == ["q_full", "q_full", "q_initial", "q_initial"]
     assert raw_plan["right_signature_ids"] == ["s_full", "s_other", "s_initial", "s_other"]
 
-    subset_plan = subset_raw_candidate_plan_for_query_ids(raw_plan, ["q_initial"], zero_plan_timings=True)
+    subset_bundle = subset_raw_plan_bundle_for_query_ids(
+        RawArrowPlanBundle.from_mapping(raw_plan),
+        ["q_initial"],
+        zero_plan_timings=True,
+    )
     single_query_plan = _raw_candidate_plan_arrow(
         paths,
         ["q_initial"],
@@ -1741,8 +1743,8 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
         orcid_enabled=False,
         num_threads=1,
     )
-    assert subset_plan.keys() == raw_plan.keys()
-    for key in (
+    single_query_bundle = RawArrowPlanBundle.from_mapping(single_query_plan)
+    for field_name in (
         "query_signature_ids",
         "query_views",
         "query_authors",
@@ -1750,29 +1752,32 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
         "left_signature_ids",
         "right_signature_ids",
     ):
-        assert subset_plan[key] == single_query_plan[key]
-    for key in (
-        "row_query_signature_indices",
+        assert getattr(subset_bundle, field_name) == getattr(single_query_bundle, field_name)
+    for field_name in (
+        "row_query_offsets",
         "retrieval_scores",
         "retrieval_ranks",
         "pair_row_indices",
-        "row_orcid_match",
-        "specter_centroid_similarity",
     ):
-        np.testing.assert_array_equal(subset_plan[key], single_query_plan[key])
-    for key in RAW_CANDIDATE_PLAN_ROW_KEYS:
-        assert key in subset_plan
-        assert len(subset_plan[key]) == int(subset_plan["row_count"]), key
-    for key in RAW_CANDIDATE_PLAN_PAIR_KEYS:
-        assert key in subset_plan
-        assert len(subset_plan[key]) == int(subset_plan["pair_count"]), key
-    assert subset_plan["telemetry"]["query_signature_count"] == 1
-    assert subset_plan["telemetry"]["signature_count"] == 0
-    assert subset_plan["telemetry"]["seed_signature_count"] == raw_plan["telemetry"]["seed_signature_count"]
-    assert subset_plan["telemetry"]["cluster_count"] == raw_plan["telemetry"]["cluster_count"]
-    assert subset_plan["telemetry"]["timings"]["total_secs"] == 0.0
-    assert subset_plan["telemetry"]["window_plan_reused"] == 1
-    assert "window_query_signature_count" not in subset_plan["telemetry"]
+        np.testing.assert_array_equal(
+            getattr(subset_bundle, field_name),
+            getattr(single_query_bundle, field_name),
+        )
+    for _raw_key, signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        np.testing.assert_array_equal(
+            subset_bundle.row_signals[signal_key],
+            single_query_bundle.row_signals[signal_key],
+        )
+    assert subset_bundle.row_count == single_query_bundle.row_count
+    assert subset_bundle.pair_count == single_query_bundle.pair_count
+    assert subset_bundle.telemetry is not None
+    assert subset_bundle.telemetry["query_signature_count"] == 1
+    assert subset_bundle.telemetry["signature_count"] == 0
+    assert subset_bundle.telemetry["seed_signature_count"] == raw_plan["telemetry"]["seed_signature_count"]
+    assert subset_bundle.telemetry["cluster_count"] == raw_plan["telemetry"]["cluster_count"]
+    assert subset_bundle.telemetry["timings"]["total_secs"] == 0.0
+    assert subset_bundle.telemetry["window_plan_reused"] == 1
+    assert "window_query_signature_count" not in subset_bundle.telemetry
 
 
 def test_raw_arrow_candidate_plan_excludes_query_seed_and_handles_missing_metadata(tmp_path: Path) -> None:
@@ -2025,11 +2030,6 @@ def test_raw_arrow_plan_bundle_owns_typed_values_used_by_subset_consumer() -> No
     assert subset_bundle.telemetry is not None
     assert subset_bundle.telemetry["seed_signature_count"] == 1
     assert subset_bundle.telemetry["timings"]["total_secs"] == pytest.approx(0.5)
-
-    mutable_plan = subset_bundle.to_mutable_mapping()
-    mutable_plan["component_members"]["c0"][0] = "mutated-copy"
-    assert subset_bundle.component_members["c0"] == ("s0",)
-
 
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)

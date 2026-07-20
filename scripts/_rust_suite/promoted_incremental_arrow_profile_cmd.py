@@ -95,23 +95,17 @@ def _resolve_arrow_dataset_paths(arrow_root: Path, dataset: str) -> ValidatedArr
         "papers",
         "paper_authors",
         "specter",
-        "specter2",
         "name_counts_index",
         "signatures_batch_index",
         "papers_batch_index",
         "paper_authors_batch_index",
         "specter_batch_index",
-        "specter2_batch_index",
         "cluster_seed_disallows",
         "altered_cluster_signatures",
     ):
         value = manifest_paths.get(key)
         if value is not None:
             paths[key] = _resolve_manifest_path(dataset_root, value)
-    if "specter" not in paths and "specter2" in paths:
-        paths["specter"] = paths["specter2"]
-    if "specter_batch_index" not in paths and "specter2_batch_index" in paths:
-        paths["specter_batch_index"] = paths["specter2_batch_index"]
     clusters_path = dataset_root / f"{dataset}_clusters.json"
     if clusters_path.exists():
         paths["clusters"] = str(clusters_path.resolve())

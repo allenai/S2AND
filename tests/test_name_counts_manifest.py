@@ -82,6 +82,8 @@ def test_valid_manifest_has_identical_python_and_rust_binding(tmp_path: Path) ->
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
 
     assert python_manifest.normalization_version == rust_index.normalization_version
+    assert not hasattr(rust_index, "lookup_many")
+    assert callable(rust_index._lookup_many_unique)
     assert rust_index.name_counts_provenance_binding == (
         python_binding.generation_id,
         python_binding.pickle_sha256,

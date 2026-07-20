@@ -82,7 +82,7 @@ def _load_dataset_from_dir(data_dir, name):
         name_counts_index=tiny_name_counts_index(),
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
     return ds
@@ -298,7 +298,7 @@ def test_rust_featurizer_supports_string_paper_ids(tmp_path):
         name_counts_index=None,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
 
@@ -386,7 +386,7 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
         name_counts_index=None,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
     arrow_dataset = build_arrow_training_dataset(ds, tmp_path, name_counts="empty")

@@ -80,7 +80,7 @@ The internal Arrow graph helper loads the union of required `signatures`,
 `paper_authors`, and selected embedding rows through raw-planner batch lookup
 indexes, then slices that in-memory evidence for each fallback group. It
 refuses filtered full scans: `signatures_batch_index`,
-`paper_authors_batch_index`, and the selected embedding index (`specter_batch_index` or `specter2_batch_index`) must be
+`paper_authors_batch_index`, and the selected embedding index (`specter_batch_index`) must be
 present, and malformed Arrow schemas or declared missing artifacts raise before
 graph clustering starts. This helper is not selected by the public
 Python/`ANDData` `Clusterer.predict(...)` route.

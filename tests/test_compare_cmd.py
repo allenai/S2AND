@@ -127,7 +127,7 @@ def test_run_single_rust_uses_arrow_native_featurizer(monkeypatch, tmp_path: Pat
     class FakeANDData:
         def __init__(self, **_kwargs):
             self.signatures = {"s1": {}, "s2": {}}
-            self.name_tuples = "filtered"
+            self.name_tuples = None
 
     class FakeFeaturizationInfo:
         def __init__(self, *, features_to_use):
@@ -221,7 +221,7 @@ def test_run_single_rust_uses_arrow_native_featurizer(monkeypatch, tmp_path: Pat
             {
                 "expected_normalization_version": consts.NORMALIZATION_VERSION,
                 "signature_ids": ["s1", "s2"],
-                "name_tuples": "filtered",
+                "name_tuples": None,
                 "load_name_counts": True,
                 "preprocess": True,
                 "num_threads": 1,

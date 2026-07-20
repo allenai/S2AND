@@ -74,6 +74,22 @@ def _validated_promoted_arrow_paths(paths: Mapping[str, Any]) -> ValidatedArrowI
     )
 
 
+def _direct_arrow_dataset(
+    *,
+    cluster_seeds_disallow: set[tuple[str, str]] | None = None,
+    signatures: Mapping[str, Any] | None = None,
+) -> Any:
+    return production_module._DirectArrowIncrementalDataset(
+        name_tuples=set(),
+        cluster_seeds_require={"seed": "c_seed"},
+        _cluster_seeds_source="dataset",
+        cluster_seeds_disallow=cluster_seeds_disallow or set(),
+        altered_cluster_signatures=None,
+        max_seed_cluster_id=0,
+        signatures=signatures or {},
+    )
+
+
 def _attach_minimal_arrow_paths(dataset: Any, tmp_path: Path) -> dict[str, str]:
     paths = _minimal_arrow_paths(tmp_path)
     dataset.arrow_paths = paths
@@ -201,8 +217,8 @@ def test_finish_incremental_uses_split_inverse_for_altered_incompatibility_check
     assert clusters == {"0": ["seed_david", "seed_initial", "new_donald"]}
 
 
-def test_finish_incremental_lazily_resolves_filtered_name_tuples_for_direct_arrow_dataset() -> None:
-    """Direct Arrow's default name_tuples token should not crash compatibility checks."""
+def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow_dataset() -> None:
+    """Direct Arrow's default name_tuples value should not crash compatibility checks."""
 
     def signature(first: str) -> SimpleNamespace:
         normalized = first.lower()
@@ -218,7 +234,7 @@ def test_finish_incremental_lazily_resolves_filtered_name_tuples_for_direct_arro
             "seed_xavier": signature("Xavier"),
             "new_zelda": signature("Zelda"),
         },
-        name_tuples="filtered",
+        name_tuples=None,
         max_seed_cluster_id=0,
     )
     clusterer = SimpleNamespace(
@@ -496,7 +512,7 @@ def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_datas
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow")
-    clusterer.incremental_linker_artifact_dir = tmp_path
+    clusterer.incremental_linker_artifact = SimpleNamespace(artifact_dir=tmp_path)
     arrow_paths = _minimal_arrow_paths(tmp_path)
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
     write_cluster_seeds_arrow(cluster_seeds_path, {"3": "0", "4": "0"})
@@ -555,7 +571,6 @@ def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_datas
     assert captured["dataset"].cluster_seeds_require == {"3": "0", "4": "0"}
     assert captured["dataset"]._cluster_seeds_source == "arrow"
     assert captured["dataset"].name_tuples == {("al", "alex")}
-    assert captured["dataset"].arrow_paths["cluster_seeds"] == str(cluster_seeds_path)
     assert captured["arrow_paths"]["cluster_seeds"] == str(cluster_seeds_path)
     assert isinstance(captured["arrow_paths"], ValidatedArrowInputs)
     assert captured["runtime_context"] is runtime_context
@@ -571,7 +586,7 @@ def test_predict_incremental_from_arrow_paths_accepts_explicit_seed_mapping(
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_seed_mapping")
-    clusterer.incremental_linker_artifact_dir = tmp_path
+    clusterer.incremental_linker_artifact = SimpleNamespace(artifact_dir=tmp_path)
     arrow_paths = _minimal_arrow_paths(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -625,7 +640,7 @@ def test_predict_incremental_from_arrow_paths_loads_altered_seed_metadata(
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_altered")
-    clusterer.incremental_linker_artifact_dir = tmp_path
+    clusterer.incremental_linker_artifact = SimpleNamespace(artifact_dir=tmp_path)
     arrow_paths = _minimal_arrow_paths(tmp_path)
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
     altered_path = tmp_path / "altered_cluster_signatures.arrow"
@@ -672,7 +687,7 @@ def test_predict_incremental_from_arrow_paths_loads_seed_orcids_for_budget_floor
     tmp_path,
 ):
     clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_orcid_floor")
-    clusterer.incremental_linker_artifact_dir = tmp_path
+    clusterer.incremental_linker_artifact = SimpleNamespace(artifact_dir=tmp_path)
     arrow_paths = _minimal_arrow_paths(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -887,41 +902,31 @@ def test_seed_cluster_count_matches_anddata_cluster_count() -> None:
     assert model_module._seed_cluster_count_from_seed_map({"s1": "component_a", "s2": "component_b"}) == 2
 
 
-def test_cached_incremental_name_tuples_are_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
-    model_module._load_name_tuples_for_incremental_rules.cache_clear()
-    loaded: list[str] = []
-
-    def fake_load(filename: str) -> set[tuple[str, str]]:
-        loaded.append(filename)
-        return {("bill", "william")}
-
+def test_packaged_incremental_name_tuples_are_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
+    packaged_pairs = frozenset({("bill", "william")})
     monkeypatch.setattr(
         model_module,
-        "_load_name_tuples_from_file",
-        fake_load,
+        "load_packaged_name_tuple_artifact",
+        lambda: SimpleNamespace(pairs=packaged_pairs),
     )
-    try:
-        name_tuples = model_module._name_tuples_for_incremental_rules("filtered")
-        default_name_tuples = model_module._name_tuples_for_incremental_rules(None)
 
-        assert name_tuples == frozenset({("bill", "william")})
-        assert default_name_tuples is name_tuples
-        assert loaded == ["s2and_name_tuples_canonical.txt"]
-        assert model_module._load_name_tuples_for_incremental_rules() is name_tuples
-        assert model_module._name_tuples_for_incremental_rules(name_tuples) is name_tuples
-        assert not hasattr(name_tuples, "add")
-    finally:
-        model_module._load_name_tuples_for_incremental_rules.cache_clear()
+    name_tuples = model_module._name_tuples_for_incremental_rules(None)
+
+    assert name_tuples is packaged_pairs
+    assert model_module._load_name_tuples_for_incremental_rules() is packaged_pairs
+    assert model_module._name_tuples_for_incremental_rules(name_tuples) is name_tuples
+    assert not hasattr(name_tuples, "add")
 
 
-def test_bare_clusterer_cannot_select_an_incremental_linker_from_another_bundle() -> None:
+def test_direct_arrow_incremental_requires_loaded_artifact() -> None:
     with pytest.raises(FileNotFoundError, match="requires an attached incremental linker artifact"):
-        model_module._required_incremental_linker_artifact_dir(SimpleNamespace())
+        model_module._required_incremental_linker_artifact(SimpleNamespace())
 
     attached = SimpleNamespace(artifact_dir=Path("explicit-linker"))
-    assert model_module._required_incremental_linker_artifact_dir(
-        SimpleNamespace(incremental_linker_artifact=attached)
-    ) == Path("explicit-linker")
+    assert (
+        model_module._required_incremental_linker_artifact(SimpleNamespace(incremental_linker_artifact=attached))
+        is attached
+    )
 
 
 def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_on_failure(
@@ -931,6 +936,7 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
     closed: list[bool] = []
 
     class FakeArtifact:
+        artifact_dir = tmp_path
         metadata = SimpleNamespace(
             retrieval_top_k=25,
             feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
@@ -962,11 +968,6 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
     def fail_raw_arrow_linker(*_args: object, **_kwargs: object):
         raise RuntimeError("raw Arrow linker failed")
 
-    monkeypatch.setattr(
-        production_module.artifact_module,
-        "load_incremental_linking_artifact",
-        lambda _path: FakeArtifact(),
-    )
     monkeypatch.setattr(production_module, "clusterer_uses_name_count_features", lambda _clusterer: False)
     monkeypatch.setattr(
         production_module.runtime_module,
@@ -984,9 +985,9 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
         production_module.predict_incremental_promoted_linker_from_arrow_paths(
             FakeClusterer(),
             ["seed", "query"],
-            cast(ANDData, SimpleNamespace(name_tuples=set())),
+            _direct_arrow_dataset(),
             arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
-            artifact_dir=tmp_path,
+            artifact=FakeArtifact(),
             prevent_new_incompatibilities=False,
             partial_supervision={},
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -997,7 +998,7 @@ def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_o
     assert closed == [True]
 
 
-def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_typed_request_sidecars(
+def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_typed_request_sidecars(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1060,11 +1061,6 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
         )
 
     monkeypatch.setattr(
-        production_module.artifact_module,
-        "load_incremental_linking_artifact",
-        lambda _path: pytest.fail("a supplied production artifact must not be loaded again"),
-    )
-    monkeypatch.setattr(
         production_module,
         "compute_promoted_incremental_limits",
         lambda **kwargs: _mock_promoted_limits(query_count=int(kwargs["query_count"]), query_batch_size=1),
@@ -1084,16 +1080,8 @@ def test_predict_incremental_arrow_promoted_linker_uses_cached_artifact_and_type
     result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
         FakeClusterer(),
         ["seed", "query"],
-        cast(
-            ANDData,
-            SimpleNamespace(
-                name_tuples=set(),
-                cluster_seeds_disallow=set(),
-                altered_cluster_signatures=None,
-            ),
-        ),
+        _direct_arrow_dataset(),
         arrow_paths=_validated_promoted_arrow_paths(arrow_paths),
-        artifact_dir=tmp_path,
         artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
         partial_supervision={},
@@ -1130,6 +1118,7 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
     tmp_path: Path,
 ) -> None:
     class FakeArtifact:
+        artifact_dir = tmp_path
         metadata = SimpleNamespace(
             retrieval_top_k=25,
             feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
@@ -1172,11 +1161,6 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
             telemetry={"query_count": len(batch), "candidate_row_count": len(batch), "pair_count": len(batch)},
         )
 
-    monkeypatch.setattr(
-        production_module.artifact_module,
-        "load_incremental_linking_artifact",
-        lambda _path: FakeArtifact(),
-    )
     monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)
     monkeypatch.setattr(
         production_module.runtime_module,
@@ -1189,16 +1173,9 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
     result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
         FakeClusterer(),
         ["seed", *query_ids],
-        cast(
-            ANDData,
-            SimpleNamespace(
-                name_tuples=set(),
-                cluster_seeds_disallow=set(),
-                altered_cluster_signatures=None,
-            ),
-        ),
+        _direct_arrow_dataset(),
         arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
-        artifact_dir=tmp_path,
+        artifact=FakeArtifact(),
         prevent_new_incompatibilities=False,
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1218,6 +1195,7 @@ def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_quer
     tmp_path: Path,
 ) -> None:
     class FakeArtifact:
+        artifact_dir = tmp_path
         metadata = SimpleNamespace(
             retrieval_top_k=25,
             feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
@@ -1235,11 +1213,6 @@ def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_quer
 
     raw_calls: list[object] = []
     monkeypatch.setattr(
-        production_module.artifact_module,
-        "load_incremental_linking_artifact",
-        lambda _path: FakeArtifact(),
-    )
-    monkeypatch.setattr(
         production_module,
         "compute_promoted_incremental_limits",
         lambda **_kwargs: _mock_promoted_limits(single_query_exceeds_budget=True),
@@ -1254,9 +1227,9 @@ def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_quer
         production_module.predict_incremental_promoted_linker_from_arrow_paths(
             FakeClusterer(),
             ["seed", "query"],
-            cast(ANDData, SimpleNamespace(name_tuples=set())),
+            _direct_arrow_dataset(),
             arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
-            artifact_dir=tmp_path,
+            artifact=FakeArtifact(),
             prevent_new_incompatibilities=False,
             partial_supervision={},
             runtime_context=cast(Any, SimpleNamespace(run_id="test")),
@@ -1602,7 +1575,7 @@ def test_subblocked_single_letter_cleanup_skips_missing_dataset_rust_featurizer(
             name="transient_arrow_only",
             cluster_seeds_require={"seed": "seed_cluster"},
             cluster_seeds_disallow=set(),
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 
@@ -1990,7 +1963,7 @@ def test_finish_incremental_with_seed_links_uses_seed_setup_when_dataset_seed_ma
             cluster_seeds_require={},
             signatures={},
             max_seed_cluster_id=0,
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 
@@ -2207,7 +2180,7 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
             cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8", "seed3": "8", "seed4": "9"},
             cluster_seeds_disallow={("seed0", "seed1"), ("seed2", "seed3"), ("seed3", "seed4")},
             altered_cluster_signatures=["seed0", "seed2", "seed4"],
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
     arrow_paths = {
@@ -2284,7 +2257,7 @@ def test_build_incremental_seed_setup_loads_altered_signatures_from_arrow_path(t
             cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8"},
             cluster_seeds_disallow=set(),
             altered_cluster_signatures=None,
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 
@@ -2347,7 +2320,7 @@ def test_build_incremental_seed_setup_loads_seed_and_altered_signatures_from_arr
             cluster_seeds_require={},
             cluster_seeds_disallow=set(),
             altered_cluster_signatures=None,
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 
@@ -2521,7 +2494,7 @@ def test_build_incremental_seed_setup_empty_altered_list_overrides_arrow_path(tm
             cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8"},
             cluster_seeds_disallow=set(),
             altered_cluster_signatures=[],
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 
@@ -2554,7 +2527,7 @@ def test_build_incremental_seed_setup_rejects_arrow_altered_signature_missing_se
             cluster_seeds_require={"seed0": "7"},
             cluster_seeds_disallow=set(),
             altered_cluster_signatures=None,
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 
@@ -2576,7 +2549,7 @@ def test_build_incremental_seed_setup_rejects_missing_declared_altered_arrow_pat
             cluster_seeds_require={"seed0": "7"},
             cluster_seeds_disallow=set(),
             altered_cluster_signatures=None,
-            name_tuples="filtered",
+            name_tuples=None,
         ),
     )
 

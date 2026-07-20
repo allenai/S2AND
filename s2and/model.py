@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache, partial
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, Self, TypeAlias, TypeVar, cast
 
@@ -31,7 +31,7 @@ from s2and.consts import (
     LARGE_INTEGER,
     NORMALIZATION_VERSION,
 )
-from s2and.data import ANDData, _load_name_tuples_from_file
+from s2and.data import ANDData
 from s2and.eval import b3_precision_recall_fscore
 from s2and.feature_port import (
     _get_rust_featurizer,
@@ -62,10 +62,14 @@ from s2and.incremental_linking.policy import (
 from s2and.incremental_linking.policy import (
     require_arrow_name_counts_index_for_clusterer as _require_arrow_name_counts_index_for_clusterer,
 )
-from s2and.incremental_linking.production import predict_incremental_promoted_linker_from_arrow_paths
+from s2and.incremental_linking.production import (
+    _DirectArrowIncrementalDataset,
+    predict_incremental_promoted_linker_from_arrow_paths,
+)
 from s2and.model_pairwise import FastCluster, intify, predict_pairwise_class0
 from s2and.model_pairwise import PairwiseModeler as PairwiseModeler
 from s2and.name_counts_index import validated_name_counts_provenance
+from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import (
     RuntimeContext,
     build_runtime_context,
@@ -113,39 +117,6 @@ class _ArrowIncrementalSignatureInfo:
     author_info_last: str | None
     author_info_first_normalized_without_apostrophe: str | None
     author_info_orcid: str | None
-
-
-class _ArrowIncrementalPredictionDataset:
-    """Request-state adapter for direct Arrow incremental prediction."""
-
-    def __init__(
-        self,
-        *,
-        arrow_paths: Mapping[str, Any],
-        name_tuples: set[tuple[str, str]] | str | None,
-        cluster_seeds_require: Mapping[Any, Any] | None,
-        cluster_seeds_source: Literal["dataset", "arrow"],
-        cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None,
-        altered_cluster_signatures: Sequence[Any] | None,
-        max_seed_cluster_id: int,
-        signatures: Mapping[str, _ArrowIncrementalSignatureInfo],
-    ) -> None:
-        self.arrow_paths = dict(arrow_paths)
-        self.name_tuples = _name_tuples_for_incremental_rules(name_tuples)
-        self.cluster_seeds_require = _normalize_cluster_seeds_require(cluster_seeds_require or {})
-        self._cluster_seeds_source = cluster_seeds_source
-        self.cluster_seeds_disallow = (
-            normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow)
-            if cluster_seeds_disallow is not None
-            else set()
-        )
-        self.altered_cluster_signatures = (
-            [str(signature_id) for signature_id in altered_cluster_signatures]
-            if altered_cluster_signatures is not None
-            else None
-        )
-        self.max_seed_cluster_id = int(max_seed_cluster_id)
-        self.signatures = dict(signatures)
 
 
 def _is_recoverable_graph_subblocking_error(exc: Exception) -> bool:
@@ -1117,35 +1088,32 @@ def _signature_first_for_rules(signature: Any) -> str:
     return signature.author_info_first_normalized_without_apostrophe or signature.author_info_first or ""
 
 
-@lru_cache(maxsize=1)
 def _load_name_tuples_for_incremental_rules() -> frozenset[tuple[str, str]]:
-    return frozenset(_load_name_tuples_from_file("s2and_name_tuples_canonical.txt"))
+    return load_packaged_name_tuple_artifact().pairs
 
 
 def _name_tuples_for_incremental_rules(
-    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | str | None,
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None,
 ) -> set[tuple[str, str]] | frozenset[tuple[str, str]]:
     if isinstance(name_tuples, frozenset):
         return name_tuples
     if isinstance(name_tuples, set):
         return {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
-    if name_tuples not in {None, "filtered"}:
-        raise ValueError("name_tuples must be None, 'filtered', or a set/frozenset of (first_a, first_b) tuples")
-    return _load_name_tuples_for_incremental_rules()
+    if name_tuples is None:
+        return _load_name_tuples_for_incremental_rules()
+    raise TypeError("name_tuples must be None or a set/frozenset of (first_a, first_b) tuples")
 
 
-def _required_incremental_linker_artifact_dir(clusterer: Any) -> Path:
-    """Return the explicitly attached linker path; never select another bundle implicitly."""
+def _required_incremental_linker_artifact(clusterer: Any) -> Any:
+    """Return the linker artifact attached by production-bundle loading."""
 
-    value = getattr(clusterer, "incremental_linker_artifact_dir", None)
-    if value is None:
-        value = getattr(getattr(clusterer, "incremental_linker_artifact", None), "artifact_dir", None)
-    if value is None:
+    artifact = getattr(clusterer, "incremental_linker_artifact", None)
+    if artifact is None:
         raise FileNotFoundError(
             "Promoted incremental prediction requires an attached incremental linker artifact. "
-            "Load a complete production bundle or set incremental_linker_artifact_dir explicitly."
+            "Load a complete production bundle before calling the direct Arrow API."
         )
-    return Path(value)
+    return artifact
 
 
 def _signature_first_initials_for_rules(first: str) -> frozenset[str]:
@@ -3598,7 +3566,7 @@ class Clusterer:
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
         load_name_counts: bool | None = None,
-        name_tuples: set[tuple[str, str]] | str | None = "filtered",
+        name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
     ) -> tuple[dict[str, list[str]], dict[str, np.ndarray] | None]:
         """Predict full blocks directly from Arrow IPC inputs through Rust."""
@@ -4680,7 +4648,7 @@ class Clusterer:
             sorted_altered_cluster_nums = cast(list[int | str], sorted(altered_cluster_nums, key=str))
             altered_cluster_count = len(sorted_altered_cluster_nums)
             model_cache_fingerprint = _model_presplit_cache_fingerprint(self)
-            name_tuples = getattr(dataset, "name_tuples", "filtered")
+            name_tuples = getattr(dataset, "name_tuples", None)
             if isinstance(arrow_paths, ValidatedArrowInputs):
                 presplit_arrow_paths: Mapping[str, Any] | None = arrow_paths.without(
                     "cluster_seeds",
@@ -5016,7 +4984,7 @@ class Clusterer:
                             runtime_context=runtime_context,
                             total_ram_bytes=total_ram_bytes,
                             load_name_counts=clusterer_uses_name_count_features(self),
-                            name_tuples=getattr(dataset, "name_tuples", "filtered"),
+                            name_tuples=getattr(dataset, "name_tuples", None),
                             cluster_seeds_disallow=request_cluster_seed_disallows,
                         )
                 for new_cluster in reclustered_output.values():
@@ -5147,7 +5115,7 @@ class Clusterer:
         partial_supervision: dict[tuple[str, str], int | float] | None = None,
         runtime_context: RuntimeContext | None = None,
         total_ram_bytes: int | None = None,
-        name_tuples: set[tuple[str, str]] | str | None = "filtered",
+        name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         cluster_seeds_require: Mapping[Any, Any] | None = None,
         cluster_seeds_disallow: Iterable[tuple[Any, Any]] | None = None,
         altered_cluster_signatures: Sequence[Any] | None = None,
@@ -5185,19 +5153,29 @@ class Clusterer:
         _require_arrow_name_counts_index_for_clusterer(self, arrow_path_payload, context="Arrow incremental prediction")
 
         explicit_cluster_seeds_require = _normalize_cluster_seeds_require(cluster_seeds_require or {})
+        resolved_name_tuples = _name_tuples_for_incremental_rules(name_tuples)
+        resolved_cluster_seed_disallows = (
+            normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow)
+            if cluster_seeds_disallow is not None
+            else set()
+        )
+        resolved_altered_cluster_signatures = (
+            [str(signature_id) for signature_id in altered_cluster_signatures]
+            if altered_cluster_signatures is not None
+            else None
+        )
         if explicit_cluster_seeds_require:
             seed_signature_to_cluster = explicit_cluster_seeds_require
         else:
             seed_signature_to_cluster = _cluster_seeds_require_from_arrow_paths(arrow_path_payload)
         if not seed_signature_to_cluster and not _cluster_seeds_arrow_path_exists(arrow_path_payload):
             _require_incremental_seed_source(
-                _ArrowIncrementalPredictionDataset(
-                    arrow_paths=arrow_path_payload,
-                    name_tuples=name_tuples,
+                _DirectArrowIncrementalDataset(
+                    name_tuples=resolved_name_tuples,
                     cluster_seeds_require=explicit_cluster_seeds_require,
-                    cluster_seeds_source="dataset",
-                    cluster_seeds_disallow=cluster_seeds_disallow,
-                    altered_cluster_signatures=altered_cluster_signatures,
+                    _cluster_seeds_source="dataset",
+                    cluster_seeds_disallow=resolved_cluster_seed_disallows,
+                    altered_cluster_signatures=resolved_altered_cluster_signatures,
                     max_seed_cluster_id=0,
                     signatures={},
                 ),
@@ -5242,13 +5220,12 @@ class Clusterer:
                     seed_orcid_signature_ids,
                 )
             )
-        request_dataset = _ArrowIncrementalPredictionDataset(
-            arrow_paths=arrow_path_payload,
-            name_tuples=name_tuples,
+        request_dataset = _DirectArrowIncrementalDataset(
+            name_tuples=resolved_name_tuples,
             cluster_seeds_require=seed_signature_to_cluster,
-            cluster_seeds_source=("dataset" if explicit_cluster_seeds_require else "arrow"),
-            cluster_seeds_disallow=cluster_seeds_disallow,
-            altered_cluster_signatures=altered_cluster_signatures,
+            _cluster_seeds_source=("dataset" if explicit_cluster_seeds_require else "arrow"),
+            cluster_seeds_disallow=resolved_cluster_seed_disallows,
+            altered_cluster_signatures=resolved_altered_cluster_signatures,
             max_seed_cluster_id=_seed_cluster_count_from_seed_map(seed_signature_to_cluster),
             signatures=signatures,
         )
@@ -5256,10 +5233,9 @@ class Clusterer:
         incremental_result = predict_incremental_promoted_linker_from_arrow_paths(
             self,
             block_signature_ids,
-            cast(ANDData, request_dataset),
+            request_dataset,
             arrow_paths=arrow_path_payload,
-            artifact_dir=_required_incremental_linker_artifact_dir(self),
-            artifact=getattr(self, "incremental_linker_artifact", None),
+            artifact=_required_incremental_linker_artifact(self),
             prevent_new_incompatibilities=prevent_new_incompatibilities,
             partial_supervision=partial_supervision,
             runtime_context=runtime_context,

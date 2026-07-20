@@ -370,7 +370,7 @@ def main() -> None:
             name_counts_index=NAME_COUNTS_INDEX_PATH if args.load_name_counts else None,
             preprocess=True,
             random_seed=random_seed,
-            name_tuples="filtered",
+            name_tuples=None,
             use_orcid_id=True,
         )
 

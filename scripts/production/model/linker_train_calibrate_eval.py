@@ -635,10 +635,6 @@ def _arrow_paths_for_dataset(
     paths: dict[str, str] = {}
     for key, raw_value in raw_paths.items():
         paths[str(key)] = str(_resolve_arrow_manifest_path(raw_value, dataset_dir=dataset_dir, bundle_root=bundle.root))
-    if "specter" not in paths and "specter2" in paths:
-        paths["specter"] = paths["specter2"]
-    if "specter_batch_index" not in paths and "specter2_batch_index" in paths:
-        paths["specter_batch_index"] = paths["specter2_batch_index"]
     if name_counts_index_root is not None:
         name_counts_index = Path(name_counts_index_root).resolve()
         if not name_counts_index.exists():
@@ -1620,7 +1616,7 @@ def _materialize_arrow_rust_dataset_rows(
         context.arrow_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
         signature_ids=signature_ids,
-        name_tuples="filtered",
+        name_tuples=None,
         load_name_counts=True,
         preprocess=True,
         num_threads=max(1, int(n_jobs)),

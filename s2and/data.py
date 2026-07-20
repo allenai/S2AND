@@ -354,9 +354,9 @@ class ANDData:
             already-open ``NameCountsIndex`` handle can be shared explicitly.
         n_jobs: number of cpus to use
         preprocess: whether to preprocess the data (normalization, etc)
-        name_tuples: Canonical first-name aliases. ``None`` and ``"filtered"``
-            both select the packaged canonical artifact. Pass an explicit empty
-            set to disable aliases, or a set of pairs; pair order is ignored.
+        name_tuples: Canonical first-name aliases. ``None`` selects the
+            packaged canonical artifact. Pass an explicit empty set or
+            frozenset to disable aliases; pair order is ignored.
         use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
             (b) subblocking so that any sigs with the same orcid are in the same subblock
     """
@@ -434,7 +434,7 @@ class ANDData:
         name_counts_index: str | os.PathLike[str] | NameCountsIndex | None = None,
         n_jobs: int = 1,
         preprocess: bool = True,
-        name_tuples: set[tuple[str, str]] | str | None = "filtered",
+        name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         use_orcid_id: bool = True,
         compute_block_fn: Callable[[str], str] = compute_block,
         _validated_arrow_inputs: ValidatedArrowInputs | None = None,
@@ -697,14 +697,12 @@ class ANDData:
         self.preprocess = preprocess
 
         resolved_name_tuples: set[tuple[str, str]]
-        if name_tuples == "filtered" or name_tuples is None:
-            # canonical_v2 alias artifact, regenerated deterministically by
-            # scripts/production/generate_canonical_name_tuples.py.
-            resolved_name_tuples = _load_name_tuples_from_file("s2and_name_tuples_canonical.txt")
-        elif isinstance(name_tuples, set):
+        if name_tuples is None:
+            resolved_name_tuples = set(load_packaged_name_tuple_artifact().pairs)
+        elif isinstance(name_tuples, set | frozenset):
             resolved_name_tuples = {canonical_name_tuple_pair(first_a, first_b) for first_a, first_b in name_tuples}
         else:
-            raise ValueError("name_tuples must be None, 'filtered', or a set of canonical (first_a, first_b) tuples")
+            raise TypeError("name_tuples must be None or a set/frozenset of (first_a, first_b) tuples")
         self.name_tuples = frozenset(resolved_name_tuples) if self.arrow_paths is not None else resolved_name_tuples
 
         preprocess_papers_stage_start = time.perf_counter()

@@ -64,7 +64,7 @@ def _build_train_dataset(
         name_counts_index=name_counts_index,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
 

@@ -229,10 +229,13 @@ def test_subset_raw_candidate_plan_preserves_unretrieved_component_members() -> 
     for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
         raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
 
-    subset = runtime_module.subset_raw_candidate_plan_for_query_ids(raw_plan, ["q0"])
+    subset = runtime_module.subset_raw_plan_bundle_for_query_ids(
+        RawArrowPlanBundle.from_mapping(raw_plan),
+        ["q0"],
+    )
 
-    assert subset["row_component_keys"] == ["c1"]
-    assert subset["component_members"] == {"c1": ["s1"], "c2": ["s2"]}
+    assert subset.row_component_keys == ("c1",)
+    assert subset.component_members == {"c1": ("s1",), "c2": ("s2",)}
 
 
 def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
@@ -258,11 +261,11 @@ def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
     return raw_plan
 
 
-def test_raw_candidate_plan_rejects_pair_row_index_outside_row_count() -> None:
+def test_raw_arrow_plan_bundle_rejects_pair_row_index_outside_row_count() -> None:
     raw_plan = _minimal_raw_candidate_plan(pair_row_indices=np.asarray([5], dtype=np.uint32))
 
     with pytest.raises(ValueError, match="pair_row_indices.*row_count=1"):
-        runtime_module.subset_raw_candidate_plan_for_query_ids(raw_plan, ["q0"])
+        RawArrowPlanBundle.from_mapping(raw_plan)
 
 
 def test_raw_candidate_plan_rejects_legacy_numeric_pair_indices() -> None:

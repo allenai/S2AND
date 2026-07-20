@@ -32,7 +32,7 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
     dataset_manifest_path = release_root / dataset_name / "manifest.json"
     dataset_manifest = json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
     manifest_paths = dataset_manifest.get("paths", {}) if isinstance(dataset_manifest, dict) else {}
-    embedding_path = manifest_paths.get("specter") or manifest_paths.get("specter2") or "specter.arrow"
+    embedding_path = manifest_paths.get("specter", "specter.arrow")
     dataset_entries = {
         entry["dataset"]: entry for entry in root_manifest.get("dataset_manifests", []) if isinstance(entry, dict)
     }
@@ -60,7 +60,7 @@ def _validate_required_release_files(release_root: Path, dataset_name: str) -> N
         context="release layout test",
         producer_hint="test fixture must include complete name_counts_index",
     )
-    for key in ("signatures", "papers", "paper_authors", "specter2"):
+    for key in ("signatures", "papers", "paper_authors", "specter"):
         path = release_root / dataset_name / manifest_paths[key]
         with pa.memory_map(str(path), "r") as source:
             assert pa.ipc.open_file(source).read_all().num_rows >= 1
@@ -156,7 +156,7 @@ def _build_arrow_release_fixture(tmp_path: Path, dataset_name: str = "s2and_mini
         "signatures": str(dataset_root / "signatures.arrow"),
         "papers": str(dataset_root / "papers.arrow"),
         "paper_authors": str(dataset_root / "paper_authors.arrow"),
-        "specter2": str(dataset_root / "specter2.arrow"),
+        "specter": str(dataset_root / "specter2.arrow"),
         "name_counts_index": str(release_root / "name_counts_index"),
         "signatures_batch_index": str(dataset_root / "signatures.signatures_batch_index.bin"),
         "papers_batch_index": str(dataset_root / "papers.papers_batch_index.bin"),
@@ -238,13 +238,13 @@ def test_validate_release_root_reports_missing_batch_index_path(tmp_path: Path) 
         validate_release_root(release_root, include_replay_bundles=False)
 
 
-def test_validate_release_root_accepts_specter2_with_canonical_batch_index(tmp_path: Path) -> None:
+def test_validate_release_root_accepts_canonical_keys_for_specter2_files(tmp_path: Path) -> None:
     release_root, _dataset_name = _build_arrow_release_fixture(tmp_path)
 
     assert validate_release_root(release_root, include_replay_bundles=False)["dataset_manifest_count"] == 1
 
 
-def test_validate_release_root_reports_missing_specter2_canonical_batch_index(tmp_path: Path) -> None:
+def test_validate_release_root_reports_missing_canonical_specter_batch_index(tmp_path: Path) -> None:
     release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
     dataset_manifest = json.loads((release_root / dataset_name / "manifest.json").read_text(encoding="utf-8"))
     paths = dataset_manifest["paths"]

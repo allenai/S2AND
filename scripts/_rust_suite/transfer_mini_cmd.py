@@ -416,7 +416,7 @@ def _build_anddata_kwargs(
         "name_counts_index": name_counts_index,
         "preprocess": PREPROCESS,
         "random_seed": random_seed,
-        "name_tuples": "filtered",
+        "name_tuples": None,
     }
 
 
@@ -529,7 +529,7 @@ def _single_run(
                     test_pairs_size=N_VAL_TEST_SIZE,
                     n_jobs=n_jobs,
                     random_seed=random_seed,
-                    name_tuples="filtered",
+                    name_tuples=None,
                 )
             else:
                 if name_counts_index is None:

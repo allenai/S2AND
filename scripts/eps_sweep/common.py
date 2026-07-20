@@ -83,10 +83,6 @@ def load_arrow_paths(arrow_root: Path, dataset: str) -> ValidatedArrowInputs:
     paths = {
         str(key): str(resolve_existing_path(str(value), manifest_dir=dataset_dir)) for key, value in raw_paths.items()
     }
-    if "specter" not in paths and "specter2" in paths:
-        paths["specter"] = paths["specter2"]
-    if "specter_batch_index" not in paths and "specter2_batch_index" in paths:
-        paths["specter_batch_index"] = paths["specter2_batch_index"]
     paths["manifest"] = str(manifest_path.resolve())
     try:
         return validate_arrow_prediction_artifacts(

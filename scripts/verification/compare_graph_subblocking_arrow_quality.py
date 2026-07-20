@@ -258,11 +258,9 @@ def load_lightweight_dataset(
 
 
 def _arrow_paths(arrow_root: Path) -> dict[str, str]:
-    specter_key = "specter2" if (arrow_root / "specter2.arrow").exists() else "specter"
-    if specter_key == "specter2":
-        specter_index_path = arrow_root / "specter2.specter2_batch_index.bin"
-        if not specter_index_path.exists():
-            specter_index_path = arrow_root / "specter2.specter_batch_index.bin"
+    specter_stem = "specter2" if (arrow_root / "specter2.arrow").exists() else "specter"
+    if specter_stem == "specter2":
+        specter_index_path = arrow_root / "specter2.specter_batch_index.bin"
     else:
         specter_index_path = arrow_root / "specter.specter_batch_index.bin"
     paths = {
@@ -270,8 +268,8 @@ def _arrow_paths(arrow_root: Path) -> dict[str, str]:
         "signatures_batch_index": arrow_root / "signatures.signatures_batch_index.bin",
         "paper_authors": arrow_root / "paper_authors.arrow",
         "paper_authors_batch_index": arrow_root / "paper_authors.paper_authors_batch_index.bin",
-        specter_key: arrow_root / f"{specter_key}.arrow",
-        f"{specter_key}_batch_index": specter_index_path,
+        "specter": arrow_root / f"{specter_stem}.arrow",
+        "specter_batch_index": specter_index_path,
     }
     missing = sorted(str(path) for path in paths.values() if not path.exists())
     if missing:
@@ -326,14 +324,6 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if isinstance(value, str | bytes):
         raise ValueError("Arrow list field unexpectedly decoded as a scalar string")
     return tuple(str(item) for item in value if item is not None)
-
-
-def _specter_path_keys(paths: Mapping[str, str]) -> tuple[str, str]:
-    if "specter" in paths:
-        return "specter", "specter_batch_index"
-    if "specter2" in paths:
-        return "specter2", "specter2_batch_index"
-    raise ValueError("Arrow paths require specter or specter2")
 
 
 def _paper_author_rows_by_paper(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -467,19 +457,18 @@ def load_lightweight_dataset_from_arrow(
     papers = {paper_id: {"authors": paper_authors_by_paper.get(paper_id, [])} for paper_id in paper_ids}
     specter_embeddings = {}
     if include_specter:
-        specter_key, specter_index_key = _specter_path_keys(paths)
         specter_columns = {"paper_id", "embedding"}
         if limit is None:
             paper_id_set = set(paper_ids)
             specter_rows = [
                 row
-                for row in _read_arrow_rows(paths[specter_key], specter_columns)
+                for row in _read_arrow_rows(paths["specter"], specter_columns)
                 if str(row.get("paper_id") or "") in paper_id_set
             ]
         else:
             specter_rows = _read_arrow_rows_by_values(
-                paths[specter_key],
-                paths[specter_index_key],
+                paths["specter"],
+                paths["specter_batch_index"],
                 "paper_id",
                 paper_ids,
                 required_columns=specter_columns,

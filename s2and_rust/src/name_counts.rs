@@ -2,9 +2,7 @@ use memmap2::Mmap;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::{self, File};
-use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -53,26 +51,6 @@ const NAME_COUNTS_INDEX_MAGIC: &[u8; 8] = b"S2NCI001";
 const NAME_COUNTS_INDEX_HASH_DOMAIN: &[u8] = b"s2and-name-counts-index-v1\0";
 const NAME_COUNTS_INDEX_HEADER_LEN: usize = 32;
 const NAME_COUNTS_INDEX_RECORD_LEN: usize = 40;
-
-struct NameCountCacheHasher(u64);
-
-impl Default for NameCountCacheHasher {
-    fn default() -> Self {
-        Self(FNV_OFFSET)
-    }
-}
-
-impl Hasher for NameCountCacheHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        self.0 = fnv64_update(self.0, bytes);
-    }
-}
-
-type NameCountCache<'a> = HashMap<&'a str, f64, BuildHasherDefault<NameCountCacheHasher>>;
 
 pub(crate) struct RawNameCountIndex {
     first: RawNameCountIndexFile,
@@ -214,52 +192,10 @@ fn lookup_name_count_column<S: AsRef<str>>(
     kind: RawNameCountKind,
     keys: &[Option<S>],
 ) -> Vec<f64> {
-    lookup_name_count_column_with(keys, |key| index.get(kind, key).unwrap_or(1.0))
-}
-
-fn lookup_unique_name_count_column<S: AsRef<str>>(
-    index: &RawNameCountIndex,
-    kind: RawNameCountKind,
-    keys: &[Option<S>],
-) -> Vec<f64> {
-    lookup_unique_name_count_column_with(keys, |key| index.get(kind, key).unwrap_or(1.0))
-}
-
-fn lookup_unique_name_count_column_with<S, F>(keys: &[Option<S>], mut resolve: F) -> Vec<f64>
-where
-    S: AsRef<str>,
-    F: FnMut(&str) -> f64,
-{
     keys.iter()
         .map(|key| match key {
             None => f64::NAN,
-            Some(key) => resolve(key.as_ref()),
-        })
-        .collect()
-}
-
-fn lookup_name_count_column_with<S, F>(keys: &[Option<S>], mut resolve: F) -> Vec<f64>
-where
-    S: AsRef<str>,
-    F: FnMut(&str) -> f64,
-{
-    // Batch-local borrowed keys avoid both repeated mmap searches and String
-    // copies. The map dies with this column task, so retained memory is
-    // proportional only to unique keys in the current batch.
-    let mut resolved = NameCountCache::default();
-    keys.iter()
-        .map(|key| match key {
-            None => f64::NAN,
-            Some(key) => {
-                let key = key.as_ref();
-                if let Some(value) = resolved.get(key) {
-                    *value
-                } else {
-                    let value = resolve(key);
-                    resolved.insert(key, value);
-                    value
-                }
-            }
+            Some(key) => index.get(kind, key.as_ref()).unwrap_or(1.0),
         })
         .collect()
 }
@@ -297,96 +233,6 @@ fn lookup_name_count_columns<S: AsRef<str> + Sync>(
     (first, last, first_last, last_first_initial)
 }
 
-fn lookup_unique_name_count_columns<S: AsRef<str> + Sync>(
-    index: &RawNameCountIndex,
-    first_keys: &[Option<S>],
-    last_keys: &[Option<S>],
-    first_last_keys: &[Option<S>],
-    last_first_initial_keys: &[Option<S>],
-) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let ((first, last), (first_last, last_first_initial)) = rayon::join(
-        || {
-            rayon::join(
-                || lookup_unique_name_count_column(index, RawNameCountKind::First, first_keys),
-                || lookup_unique_name_count_column(index, RawNameCountKind::Last, last_keys),
-            )
-        },
-        || {
-            rayon::join(
-                || {
-                    lookup_unique_name_count_column(
-                        index,
-                        RawNameCountKind::FirstLast,
-                        first_last_keys,
-                    )
-                },
-                || {
-                    lookup_unique_name_count_column(
-                        index,
-                        RawNameCountKind::LastFirstInitial,
-                        last_first_initial_keys,
-                    )
-                },
-            )
-        },
-    );
-    (first, last, first_last, last_first_initial)
-}
-
-impl NameCountsIndex {
-    fn lookup_many_impl<'py>(
-        &self,
-        py: Python<'py>,
-        first_keys: Vec<Option<PyBackedStr>>,
-        last_keys: Vec<Option<PyBackedStr>>,
-        first_last_keys: Vec<Option<PyBackedStr>>,
-        last_first_initial_keys: Vec<Option<PyBackedStr>>,
-        keys_are_unique: bool,
-    ) -> PyResult<(
-        Bound<'py, numpy::PyArray1<f64>>,
-        Bound<'py, numpy::PyArray1<f64>>,
-        Bound<'py, numpy::PyArray1<f64>>,
-        Bound<'py, numpy::PyArray1<f64>>,
-    )> {
-        validate_lookup_column_lengths([
-            first_keys.len(),
-            last_keys.len(),
-            first_last_keys.len(),
-            last_first_initial_keys.len(),
-        ])?;
-        let index = &self.index;
-        // PyBackedStr holds the Python strings without allocating Rust String
-        // copies and is Send + Sync. Borrow the columns into the no-GIL region
-        // so their Python owners are dropped only after the GIL is reacquired.
-        let (first, last, first_last, last_first_initial) = py.allow_threads(|| {
-            if keys_are_unique {
-                lookup_unique_name_count_columns(
-                    index,
-                    &first_keys,
-                    &last_keys,
-                    &first_last_keys,
-                    &last_first_initial_keys,
-                )
-            } else {
-                lookup_name_count_columns(
-                    index,
-                    &first_keys,
-                    &last_keys,
-                    &first_last_keys,
-                    &last_first_initial_keys,
-                )
-            }
-        });
-        use numpy::IntoPyArray;
-        Ok((
-            first.into_pyarray(py),
-            last.into_pyarray(py),
-            first_last.into_pyarray(py),
-            last_first_initial.into_pyarray(py),
-        ))
-    }
-}
-
 #[pymethods]
 impl NameCountsIndex {
     /// Open a manifest-backed name-count index after independently verifying
@@ -415,36 +261,10 @@ impl NameCountsIndex {
         )
     }
 
-    /// Resolve four aligned optional-key columns into float64 count arrays.
+    /// Resolve four already-deduplicated aligned optional-key columns.
     ///
     /// A missing key (`None`) produces NaN. An informative string absent from
     /// its index produces the historical default count of 1.0.
-    fn lookup_many<'py>(
-        &self,
-        py: Python<'py>,
-        first_keys: Vec<Option<PyBackedStr>>,
-        last_keys: Vec<Option<PyBackedStr>>,
-        first_last_keys: Vec<Option<PyBackedStr>>,
-        last_first_initial_keys: Vec<Option<PyBackedStr>>,
-    ) -> PyResult<(
-        Bound<'py, numpy::PyArray1<f64>>,
-        Bound<'py, numpy::PyArray1<f64>>,
-        Bound<'py, numpy::PyArray1<f64>>,
-        Bound<'py, numpy::PyArray1<f64>>,
-    )> {
-        self.lookup_many_impl(
-            py,
-            first_keys,
-            last_keys,
-            first_last_keys,
-            last_first_initial_keys,
-            false,
-        )
-    }
-
-    /// Internal fast path for Python callers that already deduplicated each
-    /// column. Values and ordering follow `lookup_many`; duplicate inputs are
-    /// accepted but deliberately receive no native caching.
     fn _lookup_many_unique<'py>(
         &self,
         py: Python<'py>,
@@ -458,14 +278,32 @@ impl NameCountsIndex {
         Bound<'py, numpy::PyArray1<f64>>,
         Bound<'py, numpy::PyArray1<f64>>,
     )> {
-        self.lookup_many_impl(
-            py,
-            first_keys,
-            last_keys,
-            first_last_keys,
-            last_first_initial_keys,
-            true,
-        )
+        validate_lookup_column_lengths([
+            first_keys.len(),
+            last_keys.len(),
+            first_last_keys.len(),
+            last_first_initial_keys.len(),
+        ])?;
+        let index = &self.index;
+        // PyBackedStr holds the Python strings without allocating Rust String
+        // copies and is Send + Sync. Borrow the columns into the no-GIL region
+        // so their Python owners are dropped only after the GIL is reacquired.
+        let (first, last, first_last, last_first_initial) = py.allow_threads(|| {
+            lookup_name_count_columns(
+                index,
+                &first_keys,
+                &last_keys,
+                &first_last_keys,
+                &last_first_initial_keys,
+            )
+        });
+        use numpy::IntoPyArray;
+        Ok((
+            first.into_pyarray(py),
+            last.into_pyarray(py),
+            first_last.into_pyarray(py),
+            last_first_initial.into_pyarray(py),
+        ))
     }
 }
 
@@ -1013,12 +851,10 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 #[cfg(test)]
 mod name_counts_tests {
     use super::{
-        lookup_name_count_column, lookup_name_count_column_with,
-        lookup_unique_name_count_column_with, name_counts_index_hashes, python_sha256_file,
+        lookup_name_count_column, name_counts_index_hashes, python_sha256_file,
         read_name_counts_index_normalization_version, validate_lookup_column_lengths,
         NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind,
     };
-    use std::collections::HashMap;
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1305,72 +1141,6 @@ mod name_counts_tests {
         assert!(values[2].is_nan());
         assert_eq!(values[3], 3.0);
         assert_eq!(values[4], 1.0);
-    }
-
-    #[test]
-    fn column_lookup_deduplicates_repeated_known_unknown_and_utf8_keys() {
-        let utf8_key = "\u{00e9}lodie".to_string();
-        let keys = vec![
-            Some("known".to_string()),
-            Some("known".to_string()),
-            Some("unknown".to_string()),
-            Some("unknown".to_string()),
-            Some(utf8_key.clone()),
-            Some(utf8_key),
-            None,
-        ];
-        let mut calls = HashMap::<String, usize>::new();
-
-        let values = lookup_name_count_column_with(&keys, |key| {
-            *calls.entry(key.to_string()).or_default() += 1;
-            match key {
-                "known" => 7.0,
-                "\u{00e9}lodie" => 3.0,
-                _ => 1.0,
-            }
-        });
-
-        assert_eq!(values[0..6], [7.0, 7.0, 1.0, 1.0, 3.0, 3.0]);
-        assert!(values[6].is_nan());
-        assert_eq!(calls.len(), 3);
-        assert!(calls.values().all(|count| *count == 1));
-    }
-
-    #[test]
-    fn unique_column_lookup_preserves_values_without_redundant_cache() {
-        let utf8_key = "\u{00e9}lodie".to_string();
-        let keys = vec![
-            Some("known".to_string()),
-            Some("known".to_string()),
-            Some("unknown".to_string()),
-            Some("unknown".to_string()),
-            Some(utf8_key.clone()),
-            Some(utf8_key),
-            None,
-        ];
-        let mut calls = Vec::<String>::new();
-
-        let values = lookup_unique_name_count_column_with(&keys, |key| {
-            calls.push(key.to_string());
-            match key {
-                "known" => 7.0,
-                "\u{00e9}lodie" => 3.0,
-                _ => 1.0,
-            }
-        });
-
-        assert_eq!(values[0..6], [7.0, 7.0, 1.0, 1.0, 3.0, 3.0]);
-        assert!(values[6].is_nan());
-        assert_eq!(calls.len(), 6);
-        assert_eq!(calls.iter().filter(|key| *key == "known").count(), 2);
-        assert_eq!(calls.iter().filter(|key| *key == "unknown").count(), 2);
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|key| key.as_str() == "\u{00e9}lodie")
-                .count(),
-            2
-        );
     }
 
     #[test]

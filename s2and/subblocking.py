@@ -24,6 +24,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from s2and.arrow_inputs import require_arrow_artifacts
+from s2and.arrow_schema import validate_arrow_schema
 from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION, SPECTER_DIM
 from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_lookup_index_batch_indices_for_request
 from s2and.text import (
@@ -46,18 +47,11 @@ def _canonical_orcid_prefix_pair(first: str, second: str) -> tuple[str, str]:
 
 
 def _orcid_prefix_pair_count(counts: Mapping[str, Mapping[str, int]], first: str, second: str) -> int | None:
-    """Look up an ORCID prefix-pair count independently of argument order."""
+    """Look up a count in the canonical lexicographically ordered mapping."""
 
     left, right = _canonical_orcid_prefix_pair(first, second)
     nested = counts.get(left)
-    count = None if nested is None else nested.get(right)
-    if count is not None:
-        return count
-    # Accept an uncanonicalized mapping supplied directly by compatibility or
-    # test callers. The packaged mapping is canonicalized once at import, so
-    # production lookups remain the one-probe path above.
-    reverse = counts.get(right)
-    return None if reverse is None else reverse.get(left)
+    return None if nested is None else nested.get(right)
 
 
 _ORCID_PREFIX_MANIFEST_FILENAME = "first_k_letter_counts_from_orcid.manifest.json"
@@ -1085,14 +1079,11 @@ def _read_arrow_rows_by_values(
         reader = pa.ipc.open_file(source)
         required_columns = set(required_columns)
         required_columns.add(key_column)
-        missing = sorted(required_columns.difference(reader.schema.names))
-        if missing:
-            raise ValueError(f"{table_name} Arrow is missing required columns for graph subblocking: {missing}")
-        _validate_arrow_graph_schema(reader.schema, table_name)
+        selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
+        validate_arrow_schema(reader.schema, table_name=table_name, columns=selected_columns)
         key_column_index = reader.schema.get_field_index(key_column)
         if key_column_index < 0:
             raise ValueError(f"{table_name} Arrow is missing key column for graph subblocking: {key_column!r}")
-        selected_columns = required_columns.union(set(optional_columns).intersection(reader.schema.names))
         selected_column_names = [name for name in reader.schema.names if name in selected_columns]
         selected_column_indices = [reader.schema.get_field_index(name) for name in selected_column_names]
         for batch_index in batch_indices:
@@ -1120,51 +1111,6 @@ def _read_arrow_rows_by_values(
         _add_load_metric(load_metrics, f"{table_name}_rows_scanned", rows_scanned)
         _add_load_metric(load_metrics, f"{table_name}_rows_loaded", len(rows))
     return rows
-
-
-def _require_arrow_column_type(
-    schema: Any, column_name: str, table_name: str, predicate: Callable[[Any], bool], expected: str
-) -> None:
-    field_index = schema.get_field_index(column_name)
-    if field_index < 0:
-        raise ValueError(f"{table_name} Arrow is missing required column for graph subblocking: {column_name!r}")
-    column_type = schema.field(field_index).type
-    if not predicate(column_type):
-        raise ValueError(
-            f"{table_name} Arrow column {column_name!r} expected {expected} for graph subblocking; "
-            f"got {column_type}"
-        )
-
-
-def _validate_arrow_graph_schema(schema: Any, table_name: str) -> None:
-    pa = __import__("pyarrow")
-    if table_name == "signatures":
-        for column_name in ("signature_id", "paper_id", "author_first", "author_middle"):
-            _require_arrow_column_type(schema, column_name, table_name, pa.types.is_string, "string")
-        if schema.get_field_index("author_orcid") >= 0:
-            _require_arrow_column_type(schema, "author_orcid", table_name, pa.types.is_string, "string")
-        _require_arrow_column_type(schema, "author_position", table_name, pa.types.is_int64, "int64")
-        _require_arrow_column_type(
-            schema,
-            "author_affiliations",
-            table_name,
-            lambda column_type: pa.types.is_list(column_type) and pa.types.is_string(column_type.value_type),
-            "list<string>",
-        )
-    elif table_name == "paper_authors":
-        for column_name in ("paper_id", "author_name"):
-            _require_arrow_column_type(schema, column_name, table_name, pa.types.is_string, "string")
-        _require_arrow_column_type(schema, "position", table_name, pa.types.is_int64, "int64")
-    elif table_name == "specter":
-        _require_arrow_column_type(schema, "paper_id", table_name, pa.types.is_string, "string")
-        field = schema.field(schema.get_field_index("embedding"))
-        if not pa.types.is_fixed_size_list(field.type) or not pa.types.is_float32(field.type.value_type):
-            raise ValueError(
-                "specter Arrow column 'embedding' expected fixed_size_list<float32> for graph subblocking; "
-                f"got {field.type}"
-            )
-        if int(field.type.list_size) <= 0:
-            raise ValueError("specter Arrow embedding column must have positive dimension for graph subblocking")
 
 
 def _add_load_metric(load_metrics: dict[str, int], key: str, value: int) -> None:
@@ -1235,10 +1181,7 @@ def _coauthor_blocks_by_paper_from_arrow(
     with pa.memory_map(str(paper_authors_path), "r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = {"paper_id", "position", "author_name"}
-        missing = sorted(required_columns.difference(reader.schema.names))
-        if missing:
-            raise ValueError(f"paper_authors Arrow is missing required columns for graph subblocking: {missing}")
-        _validate_arrow_graph_schema(reader.schema, "paper_authors")
+        validate_arrow_schema(reader.schema, table_name="paper_authors", columns=required_columns)
         paper_id_index = reader.schema.get_field_index("paper_id")
         position_index = reader.schema.get_field_index("position")
         author_name_index = reader.schema.get_field_index("author_name")
@@ -1301,11 +1244,10 @@ def _specter_embeddings_from_arrow(
     load_metrics: dict[str, int],
 ) -> dict[str, np.ndarray]:
     pa = __import__("pyarrow")
-    specter_path_key, specter_index_key = _arrow_graph_specter_path_keys(paths)
-    if specter_path_key is None:
-        raise ValueError("Graph subblocking requires a 'specter' or 'specter2' Arrow path")
-    specter_path = paths[specter_path_key]
-    specter_index_path = paths[specter_index_key]
+    if "specter" not in paths:
+        raise ValueError("Graph subblocking requires a 'specter' Arrow path")
+    specter_path = paths["specter"]
+    specter_index_path = paths["specter_batch_index"]
     keep_values = {str(value) for value in paper_ids}
     batch_indices = sorted(
         read_arrow_batch_lookup_index_batch_indices_for_request(
@@ -1322,10 +1264,10 @@ def _specter_embeddings_from_arrow(
     with pa.memory_map(str(specter_path), "r") as source:
         reader = pa.ipc.open_file(source)
         required_columns = {"paper_id", "embedding"}
-        missing = sorted(required_columns.difference(reader.schema.names))
-        if missing:
-            raise ValueError(f"specter Arrow is missing required columns for graph subblocking: {missing}")
-        _validate_arrow_graph_schema(reader.schema, "specter")
+        validate_arrow_schema(reader.schema, table_name="specter", columns=required_columns)
+        embedding_type = reader.schema.field("embedding").type
+        if int(embedding_type.list_size) <= 0:
+            raise ValueError("specter Arrow embedding column must have positive dimension for graph subblocking")
         paper_id_index = reader.schema.get_field_index("paper_id")
         embedding_index = reader.schema.get_field_index("embedding")
         for batch_index in batch_indices:
@@ -1363,18 +1305,7 @@ def _specter_embeddings_from_arrow(
     return embeddings
 
 
-def _arrow_graph_specter_path_keys(paths: Mapping[str, Any]) -> tuple[str | None, str]:
-    if "specter" in paths:
-        return "specter", "specter_batch_index"
-    if "specter2" in paths:
-        return "specter2", "specter2_batch_index" if "specter2_batch_index" in paths else "specter_batch_index"
-    return None, "specter_batch_index"
-
-
 def _require_arrow_graph_subblocking_artifacts(paths: Mapping[str, Any]) -> dict[str, str]:
-    specter_key, specter_index_key = _arrow_graph_specter_path_keys(paths)
-    if specter_key is None:
-        specter_key = "specter"
     return require_arrow_artifacts(
         paths,
         required_keys=(
@@ -1382,8 +1313,8 @@ def _require_arrow_graph_subblocking_artifacts(paths: Mapping[str, Any]) -> dict
             "signatures_batch_index",
             "paper_authors",
             "paper_authors_batch_index",
-            specter_key,
-            specter_index_key,
+            "specter",
+            "specter_batch_index",
         ),
         context="Arrow graph subblocking",
         producer_hint=(

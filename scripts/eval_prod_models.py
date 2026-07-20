@@ -702,7 +702,7 @@ def cluster_eval_arrow(
         block_dict,
         predict_arrow_paths,
         total_ram_bytes=total_ram_bytes,
-        name_tuples="filtered",
+        name_tuples=None,
     )
     (
         b3_p,
@@ -778,7 +778,7 @@ def build_eval_anddata(
         name_counts_index=NAME_COUNTS_INDEX_PATH,
         preprocess=True,
         random_seed=random_seed,
-        name_tuples="filtered",
+        name_tuples=None,
     )
 
 
@@ -921,7 +921,7 @@ def arrow_training_feature_splits(
     rust_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
         predict_arrow_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
-        name_tuples="filtered",
+        name_tuples=None,
         load_name_counts=(
             "name_counts" in featurizer_info.features_to_use
             or (nameless_featurizer_info is not None and "name_counts" in nameless_featurizer_info.features_to_use)

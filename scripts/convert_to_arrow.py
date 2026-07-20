@@ -410,7 +410,7 @@ def _validation_requirements_from_manifest(manifest: Mapping[str, Any]) -> dict[
     paths = manifest.get("paths", {})
     path_map = paths if isinstance(paths, Mapping) else {}
     return {
-        "require_embeddings": bool(path_map.get("specter") or path_map.get("specter2")),
+        "require_embeddings": bool(path_map.get("specter")),
         "require_name_counts_index": bool(path_map.get("name_counts_index")),
     }
 
@@ -829,44 +829,6 @@ def _write_specter_arrow(
     }
 
 
-def _add_extra_specter_index_and_layout(
-    *,
-    paths: dict[str, str],
-    raw_planner_index_metrics: dict[str, Any],
-    physical_layout: dict[str, Any],
-    table_key: str,
-    output_dir: Path,
-    overwrite: bool,
-) -> None:
-    from s2and.incremental_linking.feature_block import (
-        RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
-        arrow_ipc_physical_layout,
-        write_arrow_batch_lookup_index,
-    )
-
-    arrow_path = paths.get(table_key)
-    if arrow_path is None:
-        return
-    index_key = f"{table_key}_batch_index"
-    index_path, index_metrics = write_arrow_batch_lookup_index(
-        arrow_path,
-        output_dir / f"{Path(arrow_path).stem}.specter_batch_index.bin",
-        key_column="paper_id",
-        table_name="specter",
-        max_record_batch_rows=RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS["specter"],
-        overwrite=overwrite,
-    )
-    paths[index_key] = index_path
-    raw_planner_index_metrics[index_key] = index_metrics
-    physical_layout["tables"][table_key] = {
-        "key": "paper_id",
-        "max_record_batch_rows": RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS["specter"],
-        "batch_index_path_key": index_key,
-        "batch_index_present": True,
-        **arrow_ipc_physical_layout(arrow_path),
-    }
-
-
 def _source_file(source_dir: Path, dataset: str, preferred_name: str, fallback_name: str | None = None) -> Path:
     candidates = [source_dir / preferred_name]
     if fallback_name is not None:
@@ -1005,7 +967,7 @@ def convert_service_json_to_arrow(
         name_counts_index=None,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
     anddata_seconds = time.perf_counter() - start
@@ -1081,7 +1043,7 @@ def convert_service_json_to_arrow(
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
         "name_counts_index": name_counts_index_metrics,
-        "name_tuples": "default packaged filtered aliases",
+        "name_tuples": "default packaged canonical aliases",
         "timings_seconds": {
             "load_json_seconds": load_seconds,
             "anddata_seconds": anddata_seconds,
@@ -1154,7 +1116,7 @@ def convert_runtime_dataset_to_arrow(
         name_counts_index=None,
         preprocess=True,
         random_seed=42,
-        name_tuples="filtered",
+        name_tuples=None,
         use_orcid_id=True,
     )
     anddata_seconds = time.perf_counter() - start
@@ -1179,24 +1141,21 @@ def convert_runtime_dataset_to_arrow(
 
     needed_paper_ids = {str(signature.paper_id) for signature in dataset.signatures.values()}
     specter_reports: dict[str, Any] = {}
-    if sources.specter_path is not None:
-        specter_reports["specter"] = _write_specter_arrow(
-            source_path=sources.specter_path,
-            output_path=output_dir / "specter.arrow",
+    embedding_label = selected_embedding
+    if embedding_label is None:
+        embedding_label = "specter" if sources.specter_path is not None else "specter2"
+    if embedding_label not in {"specter", "specter2"}:
+        raise ValueError(f"unsupported selected embedding: {embedding_label!r}")
+    embedding_source = sources.specter_path if embedding_label == "specter" else sources.specter2_path
+    if embedding_source is not None:
+        embedding_path = output_dir / f"{embedding_label}.arrow"
+        specter_reports[embedding_label] = _write_specter_arrow(
+            source_path=embedding_source,
+            output_path=embedding_path,
             needed_paper_ids=needed_paper_ids,
             overwrite=overwrite,
         )
-        paths["specter"] = str(output_dir / "specter.arrow")
-    if sources.specter2_path is not None:
-        specter_reports["specter2"] = _write_specter_arrow(
-            source_path=sources.specter2_path,
-            output_path=output_dir / "specter2.arrow",
-            needed_paper_ids=needed_paper_ids,
-            overwrite=overwrite,
-        )
-        paths["specter2"] = str(output_dir / "specter2.arrow")
-        if selected_embedding == "specter2" or paths.get("specter") is None:
-            paths["specter"] = str(output_dir / "specter2.arrow")
+        paths["specter"] = str(embedding_path)
 
     start = time.perf_counter()
     paths, raw_planner_index_metrics = write_raw_arrow_batch_lookup_indexes(
@@ -1206,16 +1165,6 @@ def convert_runtime_dataset_to_arrow(
     )
     write_raw_planner_indexes_seconds = time.perf_counter() - start
     physical_layout = raw_planner_arrow_physical_layout(paths)
-    if sources.specter2_path is not None:
-        _add_extra_specter_index_and_layout(
-            paths=paths,
-            raw_planner_index_metrics=raw_planner_index_metrics,
-            physical_layout=physical_layout,
-            table_key="specter2",
-            output_dir=output_dir,
-            overwrite=overwrite,
-        )
-
     name_counts_index_metrics: dict[str, Any] = {"skipped": True}
     write_name_counts_index_seconds = 0.0
     if not skip_name_counts_index:
@@ -1242,7 +1191,7 @@ def convert_runtime_dataset_to_arrow(
         "physical_layout": physical_layout,
         "raw_planner_batch_indexes": raw_planner_index_metrics,
         "name_counts_index": name_counts_index_metrics,
-        "name_tuples": "default packaged filtered aliases",
+        "name_tuples": "default packaged canonical aliases",
         "timings_seconds": {
             "anddata_seconds": anddata_seconds,
             "write_common_seconds": write_common_seconds,
@@ -1413,8 +1362,6 @@ def validate_arrow_dataset_manifest(
     paths = {str(key): str(_resolve_manifest_path(value, base_dir)) for key, value in manifest["paths"].items()}
     required_paths = ["signatures", "papers", "paper_authors"]
     if require_embeddings:
-        if "specter" not in paths and "specter2" in paths:
-            paths["specter"] = paths["specter2"]
         required_paths.append("specter")
     if require_name_counts_index:
         required_paths.append("name_counts_index")

@@ -605,11 +605,11 @@ def test_arrow_paths_alias_specter2_manifest_keys(
                     "signatures": "signatures.arrow",
                     "papers": "papers.arrow",
                     "paper_authors": "paper_authors.arrow",
-                    "specter2": "specter2.arrow",
+                    "specter": "specter2.arrow",
                     "signatures_batch_index": "signatures.signatures_batch_index.bin",
                     "papers_batch_index": "papers.papers_batch_index.bin",
                     "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-                    "specter2_batch_index": "specter2.specter_batch_index.bin",
+                    "specter_batch_index": "specter2.specter_batch_index.bin",
                     "name_counts_index": "name_counts_index",
                 }
             }

@@ -34,13 +34,6 @@ class _VerifiedArrowArtifactGeneration:
     normalization_version: str | None
 
 
-class _VerifiedArrowInputsCapability:
-    """Unexported authority to create an already-verified Arrow path set."""
-
-
-_VERIFIED_ARROW_INPUTS_CAPABILITY = _VerifiedArrowInputsCapability()
-
-
 @dataclass(frozen=True, init=False)
 class ValidatedArrowInputs(Mapping[str, str]):
     """Immutable, integrity-checked Arrow paths for one artifact generation."""
@@ -65,13 +58,10 @@ class ValidatedArrowInputs(Mapping[str, str]):
         paths: Mapping[str, str],
         generation_id: str,
         normalization_version: str,
-        capability: object,
         name_counts_manifest: ValidatedNameCountsManifest | None = None,
     ) -> ValidatedArrowInputs:
         """Create an instance after a trusted internal validation or projection."""
 
-        if capability is not _VERIFIED_ARROW_INPUTS_CAPABILITY:
-            raise TypeError("ValidatedArrowInputs creation requires the internal verified capability")
         instance = object.__new__(cls)
         object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
         object.__setattr__(instance, "generation_id", str(generation_id))
@@ -97,7 +87,6 @@ class ValidatedArrowInputs(Mapping[str, str]):
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
             name_counts_manifest=(None if "name_counts_index" in removed else self.name_counts_manifest),
-            capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
         )
 
     def with_request_sidecars(
@@ -133,7 +122,6 @@ class ValidatedArrowInputs(Mapping[str, str]):
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
             name_counts_manifest=self.name_counts_manifest,
-            capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
         )
 
 
@@ -191,10 +179,9 @@ _SPECTER_PATH_KEYS = frozenset(
     {
         "specter",
         "specter_batch_index",
-        "specter2",
-        "specter2_batch_index",
     }
 )
+_UNSUPPORTED_SPECTER_PATH_KEYS = frozenset({"specter2", "specter2_batch_index"})
 
 
 def _sha256_file(path: Path) -> str:
@@ -223,10 +210,6 @@ def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str
 
     root = Path(manifest_dir)
     canonical_paths = {str(key): value for key, value in paths.items()}
-    if "specter" not in canonical_paths and "specter2" in canonical_paths:
-        canonical_paths["specter"] = canonical_paths["specter2"]
-    if "specter_batch_index" not in canonical_paths and "specter2_batch_index" in canonical_paths:
-        canonical_paths["specter_batch_index"] = canonical_paths["specter2_batch_index"]
     files: dict[str, dict[str, Any]] = {}
     for key, raw_path in sorted(canonical_paths.items()):
         if key not in _ARROW_IMMUTABLE_ARTIFACT_FILE_KEYS and key not in _ARROW_IMMUTABLE_BATCH_INDEX_KEYS:
@@ -780,26 +763,12 @@ def _validate_complete_arrow_artifacts(
 
     if isinstance(arrow_paths, ValidatedArrowInputs):
         profiled_paths = arrow_paths
-        if require_specter:
-            canonical_paths = dict(arrow_paths)
-            if "specter" not in canonical_paths and "specter2" in canonical_paths:
-                canonical_paths["specter"] = canonical_paths["specter2"]
-            if "specter_batch_index" not in canonical_paths and "specter2_batch_index" in canonical_paths:
-                canonical_paths["specter_batch_index"] = canonical_paths["specter2_batch_index"]
-            canonical_paths.pop("specter2", None)
-            canonical_paths.pop("specter2_batch_index", None)
-            if canonical_paths != dict(arrow_paths):
-                profiled_paths = ValidatedArrowInputs._from_verified(
-                    paths=canonical_paths,
-                    generation_id=arrow_paths.generation_id,
-                    normalization_version=arrow_paths.normalization_version,
-                    name_counts_manifest=arrow_paths.name_counts_manifest,
-                    capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
-                )
-        elif _SPECTER_PATH_KEYS.intersection(arrow_paths):
+        if not require_specter and _SPECTER_PATH_KEYS.intersection(arrow_paths):
             profiled_paths = arrow_paths.without(*_SPECTER_PATH_KEYS)
 
-        invalid_profile_keys = sorted(UNSUPPORTED_ARROW_NAME_ALIAS_KEYS.intersection(profiled_paths))
+        invalid_profile_keys = sorted(
+            (UNSUPPORTED_ARROW_NAME_ALIAS_KEYS | _UNSUPPORTED_SPECTER_PATH_KEYS).intersection(profiled_paths)
+        )
         if "name_counts" in profiled_paths:
             invalid_profile_keys.append("name_counts")
         if "name_counts_index_dir" in profiled_paths:
@@ -845,6 +814,9 @@ def _validate_complete_arrow_artifacts(
     normalized, invalid_paths = _normalize_arrow_path_values(arrow_paths)
     for key in UNSUPPORTED_ARROW_NAME_ALIAS_KEYS.intersection(normalized):
         invalid_paths[key] = "name aliases must be supplied via the name_tuples argument, not Arrow path bundles"
+    for key in _UNSUPPORTED_SPECTER_PATH_KEYS.intersection(normalized):
+        canonical_key = "specter_batch_index" if key.endswith("_batch_index") else "specter"
+        invalid_paths[key] = f"unsupported embedding path key; use {canonical_key}"
     if "name_counts" in normalized:
         invalid_paths["name_counts"] = "legacy name_counts Arrow tables are unsupported; use name_counts_index"
     if "name_counts_index_dir" in normalized:
@@ -852,32 +824,11 @@ def _validate_complete_arrow_artifacts(
             "legacy name-count index aliases are unsupported; use name_counts_index"
         )
 
-    if require_specter and "specter" not in normalized and "specter2" in normalized:
-        normalized["specter"] = normalized["specter2"]
-        invalid_paths.pop("specter", None)
-        if "specter" in missing_keys:
-            missing_keys.remove("specter")
-    if require_specter and "specter" in normalized:
-        invalid_paths.pop("specter2", None)
-    if require_specter and "specter_batch_index" not in normalized and "specter2_batch_index" in normalized:
-        normalized["specter_batch_index"] = normalized["specter2_batch_index"]
-        invalid_paths.pop("specter_batch_index", None)
-    if require_specter and "specter_batch_index" in normalized:
-        invalid_paths.pop("specter2_batch_index", None)
-    if require_specter:
-        normalized.pop("specter2", None)
-        normalized.pop("specter2_batch_index", None)
-        invalid_paths.pop("specter2", None)
-        invalid_paths.pop("specter2_batch_index", None)
     if not require_specter:
         normalized.pop("specter", None)
         normalized.pop("specter_batch_index", None)
-        normalized.pop("specter2", None)
-        normalized.pop("specter2_batch_index", None)
         invalid_paths.pop("specter", None)
         invalid_paths.pop("specter_batch_index", None)
-        invalid_paths.pop("specter2", None)
-        invalid_paths.pop("specter2_batch_index", None)
 
     for key in required_filtered_read_batch_index_keys(normalized):
         required.add(key)
@@ -949,7 +900,6 @@ def _validate_complete_arrow_artifacts(
         generation_id=verified.generation_id,
         normalization_version=verified.normalization_version,
         name_counts_manifest=name_counts_manifest,
-        capability=_VERIFIED_ARROW_INPUTS_CAPABILITY,
     )
 
 

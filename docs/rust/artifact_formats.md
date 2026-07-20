@@ -17,8 +17,7 @@ It replaces the older artifact-divergence migration log.
 | SPECTER | `specter.arrow` Arrow fixed-size-list `float32` table | Preferred direct-path embedding input. Include the embedding version required by the model. |
 | Raw-planner batch indexes | `<arrow-stem>.<path-key>.bin` S2AND binary sidecar | Optional derived indexes for large-block raw planning. Current writers emit `arrow_batch_lookup_index` with magic `S2ABI002`; regenerate from the final Arrow IPC files. |
 | Name counts | `s2and/data/name_counts_index/` sorted binary sidecar | Preferred Rust hot-path lookup artifact for models that use name-count features. |
-| Name-count Arrow table | `name_counts.arrow` long-form Arrow table | Generation, inspection, and parity debugging only. It is not a request-time runtime fallback for `name_counts_index/`. |
-| Name aliases | Packaged filtered text file | Shared runtime default. Avoid per-dataset alias artifacts unless running an explicit experiment. |
+| Name aliases | Packaged canonical text file | Shared runtime default. Avoid per-dataset alias artifacts unless running an explicit experiment. |
 | Pairwise and linker models | Native LightGBM text plus JSON metadata | Current production model-bundle format. |
 | Eval clusters | Existing clusters JSON | Offline evaluation truth only; not part of production inference scoring. |
 
@@ -75,7 +74,7 @@ has been removed from the runtime direction. Rust production scoring and Python
 `ANDData` both open this validated memory-mapped index. Python deduplicates each
 2,048-signature key batch, resolves unique keys in one four-column native call,
 and attaches only the resulting scalar counts. Do not build any runtime path
-that loads `name_counts.arrow` or `name_counts.pickle` into Python dicts/lists.
+that loads `name_counts.pickle` into Python dicts/lists.
 
 The legacy direct-file layout with `first.bin`, `last.bin`, `first_last.bin`,
 and `last_first_initial.bin` directly under `name_counts_index/` is accepted
@@ -118,7 +117,7 @@ planning. Do not hand-write the batch-index binary format.
 | Arrow read into Python dict/list before Rust | Defeats the columnar boundary and was measured slower than keeping the hot path in Rust. |
 | MessagePack as universal target | Better than JSON for nested legacy payloads, but it preserves the object shape the Rust path is trying to avoid. |
 | Parquet as request/runtime hot path | Useful offline, but Arrow IPC is simpler for local runtime bundles and direct Rust readers. |
-| Per-dataset `name_pairs.arrow` | Avoid for production. The default packaged filtered aliases are small enough as text. |
+| Per-dataset `name_pairs.arrow` | Avoid for production. The default packaged canonical aliases are small enough as text. |
 
 ## Format Ownership
 

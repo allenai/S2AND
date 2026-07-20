@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import s2and.name_counts_index as name_counts_index_module
+import s2and.name_counts_manifest as name_counts_manifest_module
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
@@ -30,61 +31,59 @@ def test_name_counts_index_open_is_shared_for_one_manifest_generation(tmp_path: 
     second = NameCountsIndex.open(path)
 
     assert first is second
-    assert first.source_provenance["generation_id"] == "generation-one"
+    assert dict(first.source_provenance) == {
+        **tiny_name_counts_provenance(),
+        "generation_id": "generation-one",
+    }
 
 
-def test_name_counts_index_cache_hit_skips_material_validation(
+def test_name_counts_index_open_does_not_repeat_native_material_validation_in_python(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
-    real_validator = name_counts_index_module._load_validated_name_counts_manifest
-    validation_count = 0
 
-    def count_validation(*args, **kwargs):
-        nonlocal validation_count
-        validation_count += 1
-        return real_validator(*args, **kwargs)
+    def unexpected_python_hash(*args, **kwargs):
+        pytest.fail("normal NameCountsIndex.open must use the native validation result")
 
-    monkeypatch.setattr(name_counts_index_module, "_load_validated_name_counts_manifest", count_validation)
+    monkeypatch.setattr(name_counts_manifest_module, "_sha256_file", unexpected_python_hash)
 
     first = NameCountsIndex.open(path)
     second = NameCountsIndex.open(path)
 
     assert first is second
-    assert validation_count == 1
 
 
-def test_name_counts_index_concurrent_open_validates_generation_once(
+def test_name_counts_index_concurrent_open_parses_generation_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
-    real_validator = name_counts_index_module._load_validated_name_counts_manifest
-    validation_started = threading.Event()
-    release_validation = threading.Event()
-    validation_count = 0
+    real_parser = name_counts_index_module.json.loads
+    parsing_started = threading.Event()
+    release_parsing = threading.Event()
+    parse_count = 0
 
-    def block_validation(*args, **kwargs):
-        nonlocal validation_count
-        validation_count += 1
-        validation_started.set()
-        if not release_validation.wait(timeout=10):
-            raise TimeoutError("test did not release name-count validation")
-        return real_validator(*args, **kwargs)
+    def block_parsing(*args, **kwargs):
+        nonlocal parse_count
+        parse_count += 1
+        parsing_started.set()
+        if not release_parsing.wait(timeout=10):
+            raise TimeoutError("test did not release name-count manifest parsing")
+        return real_parser(*args, **kwargs)
 
-    monkeypatch.setattr(name_counts_index_module, "_load_validated_name_counts_manifest", block_validation)
+    monkeypatch.setattr(name_counts_index_module.json, "loads", block_parsing)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(NameCountsIndex.open, path)
-        assert validation_started.wait(timeout=10)
+        assert parsing_started.wait(timeout=10)
         second_future = pool.submit(NameCountsIndex.open, path)
-        release_validation.set()
+        release_parsing.set()
         first = first_future.result(timeout=10)
         second = second_future.result(timeout=10)
 
     assert first is second
-    assert validation_count == 1
+    assert parse_count == 1
 
 
 def test_name_counts_index_manifest_replacement_opens_new_generation(tmp_path: Path) -> None:

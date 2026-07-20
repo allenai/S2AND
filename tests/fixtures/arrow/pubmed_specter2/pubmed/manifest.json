@@ -21,7 +21,7 @@
     "source": "s2and/data/name_counts_index",
     "specter": "specter2"
   },
-  "name_tuples": "default packaged filtered aliases",
+  "name_tuples": "default packaged canonical aliases",
   "normalization_version": "canonical_v2",
   "paper_count": 2871,
   "paths": {
@@ -34,8 +34,6 @@
     "signatures": "signatures.arrow",
     "signatures_batch_index": "signatures.signatures_batch_index.bin",
     "specter": "specter2.arrow",
-    "specter2": "specter2.arrow",
-    "specter2_batch_index": "specter2.specter_batch_index.bin",
     "specter_batch_index": "specter2.specter_batch_index.bin"
   },
   "physical_layout": {
@@ -69,7 +67,7 @@
         "record_batch_count": 1,
         "row_count": 2871
       },
-      "specter2": {
+      "specter": {
         "actual_max_batch_rows": 2048,
         "batch_index_path_key": "specter_batch_index",
         "batch_index_present": true,
@@ -121,19 +119,6 @@
       "max_record_batch_rows": 16384
     },
     "specter_batch_index": {
-      "reused": false,
-      "schema_version": "arrow_batch_lookup_index",
-      "magic": "S2ABI002",
-      "row_count": 2871,
-      "record_count": 2871,
-      "key_column_hash": 17948583095397703583,
-      "source_fingerprint": 13108892874319287705,
-      "source_fingerprint_kind": "fnv1a64_full_file",
-      "record_batch_count": 2,
-      "actual_max_batch_rows": 2048,
-      "max_record_batch_rows": 2048
-    },
-    "specter2_batch_index": {
       "reused": false,
       "schema_version": "arrow_batch_lookup_index",
       "magic": "S2ABI002",

@@ -32,7 +32,6 @@ from s2and.incremental_linking.feature_block_arrow import (
     write_cluster_seeds_arrow,
     write_feature_block_arrow_tables,
     write_incremental_query_signatures_arrow,
-    write_name_counts_arrow,
     write_name_counts_index,
     write_raw_arrow_batch_lookup_indexes,
 )
@@ -86,7 +85,6 @@ __all__ = [
     "write_cluster_seeds_arrow",
     "write_feature_block_arrow_tables",
     "write_incremental_query_signatures_arrow",
-    "write_name_counts_arrow",
     "write_name_counts_index",
     "write_raw_arrow_batch_lookup_indexes",
 ]

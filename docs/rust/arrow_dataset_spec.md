@@ -324,7 +324,8 @@ Migration warning: although this table currently permits null
 `author_position`, full Rust featurization rejects it and correct coauthor
 exclusion cannot be reconstructed without a focal position. The canonical
 target is a required/non-null field after intended release datasets are audited
-and repaired; see [../work_plan.md B14](../work_plan.md#b14-nullable-signature-author_position-has-contradictory-contracts).
+and repaired; see the
+[canonical artifact generation and retraining plan](../work_plan.md#canonical-artifact-generation-and-retraining).
 
 ### `papers.arrow`
 

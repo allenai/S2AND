@@ -213,6 +213,12 @@ fn is_name_invisible_format(ch: char) -> bool {
     matches!(ch, '\u{00AD}' | '\u{200D}')
 }
 
+/// Match Python `str.isspace()` where it is broader than Rust's Unicode
+/// `char::is_whitespace()`.
+pub(crate) fn is_python_whitespace_compat(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{001C}' | '\u{001D}' | '\u{001E}' | '\u{001F}')
+}
+
 /// canonical_v2 pre-translation on raw code points, before transliteration
 /// (mirrors Python `_canonical_name_pretranslate`): delete invisible format
 /// controls, unify apostrophe-like marks to ASCII apostrophe, and unify
@@ -306,7 +312,11 @@ pub(crate) fn canonicalize_name_parts_compat(
     // tagged with whether a dash bound it together.
     let mut flattened: Vec<(String, usize)> = Vec::new();
     let mut dash_bound: Vec<bool> = Vec::new();
-    for (group_index, chunk) in first_clean.split_whitespace().enumerate() {
+    for (group_index, chunk) in first_clean
+        .split(is_python_whitespace_compat)
+        .filter(|chunk| !chunk.is_empty())
+        .enumerate()
+    {
         dash_bound.push(chunk.contains('-'));
         for token in canonical_name_tokens(&chunk.replace('-', " "), unidecode_char_map) {
             flattened.push((token, group_index));
@@ -499,6 +509,30 @@ mod tests {
                     "case {case_id}: count key {name}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn canonical_first_splitting_matches_python_whitespace() {
+        let name_prefixes = python_name_prefixes();
+        for separator in ['\u{001c}', '\u{001d}', '\u{001e}', '\u{001f}'] {
+            let raw = format!("Anne-Marie{separator}Louise");
+            let (first, middle, last) =
+                canonicalize_name_parts_compat(&raw, "", "", &name_prefixes, None);
+            assert_eq!(first, "anne marie", "separator U+{:04X}", separator as u32);
+            assert_eq!(middle, "louise", "separator U+{:04X}", separator as u32);
+            assert_eq!(last, "");
+        }
+
+        for raw in [
+            "Anne-Marie\u{001c}\u{001d}\u{001e}\u{001f}Louise",
+            "Anne-Marie\u{00a0}Louise",
+        ] {
+            let (first, middle, last) =
+                canonicalize_name_parts_compat(raw, "", "", &name_prefixes, None);
+            assert_eq!(first, "anne marie", "raw input {raw:?}");
+            assert_eq!(middle, "louise", "raw input {raw:?}");
+            assert_eq!(last, "");
         }
     }
 

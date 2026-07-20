@@ -72,6 +72,15 @@ class TestClusterer(unittest.TestCase):
         assert canonicalize_name_parts("Md", None, None)[:2] == ("md", "")
         assert canonicalize_name_parts("Dr Md Karim", None, None)[:2] == ("md", "karim")
 
+    def test_canonical_first_uses_python_whitespace(self):
+        for separator in "\u001c\u001d\u001e\u001f":
+            assert canonicalize_name_parts(f"Anne-Marie{separator}Louise", None, None)[:2] == (
+                "anne marie",
+                "louise",
+            )
+        for raw in ("Anne-Marie\u001c\u001d\u001e\u001fLouise", "Anne-Marie\u00a0Louise"):
+            assert canonicalize_name_parts(raw, None, None)[:2] == ("anne marie", "louise")
+
     def test_name_similarity_features(self):
         assert [NUMPY_NAN] * 4 == name_text_features("", cast(Any, None))
         assert [0.0, 0.0, 0.0, 1.0] == name_text_features("text", "text")
@@ -195,6 +204,9 @@ class TestClusterer(unittest.TestCase):
             ".@b",
         ):
             assert email_prefix_suffix(malformed) == (None, None)
+        for separator in "\u001c\u001d\u001e\u001f":
+            assert email_prefix_suffix(f"a{separator}@b") == (None, None)
+        assert email_prefix_suffix("a\u001c\u001d\u001e\u001f@b") == (None, None)
 
     def test_first_name_aliases_are_order_independent(self):
         directed_aliases = {("qi xin", "qadir")}

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::constraints::count_initials;
 use crate::name_counts::NameCountsData;
+use crate::text_compat::is_python_whitespace_compat;
 use crate::{py_len, CounterData};
 
 pub(crate) fn extract_string_string_map(
@@ -469,7 +470,7 @@ pub(crate) fn email_parts(email: &str) -> Option<(String, String)> {
     if prefix_raw.is_empty()
         || suffix_raw.is_empty()
         || suffix_raw.contains('@')
-        || email.chars().any(char::is_whitespace)
+        || email.chars().any(is_python_whitespace_compat)
     {
         return None;
     }
@@ -902,5 +903,22 @@ mod email_tests {
             Some(("j.smith".into(), "mit.edu".into()))
         );
         assert_eq!(email_pair_parts(Some("a@b@c"), Some("ab@c")), None);
+    }
+
+    #[test]
+    fn python_whitespace_in_emails_is_missing_evidence() {
+        for separator in ['\u{001c}', '\u{001d}', '\u{001e}', '\u{001f}'] {
+            let malformed = format!("a{separator}@b");
+            assert_eq!(
+                email_parts(&malformed),
+                None,
+                "separator U+{:04X}",
+                separator as u32
+            );
+        }
+        for malformed in ["a\u{001c}\u{001d}\u{001e}\u{001f}@b", "a\u{00a0}@b"] {
+            assert_eq!(email_parts(malformed), None, "{malformed:?}");
+        }
+        assert_eq!(email_parts("A@B"), Some(("a".into(), "b".into())));
     }
 }

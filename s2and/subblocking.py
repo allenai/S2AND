@@ -27,6 +27,15 @@ from s2and.arrow_inputs import require_arrow_artifacts
 from s2and.arrow_schema import validate_arrow_schema
 from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION, SPECTER_DIM
 from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_lookup_index_batch_indices_for_request
+from s2and.orcid_prefix_counts import (
+    ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
+    ORCID_PREFIX_DATA_FILENAME,
+    ORCID_PREFIX_GENERATION_ID_PATTERN,
+    ORCID_PREFIX_MANIFEST_FILENAME,
+    ORCID_PREFIX_METADATA_FILENAME,
+    ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+    validate_orcid_prefix_counts,
+)
 from s2and.text import (
     AFFILIATIONS_STOP_WORDS,
     canonicalize_name_parts,
@@ -52,13 +61,6 @@ def _orcid_prefix_pair_count(counts: Mapping[str, Mapping[str, int]], first: str
     left, right = _canonical_orcid_prefix_pair(first, second)
     nested = counts.get(left)
     return None if nested is None else nested.get(right)
-
-
-_ORCID_PREFIX_MANIFEST_FILENAME = "first_k_letter_counts_from_orcid.manifest.json"
-_ORCID_PREFIX_METADATA_FILENAME = "first_k_letter_counts_from_orcid.meta.json"
-_ORCID_PREFIX_DATA_FILENAME = "first_k_letter_counts_from_orcid.json"
-_ORCID_PREFIX_PAIR_KEY_SEMANTICS = "unordered_lexicographic"
-_ORCID_PREFIX_GENERATION_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*-[0-9a-f]{12}"
 
 
 def _sha256_payload(payload: bytes) -> str:
@@ -141,14 +143,16 @@ def _load_canonical_orcid_prefix_count_artifact(
     """Load counts and their content hash after full artifact verification."""
 
     root = Path(data_dir).resolve()
-    pointer_path = root / _ORCID_PREFIX_MANIFEST_FILENAME
+    pointer_path = root / ORCID_PREFIX_MANIFEST_FILENAME
     if pointer_path.is_symlink() or pointer_path.resolve().parent != root:
         raise ValueError("Canonical ORCID prefix-count manifest escapes the package data directory")
     _, pointer = _read_json_mapping(pointer_path, label="manifest")
-    if pointer.get("schema_version") != 1:
-        raise ValueError("Canonical ORCID prefix-count manifest schema_version must equal 1")
+    if pointer.get("schema_version") != ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION:
+        raise ValueError(
+            "Canonical ORCID prefix-count manifest schema_version must equal " f"{ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION}"
+        )
     generation_id = pointer.get("generation_id")
-    if not isinstance(generation_id, str) or re.fullmatch(_ORCID_PREFIX_GENERATION_ID_PATTERN, generation_id) is None:
+    if not isinstance(generation_id, str) or re.fullmatch(ORCID_PREFIX_GENERATION_ID_PATTERN, generation_id) is None:
         raise ValueError("Canonical ORCID prefix-count manifest generation_id has an invalid format")
     generation_dir_name = pointer.get("generation_dir")
     expected_generation_dir_name = f"orcid-prefix-counts-{generation_id}"
@@ -158,16 +162,16 @@ def _load_canonical_orcid_prefix_count_artifact(
     if generation_dir.is_symlink() or generation_dir.resolve().parent != root:
         raise ValueError("Canonical ORCID prefix-count generation_dir escapes the package data directory")
 
-    metadata_path = generation_dir / _ORCID_PREFIX_METADATA_FILENAME
+    metadata_path = generation_dir / ORCID_PREFIX_METADATA_FILENAME
     _require_contained_file(metadata_path, parent=generation_dir, label="metadata")
     metadata_payload, metadata = _read_json_mapping(metadata_path, label="metadata")
     expected_metadata_sha256 = _require_sha256(pointer.get("metadata_sha256"), field="metadata_sha256")
     if _sha256_payload(metadata_payload) != expected_metadata_sha256:
         raise ValueError("Canonical ORCID prefix-count metadata SHA-256 does not match the manifest")
     expected_metadata = {
-        "schema_version": 1,
+        "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
         "normalization_version": NORMALIZATION_VERSION,
-        "pair_key_semantics": _ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+        "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
         "generation_id": generation_id,
     }
     for key, expected in expected_metadata.items():
@@ -183,7 +187,7 @@ def _load_canonical_orcid_prefix_count_artifact(
         raise ValueError("Canonical ORCID prefix-count generation_id is not bound to source_snapshot_id")
     _require_sha256(metadata.get("source_digest"), field="source_digest")
 
-    data_path = generation_dir / _ORCID_PREFIX_DATA_FILENAME
+    data_path = generation_dir / ORCID_PREFIX_DATA_FILENAME
     _require_contained_file(data_path, parent=generation_dir, label="data")
     expected_data_byte_count = metadata.get("data_byte_count")
     if type(expected_data_byte_count) is not int or expected_data_byte_count < 0:
@@ -197,34 +201,17 @@ def _load_canonical_orcid_prefix_count_artifact(
         expected_sha256=expected_data_sha256,
     )
 
-    pair_count = 0
-    for left, nested_counts in raw_counts.items():
-        if not isinstance(left, str) or not left:
-            raise ValueError("Canonical ORCID prefix-count outer keys must be nonempty strings")
-        if not isinstance(nested_counts, dict):
-            raise ValueError(f"Canonical ORCID prefix-count values must be JSON objects: {left!r}")
-        for right, count in nested_counts.items():
-            if not isinstance(right, str) or not right:
-                raise ValueError("Canonical ORCID prefix-count inner keys must be nonempty strings")
-            if left >= right:
-                raise ValueError("Canonical ORCID prefix-count pairs must be unequal and lexicographically ordered")
-            if (
-                not 2 <= len(left) <= 5
-                or not 2 <= len(right) <= 5
-                or left[0] != right[0]
-                or same_prefix_tokens(left, right)
-            ):
-                raise ValueError("Canonical ORCID prefix-count keys violate the generated prefix-pair semantics")
-            if type(count) is not int or count <= 0:
-                raise ValueError("Canonical ORCID prefix-count values must be positive integers")
-            pair_count += 1
+    outer_count, pair_count = validate_orcid_prefix_counts(
+        raw_counts,
+        context="Canonical ORCID prefix-count",
+    )
     outer_key_cardinality = metadata.get("outer_key_cardinality")
     pair_key_cardinality = metadata.get("pair_key_cardinality")
     if type(outer_key_cardinality) is not int or outer_key_cardinality < 0:
         raise ValueError("Canonical ORCID prefix-count outer_key_cardinality must be a nonnegative integer")
     if type(pair_key_cardinality) is not int or pair_key_cardinality < 0:
         raise ValueError("Canonical ORCID prefix-count pair_key_cardinality must be a nonnegative integer")
-    if outer_key_cardinality != len(raw_counts):
+    if outer_key_cardinality != outer_count:
         raise ValueError("Canonical ORCID prefix-count outer_key_cardinality does not match the data")
     if pair_key_cardinality != pair_count:
         raise ValueError("Canonical ORCID prefix-count pair_key_cardinality does not match the data")

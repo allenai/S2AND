@@ -17,7 +17,7 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from itertools import combinations
@@ -29,18 +29,42 @@ import orjson
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import _load_name_tuples_from_file
+from s2and.orcid_prefix_counts import (
+    ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
+    ORCID_PREFIX_DATA_FILENAME,
+    ORCID_PREFIX_MANIFEST_FILENAME,
+    ORCID_PREFIX_METADATA_FILENAME,
+    ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+    validate_orcid_prefix_counts,
+)
 from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
 
-PAIR_KEY_SEMANTICS = "unordered_lexicographic"
 K_VALUES = (2, 3, 4, 5)
 _CANONICAL_SOURCE_ORCID_PATTERN = re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9Xx]")
-QUERY = """
+_CANONICAL_SOURCE_ORCID_SQL_PATTERN = (
+    r"(?<![0-9x])[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?" r"[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{3}[0-9x](?![0-9x])"
+)
+_ORCID_DASH_SQL_PATTERN = "[-‐‑‒–—−﹘﹣－]"
+QUERY = f"""
+with source_rows as (
 select p.year, p.inserted paper_inserted,
-      pae.corpus_paper_id, pae.source, pae.orcid, pae.position,
+      pae.corpus_paper_id, pae.source, pae.orcid raw_orcid, pae.position,
       pae.first_name, pa.middle, pae.last_name,
       pa.corpus_author_id, au.ai2_id, pa.inserted pa_inserted,
       pa.updated pa_updated, pa.cluster_block_key, pa.model_version,
-      pa.clusterer
+      pa.clusterer,
+      upper(
+        regexp_replace(
+          regexp_substr(
+            coalesce(pae.orcid, ''),
+            '{_CANONICAL_SOURCE_ORCID_SQL_PATTERN}',
+            1,
+            1,
+            'ip'
+          ),
+          '{_ORCID_DASH_SQL_PATTERN}'
+        )
+      ) canonical_orcid_compact
 from content_ext.paper_authors_orcids pae
 join content_ext.papers p
   on pae.corpus_paper_id = p.corpus_paper_id
@@ -52,8 +76,21 @@ join content_ext.authors au
   on pa.corpus_author_id = au.corpus_author_id
 where pae.source in ('Crossref')
   and nullif(trim(coalesce(pae.first_name, '')), '') is not null
-order by regexp_replace(upper(pae.orcid), '[^0-9X]', ''),
-         pae.first_name, pa.middle, pae.corpus_paper_id, pae.position
+)
+select year, paper_inserted, corpus_paper_id, source, raw_orcid,
+      case
+        when canonical_orcid_compact = '' then null
+        else substring(canonical_orcid_compact, 1, 4)
+          || '-' || substring(canonical_orcid_compact, 5, 4)
+          || '-' || substring(canonical_orcid_compact, 9, 4)
+          || '-' || substring(canonical_orcid_compact, 13, 4)
+      end orcid,
+      position, first_name, middle, last_name,
+      corpus_author_id, ai2_id, pa_inserted, pa_updated,
+      cluster_block_key, model_version, clusterer
+from source_rows
+order by orcid nulls last,
+         first_name, middle, corpus_paper_id, position
 """
 
 
@@ -93,83 +130,6 @@ def prefix_pairs_for_names(
             if left != right:
                 pairs.add((left, right))
     return pairs
-
-
-def canonical_orcid_name_groups(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, set[str]], dict[str, int]]:
-    """Canonicalize source rows and group nonempty first names by ORCID."""
-
-    groups: dict[str, set[str]] = defaultdict(set)
-    cache: dict[tuple[Any, Any], str] = {}
-    metrics = Counter[str]()
-    for row in rows:
-        metrics["source_rows"] += 1
-        raw_orcid = row.get("orcid")
-        orcid = _canonical_source_orcid(raw_orcid)
-        if orcid is None:
-            metric = "rejected_missing_orcid" if not str(raw_orcid or "").strip() else "rejected_invalid_orcid"
-            metrics[metric] += 1
-            continue
-        raw_key = (row.get("first_name"), row.get("middle"))
-        canonical_first = cache.get(raw_key)
-        if canonical_first is None:
-            parts = canonicalize_name_parts(raw_key[0], raw_key[1], None)
-            canonical_first = parts.first
-            cache[raw_key] = canonical_first
-        if not canonical_first:
-            metrics["rejected_empty_canonical_first"] += 1
-            continue
-        groups[orcid].add(canonical_first)
-        metrics["accepted_rows"] += 1
-    metrics["orcid_groups"] = len(groups)
-    metrics["unique_orcid_names"] = sum(len(names) for names in groups.values())
-    return dict(groups), dict(metrics)
-
-
-def build_prefix_counts(
-    orcid_name_groups: Mapping[str, Iterable[str]],
-    name_tuples: Iterable[tuple[str, str]],
-    *,
-    min_orcid_count: int = 10,
-    min_alias_count: int = 2,
-    max_names_per_orcid: int = 100,
-) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Build deterministic nested counts using canonical unordered pair keys."""
-
-    if max_names_per_orcid < 2:
-        raise ValueError("max_names_per_orcid must be at least 2")
-    orcid_counts: Counter[tuple[str, str]] = Counter()
-    rejected_empty_names = 0
-    max_names_observed = 0
-    for orcid, names in orcid_name_groups.items():
-        valid_name_set: set[str] = set()
-        for name in names:
-            if not isinstance(name, str) or not name:
-                rejected_empty_names += 1
-                continue
-            valid_name_set.add(name)
-            if len(valid_name_set) > max_names_per_orcid:
-                raise ValueError(
-                    f"ORCID {orcid!r} has more than max_names_per_orcid={max_names_per_orcid} unique names; "
-                    "raise the explicit bound only after reviewing the source group"
-                )
-        max_names_observed = max(max_names_observed, len(valid_name_set))
-        valid_names = sorted(valid_name_set)
-        for first_name, second_name in combinations(valid_names, 2):
-            pairs = prefix_pairs_for_names(first_name, second_name)
-            orcid_counts.update(pair for pair in pairs if not same_prefix_tokens(*pair))
-
-    nested, merge_metrics, _name_tuples_digest = _merge_prefix_counts(
-        orcid_counts,
-        name_tuples,
-        min_orcid_count=min_orcid_count,
-        min_alias_count=min_alias_count,
-    )
-    return nested, {
-        **merge_metrics,
-        "rejected_empty_group_names": rejected_empty_names,
-        "max_unique_names_per_orcid": max_names_observed,
-        "max_names_per_orcid_limit": max_names_per_orcid,
-    }
 
 
 def _merge_prefix_counts(
@@ -241,7 +201,7 @@ def build_prefix_counts_from_sorted_rows(
     current_orcid: str | None = None
     current_names: set[str] = set()
     previous_orcid: str | None = None
-    previous_raw_orcid: str | None = None
+    previous_source_orcid: str | None = None
     previous_normalized_orcid: str | None = None
     canonical_first_cache: dict[tuple[str | None, str | None], str] = {}
 
@@ -279,17 +239,18 @@ def build_prefix_counts_from_sorted_rows(
 
     for row in rows:
         metrics["source_rows"] += 1
-        raw_orcid = row.get("orcid")
+        raw_orcid = row.get("raw_orcid", row.get("orcid"))
+        source_orcid = row.get("orcid")
         raw_first_value = row.get("first_name")
         raw_middle_value = row.get("middle")
         raw_first = None if raw_first_value is None else str(raw_first_value)
         raw_middle = None if raw_middle_value is None else str(raw_middle_value)
-        raw_orcid_text = None if raw_orcid is None else str(raw_orcid)
-        if raw_orcid_text == previous_raw_orcid:
+        source_orcid_text = None if source_orcid is None else str(source_orcid)
+        if source_orcid_text == previous_source_orcid:
             orcid = previous_normalized_orcid
         else:
-            orcid = _canonical_source_orcid(raw_orcid_text)
-            previous_raw_orcid = raw_orcid_text
+            orcid = _canonical_source_orcid(source_orcid_text)
+            previous_source_orcid = source_orcid_text
             previous_normalized_orcid = orcid
         if orcid is None:
             metric = "rejected_missing_orcid" if not str(raw_orcid or "").strip() else "rejected_invalid_orcid"
@@ -341,16 +302,6 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _is_canonical_prefix_token(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and 2 <= len(value) <= 5
-        and value.isascii()
-        and value.isprintable()
-        and value == value.lower()
-    )
-
-
 def _write_compact_json(path: Path, payload: Mapping[str, object]) -> tuple[str, int]:
     """Write deterministic compact JSON without materializing an intermediate string."""
 
@@ -360,33 +311,6 @@ def _write_compact_json(path: Path, payload: Mapping[str, object]) -> tuple[str,
         output.flush()
         os.fsync(output.fileno())
     return _sha256_bytes(encoded), len(encoded)
-
-
-def _validate_counts_for_publication(counts: Mapping[str, Mapping[str, int]]) -> tuple[int, int]:
-    """Validate the runtime pair-key contract before writing any generation files."""
-
-    if not isinstance(counts, dict):
-        raise TypeError("counts must be a plain dict so publication does not make an unbounded copy")
-    pair_count = 0
-    for left, nested in counts.items():
-        if not _is_canonical_prefix_token(left):
-            raise ValueError("counts outer keys must be lowercase printable ASCII prefixes of length 2 through 5")
-        if not isinstance(nested, dict):
-            raise TypeError("counts nested values must be plain dictionaries")
-        for right, count in nested.items():
-            if not _is_canonical_prefix_token(right) or left >= right:
-                raise ValueError("counts pairs must be unequal and lexicographically ordered")
-            if (
-                not 2 <= len(left) <= 5
-                or not 2 <= len(right) <= 5
-                or left[0] != right[0]
-                or same_prefix_tokens(left, right)
-            ):
-                raise ValueError("counts keys violate the generated prefix-pair semantics")
-            if type(count) is not int or count <= 0:
-                raise ValueError("counts values must be positive integers")
-            pair_count += 1
-    return len(counts), pair_count
 
 
 @contextmanager
@@ -412,9 +336,12 @@ def publish_generation(
         raise ValueError("source_snapshot_id must contain only letters, digits, '.', '_', and '-'")
     if re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
         raise ValueError("source_digest must be a lowercase SHA-256 digest of the selected canonical inputs")
-    outer_key_cardinality, pair_key_cardinality = _validate_counts_for_publication(counts)
+    outer_key_cardinality, pair_key_cardinality = validate_orcid_prefix_counts(
+        counts,
+        context="counts",
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    pointer_path = output_dir / "first_k_letter_counts_from_orcid.manifest.json"
+    pointer_path = output_dir / ORCID_PREFIX_MANIFEST_FILENAME
     if pointer_path.exists() and not overwrite:
         raise FileExistsError(f"Manifest already exists; pass --overwrite to replace it: {pointer_path}")
     generation_id = f"{source_snapshot_id}-{uuid.uuid4().hex[:12]}"
@@ -426,12 +353,12 @@ def publish_generation(
     pointer_committed = False
     pointer_tmp: Path | None = None
     try:
-        data_path = staging_dir / "first_k_letter_counts_from_orcid.json"
+        data_path = staging_dir / ORCID_PREFIX_DATA_FILENAME
         data_sha256, data_byte_count = _write_compact_json(data_path, counts)
         metadata = {
-            "schema_version": 1,
+            "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
             "normalization_version": NORMALIZATION_VERSION,
-            "pair_key_semantics": PAIR_KEY_SEMANTICS,
+            "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
             "generation_id": generation_id,
             "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
             "source_snapshot_id": source_snapshot_id,
@@ -443,7 +370,7 @@ def publish_generation(
             "metrics": dict(metrics),
         }
         metadata_bytes = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
-        (staging_dir / "first_k_letter_counts_from_orcid.meta.json").write_bytes(metadata_bytes)
+        (staging_dir / ORCID_PREFIX_METADATA_FILENAME).write_bytes(metadata_bytes)
         for path in staging_dir.iterdir():
             with path.open("r+b") as stream:
                 os.fsync(stream.fileno())
@@ -453,7 +380,7 @@ def publish_generation(
         final_dir_published = True
         fsync_directory(output_dir)
         pointer = {
-            "schema_version": 1,
+            "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
             "generation_id": generation_id,
             "generation_dir": final_dir.name,
             "metadata_sha256": _sha256_bytes(metadata_bytes),
@@ -509,7 +436,7 @@ def _load_warehouse_rows(limit: int | None) -> Iterable[Mapping[str, Any]]:
     print(json.dumps({"warehouse_query": query, "limit": limit}, indent=2))
     dataframe = _evaluate_redshift_query(query)
     columns = {str(column): index for index, column in enumerate(dataframe.columns)}
-    required_columns = ("orcid", "first_name", "middle")
+    required_columns = ("raw_orcid", "orcid", "first_name", "middle")
     missing_columns = [column for column in required_columns if column not in columns]
     if missing_columns:
         raise ValueError(f"Warehouse result is missing required columns: {missing_columns}")

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import multiprocessing
+import re
 import shutil
 import threading
 import tomllib
@@ -21,6 +22,7 @@ from s2and.subblocking import _LazyCanonicalOrcidPrefixCounts, _load_canonical_o
 
 ORCID_1 = "0000-0000-0000-0001"
 ORCID_2 = "0000-0000-0000-0002"
+ORCID_X = "0000-0000-0000-000X"
 
 
 def _load_module() -> ModuleType:
@@ -57,6 +59,117 @@ def test_import_is_side_effect_free_without_internal_pys2() -> None:
     assert callable(module.main)
 
 
+def test_warehouse_query_emits_and_orders_by_the_canonical_orcid() -> None:
+    module = _load_module()
+
+    query = module._warehouse_query(None)
+
+    assert "regexp_substr(" in query
+    assert "pae.orcid raw_orcid" in query
+    assert "end orcid" in query
+    assert "order by orcid nulls last" in query
+    assert "regexp_replace(upper(pae.orcid), '[^0-9X]', '')" not in query
+
+
+@pytest.mark.parametrize(
+    ("raw_orcid", "expected"),
+    [
+        ("leading junk 0000-0000-0000-0001 trailing junk", ORCID_1),
+        ("leading-x 0000-0000-0000-000x trailing-x", ORCID_X),
+        ("x0000-0000-0000-0001", None),
+        ("not-an-orcid", None),
+        (None, None),
+    ],
+)
+def test_source_orcid_canonicalization_matches_the_warehouse_key(
+    raw_orcid: str | None,
+    expected: str | None,
+) -> None:
+    module = _load_module()
+    match = re.search(
+        module._CANONICAL_SOURCE_ORCID_SQL_PATTERN,
+        raw_orcid or "",
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        warehouse_key = None
+    else:
+        compact = re.sub(module._ORCID_DASH_SQL_PATTERN, "", match.group(0)).upper()
+        warehouse_key = f"{compact[:4]}-{compact[4:8]}-{compact[8:12]}-{compact[12:]}"
+
+    assert module._canonical_source_orcid(raw_orcid) == expected
+    assert warehouse_key == expected
+
+
+def test_streaming_builder_keeps_repeated_canonical_groups_contiguous() -> None:
+    module = _load_module()
+    rows = [
+        {
+            "raw_orcid": "leading-x 0000-0000-0000-0001 trailing-x",
+            "orcid": ORCID_1,
+            "first_name": "Alice",
+            "middle": None,
+        },
+        {
+            "raw_orcid": "ORCID: 0000000000000001",
+            "orcid": ORCID_1,
+            "first_name": "Amy",
+            "middle": None,
+        },
+        {
+            "raw_orcid": "ORCID: 0000-0000-0000-000x",
+            "orcid": ORCID_X,
+            "first_name": "Axel",
+            "middle": None,
+        },
+        {
+            "raw_orcid": "000000000000000x trailing",
+            "orcid": ORCID_X,
+            "first_name": "Ava",
+            "middle": None,
+        },
+        {
+            "raw_orcid": "not-an-orcid",
+            "orcid": None,
+            "first_name": "Invalid",
+            "middle": None,
+        },
+        {
+            "raw_orcid": None,
+            "orcid": None,
+            "first_name": "Missing",
+            "middle": None,
+        },
+    ]
+
+    counts, metrics, _digest = module.build_prefix_counts_from_sorted_rows(
+        rows,
+        [],
+        min_orcid_count=1,
+    )
+
+    assert counts
+    assert metrics["accepted_rows"] == 4
+    assert metrics["orcid_groups"] == 2
+    assert metrics["unique_orcid_names"] == 4
+    assert metrics["rejected_invalid_orcid"] == 1
+    assert metrics["rejected_missing_orcid"] == 1
+
+
+def test_streaming_builder_retains_the_canonical_orcid_monotonicity_check() -> None:
+    module = _load_module()
+
+    with pytest.raises(ValueError, match="sorted by canonical orcid"):
+        module.build_prefix_counts_from_sorted_rows(
+            [
+                {"orcid": ORCID_2, "first_name": "Amy", "middle": None},
+                {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
+            ],
+            [],
+            min_orcid_count=1,
+        )
+
+
 def test_package_data_includes_versioned_orcid_count_generation_files() -> None:
     with (Path(PROJECT_ROOT_PATH) / "pyproject.toml").open("rb") as stream:
         setuptools = tomllib.load(stream)["tool"]["setuptools"]
@@ -73,17 +186,19 @@ def test_package_data_includes_versioned_orcid_count_generation_files() -> None:
 
 def test_empty_canonical_names_are_rejected_with_metrics() -> None:
     module = _load_module()
-    groups, metrics = module.canonical_orcid_name_groups(
+    counts, metrics, _digest = module.build_prefix_counts_from_sorted_rows(
         [
             {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
             {"orcid": ORCID_1, "first_name": "", "middle": None},
             {"orcid": ORCID_1, "first_name": "...", "middle": None},
             {"orcid": "", "first_name": "Amy", "middle": None},
             {"orcid": "not-an-orcid", "first_name": "Ava", "middle": None},
-        ]
+        ],
+        [],
+        min_orcid_count=1,
     )
 
-    assert groups == {ORCID_1: {"alice"}}
+    assert counts == {}
     assert metrics["accepted_rows"] == 1
     assert metrics["rejected_empty_canonical_first"] == 2
     assert metrics["rejected_missing_orcid"] == 1
@@ -92,14 +207,20 @@ def test_empty_canonical_names_are_rejected_with_metrics() -> None:
 
 def test_prefix_counts_are_unordered_and_deterministic() -> None:
     module = _load_module()
-    forward, _ = module.build_prefix_counts(
-        {"o1": ["alice", "amy"]},
+    forward, _, _ = module.build_prefix_counts_from_sorted_rows(
+        [
+            {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
+            {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
+        ],
         {("alicia", "amanda")},
         min_orcid_count=1,
         min_alias_count=1,
     )
-    reverse, _ = module.build_prefix_counts(
-        {"o1": ["amy", "alice"]},
+    reverse, _, _ = module.build_prefix_counts_from_sorted_rows(
+        [
+            {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
+            {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
+        ],
         {("amanda", "alicia")},
         min_orcid_count=1,
         min_alias_count=1,
@@ -186,6 +307,39 @@ def test_runtime_loader_is_lazy_and_verifies_the_published_generation(tmp_path: 
     data_path = tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.json"
     data_path.write_text('{"al":{"az":9}}', encoding="utf-8")
     with pytest.raises(ValueError, match="data SHA-256"):
+        _load_canonical_orcid_prefix_counts(tmp_path)
+
+
+@pytest.mark.parametrize("counts", [{"Al": {"Am": 7}}, {"ál": {"ám": 7}}])
+def test_runtime_loader_rejects_noncanonical_prefix_tokens(
+    tmp_path: Path,
+    counts: dict[str, dict[str, int]],
+) -> None:
+    module = _load_module()
+    module.publish_generation(
+        {"al": {"am": 7}},
+        output_dir=tmp_path,
+        source_snapshot_id="fixture",
+        source_digest="a" * 64,
+        metrics={},
+        overwrite=False,
+    )
+    pointer_path = tmp_path / "first_k_letter_counts_from_orcid.manifest.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    generation_dir = tmp_path / pointer["generation_dir"]
+    data_path = generation_dir / "first_k_letter_counts_from_orcid.json"
+    metadata_path = generation_dir / "first_k_letter_counts_from_orcid.meta.json"
+    data_bytes = json.dumps(counts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    data_path.write_bytes(data_bytes)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["data_sha256"] = hashlib.sha256(data_bytes).hexdigest()
+    metadata["data_byte_count"] = len(data_bytes)
+    metadata_bytes = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
+    metadata_path.write_bytes(metadata_bytes)
+    pointer["metadata_sha256"] = hashlib.sha256(metadata_bytes).hexdigest()
+    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lowercase printable ASCII prefixes"):
         _load_canonical_orcid_prefix_counts(tmp_path)
 
 
@@ -443,14 +597,6 @@ def test_publication_rejects_non_ascii_prefixes_before_writing(tmp_path: Path) -
 
 def test_name_pair_expansion_has_an_explicit_per_orcid_bound() -> None:
     module = _load_module()
-
-    with pytest.raises(ValueError, match="max_names_per_orcid=2"):
-        module.build_prefix_counts(
-            {"o1": ["alice", "amy", "ava"]},
-            [],
-            min_orcid_count=1,
-            max_names_per_orcid=2,
-        )
 
     with pytest.raises(ValueError, match="max_names_per_orcid=2"):
         module.build_prefix_counts_from_sorted_rows(

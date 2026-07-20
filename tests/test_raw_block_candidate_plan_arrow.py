@@ -2031,6 +2031,7 @@ def test_raw_arrow_plan_bundle_owns_typed_values_used_by_subset_consumer() -> No
     assert subset_bundle.telemetry["seed_signature_count"] == 1
     assert subset_bundle.telemetry["timings"]["total_secs"] == pytest.approx(0.5)
 
+
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")

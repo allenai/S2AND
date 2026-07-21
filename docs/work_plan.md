@@ -282,12 +282,13 @@ boundaries fail closed under mutation.
 
 ### One-off benchmark machinery
 
-**Status: Open**
+**Status: Complete**
 
-- Move or delete `scripts/bench_python_name_counts.py` from maintained source.
-- Remove the in-file Rust benchmark harness that recreates the retired dense
-  layout. Preserve relevant conclusions in documentation rather than obsolete
-  executable machinery.
+- `scripts/bench_python_name_counts.py` is deleted.
+- The in-file Rust benchmark harness that recreated the retired dense layout
+  is removed; the adaptive-layout rationale is recorded in
+  [rust/runtime.md](rust/runtime.md) and the real layout-selection unit tests
+  remain.
 
 ### Proven dead private code
 

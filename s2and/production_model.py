@@ -568,10 +568,18 @@ def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
     _validate_clusterer_config(clusterer_config)
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
-    _validate_pairwise_metadata(
-        root,
-        manifest,
-    )
+    _validate_pairwise_metadata(root, manifest)
+    return _pairwise_binding_from_validated_parts(manifest, clusterer_config, featurizer_info, nameless_info)
+
+
+def _pairwise_binding_from_validated_parts(
+    manifest: Mapping[str, Any],
+    clusterer_config: Mapping[str, Any],
+    featurizer_info: FeaturizationInfo,
+    nameless_info: FeaturizationInfo,
+) -> dict[str, Any]:
+    """Build the pairwise binding from bundle parts a caller already validated."""
+
     feature_contract = dict(clusterer_config["feature_contract"])
     ordered_feature_contract = {
         "feature_contract": feature_contract,
@@ -745,7 +753,12 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     if incremental_linker_relpath is not None:
         incremental_linker_dir = bundle_dir / str(incremental_linker_relpath)
         incremental_linker_artifact = _validate_incremental_linker_metadata(incremental_linker_dir)
-        expected_binding = pairwise_bundle_binding(bundle_dir)
+        expected_binding = _pairwise_binding_from_validated_parts(
+            manifest,
+            clusterer_config,
+            featurizer_info,
+            nameless_featurizer_info,
+        )
         if dict(incremental_linker_artifact.metadata.pairwise_bundle_binding) != expected_binding:
             raise ValueError("Incremental linker pairwise_bundle_binding does not match enclosing bundle")
         target_path = bundle_dir / str(manifest["files"]["incremental_linker_training_target"])

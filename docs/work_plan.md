@@ -233,13 +233,13 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Single-pass bundle validation
 
-**Status: Open**
+**Status: Complete**
 
-- Keep public `pairwise_bundle_binding(path)` as a validating boundary.
-- During model loading, derive the binding from the already validated manifest
-  and clusterer config instead of hashing the whole bundle a second time.
-- Add a checksum-call-count regression showing one hash per declared file on a
-  normal load while preserving tamper rejection.
+- Public `pairwise_bundle_binding(path)` remains a validating boundary; model
+  loading derives the binding from the already validated manifest and
+  clusterer config via `_pairwise_binding_from_validated_parts`.
+- A checksum-call-count regression asserts exactly one hash per declared file
+  on a normal complete-bundle load; tamper rejection is unchanged.
 
 ### Artifact save validation
 

@@ -948,6 +948,40 @@ def test_complete_bundle_rejects_target_tampering_even_with_refreshed_manifest(
         load_production_model(output_bundle)
 
 
+def test_normal_load_hashes_each_declared_file_exactly_once(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    output_bundle = tmp_path / "production_model_v9.8"
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
+    finalize_production_bundle(
+        pairwise_bundle_dir=bundle_dir,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        bundle_version="9.8",
+        pairwise_model_version="9.9",
+        incremental_linker_version="9.9",
+    )
+
+    hashed: list[str] = []
+    real_sha256 = production_model_module._sha256_file
+
+    def counting_sha256(path: Path) -> str:
+        hashed.append(Path(path).resolve().as_posix())
+        return real_sha256(path)
+
+    monkeypatch.setattr(production_model_module, "_sha256_file", counting_sha256)
+    load_production_model(output_bundle)
+
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    expected = sorted((output_bundle / relpath).resolve().as_posix() for relpath in manifest["sha256"])
+    assert sorted(hashed) == expected
+
+
 def test_bundle_directory_version_must_match_explicit_version(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],

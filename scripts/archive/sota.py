@@ -24,12 +24,9 @@ import pandas as pd
 
 logger = logging.getLogger("s2and")
 
-from tqdm import tqdm
-
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["main_data_dir"], ".feature_cache")
-
 from hyperopt import hp
 from sklearn.cluster import DBSCAN
+from tqdm import tqdm
 
 from s2and.consts import DEFAULT_CHUNK_SIZE, FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH
 from s2and.data import ANDData
@@ -79,7 +76,6 @@ BLOCK_TYPE = "original"
 N_TRAIN_PAIRS_SIZE = 100000
 N_VAL_TEST_SIZE = 10000
 N_ITER = 25
-USE_CACHE = False  # turn on if you aren't planning on changing the features and have lots of RAM
 PREPROCESS = True
 
 
@@ -304,7 +300,6 @@ def main(
             anddata,
             FEATURIZER_INFO,
             n_jobs=N_JOBS,
-            use_cache=USE_CACHE,
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=NAN_VALUE,
@@ -351,7 +346,6 @@ def main(
                 ),
                 search_space=search_space,
                 n_jobs=N_JOBS,
-                use_cache=USE_CACHE,
                 nameless_classifier=(
                     nameless_pairwise_modeler.classifier if nameless_pairwise_modeler is not None else None
                 ),

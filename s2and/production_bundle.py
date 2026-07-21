@@ -181,7 +181,6 @@ def _clusterer_config_payload(
         "random_state": int(getattr(clusterer, "random_state", 42)),
         "schema_version": CLUSTERER_CONFIG_SCHEMA_VERSION,
         "suppress_orcid": bool(getattr(clusterer, "suppress_orcid", False)),
-        "use_cache": bool(getattr(clusterer, "use_cache", False)),
         "use_default_constraints_as_supervision": bool(
             getattr(clusterer, "use_default_constraints_as_supervision", True)
         ),

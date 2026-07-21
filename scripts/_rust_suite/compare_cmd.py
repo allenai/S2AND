@@ -126,13 +126,7 @@ def _validate_bounded_args(args: argparse.Namespace) -> None:
 
 
 def _selected_feature_indices(featurizer_info: Any) -> list[int]:
-    return sorted(
-        {
-            feature_index
-            for feature_group in featurizer_info.features_to_use
-            for feature_index in featurizer_info.feature_group_to_index[feature_group]
-        }
-    )
+    return featurizer_info.selected_feature_indices()
 
 
 def _featurize_pairs_with_rust(
@@ -285,7 +279,6 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
                 dataset,
                 featurizer_info,
                 n_jobs=args.n_jobs,
-                use_cache=False,
                 chunk_size=args.chunk_size,
                 nameless_featurizer_info=None,
                 nan_value=np.nan,

@@ -176,7 +176,6 @@ def _dummy_clusterer(
         classifier=None,
         cluster_model=cluster_model,
         n_jobs=1,
-        use_cache=False,
         use_default_constraints_as_supervision=use_default_constraints_as_supervision,
         batch_size=2,
     )

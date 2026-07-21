@@ -12,14 +12,6 @@ Centralized reference for supported S2AND environment variables.
 
 ---
 
-## Cache Configuration
-
-| Variable | Values | Default | Description |
-|----------|--------|---------|-------------|
-| `S2AND_CACHE` | `<path>` | `~/.s2and` | Cache root directory for the pair-feature cache and artifact downloads. |
-
-See [caching.md](caching.md) for cache semantics and on-disk layout.
-
 ---
 
 ## Artifact Paths

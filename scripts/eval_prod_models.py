@@ -1037,7 +1037,6 @@ def build_pairwise_clusterer_from_features(
         search_space=fixed_cluster_search_space,
         n_jobs=n_jobs,
         n_iter=cluster_n_iter,
-        use_cache=False,
         nameless_classifier=nameless_pairwise_modeler.classifier,
         nameless_featurizer_info=nameless_featurization_info,
         random_state=random_seed,
@@ -1207,7 +1206,6 @@ def main() -> None:
                     raise FileNotFoundError(f"Missing explicit model artifact at {model_path}")
                 print(f"=== specter_suffix: {specter_suffix}, model: {model_path} ===")
                 clusterer = load_production_model(model_path)
-                clusterer.use_cache = False
                 clusterer.n_jobs = n_jobs
             else:
                 print(f"=== specter_suffix: {specter_suffix}, train_mode: {train_mode} ===")
@@ -1303,7 +1301,6 @@ def main() -> None:
                             anddata,
                             featurization_info,
                             n_jobs=n_jobs,
-                            use_cache=False,
                             chunk_size=DEFAULT_CHUNK_SIZE,
                             nameless_featurizer_info=nameless_featurization_info,
                             nan_value=np.nan,

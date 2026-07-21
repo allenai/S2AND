@@ -775,7 +775,6 @@ def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
     assert Path(arrow_paths["name_counts_index"]).resolve() == (fixture_dataset / "name_counts_index").resolve()
 
     clusterer = load_production_model(str(production_model))
-    clusterer.use_cache = False
     clusterer.n_jobs = 4
     cluster_metrics, _ = eval_prod_models.cluster_eval_arrow(
         arrow_paths,
@@ -835,7 +834,6 @@ def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
     cluster_to_signatures = eval_prod_models.construct_cluster_to_signatures(signature_to_cluster_id, test_block_dict)
 
     clusterer = load_production_model(str(production_model))
-    clusterer.use_cache = False
     clusterer.n_jobs = 4
     predicted_clusters: dict[str, list[str]] = {}
     total_query_count = 0

@@ -377,7 +377,6 @@ def _run_single(
     clusterer = load_production_model(resolved_model_path)
     model_module._ensure_lightgbm_fitted(clusterer.classifier)
     model_module._ensure_lightgbm_fitted(clusterer.nameless_classifier)
-    clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
     # Check if we have clusters (needed for train mode / cluster_eval)
@@ -673,7 +672,6 @@ def _run_single_arrow(
     clusterer = load_production_model(resolved_model_path)
     model_module._ensure_lightgbm_fitted(clusterer.classifier)
     model_module._ensure_lightgbm_fitted(clusterer.nameless_classifier)
-    clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
     rust_extension_identity = collect_rust_extension_identity(

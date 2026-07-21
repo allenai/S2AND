@@ -165,7 +165,6 @@ def run_smoke(root: Path) -> dict[str, Any]:
     arrow_paths = _write_arrow_request(root / "arrow")
     clusterer = load_production_model(bundle_dir)
     clusterer.n_jobs = 1
-    clusterer.use_cache = False
     result = clusterer.predict_incremental_from_arrow_paths(
         ["q1", "s1", "s2"],
         arrow_paths,

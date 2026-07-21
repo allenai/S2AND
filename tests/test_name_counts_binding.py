@@ -46,7 +46,6 @@ def _name_count_clusterer(provenance: dict[str, Any]) -> Clusterer:
         FeaturizationInfo(["name_counts"], featurizer_version=FEATURIZER_VERSION),
         _ConstantClassifier(),
         n_jobs=1,
-        use_cache=False,
     )
     clusterer.feature_contract = _feature_contract(provenance)
     return clusterer

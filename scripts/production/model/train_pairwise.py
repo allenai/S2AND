@@ -24,12 +24,10 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-DEFAULT_FEATURE_CACHE_ROOT = REPO_ROOT / "data" / ".feature_cache"
-os.environ.setdefault("S2AND_CACHE", str(DEFAULT_FEATURE_CACHE_ROOT))
-os.environ.setdefault("S2AND_BACKEND", "rust")
 
 from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH  # noqa: E402
 from s2and.data import ANDData  # noqa: E402
+from s2and.feature_cache import build_and_cached_featurize  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -131,7 +129,6 @@ def _training_config(args: argparse.Namespace, dataset_names: list[str]) -> dict
         "specter_suffix": str(args.specter_suffix),
         "signatures_suffix": str(args.signatures_suffix),
         "train_pairs_size": int(args.train_pairs_size),
-        "use_cache": bool(args.use_cache),
         "val_test_size": int(args.val_test_size),
     }
 
@@ -177,58 +174,74 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
     for dataset_name in tqdm(dataset_names, desc="Processing datasets and fitting base models"):
         logger.info("processing dataset %s", dataset_name)
         clusters_path, train_pairs_path, val_pairs_path, test_pairs_path = _dataset_pair_paths(data_dir, dataset_name)
-        anddata = ANDData(
-            signatures=str(
-                _resolve_dataset_file(
-                    data_dir,
-                    dataset_name,
-                    f"{dataset_name}{args.signatures_suffix}",
-                    args.signatures_suffix.lstrip("_"),
-                    "signatures.json",
-                )
-            ),
-            papers=str(
-                _resolve_dataset_file(
-                    data_dir,
-                    dataset_name,
-                    f"{dataset_name}_papers.json",
-                    "papers.json",
-                )
-            ),
-            name=dataset_name,
-            mode="train",
-            specter_embeddings=str(
-                _resolve_dataset_file(
-                    data_dir,
-                    dataset_name,
-                    f"{dataset_name}{args.specter_suffix}",
-                    args.specter_suffix.lstrip("_"),
-                    "specter.pickle",
-                )
-            ),
-            clusters=clusters_path,
-            block_type=DEFAULT_BLOCK_TYPE,
-            train_pairs=train_pairs_path,
-            val_pairs=val_pairs_path,
-            test_pairs=test_pairs_path,
-            train_pairs_size=int(args.train_pairs_size),
-            val_pairs_size=int(args.val_test_size),
-            test_pairs_size=int(args.val_test_size),
-            name_counts_index=NAME_COUNTS_INDEX_PATH,
-            preprocess=True,
+        signatures_path = str(
+            _resolve_dataset_file(
+                data_dir,
+                dataset_name,
+                f"{dataset_name}{args.signatures_suffix}",
+                args.signatures_suffix.lstrip("_"),
+                "signatures.json",
+            )
         )
+        papers_path = str(
+            _resolve_dataset_file(
+                data_dir,
+                dataset_name,
+                f"{dataset_name}_papers.json",
+                "papers.json",
+            )
+        )
+        specter_path = str(
+            _resolve_dataset_file(
+                data_dir,
+                dataset_name,
+                f"{dataset_name}{args.specter_suffix}",
+                args.specter_suffix.lstrip("_"),
+                "specter.pickle",
+            )
+        )
+
+        anddata_kwargs: dict[str, Any] = {
+            "signatures": signatures_path,
+            "papers": papers_path,
+            "name": dataset_name,
+            "mode": "train",
+            "specter_embeddings": specter_path,
+            "clusters": clusters_path,
+            "block_type": DEFAULT_BLOCK_TYPE,
+            "train_pairs": train_pairs_path,
+            "val_pairs": val_pairs_path,
+            "test_pairs": test_pairs_path,
+            "train_pairs_size": int(args.train_pairs_size),
+            "val_pairs_size": int(args.val_test_size),
+            "test_pairs_size": int(args.val_test_size),
+            "name_counts_index": NAME_COUNTS_INDEX_PATH,
+            "preprocess": True,
+        }
+
+        if args.feature_cache_dir is None:
+            anddata = ANDData(**anddata_kwargs)
+            train, val, test = featurize(
+                anddata,
+                featurizer_info,
+                n_jobs=int(args.n_jobs),
+                chunk_size=int(args.chunk_size),
+                nameless_featurizer_info=nameless_featurizer_info,
+                nan_value=nan_value,
+            )
+        else:
+            anddata, (train, val, test) = build_and_cached_featurize(
+                anddata_kwargs,
+                featurizer_info,
+                cache_dir=args.feature_cache_dir,
+                n_jobs=int(args.n_jobs),
+                chunk_size=int(args.chunk_size),
+                nameless_featurizer_info=nameless_featurizer_info,
+                nan_value=nan_value,
+            )
+
         if anddata.name_tuples != canonical_name_tuples.pairs:
             raise ValueError(f"Production training dataset {dataset_name!r} does not use the canonical name tuples")
-
-        train, val, test = featurize(
-            anddata,
-            featurizer_info,
-            n_jobs=int(args.n_jobs),
-            use_cache=bool(args.use_cache),
-            chunk_size=int(args.chunk_size),
-            nameless_featurizer_info=nameless_featurizer_info,
-            nan_value=nan_value,
-        )
         if train is None or val is None or test is None:
             raise RuntimeError(f"Expected train/val/test features for {dataset_name}")
         X_train, y_train, nameless_X_train = train
@@ -284,7 +297,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
         search_space=_search_space(),
         n_iter=int(args.cluster_n_iter),
         n_jobs=int(args.n_jobs),
-        use_cache=bool(args.use_cache),
         nameless_classifier=nameless_union_classifier.classifier,
         nameless_featurizer_info=nameless_featurizer_info,
     )
@@ -337,7 +349,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-test-size", type=int, default=DEFAULT_VAL_TEST_SIZE)
     parser.add_argument("--datasets", nargs="*", default=None, help="Optional dataset names for smoke tests.")
     parser.add_argument("--include-augmented", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--use-cache", action="store_true")
+    parser.add_argument(
+        "--feature-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional featurized-split snapshot cache directory for repeated training experiments. "
+        "Prefer a local unsynced directory; snapshots are content-addressed NPZ files.",
+    )
     parser.add_argument("--negative-one-for-nan", action="store_true")
     parser.add_argument("--run-full", action="store_true", help="Explicitly allow full production pairwise training.")
     return parser

@@ -75,10 +75,10 @@ from s2and.featurizer import FeaturizationInfo, featurize
 from s2and.model import PairwiseModeler
 
 featurization_info = FeaturizationInfo()
-train, val, test = featurize(dataset, featurization_info, n_jobs=4, use_cache=False)
-X_train, y_train = train
-X_val, y_val = val
-X_test, y_test = test
+train, val, test = featurize(dataset, featurization_info, n_jobs=4)
+X_train, y_train, _ = train
+X_val, y_val, _ = val
+X_test, y_test, _ = test
 
 pairwise_model = PairwiseModeler(
     n_iter=25,
@@ -87,14 +87,11 @@ pairwise_model = PairwiseModeler(
 pairwise_model.fit(X_train, y_train, X_val, y_val)
 ```
 
-Set `use_cache=True` when repeated experiments intentionally reuse the same
-pair rows. The persistent cache and the in-process Rust featurizer cache are
-separate:
-
-- the persistent pair-feature cache can reuse previously computed pair rows
-- the Rust featurizer can be reused in-process even when `use_cache=False`
-
-See [caching.md](caching.md) for the exact cache semantics.
+For repeated training experiments on unchanged inputs, wrap featurization with
+the snapshot cache instead, exposed only by `train_pairwise.py` as
+`--feature-cache-dir`. It stores each split's output
+matrices as one content-addressed uncompressed NPZ file and recomputes on any
+input change. See [caching.md](caching.md) for the exact semantics.
 
 ## Evaluate the pairwise classifier
 

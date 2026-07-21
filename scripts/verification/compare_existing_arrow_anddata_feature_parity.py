@@ -250,7 +250,6 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         dataset,
         FeaturizationInfo(),
         n_jobs=int(args.n_jobs),
-        use_cache=False,
         chunk_size=max(1, int(args.pair_count)),
         nan_value=np.nan,
         runtime_context=RuntimeContext(

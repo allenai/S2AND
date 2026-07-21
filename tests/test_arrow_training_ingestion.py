@@ -604,7 +604,6 @@ def test_featurize_end_to_end_with_fixed_pairs(
             dataset,
             featurizer_info,
             n_jobs=1,
-            use_cache=False,
             chunk_size=100,
             nameless_featurizer_info=nameless_info,
             nan_value=np.nan,

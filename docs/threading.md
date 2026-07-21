@@ -150,7 +150,7 @@ Rules of thumb:
 
 The Rust extension caches Rayon thread pools by thread count for reuse. Those worker threads stay alive for the process
 lifetime, even between calls. This should not consume CPU when idle, but it does mean “thread count” tools may show more
-threads than expected. This thread-pool reuse is unrelated to the public `use_cache` flag.
+threads than expected.
 
 If you need to guarantee that all worker threads fully exit between runs, use process boundaries (run each workload in a
 fresh Python process).

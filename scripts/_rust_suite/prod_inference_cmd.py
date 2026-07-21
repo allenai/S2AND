@@ -154,7 +154,6 @@ def _single_run(
 
     resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     clusterer = load_production_model(resolved_model_path)
-    clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
     paths = _build_data_paths(PROJECT_ROOT_PATH, dataset_name, data_root, specter_file)
@@ -259,7 +258,6 @@ def _single_arrow_run(
     resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     resolved_arrow_root = _resolve_path(PROJECT_ROOT_PATH, arrow_data_root)
     clusterer = load_production_model(resolved_model_path)
-    clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
     arrow_paths = resolve_arrow_dataset_paths(resolved_arrow_root, dataset_name, specter_suffix)
 

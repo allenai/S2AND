@@ -103,7 +103,6 @@ def test_classic_predict_rejects_rust_context() -> None:
         classifier=None,
         cluster_model=None,
         n_jobs=1,
-        use_cache=False,
         batch_size=2,
     )
     runtime_context = runtime.RuntimeContext(
@@ -126,7 +125,6 @@ def test_classic_incremental_rejects_rust_context() -> None:
         classifier=None,
         cluster_model=None,
         n_jobs=1,
-        use_cache=False,
         batch_size=2,
     )
     runtime_context = runtime.RuntimeContext(

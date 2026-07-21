@@ -919,7 +919,6 @@ def _write_claims_eval_shap_plots(
         dataset,
         clusterer.featurizer_info,
         n_jobs=10,
-        use_cache=True,
         chunk_size=100,
         nameless_featurizer_info=clusterer.nameless_featurizer_info,
     )

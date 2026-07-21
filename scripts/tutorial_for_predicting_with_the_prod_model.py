@@ -203,16 +203,6 @@ def main() -> None:
         help="Parallel jobs for ANDData/clusterer (default: 4).",
     )
     parser.add_argument(
-        "--use-cache",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help=(
-            "Set 1 to enable the persistent pair-feature SQLite cache during cache-aware prediction paths. "
-            "Same-process Rust featurizer reuse is independent of this flag."
-        ),
-    )
-    parser.add_argument(
         "--batching-threshold",
         type=int,
         default=None,
@@ -255,7 +245,6 @@ def main() -> None:
     from scripts.eval_prod_models import cluster_eval_arrow, resolve_arrow_dataset_paths
 
     n_jobs = args.n_jobs
-    use_cache = bool(args.use_cache)
 
     # Limit BLAS threads to keep things responsive
     os.environ["OMP_NUM_THREADS"] = f"{n_jobs}"
@@ -293,13 +282,12 @@ def main() -> None:
     # The public loader accepts only an explicitly selected complete native bundle.
     model_path = _resolve_root(PROJECT_ROOT_PATH, args.model_path)
     clusterer = load_production_model(model_path)
-    clusterer.use_cache = use_cache
     clusterer.n_jobs = n_jobs
 
     print(
         "Config: "
         f"runtime_context_default={os.environ.get('S2AND_BACKEND', 'python')}, "
-        f"split={args.split}, n_jobs={n_jobs}, use_cache={int(use_cache)}, "
+        f"split={args.split}, n_jobs={n_jobs}, "
         f"batching_threshold={args.batching_threshold}, "
         f"desired_memory_use={args.desired_memory_use}, "
         f"load_name_counts={args.load_name_counts}, "

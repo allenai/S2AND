@@ -153,7 +153,6 @@ def test_rust_batch_plan_never_decreases_fixed_overhead(monkeypatch):
         dataset,
         featurizer_info,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
         total_ram_bytes=2 * 1024 * 1024 * 1024,
@@ -190,7 +189,6 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
         dataset,
         featurizer_info,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
         total_ram_bytes=2 * 1024 * 1024 * 1024,
@@ -242,7 +240,6 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
         dataset,
         featurizer_info,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
         total_ram_bytes=2 * 1024 * 1024 * 1024,
@@ -300,7 +297,6 @@ def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
         dataset,
         featurizer_info,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
         total_ram_bytes=2 * 1024 * 1024 * 1024,
@@ -332,7 +328,6 @@ def test_rust_batch_uses_same_process_featurizer_without_cache_flag(monkeypatch)
     monkeypatch.setattr(feature_port, "s2and_rust", object())
 
     def _fake_get_rust_featurizer(_dataset, **kwargs):
-        assert "use_cache" not in kwargs
         featurizer_calls["count"] += 1
         return fake_rust_featurizer
 
@@ -347,7 +342,6 @@ def test_rust_batch_uses_same_process_featurizer_without_cache_flag(monkeypatch)
         dataset,
         featurizer_info,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
         total_ram_bytes=2 * 1024 * 1024 * 1024,
@@ -396,7 +390,6 @@ def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch):
             dataset,
             featurizer_info,
             n_jobs=2,
-            use_cache=False,
             chunk_size=100,
             nan_value=np.nan,
             total_ram_bytes=total_ram_bytes,

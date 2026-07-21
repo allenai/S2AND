@@ -2516,7 +2516,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         source_bundle = load_bundle(args.source_bundle_root)
         clusterer = load_clusterer(args.pairwise_model_path, n_jobs=int(args.n_jobs))
-        clusterer.use_cache = False
         _assert_pairwise_model_supports_arrow_materialization(clusterer, args.pairwise_model_path)
         feature_bundle_root = output_dir / f"{str(args.feature_mode).replace('-', '_')}_feature_bundle"
         feature_bundle, featureization_summaries = _materialize_arrow_rust_feature_bundle(

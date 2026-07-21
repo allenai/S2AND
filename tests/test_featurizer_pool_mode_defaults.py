@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import s2and.featurizer as featurizer_module
-from s2and.featurizer import FeaturizationInfo, ScatterContext
+from s2and.featurizer import ScatterContext
 
 
 @pytest.mark.parametrize(
@@ -51,19 +51,14 @@ def test_execute_python_featurization_phase_explicit_pool_mode(monkeypatch, plat
 
     monkeypatch.setattr(featurizer_module, "UniversalPool", FakeUniversalPool)
 
-    backend, new_features_count = featurizer_module._execute_python_featurization_phase(
+    backend = featurizer_module._execute_python_featurization_phase(
         pieces_of_work=[],
         n_jobs=4,
         chunk_size=64,
-        use_cache=False,
-        signature_pairs=[],
-        featurizer_info=FeaturizationInfo(features_to_use=[]),
         scatter_context=scatter_context,
-        new_features={},
     )
 
     assert backend == "python_parallel"
-    assert new_features_count == 0
     assert FakeUniversalPool.init_calls == 1
     assert FakeUniversalPool.last_processes == 1
     assert FakeUniversalPool.last_use_threads is expected_use_threads

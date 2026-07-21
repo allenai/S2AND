@@ -1,146 +1,73 @@
 # Caching
 
-This document describes every cache-like mechanism in S2AND and how it relates to the public
-`use_cache` flag.
+The core S2AND library has one persistent cache — the training-time feature
+snapshot cache — plus a small set of in-memory reuse mechanisms. Production
+inference never reads or writes any disk cache. Standalone analysis scripts
+may manage their own output reuse, such as the epsilon-sweep distance files.
 
-## Public API
+## Feature snapshot cache (training only)
 
-`use_cache` is the public control for the persistent pair-feature cache on the main pair-featurization APIs:
+`train_pairwise.py --feature-cache-dir PATH` opts into snapshot reuse for
+repeated pairwise training experiments; there is no implicit default location.
+The training command owns dataset construction and immediately featurizes it,
+so mutable `ANDData` objects are never accepted as a reusable cache boundary.
+The cache stores the *output* of featurization, not per-pair state:
 
-- `featurize(..., use_cache=...)`
-- `many_pairs_featurize(..., use_cache=...)`
-- `Clusterer.use_cache`
+- One uncompressed NPZ file per train/val/test split at
+  `<cache_dir>/<split>_<key-prefix>.npz`, holding the exact `X`, `y`,
+  and (when configured) `nameless_X` matrices.
+- The key is a SHA-256 over: a snapshot schema version, the content hashes of
+  the feature-input files (signatures, papers, SPECTER), the verified name-counts
+  binding when name-count features are selected, the name-tuples digest, the
+  normalization version, both featurizer configurations (version + feature
+  groups), `nan_value`,
+  and the hash of the exact resolved pair lists.
+- There is no invalidation logic: any input change produces a different key
+  and a fresh snapshot. Old snapshots are dead files; delete the directory
+  whenever you like.
+- Identity is fail-closed: source hashes are captured privately while the
+  cache-enabled training dataset is parsed, consumed once, and never exposed
+  for reuse. Missing file identity or required name-count provenance raises.
+- Snapshots are write-once (published under a short file lock; never
+  overwritten) and strictly validated on load (`allow_pickle=False`, exact
+  members, dtypes, shapes). A corrupt snapshot raises with its path — delete
+  the file and rerun.
+- Loading a snapshot reproduces the originally written matrices bit-for-bit.
 
-Public semantics:
+The snapshot boundary currently supports classic file-backed `ANDData`
+training, which uses the Python feature backend. Arrow-backed Rust feature
+generation does not read or write these disk snapshots, so there is no shared
+Python/Rust snapshot contract to compare. Rust's reuse is the separate
+in-process mechanism described below.
 
-- `use_cache=True`: read and write the persistent pair-feature cache.
-- `use_cache=False`: skip persistent pair-feature cache reads/writes.
+Prefer an unsynced local directory for `cache_dir`; snapshots are intentionally
+uncompressed to keep cold insertion cheap and can be tens of MB per split.
+Cloud-sync churn is pure overhead.
 
-Important nuance:
+`Clusterer.fit` has no pair-level cache: its validation-block featurization
+recomputes each run (measured ~2.3 s per 6.4k pairs on the Python backend;
+`fit` logs `stage=fit_val_dists` telemetry with pair counts and seconds so the
+cost can be re-evaluated on full retrains).
 
-- `use_cache` does not disable same-process Rust featurizer reuse.
-- Direct Arrow/Rust production prediction paths bypass the persistent pair-feature SQLite cache; `use_cache` only affects
-  prediction paths that materialize pair features through the Python cache-aware featurization layer.
+## In-memory reuse (not caches on disk)
 
-## Cache Inventory
+- **Rust featurizer in-process reuse**: an already-built Rust featurizer is
+  reused for the same Arrow-attached dataset object within one process, keyed
+  by validated generation ID, path set, and seed versions. Process restarts
+  rebuild it. `evict_rust_featurizer(dataset)` / `clear_rust_featurizer_cache()`
+  manage it explicitly; `warm_rust_featurizer(dataset)` prebuilds it for
+  lower cold-start latency in long-lived Arrow services.
+- **Name-counts index open dedup**: one shared immutable `NameCountsIndex`
+  handle per `(path, manifest sha256)` within a process.
+- Assorted per-request/per-call memoization inside incremental linking; all
+  ephemeral, none persisted.
 
-| Layer | Controlled by `use_cache` | Purpose | Default location |
-| --- | --- | --- | --- |
-| Pair-feature cache | Yes | Reuse computed pairwise feature rows across repeated featurization/prediction | `<S2AND_CACHE>/<dataset>/<featurizer_version>/pair_features.sqlite3` |
-| Rust featurizer in-memory reuse | No | Reuse an already-built Rust featurizer within the current Python process | memory only |
-| Direct Arrow/Rust prediction inputs | No | Read request/runtime Arrow artifacts directly without pair-feature SQLite caching | request or bundle artifact paths |
+## History
 
-`S2AND_CACHE` defaults to `~/.s2and`.
-
-## Pair-Feature Cache
-
-The pair-feature cache stores full feature rows keyed by the internal signature-pair cache key.
-Its path is derived from:
-
-- dataset name
-- featurizer version
-
-Current on-disk layout:
-
-```text
-<S2AND_CACHE>/
-  <dataset_name>/
-    <featurizer_version>/
-      pair_features.sqlite3
-```
-
-The SQLite database stores:
-
-- one row per cached pair
-- the full `NUM_FEATURES` feature vector as a float64 blob
-- required schema-version and feature-width metadata
-
-Schema version 2 uses length-prefixed signature IDs for collision-free pair keys.
-Schema-version-1 databases are rejected on both reads and writes so ambiguous
-legacy rows cannot be reused. Delete the affected dataset/featurizer cache
-directory and rerun with `use_cache=True` to rebuild it.
-
-Operational behavior:
-
-- writes upsert only rows computed by the current call, so write cost scales with newly computed
-  rows instead of the total cache size
-- the cache is only consulted when `use_cache=True`
-- if `use_cache=False`, pair features are computed and returned normally but are not read from or
-  written to the persistent cache
-- each call reads only its requested pair keys from SQLite; persisted rows are not copied into a
-  process-global mirror, so memory scales with requested hits and newly computed rows rather than
-  the total cache size
-
-## Rust Featurizer Caches
-
-The Rust featurizer has two distinct reuse mechanisms.
-
-### Same-Process In-Memory Reuse
-
-When the same Arrow-attached dataset object is reused inside one Python process,
-S2AND keeps the built Rust featurizer in memory and reuses it on later calls.
-Rust construction is Arrow-only; `warm_rust_featurizer(dataset)` therefore
-requires validated attached Arrow artifacts and is not a generic JSON/`ANDData`
-warm path.
-
-Current implications:
-
-- `use_cache=False` does not force a rebuild if the same dataset object already has a live cached
-  Rust featurizer
-- Rust featurizers are not serialized to disk; process restarts rebuild them from the dataset
-- `evict_rust_featurizer(dataset)` evicts one dataset and
-  `clear_rust_featurizer_cache()` clears the process cache
-- published Arrow/count artifacts are immutable content-addressed generations
-- the cache key binds the exact normalized path set, validated generation ID,
-  non-seed settings, and seed version
-- raw Arrow mappings are checksummed and batch-index validated at the public
-  boundary; internal builders receive the resulting immutable
-  `ValidatedArrowInputs` value instead of consulting process-global validation
-  caches or rechecking the same generation
-- `ValidatedArrowInputs` is not publicly constructible; callers obtain it from
-  `validate_arrow_prediction_artifacts`, `validate_arrow_training_artifacts`, or
-  `validate_arrow_publication_artifacts`
-- request-local seed require/disallow sidecars are deliberately excluded from
-  the immutable generation; each public request parses them once into
-  normalized request-local state and passes that state downward
-- there is no process-global parsed seed-sidecar cache; altered-presplit cache
-  identity still uses full-file digests for mutable disallow and
-  altered-profile inputs
-
-## Interaction with Rust Batch Featurization
-
-Rust batch featurization can sometimes emit only the selected feature columns needed downstream.
-Persistent pair-feature caching needs the full feature row, so:
-
-- `use_cache=False` allows the selected-feature fast path when the rest of the runtime conditions
-  allow it
-- `use_cache=True` materializes full feature rows so they can be written into the pair-feature cache
-
-This is an internal optimization detail, but it explains why persistent caching can add some extra
-work even when the cache backend itself is fast.
-
-## Recommended Usage
-
-- Repeated training or repeated inference on the same dataset or pair set: use `use_cache=True`
-- One-shot experiments, one-pass offline jobs, or feature-development work: use `use_cache=False`
-- Long-lived Arrow-attached services that want lower cold-start latency in a
-  single process may call `warm_rust_featurizer(dataset)` during startup
-- Production Arrow services should keep Arrow artifacts local and call
-  `Clusterer.predict_from_arrow_paths(...)` or Arrow-routed
-  `Clusterer.predict(...)`; `warm_rust_featurizer(dataset)` is not the Arrow
-  production warmup API
-If a job will not revisit the same pair set, `use_cache=False` is usually the right choice because
-it avoids unnecessary persistent writes.
-
-## Clearing Caches
-
-To force a rebuild, delete the relevant cache paths under `S2AND_CACHE`:
-
-- pair-feature cache: `<S2AND_CACHE>/<dataset>/<featurizer_version>/`
-- artifact cache: `<S2AND_CACHE>/artifacts/`
-
-You can delete one layer without affecting the others.
-
-For process-local Rust reuse, call `evict_rust_featurizer(dataset)` or
-`clear_rust_featurizer_cache()`; deleting disk cache directories does not evict
-live Rust objects.
+The per-pair SQLite cache (`~/.s2and/<dataset>/<version>/pair_features.sqlite3`)
+and the `use_cache` flag were removed after the 2026-07-20 benchmark
+(`scratch/feature_cache_benchmark/`): its binding did not cover dataset file
+contents (stale hits on changed inputs), it forced full-row materialization
+and disabled the fused Rust block path, and the snapshot cache replaces its
+only real use. Delete any leftover `~/.s2and` dataset directories to reclaim
+space.

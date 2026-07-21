@@ -34,8 +34,6 @@ logger.addHandler(ch)
 
 from tqdm import tqdm
 
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
-
 DATA_DIR = CONFIG["internal_data_dir"]
 
 # NOTE: This script will not run, because these functions need to access internal resources

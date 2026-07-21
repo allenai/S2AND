@@ -32,7 +32,6 @@ def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_predict_memory") ->
             x_random, y_random
         ),
         n_jobs=1,
-        use_cache=False,
         use_default_constraints_as_supervision=False,
     )
     return clusterer, dataset

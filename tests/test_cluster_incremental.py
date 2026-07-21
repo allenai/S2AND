@@ -398,7 +398,6 @@ def _build_dummy_clusterer_and_dataset(*, name: str = "dummy_chunked") -> tuple[
             X_random, y_random
         ),
         n_jobs=1,
-        use_cache=False,
         use_default_constraints_as_supervision=True,
     )
     return clusterer, dataset
@@ -1675,7 +1674,6 @@ def _build_minimal_incremental_clusterer() -> Clusterer:
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff"]),
         classifier=object(),
         n_jobs=1,
-        use_cache=False,
     )
 
 

@@ -65,7 +65,6 @@ def test_run_uses_direct_arrow_api_and_forwards_batching_threshold(
     captured: dict[str, object] = {}
 
     class FakeClusterer:
-        use_cache = True
         n_jobs = 1
 
         def predict_incremental_from_arrow_paths(self, block_signatures, arrow_paths, **kwargs):

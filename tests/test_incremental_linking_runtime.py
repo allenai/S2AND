@@ -445,7 +445,6 @@ class FakeProductionClusterer:
         self.recluster_map = dict(recluster_map or {})
         self.default_label = float(default_label)
         self.n_jobs = 1
-        self.use_cache = False
         self.classifier = FirstColumnDistanceClassifier()
         self.featurizer_info = FeaturizationInfo(features_to_use=["name_similarity"])
         self.nameless_classifier = None

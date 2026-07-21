@@ -173,7 +173,6 @@ def _run_arrow_reuse_profile(
     resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     resolved_arrow_root = _resolve_path(PROJECT_ROOT_PATH, arrow_data_root)
     clusterer = load_production_model(resolved_model_path)
-    clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
     same_arrow_paths = resolve_arrow_dataset_paths(resolved_arrow_root, dataset_name, specter_suffix)
@@ -249,7 +248,6 @@ def _run_json_reuse_profile(
 
     resolved_model_path = _resolve_path(PROJECT_ROOT_PATH, model_path)
     clusterer = load_production_model(resolved_model_path)
-    clusterer.use_cache = False
     clusterer.n_jobs = n_jobs
 
     clear_rust_featurizer_cache()

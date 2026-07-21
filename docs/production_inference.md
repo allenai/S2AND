@@ -234,10 +234,9 @@ otherwise. Models, datasets, count indexes, ORCID counts, name tuples, and the
 linker must agree on their canonical-v2 provenance; legacy artifacts are
 rejected rather than adapted.
 
-The persistent pair-feature cache applies only to Python featurization through
-`Clusterer.use_cache` and `featurize(..., use_cache=...)`. Direct Arrow/Rust
-prediction bypasses it and reuses already validated immutable native state.
-See [caching.md](caching.md) for the Python cache details.
+Production inference has no persistent cache. Direct Arrow/Rust prediction
+reuses already validated immutable native state in-process only. See
+[caching.md](caching.md) for details.
 
 ## Verification
 

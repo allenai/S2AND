@@ -209,7 +209,6 @@ def load_clusterer(model_path: Path, *, n_jobs: int) -> Any:
     clusterer = _load_pairwise_staging_model(model_path)
     _ensure_lightgbm_fitted(clusterer.classifier)
     _ensure_lightgbm_fitted(clusterer.nameless_classifier)
-    clusterer.use_cache = False
     clusterer.n_jobs = int(n_jobs)
     return clusterer
 

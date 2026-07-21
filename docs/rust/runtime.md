@@ -54,9 +54,9 @@ Models and artifacts must explicitly declare the package's
 executable runtime modes.
 
 Arrow generations are treated as immutable. Process-local Rust featurizer
-reuse is keyed by the validated artifact generation and build settings; it is
-independent of the public persistent pair-feature `use_cache` option. Replace
-an artifact by publishing a new generation rather than mutating a live path.
+reuse is keyed by the validated artifact generation and build settings.
+Replace an artifact by publishing a new generation rather than mutating a
+live path.
 
 ## Threading
 

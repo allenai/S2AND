@@ -975,10 +975,7 @@ def _altered_cluster_signatures_from_values_or_arrow(
 
 
 def _selected_feature_indices(featurizer_info: FeaturizationInfo) -> list[int]:
-    indices: set[int] = set()
-    for feature_name in featurizer_info.features_to_use:
-        indices.update(featurizer_info.feature_group_to_index[feature_name])
-    return sorted(indices)
+    return featurizer_info.selected_feature_indices()
 
 
 def _condensed_pair_index(block_size: int, left: int, right: int) -> int:
@@ -2200,8 +2197,6 @@ class Clusterer:
             Number of hyperparameter evaluations
         n_jobs: int
             Parallelize each clusterer this many ways
-        use_cache: bool
-            Whether to use the cache when making distance matrices
         use_default_constraints_as_supervision: bool
             Whether to use the default constraints when constructing the distance matrices.
             These are high precision and can save a lot of compute/time.
@@ -2229,7 +2224,7 @@ class Clusterer:
         search_space: dict[str, Any] | None = None,
         n_iter: int = 25,
         n_jobs: int = 16,
-        use_cache: bool = False,
+        *,
         use_default_constraints_as_supervision: bool = True,
         random_state: int = 42,
         nameless_classifier: Any | None = None,
@@ -2247,7 +2242,6 @@ class Clusterer:
         self._n_jobs = 1
         self.n_jobs = n_jobs
         self.random_state = random_state
-        self.use_cache = use_cache
         self.use_default_constraints_as_supervision = use_default_constraints_as_supervision
         self.dont_merge_cluster_seeds = dont_merge_cluster_seeds
         self.suppress_orcid = suppress_orcid
@@ -2571,7 +2565,6 @@ class Clusterer:
         if not stage_uses_rust(runtime_context):
             raise ValueError("Rust chunk helper is only valid when runtime_context resolves to rust backend")
 
-        use_cache = bool(self.use_cache)
         constraint_backend = _build_incremental_constraint_backend(
             dataset,
             use_default_constraints_as_supervision=self.use_default_constraints_as_supervision,
@@ -2587,7 +2580,6 @@ class Clusterer:
         used_fused_path = False
         use_fused_block_api = bool(
             self.use_default_constraints_as_supervision
-            and not use_cache
             and constraint_api_mode == "indexed"
             and rust_featurizer is not None
             and signature_index_by_id is not None
@@ -2734,10 +2726,7 @@ class Clusterer:
         batch_label: int | str,
         total_ram_bytes: int | None = None,
     ) -> tuple[np.ndarray, float]:
-        use_cache = bool(self.use_cache)
         if chunk.block_signature_indices is not None and chunk.pair_ids is None:
-            if use_cache:
-                raise RuntimeError("Fused Rust chunk path does not support use_cache=True")
             try:
                 rust_featurizer = _get_rust_featurizer(
                     dataset,
@@ -2781,8 +2770,7 @@ class Clusterer:
                 signature_pairs,
                 dataset,
                 self.featurizer_info,
-                self.n_jobs,
-                use_cache=use_cache,
+                n_jobs=self.n_jobs,
                 chunk_size=DEFAULT_CHUNK_SIZE,
                 nameless_featurizer_info=self.nameless_featurizer_info,
                 runtime_context=runtime_context,
@@ -2897,8 +2885,7 @@ class Clusterer:
                 pairs,
                 dataset,
                 self.featurizer_info,
-                self.n_jobs,
-                use_cache=self.use_cache,
+                n_jobs=self.n_jobs,
                 chunk_size=DEFAULT_CHUNK_SIZE,
                 nameless_featurizer_info=self.nameless_featurizer_info,
                 runtime_context=runtime_context,
@@ -3746,7 +3733,17 @@ class Clusterer:
 
             # distance matrix
             if val_dists_precomputed is None:
+                make_dists_start = time.perf_counter()
                 val_dists = self.make_distance_matrices(val_block_dict, dataset)
+                # Recorded to decide whether fit-stage featurization ever
+                # warrants its own snapshot cache (see docs/caching.md).
+                logger.info(
+                    "Telemetry stage: stage=fit_val_dists dataset=%s blocks=%d pairs=%d seconds=%.3f",
+                    getattr(dataset, "name", "<unnamed>"),
+                    len(val_block_dict),
+                    sum(len(sigs) * (len(sigs) - 1) // 2 for sigs in val_block_dict.values()),
+                    time.perf_counter() - make_dists_start,
+                )
             else:
                 val_dists = val_dists_precomputed[dataset.name]
             val_dists_list.append(val_dists)
@@ -5417,8 +5414,7 @@ class Clusterer:
             all_pairs,
             dataset,
             self.featurizer_info,
-            self.n_jobs,
-            use_cache=self.use_cache,
+            n_jobs=self.n_jobs,
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=self.nameless_featurizer_info,
             runtime_context=runtime_context,

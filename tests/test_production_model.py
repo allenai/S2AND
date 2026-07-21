@@ -165,7 +165,6 @@ def _prepare_prediction_clusterer(clusterer):
     _ensure_lightgbm_fitted(clusterer.classifier)
     _ensure_lightgbm_fitted(clusterer.nameless_classifier)
     clusterer.n_jobs = 1
-    clusterer.use_cache = False
     return clusterer
 
 
@@ -352,7 +351,6 @@ def test_synthetic_native_clusterer_runtime_config_round_trips(
         native_clusterer.use_default_constraints_as_supervision
         == source_clusterer.use_default_constraints_as_supervision
     )
-    assert native_clusterer.use_cache == source_clusterer.use_cache
     assert native_clusterer.n_iter == source_clusterer.n_iter
     assert native_clusterer.random_state == source_clusterer.random_state
 
@@ -443,6 +441,7 @@ def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
     (
         ("manifest.json", "s2and_production_model_bundle_v2"),
         ("clusterer.json", "s2and_clusterer_config_v2"),
+        ("clusterer.json", "s2and_clusterer_config_v3"),
     ),
 )
 def test_bundle_rejects_previous_schema_versions(

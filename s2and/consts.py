@@ -3,7 +3,6 @@ import logging
 import os
 import threading
 from collections.abc import Iterator, MutableMapping
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -127,8 +126,6 @@ CONFIG: MutableMapping[str, Any] = _LazyConfig()
 # Lazily-resolved artifact paths
 NAME_COUNTS_INDEX_PATH = _LazyDataPath("name_counts_index")
 
-# feature caching related consts
-CACHE_ROOT = Path(os.getenv("S2AND_CACHE", str(Path.home() / ".s2and"))).resolve()
 """
 Incrementation history
 1 - initial version

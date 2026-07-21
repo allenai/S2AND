@@ -1122,7 +1122,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"No gold rows for dataset={args.dataset}")
 
     clusterer = load_production_model(args.model_path)
-    clusterer.use_cache = False
     clusterer.n_jobs = int(args.n_jobs)
     clusterer.suppress_orcid = bool(args.suppress_orcid_constraints)
     model_eps = None

@@ -63,7 +63,6 @@ _CLUSTERER_CONFIG_FIELDS = frozenset(
         "random_state",
         "schema_version",
         "suppress_orcid",
-        "use_cache",
         "use_default_constraints_as_supervision",
         "val_blocks_size",
     }
@@ -512,7 +511,6 @@ def _validate_clusterer_config(payload: dict[str, Any]) -> None:
     for field in (
         "dont_merge_cluster_seeds",
         "suppress_orcid",
-        "use_cache",
         "use_default_constraints_as_supervision",
     ):
         if not isinstance(payload[field], bool):
@@ -704,7 +702,6 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         search_space=None,
         n_iter=int(clusterer_config["n_iter"]),
         n_jobs=int(clusterer_config["n_jobs"]),
-        use_cache=bool(clusterer_config["use_cache"]),
         use_default_constraints_as_supervision=bool(clusterer_config["use_default_constraints_as_supervision"]),
         random_state=int(clusterer_config["random_state"]),
         nameless_classifier=nameless_classifier,

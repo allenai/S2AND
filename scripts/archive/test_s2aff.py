@@ -45,10 +45,8 @@ datasets = [
 
 # this is the prod 1.1 model
 clusterer = load_production_model("s2and/data/production_model_v1.1.pickle")
-clusterer.use_cache = False
 
 clusterer2 = load_production_model("s2and/data/model_dump_specter2.pickle")
-clusterer2.use_cache = False
 
 
 def extract_a_nice_trials_object(clusterer):
@@ -211,7 +209,6 @@ _, _, test1 = featurize(
     anddata1,
     featurization_info,
     n_jobs=4,
-    use_cache=False,
     chunk_size=DEFAULT_CHUNK_SIZE,
     nameless_featurizer_info=nameless_featurization_info,
     nan_value=np.nan,
@@ -224,7 +221,6 @@ _, _, test2 = featurize(
     anddata2,
     featurization_info,
     n_jobs=4,
-    use_cache=False,
     chunk_size=DEFAULT_CHUNK_SIZE,
     nameless_featurizer_info=nameless_featurization_info,
     nan_value=np.nan,

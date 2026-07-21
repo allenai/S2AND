@@ -68,7 +68,6 @@ def _raw_test_clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=features_to_use or []),
         classifier=None,
         n_jobs=n_jobs,
-        use_cache=False,
         suppress_orcid=suppress_orcid,
     )
 
@@ -2250,7 +2249,6 @@ def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
             featurizer_info=FeaturizationInfo(features_to_use=[]),
             classifier=None,
             n_jobs=1,
-            use_cache=False,
             use_default_constraints_as_supervision=False,
         ),
         _raw_test_artifact(),

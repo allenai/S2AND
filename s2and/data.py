@@ -1,3 +1,5 @@
+import hashlib
+import io
 import json
 import logging
 import math
@@ -79,6 +81,29 @@ _PAIR_SAMPLING_MODES: frozenset[str] = frozenset(
         "global_balanced_classes",
     }
 )
+
+
+class _HashingRawReader(io.RawIOBase):
+    """Hash bytes as a buffered parser consumes them."""
+
+    def __init__(self, raw: io.BufferedReader, digest: Any):
+        self._raw = raw
+        self._digest = digest
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int | None:
+        count = self._raw.readinto(buffer)
+        if count:
+            self._digest.update(memoryview(buffer)[:count])
+        return count
+
+    def close(self) -> None:
+        try:
+            self._raw.close()
+        finally:
+            super().close()
 
 
 def _normalize_specter_keys(embeddings: Iterable[tuple[Any, Any]]) -> dict[str, Any]:
@@ -317,7 +342,7 @@ class ANDData:
     Input:
         signatures: path to the signatures json file (or the json object)
         papers: path to the papers information json file (or the json object)
-        name: name of the dataset, used for caching computed features
+        name: human-readable dataset name used in logs and metrics
         mode: 'train' or 'inference'; if 'inference', everything related to dataset
             splitting will be ignored
         clusters: path to the clusters json file (or the json object)
@@ -376,7 +401,7 @@ class ANDData:
         Args:
             signatures: Signature rows reconstructed from the Arrow bundle.
             papers: Paper rows reconstructed from the Arrow bundle.
-            name: Dataset name used for feature-cache identity.
+            name: Human-readable dataset name used in logs and metrics.
             arrow_paths: Fully verified immutable Arrow artifact paths.
             **kwargs: Remaining train-mode ``ANDData`` construction arguments.
 
@@ -435,6 +460,7 @@ class ANDData:
         use_orcid_id: bool = True,
         compute_block_fn: Callable[[str], str] = compute_block,
         _validated_arrow_inputs: ValidatedArrowInputs | None = None,
+        _capture_feature_source_hashes: bool = False,
     ):
         init_start = time.perf_counter()
         arrow_name_counts_provenance: Mapping[str, Any] | None = None
@@ -488,10 +514,14 @@ class ANDData:
             if train_blocks is not None and clusters is None:
                 raise ValueError("Train blocks still needs clusters")
 
+        # Private, opt-in provenance for the one-shot training snapshot path.
+        # Ordinary ANDData callers retain the original zero-hash-overhead loaders.
+        self._feature_source_sha256: dict[str, str] | None = {} if _capture_feature_source_hashes else None
+
         # Load signatures first so we can restrict papers/specter to relevant subset
         signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
-        raw_signatures = self.maybe_load_json(signatures)
+        raw_signatures = self._load_json_feature_source(signatures, "signatures")
         self.signatures = {}
         # convert dictionary to namedtuples for memory reduction
         for signature_id, signature in raw_signatures.items():
@@ -547,7 +577,7 @@ class ANDData:
 
         papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
-        raw_papers = self.maybe_load_json(papers)
+        raw_papers = self._load_json_feature_source(papers, "papers")
         filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
         self.papers = {}
         # convert dictionary to namedtuples for memory reduction
@@ -589,7 +619,9 @@ class ANDData:
         logger.info("loading clusters")
         self.clusters: dict | None = self.maybe_load_json(clusters)
         logger.info("loaded clusters, loading specter")
-        self.specter_embeddings = self.maybe_load_specter(specter_embeddings)
+        self.specter_embeddings = self.maybe_load_specter(
+            self._load_pickle_feature_source(specter_embeddings, "specter_embeddings")
+        )
         # prevents errors during testing where we have no specter embeddings
         if self.specter_embeddings is None:
             self.specter_embeddings = {}
@@ -1099,6 +1131,45 @@ class ANDData:
             return output
         else:
             return path_or_json
+
+    def _load_json_feature_source(self, path_or_json: str | list | dict | None, source_name: str) -> Any:
+        """Load JSON normally, or stream-hash it for one-shot snapshot use."""
+        if self._feature_source_sha256 is None or not isinstance(path_or_json, str):
+            return self.maybe_load_json(path_or_json)
+
+        digest = hashlib.sha256()
+        with open(path_or_json, "rb") as raw:
+            with io.TextIOWrapper(
+                io.BufferedReader(_HashingRawReader(raw, digest)),
+                encoding="utf-8",
+            ) as handle:
+                output = json.load(handle)
+        self._feature_source_sha256[source_name] = digest.hexdigest()
+        return output
+
+    def _load_pickle_feature_source(self, path_or_object: str | dict | tuple | None, source_name: str) -> Any:
+        """Load pickle normally, or stream-hash it for one-shot snapshot use."""
+        if self._feature_source_sha256 is None or not isinstance(path_or_object, str):
+            return path_or_object
+
+        digest = hashlib.sha256()
+        with open(path_or_object, "rb") as raw:
+            with io.BufferedReader(_HashingRawReader(raw, digest)) as handle:
+                output = pickle.load(handle)
+                while handle.read(1 << 20):
+                    pass
+        self._feature_source_sha256[source_name] = digest.hexdigest()
+        return output
+
+    def _consume_feature_source_sha256(self) -> dict[str, str]:
+        """Consume private file provenance for one immediate cache operation."""
+        source_hashes = self._feature_source_sha256
+        if source_hashes is None:
+            raise ValueError(
+                "Feature snapshot caching requires a freshly constructed ANDData with private source capture enabled"
+            )
+        self._feature_source_sha256 = None
+        return dict(source_hashes)
 
     @staticmethod
     def maybe_load_list(path_or_list: str | list | set | None) -> list | set | None:

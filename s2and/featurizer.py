@@ -1,27 +1,20 @@
 import contextlib
 import functools
 import gc
-import hashlib
-import json
 import logging
-import os
 import platform
-import sqlite3
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import islice
 from typing import Any
 
 import numpy as np
 from tqdm import tqdm
 
 from s2and import feature_port, memory_budget
-from s2and._atomic_io import exclusive_file_lock
 from s2and.consts import (
-    CACHE_ROOT,
     DEFAULT_CHUNK_SIZE,
     FEATURIZER_VERSION,
     LARGE_INTEGER,
@@ -29,7 +22,6 @@ from s2and.consts import (
 )
 from s2and.data import ANDData
 from s2and.mp import UniversalPool
-from s2and.name_count_binding import NameCountsBinding
 from s2and.runtime import RuntimeContext, build_runtime_context, dataset_stage_uses_rust, stage_uses_rust
 from s2and.text import (
     TEXT_FUNCTIONS,
@@ -368,7 +360,7 @@ def _log_featurization_backend_decision(
     rust_module_available: bool,
 ) -> None:
     if pieces_of_work_count <= 0:
-        logger.info("Featurization backend decision: skipped compute (all pairs were cached or pre-labeled)")
+        logger.info("Featurization backend decision: skipped compute (all pairs were pre-labeled)")
         return
 
     if use_rust_featurizer and rust_module_available:
@@ -425,7 +417,6 @@ class ScatterContext:
 @dataclass(frozen=True)
 class RustBatchExecutionResult:
     rust_batch_plan: memory_budget.RustBatchChunkPlan
-    new_features_count: int
     rust_batch_total_ram_for_stage: int | None
     rust_batch_rss_before_bytes: int
     rust_batch_rss_peak_bytes: int
@@ -547,54 +538,6 @@ def _scatter_chunk_to_output(
         coauthor_similarity_values[chunk_indices] = rust_features_chunk[:, scatter_context.coauthor_position]
 
 
-def _cache_feature_output(
-    *,
-    new_features: dict[str, np.ndarray],
-    cache_key: str,
-    feature_output: np.ndarray | list[int | float],
-) -> None:
-    # Preserve cache value immutability and avoid aliasing when worker buffers are reused.
-    new_features[cache_key] = np.asarray(feature_output, dtype=np.float64).copy()
-
-
-def _write_feature_row(
-    *,
-    feature_output: np.ndarray | list[int | float],
-    output_index: int,
-    signature_pairs: list[tuple[str, str, int | float]],
-    featurizer_info: "FeaturizationInfo",
-    new_features: dict[str, np.ndarray],
-    use_cache: bool,
-    scatter_context: ScatterContext,
-    source_is_full: bool,
-) -> int:
-    if use_cache:
-        cache_key = featurizer_info.feature_cache_key(signature_pairs[output_index])
-        _cache_feature_output(
-            new_features=new_features,
-            cache_key=cache_key,
-            feature_output=feature_output,
-        )
-    _scatter_feature_row_from_source(
-        feature_output=np.asarray(feature_output, dtype=np.float64),
-        output_index=int(output_index),
-        scatter_context=scatter_context,
-        rust_chunk_is_full=source_is_full,
-    )
-    return 1 if use_cache else 0
-
-
-# ── constants for cache writes ───────────────────────────
-PAIR_FEATURE_CACHE_DB_FILENAME = "pair_features.sqlite3"
-PAIR_FEATURE_CACHE_SCHEMA_VERSION = 2
-PAIR_FEATURE_CACHE_READ_BATCH_SIZE = 900
-PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES = 3
-PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS = 30.0
-PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS = 0.1
-_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION = "schema_version"
-_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT = "feature_count"
-
-
 def _signature_id_to_index_or_raise(signature_id_to_index: dict[Any, int], signature_id: Any) -> int:
     if signature_id in signature_id_to_index:
         return int(signature_id_to_index[signature_id])
@@ -609,15 +552,15 @@ def _signature_id_to_index_or_raise(signature_id_to_index: dict[Any, int], signa
 
 class FeaturizationInfo:
     """
-    Class to store information about how to generate and cache features
+    Class to store information about how to generate features
 
     Inputs:
         features_to_use: List[str]
             list of feature types to use
         featurizer_version: int
             What version of the featurizer we are on. This should be
-            incremented when changing how features are computed so that a new cache
-            is created
+            incremented when changing how features are computed; it is part of
+            the persisted model contract and feature-snapshot identity.
     """
 
     def __init__(
@@ -699,6 +642,12 @@ class FeaturizationInfo:
         self.__init__(
             features_to_use=list(state["features_to_use"]),
             featurizer_version=int(state.get("featurizer_version", FEATURIZER_VERSION)),
+        )
+
+    def selected_feature_indices(self) -> list[int]:
+        """Return the canonical sorted feature columns selected by this configuration."""
+        return sorted(
+            {index for feature_group in self.features_to_use for index in self.feature_group_to_index[feature_group]}
         )
 
     def get_feature_names(self) -> list[str]:
@@ -786,250 +735,6 @@ class FeaturizationInfo:
 
         return feature_names
 
-    @staticmethod
-    def feature_cache_key(signature_pair: tuple[Any, ...]) -> str:
-        """Return an injective cache key for a pair of signature IDs.
-
-        Args:
-            signature_pair: Pair whose first two elements are signature IDs.
-
-        Returns:
-            A length-prefixed encoding of the two canonical string IDs.
-        """
-
-        signature_id_1 = str(signature_pair[0])
-        signature_id_2 = str(signature_pair[1])
-        return f"{len(signature_id_1)}:{signature_id_1}{len(signature_id_2)}:{signature_id_2}"
-
-    @staticmethod
-    def feature_cache_lookup_keys(signature_pair: tuple[Any, ...]) -> tuple[str, ...]:
-        """Return cache lookup keys in forward-first order, including reverse when distinct."""
-        forward = FeaturizationInfo.feature_cache_key(signature_pair)
-        reverse = FeaturizationInfo.feature_cache_key((signature_pair[1], signature_pair[0]))
-        if reverse == forward:
-            return (forward,)
-        return (forward, reverse)
-
-    def cache_directory(self, dataset_name: str) -> str:
-        """
-        returns the cache directory for this dataset and featurizer version
-
-        Parameters
-        ----------
-        dataset_name: string
-            the name of the dataset
-
-        Returns
-        -------
-        string: the cache directory
-        """
-        return os.path.join(CACHE_ROOT, dataset_name, str(self.featurizer_version))
-
-    def cache_db_path(self, dataset_name: str) -> str:
-        """
-        returns the SQLite database path for the features cache
-
-        Parameters
-        ----------
-        dataset_name: string
-            the name of the dataset
-
-        Returns
-        -------
-        string: the full file path for the SQLite cache database
-        """
-        return os.path.join(
-            self.cache_directory(dataset_name),
-            PAIR_FEATURE_CACHE_DB_FILENAME,
-        )
-
-    @staticmethod
-    def _sqlite_feature_blob(feature_output: np.ndarray | list[int | float]) -> sqlite3.Binary:
-        feature_array = np.asarray(feature_output, dtype=np.float64)
-        if feature_array.shape != (NUM_FEATURES,):
-            raise ValueError(
-                "Pair-feature cache entry has unexpected shape " f"expected=({NUM_FEATURES},) got={feature_array.shape}"
-            )
-        return sqlite3.Binary(feature_array.tobytes(order="C"))
-
-    @staticmethod
-    def _decode_sqlite_feature_blob(feature_blob: bytes | bytearray | memoryview) -> np.ndarray:
-        feature_view = np.frombuffer(feature_blob, dtype=np.float64)
-        if int(feature_view.shape[0]) != int(NUM_FEATURES):
-            raise ValueError(
-                "Pair-feature cache entry has unexpected width "
-                f"expected={NUM_FEATURES} got={int(feature_view.shape[0])}"
-            )
-        return feature_view.copy()
-
-    @staticmethod
-    def _configure_pair_feature_cache_connection(connection: sqlite3.Connection) -> None:
-        connection.execute(f"PRAGMA busy_timeout = {int(PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS * 1000)}")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
-
-    @classmethod
-    def _initialize_pair_feature_cache_schema(cls, connection: sqlite3.Connection) -> None:
-        cls._configure_pair_feature_cache_connection(connection)
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pair_features (
-                cache_key TEXT PRIMARY KEY,
-                feature_blob BLOB NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS cache_metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
-        )
-
-    @staticmethod
-    def _validate_pair_feature_cache_metadata(metadata_rows: Mapping[str, str], db_path: str) -> None:
-        required_keys = {
-            _FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION,
-            _FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT,
-        }
-        missing_keys = sorted(required_keys - metadata_rows.keys())
-        if missing_keys:
-            raise RuntimeError(f"Pair-feature cache is missing required metadata path={db_path} keys={missing_keys}")
-
-        schema_version_raw = metadata_rows[_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION]
-        try:
-            schema_version = int(schema_version_raw)
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid pair-feature cache schema version path={db_path} value={schema_version_raw!r}"
-            ) from exc
-        if schema_version != int(PAIR_FEATURE_CACHE_SCHEMA_VERSION):
-            raise RuntimeError(
-                "Unsupported pair-feature cache schema version "
-                f"path={db_path} expected={PAIR_FEATURE_CACHE_SCHEMA_VERSION} got={schema_version}"
-            )
-
-        feature_count_raw = metadata_rows[_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT]
-        try:
-            feature_count = int(feature_count_raw)
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid pair-feature cache feature count path={db_path} value={feature_count_raw!r}"
-            ) from exc
-        if feature_count != int(NUM_FEATURES):
-            raise RuntimeError(
-                "Unsupported pair-feature cache feature count "
-                f"path={db_path} expected={NUM_FEATURES} got={feature_count}"
-            )
-
-    @staticmethod
-    def _pair_feature_cache_initialization_lock_path(db_path: str) -> str:
-        return f"{db_path}.initialize.lock"
-
-    def _load_sqlite_cache(self, db_path: str, cache_keys: Iterable[str]) -> dict[str, np.ndarray]:
-        cached_features: dict[str, np.ndarray] = {}
-        lock_path = self._pair_feature_cache_initialization_lock_path(db_path)
-        with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
-            with exclusive_file_lock(lock_path):
-                self._initialize_pair_feature_cache_schema(connection)
-                metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
-                self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
-            cache_key_iterator = (str(cache_key) for cache_key in cache_keys)
-            while key_batch := tuple(islice(cache_key_iterator, PAIR_FEATURE_CACHE_READ_BATCH_SIZE)):
-                placeholders = ",".join("?" for _ in key_batch)
-                rows = connection.execute(
-                    f"SELECT cache_key, feature_blob FROM pair_features WHERE cache_key IN ({placeholders})",
-                    key_batch,
-                )
-                for cache_key, feature_blob in rows:
-                    try:
-                        cached_features[str(cache_key)] = self._decode_sqlite_feature_blob(feature_blob)
-                    except ValueError as exc:
-                        raise ValueError(
-                            f"Invalid pair-feature cache entry path={db_path} key={cache_key!r}: {exc}"
-                        ) from exc
-        return cached_features
-
-    def load_cache(self, dataset_name: str, cache_keys: Iterable[str]) -> dict[str, np.ndarray]:
-        """Load only requested rows from a dataset's persisted pair-feature cache."""
-        db_path = self.cache_db_path(dataset_name)
-        if os.path.exists(db_path):
-            return self._load_sqlite_cache(db_path, cache_keys)
-        return {}
-
-    def write_cache(
-        self,
-        features: Mapping[str, np.ndarray | list[int | float]],
-        dataset_name: str,
-    ) -> None:
-        """Upsert newly computed pair features into the SQLite cache."""
-        if not features:
-            return
-        cache_dir = self.cache_directory(dataset_name)
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
-        db_path = self.cache_db_path(dataset_name)
-        lock_path = self._pair_feature_cache_initialization_lock_path(db_path)
-        with exclusive_file_lock(lock_path):
-            for attempt in range(PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES):
-                try:
-                    with sqlite3.connect(db_path, timeout=PAIR_FEATURE_CACHE_BUSY_TIMEOUT_SECONDS) as connection:
-                        self._initialize_pair_feature_cache_schema(connection)
-                        metadata_rows = dict(connection.execute("SELECT key, value FROM cache_metadata"))
-                        has_feature_rows = (
-                            connection.execute("SELECT 1 FROM pair_features LIMIT 1").fetchone() is not None
-                        )
-                        if metadata_rows or has_feature_rows:
-                            self._validate_pair_feature_cache_metadata(metadata_rows, db_path)
-                        with connection:
-                            connection.execute(
-                                """
-                                INSERT OR REPLACE INTO cache_metadata(key, value)
-                                VALUES (?, ?)
-                                """,
-                                (_FEATURE_CACHE_METADATA_KEY_SCHEMA_VERSION, str(PAIR_FEATURE_CACHE_SCHEMA_VERSION)),
-                            )
-                            connection.execute(
-                                """
-                                INSERT OR REPLACE INTO cache_metadata(key, value)
-                                VALUES (?, ?)
-                                """,
-                                (_FEATURE_CACHE_METADATA_KEY_FEATURE_COUNT, str(NUM_FEATURES)),
-                            )
-                            connection.executemany(
-                                """
-                                INSERT INTO pair_features(cache_key, feature_blob)
-                                VALUES(?, ?)
-                                ON CONFLICT(cache_key) DO UPDATE SET feature_blob=excluded.feature_blob
-                                """,
-                                (
-                                    (
-                                        str(cache_key),
-                                        self._sqlite_feature_blob(feature_output),
-                                    )
-                                    for cache_key, feature_output in features.items()
-                                ),
-                            )
-                    return
-                except sqlite3.OperationalError as exc:
-                    if "locked" in str(exc).lower() and attempt < PAIR_FEATURE_CACHE_WRITE_MAX_RETRIES - 1:
-                        logger.warning(
-                            "Pair-feature cache write attempt %d failed due to SQLite lock; retrying path=%s",
-                            attempt + 1,
-                            db_path,
-                        )
-                        time.sleep(PAIR_FEATURE_CACHE_WRITE_BACKOFF_SECONDS * (attempt + 1))
-                        continue
-                    logger.error(
-                        "Pair-feature cache write failed after %d attempts path=%s error=%s",
-                        attempt + 1,
-                        db_path,
-                        exc,
-                    )
-                    raise
-
 
 NUM_FEATURES = FeaturizationInfo().number_of_features
 
@@ -1077,7 +782,7 @@ def _single_pair_featurize(
         pair of signature ids
     index: int
         the index of the pair in the list of all pairs,
-        used to keep track of cached features
+        used to scatter results into the output row
 
     Returns
     -------
@@ -1298,19 +1003,11 @@ def _execute_python_featurization_phase(
     pieces_of_work: list[tuple[tuple[str, str], int]],
     n_jobs: int,
     chunk_size: int,
-    use_cache: bool,
-    signature_pairs: list[tuple[str, str, int | float]],
-    featurizer_info: FeaturizationInfo,
     scatter_context: ScatterContext,
-    new_features: dict[str, np.ndarray],
-) -> tuple[str, int]:
-    new_features_count = 0
+) -> str:
     if n_jobs > 1:
         backend_used = "python_parallel"
-        if use_cache:
-            logger.info("Cache changed, making %d feature vectors in parallel", len(pieces_of_work))
-        else:
-            logger.info("Making %d feature vectors in parallel", len(pieces_of_work))
+        logger.info("Making %d feature vectors in parallel", len(pieces_of_work))
 
         pool_size = n_jobs if len(pieces_of_work) > 1000 else 1
         # Explicit platform policy to avoid implicit UniversalPool defaults at call sites.
@@ -1323,38 +1020,27 @@ def _execute_python_featurization_phase(
                     pieces_of_work,
                     min(chunk_size, max(1, int((work_count / n_jobs) / 2))),
                 ):
-                    new_features_count += _write_feature_row(
-                        feature_output=feature_output,
+                    _scatter_feature_row_from_source(
+                        feature_output=np.asarray(feature_output, dtype=np.float64),
                         output_index=int(index),
-                        signature_pairs=signature_pairs,
-                        featurizer_info=featurizer_info,
-                        new_features=new_features,
-                        use_cache=use_cache,
                         scatter_context=scatter_context,
-                        source_is_full=True,
+                        rust_chunk_is_full=True,
                     )
                     pbar.update()
-        return backend_used, new_features_count
+        return backend_used
 
     backend_used = "python_serial"
-    if use_cache:
-        logger.info("Cache changed, making %d feature vectors in serial", len(pieces_of_work))
-    else:
-        logger.info("Making %d feature vectors in serial", len(pieces_of_work))
+    logger.info("Making %d feature vectors in serial", len(pieces_of_work))
     partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
     for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
         result = partial_func(piece)
-        new_features_count += _write_feature_row(
-            feature_output=result[0],
+        _scatter_feature_row_from_source(
+            feature_output=np.asarray(result[0], dtype=np.float64),
             output_index=int(result[1]),
-            signature_pairs=signature_pairs,
-            featurizer_info=featurizer_info,
-            new_features=new_features,
-            use_cache=use_cache,
             scatter_context=scatter_context,
-            source_is_full=True,
+            rust_chunk_is_full=True,
         )
-    return backend_used, new_features_count
+    return backend_used
 
 
 def _execute_rust_batch_featurization_phase(
@@ -1365,7 +1051,6 @@ def _execute_rust_batch_featurization_phase(
     featurizer_info: FeaturizationInfo,
     runtime_context: RuntimeContext,
     n_jobs: int,
-    use_cache: bool,
     total_ram_bytes: int | None,
     rust_batch_total_ram_for_stage: int | None,
     rust_batch_rss_before_bytes: int,
@@ -1380,7 +1065,6 @@ def _execute_rust_batch_featurization_phase(
     features: np.ndarray,
     nameless_features: np.ndarray | None,
     coauthor_similarity_values: np.ndarray | None,
-    new_features: dict[str, np.ndarray],
 ) -> RustBatchExecutionResult:
     if len(pieces_of_work) <= 0:
         raise ValueError("Rust batch execution requires non-empty pieces_of_work")
@@ -1424,7 +1108,7 @@ def _execute_rust_batch_featurization_phase(
         runtime_context=runtime_context,
     )
     rust_selected_indices: list[int] | None = None
-    if not use_cache and len(indices_needed_for_compute) > 0:
+    if len(indices_needed_for_compute) > 0:
         rust_selected_indices = indices_needed_for_compute
     signature_id_to_index: dict[Any, int] = {}
     rust_signature_ids = rust_featurizer.signature_ids()
@@ -1527,7 +1211,6 @@ def _execute_rust_batch_featurization_phase(
 
     num_threads = max(1, int(n_jobs))
     rust_batch_adaptive_halvings = 0
-    new_features_count = 0
     with _rust_batch_sampler_context():
         with tqdm(
             total=len(pieces_of_work),
@@ -1581,25 +1264,12 @@ def _execute_rust_batch_featurization_phase(
                 rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
                 chunk_indices = [index for _, index in chunk_work]
 
-                if use_cache:
-                    for row_offset, index in enumerate(chunk_indices):
-                        new_features_count += _write_feature_row(
-                            feature_output=rust_features_chunk[row_offset],
-                            output_index=int(index),
-                            signature_pairs=signature_pairs,
-                            featurizer_info=featurizer_info,
-                            new_features=new_features,
-                            use_cache=use_cache,
-                            scatter_context=rust_scatter_context,
-                            source_is_full=rust_chunk_is_full,
-                        )
-                else:
-                    _scatter_chunk_to_output(
-                        rust_features_chunk=rust_features_chunk,
-                        chunk_indices=chunk_indices,
-                        scatter_context=rust_scatter_context,
-                        rust_chunk_is_full=rust_chunk_is_full,
-                    )
+                _scatter_chunk_to_output(
+                    rust_features_chunk=rust_features_chunk,
+                    chunk_indices=chunk_indices,
+                    scatter_context=rust_scatter_context,
+                    rust_chunk_is_full=rust_chunk_is_full,
+                )
                 _sample_rss_peak()
                 if (
                     rust_batch_total_ram_for_stage is not None
@@ -1625,7 +1295,6 @@ def _execute_rust_batch_featurization_phase(
     _sample_rss_peak()
     return RustBatchExecutionResult(
         rust_batch_plan=rust_batch_plan,
-        new_features_count=int(new_features_count),
         rust_batch_total_ram_for_stage=rust_batch_total_ram_for_stage,
         rust_batch_rss_before_bytes=int(rust_batch_rss_before_bytes),
         rust_batch_rss_peak_bytes=int(rust_batch_rss_peak_bytes),
@@ -1638,7 +1307,7 @@ def _is_partial_supervision_label(label: int | float) -> bool:
     """Return whether a pair label encodes a partial-supervision constraint.
 
     Negative labels are constraints. ``NaN`` labels represent unlabeled
-    inference pairs and therefore remain eligible for cache reads and compute.
+    inference pairs and therefore remain eligible for compute.
 
     Args:
         label: Pair label supplied to featurization.
@@ -1650,85 +1319,44 @@ def _is_partial_supervision_label(label: int | float) -> bool:
     return bool(label < 0)
 
 
-def _pair_feature_cache_binding(dataset: ANDData) -> str:
-    """Hash the names/counts inputs embedded in persistent pair features."""
-
-    provenance = getattr(dataset, "name_counts_provenance", None)
-    payload = {
-        "schema": "s2and-pair-feature-inputs-v1",
-        "normalization_version": getattr(dataset, "normalization_version", None),
-        "arrow_artifact_generation": getattr(dataset, "arrow_artifact_generation", None),
-        "name_counts": (
-            None
-            if provenance is None
-            else NameCountsBinding.from_provenance(
-                provenance,
-                context="pair-feature cache",
-            ).feature_contract_fields()
-        ),
-        "name_tuples": sorted(getattr(dataset, "name_tuples", ())),
-    }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def _bound_pair_feature_cache_key(binding: str, cache_key: str) -> str:
-    """Bind one pair ID key to the exact feature inputs used to compute it."""
-
-    return f"{binding}:{cache_key}"
-
-
 def many_pairs_featurize(
     signature_pairs: list[tuple[str, str, int | float]],
     dataset: ANDData,
     featurizer_info: FeaturizationInfo,
+    *,
     n_jobs: int,
-    use_cache: bool,
-    chunk_size: int,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
     nameless_featurizer_info: FeaturizationInfo | None = None,
     nan_value: float = np.nan,
     delete_training_data: bool = False,
     runtime_context: RuntimeContext | None = None,
     total_ram_bytes: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """
-    Featurizes many pairs
+    """Featurize many signature pairs.
 
-    Parameters
-    ----------
-    signature_pairs: List[pairs]
-        the pairs to featurize
-    dataset: ANDData
-        the dataset containing the relevant data
-    featurizer_info: FeaturizationInfo
-        the FeautrizationInfo object containing the listing of features to use
-        and featurizer version
-    n_jobs: int
-        the number of cpus to use
-    use_cache: bool
-        whether or not to use write to/read from the features cache
-    chunk_size: int
-        the chunk size for multiprocessing
-    nameless_featurizer_info: FeaturizationInfo
-        the FeaturizationInfo for creating the features that do not use any name features,
-        these will not be computed if this is None
-    nan_value: float
-        the value to replace nans with
-    delete_training_data: bool
-        Whether to delete some suspicious training rows
-    total_ram_bytes: Optional[int]
-        Optional explicit RAM input used for stage-wise memory budgeting of Rust batch featurization.
+    Args:
+        signature_pairs: The ``(signature_id_1, signature_id_2, label)`` pairs
+            to featurize. Negative labels encode partial-supervision
+            constraints and are not computed.
+        dataset: The dataset containing the relevant data.
+        featurizer_info: Listing of feature groups to use.
+        n_jobs: The number of cpus to use.
+        chunk_size: The chunk size for multiprocessing.
+        nameless_featurizer_info: FeaturizationInfo for the features that do
+            not use any name features; those are not computed when ``None``.
+        nan_value: The value to replace NaNs with.
+        delete_training_data: Whether to delete some suspicious training rows.
+        runtime_context: Optional runtime context override.
+        total_ram_bytes: Optional explicit RAM input used for stage-wise
+            memory budgeting of Rust batch featurization.
 
-    Returns
-    -------
-    np.ndarray: the main features for all the pairs
-    np.ndarray: the labels for all the pairs
-    np.ndarray: the nameless features for all the pairs
+    Returns:
+        Tuple of (features, labels, nameless features or None).
     """
     featurize_start = time.perf_counter()
-    backend_used = "cached_only"
+    backend_used = "no_compute_needed"
     if runtime_context is None:
         runtime_context = dataset.runtime_context
-    use_cache = bool(use_cache)
     signature_pairs = [(str(pair[0]), str(pair[1]), pair[2]) for pair in signature_pairs]
     _ensure_python_pair_signature_ngrams(dataset, signature_pairs, runtime_context)
 
@@ -1737,11 +1365,6 @@ def many_pairs_featurize(
     global_dataset = dataset
     global_runtime_context = runtime_context
 
-    cached_features: dict[str, np.ndarray] = {}
-    new_features: dict[str, np.ndarray] = {}
-    cache_binding = _pair_feature_cache_binding(dataset) if use_cache else ""
-    cache_changed = False
-    new_features_count = 0
     did_rust_batch = False
     rust_batch_plan: memory_budget.RustBatchChunkPlan | None = None
     rust_batch_total_ram_for_stage: int | None = None
@@ -1770,7 +1393,7 @@ def many_pairs_featurize(
             rust_batch_rss_peak_bytes = rust_batch_rss_before_bytes
             rust_batch_rss_baseline_locked = True
         except RuntimeError:
-            # Preserve behavior for all-cached paths when RAM autodetection is unavailable.
+            # Preserve behavior for no-compute paths when RAM autodetection is unavailable.
             rust_batch_total_ram_for_stage = None
 
     def _sample_rust_batch_rss_peak() -> None:
@@ -1781,32 +1404,11 @@ def many_pairs_featurize(
         if rss_now > rust_batch_rss_peak_bytes:
             rust_batch_rss_peak_bytes = rss_now
 
-    if use_cache:
-        logger.info("Loading cache...")
-        requested_cache_keys = {
-            _bound_pair_feature_cache_key(cache_binding, cache_key)
-            for pair in signature_pairs
-            if not _is_partial_supervision_label(pair[2])
-            for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1]))
-        }
-        cached_features = featurizer_info.load_cache(dataset.name, requested_cache_keys)
-        logger.info(
-            "Cache loaded with %d requested hits out of %d lookup keys",
-            len(cached_features),
-            len(requested_cache_keys),
-        )
-
-    indices_to_use_set: set[int] = set()
-    for feature_name in featurizer_info.features_to_use:
-        indices_to_use_set.update(featurizer_info.feature_group_to_index[feature_name])
-    indices_to_use: list[int] = sorted(indices_to_use_set)
+    indices_to_use = featurizer_info.selected_feature_indices()
 
     nameless_indices_to_use: list[int] = []
     if nameless_featurizer_info is not None:
-        nameless_indices_to_use_set: set[int] = set()
-        for feature_name in nameless_featurizer_info.features_to_use:
-            nameless_indices_to_use_set.update(nameless_featurizer_info.feature_group_to_index[feature_name])
-        nameless_indices_to_use = sorted(nameless_indices_to_use_set)
+        nameless_indices_to_use = nameless_featurizer_info.selected_feature_indices()
 
     identity_selected_indices = indices_to_use == list(range(NUM_FEATURES))
     coauthor_similarity_index: int | None = None
@@ -1856,27 +1458,11 @@ def many_pairs_featurize(
         if _is_partial_supervision_label(pair[2]):
             continue
 
-        if use_cache:
-            cached_vector = None
-            for cache_key in featurizer_info.feature_cache_lookup_keys((pair[0], pair[1])):
-                cached_vector = cached_features.get(_bound_pair_feature_cache_key(cache_binding, cache_key))
-                if cached_vector is not None:
-                    break
-            if cached_vector is not None:
-                _scatter_feature_row_from_source(
-                    feature_output=np.asarray(cached_vector, dtype=np.float64),
-                    output_index=i,
-                    scatter_context=default_scatter_context,
-                    rust_chunk_is_full=True,
-                )
-                continue
-
-        cache_changed = True
         pieces_of_work.append(((pair[0], pair[1]), i))
 
     logger.info("Created pieces of work")
 
-    if cache_changed:
+    if pieces_of_work:
         use_rust = _use_rust_featurizer(runtime_context, dataset)
         if use_rust and not rust_module_available:
             raise RuntimeError(
@@ -1901,7 +1487,6 @@ def many_pairs_featurize(
                     featurizer_info=featurizer_info,
                     runtime_context=runtime_context,
                     n_jobs=n_jobs,
-                    use_cache=use_cache,
                     total_ram_bytes=total_ram_bytes,
                     rust_batch_total_ram_for_stage=rust_batch_total_ram_for_stage,
                     rust_batch_rss_before_bytes=rust_batch_rss_before_bytes,
@@ -1916,7 +1501,6 @@ def many_pairs_featurize(
                     features=features,
                     nameless_features=nameless_features,
                     coauthor_similarity_values=coauthor_similarity_values,
-                    new_features=new_features,
                 )
                 rust_batch_plan = rust_batch_result.rust_batch_plan
                 rust_batch_total_ram_for_stage = rust_batch_result.rust_batch_total_ram_for_stage
@@ -1926,7 +1510,6 @@ def many_pairs_featurize(
                 rust_batch_adaptive_halvings = rust_batch_result.rust_batch_adaptive_halvings
                 did_rust_batch = True
                 backend_used = "rust_batch"
-                new_features_count += int(rust_batch_result.new_features_count)
             except Exception as exc:
                 raise RuntimeError(
                     "Rust batch featurization failed in strict rust backend "
@@ -1941,32 +1524,16 @@ def many_pairs_featurize(
             )
 
         if not did_rust_batch:
-            backend_used, python_new_features = _execute_python_featurization_phase(
+            backend_used = _execute_python_featurization_phase(
                 pieces_of_work=pieces_of_work,
                 n_jobs=n_jobs,
                 chunk_size=chunk_size,
-                use_cache=use_cache,
-                signature_pairs=signature_pairs,
-                featurizer_info=featurizer_info,
                 scatter_context=default_scatter_context,
-                new_features=new_features,
             )
-            new_features_count += int(python_new_features)
         _sample_rust_batch_rss_peak()
         logger.info("Work completed")
     else:
-        logger.info("Featurization backend decision: skipped compute (all pairs were cached or pre-labeled)")
-
-    if use_cache and cache_changed and new_features:
-        logger.info("Writing %d new features to cache", len(new_features))
-        featurizer_info.write_cache(
-            {
-                _bound_pair_feature_cache_key(cache_binding, cache_key): feature_vector
-                for cache_key, feature_vector in new_features.items()
-            },
-            dataset.name,
-        )
-        logger.info("Cache write completed")
+        logger.info("Featurization backend decision: skipped compute (all pairs were pre-labeled)")
     _sample_rust_batch_rss_peak()
 
     if delete_training_data:
@@ -2066,7 +1633,7 @@ def many_pairs_featurize(
         )
 
     logger.info(
-        "Telemetry stage: stage=pair_featurization seconds=%.3f total_pairs=%d uncached_pairs=%d backend=%s",
+        "Telemetry stage: stage=pair_featurization seconds=%.3f total_pairs=%d computed_pairs=%d backend=%s",
         time.perf_counter() - featurize_start,
         len(signature_pairs),
         len(pieces_of_work),
@@ -2076,47 +1643,68 @@ def many_pairs_featurize(
     return features, labels, nameless_features
 
 
+def resolve_training_pairs(
+    dataset: ANDData,
+) -> tuple[
+    list[tuple[str, str, int | float]],
+    list[tuple[str, str, int | float]],
+    list[tuple[str, str, int | float]],
+]:
+    """Resolve the train/val/test signature pairs for a training dataset.
+
+    This is the single source of pair-list truth shared by ``featurize`` and
+    the training-time feature snapshot cache: both hash and featurize exactly
+    the lists returned here.
+
+    Args:
+        dataset: A ``mode='train'`` dataset.
+
+    Returns:
+        Tuple of (train_pairs, val_pairs, test_pairs).
+
+    Raises:
+        ValueError: If the dataset is not in training mode.
+    """
+    if dataset.mode != "train":
+        raise ValueError(f"resolve_training_pairs requires mode='train', got {dataset.mode!r}")
+    if dataset.train_pairs is not None:
+        return dataset.fixed_pairs()
+    if dataset.train_blocks is not None:
+        train_signatures, val_signatures, test_signatures = dataset.split_cluster_signatures_fixed()
+    elif dataset.train_signatures is not None:
+        train_signatures, val_signatures, test_signatures = dataset.split_data_signatures_fixed()
+    else:
+        train_signatures, val_signatures, test_signatures = dataset.split_cluster_signatures()
+    return dataset.split_pairs(train_signatures, val_signatures, test_signatures)
+
+
 def featurize(
     dataset: ANDData,
     featurizer_info: FeaturizationInfo,
+    *,
     n_jobs: int = 1,
-    use_cache: bool = False,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     nameless_featurizer_info: FeaturizationInfo | None = None,
     nan_value: float = np.nan,
     delete_training_data: bool = False,
     total_ram_bytes: int | None = None,
 ) -> tuple[TupleOfArrays, TupleOfArrays, TupleOfArrays] | TupleOfArrays:
-    """
-    Featurizes the input dataset
+    """Featurize the input dataset.
 
-    Parameters
-    ----------
-    dataset: ANDData
-        the dataset containing the relevant data
-    featurizer_info: FeaturizationInfo
-        the FeautrizationInfo object containing the listing of features to use
-        and featurizer version
-    n_jobs: int
-        the number of cpus to use
-    use_cache: bool
-        whether or not to use write to/read from the features cache
-    chunk_size: int
-        the chunk size for multiprocessing
-    nameless_featurizer_info: FeaturizationInfo
-        the FeaturizationInfo for creating the features that do not use any name features,
-        these will not be computed if this is None
-    nan_value: float
-        the value to replace nans with
-    delete_training_data: bool
-        Whether to delete some suspicious training examples
-    total_ram_bytes: Optional[int]
-        Optional explicit RAM input used for stage-wise memory budgeting.
+    Args:
+        dataset: The dataset containing the relevant data.
+        featurizer_info: Listing of feature groups to use.
+        n_jobs: The number of cpus to use.
+        chunk_size: The chunk size for multiprocessing.
+        nameless_featurizer_info: FeaturizationInfo for the features that do
+            not use any name features; those are not computed when ``None``.
+        nan_value: The value to replace NaNs with.
+        delete_training_data: Whether to delete some suspicious training examples.
+        total_ram_bytes: Optional explicit RAM input used for stage-wise memory budgeting.
 
-    Returns
-    -------
-    train/val/test features and labels if mode is 'train',
-    features and labels for all pairs if mode is 'inference'
+    Returns:
+        Train/val/test features and labels if mode is 'train'; features and
+        labels for all pairs if mode is 'inference'.
     """
     if dataset.mode == "inference":
         logger.info("featurizing all pairs")
@@ -2125,80 +1713,36 @@ def featurize(
             all_pairs,
             dataset,
             featurizer_info,
-            n_jobs,
-            use_cache,
-            chunk_size,
-            nameless_featurizer_info,
-            nan_value,
-            False,
+            n_jobs=n_jobs,
+            chunk_size=chunk_size,
+            nameless_featurizer_info=nameless_featurizer_info,
+            nan_value=nan_value,
             total_ram_bytes=total_ram_bytes,
         )
         logger.info("featurized all pairs")
         return all_features
-    else:
-        if dataset.train_pairs is None:
-            if dataset.train_blocks is not None:
-                (
-                    train_signatures,
-                    val_signatures,
-                    test_signatures,
-                ) = dataset.split_cluster_signatures_fixed()
-            elif dataset.train_signatures is not None:
-                (
-                    train_signatures,
-                    val_signatures,
-                    test_signatures,
-                ) = dataset.split_data_signatures_fixed()
-            else:
-                (
-                    train_signatures,
-                    val_signatures,
-                    test_signatures,
-                ) = dataset.split_cluster_signatures()
 
-            train_pairs, val_pairs, test_pairs = dataset.split_pairs(train_signatures, val_signatures, test_signatures)
-
-        else:
-            train_pairs, val_pairs, test_pairs = dataset.fixed_pairs()
-
-        logger.info("featurizing train")
-        train_features = many_pairs_featurize(
-            train_pairs,
-            dataset,
-            featurizer_info,
-            n_jobs,
-            use_cache,
-            chunk_size,
-            nameless_featurizer_info,
-            nan_value,
-            delete_training_data,
-            total_ram_bytes=total_ram_bytes,
+    train_pairs, val_pairs, test_pairs = resolve_training_pairs(dataset)
+    split_results = []
+    for split_name, split_pairs, split_delete_training_data in (
+        ("train", train_pairs, delete_training_data),
+        ("val", val_pairs, False),
+        ("test", test_pairs, False),
+    ):
+        logger.info("featurizing %s", split_name)
+        split_results.append(
+            many_pairs_featurize(
+                split_pairs,
+                dataset,
+                featurizer_info,
+                n_jobs=n_jobs,
+                chunk_size=chunk_size,
+                nameless_featurizer_info=nameless_featurizer_info,
+                nan_value=nan_value,
+                delete_training_data=split_delete_training_data,
+                total_ram_bytes=total_ram_bytes,
+            )
         )
-        logger.info("featurized train, featurizing val")
-        val_features = many_pairs_featurize(
-            val_pairs,
-            dataset,
-            featurizer_info,
-            n_jobs,
-            use_cache,
-            chunk_size,
-            nameless_featurizer_info,
-            nan_value,
-            False,
-            total_ram_bytes=total_ram_bytes,
-        )
-        logger.info("featurized val, featurizing test")
-        test_features = many_pairs_featurize(
-            test_pairs,
-            dataset,
-            featurizer_info,
-            n_jobs,
-            use_cache,
-            chunk_size,
-            nameless_featurizer_info,
-            nan_value,
-            False,
-            total_ram_bytes=total_ram_bytes,
-        )
-        logger.info("featurized test")
-        return train_features, val_features, test_features
+        logger.info("featurized %s", split_name)
+    train_features, val_features, test_features = split_results
+    return train_features, val_features, test_features

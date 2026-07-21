@@ -32,7 +32,6 @@ DATA_DIR = CONFIG["internal_data_dir"]
 if not os.path.exists(DATA_DIR):
     DATA_DIR = CONFIG["main_data_dir"]
 
-os.environ["S2AND_CACHE"] = os.path.join(DATA_DIR, ".feature_cache")
 os.environ["OMP_NUM_THREADS"] = "8"
 
 import argparse
@@ -439,7 +438,6 @@ def main(
     feature_groups_to_skip: list[str],
     use_linear_pairwise_model: bool,
     gender_ethnicity_available: bool,
-    use_cache: bool,
 ):
     USE_NAMELESS_MODEL = not dont_use_nameless_model
     N_JOBS = n_jobs
@@ -448,7 +446,6 @@ def main(
     INDIVIDUAL_MODELS = not skip_individual_models
     UNION_MODELS = not skip_union_models
     N_TRAIN_PAIRS_SIZE = n_train_pairs_size
-    USE_CACHE = use_cache
     logger.info(
         f"USE_NAMELESS_MODEL={USE_NAMELESS_MODEL}, "
         f"N_JOBS={N_JOBS}, "
@@ -463,7 +460,6 @@ def main(
         f"N_TRAIN_PAIRS_SIZE={N_TRAIN_PAIRS_SIZE}, "
         f"feature_groups_to_skip={feature_groups_to_skip}, "
         f"use_linear_pairwise_model={use_linear_pairwise_model}, "
-        f"USE_CACHE={USE_CACHE}, "
     )
 
     FEATURES_TO_USE = [
@@ -665,7 +661,6 @@ def main(
             anddata,
             FEATURIZER_INFO,
             n_jobs=N_JOBS,
-            use_cache=USE_CACHE,
             chunk_size=DEFAULT_CHUNK_SIZE,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=NAN_VALUE,
@@ -787,7 +782,6 @@ def main(
                     ),
                     search_space=cluster_search_space,
                     n_jobs=N_JOBS,
-                    use_cache=USE_CACHE,
                     nameless_classifier=(
                         nameless_pairwise_modeler.classifier if nameless_pairwise_modeler is not None else None
                     ),
@@ -954,7 +948,6 @@ def main(
                     ),
                     search_space=cluster_search_space,
                     n_jobs=N_JOBS,
-                    use_cache=USE_CACHE,
                     nameless_classifier=(
                         nameless_union_classifier.classifier if nameless_union_classifier is not None else None
                     ),
@@ -1531,12 +1524,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Do the signatures have estimated gender/ethnicity of author?",
     )
-    parser.add_argument(
-        "--use_cache",
-        action="store_true",
-        help="Use this flag to enable the cache; cache makes things faster but uses a *lot* of ram",
-    )
-
     args = parser.parse_args()
     logger.info(args)
 
@@ -1561,7 +1548,6 @@ if __name__ == "__main__":
             args.feature_groups_to_skip,
             args.use_linear_pairwise_model,
             args.gender_ethnicity_available,
-            args.use_cache,
         )
         multi_b3_grid.append(b3_f1_grid)
         multi_pairwise_auroc_grid.append(pairwise_auroc_grid)

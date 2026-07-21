@@ -333,7 +333,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     clusterer = load_production_model(str(args.model_path))
-    clusterer.use_cache = False
     clusterer.n_jobs = int(args.n_jobs)
 
     prior_env = _set_runtime_env(int(args.n_jobs))

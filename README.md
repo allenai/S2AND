@@ -156,9 +156,9 @@ dataset = build_training_anddata_from_arrow(
 )
 
 featurization_info = FeaturizationInfo()
-train, val, test = featurize(dataset, featurization_info, n_jobs=4, use_cache=False)
-X_train, y_train = train
-X_val, y_val = val
+train, val, test = featurize(dataset, featurization_info, n_jobs=4)
+X_train, y_train, _ = train
+X_val, y_val, _ = val
 
 pairwise_model = PairwiseModeler(
     n_iter=25,
@@ -199,10 +199,11 @@ Runtime controls:
 
 Cache behavior:
 
-- `use_cache=False` skips persistent pair-feature SQLite cache reads and writes.
-- `use_cache=True` enables the SQLite-backed pair-feature cache under `S2AND_CACHE` for cache-aware pair-featurization paths.
-- Same-process Rust featurizer reuse is independent of `use_cache` and remains available even when `use_cache=False`.
-- Rust featurizers are not serialized to disk; direct Arrow/Rust production prediction paths bypass the persistent pair-feature cache.
+- Production inference has no persistent cache; Rust featurizers are not
+  serialized to disk, and same-process Rust featurizer reuse is the only
+  inference-time reuse mechanism.
+- Repeated training experiments can opt into the featurized-split snapshot
+  cache (`train_pairwise.py --feature-cache-dir`). See `docs/caching.md`.
 
 Large blocks:
 

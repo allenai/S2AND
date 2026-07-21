@@ -41,7 +41,6 @@ class TestClusterer(unittest.TestCase):
                 X_random, y_random
             ),
             n_jobs=1,
-            use_cache=False,
             use_default_constraints_as_supervision=False,
         )
 
@@ -210,3 +209,11 @@ class TestClusterer(unittest.TestCase):
         }
         with pytest.raises(KeyError, match="Missing precomputed distance matrix for block"):
             self.dummy_clusterer.predict_helper(block, self.dummy_dataset, dists={})
+
+
+def test_clusterer_rejects_legacy_positional_use_cache_argument() -> None:
+    """The old 8th positional slot was use_cache; it must fail loudly rather
+    than silently binding to use_default_constraints_as_supervision."""
+    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
+    with pytest.raises(TypeError, match="positional"):
+        Clusterer(featurizer_info, None, None, None, None, 25, 1, False)  # ty: ignore[too-many-positional-arguments]

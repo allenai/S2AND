@@ -462,7 +462,6 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
         ds_python,
         featurizer_info,
         n_jobs=2,
-        use_cache=False,
         chunk_size=4,
         nan_value=np.nan,
     )
@@ -477,7 +476,6 @@ def test_many_pairs_end_to_end_parity_python_vs_rust(monkeypatch, tmp_path):
         ds_rust,
         featurizer_info,
         n_jobs=2,
-        use_cache=False,
         chunk_size=4,
         nan_value=np.nan,
     )

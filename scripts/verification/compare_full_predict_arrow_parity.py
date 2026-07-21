@@ -280,7 +280,6 @@ def _feature_constraint_report(
         dataset,
         FeaturizationInfo(),
         n_jobs=int(n_jobs),
-        use_cache=False,
         chunk_size=max(1, len(signature_pairs)),
         nan_value=np.nan,
         runtime_context=RuntimeContext(
@@ -404,7 +403,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     start = time.perf_counter()
     clusterer = load_production_model(args.model_path)
     clusterer.n_jobs = int(args.n_jobs)
-    clusterer.use_cache = False
     timings["load_model_seconds"] = time.perf_counter() - start
 
     start = time.perf_counter()

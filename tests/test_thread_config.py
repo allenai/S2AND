@@ -15,7 +15,6 @@ def test_clusterer_n_jobs_propagates_to_lightgbm() -> None:
         classifier=classifier,
         nameless_classifier=nameless_classifier,
         n_jobs=2,
-        use_cache=False,
         use_default_constraints_as_supervision=False,
     )
 
@@ -38,7 +37,6 @@ def test_clusterer_n_jobs_minus_one_uses_all_cores(monkeypatch) -> None:
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=classifier,
         n_jobs=-1,
-        use_cache=False,
         use_default_constraints_as_supervision=False,
     )
 

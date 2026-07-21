@@ -98,7 +98,7 @@ def test_featurizer_computes_requested_pairs() -> None:
         ("3", "2", -1),
     ]
 
-    features, labels, _ = many_pairs_featurize(test_pairs, dataset, featurizer, 2, False, 1, nan_value=-1)
+    features, labels, _ = many_pairs_featurize(test_pairs, dataset, featurizer, n_jobs=2, chunk_size=1, nan_value=-1)
 
     expected_width = sum(len(featurizer.feature_group_to_index[name]) for name in _FULL_FEATURES)
     assert features.shape == (len(test_pairs), expected_width)
@@ -117,7 +117,6 @@ def test_malformed_emails_produce_only_missing_features() -> None:
         dataset,
         featurizer,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
     )
@@ -142,7 +141,6 @@ def test_zero_specter_embedding_is_missing_for_lists_and_arrays(zero_embedding) 
         dataset,
         featurizer,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
     )
@@ -167,7 +165,6 @@ def test_specter_embedding_must_be_one_dimensional() -> None:
             dataset,
             featurizer,
             n_jobs=1,
-            use_cache=False,
             chunk_size=1,
             nan_value=np.nan,
         )
@@ -192,7 +189,6 @@ def test_numeric_specter_tuple_keys_are_available_to_pair_featurization() -> Non
         dataset,
         featurizer,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         nan_value=np.nan,
     )
@@ -269,7 +265,6 @@ def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch:
         dataset,
         featurizer_info,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         delete_training_data=True,
         runtime_context=runtime_context,
@@ -335,7 +330,6 @@ def test_rust_prewarm_happens_before_rss_sampling(monkeypatch: pytest.MonkeyPatc
         dataset,
         featurizer_info,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         runtime_context=runtime_context,
     )
@@ -452,7 +446,6 @@ def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
         dataset,
         featurizer_info,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         runtime_context=runtime_context,
     )
@@ -483,7 +476,6 @@ def test_featurizer_with_feature_subset_ok() -> None:
         dataset_no_ref,
         featurizer,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         nan_value=-1,
     )
@@ -517,7 +509,6 @@ def test_multiprocessing_featurization_consistency() -> None:
         dataset,
         featurizer,
         n_jobs=1,
-        use_cache=False,
         chunk_size=1,
         nan_value=-1,
     )
@@ -526,7 +517,6 @@ def test_multiprocessing_featurization_consistency() -> None:
         dataset,
         featurizer,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=-1,
     )
@@ -549,7 +539,6 @@ def test_bound_dataset_is_available_in_workers() -> None:
             dataset,
             featurizer,
             n_jobs=2,
-            use_cache=False,
             chunk_size=1,
             nan_value=-1,
         )
@@ -576,7 +565,6 @@ def test_multiprocessing_with_different_chunk_sizes() -> None:
         dataset,
         featurizer,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=-1,
     )
@@ -585,7 +573,6 @@ def test_multiprocessing_with_different_chunk_sizes() -> None:
         dataset,
         featurizer,
         n_jobs=2,
-        use_cache=False,
         chunk_size=3,
         nan_value=-1,
     )
@@ -603,7 +590,6 @@ def test_multiprocessing_fallback_to_single_thread() -> None:
         dataset,
         featurizer,
         n_jobs=4,
-        use_cache=False,
         chunk_size=1,
         nan_value=-1,
     )
@@ -626,7 +612,6 @@ def test_spawn_context_compatibility() -> None:
         dataset,
         featurizer,
         n_jobs=2,
-        use_cache=False,
         chunk_size=1,
         nan_value=-1,
     )
@@ -680,7 +665,6 @@ def test_many_pairs_featurize_surfaces_rust_initialization_failure(monkeypatch: 
             dataset,
             featurizer_info,
             n_jobs=1,
-            use_cache=False,
             chunk_size=1,
             runtime_context=runtime_context,
         )

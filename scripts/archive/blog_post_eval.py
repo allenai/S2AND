@@ -27,7 +27,6 @@ from typing import Any
 from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "8"
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
 import argparse
 import json
@@ -167,7 +166,6 @@ def main(
             anddata,
             FEATURIZER_INFO,
             n_jobs=N_JOBS,
-            use_cache=True,
             chunk_size=100,
             nameless_featurizer_info=NAMELESS_FEATURIZER_INFO,
             nan_value=np.nan,
@@ -239,7 +237,6 @@ def main(
         nameless_classifier=nameless_union_classifier.classifier if nameless_union_classifier is not None else None,
         nameless_featurizer_info=NAMELESS_FEATURIZER_INFO if nameless_union_classifier is not None else None,
         use_default_constraints_as_supervision=USE_RULES,
-        use_cache=True,
         random_state=random_seed if random_seed is not None else 42,
     )
     clusterer.fit(anddatas)

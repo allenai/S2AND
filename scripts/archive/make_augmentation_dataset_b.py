@@ -16,7 +16,6 @@ from s2and.consts import CONFIG
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "<fill me in>"
-os.environ["S2AND_CACHE"] = os.path.join(CONFIG["internal_data_dir"], ".feature_cache")
 
 import argparse
 import copy

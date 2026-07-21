@@ -128,7 +128,6 @@ def test_python_predicted_batches_use_effective_pair_chunk_size(monkeypatch):
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
-        use_cache=False,
         batch_size=10,
     )
     helper_items = [((f"s{i}", f"s{i + 1}", float("nan")), (0, i + 1), "block") for i in range(5)]
@@ -182,7 +181,6 @@ def test_fused_constraint_fallback_resumes_at_failed_offset(monkeypatch):
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
-        use_cache=False,
         batch_size=2,
         use_default_constraints_as_supervision=True,
     )
@@ -261,7 +259,6 @@ def test_predict_from_arrow_paths_rejects_disallows_with_precomputed_dists_befor
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
-        use_cache=False,
     )
     dists = {"block": np.asarray([0.5], dtype=np.float64)}
     arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path)
@@ -285,7 +282,6 @@ def test_predict_from_arrow_paths_rejects_empty_path_before_rust_builder(monkeyp
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
-        use_cache=False,
     )
 
     with pytest.raises(ValueError, match="signatures"):
@@ -310,7 +306,6 @@ def test_rust_featurizer_distance_matrix_guards_allocation_before_matrix_build()
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
-        use_cache=False,
     )
 
     with pytest.raises(MemoryError, match="Predict exact block exceeds memory budget"):
@@ -327,7 +322,6 @@ def test_make_distance_matrices_guards_allocation_before_pair_featurization(monk
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
         classifier=None,
         n_jobs=1,
-        use_cache=False,
     )
 
     monkeypatch.setattr(
@@ -531,7 +525,7 @@ def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incrementa
     )
 
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    clusterer = Clusterer(featurizer_info=featurizer_info, classifier=None, n_jobs=1, use_cache=False)
+    clusterer = Clusterer(featurizer_info=featurizer_info, classifier=None, n_jobs=1)
 
     monkeypatch.setattr(
         model_module,
@@ -669,7 +663,6 @@ def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_orde
         featurizer_info=featurizer_info,
         classifier=None,
         n_jobs=1,
-        use_cache=False,
         batch_size=2,
     )
 

@@ -137,6 +137,9 @@ def test_run_single_rust_uses_arrow_native_featurizer(monkeypatch, tmp_path: Pat
         def get_feature_names(self):
             return ["first_name_count"]
 
+        def selected_feature_indices(self):
+            return [0]
+
     monkeypatch.setattr("s2and.data.ANDData", FakeANDData)
     monkeypatch.setattr(featurizer, "FeaturizationInfo", FakeFeaturizationInfo)
 

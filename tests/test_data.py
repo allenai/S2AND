@@ -514,7 +514,7 @@ class TestData(unittest.TestCase):
                 ), f"Title ngrams mismatch for paper {paper_id}"
 
 
-def test_compute_signature_name_counts_uses_single_character_initial(tmp_path):
+def test_preprocessing_name_counts_use_single_character_initial(tmp_path):
     from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 
     index_path, _metrics = write_name_counts_index(
@@ -530,21 +530,16 @@ def test_compute_signature_name_counts_uses_single_character_initial(tmp_path):
         name_counts_index=index_path,
         preprocess=False,
     )
-    signature = next(iter(dataset.signatures.values()))._replace(
+    signature_id = next(iter(dataset.signatures))
+    dataset.signatures[signature_id] = dataset.signatures[signature_id]._replace(
         author_info_first="Michael",
         author_info_middle="",
         author_info_last="Smith",
-        author_info_first_normalized_without_apostrophe="michael",
-        author_info_middle_normalized_without_apostrophe="",
-        author_info_last_normalized="smith",
     )
-    counts = dataset._compute_signature_name_counts(
-        signature,
-        first_raw="Michael",
-        middle_raw="",
-        first_without_apostrophe="michael",
-        last_normalized="smith",
-    )
+    dataset.preprocess = True
+    dataset.preprocess_signatures()
+
+    counts = dataset.signatures[signature_id].author_info_name_counts
     assert counts.last_first_initial == 17
 
 

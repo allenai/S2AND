@@ -292,19 +292,15 @@ boundaries fail closed under mutation.
 
 ### Proven dead private code
 
-**Status: Open**
+**Status: Complete**
 
-Delete after retargeting any useful assertions to live paths:
-
-- `model._missing_arrow_prediction_artifacts_error`;
-- `production._summarize_query_views`;
-- `production.promoted_incremental_observed_probe`;
-- `production._raw_arrow_plan_window_size/_raw_arrow_plan_windows`;
-- `policy.arrow_paths_have_name_counts_index`;
-- `subblocking._load_canonical_orcid_prefix_counts`.
-
-For `ANDData._compute_signature_name_counts`, move canonical-key coverage to the
-live batched preprocessing path before deleting the private single-row helper.
+All seven dead private paths are deleted. Useful assertions were retargeted to
+live paths first: ORCID loader-validation tests run through
+`_LazyCanonicalOrcidPrefixCounts.load()`, and canonical count-key coverage
+(the frozen example table and the single-character-initial case) runs through
+the live batched `preprocess_signatures` count path. Tests that asserted only
+dead plan-window behavior were removed; the live
+`_disallow_aware_query_batches` retains its own coverage.
 
 ### Rust and test cleanup
 

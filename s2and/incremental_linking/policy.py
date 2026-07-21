@@ -49,12 +49,6 @@ def existing_name_counts_index_path(paths: Mapping[str, Any]) -> str | None:
     return None
 
 
-def arrow_paths_have_name_counts_index(paths: Mapping[str, Any]) -> bool:
-    """Return whether Arrow paths include an existing name-count index."""
-
-    return existing_name_counts_index_path(paths) is not None
-
-
 def require_arrow_name_counts_index_for_clusterer(
     clusterer: Any,
     arrow_paths: Mapping[str, Any],

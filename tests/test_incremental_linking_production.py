@@ -12,30 +12,6 @@ from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 
 
-def test_raw_arrow_plan_window_enabled_when_query_batch_is_smaller_than_query_count() -> None:
-    query_batch_size = 2
-    plan_window_size = production_module._raw_arrow_plan_window_size(  # noqa: SLF001
-        query_count=9,
-        query_batch_size=query_batch_size,
-        plan_window_multiplier=production_module._RAW_ARROW_PLAN_WINDOW_MULTIPLIER,  # noqa: SLF001
-    )
-
-    assert production_module._RAW_ARROW_PLAN_WINDOW_MULTIPLIER > 1  # noqa: SLF001
-    assert plan_window_size > query_batch_size
-    assert int(plan_window_size > query_batch_size) == 1
-
-
-def test_raw_arrow_plan_window_size_is_positive_for_empty_query_set() -> None:
-    assert (
-        production_module._raw_arrow_plan_window_size(  # noqa: SLF001
-            query_count=0,
-            query_batch_size=10,
-            plan_window_multiplier=production_module._RAW_ARROW_PLAN_WINDOW_MULTIPLIER,  # noqa: SLF001
-        )
-        == 1
-    )
-
-
 def test_memory_safe_query_batch_shrinks_to_refreshed_limit(monkeypatch) -> None:
     calls: list[int] = []
 

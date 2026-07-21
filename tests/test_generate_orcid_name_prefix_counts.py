@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from s2and.consts import NORMALIZATION_VERSION, PROJECT_ROOT_PATH
-from s2and.subblocking import _LazyCanonicalOrcidPrefixCounts, _load_canonical_orcid_prefix_counts
+from s2and.subblocking import _LazyCanonicalOrcidPrefixCounts
 
 ORCID_1 = "0000-0000-0000-0001"
 ORCID_2 = "0000-0000-0000-0002"
@@ -294,7 +294,7 @@ def test_runtime_loader_is_lazy_and_verifies_the_published_generation(tmp_path: 
         metrics={"source_rows": 2},
         overwrite=False,
     )
-    assert _load_canonical_orcid_prefix_counts(tmp_path) == {"al": {"am": 7}}
+    assert _LazyCanonicalOrcidPrefixCounts(tmp_path).load() == {"al": {"am": 7}}
     assert dict(lazy_counts) == {"al": {"am": 7}}
 
     pointer = json.loads((tmp_path / "first_k_letter_counts_from_orcid.manifest.json").read_text(encoding="utf-8"))
@@ -307,7 +307,7 @@ def test_runtime_loader_is_lazy_and_verifies_the_published_generation(tmp_path: 
     data_path = tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.json"
     data_path.write_text('{"al":{"az":9}}', encoding="utf-8")
     with pytest.raises(ValueError, match="data SHA-256"):
-        _load_canonical_orcid_prefix_counts(tmp_path)
+        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
 @pytest.mark.parametrize("counts", [{"Al": {"Am": 7}}, {"ál": {"ám": 7}}])
@@ -340,7 +340,7 @@ def test_runtime_loader_rejects_noncanonical_prefix_tokens(
     pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
 
     with pytest.raises(ValueError, match="lowercase printable ASCII prefixes"):
-        _load_canonical_orcid_prefix_counts(tmp_path)
+        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
 def test_runtime_loader_rejects_manifest_path_escape(tmp_path: Path) -> None:
@@ -357,7 +357,7 @@ def test_runtime_loader_rejects_manifest_path_escape(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="generation_dir must exactly match"):
-        _load_canonical_orcid_prefix_counts(tmp_path)
+        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
 def test_runtime_loader_rejects_boolean_cardinality(tmp_path: Path) -> None:
@@ -381,7 +381,7 @@ def test_runtime_loader_rejects_boolean_cardinality(tmp_path: Path) -> None:
     pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
 
     with pytest.raises(ValueError, match="outer_key_cardinality must be a nonnegative integer"):
-        _load_canonical_orcid_prefix_counts(tmp_path)
+        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
 def test_publish_rechecks_no_overwrite_under_the_manifest_lock(

@@ -421,46 +421,6 @@ def _rescore_query_disallow_endpoint(
     )
 
 
-def _raw_arrow_plan_window_size(
-    *,
-    query_count: int,
-    query_batch_size: int,
-    plan_window_multiplier: int,
-) -> int:
-    """Return a positive window step for raw Arrow planning loops."""
-
-    resolved_query_count = max(0, int(query_count))
-    resolved_query_batch_size = max(1, int(query_batch_size))
-    return max(1, min(resolved_query_count, resolved_query_batch_size * max(1, int(plan_window_multiplier))))
-
-
-def _raw_arrow_plan_windows(
-    query_signature_ids: Sequence[str],
-    *,
-    window_size: int,
-    seed_signature_ids: set[str],
-) -> list[list[str]]:
-    """Build raw-planner windows without mixing seed-overlap queries."""
-
-    resolved_window_size = max(1, int(window_size))
-    windows: list[list[str]] = []
-    current: list[str] = []
-    for signature_id in query_signature_ids:
-        if signature_id in seed_signature_ids:
-            if current:
-                windows.append(current)
-                current = []
-            windows.append([signature_id])
-            continue
-        current.append(signature_id)
-        if len(current) >= resolved_window_size:
-            windows.append(current)
-            current = []
-    if current:
-        windows.append(current)
-    return windows
-
-
 def _disallow_aware_query_batches(
     query_signature_ids: Sequence[str],
     *,
@@ -995,23 +955,6 @@ def _memory_safe_promoted_query_batch(
         query_batch = query_batch[:safe_size]
 
 
-def promoted_incremental_observed_probe(
-    telemetry: Mapping[str, int | float | str],
-    fallback_query_count: int,
-) -> tuple[int, int, int] | None:
-    try:
-        query_count = int(telemetry.get("query_count", fallback_query_count))
-        candidate_row_count = int(telemetry.get("candidate_row_count", 0))
-        pair_count = int(telemetry.get("pair_count", 0))
-    except (TypeError, ValueError):
-        return None
-    if query_count <= 0 or (candidate_row_count <= 0 and pair_count <= 0):
-        return None
-    rows_per_query = int(math.ceil(float(candidate_row_count) / float(query_count)))
-    pairs_per_query = int(math.ceil(float(pair_count) / float(query_count)))
-    return query_count, rows_per_query, pairs_per_query
-
-
 def merge_promoted_incremental_batch_telemetry(
     batch_telemetries: list[Mapping[str, int | float | str]],
     *,
@@ -1096,15 +1039,6 @@ def merge_promoted_incremental_batch_telemetry(
     for key, count in conflict_counts.items():
         merged[f"{key}_batch_conflict_count"] = int(count)
     return merged
-
-
-def _summarize_query_views(query_views: tuple[str, ...]) -> str:
-    if not query_views:
-        return "none"
-    unique_views = set(query_views)
-    if len(unique_views) == 1:
-        return query_views[0]
-    return "mixed"
 
 
 def predict_incremental_promoted_linker_from_arrow_paths(

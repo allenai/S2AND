@@ -218,13 +218,6 @@ def _load_canonical_orcid_prefix_count_artifact(
     return raw_counts, expected_data_sha256
 
 
-def _load_canonical_orcid_prefix_counts(data_dir: str | Path = _PACKAGE_DATA_DIR) -> dict[str, dict[str, int]]:
-    """Load and fully verify the immutable canonical ORCID prefix-count generation."""
-
-    counts, _data_sha256 = _load_canonical_orcid_prefix_count_artifact(data_dir)
-    return counts
-
-
 class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
     """Defer canonical artifact I/O until subblocking actually needs the priors."""
 

@@ -8,7 +8,7 @@ layers. The live pipeline and the fixture both use canonical_v2:
   ``s2and.text.canonicalize_name_parts`` and
   ``s2and.text.canonical_name_count_keys``.
 - Live count-key wiring: the canonical count keys are asserted through the
-  LIVE ``ANDData._compute_signature_name_counts`` path with seeded count
+  LIVE batched ``ANDData.preprocess_signatures`` count path with seeded count
   dicts, so drift between the pure functions and the real method fails here.
 - Compare-time contract: canonical first fields across variant groups
   (``Jo`` / ``Jo Ann`` / ``JoAnn`` etc.) must be pairwise compatible under the
@@ -35,6 +35,7 @@ import pytest
 from s2and.data import ANDData, Signature
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.name_counts_index import NameCountsIndex
+from s2and.runtime import build_runtime_context
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts, same_prefix_tokens
 from tests.helpers import tiny_name_counts_provenance
 
@@ -102,25 +103,31 @@ def canonical_name_counts_index(tmp_path_factory) -> NameCountsIndex:
 
 
 def _live_canonical_name_counts(case, index: NameCountsIndex):
-    """Run the real ANDData count path with an index seeded at the fixture's keys.
+    """Run the real batched ANDData preprocessing count path with a seeded index.
 
     Each dict maps only the fixture's expected canonical key (when non-None) to
-    a sentinel value, so if ``_compute_signature_name_counts`` ever builds a
-    different key string the lookup falls back to the default (1) and the
-    assertions fail. A None fixture key means the method should do no lookup and
-    return NaN. ``first_without_apostrophe=None`` forces the method to recompute
-    the canonical fields itself, exercising the full live path.
+    a sentinel value, so if ``preprocess_signatures`` ever builds a different
+    key string the lookup falls back to the default (1) and the assertions
+    fail. A None fixture key means the batch should do no lookup and return
+    NaN. The skeleton signature carries only raw name fields, forcing the
+    batch to recompute the canonical fields itself.
     """
     raw = case["input"]
     dataset = ANDData.__new__(ANDData)
+    dataset.signatures = {
+        "case": _skeleton_signature(raw["last"])._replace(
+            author_info_first=raw["first"],
+            author_info_middle=raw["middle"],
+            signature_id="case",
+        )
+    }
+    dataset.papers = {}
+    dataset.preprocess = True
+    dataset.arrow_paths = None
     dataset.name_counts_index = index
-    return dataset._compute_signature_name_counts(
-        _skeleton_signature(raw["last"]),
-        first_raw=raw["first"],
-        middle_raw=raw["middle"],
-        first_without_apostrophe=None,
-        last_normalized=None,
-    )
+    dataset.runtime_context = build_runtime_context("canonical-name-example-test", backend="python")
+    dataset.preprocess_signatures()
+    return dataset.signatures["case"].author_info_name_counts
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)

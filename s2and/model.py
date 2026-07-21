@@ -743,39 +743,6 @@ def _require_incremental_seed_source(
     )
 
 
-def _missing_arrow_prediction_artifacts_error(
-    clusterer: Any,
-    *,
-    context: str,
-    producer_hint: str,
-    arrow_paths: Mapping[str, Any] | None = None,
-) -> MissingArrowArtifactError:
-    required = ["signatures", "papers", "paper_authors"]
-    if clusterer_uses_embedding_features(clusterer):
-        required.append("specter")
-    if clusterer_uses_name_count_features(clusterer):
-        required.append("name_counts_index")
-    if arrow_paths is not None:
-        try:
-            validate_arrow_prediction_artifacts(
-                arrow_paths,
-                require_specter=clusterer_uses_embedding_features(clusterer),
-                require_name_counts_index=clusterer_uses_name_count_features(clusterer),
-                expected_normalization_version=_resolve_clusterer_normalization_version(clusterer),
-                context=context,
-                producer_hint=producer_hint,
-            )
-        except MissingArrowArtifactError as exc:
-            return exc
-    return MissingArrowArtifactError(
-        context=context,
-        required_keys=required,
-        missing_keys=required,
-        missing_files={},
-        producer_hint=producer_hint,
-    )
-
-
 def _normalize_cluster_seeds_require(cluster_seeds_require: Mapping[Any, Any]) -> dict[str, str]:
     """Return the seed map with the same string policy used by Arrow sidecars."""
 

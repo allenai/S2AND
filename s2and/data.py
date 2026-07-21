@@ -815,34 +815,6 @@ class ANDData:
             last_first_initial_key,
         )
 
-    def _compute_signature_name_counts(
-        self,
-        signature: Signature,
-        *,
-        first_raw: str,
-        middle_raw: str,
-        first_without_apostrophe: str | None,
-        last_normalized: str | None,
-    ) -> NameCounts:
-        """Resolve one signature through the binary index for targeted refreshes."""
-
-        if self.name_counts_index is None:
-            return NameCounts(first=None, last=None, first_last=None, last_first_initial=None)
-        keys = self._signature_name_count_keys(
-            signature,
-            first_raw=first_raw,
-            middle_raw=middle_raw,
-            first_without_apostrophe=first_without_apostrophe,
-            last_normalized=last_normalized,
-        )
-        columns = self.name_counts_index.lookup_many(
-            [keys[0]],
-            [keys[1]],
-            [keys[2]],
-            [keys[3]],
-        )
-        return NameCounts(*(float(column[0]) for column in columns))
-
     def preprocess_signatures(self) -> None:
         """
         Preprocess the signatures, doing lots of normalization and feature creation

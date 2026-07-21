@@ -1,10 +1,9 @@
 use super::*;
 
 #[pyclass]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct RustFeaturizer {
     signatures: HashMap<String, SignatureData>,
-    #[serde(default)]
     signature_ids: Vec<String>,
     papers: HashMap<PaperId, PaperData>,
     name_tuples: HashMap<String, HashSet<String>>,
@@ -12,9 +11,7 @@ pub(crate) struct RustFeaturizer {
     cluster_seeds_require: HashMap<String, ClusterId>,
     cluster_seed_require_value: f64,
     cluster_seed_disallow_value: f64,
-    #[serde(skip)]
     name_counts_provenance_binding: Option<NameCountsProvenanceBinding>,
-    #[serde(skip)]
     cluster_seeds_disallow_index: OnceLock<HashMap<String, HashSet<String>>>,
 }
 

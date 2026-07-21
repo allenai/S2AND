@@ -3,7 +3,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyIterator, PyModule, PyTuple};
 use pyo3::Bound;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::fs;
@@ -90,7 +89,7 @@ fn is_dropped_affix(token: &str) -> bool {
     DROPPED_AFFIXES.contains(&token)
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct CounterData {
     // FNV-1a 64-bit hashes of original string keys, sorted ascending.
     // Values are f32 counts. Binary search replaces HashMap lookup.
@@ -152,7 +151,7 @@ fn read_f64_le_unchecked(bytes: &[u8], offset: usize) -> f64 {
     f64::from_le_bytes(raw)
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum ClusterId {
     Int(i64),
     Str(String),
@@ -160,7 +159,7 @@ enum ClusterId {
 
 type PaperId = String;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct SignatureData {
     // Python author_info_first_normalized_without_apostrophe.
     first: Option<String>,
@@ -189,7 +188,7 @@ impl SignatureData {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct PaperData {
     venue_ngrams: Option<CounterData>,
     title_words: Option<CounterData>,
@@ -198,11 +197,9 @@ struct PaperData {
     has_abstract: bool,
     predicted_language: Option<String>,
     is_reliable: bool,
-    #[serde(default)]
     language_reliability: f64,
     journal_ngrams: Option<CounterData>,
     specter: Option<Vec<f32>>,
-    #[serde(default)]
     specter_norm: Option<f64>,
 }
 

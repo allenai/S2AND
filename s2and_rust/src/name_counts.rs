@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v1";
 const NAME_COUNTS_PROVENANCE_SCHEMA_VERSION: &str = "name_counts_provenance_v1";
 const NAME_COUNTS_NORMALIZATION_VERSION: &str = "canonical_v2";
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct NameCountsData {
     pub(crate) first: f64,
     pub(crate) first_last: f64,

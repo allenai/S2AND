@@ -304,15 +304,18 @@ dead plan-window behavior were removed; the live
 
 ### Rust and test cleanup
 
-**Status: Open**
+**Status: Complete**
 
-- Remove the six dead serde derives together so the compiler verifies the
-  transitive cleanup.
-- Remove the broken reference to an ignored canonical-example generator unless
-  regeneration becomes a supported tracked workflow.
-- Correct the enabled aarch64 matrix comment.
-- Keep release-policy coverage, but prefer parsed workflow/policy assertions to
-  brittle formatting snapshots.
+- The six dead serde derives (`CounterData`, `ClusterId`, `SignatureData`,
+  `PaperData`, `NameCountsData`, `RustFeaturizer`) are removed together with
+  their field attributes and unused imports; the compiler verified the
+  transitive cleanup and all Rust tests pass.
+- The docstring reference to the ignored canonical-example generator is
+  removed; the stale "optional" comment on the enabled aarch64 matrix entry is
+  gone.
+- Release-workflow policy tests assert on parsed YAML structure (job
+  matrices, step conditions, needs lists) instead of raw-text regex and
+  formatting-sensitive string counts.
 
 Phase 3 exit condition: branch-local experimental code is either explicitly
 owned or removed, dead private paths are gone, and no public API is deleted by

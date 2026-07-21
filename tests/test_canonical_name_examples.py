@@ -17,9 +17,8 @@ layers. The live pipeline and the fixture both use canonical_v2:
 - Table coherence: equivalence groups, decision references, and
   normalized-form invariants of the ``canonical`` values.
 
-The JSON fixture is the frozen source of truth. The generator that produced it
-(``scratch/generate_canonical_name_examples.py``) exists only to add cases;
-decided values must not be regenerated silently.
+The JSON fixture is the frozen source of truth; decided values must not be
+regenerated silently. Add new cases by hand-writing them into the fixture.
 """
 
 from __future__ import annotations

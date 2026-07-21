@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import tarfile
 import tomllib
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.verification.verify_production_model_distributions import verify_production_model_distributions
 
@@ -16,28 +17,57 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-rust.yml"
 
 
+def _release_workflow_jobs() -> dict[str, dict]:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    return workflow["jobs"]
+
+
+def _all_run_text(jobs: dict[str, dict]) -> str:
+    return "\n".join(step.get("run", "") for job in jobs.values() for step in job.get("steps", []))
+
+
+def _all_action_args(jobs: dict[str, dict]) -> str:
+    return "\n".join(
+        str(step["with"]["args"])
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if isinstance(step.get("with"), dict) and "args" in step["with"]
+    )
+
+
 def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
     rust_project = tomllib.loads((REPO_ROOT / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8"))
     assert rust_project["project"]["requires-python"] == ">=3.11,<3.14"
 
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-    matrices = re.findall(r"^\s+py: \[([^]]+)\]$", workflow, flags=re.MULTILINE)
-    assert matrices == ['"3.11", "3.12", "3.13"'] * 2
-    assert "-i python3.11 -i python3.12 -i python3.13" in workflow
-    assert "python3.10" not in workflow
+    jobs = _release_workflow_jobs()
+    python_matrices = [
+        job["strategy"]["matrix"]["py"] for job in jobs.values() if "py" in job.get("strategy", {}).get("matrix", {})
+    ]
+    assert python_matrices == [["3.11", "3.12", "3.13"]] * 2
+    interpreter_args = _all_action_args(jobs)
+    assert "-i python3.11 -i python3.12 -i python3.13" in interpreter_args
+    assert "python3.10" not in interpreter_args
+    assert "python3.10" not in _all_run_text(jobs)
 
 
 def test_release_workflow_consumes_only_final_policy_outputs() -> None:
-    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    jobs = _release_workflow_jobs()
 
-    assert workflow.count("scripts/sync_version.py --release-policy") == 1
-    assert workflow.count("if: needs.detect-versions.outputs.build_s2and == 'true'") == 1
-    assert workflow.count("if: needs.detect-versions.outputs.build_rust == 'true'") == 4
-    assert workflow.count("if: needs.detect-versions.outputs.run_release_smoke == 'true'") == 1
-    assert workflow.count("if: needs.detect-versions.outputs.publish_s2and == 'true'") == 2
-    assert workflow.count("if: needs.detect-versions.outputs.publish_rust == 'true'") == 1
-    assert "needs: [detect-versions, s2and-dist, release-smoke, release-tests, probe-rust-release]" in workflow
-    assert "needs: [detect-versions, publish-rust]" in workflow
+    assert _all_run_text(jobs).count("scripts/sync_version.py --release-policy") == 1
+    conditions = Counter(
+        condition
+        for job in jobs.values()
+        for condition in (job.get("if"), *(step.get("if") for step in job.get("steps", [])))
+        if condition
+    )
+    assert conditions["needs.detect-versions.outputs.build_s2and == 'true'"] == 1
+    assert conditions["needs.detect-versions.outputs.build_rust == 'true'"] == 4
+    assert conditions["needs.detect-versions.outputs.run_release_smoke == 'true'"] == 1
+    assert conditions["needs.detect-versions.outputs.publish_s2and == 'true'"] == 2
+    assert conditions["needs.detect-versions.outputs.publish_rust == 'true'"] == 1
+    needs_lists = [job.get("needs") for job in jobs.values() if isinstance(job.get("needs"), list)]
+    assert ["detect-versions", "s2and-dist", "release-smoke", "release-tests", "probe-rust-release"] in needs_lists
+    assert ["detect-versions", "publish-rust"] in needs_lists
 
 
 def test_python_package_data_is_explicit() -> None:

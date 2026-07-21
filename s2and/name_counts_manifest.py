@@ -88,17 +88,6 @@ def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, A
     return dict(value)
 
 
-def _file_stat_token(path: Path) -> tuple[int, int, int, int, int]:
-    stat = path.stat()
-    return (
-        int(stat.st_dev),
-        int(stat.st_ino),
-        int(stat.st_size),
-        int(stat.st_mtime_ns),
-        int(stat.st_ctime_ns),
-    )
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -134,7 +123,6 @@ class ValidatedNameCountsManifest:
         index_dir: str | os.PathLike[str],
         *,
         context: str,
-        manifest_bytes: bytes | None = None,
     ) -> ValidatedNameCountsManifest:
         """Read and verify one immutable name-count manifest generation."""
 
@@ -142,13 +130,7 @@ class ValidatedNameCountsManifest:
         manifest_path = root / "manifest.json"
         if not manifest_path.is_file():
             raise FileNotFoundError(f"{manifest_path} (missing manifest.json)")
-        initial_manifest_stat = _file_stat_token(manifest_path)
-        current_manifest_bytes = manifest_path.read_bytes()
-        if manifest_bytes is not None and current_manifest_bytes != manifest_bytes:
-            raise RuntimeError(f"{context} manifest changed before validation: {manifest_path}")
-        manifest_bytes = current_manifest_bytes
-        if _file_stat_token(manifest_path) != initial_manifest_stat:
-            raise RuntimeError(f"{context} manifest changed while reading: {manifest_path}")
+        manifest_bytes = manifest_path.read_bytes()
         try:
             manifest = json.loads(manifest_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -177,7 +159,6 @@ class ValidatedNameCountsManifest:
         if not isinstance(raw_files, Mapping):
             raise ValueError(f"{context} manifest requires files mapping: {manifest_path}")
         files: dict[str, ValidatedNameCountsFile] = {}
-        initial_file_stats: dict[str, tuple[int, int, int, int, int]] = {}
         for file_key in NAME_COUNTS_INDEX_FILE_KEYS:
             entry = raw_files.get(file_key)
             if not isinstance(entry, Mapping):
@@ -213,8 +194,7 @@ class ValidatedNameCountsManifest:
                 field=f"files.{file_key}.sha256",
                 context=f"{context} manifest",
             )
-            initial_file_stats[file_key] = _file_stat_token(resolved_path)
-            if initial_file_stats[file_key][2] != byte_count:
+            if resolved_path.stat().st_size != byte_count:
                 raise ValueError(f"{context} manifest files.{file_key}.byte_count mismatch: {resolved_path}")
             if _sha256_file(resolved_path) != expected_sha256:
                 raise ValueError(f"{context} manifest files.{file_key} SHA-256 mismatch: {resolved_path}")
@@ -224,11 +204,6 @@ class ValidatedNameCountsManifest:
                 sha256=expected_sha256,
             )
 
-        if manifest_path.read_bytes() != manifest_bytes or _file_stat_token(manifest_path) != initial_manifest_stat:
-            raise RuntimeError(f"{context} manifest changed during validation: {manifest_path}")
-        for file_key, validated_file in files.items():
-            if _file_stat_token(validated_file.path) != initial_file_stats[file_key]:
-                raise RuntimeError(f"{context} name-count index file changed during validation: {validated_file.path}")
         return cls(
             index_dir=root,
             manifest_path=manifest_path,

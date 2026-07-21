@@ -92,9 +92,10 @@ def _write_fake_artifact(artifact_dir: Path) -> Path:
 @requires_rust_lightgbm
 def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
+    artifact_dir = tmp_path / "artifact"
     metadata = save_incremental_linking_artifact(
         booster,
-        tmp_path,
+        artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
         target_spec=_TEST_TARGET_SPEC,
@@ -105,9 +106,9 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
         },
     )
 
-    assert (tmp_path / BOOSTER_FILENAME).exists()
-    assert (tmp_path / METADATA_FILENAME).exists()
-    loaded = load_incremental_linking_artifact(tmp_path)
+    assert (artifact_dir / BOOSTER_FILENAME).exists()
+    assert (artifact_dir / METADATA_FILENAME).exists()
+    loaded = load_incremental_linking_artifact(artifact_dir)
 
     assert loaded.metadata.feature_columns == promoted_linker_feature_columns()
     assert loaded.metadata.feature_schema_digest == metadata.feature_schema_digest
@@ -162,25 +163,24 @@ def test_save_rejects_empty_pairwise_bundle_binding(tmp_path: Path) -> None:
 
 
 @requires_rust_lightgbm
-def test_load_accepts_legacy_nested_audit_binding_as_inert(tmp_path: Path) -> None:
+def test_load_rejects_nested_audit_binding(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
-    metadata = save_incremental_linking_artifact(
+    artifact_dir = tmp_path / "artifact"
+    save_incremental_linking_artifact(
         booster,
-        tmp_path,
+        artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
         target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
-    metadata_path = tmp_path / METADATA_FILENAME
+    metadata_path = artifact_dir / METADATA_FILENAME
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload["audit_metadata"]["pairwise_bundle_binding"] = {"legacy": "historical-copy"}
     metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    loaded = load_incremental_linking_artifact(tmp_path)
-
-    assert loaded.metadata.pairwise_bundle_binding == metadata.pairwise_bundle_binding
-    assert loaded.metadata.audit_metadata["pairwise_bundle_binding"] == {"legacy": "historical-copy"}
+    with pytest.raises(ValueError, match="audit_metadata key 'pairwise_bundle_binding' is reserved"):
+        load_incremental_linking_artifact(artifact_dir)
 
 
 @requires_rust_lightgbm
@@ -225,7 +225,7 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
 
 
 @requires_rust_lightgbm
-def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> None:
+def test_artifact_publication_requires_a_new_directory(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
     artifact_dir = tmp_path / "artifact"
     kwargs: dict[str, Any] = {
@@ -237,10 +237,9 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
     save_incremental_linking_artifact(booster, artifact_dir, **kwargs)
     original_metadata = (artifact_dir / METADATA_FILENAME).read_bytes()
 
-    save_incremental_linking_artifact(booster, artifact_dir, **kwargs)
-    assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
-
-    with pytest.raises(FileExistsError, match="immutable"):
+    with pytest.raises(FileExistsError, match="already exists"):
+        save_incremental_linking_artifact(booster, artifact_dir, **kwargs)
+    with pytest.raises(FileExistsError, match="already exists"):
         save_incremental_linking_artifact(
             booster,
             artifact_dir,
@@ -252,7 +251,7 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
     assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
 
 
-def test_concurrent_identical_artifact_publication_is_idempotent(tmp_path: Path) -> None:
+def test_concurrent_identical_artifact_publication_has_one_winner(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifact"
     staging_dirs = (tmp_path / "staging-a", tmp_path / "staging-b")
     for staging_dir in staging_dirs:
@@ -260,13 +259,18 @@ def test_concurrent_identical_artifact_publication_is_idempotent(tmp_path: Path)
         (staging_dir / "payload").write_bytes(b"identical")
     start = threading.Barrier(len(staging_dirs))
 
-    def publish(staging_dir: Path) -> None:
+    def publish(staging_dir: Path) -> str:
         start.wait(timeout=5.0)
-        artifact_module._publish_immutable_artifact(staging_dir, artifact_dir)
+        try:
+            artifact_module._publish_immutable_artifact(staging_dir, artifact_dir)
+        except FileExistsError:
+            return "conflict"
+        return "published"
 
     with ThreadPoolExecutor(max_workers=len(staging_dirs)) as executor:
-        list(executor.map(publish, staging_dirs))
+        outcomes = list(executor.map(publish, staging_dirs))
 
+    assert sorted(outcomes) == ["conflict", "published"]
     assert (artifact_dir / "payload").read_bytes() == b"identical"
 
 
@@ -328,21 +332,22 @@ def test_load_incremental_linking_artifact_rejects_digest_drift(
     message: str,
 ) -> None:
     booster, fixture = build_tiny_promoted_booster()
+    artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
-        tmp_path,
+        artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
         target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
-    metadata_path = tmp_path / METADATA_FILENAME
+    metadata_path = artifact_dir / METADATA_FILENAME
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload[field_name] = "bad"
     metadata_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
-        load_incremental_linking_artifact(tmp_path)
+        load_incremental_linking_artifact(artifact_dir)
 
 
 def test_retrieval_stack_contract_records_constraint_decision_policy() -> None:

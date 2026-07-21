@@ -1284,9 +1284,8 @@ pub(crate) fn update_cluster_df_from_counter(
 
 impl RustNameCompatibleSubblockSelector {
     fn from_py(
-        py: Python<'_>,
         retrieval_subblock_index: &Bound<'_, PyAny>,
-        name_tuples_path: Option<String>,
+        name_tuples: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
         let signature_to_subblock = extract_string_string_map(
             &retrieval_subblock_index.get_item("signature_to_subblock")?,
@@ -1301,7 +1300,7 @@ impl RustNameCompatibleSubblockSelector {
                     .map(|subblock| (subblock.clone(), subblock_tokens_from_key(subblock)))
                     .collect(),
             };
-        let name_tuples = load_name_tuples_from_text_path(py, name_tuples_path.as_deref())?;
+        let name_tuples = extract_name_tuples_map(name_tuples)?;
         Ok(Self {
             signature_to_subblock,
             subblock_to_components,
@@ -1418,7 +1417,8 @@ impl RustHybridCentroidRetriever {
         query_signature_ids = None,
         retrieval_subblock_index = None,
         query_candidate_component_keys_by_signature_id = None,
-        full_first_global_backfill_count = 0
+        full_first_global_backfill_count = 0,
+        name_tuples = None
     ))]
     fn top_k_hybrid_centroid_pair_plan<'py>(
         &self,
@@ -1432,6 +1432,7 @@ impl RustHybridCentroidRetriever {
         retrieval_subblock_index: Option<&Bound<'py, PyAny>>,
         query_candidate_component_keys_by_signature_id: Option<&Bound<'py, PyAny>>,
         full_first_global_backfill_count: usize,
+        name_tuples: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Py<PyDict>> {
         validate_retrieval_rank_top_k(top_k)?;
         let mut query_data = Vec::new();
@@ -1474,9 +1475,17 @@ impl RustHybridCentroidRetriever {
                 "query_signature_ids are required when query candidate component keys are provided",
             ));
         }
-        let selector = retrieval_subblock_index
-            .map(|index| RustNameCompatibleSubblockSelector::from_py(py, index, None))
-            .transpose()?;
+        let selector = match retrieval_subblock_index {
+            Some(index) => {
+                let pairs = name_tuples.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "name_tuples are required when retrieval_subblock_index is provided",
+                    )
+                })?;
+                Some(RustNameCompatibleSubblockSelector::from_py(index, pairs)?)
+            }
+            None => None,
+        };
         let query_candidate_indices_by_signature_id =
             query_candidate_component_keys_by_signature_id
                 .map(|mapping| self.extract_candidate_indices_by_query_signature_id(mapping))

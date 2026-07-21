@@ -2,7 +2,6 @@ use cld2::{
     detect_language_ext as cld2_detect_language_ext, Format as Cld2Format,
     Reliability as Cld2Reliability,
 };
-use pyo3::prelude::*;
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 
 /// Python `str.isalpha` counts only general-category Letter (L*) characters,
@@ -17,54 +16,34 @@ pub(crate) fn python_alpha_count(text: &str) -> usize {
     text.chars().filter(|ch| is_python_alpha(*ch)).count()
 }
 
-pub(crate) struct LanguageDetectorCompat;
-
 pub(crate) struct LanguageDetectionAudit {
     pub(crate) predicted_language: String,
     pub(crate) is_reliable: bool,
-    pub(crate) is_english: bool,
     pub(crate) language_reliability: f64,
 }
 
-impl LanguageDetectorCompat {
-    pub(crate) fn new(_py: Python<'_>) -> PyResult<Self> {
-        Ok(Self)
+pub(crate) fn detect_language_compat(text: &str) -> LanguageDetectionAudit {
+    if text.split_whitespace().count() <= 1 || python_alpha_count(text) == 0 {
+        return unknown_language_detection();
     }
 
-    pub(crate) fn detect(&self, text: &str) -> PyResult<(bool, bool, String, f64)> {
-        let audit = self.audit(text)?;
-        Ok((
-            audit.is_reliable,
-            audit.is_english,
-            audit.predicted_language,
-            audit.language_reliability,
-        ))
-    }
+    let cld2_result = cld2_detect_language_ext(text, Cld2Format::Text, &Default::default());
+    let top_score = cld2_result.scores[0];
+    let predicted_language = match top_score.language {
+        Some(lang) if lang.0 != "un" => lang.0.to_string(),
+        _ => return unknown_language_detection(),
+    };
 
-    pub(crate) fn audit(&self, text: &str) -> PyResult<LanguageDetectionAudit> {
-        if text.split_whitespace().count() <= 1 || python_alpha_count(text) == 0 {
-            return Ok(unknown_language_detection());
-        }
-
-        let cld2_result = cld2_detect_language_ext(text, Cld2Format::Text, &Default::default());
-        let top_score = cld2_result.scores[0];
-        let predicted_language = match top_score.language {
-            Some(lang) if lang.0 != "un" => lang.0.to_string(),
-            _ => return Ok(unknown_language_detection()),
-        };
-
-        let is_reliable = cld2_result.reliability == Cld2Reliability::Reliable;
-        let language_reliability = if is_reliable {
-            top_score.percent as f64 / 100.0
-        } else {
-            0.0
-        };
-        Ok(LanguageDetectionAudit {
-            is_english: predicted_language == "en",
-            predicted_language,
-            is_reliable,
-            language_reliability,
-        })
+    let is_reliable = cld2_result.reliability == Cld2Reliability::Reliable;
+    let language_reliability = if is_reliable {
+        top_score.percent as f64 / 100.0
+    } else {
+        0.0
+    };
+    LanguageDetectionAudit {
+        predicted_language,
+        is_reliable,
+        language_reliability,
     }
 }
 
@@ -72,15 +51,13 @@ fn unknown_language_detection() -> LanguageDetectionAudit {
     LanguageDetectionAudit {
         predicted_language: "un".to_string(),
         is_reliable: false,
-        is_english: false,
         language_reliability: 0.0,
     }
 }
 
 #[cfg(test)]
 mod alpha_gate_tests {
-    use super::{is_python_alpha, python_alpha_count, LanguageDetectorCompat};
-    use pyo3::Python;
+    use super::{detect_language_compat, is_python_alpha, python_alpha_count};
 
     #[test]
     fn letter_categories_are_python_alpha() {
@@ -107,22 +84,11 @@ mod alpha_gate_tests {
 
     #[test]
     fn markup_title_uses_plain_text_cld2_mode_matching_python() {
-        #[cfg(windows)]
-        if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
-            std::env::set_var("PYTHONHOME", python_home);
-        }
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let detector = LanguageDetectorCompat::new(py).expect("detector");
-            let result = detector
-                .audit(
-                    "<div>This is a detailed English research title about neural systems and scientific evaluation.</div>",
-                )
-                .expect("detection");
-            assert_eq!(result.predicted_language, "en");
-            assert!(result.is_reliable);
-            assert!(result.is_english);
-            assert_eq!(result.language_reliability, 0.98);
-        });
+        let result = detect_language_compat(
+            "<div>This is a detailed English research title about neural systems and scientific evaluation.</div>",
+        );
+        assert_eq!(result.predicted_language, "en");
+        assert!(result.is_reliable);
+        assert_eq!(result.language_reliability, 0.98);
     }
 }

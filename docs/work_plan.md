@@ -10,17 +10,20 @@ normalization contract, artifact requirements, and quality thresholds remain in
 
 ## Current release state
 
-- Phase 0 and Phase 1 implementation work is landed through `88c6f19` on
-  `canonical-v2-migration`.
-- Later-phase and schema-changing candidates are preserved in stash commit
+- Phases 0 through 3 are committed through `aca89b4` on
+  `canonical-v2-migration`. The current working tree adds the completed
+  parsimony sweep described below.
+- Accepted schema and integrity changes were recovered from stash commit
   `328c79d12f15` (`phase2-schema-and-generation-candidates-after-phase1`,
-  currently `stash@{0}`). Do not apply that stash wholesale; two candidate
-  groups have confirmed blockers and mixed files require hunk-level recovery.
+  currently `stash@{0}`). Do not apply that stash wholesale. Only the blocked
+  promoted-feature-reuse candidate remains relevant; the publication
+  rollback/callback candidate is rejected.
 - The artifact-independent canonical-v2 implementation is substantially in
   place: normalization is `canonical_v2`, `FEATURIZER_VERSION = 10`, production
   inference uses validated Arrow inputs, model loading requires an explicit
-  complete bundle, and canonical tuple/count/ORCID artifacts are provenance
-  bound.
+  complete bundle, and canonical tuple/count/ORCID artifact contracts are
+  provenance bound. The canonical ORCID bytes and sidecar have not yet been
+  generated or packaged.
 - Require-constraint extraction, pair-cache lineage, strict training
   `author_block`, mandatory name-count binding, ORCID producer ordering, and
   Python/Rust whitespace parity are implemented and verified.
@@ -32,8 +35,8 @@ normalization contract, artifact requirements, and quality thresholds remain in
 
 ## Status vocabulary
 
-- **Complete:** landed in the reviewed commit stack and focused verification
-  passes.
+- **Complete:** implemented in the current branch/working tree and focused
+  verification passes.
 - **Preserved candidate:** retained in the named stash; not accepted.
 - **Blocked:** a concrete correctness gap prevents acceptance.
 - **Open:** confirmed work remains.
@@ -166,13 +169,13 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 **Status: Complete (recovered from `328c79d12f15`)**
 
-- v3 adds the `dropped_duplicate_canonical` generation count and a load-time
-  invariant (Python and Rust) that every input pair is accounted for. The v2
-  metadata left 3,768 of 9,925 input pairs unaccounted.
-- Owner approved the serialization-format change 2026-07-20. The Python loader,
-  packaged metadata, generator, Rust loader, tests, and migration documentation
-  landed as one unit, before canonical artifact generation, so the immutable
-  v1.3 tuple artifact is generated once under the complete-accounting schema.
+- v3 adds the `dropped_duplicate_canonical` generation count and a Python
+  load-time invariant that every input pair is accounted for. The v2 metadata
+  left 3,768 of 9,925 input pairs unaccounted.
+- Owner approved the serialization-format change 2026-07-20. The packaged
+  metadata, generator, Python loader, tests, and migration documentation landed
+  as one unit. Python is now the sole artifact-loading authority and passes the
+  validated frozen pairs into Rust-backed flows.
 
 ## Phase 2: artifact and bundle integrity
 
@@ -225,9 +228,8 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 - `pairwise_bundle_binding` is an explicit required argument on
   `save_incremental_linking_artifact` and metadata `build`; only the validated
   top-level field persists.
-- New `audit_metadata` rejects the reserved `pairwise_bundle_binding` key.
-- Existing artifacts load an old nested audit copy as inert historical
-  metadata (regression-tested).
+- `audit_metadata` rejects the reserved `pairwise_bundle_binding` key on both
+  build and load.
 - Owner approved the callable API and serialized-output change 2026-07-20; no
   canonical bundle was generated under the old layout.
 
@@ -248,8 +250,9 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 - The explicit contract-validation call immediately after metadata
   construction is removed; `__post_init__` performs it on construction.
 - The staged reload remains because it verifies serialized bytes, booster
-  checksum, Rust loading, and prediction fixtures. Atomic staging, fsync,
-  publication locks, and manifest hashing are unchanged.
+  checksum, Rust loading, and prediction fixtures. Publication is one rename
+  into a new directory; there is no fsync tree walk, publication lock, or
+  identical-tree/idempotent rewrite path.
 
 ### Rust/Arrow production boundary coverage
 
@@ -299,8 +302,8 @@ live paths first: ORCID loader-validation tests run through
 `_LazyCanonicalOrcidPrefixCounts.load()`, and canonical count-key coverage
 (the frozen example table and the single-character-initial case) runs through
 the live batched `preprocess_signatures` count path. Tests that asserted only
-dead plan-window behavior were removed; the live
-`_disallow_aware_query_batches` retains its own coverage.
+dead plan-window behavior were removed; batching-invariant global disallow
+resolution is covered through the live promoted entrypoint.
 
 ### Rust and test cleanup
 
@@ -321,32 +324,69 @@ Phase 3 exit condition: branch-local experimental code is either explicitly
 owned or removed, dead private paths are gone, and no public API is deleted by
 accident.
 
+## Post-Phase 3 parsimony sweep
+
+**Status: Complete in the current working tree**
+
+- Production bundle and linker artifact publication no longer use
+  directory-tree rehashing, publication locks, fsync machinery, or idempotent
+  rewrite handling. Validated staging and a single rename into a new
+  destination remain. Arrow/name-count runtime validation and caches no longer
+  use speculative stat/reread retries or duplicate validation; the existing
+  name-count generation publication contract is unchanged.
+- Python is the sole name-tuple artifact loader; ORCID prefix counts use one
+  direct JSON file plus an adjacent digest sidecar; LightGBM unwrapping,
+  cluster-disallow loading, gate parsing, and artifact metadata each have one
+  authority.
+- Promoted inference uses a memory-refreshed queue of exact batches. Planner
+  windows, plan subsetting, featurizer-window reuse, and their telemetry were
+  removed after profiling showed less than the 10% benefit required to retain
+  the extra state. Request-global disallow conflicts still rebuild and score a
+  complete single-query plan.
+- Rust now hashes name-count files with `sha2`, uses a pure language-detection
+  compatibility function, and compares float32 values against the stored
+  LightGBM threshold directly. The simplified threshold path preserved the
+  prediction digest and improved the measured 200k-row median.
+- The production-bundle and clusterer-config schemas are v4. Pairwise metadata
+  and the un-hashed linker-directory pseudo-entry are gone; the production
+  loader hashes every declared bundle file once and ignores unrelated bundle
+  files.
+- No-choice CLI flags, legacy path fallbacks, redundant CI LFS verification,
+  and mock-mirror tests were removed. The Python and Rust static checks, full
+  test suites, installed-extension integrations, and version/lock checks pass.
+
 ## Canonical artifact generation and retraining
 
-These tasks remain external until Phases 0 through 3 are complete and the owner
-approves the expensive commands.
+All code phases are complete. These tasks remain external and require owner
+approval before the expensive commands run.
 
-1. Run tiny local fixtures for name-count and ORCID generation.
+1. Run tiny local fixtures for name-count, ORCID, and name-tuple generation.
 2. Generate the immutable canonical `name_counts` generation and binary
    `name_counts_index` from the reviewed source snapshot.
 3. Run the ORCID query on a bounded internal warehouse sample and verify its
-   emitted canonical key is monotonic before full prefix-count generation.
-4. Record and validate source snapshot IDs, generation IDs, selected/rejected
+   emitted canonical key is monotonic before full prefix-count generation into
+   the direct JSON plus adjacent metadata sidecar.
+4. Regenerate the canonical v3 name-tuple data and metadata from the reviewed
+   source file.
+5. Replace the excluded legacy ORCID JSON with the generated canonical JSON and
+   sidecar, then update explicit package data and distribution verification to
+   require exactly those reviewed bytes.
+6. Record and validate source snapshot IDs, generation IDs, selected/rejected
    row counts, cardinalities, byte sizes, and SHA-256 digests.
-5. Audit nullable `signatures.author_position` in every intended release
+7. Audit nullable `signatures.author_position` in every intended release
    dataset; repair source data or explicitly retain nullability.
-6. Re-export benchmark names by signature-ID join and report join/divergence
+8. Re-export benchmark names by signature-ID join and report join/divergence
    counts.
-7. Train the pairwise model from the exact immutable dataset/count/tuple/ORCID
+9. Train the pairwise model from the exact immutable dataset/count/tuple/ORCID
    identities.
-8. Train the promoted linker against that exact pairwise bundle and target
+10. Train the promoted linker against that exact pairwise bundle and target
    digest. Do not reuse promoted features until the blocked materialization
    identity is corrected and verified.
-9. Finalize the complete bundle, reload it, and verify every cross-artifact
+11. Finalize the complete bundle, reload it, and verify every cross-artifact
    identity before evaluation.
-10. Run pairwise, clustering, subblocking, parity, quality, throughput, and
+12. Run pairwise, clustering, subblocking, parity, quality, throughput, and
     peak-RSS gates.
-11. Build clean Python and Rust distributions, install them outside the source
+13. Build clean Python and Rust distributions, install them outside the source
     checkout, and run pairwise plus incremental smoke using the explicit
     complete bundle path.
 
@@ -376,6 +416,7 @@ uv run ruff format --check .
 uv run ty check s2and --ignore unresolved-import --ignore unused-type-ignore-comment --ignore possibly-missing-attribute --ignore unresolved-global
 $env:PYO3_PYTHON=(Resolve-Path '.venv\Scripts\python.exe').Path
 uv run cargo fmt --manifest-path s2and_rust/Cargo.toml -- --check
+uv run cargo clippy --manifest-path s2and_rust/Cargo.toml --lib --no-deps -- -D clippy::correctness -D clippy::suspicious
 uv run cargo test --manifest-path s2and_rust/Cargo.toml --lib --no-default-features
 uv run --no-project python scripts/sync_version.py --check
 git diff --check

@@ -7,10 +7,25 @@ import numpy as np
 from fastcluster import linkage
 from hyperopt import Trials, fmin, hp, space_eval, tpe
 from hyperopt.pyll import scope
-from lightgbm import LGBMClassifier
+from lightgbm import Booster, LGBMClassifier
 from scipy.cluster.hierarchy import fcluster
 from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.metrics import roc_auc_score
+
+
+def lightgbm_booster(model: Any) -> Booster:
+    """Return the fitted booster behind an S2AND or LightGBM model wrapper."""
+
+    if isinstance(model, Booster):
+        return model
+    inner = getattr(model, "classifier", None)
+    if inner is not None and inner is not model:
+        return lightgbm_booster(inner)
+    for attribute in ("booster_", "_Booster"):
+        booster = getattr(model, attribute, None)
+        if isinstance(booster, Booster):
+            return booster
+    raise TypeError(f"Expected a fitted LightGBM model, got {type(model)!r}")
 
 
 def _validated_classifier_features(

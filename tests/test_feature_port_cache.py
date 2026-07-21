@@ -3,6 +3,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
@@ -551,7 +552,7 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     class ArrowRustFeaturizer(DummyRustFeaturizer):
         @classmethod
         def from_arrow_paths(cls, paths, _signature_ids, _name_tuples, *_args):
-            calls.append({"paths": dict(paths)})
+            calls.append({"paths": dict(paths), "name_tuples": _name_tuples})
             return cls("arrow")
 
     class ArrowRustModule:
@@ -559,6 +560,12 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
         RustFeaturizer = ArrowRustFeaturizer
 
     monkeypatch.setattr(feature_port, "s2and_rust", ArrowRustModule)
+    canonical_pairs = frozenset({("alice", "ally")})
+    monkeypatch.setattr(
+        feature_port,
+        "load_packaged_name_tuple_artifact",
+        lambda: SimpleNamespace(pairs=canonical_pairs),
+    )
     for filename in ("signatures.arrow", "papers.arrow", "paper_authors.arrow"):
         (tmp_path / filename).touch()
     paths = {
@@ -599,6 +606,7 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     assert calls == [
         {
             "paths": expected_paths,
+            "name_tuples": canonical_pairs,
         }
     ]
 

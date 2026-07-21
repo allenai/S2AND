@@ -252,7 +252,8 @@ Rows must provide the source values needed for the local Rust runtime to produce
 the same feature view that S2AND would expose after normal preprocessing:
 
 - `block_type="s2"`
-- `name_tuples=None`
+- Python `name_tuples=None`, resolved to validated packaged pairs before the
+  Rust call
 - `name_counts_index/` available when the selected model uses name-count features
 
 `author_orcid` is optional. If the column is absent, every signature is treated
@@ -506,8 +507,9 @@ s2and_name_tuples_canonical.txt
 ```
 
 If a non-default alias set is ever needed, make it an explicit shared/global
-runtime artifact passed through the Python `name_tuples` argument, not something
-duplicated into every dataset directory or hidden in path bundles.
+runtime artifact loaded through the Python name-tuple artifact loader and
+passed to Rust as explicit pairs, not something duplicated into every dataset
+directory or hidden in path bundles.
 
 ---
 

@@ -192,8 +192,8 @@ Runtime controls:
 
 - Unset `S2AND_BACKEND` means Python; the only accepted values are `python` and
   `rust`.
-- Rust mode requires the exactly pinned `s2and-rust==0.60.0` extension and
-  fails explicitly if it is missing or different.
+- Rust mode requires the exact `s2and-rust` version pinned by the project
+  metadata and fails explicitly if it is missing or different.
 - Public prediction routes are method-based: `ANDData` methods use Python and
   `*_from_arrow_paths` methods use Rust.
 
@@ -278,8 +278,7 @@ git config core.hooksPath .githooks
 
 Workflow:
 ```bash
-# 1) edit VERSION
-echo 0.60.0 > VERSION
+# 1) edit VERSION to the new semantic version
 
 # 2) sync manifests
 uv run python scripts/sync_version.py

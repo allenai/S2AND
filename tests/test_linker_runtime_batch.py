@@ -481,12 +481,12 @@ def test_rust_retrieval_batch_applies_name_compatible_full_first_window() -> Non
         "signature_to_subblock": {"q1": "block::zz"},
         "subblock_to_components": {
             "block::zz": ["c_same"],
-            "block::ali": ["c_name"],
+            "block::ally": ["c_name"],
             "block::bob": ["c_other"],
         },
         "subblock_tokens_by_subblock": {
             "block::zz": ["zz"],
-            "block::ali": ["ali"],
+            "block::ally": ["ally"],
             "block::bob": ["bob"],
         },
     }
@@ -508,6 +508,7 @@ def test_rust_retrieval_batch_applies_name_compatible_full_first_window() -> Non
         retrieval_subblock_index=retrieval_subblock_index,
         query_candidate_component_keys_by_signature_id={"q1": ["c_same", "c_name", "c_backfill"]},
         full_first_global_backfill_count=2,
+        name_tuples={("alice", "ally")},
     )
 
     row_component_keys = batch.candidate_batch.row_component_keys

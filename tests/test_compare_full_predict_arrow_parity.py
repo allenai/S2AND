@@ -68,67 +68,32 @@ def test_numeric_report_requires_exact_integer_reference_values() -> None:
     assert report["exact_integer_mismatch_count"] == 1
 
 
-def test_feature_constraint_report_compares_python_anddata_to_rust_arrow(monkeypatch) -> None:
-    signature_ids = ["s1", "s2", "s3"]
-    expected_signature_pairs = [("s1", "s2"), ("s1", "s3"), ("s2", "s3")]
-    expected_features = np.asarray([[1.25, np.nan], [2.0, 3.0], [4.0, 5.0]])
-    python_constraint_values = {
-        ("s1", "s2"): None,
-        ("s1", "s3"): 0.0,
-        ("s2", "s3"): 10000.0,
-    }
+def test_feature_constraint_report_compares_real_tiny_python_and_arrow_paths(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from s2and.feature_port import _get_rust_featurizer
+    from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
-    class FakeDataset:
-        def __init__(self) -> None:
-            self.constraint_pairs: list[tuple[str, str]] = []
-
-        def get_constraint(self, left: str, right: str, **_kwargs):
-            self.constraint_pairs.append((left, right))
-            return python_constraint_values[(left, right)]
-
-    class FakeArrowFeaturizer:
-        def signature_ids(self):
-            return signature_ids
-
-        def featurize_pairs_matrix_indexed(self, pairs, selected_indices, num_threads, nan_value):
-            assert pairs == [(0, 1), (0, 2), (1, 2)]
-            assert selected_indices is None
-            assert num_threads == 2
-            assert np.isnan(nan_value)
-            return expected_features + np.asarray([[5e-7, 0.0], [0.0, 0.0], [0.0, 0.0]])
-
-    def fake_many_pairs_featurize(pairs, dataset, _info, **kwargs):
-        assert dataset is python_dataset
-        assert [(left, right) for left, right, _label in pairs] == expected_signature_pairs
-        assert kwargs["runtime_context"].backend == "python"
-        return expected_features, np.zeros(len(pairs)), None
-
-    def fake_get_constraints(block_indices, **kwargs):
-        assert block_indices == [0, 1, 2]
-        assert kwargs["featurizer"] is arrow_featurizer
-        return [0, 0, 1], [1, 2, 2], [None, 0.0, 10000.0]
-
-    python_dataset = FakeDataset()
-    arrow_featurizer = FakeArrowFeaturizer()
-    monkeypatch.setattr("s2and.featurizer.many_pairs_featurize", fake_many_pairs_featurize)
-    monkeypatch.setattr(
-        "s2and.rust_calls.get_constraints_block_upper_triangle_indexed_rust",
-        fake_get_constraints,
-    )
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    python_dataset = build_dummy_dataset("full-predict-parity-report", name_counts_index=True)
+    arrow_dataset = build_arrow_training_dataset(python_dataset, tmp_path)
+    arrow_featurizer = _get_rust_featurizer(arrow_dataset)
+    signature_ids = list(python_dataset.signatures)[:4]
 
     report = _feature_constraint_report(
         python_dataset,
         arrow_featurizer,
         signature_ids,
-        n_jobs=2,
+        n_jobs=1,
     )
 
-    assert report["reference_backend"] == "python_anddata"
-    assert report["candidate_backend"] == "rust_arrow"
+    assert report["pair_count"] == 6
     assert report["feature_matrix"]["allclose_equal_nan"] is True
-    assert report["feature_matrix"]["atol"] == 1e-6
+    assert report["feature_matrix"]["nan_mismatch_count"] == 0
+    assert report["constraints"]["left_indices_equal"] is True
+    assert report["constraints"]["right_indices_equal"] is True
     assert report["constraints"]["values_equal"] is True
-    assert python_dataset.constraint_pairs == expected_signature_pairs
 
 
 def test_cluster_partition_ignores_cluster_labels_and_member_order() -> None:
@@ -143,7 +108,7 @@ def test_jsonable_converts_validated_arrow_mapping() -> None:
     from s2and.arrow_inputs import ValidatedArrowInputs
     from s2and.consts import NORMALIZATION_VERSION
 
-    paths = ValidatedArrowInputs._from_verified(
+    paths = ValidatedArrowInputs(
         paths={"signatures": "signatures.arrow"},
         generation_id="generation",
         normalization_version=NORMALIZATION_VERSION,

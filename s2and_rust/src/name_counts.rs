@@ -2,6 +2,7 @@ use memmap2::Mmap;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -619,12 +620,7 @@ impl NameCountsProvenance {
     }
 }
 
-pub(crate) fn python_sha256_file(path: &Path) -> PyResult<String> {
-    #[cfg(windows)]
-    if let Some(python_home) = option_env!("S2AND_RUST_PYTHONHOME") {
-        std::env::set_var("PYTHONHOME", python_home);
-    }
-    pyo3::prepare_freethreaded_python();
+pub(crate) fn sha256_file(path: &Path) -> PyResult<String> {
     let mut input = File::open(path).map_err(|err| {
         pyo3::exceptions::PyIOError::new_err(format!(
             "failed to open name-count index file {} for SHA-256 verification: {}",
@@ -632,26 +628,22 @@ pub(crate) fn python_sha256_file(path: &Path) -> PyResult<String> {
             err
         ))
     })?;
-    Python::with_gil(|py| {
-        use pyo3::types::PyBytes;
-
-        let hasher = py.import("hashlib")?.call_method0("sha256")?;
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let byte_count = input.read(&mut buffer).map_err(|err| {
-                pyo3::exceptions::PyIOError::new_err(format!(
-                    "failed to read name-count index file {} for SHA-256 verification: {}",
-                    path.display(),
-                    err
-                ))
-            })?;
-            if byte_count == 0 {
-                break;
-            }
-            hasher.call_method1("update", (PyBytes::new(py, &buffer[..byte_count]),))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let byte_count = input.read(&mut buffer).map_err(|err| {
+            pyo3::exceptions::PyIOError::new_err(format!(
+                "failed to read name-count index file {} for SHA-256 verification: {}",
+                path.display(),
+                err
+            ))
+        })?;
+        if byte_count == 0 {
+            break;
         }
-        hasher.call_method0("hexdigest")?.extract()
-    })
+        hasher.update(&buffer[..byte_count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn validated_name_counts_index_manifest_path(
@@ -731,7 +723,7 @@ fn validated_name_counts_index_manifest_path(
             canonical_resolved.display()
         )));
     }
-    let actual_sha256 = python_sha256_file(&canonical_resolved)?;
+    let actual_sha256 = sha256_file(&canonical_resolved)?;
     if actual_sha256 != entry.sha256 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "name-count index manifest {} files.{} SHA-256 mismatch: {}",
@@ -851,8 +843,8 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 #[cfg(test)]
 mod name_counts_tests {
     use super::{
-        lookup_name_count_column, name_counts_index_hashes, python_sha256_file,
-        read_name_counts_index_normalization_version, validate_lookup_column_lengths,
+        lookup_name_count_column, name_counts_index_hashes,
+        read_name_counts_index_normalization_version, sha256_file, validate_lookup_column_lengths,
         NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind,
     };
     use std::io::{Seek, SeekFrom, Write};
@@ -898,8 +890,20 @@ mod name_counts_tests {
         serde_json::json!({
             "path": path.file_name().expect("file name").to_str().expect("utf-8 file name"),
             "byte_count": path.metadata().expect("file metadata").len(),
-            "sha256": python_sha256_file(path).expect("hash fixture"),
+            "sha256": sha256_file(path).expect("hash fixture"),
         })
+    }
+
+    #[test]
+    fn sha256_file_matches_known_digest() {
+        let dir = unique_temp_dir("s2and_sha256");
+        let path = dir.join("fixture.bin");
+        std::fs::write(&path, b"abc").expect("write hash fixture");
+
+        assert_eq!(
+            sha256_file(&path).expect("hash fixture"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {

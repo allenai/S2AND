@@ -25,7 +25,7 @@ from s2and.incremental_linking.linker_pairwise import (
     LinkerCandidateBatch,
     promoted_pairwise_aggregate_columns,
 )
-from s2and.incremental_linking.logistic_gate import logistic_gate_config
+from s2and.incremental_linking.logistic_gate import load_logistic_gate_config, logistic_gate_config
 from s2and.incremental_linking.retrieval import (
     RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
@@ -90,6 +90,7 @@ class StaticArtifact:
     def __init__(self, probabilities: np.ndarray, gate_config: dict[str, Any]) -> None:
         self.probabilities = np.asarray(probabilities, dtype=np.float64)
         self.last_num_threads: int | None = None
+        self.gate_model = load_logistic_gate_config(gate_config)
         self.metadata = SimpleNamespace(
             feature_columns=promoted_linker_feature_columns(),
             gate_config=gate_config,
@@ -189,53 +190,6 @@ def test_distance_row_signals_distinguish_top3_and_top5_means() -> None:
     assert signals["mean_distance"][0] == pytest.approx(0.35)
     assert signals["top3_mean_distance"][0] == pytest.approx(0.2)
     assert signals["top5_mean_distance"][0] == pytest.approx(0.3)
-
-
-def test_raw_candidate_plan_telemetry_preserves_seed_counts_for_window_reuse() -> None:
-    fields = runtime_module._raw_candidate_plan_telemetry_fields(  # noqa: SLF001
-        {
-            "window_plan_reused": 1,
-            "signature_count": 9,
-            "seed_signature_count": 4,
-            "cluster_count": 2,
-            "timings": {"total_secs": 0.5},
-        }
-    )
-
-    assert fields["raw_arrow_plan_signature_count"] == 0
-    assert fields["raw_arrow_plan_seed_signature_count"] == 4
-    assert fields["raw_arrow_plan_cluster_count"] == 2
-    assert fields["raw_arrow_plan_total_secs"] == 0.5
-
-
-def test_subset_raw_candidate_plan_preserves_unretrieved_component_members() -> None:
-    raw_plan = {
-        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
-        "query_signature_ids": ["q0", "q1"],
-        "query_views": ["full", "full"],
-        "query_authors": ["Alice", "Alice"],
-        "row_count": 1,
-        "pair_count": 1,
-        "row_query_signature_indices": np.asarray([0], dtype=np.uint32),
-        "row_component_keys": ["c1"],
-        "retrieval_scores": np.asarray([0.9], dtype=np.float32),
-        "retrieval_ranks": np.asarray([1], dtype=np.uint16),
-        "pair_row_indices": np.asarray([0], dtype=np.uint32),
-        "left_signature_ids": ["q0"],
-        "right_signature_ids": ["s1"],
-        "component_members": {"c1": ["s1"], "c2": ["s2"]},
-        "telemetry": {},
-    }
-    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
-        raw_plan[raw_key] = np.asarray([""] if dtype is object else [0], dtype=dtype)
-
-    subset = runtime_module.subset_raw_plan_bundle_for_query_ids(
-        RawArrowPlanBundle.from_mapping(raw_plan),
-        ["q0"],
-    )
-
-    assert subset.row_component_keys == ("c1",)
-    assert subset.component_members == {"c1": ("s1",), "c2": ("s2",)}
 
 
 def _minimal_raw_candidate_plan(**overrides: Any) -> dict[str, Any]:
@@ -1260,15 +1214,16 @@ def test_fused_pairwise_model_rust_distance_accumulator_matches_python_large(
 @requires_rust_lightgbm
 def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
+    artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
-        tmp_path,
+        artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(0.0),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
-    artifact = load_incremental_linking_artifact(tmp_path)
+    artifact = load_incremental_linking_artifact(artifact_dir)
     candidate_batch = LinkerCandidateBatch(
         row_count=3,
         left_signature_indices=np.zeros(0, dtype=np.uint32),
@@ -1301,15 +1256,16 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
 @requires_rust_lightgbm
 def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
+    artifact_dir = tmp_path / "artifact"
     save_incremental_linking_artifact(
         booster,
-        tmp_path,
+        artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(1.1),
         target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
-    artifact = load_incremental_linking_artifact(tmp_path)
+    artifact = load_incremental_linking_artifact(artifact_dir)
     candidate_batch = LinkerCandidateBatch(
         row_count=1,
         left_signature_indices=np.zeros(0, dtype=np.uint32),
@@ -1396,31 +1352,6 @@ def test_compact_link_or_abstain_applies_numpy_logistic_gate_feature() -> None:
     assert [decision.action for decision in result.decisions] == ["link", "abstain"]
     assert result.decisions[0].component_key == "c_margin"
     assert result.decisions[0].score_margin == pytest.approx(0.05)
-
-
-def test_compact_gate_rejects_non_logistic_config() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.60], dtype=np.float64),
-        gate_config={
-            "model_type": "legacy_thresholds",
-        },
-    )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
-        row_component_keys=("c_single",),
-        retrieval_ranks=np.asarray([1], dtype=np.uint16),
-    )
-
-    with pytest.raises(ValueError, match="Unsupported logistic gate model_type"):
-        _predict_incremental_link_or_abstain_compact(
-            artifact,
-            _empty_feature_matrix(candidate_batch),
-            row_signals={},
-        )
 
 
 def test_compact_logistic_gate_can_use_materialized_bucket_feature() -> None:
@@ -1679,115 +1610,6 @@ def test_constraint_disallow_veto_policy_pins_two_pair_half_disallow_fall_throug
     assert veto.tolist() == [True, False, True, False, True, True]
 
 
-def _same_batch_disallow_candidate_batch() -> LinkerCandidateBatch:
-    return LinkerCandidateBatch(
-        row_count=4,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-        row_query_signature_indices=np.asarray([10, 10, 11, 11], dtype=np.uint32),
-        row_component_keys=("c_shared", "c_ten_other", "c_shared", "c_eleven_other"),
-        retrieval_ranks=np.asarray([1, 2, 1, 2], dtype=np.uint16),
-    )
-
-
-def test_compact_same_batch_disallow_conflict_keeps_higher_score_and_reassigns_partner() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.60, 0.90, 0.70], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(_same_batch_disallow_candidate_batch()),
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"] * 4, dtype=object)},
-        disallow_partner_query_indices={10: {11}},
-    )
-
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "c_shared"
-    assert result.decisions[0].score == pytest.approx(0.95)
-    assert result.decisions[1].action == "link"
-    assert result.decisions[1].component_key == "c_eleven_other"
-    assert result.decisions[1].score == pytest.approx(0.70)
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_conflict_count"] == 1
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_reassigned_link_count"] == 1
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_demoted_abstain_count"] == 0
-
-
-def test_compact_same_batch_disallow_conflict_demotes_partner_to_abstain_when_runner_up_fails_gate() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.60, 0.90, 0.30], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(_same_batch_disallow_candidate_batch()),
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"] * 4, dtype=object)},
-        # The partner map is symmetrized internally; declaring one direction is enough.
-        disallow_partner_query_indices={11: {10}},
-    )
-
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "c_shared"
-    assert result.decisions[1].action == "abstain"
-    assert result.decisions[1].component_key is None
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_conflict_count"] == 1
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_reassigned_link_count"] == 0
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_demoted_abstain_count"] == 1
-
-
-def test_compact_same_batch_disallow_no_conflict_when_partners_link_to_different_components() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.60, 0.95, 0.90, 0.70], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(_same_batch_disallow_candidate_batch()),
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"] * 4, dtype=object)},
-        disallow_partner_query_indices={10: {11}},
-    )
-
-    assert result.decisions[0].component_key == "c_ten_other"
-    assert result.decisions[1].component_key == "c_shared"
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_conflict_count"] == 0
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_reassigned_link_count"] == 0
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_demoted_abstain_count"] == 0
-
-
-def test_compact_same_batch_disallow_require_forced_link_wins_over_higher_score_partner() -> None:
-    # Query 11 has an explicit require constraint into c_shared; query 10 merely
-    # scores higher there. The require contract is immovable, so query 10 is the
-    # one that re-decides.
-    artifact = _static_artifact(
-        np.asarray([0.95, 0.60, 0.90, 0.70], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.5),
-    )
-
-    result = _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(_same_batch_disallow_candidate_batch()),
-        row_signals={
-            "first_name_bucket": np.asarray(["multi_letter_first"] * 4, dtype=object),
-            "constraint_pair_count": np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
-            "constraint_require_count": np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32),
-            "constraint_disallow_count": np.zeros(4, dtype=np.float32),
-            "constraint_disallow_fraction": np.zeros(4, dtype=np.float32),
-        },
-        disallow_partner_query_indices={10: {11}},
-    )
-
-    assert result.decisions[1].action == "link"
-    assert result.decisions[1].component_key == "c_shared"
-    assert result.decisions[0].action == "link"
-    assert result.decisions[0].component_key == "c_ten_other"
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_conflict_count"] == 1
-    assert result.decision_telemetry["cluster_seed_disallow_same_batch_reassigned_link_count"] == 1
-
-
 def test_compact_hard_excluded_rows_block_component_even_against_orcid_force() -> None:
     # Hard exclusions carry cluster-seed disallows against a component that a
     # mutually-disallowed query already linked to. Semantics match plan-time
@@ -1924,52 +1746,6 @@ def test_query_disallow_partner_ids_collects_query_pairs_from_both_channels() ->
     assert partners == {"q1": {"q2"}, "q2": {"q1", "q3"}, "q3": {"q2"}}
 
 
-def test_private_production_slice_enforces_same_batch_query_disallow(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1", "q2"])
-    clusterer = FakeProductionClusterer({"s1": "7"})
-    artifact = _static_artifact(np.asarray([0.9, 0.8], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-
-    def fake_retrieval(**_kwargs: Any) -> LinkerRetrievalBatch:
-        return _production_retrieval_batch(
-            row_query_signature_indices=np.asarray([0, 2], dtype=np.uint32),
-            row_component_keys=("7", "7"),
-        )
-
-    monkeypatch.setattr(runtime_module, "build_linker_retrieval_batch_rust", fake_retrieval)
-    monkeypatch.setattr(
-        runtime_module,
-        "compute_candidate_batch_pairwise_model_and_aggregate_stats",
-        lambda _dataset, candidate_batch, **_kwargs: _fake_pairwise_result(candidate_batch),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "build_promoted_non_pairwise_row_features_with_telemetry",
-        lambda _candidate_batch, _row_signals: _row_features_with_telemetry(np.asarray([0.9, 0.8], dtype=np.float32)),
-    )
-
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object(), object()],
-        query_signature_ids=["q1", "q2"],
-        cluster_seed_disallow_partner_ids={"q1": {"q2"}},
-    )
-
-    # Both queries retrieved only component "7"; the higher-scoring q1 keeps it
-    # and the mutually-disallowed q2 abstains to residual Phase B (where the
-    # disallow is enforced through partial supervision).
-    assert result.linked_signature_clusters == {"q1": "7"}
-    assert [decision.action for decision in result.compact_result.decisions] == ["link", "abstain"]
-    assert result.telemetry["cluster_seed_disallow_same_batch_conflict_count"] == 1
-    assert result.telemetry["cluster_seed_disallow_same_batch_demoted_abstain_count"] == 1
-
-
 def test_private_production_slice_enforces_cross_batch_query_disallow_exclusion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2053,9 +1829,6 @@ def test_private_retrieved_candidate_slice_scores_matrix_and_records_telemetry(
         "abstain_count": 0,
         "cluster_seed_disallow_excluded_row_count": 0,
         "cluster_seed_disallow_excluded_query_count": 0,
-        "cluster_seed_disallow_same_batch_conflict_count": 0,
-        "cluster_seed_disallow_same_batch_reassigned_link_count": 0,
-        "cluster_seed_disallow_same_batch_demoted_abstain_count": 0,
         "row_feature_generated_family_id_count": 0,
         "row_feature_generic_family_override_count": 0,
     }

@@ -82,7 +82,7 @@ def test_run_uses_direct_arrow_api_and_forwards_batching_threshold(
         def __exit__(self, *_args):
             return False
 
-    arrow_paths = cmd.ValidatedArrowInputs._from_verified(
+    arrow_paths = cmd.ValidatedArrowInputs(
         paths={"signatures": str(tmp_path / "signatures.arrow"), "clusters": str(tmp_path / "clusters.json")},
         generation_id="test-generation",
         normalization_version="test-normalization",

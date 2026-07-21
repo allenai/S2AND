@@ -1,11 +1,7 @@
 import hashlib
-import io
 import json
 import logging
-import os
 import random
-import re
-import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -30,8 +26,6 @@ from s2and.incremental_linking.feature_block_arrow import read_arrow_batch_looku
 from s2and.orcid_prefix_counts import (
     ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
     ORCID_PREFIX_DATA_FILENAME,
-    ORCID_PREFIX_GENERATION_ID_PATTERN,
-    ORCID_PREFIX_MANIFEST_FILENAME,
     ORCID_PREFIX_METADATA_FILENAME,
     ORCID_PREFIX_PAIR_KEY_SEMANTICS,
     validate_orcid_prefix_counts,
@@ -63,158 +57,58 @@ def _orcid_prefix_pair_count(counts: Mapping[str, Mapping[str, int]], first: str
     return None if nested is None else nested.get(right)
 
 
-def _sha256_payload(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _read_json_mapping(path: Path, *, label: str) -> tuple[bytes, dict[str, Any]]:
+def _read_orcid_json(path: Path, *, label: str) -> tuple[bytes, dict[str, Any]]:
     try:
         payload = path.read_bytes()
     except FileNotFoundError as error:
         raise FileNotFoundError(
             f"Missing canonical ORCID prefix-count {label}: {path}. Regenerate and publish the "
-            "versioned ORCID prefix-count artifact before using default subblocking priors."
+            "canonical ORCID prefix-count data and metadata before using default subblocking priors."
         ) from error
     try:
         value = json.loads(payload)
-    except json.JSONDecodeError as error:
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"Canonical ORCID prefix-count {label} is invalid JSON: {path}") from error
     if not isinstance(value, dict):
         raise ValueError(f"Canonical ORCID prefix-count {label} must be a JSON object: {path}")
     return payload, value
 
 
-def _require_contained_file(path: Path, *, parent: Path, label: str) -> None:
-    """Reject symlinks, path escapes, and non-files at an artifact boundary."""
-
-    if path.is_symlink() or path.resolve().parent != parent.resolve():
-        raise ValueError(f"Canonical ORCID prefix-count {label} escapes its expected directory")
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing canonical ORCID prefix-count {label}: {path}")
-
-
-def _read_verified_json_mapping(
-    path: Path,
-    *,
-    label: str,
-    expected_sha256: str,
-) -> dict[str, Any]:
-    """Hash and parse one file without retaining its bytes beside the parsed mapping."""
-
-    try:
-        with path.open("rb") as binary_stream:
-            before = os.fstat(binary_stream.fileno())
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: binary_stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-            if digest.hexdigest() != expected_sha256:
-                raise ValueError(f"Canonical ORCID prefix-count {label} SHA-256 does not match its metadata")
-            binary_stream.seek(0)
-            text_stream = io.TextIOWrapper(binary_stream, encoding="utf-8")
-            try:
-                value = json.load(text_stream)
-            finally:
-                text_stream.detach()
-            after = os.fstat(binary_stream.fileno())
-    except FileNotFoundError as error:
-        raise FileNotFoundError(f"Missing canonical ORCID prefix-count {label}: {path}") from error
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Canonical ORCID prefix-count {label} is invalid JSON: {path}") from error
-    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-        raise RuntimeError(f"Canonical ORCID prefix-count {label} changed while it was being verified")
-    if not isinstance(value, dict):
-        raise ValueError(f"Canonical ORCID prefix-count {label} must be a JSON object: {path}")
-    return value
-
-
-def _require_sha256(value: Any, *, field: str) -> str:
+def _require_orcid_sha256(value: Any) -> str:
     if (
         not isinstance(value, str)
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        raise ValueError(f"Canonical ORCID prefix-count {field} must be a lowercase SHA-256 digest")
+        raise ValueError("Canonical ORCID prefix-count metadata data_sha256 must be a lowercase SHA-256 digest")
     return value
 
 
 def _load_canonical_orcid_prefix_count_artifact(
     data_dir: str | Path = _PACKAGE_DATA_DIR,
 ) -> tuple[dict[str, dict[str, int]], str]:
-    """Load counts and their content hash after full artifact verification."""
+    """Load direct count data and its content hash after one-pass validation."""
 
-    root = Path(data_dir).resolve()
-    pointer_path = root / ORCID_PREFIX_MANIFEST_FILENAME
-    if pointer_path.is_symlink() or pointer_path.resolve().parent != root:
-        raise ValueError("Canonical ORCID prefix-count manifest escapes the package data directory")
-    _, pointer = _read_json_mapping(pointer_path, label="manifest")
-    if pointer.get("schema_version") != ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION:
-        raise ValueError(
-            "Canonical ORCID prefix-count manifest schema_version must equal " f"{ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION}"
-        )
-    generation_id = pointer.get("generation_id")
-    if not isinstance(generation_id, str) or re.fullmatch(ORCID_PREFIX_GENERATION_ID_PATTERN, generation_id) is None:
-        raise ValueError("Canonical ORCID prefix-count manifest generation_id has an invalid format")
-    generation_dir_name = pointer.get("generation_dir")
-    expected_generation_dir_name = f"orcid-prefix-counts-{generation_id}"
-    if generation_dir_name != expected_generation_dir_name:
-        raise ValueError("Canonical ORCID prefix-count manifest generation_dir must exactly match its generation_id")
-    generation_dir = root / expected_generation_dir_name
-    if generation_dir.is_symlink() or generation_dir.resolve().parent != root:
-        raise ValueError("Canonical ORCID prefix-count generation_dir escapes the package data directory")
-
-    metadata_path = generation_dir / ORCID_PREFIX_METADATA_FILENAME
-    _require_contained_file(metadata_path, parent=generation_dir, label="metadata")
-    metadata_payload, metadata = _read_json_mapping(metadata_path, label="metadata")
-    expected_metadata_sha256 = _require_sha256(pointer.get("metadata_sha256"), field="metadata_sha256")
-    if _sha256_payload(metadata_payload) != expected_metadata_sha256:
-        raise ValueError("Canonical ORCID prefix-count metadata SHA-256 does not match the manifest")
+    root = Path(data_dir)
+    metadata_path = root / ORCID_PREFIX_METADATA_FILENAME
+    _, metadata = _read_orcid_json(metadata_path, label="metadata")
     expected_metadata = {
         "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
         "normalization_version": NORMALIZATION_VERSION,
         "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
-        "generation_id": generation_id,
     }
     for key, expected in expected_metadata.items():
         if metadata.get(key) != expected:
             raise ValueError(f"Canonical ORCID prefix-count metadata {key} must equal {expected!r}")
-    source_snapshot_id = metadata.get("source_snapshot_id")
-    if (
-        not isinstance(source_snapshot_id, str)
-        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_snapshot_id) is None
-    ):
-        raise ValueError("Canonical ORCID prefix-count metadata source_snapshot_id has an invalid format")
-    if generation_id != f"{source_snapshot_id}-{generation_id[-12:]}":
-        raise ValueError("Canonical ORCID prefix-count generation_id is not bound to source_snapshot_id")
-    _require_sha256(metadata.get("source_digest"), field="source_digest")
+    if set(metadata) != {*expected_metadata, "data_sha256"}:
+        raise ValueError("Canonical ORCID prefix-count metadata fields do not match the direct artifact contract")
+    expected_data_sha256 = _require_orcid_sha256(metadata.get("data_sha256"))
 
-    data_path = generation_dir / ORCID_PREFIX_DATA_FILENAME
-    _require_contained_file(data_path, parent=generation_dir, label="data")
-    expected_data_byte_count = metadata.get("data_byte_count")
-    if type(expected_data_byte_count) is not int or expected_data_byte_count < 0:
-        raise ValueError("Canonical ORCID prefix-count data_byte_count must be a nonnegative integer")
-    if data_path.stat().st_size != expected_data_byte_count:
-        raise ValueError("Canonical ORCID prefix-count data_byte_count does not match the data")
-    expected_data_sha256 = _require_sha256(metadata.get("data_sha256"), field="data_sha256")
-    raw_counts = _read_verified_json_mapping(
-        data_path,
-        label="data",
-        expected_sha256=expected_data_sha256,
-    )
-
-    outer_count, pair_count = validate_orcid_prefix_counts(
-        raw_counts,
-        context="Canonical ORCID prefix-count",
-    )
-    outer_key_cardinality = metadata.get("outer_key_cardinality")
-    pair_key_cardinality = metadata.get("pair_key_cardinality")
-    if type(outer_key_cardinality) is not int or outer_key_cardinality < 0:
-        raise ValueError("Canonical ORCID prefix-count outer_key_cardinality must be a nonnegative integer")
-    if type(pair_key_cardinality) is not int or pair_key_cardinality < 0:
-        raise ValueError("Canonical ORCID prefix-count pair_key_cardinality must be a nonnegative integer")
-    if outer_key_cardinality != outer_count:
-        raise ValueError("Canonical ORCID prefix-count outer_key_cardinality does not match the data")
-    if pair_key_cardinality != pair_count:
-        raise ValueError("Canonical ORCID prefix-count pair_key_cardinality does not match the data")
+    data_path = root / ORCID_PREFIX_DATA_FILENAME
+    data_payload, raw_counts = _read_orcid_json(data_path, label="data")
+    if hashlib.sha256(data_payload).hexdigest() != expected_data_sha256:
+        raise ValueError("Canonical ORCID prefix-count data SHA-256 does not match its metadata")
+    validate_orcid_prefix_counts(raw_counts, context="Canonical ORCID prefix-count")
     return raw_counts, expected_data_sha256
 
 
@@ -225,19 +119,14 @@ class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
         self._data_dir = Path(data_dir)
         self._loaded: dict[str, dict[str, int]] | None = None
         self._data_sha256: str | None = None
-        self._load_lock = threading.Lock()
 
     def load(self) -> dict[str, dict[str, int]]:
         loaded = self._loaded
-        if loaded is not None:
-            return loaded
-        with self._load_lock:
-            loaded = self._loaded
-            if loaded is None:
-                loaded, data_sha256 = _load_canonical_orcid_prefix_count_artifact(self._data_dir)
-                self._data_sha256 = data_sha256
-                self._loaded = loaded
-            return loaded
+        if loaded is None:
+            loaded, data_sha256 = _load_canonical_orcid_prefix_count_artifact(self._data_dir)
+            self._data_sha256 = data_sha256
+            self._loaded = loaded
+        return loaded
 
     def data_sha256(self) -> str:
         """Return the verified count-data content hash."""

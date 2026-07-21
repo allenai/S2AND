@@ -309,7 +309,7 @@ def _raw_plan() -> dict[str, Any]:
 
 
 def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
-    return ValidatedArrowInputs._from_verified(
+    return ValidatedArrowInputs(
         paths={},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
@@ -1960,7 +1960,7 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
 
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
-            return ["q", "s1", "s2", "s3", "window-only"]
+            return ["q", "s1", "s2", "s3"]
 
     def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("preplanned raw Arrow scoring should reuse the supplied featurizer")
@@ -2016,7 +2016,6 @@ def test_preplanned_raw_arrow_scoring_uses_provided_plan(
     assert captured["retrieval_right_indices"] == [1, 2, 3]
     assert captured["queries"][0].query_author == "Ada Lovelace"
     assert result.linked_signature_clusters == {"q": "c_ada"}
-    assert result.telemetry["raw_arrow_featurizer_reused"] == 1
     assert result.telemetry["raw_arrow_retrieval_seconds"] == 0.0
 
 
@@ -2110,7 +2109,7 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
 
     class FakeFeaturizer:
         def signature_ids(self) -> list[str]:
-            return ["q", "s1", "s2", "s3", "window-only"]
+            return ["q", "s1", "s2", "s3"]
 
     def fail_build_rust_featurizer_from_arrow_paths(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("prebuilt raw Arrow featurizer should be reused")
@@ -2164,9 +2163,8 @@ def test_preplanned_raw_arrow_scoring_uses_provided_rust_featurizer(
     assert captured["featurizer"] is fake_featurizer
     assert captured["retrieval_left_indices"] == [0, 0, 0]
     assert captured["retrieval_right_indices"] == [1, 2, 3]
-    assert result.telemetry["raw_arrow_featurizer_reused"] == 1
-    assert result.telemetry["raw_arrow_signature_count"] == 5
-    assert result.telemetry["raw_arrow_plan_signature_count"] == 5
+    assert result.telemetry["raw_arrow_signature_count"] == 4
+    assert result.telemetry["raw_arrow_plan_signature_count"] == 4
     assert isinstance(result.telemetry["raw_arrow_featurizer_seconds"], float)
 
 

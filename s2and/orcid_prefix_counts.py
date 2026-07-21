@@ -7,11 +7,9 @@ from collections.abc import Mapping
 from s2and.text import same_prefix_tokens
 
 ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION = 1
-ORCID_PREFIX_MANIFEST_FILENAME = "first_k_letter_counts_from_orcid.manifest.json"
 ORCID_PREFIX_METADATA_FILENAME = "first_k_letter_counts_from_orcid.meta.json"
 ORCID_PREFIX_DATA_FILENAME = "first_k_letter_counts_from_orcid.json"
 ORCID_PREFIX_PAIR_KEY_SEMANTICS = "unordered_lexicographic"
-ORCID_PREFIX_GENERATION_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*-[0-9a-f]{12}"
 
 
 def _is_canonical_prefix_token(value: object) -> bool:

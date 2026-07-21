@@ -5,8 +5,6 @@ use pyo3::Bound;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
-use std::fs;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -35,7 +33,7 @@ use constraints::{
 };
 use features::*;
 pub(crate) use ingest_dataset::*;
-use language_detection::LanguageDetectorCompat;
+use language_detection::detect_language_compat;
 use name_counts::{
     read_name_counts_index_normalization_version, NameCountsData, NameCountsIndex,
     NameCountsProvenanceBinding, RawNameCountKind, RawNameCountMaps,

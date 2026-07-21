@@ -39,7 +39,6 @@ from s2and.incremental_linking.linker_pairwise import (
 from s2and.incremental_linking.logistic_gate import (
     NumpyLogisticGate,
     build_runtime_logistic_gate_matrix,
-    load_logistic_gate_config,
 )
 from s2and.incremental_linking.policy import (
     clusterer_uses_embedding_features,
@@ -50,7 +49,6 @@ from s2and.incremental_linking.policy import (
     resolve_load_name_counts_policy as _resolve_load_name_counts_policy,
 )
 from s2and.incremental_linking.retrieval import (
-    RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS,
     LinkerRetrievalBatch,
     RawArrowPlanBundle,
     _query_author_for_retrieval_row_signal,
@@ -195,13 +193,6 @@ def _forced_runner_up_score(
         component_keys=component_keys,
     )
     return float(probabilities[runner_up])
-
-
-def _artifact_logistic_gate(artifact: IncrementalLinkingArtifact) -> NumpyLogisticGate:
-    gate_model = getattr(artifact, "gate_model", None)
-    if gate_model is not None:
-        return gate_model
-    return load_logistic_gate_config(artifact.metadata.gate_config)
 
 
 def _orcid_match_signal(row_signals: Mapping[str, Any] | None, row_count: int) -> np.ndarray | None:
@@ -455,8 +446,8 @@ def _decide_query_rows(
     ``fast_path`` carries the precomputed full-group gate outputs
     ``(best_row, runner_up_score, score_margin, gate_link)`` and must only be
     provided when ``allowed_rows`` is the query's complete retrieved group;
-    subset callers (disallow exclusions, same-batch conflict re-decisions) pass
-    ``None`` and the gate is re-run over the subset.
+    subset callers (such as disallow exclusions) pass ``None`` and the gate is
+    re-run over the subset.
     """
 
     if len(allowed_rows) == 0:
@@ -588,8 +579,6 @@ def _predict_incremental_link_or_abstain_compact(
     row_signals: Mapping[str, Any] | None = None,
     num_threads: int | None = None,
     hard_excluded_rows: np.ndarray | None = None,
-    disallow_partner_query_indices: Mapping[int, Collection[int]] | None = None,
-    disallow_query_priority_ids: Mapping[int, str] | None = None,
     scorer_max_rows_per_chunk: int | None = None,
 ) -> LinkOrAbstainCompactResult:
     """Score artifact-ordered rows and apply the artifact's logistic gate.
@@ -597,10 +586,7 @@ def _predict_incremental_link_or_abstain_compact(
     ``hard_excluded_rows`` removes candidate rows from consideration entirely,
     as if the raw planner had excluded them at retrieval time; it carries
     cluster-seed-disallow exclusions against components that a mutually
-    disallowed query linked to in an earlier batch. ``disallow_partner_query_indices``
-    maps a query signature index to same-batch mutually-disallowed query
-    signature indices; when two partners link to the same component, the
-    lower-priority link is re-decided without that component.
+    disallowed query linked to in an earlier batch.
 
     This is intentionally not a public API. It exists to keep the first vertical
     slice concrete while retrieval policy, constraint handling, and telemetry are
@@ -622,7 +608,7 @@ def _predict_incremental_link_or_abstain_compact(
         raise ValueError("artifact probability count must match candidate row_count")
     query_indices = np.asarray(candidate_batch.row_query_signature_indices, dtype=np.uint32)
     component_keys = candidate_batch.row_component_keys
-    gate = _artifact_logistic_gate(artifact)
+    gate = artifact.gate_model
     gate_matrix, gate_query_rows = build_runtime_logistic_gate_matrix(
         gate,
         feature_matrix,
@@ -646,9 +632,6 @@ def _predict_incremental_link_or_abstain_compact(
             0 if excluded_rows_mask is None else int(excluded_rows_mask.sum())
         ),
         "cluster_seed_disallow_excluded_query_count": 0,
-        "cluster_seed_disallow_same_batch_conflict_count": 0,
-        "cluster_seed_disallow_same_batch_reassigned_link_count": 0,
-        "cluster_seed_disallow_same_batch_demoted_abstain_count": 0,
     }
     decide_kwargs: dict[str, Any] = {
         "gate": gate,
@@ -662,11 +645,9 @@ def _predict_incremental_link_or_abstain_compact(
         "candidate_batch": candidate_batch,
     }
     decisions: list[LinkOrAbstainDecision] = []
-    group_rows_by_query_index: dict[int, np.ndarray] = {}
     for query_pos, group in enumerate(gate_query_rows.groups):
         group = np.asarray(group, dtype=np.int64)
         query_signature_index = int(query_indices[int(group[0])])
-        group_rows_by_query_index[query_signature_index] = group
         allowed_rows = group
         fast_path: tuple[int, float, float, bool] | None = (
             int(gate_query_rows.best_rows[query_pos]),
@@ -693,135 +674,11 @@ def _predict_incremental_link_or_abstain_compact(
                 **decide_kwargs,
             )
         )
-    if disallow_partner_query_indices:
-        _resolve_same_batch_disallow_conflicts(
-            decisions,
-            disallow_partner_query_indices=disallow_partner_query_indices,
-            disallow_query_priority_ids=disallow_query_priority_ids,
-            group_rows_by_query_index=group_rows_by_query_index,
-            excluded_rows_mask=excluded_rows_mask,
-            decision_telemetry=decision_telemetry,
-            decide_kwargs=decide_kwargs,
-        )
     return LinkOrAbstainCompactResult(
         probabilities=np.asarray(probabilities, dtype=np.float64),
         decisions=tuple(decisions),
         decision_telemetry=decision_telemetry,
     )
-
-
-def _resolve_same_batch_disallow_conflicts(
-    decisions: list[LinkOrAbstainDecision],
-    *,
-    disallow_partner_query_indices: Mapping[int, Collection[int]],
-    disallow_query_priority_ids: Mapping[int, str] | None,
-    group_rows_by_query_index: Mapping[int, np.ndarray],
-    excluded_rows_mask: np.ndarray | None,
-    decision_telemetry: dict[str, int],
-    decide_kwargs: Mapping[str, Any],
-) -> None:
-    """Enforce query-vs-query disallow pairs whose endpoints share a batch.
-
-    A disallow pair between two queries is unenforceable at plan time (neither
-    endpoint has a component yet) and becomes an ordinary component exclusion
-    the moment one endpoint links. Decisions are finalized in priority order --
-    require-forced links first (they cannot move), then descending link score --
-    and a lower-priority partner that landed on the same component is re-decided
-    over its already-scored rows with that component removed, so no re-scoring
-    or re-featurization happens.
-    """
-
-    constraint_requires = decide_kwargs["constraint_requires"]
-    component_keys = decide_kwargs["component_keys"]
-    partners: dict[int, set[int]] = {}
-    for query_index, partner_indices in disallow_partner_query_indices.items():
-        for partner_index in partner_indices:
-            left = int(query_index)
-            right = int(partner_index)
-            if left == right:
-                continue
-            partners.setdefault(left, set()).add(right)
-            partners.setdefault(right, set()).add(left)
-    position_by_query_index: dict[int, int] = {}
-    for position, decision in enumerate(decisions):
-        position_by_query_index.setdefault(decision.query_signature_index, position)
-
-    def _allowed_rows(query_index: int) -> np.ndarray:
-        rows = group_rows_by_query_index[query_index]
-        if excluded_rows_mask is None:
-            return rows
-        return rows[~excluded_rows_mask[rows]]
-
-    def _has_require_force(query_index: int) -> bool:
-        if constraint_requires is None or query_index not in group_rows_by_query_index:
-            return False
-        rows = _allowed_rows(query_index)
-        return bool(np.any(constraint_requires[rows])) if len(rows) else False
-
-    contended = [
-        query_index
-        for query_index in sorted(partners)
-        if query_index in position_by_query_index
-        and query_index in group_rows_by_query_index
-        and decisions[position_by_query_index[query_index]].action == "link"
-    ]
-    order = sorted(
-        contended,
-        key=lambda query_index: (
-            0 if _has_require_force(query_index) else 1,
-            -float(decisions[position_by_query_index[query_index]].score or 0.0),
-            (
-                (0, str(disallow_query_priority_ids[query_index]))
-                if disallow_query_priority_ids is not None and query_index in disallow_query_priority_ids
-                else (1, query_index)
-            ),
-        ),
-    )
-    finalized: dict[int, LinkOrAbstainDecision] = {}
-    for query_index in order:
-        position = position_by_query_index[query_index]
-        decision = decisions[position]
-        excluded_components: set[str] = set()
-        was_conflicted = False
-        while decision.action == "link" and decision.component_key is not None:
-            conflict_components = {
-                finalized[partner_index].component_key
-                for partner_index in partners.get(query_index, ())
-                if partner_index in finalized
-                and finalized[partner_index].action == "link"
-                and finalized[partner_index].component_key == decision.component_key
-            }
-            if not conflict_components:
-                break
-            if component_keys is None:
-                raise ValueError("same-batch cluster_seed_disallow resolution requires row_component_keys")
-            was_conflicted = True
-            excluded_components |= {str(key) for key in conflict_components if key is not None}
-            allowed = _allowed_rows(query_index)
-            component_excluded = np.asarray(
-                [str(component_keys[int(row_index)]) in excluded_components for row_index in allowed],
-                dtype=bool,
-            )
-            _raise_if_require_rows_excluded(
-                excluded_rows=allowed[component_excluded],
-                constraint_requires=constraint_requires,
-                component_keys=component_keys,
-                query_signature_index=query_index,
-            )
-            decision = _decide_query_rows(
-                allowed[~component_excluded],
-                query_signature_index=query_index,
-                fast_path=None,
-                **decide_kwargs,
-            )
-        if was_conflicted:
-            decision_telemetry["cluster_seed_disallow_same_batch_conflict_count"] += 1
-            if decision.action == "link":
-                decision_telemetry["cluster_seed_disallow_same_batch_reassigned_link_count"] += 1
-            else:
-                decision_telemetry["cluster_seed_disallow_same_batch_demoted_abstain_count"] += 1
-        finalized[query_index] = decision
-        decisions[position] = decision
 
 
 def _pairwise_model_feature_indices(featurizer_info: FeaturizationInfo) -> tuple[int, ...]:
@@ -1513,8 +1370,6 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
     runtime_context: Any | None = None,
     featurizer: Any | None = None,
     hard_excluded_rows: np.ndarray | None = None,
-    disallow_partner_query_indices: Mapping[int, Collection[int]] | None = None,
-    disallow_query_priority_ids: Mapping[int, str] | None = None,
 ) -> LinkOrAbstainRetrievedCandidatesResult:
     """Private vertical slice over retrieved candidates.
 
@@ -1549,8 +1404,6 @@ def _predict_incremental_link_or_abstain_retrieved_candidates(
         row_signals=row_signals,
         num_threads=n_jobs,
         hard_excluded_rows=hard_excluded_rows,
-        disallow_partner_query_indices=disallow_partner_query_indices,
-        disallow_query_priority_ids=disallow_query_priority_ids,
         scorer_max_rows_per_chunk=max(1, scorer_plan.chunk_rows),
     )
     no_candidate_decisions = _no_candidate_abstain_decisions(no_candidate_query_signature_indices)
@@ -1603,7 +1456,6 @@ def _predict_incremental_link_or_abstain_production_private(
     n_jobs: int | None = None,
     total_ram_bytes: int | None = None,
     retrieval_top_k: int | None = None,
-    cluster_seed_disallow_partner_ids: Mapping[str, Collection[str]] | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run the private M3a production-shaped link-or-abstain slice.
@@ -1694,7 +1546,6 @@ def _predict_incremental_link_or_abstain_production_private(
         n_jobs=n_jobs_resolved,
         total_ram_bytes=total_ram_bytes,
         retrieval_top_k=retrieval_top_k,
-        cluster_seed_disallow_partner_ids=cluster_seed_disallow_partner_ids,
         cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
     )
 
@@ -1754,7 +1605,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     n_jobs: int | None = None,
     total_ram_bytes: int | None = None,
     retrieval_top_k: int | None = None,
-    cluster_seed_disallow_partner_ids: Mapping[str, Collection[str]] | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Run production scoring/gating from an already retrieved candidate batch."""
@@ -1899,27 +1749,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
             signature_id_to_index=signature_id_to_index,
             excluded_components_by_query_id=cluster_seed_disallow_excluded_components,
         )
-    disallow_partner_query_indices: dict[int, set[int]] | None = None
-    disallow_query_priority_ids: dict[int, str] | None = None
-    if cluster_seed_disallow_partner_ids:
-        disallow_partner_query_indices = {}
-        disallow_query_priority_ids = {}
-        for partner_query_id, partner_ids in cluster_seed_disallow_partner_ids.items():
-            query_key = str(partner_query_id)
-            if query_key not in signature_id_to_index:
-                continue
-            partner_indices = {
-                int(signature_id_to_index[str(partner_id)])
-                for partner_id in partner_ids
-                if str(partner_id) in signature_id_to_index
-            }
-            if partner_indices:
-                query_index = int(signature_id_to_index[query_key])
-                disallow_partner_query_indices[query_index] = partner_indices
-                disallow_query_priority_ids[query_index] = query_key
-        if not disallow_partner_query_indices:
-            disallow_partner_query_indices = None
-            disallow_query_priority_ids = None
     private_result = _predict_incremental_link_or_abstain_retrieved_candidates(
         artifact,
         retrieval_batch,
@@ -1933,8 +1762,6 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
         runtime_context=resolved_runtime_context,
         featurizer=featurizer,
         hard_excluded_rows=hard_excluded_rows,
-        disallow_partner_query_indices=disallow_partner_query_indices,
-        disallow_query_priority_ids=disallow_query_priority_ids,
     )
 
     raw_linked_clusters = {
@@ -2002,12 +1829,8 @@ def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) ->
     if telemetry is None:
         return {}
     fields: dict[str, int | float | str] = {}
-    window_plan_reused = bool(telemetry.get("window_plan_reused", 0))
     for key, value in telemetry.items():
         if key == "timings":
-            continue
-        if window_plan_reused and key in _RAW_CANDIDATE_PLAN_WINDOW_REUSE_ZERO_TELEMETRY_KEYS:
-            fields[f"raw_arrow_plan_{key}"] = 0
             continue
         if isinstance(value, bool):
             fields[f"raw_arrow_plan_{key}"] = int(value)
@@ -2019,25 +1842,6 @@ def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) ->
             if isinstance(value, int | float):
                 fields[f"raw_arrow_plan_{key}"] = float(value)
     return fields
-
-
-_RAW_CANDIDATE_PLAN_WINDOW_REUSE_ZERO_TELEMETRY_KEYS: tuple[str, ...] = (
-    "signature_count",
-    "paper_count",
-    "paper_author_paper_count",
-    "specter_count",
-    "unidecode_char_count",
-    "excluded_query_seed_count",
-    "indexed_arrow_candidate_plan",
-    "signature_batches_read",
-    "signature_rows_scanned",
-    "paper_batches_read",
-    "paper_rows_scanned",
-    "paper_author_batches_read",
-    "paper_author_rows_scanned",
-    "specter_batches_read",
-    "specter_rows_scanned",
-)
 
 
 _RAW_ARROW_PLANNER_BUILD_COUNT_TELEMETRY_KEYS: tuple[str, ...] = (
@@ -2086,117 +1890,6 @@ def _merge_raw_arrow_planner_build_telemetry(
         timings[key] = float(timings.get(key, 0.0) or 0.0) + float(build_timings.get(key, 0.0) or 0.0)
     telemetry["planner_seed_state_reused"] = 0
     telemetry["planner_seed_state_built"] = 1
-
-
-def _zero_raw_plan_timings(telemetry: Mapping[str, Any]) -> dict[str, Any]:
-    out = dict(telemetry)
-    timings = out.get("timings")
-    if isinstance(timings, Mapping):
-        out["timings"] = {str(key): 0.0 for key in timings}
-    for key in _RAW_CANDIDATE_PLAN_WINDOW_REUSE_ZERO_TELEMETRY_KEYS:
-        value = out.get(key)
-        if isinstance(value, int | float) and not isinstance(value, bool):
-            out[key] = 0
-    return out
-
-
-def subset_raw_plan_bundle_for_query_ids(
-    raw_plan_bundle: RawArrowPlanBundle,
-    query_signature_ids: Sequence[Any],
-    *,
-    zero_plan_timings: bool = False,
-) -> RawArrowPlanBundle:
-    """Return a validated raw plan bundle restricted to a query-id subset.
-
-    The raw Arrow planner is query-separable: candidate rows and pair rows for
-    each query depend on the shared seed table, not on other queries in the same
-    planner call. This helper preserves the exact per-query row payload while
-    remapping query offsets so downstream scoring sees the normal batch-local
-    raw-plan contract.
-    """
-
-    requested_query_ids = tuple(str(signature_id) for signature_id in query_signature_ids)
-    plan_query_ids = raw_plan_bundle.query_signature_ids
-    if not requested_query_ids:
-        raise ValueError("raw candidate plan query_signature_ids must be non-empty")
-
-    def duplicate_ids(values: Sequence[str]) -> list[str]:
-        seen: set[str] = set()
-        duplicates: set[str] = set()
-        for value in values:
-            if value in seen:
-                duplicates.add(value)
-            seen.add(value)
-        return sorted(duplicates)
-
-    duplicate_requested_query_ids = duplicate_ids(requested_query_ids)
-    if duplicate_requested_query_ids:
-        raise ValueError(f"requested query_signature_ids must be unique: {duplicate_requested_query_ids[:10]}")
-    query_offset_by_id = {signature_id: offset for offset, signature_id in enumerate(plan_query_ids)}
-    missing = [signature_id for signature_id in requested_query_ids if signature_id not in query_offset_by_id]
-    if missing:
-        raise ValueError(f"raw candidate plan is missing requested query_signature_ids: {missing[:10]}")
-
-    old_query_offsets = np.asarray(
-        [query_offset_by_id[signature_id] for signature_id in requested_query_ids],
-        dtype=np.uint32,
-    )
-    old_to_new_query_offset = {
-        int(old_query_offset): int(new_query_offset)
-        for new_query_offset, old_query_offset in enumerate(old_query_offsets)
-    }
-    row_mask = np.isin(raw_plan_bundle.row_query_offsets, old_query_offsets)
-    old_row_indices = np.flatnonzero(row_mask)
-    old_row_to_new = np.full(raw_plan_bundle.row_count, -1, dtype=np.int64)
-    old_row_to_new[old_row_indices] = np.arange(len(old_row_indices), dtype=np.int64)
-    pair_mask = old_row_to_new[raw_plan_bundle.pair_row_indices] >= 0
-    telemetry = (
-        None
-        if raw_plan_bundle.telemetry is None
-        else (
-            _zero_raw_plan_timings(raw_plan_bundle.telemetry) if zero_plan_timings else dict(raw_plan_bundle.telemetry)
-        )
-    )
-    if telemetry is not None:
-        telemetry["query_signature_count"] = int(len(requested_query_ids))
-        if len(plan_query_ids) != len(requested_query_ids):
-            telemetry["window_plan_reused"] = 1
-
-    return RawArrowPlanBundle._from_normalized_values(
-        query_signature_ids=requested_query_ids,
-        query_views=tuple(
-            raw_plan_bundle.query_views[query_offset_by_id[signature_id]] for signature_id in requested_query_ids
-        ),
-        query_authors=tuple(
-            raw_plan_bundle.query_authors[query_offset_by_id[signature_id]] for signature_id in requested_query_ids
-        ),
-        seed_signature_ids=raw_plan_bundle.seed_signature_ids,
-        component_members=raw_plan_bundle.component_members,
-        telemetry=telemetry,
-        row_query_offsets=np.asarray(
-            [old_to_new_query_offset[int(value)] for value in raw_plan_bundle.row_query_offsets[row_mask]],
-            dtype=np.uint32,
-        ),
-        left_signature_ids=tuple(
-            value for value, keep in zip(raw_plan_bundle.left_signature_ids, pair_mask, strict=True) if bool(keep)
-        ),
-        right_signature_ids=tuple(
-            value for value, keep in zip(raw_plan_bundle.right_signature_ids, pair_mask, strict=True) if bool(keep)
-        ),
-        pair_row_indices=old_row_to_new[raw_plan_bundle.pair_row_indices[pair_mask]].astype(
-            np.uint32,
-            copy=False,
-        ),
-        row_component_keys=tuple(
-            value for value, keep in zip(raw_plan_bundle.row_component_keys, row_mask, strict=True) if bool(keep)
-        ),
-        retrieval_scores=raw_plan_bundle.retrieval_scores[row_mask],
-        retrieval_ranks=raw_plan_bundle.retrieval_ranks[row_mask],
-        normalized_row_signals={
-            signal_key: raw_plan_bundle.row_signals[signal_key][row_mask]
-            for _raw_key, signal_key, _dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
-        },
-    )
 
 
 def _seed_setup_from_component_members(
@@ -2318,7 +2011,6 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         query_signature_ids=query_signature_id_strings,
         raw_plan_bundle=raw_plan_bundle,
         rust_featurizer=rust_featurizer,
-        raw_arrow_featurizer_source="request",
         raw_arrow_featurizer_seconds=raw_arrow_featurizer_seconds,
         raw_arrow_retrieval_seconds=raw_arrow_retrieval_seconds,
         partial_supervision=partial_supervision,
@@ -2338,7 +2030,6 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     query_signature_ids: Sequence[Any],
     raw_plan_bundle: RawArrowPlanBundle,
     rust_featurizer: Any,
-    raw_arrow_featurizer_source: Literal["request", "window"] = "window",
     raw_arrow_featurizer_seconds: float = 0.0,
     raw_arrow_retrieval_seconds: float = 0.0,
     partial_supervision: Mapping[tuple[Any, Any], int | float] | None = None,
@@ -2347,7 +2038,6 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     total_ram_bytes: int | None = None,
     top_k: int | None = None,
     partial_supervision_seed_signature_to_component: Mapping[str, Any] | None = None,
-    cluster_seed_disallow_partner_ids: Mapping[str, Collection[str]] | None = None,
     cluster_seed_disallow_excluded_components: Mapping[str, Collection[str]] | None = None,
 ) -> LinkOrAbstainProductionResult:
     """Shared raw Arrow scoring implementation."""
@@ -2364,16 +2054,11 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
     _validate_raw_plan_query_signature_ids(raw_plan_bundle, query_signature_id_strings)
     if rust_featurizer is None:
         raise ValueError("preplanned raw Arrow scoring requires rust_featurizer built for the same raw_candidate_plan")
-    if raw_arrow_featurizer_source not in {"request", "window"}:
-        raise ValueError(f"unknown raw_arrow_featurizer_source={raw_arrow_featurizer_source!r}")
     signature_order = raw_plan_bundle.signature_order
     featurizer = rust_featurizer
-    raw_arrow_featurizer_reused = int(raw_arrow_featurizer_source == "window")
     featurizer_signature_id_to_index = signature_id_to_index_map(featurizer)
     raw_arrow_signature_count = len(featurizer_signature_id_to_index)
-    raw_arrow_plan_signature_count = (
-        raw_arrow_signature_count if raw_arrow_featurizer_reused else len(signature_order.signature_ids)
-    )
+    raw_arrow_plan_signature_count = len(signature_order.signature_ids)
 
     retrieval_batch = build_linker_retrieval_batch_from_raw_plan_bundle(
         raw_plan_bundle,
@@ -2408,7 +2093,6 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         n_jobs=n_jobs_resolved,
         total_ram_bytes=total_ram_bytes,
         retrieval_top_k=top_k_resolved,
-        cluster_seed_disallow_partner_ids=cluster_seed_disallow_partner_ids,
         cluster_seed_disallow_excluded_components=cluster_seed_disallow_excluded_components,
     )
     raw_plan_telemetry_fields = _raw_candidate_plan_telemetry_fields(raw_plan_bundle.telemetry)
@@ -2419,7 +2103,6 @@ def _predict_incremental_link_or_abstain_from_preplanned_raw_arrow(
         "seed_component_count": int(seed_component_count),
         "raw_arrow_retrieval_seconds": float(raw_arrow_retrieval_seconds),
         "raw_arrow_featurizer_seconds": float(raw_arrow_featurizer_seconds),
-        "raw_arrow_featurizer_reused": int(raw_arrow_featurizer_reused),
         "raw_arrow_signal_seconds": float(raw_arrow_signal_seconds),
         "raw_arrow_signature_count": int(raw_arrow_signature_count),
         "raw_arrow_plan_signature_count": int(raw_arrow_plan_signature_count),

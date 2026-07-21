@@ -34,6 +34,7 @@ from s2and.arrow_inputs import (  # noqa: E402
     require_name_counts_index_artifact,
     write_arrow_artifact_manifest,
 )
+from s2and.arrow_schema import validate_arrow_schema  # noqa: E402
 from s2and.consts import NORMALIZATION_VERSION  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 BENCHMARK_DATASETS = ("aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath")
 ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
-ARROW_SCHEMA_CONTRACT_PATH = _PROJECT_ROOT / "s2and" / "arrow_schema_contract.json"
 
 
 @dataclass(frozen=True)
@@ -1219,86 +1219,6 @@ def _read_arrow_table(path: str | Path) -> Any:
         return pa.ipc.open_file(source).read_all()
 
 
-def _ensure_arrow_column_type(table: Any, column: str, predicate: Callable[[Any], bool], expected: str) -> None:
-    field_index = table.schema.get_field_index(column)
-    if field_index < 0:
-        raise KeyError(f"Arrow table is missing required column {column!r}")
-    field_type = table.schema.field(field_index).type
-    if not predicate(field_type):
-        raise ValueError(f"Arrow column {column!r} expected {expected}, got {field_type}")
-
-
-def _ensure_string_column(table: Any, column: str) -> None:
-    import pyarrow as pa
-
-    _ensure_arrow_column_type(table, column, pa.types.is_string, "string")
-
-
-def _ensure_integer_column(table: Any, column: str) -> None:
-    import pyarrow as pa
-
-    _ensure_arrow_column_type(table, column, pa.types.is_integer, "integer")
-
-
-def _ensure_specter_embedding_column(table: Any) -> None:
-    import pyarrow as pa
-
-    field_index = table.schema.get_field_index("embedding")
-    if field_index < 0:
-        raise KeyError("Arrow table is missing required column 'embedding'")
-    field_type = table.schema.field(field_index).type
-    if not (pa.types.is_fixed_size_list(field_type) and pa.types.is_float32(field_type.value_type)):
-        raise ValueError(f"Arrow column 'embedding' expected fixed_size_list<float32>, got {field_type}")
-
-
-def _arrow_contract_required_columns(table_name: str) -> list[Mapping[str, Any]]:
-    contract = _load_json(ARROW_SCHEMA_CONTRACT_PATH)
-    if not isinstance(contract, Mapping):
-        raise TypeError(f"Arrow schema contract must contain an object: {ARROW_SCHEMA_CONTRACT_PATH}")
-    tables = contract.get("tables")
-    if not isinstance(tables, Mapping):
-        raise ValueError(f"Arrow schema contract is missing tables: {ARROW_SCHEMA_CONTRACT_PATH}")
-    columns = tables.get(table_name)
-    if not isinstance(columns, Sequence) or isinstance(columns, str | bytes):
-        raise ValueError(f"Arrow schema contract is missing table {table_name!r}: {ARROW_SCHEMA_CONTRACT_PATH}")
-    return [column for column in columns if isinstance(column, Mapping) and bool(column.get("required"))]
-
-
-def _ensure_arrow_contract_column_type(table: Any, table_name: str, column: str, datatype: str) -> None:
-    import pyarrow as pa
-
-    def is_string_list(value: Any) -> bool:
-        return pa.types.is_list(value) and pa.types.is_string(value.value_type)
-
-    def is_float32_fixed_size_list(value: Any) -> bool:
-        return pa.types.is_fixed_size_list(value) and pa.types.is_float32(value.value_type)
-
-    match datatype:
-        case "string":
-            predicate = pa.types.is_string
-        case "int64":
-            predicate = pa.types.is_int64
-        case "bool":
-            predicate = pa.types.is_boolean
-        case "list<string>":
-            predicate = is_string_list
-        case "fixed_size_list<float32>":
-            predicate = is_float32_fixed_size_list
-        case _:
-            raise ValueError(f"Arrow schema contract has unsupported datatype {datatype!r} for {table_name}.{column}")
-    _ensure_arrow_column_type(table, column, predicate, datatype)
-
-
-def _ensure_arrow_contract_required_columns(table: Any, table_name: str) -> None:
-    for column_spec in _arrow_contract_required_columns(table_name):
-        column = str(column_spec["name"])
-        datatype = str(column_spec["datatype"])
-        try:
-            _ensure_arrow_contract_column_type(table, table_name, column, datatype)
-        except KeyError as exc:
-            raise KeyError(f"{table_name} Arrow table is missing required column {column!r}") from exc
-
-
 def _table_values(table: Any, column: str) -> list[Any]:
     if column not in table.column_names:
         raise ValueError(f"Arrow table is missing required column {column!r}")
@@ -1372,9 +1292,9 @@ def validate_arrow_dataset_manifest(
     signatures = _read_arrow_table(paths["signatures"])
     papers = _read_arrow_table(paths["papers"])
     paper_authors = _read_arrow_table(paths["paper_authors"])
-    _ensure_arrow_contract_required_columns(signatures, "signatures")
-    _ensure_arrow_contract_required_columns(papers, "papers")
-    _ensure_arrow_contract_required_columns(paper_authors, "paper_authors")
+    validate_arrow_schema(signatures.schema, table_name="signatures")
+    validate_arrow_schema(papers.schema, table_name="papers")
+    validate_arrow_schema(paper_authors.schema, table_name="paper_authors")
     signature_ids = _required_string_values(signatures, "signature_id", label="signatures.signature_id")
     signature_paper_ids = _required_string_values(signatures, "paper_id", label="signatures.paper_id")
     paper_ids = _required_string_values(papers, "paper_id", label="papers.paper_id")
@@ -1408,7 +1328,7 @@ def validate_arrow_dataset_manifest(
 
     if require_embeddings:
         specter = _read_arrow_table(paths["specter"])
-        _ensure_arrow_contract_required_columns(specter, "specter")
+        validate_arrow_schema(specter.schema, table_name="specter")
         specter_paper_ids = _required_string_values(specter, "paper_id", label="specter.paper_id")
         _ensure_unique(specter_paper_ids, label="specter.paper_id")
         missing_embeddings = sorted(set(signature_paper_ids) - set(specter_paper_ids))
@@ -1424,8 +1344,7 @@ def validate_arrow_dataset_manifest(
     cluster_seed_path = paths.get("cluster_seeds")
     if cluster_seed_path is not None and Path(cluster_seed_path).exists():
         cluster_seeds = _read_arrow_table(cluster_seed_path)
-        _ensure_string_column(cluster_seeds, "signature_id")
-        _ensure_string_column(cluster_seeds, "cluster_id")
+        validate_arrow_schema(cluster_seeds.schema, table_name="cluster_seeds")
         seed_signature_ids = [str(value) for value in _table_values(cluster_seeds, "signature_id")]
         seed_cluster_ids = [str(value) for value in _table_values(cluster_seeds, "cluster_id")]
         _ensure_unique(seed_signature_ids, label="cluster_seeds.signature_id")
@@ -1440,8 +1359,7 @@ def validate_arrow_dataset_manifest(
     disallow_path = paths.get("cluster_seed_disallows")
     if disallow_path is not None and Path(disallow_path).exists():
         disallows = _read_arrow_table(disallow_path)
-        _ensure_string_column(disallows, "signature_id_1")
-        _ensure_string_column(disallows, "signature_id_2")
+        validate_arrow_schema(disallows.schema, table_name="cluster_seed_disallows")
         left_ids = [str(value) for value in _table_values(disallows, "signature_id_1")]
         right_ids = [str(value) for value in _table_values(disallows, "signature_id_2")]
         _ensure_subset(left_ids, signature_id_set, label="cluster_seed_disallows.signature_id_1")
@@ -1459,7 +1377,7 @@ def validate_arrow_dataset_manifest(
     altered_path = paths.get("altered_cluster_signatures")
     if altered_path is not None and Path(altered_path).exists():
         altered = _read_arrow_table(altered_path)
-        _ensure_string_column(altered, "signature_id")
+        validate_arrow_schema(altered.schema, table_name="altered_cluster_signatures")
         altered_signature_ids = [str(value) for value in _table_values(altered, "signature_id")]
         _ensure_unique(altered_signature_ids, label="altered_cluster_signatures.signature_id")
         _ensure_subset(altered_signature_ids, signature_id_set, label="altered_cluster_signatures.signature_id")

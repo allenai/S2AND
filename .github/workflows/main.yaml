@@ -48,57 +48,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Hydrate CI LFS artifacts
-        run: git lfs pull --include="tests/fixtures/arrow/pubmed_specter2/**"
-
-      - name: Verify hydrated CI LFS artifacts
-        run: |
-          uv run --no-project python - <<'PY'
-          from pathlib import Path
-
-          pointer_prefix = b"version https://git-lfs.github.com/spec/v1"
-          required_paths = [
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/signatures.arrow"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/papers.arrow"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/paper_authors.arrow"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/specter2.arrow"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/signatures.signatures_batch_index.bin"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/papers.papers_batch_index.bin"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/paper_authors.paper_authors_batch_index.bin"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/specter2.specter_batch_index.bin"),
-              Path("tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/manifest.json"),
-              Path(
-                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                  "generations/pubmed-specter2/first.bin"
-              ),
-              Path(
-                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                  "generations/pubmed-specter2/last.bin"
-              ),
-              Path(
-                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                  "generations/pubmed-specter2/first_last.bin"
-              ),
-              Path(
-                  "tests/fixtures/arrow/pubmed_specter2/pubmed/name_counts_index/"
-                  "generations/pubmed-specter2/last_first_initial.bin"
-              ),
-          ]
-
-          failures = []
-          for path in required_paths:
-              if not path.exists():
-                  failures.append(f"missing: {path}")
-                  continue
-              head = path.read_bytes()[: len(pointer_prefix)]
-              if head == pointer_prefix:
-                  failures.append(f"LFS pointer was not hydrated: {path}")
-
-          if failures:
-              raise SystemExit("\n".join(failures))
-          print(f"Verified {len(required_paths)} hydrated CI LFS artifact files.")
-          PY
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

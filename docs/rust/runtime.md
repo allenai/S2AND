@@ -8,13 +8,13 @@ The runtime does not discover native methods or switch routes after a failure.
 
 ## Installation and version
 
-`s2and-rust==0.60.0` is a required S2AND dependency installed by a normal
-`uv sync`.
+The exact `s2and-rust` version pinned by the S2AND project metadata is a
+required dependency installed by a normal `uv sync`.
 
 When Rust is requested, S2AND imports `s2and_rust` and requires its
-`__version__` to equal `0.60.0`. A missing extension or a different version is
-an error. Supporting another native version requires updating the pinned
-dependency and S2AND together.
+`__version__` to equal the runtime's required version. A missing extension or a
+different version is an error. Supporting another native version requires
+updating the pinned dependency and S2AND together.
 
 ## Backend selection
 

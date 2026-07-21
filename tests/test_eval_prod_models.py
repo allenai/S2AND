@@ -333,7 +333,7 @@ def test_arrow_training_feature_splits_loads_selected_name_counts(monkeypatch, n
         return FakeRustFeaturizer()
 
     monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_paths", fake_build)
-    validated_paths = ValidatedArrowInputs._from_verified(
+    validated_paths = ValidatedArrowInputs(
         paths={"signatures": "signatures.arrow", "name_counts_index": "name_counts_index"},
         generation_id="generation",
         normalization_version=NORMALIZATION_VERSION,
@@ -596,7 +596,7 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
     )
     monkeypatch.setattr(eval_prod_models, "read_signature_to_cluster_id", lambda _path: {"s1": "truth"})
 
-    arrow_paths = ValidatedArrowInputs._from_verified(
+    arrow_paths = ValidatedArrowInputs(
         paths={
             "signatures": "signatures.arrow",
             "papers": "papers.arrow",
@@ -766,7 +766,6 @@ def test_pubmed_specter2_arrow_fixture_matches_production_eval() -> None:
             production_model / "clusterer.json",
             production_model / "pairwise/main.lgb",
             production_model / "pairwise/nameless.lgb",
-            production_model / "pairwise/metadata.json",
         ]
     )
 
@@ -818,7 +817,6 @@ def test_pubmed_specter2_arrow_fixture_incremental_smoke_matches_expected_b3(
             production_model / "clusterer.json",
             production_model / "pairwise/main.lgb",
             production_model / "pairwise/nameless.lgb",
-            production_model / "pairwise/metadata.json",
             production_model / "incremental_linker/booster.lgb",
             production_model / "incremental_linker/metadata.json",
         ]

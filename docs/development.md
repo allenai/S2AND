@@ -33,7 +33,8 @@ uv run python scripts/run_ci_locally.py typecheck-and-test
 ```
 
 Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds
-exactly `s2and-rust==0.60.0` once, requires it to import, and then runs full-suite coverage of the Python route.
+the exactly pinned `s2and-rust` dependency once, requires it to import, and then runs full-suite coverage of the Python
+route.
 
 By default, local `ty` checks use `--python-version 3.11 --python-platform linux` to match GitHub Linux runners.
 
@@ -71,8 +72,7 @@ git config core.hooksPath .githooks
 Version bump workflow:
 
 ```bash
-# 1) edit VERSION
-echo 0.60.0 > VERSION
+# 1) edit VERSION to the new semantic version
 
 # 2) sync manifests
 uv run python scripts/sync_version.py

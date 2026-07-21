@@ -65,7 +65,7 @@ def test_arrow_production_builder_calls_only_arrow_constructor(
     tmp_path: Path,
 ) -> None:
     paths = _touch_arrow_bundle(tmp_path)
-    validated_paths = ValidatedArrowInputs._from_verified(
+    validated_paths = ValidatedArrowInputs(
         paths=paths,
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,

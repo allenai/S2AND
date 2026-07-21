@@ -170,8 +170,6 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
 
     metadata_bytes = metadata_path.read_bytes()
     data_bytes = data_path.read_bytes()
-    if metadata_path.read_bytes() != metadata_bytes:
-        raise RuntimeError(f"Name-tuple metadata changed while loading: {metadata_path}")
     try:
         metadata = json.loads(metadata_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

@@ -5,9 +5,10 @@
 - **Unreleased migration state:** the artifact-independent canonical-v2 code
   and release hardening are implemented, but canonical name counts, canonical
   ORCID prefix counts, benchmark-name re-export, the v1.3 retrain, and
-  release-candidate quality/scale measurements are still pending. The packaged
-  legacy v1.21/v1.0-v1.2 models are deliberately rejected, so 0.60.0 is not yet
-  a usable production release. See [work_plan.md](work_plan.md).
+  release-candidate quality/scale measurements are still pending. The legacy
+  v1.21/v1.0-v1.2 models are not packaged and are rejected by the canonical
+  loader, so 0.60.0 is not yet a usable production release. See
+  [work_plan.md](work_plan.md).
 - Breaking: Python and Rust now share one `canonical_v2` name contract and one
   versioned feature contract. `FEATURIZER_VERSION` is 10. Titles retain letters
   and digits, CLD2 runs in explicit plain-text mode, malformed email is missing
@@ -21,19 +22,21 @@
   and reference surface.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
-  retains only validated alias pairs plus `data_sha256`; Rust validates the same
-  artifact directly at ingest.
+  validates each artifact once and retains only frozen alias pairs plus
+  `data_sha256`; Python-driven Rust flows receive those explicit pairs rather
+  than reopening the artifact in Rust.
 - Promoted query-disallow resolution is request-global and deterministic:
   require-forced decisions first, then descending initial score, then signature
-  ID. Component-aware packing and complete single-query rescoring preserve
-  outcomes across input permutations and batch/window sizes. Outcome telemetry
-  is invariant; physical batch telemetry may vary with the RAM plan.
-- Promoted RAM limits are refreshed after planner, featurizer, and scorer
-  allocations. Oversized work is discarded and re-planned before scoring. The
-  native LightGBM path consumes contiguous float32 features and uses budgeted
-  row chunks, avoiding the previous full float64 widening transient. Loaded
-  incremental linker artifacts are retained on the clusterer instead of being
-  reloaded and rehashed per request.
+  ID. Conflicts rebuild and score a complete single-query plan with the winning
+  component excluded, preserving outcomes across input permutations and batch
+  sizes. Physical batch telemetry may vary with the RAM plan.
+- Promoted RAM limits are refreshed before each exact batch and after planner
+  and featurizer allocation. When a refreshed limit shrinks the batch, the
+  unscored remainder is queued and the safe prefix is replanned before scoring.
+  The native LightGBM path consumes contiguous float32 features and uses
+  budgeted row chunks, avoiding the previous full float64 widening transient.
+  Loaded incremental linker artifacts are retained on the clusterer instead of
+  being reloaded and rehashed per request.
 - Name-count pickle, binary index, Arrow inputs, pairwise boosters, and linker
   metadata now carry and verify normalization, generation, size, SHA-256, and
   feature-contract provenance. Manifest-relative paths cannot escape their
@@ -52,30 +55,33 @@
   reject partial/malformed values and agree across pair order. Raw candidate
   planning likewise has only two valid constructors: declared queries and
   explicit automatic queries; the empty-sidecar/boolean-bypass state is gone.
-- Count generation is guarded and transactional. Warehouse access requires an
-  explicit full-run flag; local fixtures are bounded. Immutable generations are
-  fsynced and pointer manifests publish last under a cross-process lock. The
-  ORCID runtime lazily requires the new canonical manifest and never falls back
-  to the unversioned JSON. Setuptools explicitly excludes that obsolete file,
-  and distribution verification rejects it if it reappears in either wheel or
-  sdist.
-- Pairwise bundles, linker artifacts, and in-place pairwise-to-complete
-  finalization use validated staging and manifest-last commits. Metric promotion
-  rejects missing/nonfinite values, and diagnostic metric-drift overrides cannot
+- Name-count source and binary-index publication remain two sequential,
+  individually atomic generation publishes. A crash between them can leave a
+  detected binding mismatch; rerunning with `--overwrite` repairs it. Warehouse
+  access requires an explicit full-run flag and local fixtures are bounded.
+  ORCID counts now use one direct JSON file plus an adjacent metadata sidecar,
+  with no pointer manifest, cross-process lock, fsync protocol, retry loop, or
+  legacy fallback. Both paths remain excluded from distributions until the
+  approved canonical generation replaces the checked-in legacy JSON.
+- Pairwise bundles and linker artifacts validate in sibling staging
+  directories and publish with one rename into a new path; finalization never
+  mutates the pairwise source in place. Metric promotion rejects
+  missing/nonfinite values, and diagnostic metric-drift overrides cannot
   promote artifacts. Wheel/sdist validation rejects undeclared production
-  assets and checks the single declared default. Production training records the
-  canonical name-tuple and ORCID prefix-count data SHA-256 values in the existing
-  feature contract; bundle export and load require exact matches, and the linker
-  binding covers both through its ordered feature-contract digest. The
-  production-bundle and clusterer-config schemas are version 3; version 2
-  bundles are rejected rather than adapted.
+  assets and, when a default is declared, requires exactly that bundle.
+  Production training records the canonical name-tuple and ORCID prefix-count
+  data SHA-256 values in the feature contract; bundle export and load require
+  exact matches, and the linker binding covers both through its ordered
+  feature-contract digest. The production-bundle and clusterer-config schemas
+  are version 4; older bundles are rejected rather than adapted.
 - The release workflow builds and installs the exact Python and Rust wheels
   outside the source tree. A synthetic public
   `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the
   installed wheels and itself carries the strict canonical Arrow manifest.
   Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS jobs execute
-  their built wheels. The declared-default smoke remains blocked only on the
-  new v1.3 artifacts.
+  their built wheels. The Rust build-system floor and release action are aligned
+  at Maturin 1.12.4. A real declared-bundle smoke remains an external gate on
+  the new v1.3 artifacts.
 - Arrow training iterates record batches and avoids duplicate full-table
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking
@@ -94,6 +100,12 @@
   scalar values per signature. The v1 `pickle_sha256` provenance field remains
   source-lineage metadata until the model contract is versioned; runtime never
   opens that pickle.
+- A parsimony sweep removed duplicated artifact loaders, validators, cache
+  state, publication hardening, plan-window machinery, dead telemetry, no-op
+  CLI choices, legacy path fallbacks, mock-mirror tests, and redundant CI LFS
+  verification. Python owns name-tuple loading, Rust owns native SHA-256, graph
+  subblocking fails directly when explicitly selected, and production bundle
+  loading hashes only declared files once while ignoring unrelated files.
 - Local code-now performance gates stayed inside the requested envelope. The
   specialized float32 scorer improved throughput by 26.8-34.9% while removing
   roughly 74% of per-call RSS; retained model RSS rose 7.0-7.39%. On all 40,383
@@ -102,7 +114,10 @@
   3.390 GiB retained / 3.885 GiB peak historical dictionaries with a 0.52 MB
   native open and 197.4 MB lookup-benchmark peak. Exact count-output digests
   match. Deterministic ORCID JSON publication improved 300k-record throughput
-  by 713% and reduced incremental peak RSS by 13.5%.
+  by 713% and reduced incremental peak RSS by 13.5%. Follow-up profiling found
+  planner/featurizer window reuse worth only 2.6%, so that state machine was
+  removed. Removing the float32 threshold-floor cache preserved the prediction
+  digest and improved the 200k-row median by 5.6%.
 
 ## 0.51.1
 

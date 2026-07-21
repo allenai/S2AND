@@ -40,9 +40,8 @@ from s2and.feature_port import (
 )
 from s2and.featurizer import FeaturizationInfo, many_pairs_featurize
 from s2and.incremental_linking.feature_block import (
-    cluster_seed_disallows_path_from_arrow_paths,
+    cluster_seed_disallows_from_arrow_paths,
     normalize_cluster_seed_disallow_pairs,
-    read_cluster_seed_disallows_arrow,
 )
 from s2and.incremental_linking.feature_block import (
     read_altered_cluster_signatures_arrow as _read_altered_cluster_signatures_arrow_file,
@@ -84,8 +83,6 @@ from s2and.rust_calls import (
 from s2and.subblocking import (
     GraphSubblockingConfig,
     _resolve_graph_subblocking_config,
-    cluster_with_specter,
-    make_arrow_graph_subblocking_cluster_fn,
     make_dataset_graph_subblocking_cluster_fn,
     make_subblocks,
 )
@@ -117,168 +114,6 @@ class _ArrowIncrementalSignatureInfo:
     author_info_last: str | None
     author_info_first_normalized_without_apostrophe: str | None
     author_info_orcid: str | None
-
-
-def _is_recoverable_graph_subblocking_error(exc: Exception) -> bool:
-    if isinstance(exc, FileNotFoundError):
-        return True
-    exc_type = type(exc)
-    return exc_type.__module__.split(".", maxsplit=1)[0] == "pyarrow" or exc_type.__name__.startswith("Arrow")
-
-
-class _GraphSubblockingFallbackWithLegacyFallback:
-    """Call graph subblocking first, then fall back to the legacy SPECTER path."""
-
-    def __init__(
-        self,
-        graph_fallback: Callable[..., dict[str, list[str]]],
-        *,
-        source: str,
-        candidate_signature_count: int = 0,
-    ) -> None:
-        self.graph_fallback = graph_fallback
-        self.source = source
-        self.telemetry: dict[str, Any] = {
-            "enabled": 1,
-            "mode": "graph",
-            "source": source,
-            "candidate_signature_count": int(candidate_signature_count),
-            "legacy_fallback_invocation_count": 0,
-            "graph_prepare_failed": 0,
-            "graph_prepare_error": None,
-            "graph_fallback_errors": [],
-        }
-
-    @property
-    def legacy_fallback_invocation_count(self) -> int:
-        return int(self.telemetry["legacy_fallback_invocation_count"])
-
-    @property
-    def graph_prepare_failed(self) -> bool:
-        return bool(self.telemetry["graph_prepare_failed"])
-
-    @property
-    def graph_prepare_error(self) -> dict[str, Any] | None:
-        return cast(dict[str, Any] | None, self.telemetry["graph_prepare_error"])
-
-    @property
-    def graph_fallback_errors(self) -> list[dict[str, Any]]:
-        return cast(list[dict[str, Any]], self.telemetry["graph_fallback_errors"])
-
-    @property
-    def stats(self) -> list[dict[str, Any]]:
-        return list(getattr(self.graph_fallback, "stats", []) or [])
-
-    @property
-    def load_seconds(self) -> float:
-        return float(getattr(self.graph_fallback, "load_seconds", 0.0) or 0.0)
-
-    @property
-    def load_metrics(self) -> dict[str, Any]:
-        return dict(getattr(self.graph_fallback, "load_metrics", {}) or {})
-
-    def prepare(self, signature_groups: Sequence[Sequence[str]]) -> None:
-        prepare_graph = getattr(self.graph_fallback, "prepare", None)
-        if not callable(prepare_graph):
-            return
-        group_count = 0
-        signature_count = 0
-        prepared_groups: list[tuple[str, ...]] = []
-        for group in signature_groups:
-            prepared_group = tuple(str(signature_id) for signature_id in group)
-            prepared_groups.append(prepared_group)
-            group_count += 1
-            signature_count += len(prepared_group)
-        try:
-            prepare_graph(prepared_groups)
-        except Exception as exc:
-            if not _is_recoverable_graph_subblocking_error(exc):
-                raise
-            if self.source == "arrow":
-                raise
-            self.telemetry["graph_prepare_failed"] = 1
-            self.telemetry["graph_prepare_error"] = self._error_payload(
-                exc,
-                stage="prepare",
-                group_count=group_count,
-                signature_count=signature_count,
-            )
-            logger.warning(
-                "Graph subblocking prepare failed; using legacy SPECTER fallback "
-                "for graph subblocking fallback calls: source=%s groups=%d signatures=%d",
-                self.source,
-                group_count,
-                signature_count,
-                exc_info=True,
-            )
-
-    def __call__(
-        self,
-        signature_ids: Sequence[str],
-        anddata: ANDData,
-        target_subblock_size: int = 10000,
-        **kwargs: Any,
-    ) -> dict[str, list[str]]:
-        signature_id_list = [str(signature_id) for signature_id in signature_ids]
-        if self.graph_prepare_failed:
-            return self._call_legacy(signature_id_list, anddata, target_subblock_size, **kwargs)
-        try:
-            return self.graph_fallback(
-                signature_id_list,
-                anddata,
-                target_subblock_size=target_subblock_size,
-                **kwargs,
-            )
-        except Exception as exc:
-            if not _is_recoverable_graph_subblocking_error(exc):
-                raise
-            if self.source == "arrow":
-                raise
-            self.graph_fallback_errors.append(
-                self._error_payload(exc, stage="call", signature_count=len(signature_id_list))
-            )
-            logger.warning(
-                "Graph subblocking fallback failed; using legacy SPECTER fallback: "
-                "source=%s signatures=%d target_subblock_size=%d",
-                self.source,
-                len(signature_id_list),
-                int(target_subblock_size),
-                exc_info=True,
-            )
-            return self._call_legacy(signature_id_list, anddata, target_subblock_size, **kwargs)
-
-    def _call_legacy(
-        self,
-        signature_ids: list[str],
-        anddata: ANDData,
-        target_subblock_size: int,
-        **kwargs: Any,
-    ) -> dict[str, list[str]]:
-        self.telemetry["legacy_fallback_invocation_count"] = self.legacy_fallback_invocation_count + 1
-        return cluster_with_specter(
-            signature_ids,
-            anddata,
-            target_subblock_size=target_subblock_size,
-            **kwargs,
-        )
-
-    @staticmethod
-    def _error_payload(
-        exc: Exception,
-        *,
-        stage: str,
-        signature_count: int,
-        group_count: int | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "stage": stage,
-            "type": type(exc).__name__,
-            "message": str(exc),
-            "signature_count": int(signature_count),
-        }
-        if group_count is not None:
-            payload["group_count"] = int(group_count)
-        return payload
 
 
 def _build_incremental_result(
@@ -329,22 +164,12 @@ def _path_cache_fingerprint(path_value: Any, *, hash_content: bool = True) -> _P
             return str(path_value), None, None, None
         return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns), None
 
-    for _attempt in range(3):
-        try:
-            before = path.stat()
-            digest = _path_full_digest(path)
-            after = path.stat()
-        except OSError:
-            return str(path_value), None, None, None
-        if (int(before.st_size), int(before.st_mtime_ns)) == (
-            int(after.st_size),
-            int(after.st_mtime_ns),
-        ):
-            return str(path.resolve()), int(after.st_size), int(after.st_mtime_ns), digest
-    # A concurrently rewritten sidecar must never hit a cache entry. The
-    # monotonic token deliberately makes this read uncached while its writer
-    # is active; the next stable read regains normal cache reuse.
-    return str(path.resolve()), int(after.st_size), int(after.st_mtime_ns), ("unstable", time.monotonic_ns())
+    try:
+        stat = path.stat()
+        digest = _path_full_digest(path)
+    except OSError:
+        return str(path_value), None, None, None
+    return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns), digest
 
 
 def _arrow_paths_cache_fingerprint(arrow_paths: Mapping[str, Any] | None) -> tuple[tuple[str, Any], ...]:
@@ -775,26 +600,13 @@ def _cluster_seeds_require_inverse(
     return inverse
 
 
-def _read_cluster_seed_disallows_arrow(path: Path) -> set[tuple[str, str]]:
-    """Read seed disallow pairs for the current request."""
-
-    return set(read_cluster_seed_disallows_arrow(path))
-
-
-def _cluster_seed_disallows_from_arrow_paths(arrow_paths: Mapping[str, Any] | None) -> set[tuple[str, str]]:
-    path = cluster_seed_disallows_path_from_arrow_paths(arrow_paths)
-    if path is None:
-        return set()
-    return _read_cluster_seed_disallows_arrow(path)
-
-
 def _cluster_seed_disallows_for_request(
     dataset: Any,
     arrow_paths: Mapping[str, Any] | None,
 ) -> set[tuple[str, str]]:
     request_disallows, _dataset_disallows, _arrow_disallows = request_cluster_seed_disallow_parts(
         dataset,
-        _cluster_seed_disallows_from_arrow_paths(arrow_paths),
+        cluster_seed_disallows_from_arrow_paths(arrow_paths),
     )
     return request_disallows
 
@@ -3550,7 +3362,7 @@ class Clusterer:
         signature_ids = list(
             dict.fromkeys(str(signature_id) for signatures in block_dict.values() for signature_id in signatures)
         )
-        arrow_cluster_seed_disallows = _cluster_seed_disallows_from_arrow_paths(arrow_path_payload)
+        arrow_cluster_seed_disallows = cluster_seed_disallows_from_arrow_paths(arrow_path_payload)
         cluster_seed_disallows = set(arrow_cluster_seed_disallows)
         if cluster_seeds_disallow is not None:
             cluster_seed_disallows.update(normalize_cluster_seed_disallow_pairs(cluster_seeds_disallow))
@@ -3814,31 +3626,8 @@ class Clusterer:
     def _subblocking_graph_config(self) -> GraphSubblockingConfig:
         return _resolve_graph_subblocking_config(getattr(self, "subblocking_graph_config", None))
 
-    def _subblocking_specter_cluster_fn(
-        self,
-        arrow_paths: Mapping[str, Any] | None,
-        signature_ids: Sequence[str],
-    ) -> Callable[..., dict[str, list[str]]] | None:
-        candidate_signature_count = int(len(tuple(dict.fromkeys(str(value) for value in signature_ids))))
-        if arrow_paths is not None:
-            fallback = make_arrow_graph_subblocking_cluster_fn(
-                arrow_paths,
-                signature_ids,
-                config=self._subblocking_graph_config(),
-                random_seed=int(getattr(self, "random_state", 0) or 0),
-            )
-            source = "arrow"
-        else:
-            fallback = make_dataset_graph_subblocking_cluster_fn(config=self._subblocking_graph_config())
-            source = "anddata"
-        adapter = _GraphSubblockingFallbackWithLegacyFallback(
-            fallback,
-            source=source,
-            candidate_signature_count=candidate_signature_count,
-        )
-        self._last_graph_subblocking_telemetry = adapter.telemetry
-        self._last_arrow_graph_subblocking_telemetry = self._last_graph_subblocking_telemetry
-        return adapter
+    def _subblocking_graph_cluster_fn(self) -> Callable[..., dict[str, list[str]]]:
+        return make_dataset_graph_subblocking_cluster_fn(config=self._subblocking_graph_config())
 
     def _partition_subblocked_first_name_groups(
         self,
@@ -4021,15 +3810,12 @@ class Clusterer:
             "bulk_altered_presplit_applied": 0,
             "bulk_altered_presplit_seconds": 0.0,
         }
-        subblocking_signature_ids = list(
-            dict.fromkeys(str(signature_id) for signatures in block_dict.values() for signature_id in signatures)
-        )
-        specter_cluster_fn = self._subblocking_specter_cluster_fn(None, subblocking_signature_ids)
+        graph_cluster_fn = self._subblocking_graph_cluster_fn()
         block_dict_subblocked = self._build_subblocked_block_dict(
             block_dict,
             dataset,
             batching_threshold=batching_threshold,
-            specter_cluster_fn=specter_cluster_fn,
+            specter_cluster_fn=graph_cluster_fn,
         )
         (
             block_dict_multiple_letter_first_names,

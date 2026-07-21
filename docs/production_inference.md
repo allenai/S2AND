@@ -35,14 +35,22 @@ production_model_vX.Y/
   clusterer.json
   pairwise/
     main.lgb
+    main_prediction_fixture.json
     nameless.lgb
-    metadata.json
+    nameless_prediction_fixture.json
   incremental_linker/
     booster.lgb
     metadata.json
   reproducibility/
     incremental_linker_training_target.json
 ```
+
+The v4 complete manifest requires the fixed runtime entries shown above. The
+pairwise training config and summary may also appear, but only together as a
+reproducibility pair. The `files` mapping must match one of those two shapes
+exactly. The loader hashes every declared file once, derives the fixed
+`incremental_linker/` directory from the schema, and ignores unrelated files
+that are not part of the runtime contract.
 
 `load_production_model(path)` rejects legacy pickles, incomplete directories,
 and `pairwise_only` manifests. A pairwise-only bundle is an internal training
@@ -54,13 +62,15 @@ round trips revalidate and reload it from the recorded bundle path.
 `clusterer.json` is the sole authority for the clustering `eps`. There are no
 version- or path-based threshold overrides.
 
-### Atomic publication
+### Staged publication
 
 Pairwise training writes an immutable pairwise-only source. Finalization does
 not add a linker to that directory and does not transition its manifest in
 place. It assembles a complete sibling staging directory, copies the verified
-pairwise files and newly trained linker into it, validates and fsyncs the whole
-tree, and renames that tree once into a previously nonexistent final path.
+pairwise files and newly trained linker into it, validates the complete staged
+bundle, and renames that directory once into a previously nonexistent final
+path. It does not use publication locks, directory fsyncs, or identical-tree
+rewrite handling.
 
 A failed finalization therefore leaves the pairwise source unchanged and does
 not expose a partial final bundle. Publishing to an existing final path is an
@@ -103,8 +113,8 @@ capability matrix, or Python/Rust fallback:
 | `Clusterer.predict_incremental_from_arrow_paths` | immutable Arrow paths | Rust | structured mapping |
 
 Passing a Rust runtime context to an `ANDData` API, or a Python context to an
-Arrow API, is an error. Rust entry points import exactly
-`s2and-rust==0.60.0` and fail on a missing or different version. That exact
+Arrow API, is an error. Rust entry points import the exact `s2and-rust` version
+pinned by the project metadata and fail on a missing or different version. That
 dependency is part of the normal S2AND install; there is no `s2and[rust]`
 compatibility extra.
 
@@ -206,16 +216,16 @@ path assigns different cluster IDs.
 ## Incremental decision semantics
 
 Promoted query decisions are request-global and deterministic across input
-order, query windows, and `batching_threshold`. A global conflict is resolved
+order, query batches, and `batching_threshold`. A global conflict is resolved
 by rebuilding and rescoring the lower-priority query from its complete
 single-query candidate plan with the winning component excluded. The runtime
 does not replay a compact retained subset as a substitute for that complete
 plan.
 
-RAM limits are refreshed after planner, featurizer, and scorer allocations. If
-a changed limit invalidates queued work, that work is discarded and replanned
-before scoring. Planning uses the loaded model’s actual final, pairwise, and
-aggregate feature widths.
+RAM limits are refreshed before each batch and after planner and featurizer
+allocations. If a changed limit shrinks the batch, its unscored remainder is
+queued and the safe prefix is replanned before scoring. Planning uses the loaded
+model’s actual final, pairwise, and aggregate feature widths.
 
 ## Name-count and cache boundaries
 
@@ -227,6 +237,19 @@ the historical source pickle. Python deduplicates each 2,048-signature batch
 before unique keys cross the native boundary, scatters the four result columns
 back onto signatures, and discards all temporary key maps with the batch. The
 v1 `pickle_sha256` field is source-lineage metadata, not a runtime dependency.
+
+Python is the sole name-tuple artifact loader. It validates the data and
+adjacent metadata once for the packaged immutable artifact, retains frozen
+pairs plus `data_sha256`, and passes those pairs explicitly to Rust-backed
+flows.
+
+Canonical ORCID prefix counts likewise use a direct JSON data file and adjacent
+`.meta.json` sidecar. The lazy runtime loader reads each once, validates the
+small metadata schema and data SHA-256, and retains the result in-process. There
+is no ORCID generation pointer, publication lock, retry loop, or legacy
+fallback. During cutover, the checked-in legacy JSON and absent canonical
+sidecar remain excluded from distributions until the approved canonical
+generation is produced.
 
 `last_first_initial_count_min` uses
 `<canonical last> <canonical first[0]>` when both fields exist and a null key
@@ -244,6 +267,7 @@ The focused code gate is:
 
 ```powershell
 uv run pytest -q tests/test_production_model.py tests/test_production_model_cli_flow.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
+uv run pytest -q tests/test_name_tuple_artifact.py tests/test_generate_orcid_name_prefix_counts.py
 uv run ruff check s2and scripts/production/model tests/test_production_model.py tests/test_production_model_cli_flow.py tests/test_arrow_production_boundary.py tests/test_arrow_training_ingestion.py tests/test_cluster_incremental.py
 git diff --check
 ```

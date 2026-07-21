@@ -970,8 +970,8 @@ impl RustFeaturizer {
     #[pyo3(
         signature = (
             paths,
-            signature_ids = None,
-            name_tuples = None,
+            signature_ids,
+            name_tuples,
             preprocess = true,
             cluster_seed_require_value = 0.0,
             cluster_seed_disallow_value = 10000.0,
@@ -1109,8 +1109,6 @@ impl RustFeaturizer {
             Some(path) => read_raw_name_counts_index(path)?,
             None => RawNameCountMaps::default(),
         };
-        let mut language_detector: Option<LanguageDetectorCompat> = None;
-
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
         ensure_unidecode_for_raw_arrow_inputs(
             &raw_signatures,
@@ -1175,15 +1173,12 @@ impl RustFeaturizer {
                     language_reliability,
                 )
             } else {
-                if language_detector.is_none() {
-                    language_detector = Some(LanguageDetectorCompat::new(py)?);
-                }
-                let detector = language_detector
-                    .as_ref()
-                    .expect("language detector was just initialized");
-                let (reliable, _is_english, language, reliability) =
-                    detector.detect(&raw_paper.title)?;
-                (reliable, Some(language), reliability)
+                let audit = detect_language_compat(&raw_paper.title);
+                (
+                    audit.is_reliable,
+                    Some(audit.predicted_language),
+                    audit.language_reliability,
+                )
             };
             paper_inputs.push(StagePaperInput {
                 paper_id: paper_id.clone(),
@@ -1257,7 +1252,7 @@ impl RustFeaturizer {
                 },
             );
         }
-        let name_tuples = extract_name_tuples_argument(py, name_tuples)?;
+        let name_tuples = extract_name_tuples_argument(name_tuples)?;
 
         Ok(RustFeaturizer {
             signatures,

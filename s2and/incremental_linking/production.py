@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import heapq
 import logging
 import math
 import time
@@ -36,17 +35,12 @@ from s2and.runtime import RuntimeContext
 
 logger = logging.getLogger("s2and")
 
-_RAW_ARROW_PLAN_WINDOW_MULTIPLIER = 4
-
 _PROMOTED_INCREMENTAL_SUM_TELEMETRY_FIELDS = frozenset(
     {
         "abstain_count",
         "candidate_row_count",
         "cluster_seed_disallow_excluded_query_count",
         "cluster_seed_disallow_excluded_row_count",
-        "cluster_seed_disallow_same_batch_conflict_count",
-        "cluster_seed_disallow_same_batch_demoted_abstain_count",
-        "cluster_seed_disallow_same_batch_reassigned_link_count",
         "constraint_elapsed_seconds",
         "constraint_partial_supervision_hits",
         "constraint_rust_batch_call_count",
@@ -71,7 +65,6 @@ _PROMOTED_INCREMENTAL_SUM_TELEMETRY_FIELDS = frozenset(
         "partial_supervision_pair_count",
         "partial_supervision_require_outside_retrieval_window",
         "query_count",
-        "raw_arrow_featurizer_reused",
         "raw_arrow_featurizer_seconds",
         "raw_arrow_retrieval_seconds",
         "raw_arrow_signal_seconds",
@@ -124,31 +117,6 @@ _PROMOTED_INCREMENTAL_SUM_TELEMETRY_FIELDS = frozenset(
 
 _PROMOTED_INCREMENTAL_TELEMETRY_MERGE_POLICY = {
     **{key: "sum_numeric" for key in _PROMOTED_INCREMENTAL_SUM_TELEMETRY_FIELDS},
-    "retrieval_top_k": "constant",
-    "seed_signature_count": "constant",
-    "seed_component_count": "constant",
-    "raw_arrow_seed_signature_count": "constant",
-    "raw_arrow_seed_component_count": "constant",
-    "raw_arrow_plan_seed_signature_count": "constant",
-    "raw_arrow_plan_cluster_count": "constant",
-    "raw_arrow_plan_cluster_seed_disallow_pair_count": "constant",
-    "raw_arrow_plan_indexed_arrow_candidate_plan": "constant",
-    "raw_arrow_plan_matrix_feature_count": "constant",
-    "pairwise_aggregate_feature_count": "constant",
-    "pairwise_index_remap_bytes_per_pair": "constant",
-    "pairwise_matrix_feature_count": "constant",
-    "memory_total_ram_bytes": "first",
-    "memory_available_bytes": "first",
-    "memory_stage_budget_bytes": "first",
-    "memory_predicted_peak_delta_bytes": "first",
-    "memory_predicted_peak_rss_bytes": "first",
-    "memory_rss_before_bytes": "first",
-    "memory_rss_peak_bytes": "first",
-    "memory_rss_after_bytes": "first",
-    "memory_observed_peak_delta_bytes": "first",
-    "memory_observed_end_delta_bytes": "first",
-    "memory_prediction_error_ratio": "first",
-    "memory_underpredicted": "first",
     "native_scorer_chunk_rows": "min_numeric",
     "native_scorer_stage_budget_bytes": "min_numeric",
     "native_scorer_predicted_peak_delta_bytes": "max_numeric",
@@ -397,9 +365,7 @@ def _rescore_query_disallow_endpoint(
         total_ram_bytes=context.total_ram_bytes,
         raw_plan_bundle=raw_plan_bundle,
         rust_featurizer=featurizer,
-        raw_arrow_featurizer_source="window",
         partial_supervision_seed_signature_to_component=context.cluster_seeds_require,
-        cluster_seed_disallow_partner_ids=None,
         cluster_seed_disallow_excluded_components={signature_id: excluded_components},
     )
     decision = _scored_query_decisions_from_result(
@@ -419,177 +385,6 @@ def _rescore_query_disallow_endpoint(
             "featurizer_signatures": len(raw_plan_bundle.signature_order.signature_ids),
         },
     )
-
-
-def _disallow_aware_query_batches(
-    query_signature_ids: Sequence[str],
-    *,
-    query_batch_size: int,
-    disallow_components_by_id: Mapping[str, frozenset[str]],
-) -> list[list[str]]:
-    """Pack complete query-disallow components together whenever the budget permits."""
-
-    resolved_batch_size = max(1, int(query_batch_size))
-    query_ids = [str(signature_id) for signature_id in query_signature_ids]
-    query_id_set = set(query_ids)
-    if len(query_id_set) != len(query_ids):
-        raise ValueError("Promoted incremental query signature ids must be unique")
-    if not disallow_components_by_id:
-        return [
-            query_ids[start : start + resolved_batch_size] for start in range(0, len(query_ids), resolved_batch_size)
-        ]
-    components = {
-        frozenset(component & query_id_set)
-        for signature_id in query_id_set
-        if (component := disallow_components_by_id.get(signature_id)) is not None
-    }
-    component_query_ids = set().union(*components) if components else set()
-    units = [sorted(component) for component in components if component]
-    free_query_ids = sorted(query_id_set - component_query_ids)
-    split_units = [
-        unit[start : start + resolved_batch_size]
-        for unit in units
-        for start in range(0, len(unit), resolved_batch_size)
-    ]
-    split_units.sort(key=lambda unit: (-len(unit), tuple(unit)))
-
-    # Preallocate the exact fixed-slicing batch count so component-aware packing
-    # can never reduce throughput by creating extra scoring calls. Whole units
-    # use deterministic best fit; a unit that cannot fit is split across the
-    # remaining capacities and therefore routed through global resolution.
-    batch_count = (len(query_ids) + resolved_batch_size - 1) // resolved_batch_size
-    batches: list[list[str]] = [[] for _ in range(batch_count)]
-    remaining_by_batch = [resolved_batch_size] * batch_count
-    batches_by_remaining: list[list[int]] = [[] for _ in range(resolved_batch_size + 1)]
-    batches_by_remaining[resolved_batch_size] = list(range(batch_count))
-    heapq.heapify(batches_by_remaining[resolved_batch_size])
-
-    def _take_batch_with_capacity(minimum_capacity: int) -> int | None:
-        for remaining_capacity in range(minimum_capacity, resolved_batch_size + 1):
-            heap = batches_by_remaining[remaining_capacity]
-            while heap and remaining_by_batch[heap[0]] != remaining_capacity:
-                heapq.heappop(heap)
-            if heap:
-                return heapq.heappop(heap)
-        return None
-
-    def _take_batch_with_largest_capacity() -> int | None:
-        for remaining_capacity in range(resolved_batch_size, 0, -1):
-            heap = batches_by_remaining[remaining_capacity]
-            while heap and remaining_by_batch[heap[0]] != remaining_capacity:
-                heapq.heappop(heap)
-            if heap:
-                return heapq.heappop(heap)
-        return None
-
-    def _place(batch_index: int, values: Sequence[str]) -> None:
-        batches[batch_index].extend(values)
-        remaining_by_batch[batch_index] -= len(values)
-        heapq.heappush(batches_by_remaining[remaining_by_batch[batch_index]], batch_index)
-
-    for unit in split_units:
-        target = _take_batch_with_capacity(len(unit))
-        if target is not None:
-            _place(target, unit)
-            continue
-        remaining_unit = list(unit)
-        while remaining_unit:
-            target = _take_batch_with_largest_capacity()
-            if target is None:
-                break
-            remaining_capacity = remaining_by_batch[target]
-            if remaining_capacity == 0:
-                continue
-            _place(target, remaining_unit[:remaining_capacity])
-            del remaining_unit[:remaining_capacity]
-        if remaining_unit:
-            raise RuntimeError("Promoted incremental deterministic batch packing exhausted total capacity")
-
-    free_offset = 0
-    for batch_index, remaining_capacity in enumerate(remaining_by_batch):
-        if remaining_capacity <= 0:
-            continue
-        values = free_query_ids[free_offset : free_offset + remaining_capacity]
-        batches[batch_index].extend(values)
-        free_offset += len(values)
-    if free_offset != len(free_query_ids):
-        raise RuntimeError("Promoted incremental deterministic batch packing did not consume free queries")
-    if any(not batch for batch in batches):
-        raise RuntimeError("Promoted incremental deterministic batch packing produced an empty batch")
-    return batches
-
-
-def _query_batch_plan_windows(
-    query_batches: Sequence[Sequence[str]],
-    *,
-    plan_window_multiplier: int,
-) -> list[list[list[str]]]:
-    """Group already-budgeted query batches into reusable planner/featurizer windows."""
-
-    resolved_multiplier = max(1, int(plan_window_multiplier))
-    return [
-        [list(batch) for batch in query_batches[start : start + resolved_multiplier]]
-        for start in range(0, len(query_batches), resolved_multiplier)
-    ]
-
-
-def _resize_query_batch_plan_windows(
-    query_batches: Sequence[Sequence[str]],
-    *,
-    query_batch_size: int,
-    plan_window_multiplier: int,
-) -> list[list[list[str]]]:
-    """Split queued batches to a refreshed limit and regroup bounded plan windows."""
-
-    resolved_batch_size = max(1, int(query_batch_size))
-    resized_batches = [
-        list(batch[start : start + resolved_batch_size])
-        for batch in query_batches
-        for start in range(0, len(batch), resolved_batch_size)
-    ]
-    return _query_batch_plan_windows(
-        resized_batches,
-        plan_window_multiplier=plan_window_multiplier,
-    )
-
-
-def _raw_window_plan_telemetry_fields(raw_candidate_plan: Mapping[str, Any]) -> dict[str, int | float | str]:
-    """Return raw Arrow planner telemetry under the window-plan prefix."""
-
-    telemetry = raw_candidate_plan.get("telemetry")
-    if not isinstance(telemetry, Mapping):
-        return {}
-    fields: dict[str, int | float | str] = {}
-    for key, value in telemetry.items():
-        if key == "timings":
-            continue
-        if isinstance(value, bool):
-            fields[f"raw_arrow_window_plan_{key}"] = int(value)
-        elif isinstance(value, int | float | str):
-            fields[f"raw_arrow_window_plan_{key}"] = value
-    timings = telemetry.get("timings")
-    if isinstance(timings, Mapping):
-        for key, value in timings.items():
-            if isinstance(value, int | float):
-                fields[f"raw_arrow_window_plan_{key}"] = float(value)
-    return fields
-
-
-def _merge_raw_window_plan_telemetry(
-    merged: dict[str, int | float | str],
-    fields: Mapping[str, int | float | str],
-) -> None:
-    """Merge telemetry from one raw Arrow window into an aggregate payload."""
-
-    for key, value in fields.items():
-        if isinstance(value, int | float) and not isinstance(value, bool):
-            merged[key] = float(merged.get(key, 0.0)) + float(value)
-            continue
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = value
-        elif existing != value:
-            merged[key] = "__mixed__"
 
 
 def _request_cluster_seed_disallows(
@@ -639,34 +434,6 @@ def _query_disallow_partner_ids(
         ):
             _add_pair(left_id, right_id)
     return partners
-
-
-def _query_disallow_components_by_id(
-    disallow_partners: Mapping[str, set[str]],
-) -> dict[str, frozenset[str]]:
-    """Return the undirected query-disallow component containing each endpoint."""
-
-    components_by_id: dict[str, frozenset[str]] = {}
-    unseen = {str(signature_id) for signature_id in disallow_partners}
-    while unseen:
-        start = min(unseen)
-        stack = [start]
-        component: set[str] = set()
-        while stack:
-            signature_id = stack.pop()
-            if signature_id in component:
-                continue
-            component.add(signature_id)
-            stack.extend(
-                str(partner_id)
-                for partner_id in disallow_partners.get(signature_id, ())
-                if str(partner_id) not in component
-            )
-        frozen_component = frozenset(component)
-        for signature_id in frozen_component:
-            components_by_id[signature_id] = frozen_component
-        unseen -= component
-    return components_by_id
 
 
 def _cluster_seed_map_fingerprint(cluster_seeds_require: Mapping[Any, Any]) -> tuple[int, str]:
@@ -963,25 +730,12 @@ def merge_promoted_incremental_batch_telemetry(
     initial_limits: memory_budget.PromotedPhaseALimits | None = None,
     final_limits: memory_budget.PromotedPhaseALimits | None = None,
     final_limits_history: Sequence[memory_budget.PromotedPhaseALimits] | None = None,
-    calibration_applied: bool = False,
 ) -> dict[str, int | float | str]:
     merged: dict[str, int | float | str] = {}
     conflict_counts: dict[str, int] = {}
     for telemetry in batch_telemetries:
         for key, value in telemetry.items():
-            merge_policy = _PROMOTED_INCREMENTAL_TELEMETRY_MERGE_POLICY.get(key, "constant")
-            if merge_policy == "first":
-                if key not in merged:
-                    merged[key] = value
-                elif merged[key] != value:
-                    conflict_counts[key] = conflict_counts.get(key, 0) + 1
-                continue
-            if merge_policy == "constant":
-                if key not in merged:
-                    merged[key] = value
-                elif merged[key] != value:
-                    conflict_counts[key] = conflict_counts.get(key, 0) + 1
-                continue
+            merge_policy = _PROMOTED_INCREMENTAL_TELEMETRY_MERGE_POLICY.get(key)
             if merge_policy == "sum_numeric" and isinstance(value, int | float) and not isinstance(value, bool):
                 previous = merged.get(key, 0)
                 if isinstance(previous, int | float) and not isinstance(previous, bool):
@@ -1035,7 +789,6 @@ def merge_promoted_incremental_batch_telemetry(
         merged["memory_final_operational_estimate_source"] = (
             next(iter(estimate_sources)) if len(estimate_sources) == 1 else "__mixed__"
         )
-    merged["memory_observed_calibration_applied"] = int(bool(calibration_applied))
     for key, count in conflict_counts.items():
         merged[f"{key}_batch_conflict_count"] = int(count)
     return merged
@@ -1138,9 +891,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         request_disallows,
         partial_supervision,
     )
-    query_disallow_components_by_id = _query_disallow_components_by_id(query_disallow_partners)
-    same_batch_finalized_disallow_query_ids: set[str] = set()
-    same_batch_finalized_disallow_components: set[frozenset[str]] = set()
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
     seed_arrow_start = time.perf_counter()
     seed_arrow_matches_cluster_seeds_require = _cluster_seeds_arrow_matches(
@@ -1176,25 +926,19 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 ),
             )
         seed_arrow_assignment_seconds = time.perf_counter() - seed_arrow_start
-        raw_window_plan_count = 0
-        raw_window_plan_seconds = 0.0
-        raw_window_plan_query_count = 0
-        raw_window_featurizer_count = 0
-        raw_window_featurizer_seconds = 0.0
-        raw_window_featurizer_signature_count = 0
-        raw_window_featurizer_reused_batch_count = 0
-        raw_window_subset_seconds = 0.0
-        raw_window_memory_replan_count = 0
-        raw_window_plan_telemetry: dict[str, int | float | str] = {}
+        raw_planner_build_seconds = 0.0
+        raw_batch_plan_count = 0
+        raw_batch_plan_query_count = 0
+        raw_batch_plan_seconds = 0.0
+        raw_batch_featurizer_count = 0
+        raw_batch_featurizer_seconds = 0.0
+        raw_batch_featurizer_signature_count = 0
+        raw_batch_memory_replan_count = 0
         final_limits_history: list[memory_budget.PromotedPhaseALimits] = []
 
-        raw_window_planner_count = 0
-        raw_window_planner_batch_plan_count = 0
-        raw_window_planner_plan_call_count = 0
-        raw_window_planner_plan_seconds = 0.0
         raw_request_planner: Any | None = None
         if unassigned_signature_ids:
-            raw_window_start = time.perf_counter()
+            planner_build_start = time.perf_counter()
             raw_request_planner = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner.from_auto_queries(  # noqa: SLF001
                 dict(arrow_path_payload),
                 top_k=retrieval_top_k,
@@ -1202,16 +946,16 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 num_threads=clusterer.n_jobs,
                 max_exemplars=4,
             )
-            raw_window_plan_seconds += time.perf_counter() - raw_window_start
-            raw_window_plan_count += 1
-            raw_window_plan_query_count += len(unassigned_signature_ids)
-            raw_window_planner_count += 1
-            _merge_raw_window_plan_telemetry(
-                raw_window_plan_telemetry,
-                _raw_window_plan_telemetry_fields({"telemetry": raw_request_planner.build_telemetry()}),
-            )
-            post_planner_batch, final_limits = _memory_safe_promoted_query_batch(
-                unassigned_signature_ids[:query_batch_size],
+            raw_planner_build_seconds = time.perf_counter() - planner_build_start
+        query_batch_queue = deque(
+            unassigned_signature_ids[start : start + query_batch_size]
+            for start in range(0, len(unassigned_signature_ids), query_batch_size)
+        )
+
+        def _refresh_batch(proposed_batch: Sequence[str]) -> list[str]:
+            nonlocal final_limits
+            safe_batch, final_limits = _memory_safe_promoted_query_batch(
+                proposed_batch,
                 orcid_fanout_by_query=orcid_fanout_by_query,
                 component_sizes=component_sizes,
                 retrieval_top_k=retrieval_top_k,
@@ -1220,95 +964,41 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 base_candidate_rows_per_query=base_candidate_rows_per_query,
                 base_pairs_per_query=base_pairs_per_query,
             )
-            query_batch_size = len(post_planner_batch)
             final_limits_history.append(final_limits)
-        planned_query_batches = _disallow_aware_query_batches(
-            [str(signature_id) for signature_id in unassigned_signature_ids],
-            query_batch_size=query_batch_size,
-            disallow_components_by_id=query_disallow_components_by_id,
-        )
-        featurizer_window_multiplier = _RAW_ARROW_PLAN_WINDOW_MULTIPLIER
-        query_batch_plan_windows = _query_batch_plan_windows(
-            planned_query_batches,
-            plan_window_multiplier=featurizer_window_multiplier,
-        )
-        query_batch_plan_window_queue = deque(query_batch_plan_windows)
-        featurizer_window_size = max(
-            (
-                sum(len(planned_batch) for planned_batch in query_batch_plan_window)
-                for query_batch_plan_window in query_batch_plan_windows
-            ),
-            default=0,
-        )
+            return safe_batch
 
-        def _refreshed_window_batch_size(query_batches: Sequence[Sequence[str]]) -> int:
-            nonlocal final_limits
-            limiting_batch_sizes: list[int] = []
-            largest_batch_size = 0
-            for planned_batch in query_batches:
-                largest_batch_size = max(largest_batch_size, len(planned_batch))
-                safe_batch, final_limits = _memory_safe_promoted_query_batch(
-                    planned_batch,
-                    orcid_fanout_by_query=orcid_fanout_by_query,
-                    component_sizes=component_sizes,
-                    retrieval_top_k=retrieval_top_k,
-                    memory_layout=memory_layout,
-                    total_ram_bytes=resolved_total_ram_bytes,
-                    base_candidate_rows_per_query=base_candidate_rows_per_query,
-                    base_pairs_per_query=base_pairs_per_query,
-                )
-                final_limits_history.append(final_limits)
-                if len(safe_batch) < len(planned_batch):
-                    limiting_batch_sizes.append(len(safe_batch))
-            return min(limiting_batch_sizes, default=largest_batch_size)
+        def _requeue_split_batch(proposed_batch: Sequence[str], safe_size: int) -> None:
+            remainder = list(proposed_batch[safe_size:])
+            if remainder:
+                query_batch_queue.appendleft(remainder)
+            query_batch_queue.appendleft(list(proposed_batch[:safe_size]))
 
-        def _prepend_resized_windows(
-            query_batches: Sequence[Sequence[str]],
-            *,
-            safe_batch_size: int,
-        ) -> None:
-            resized_windows = _resize_query_batch_plan_windows(
-                query_batches,
-                query_batch_size=safe_batch_size,
-                plan_window_multiplier=featurizer_window_multiplier,
-            )
-            for resized_window in reversed(resized_windows):
-                query_batch_plan_window_queue.appendleft(resized_window)
-
-        while query_batch_plan_window_queue:
-            query_batch_plan_window = query_batch_plan_window_queue.popleft()
-            refreshed_batch_size = _refreshed_window_batch_size(query_batch_plan_window)
-            if any(len(planned_batch) > refreshed_batch_size for planned_batch in query_batch_plan_window):
-                _prepend_resized_windows(
-                    query_batch_plan_window,
-                    safe_batch_size=refreshed_batch_size,
-                )
-                raw_window_memory_replan_count += 1
-                continue
-            query_plan_window = [
-                signature_id for planned_batch in query_batch_plan_window for signature_id in planned_batch
-            ]
-            if not query_plan_window:
-                continue
+        while query_batch_queue:
+            proposed_query_batch = query_batch_queue.popleft()
+            query_batch = _refresh_batch(proposed_query_batch)
+            if len(query_batch) < len(proposed_query_batch):
+                remainder = proposed_query_batch[len(query_batch) :]
+                if remainder:
+                    query_batch_queue.appendleft(remainder)
+                raw_batch_memory_replan_count += 1
             if raw_request_planner is None:
                 raise RuntimeError("reusable raw Arrow planner was not initialized")
-            raw_window_planner_plan_start = time.perf_counter()
-            raw_candidate_plan = raw_request_planner.plan(list(query_plan_window))
-            raw_window_planner_plan_call_count += 1
-            raw_window_planner_plan_seconds += time.perf_counter() - raw_window_planner_plan_start
-            refreshed_batch_size = _refreshed_window_batch_size(query_batch_plan_window)
-            if any(len(planned_batch) > refreshed_batch_size for planned_batch in query_batch_plan_window):
+            planner_start = time.perf_counter()
+            raw_candidate_plan = raw_request_planner.plan(query_batch)
+            raw_batch_plan_seconds += time.perf_counter() - planner_start
+            raw_batch_plan_count += 1
+            raw_batch_plan_query_count += len(query_batch)
+            refreshed_batch = _refresh_batch(query_batch)
+            if len(refreshed_batch) < len(query_batch):
                 del raw_candidate_plan
-                _prepend_resized_windows(
-                    query_batch_plan_window,
-                    safe_batch_size=refreshed_batch_size,
-                )
-                raw_window_memory_replan_count += 1
+                _requeue_split_batch(query_batch, len(refreshed_batch))
+                raw_batch_memory_replan_count += 1
                 continue
             raw_plan_bundle = RawArrowPlanBundle.from_mapping(raw_candidate_plan)
-            raw_window_featurizer_start = time.perf_counter()
+            del raw_candidate_plan
+            featurizer_start = time.perf_counter()
             signature_ids = raw_plan_bundle.signature_order.signature_ids
-            raw_window_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
+            raw_batch_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
                 arrow_path_payload,
                 expected_normalization_version=expected_normalization_version,
                 signature_ids=signature_ids,
@@ -1317,121 +1007,53 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 preprocess=True,
                 num_threads=clusterer.n_jobs,
             )
-            raw_window_featurizer_seconds += time.perf_counter() - raw_window_featurizer_start
-            raw_window_featurizer_count += 1
-            raw_window_featurizer_signature_count += len(signature_ids)
-            refreshed_batch_size = _refreshed_window_batch_size(query_batch_plan_window)
-            if any(len(planned_batch) > refreshed_batch_size for planned_batch in query_batch_plan_window):
-                del raw_window_featurizer
+            raw_batch_featurizer_seconds += time.perf_counter() - featurizer_start
+            raw_batch_featurizer_count += 1
+            raw_batch_featurizer_signature_count += len(signature_ids)
+            refreshed_batch = _refresh_batch(query_batch)
+            if len(refreshed_batch) < len(query_batch):
+                del raw_batch_featurizer
                 del raw_plan_bundle
-                _prepend_resized_windows(
-                    query_batch_plan_window,
-                    safe_batch_size=refreshed_batch_size,
-                )
-                raw_window_memory_replan_count += 1
+                _requeue_split_batch(query_batch, len(refreshed_batch))
+                raw_batch_memory_replan_count += 1
                 continue
-
-            query_batch_queue = deque(list(planned_batch) for planned_batch in query_batch_plan_window)
-            window_replanned = False
-            while query_batch_queue:
-                proposed_query_batch = query_batch_queue.popleft()
-                query_batch, final_limits = _memory_safe_promoted_query_batch(
-                    proposed_query_batch,
-                    orcid_fanout_by_query=orcid_fanout_by_query,
-                    component_sizes=component_sizes,
-                    retrieval_top_k=retrieval_top_k,
-                    memory_layout=memory_layout,
-                    total_ram_bytes=resolved_total_ram_bytes,
-                    base_candidate_rows_per_query=base_candidate_rows_per_query,
-                    base_pairs_per_query=base_pairs_per_query,
+            result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
+                clusterer,
+                artifact,
+                arrow_paths=arrow_path_payload,
+                query_signature_ids=query_batch,
+                top_k=retrieval_top_k,
+                partial_supervision=partial_supervision,
+                runtime_context=runtime_context,
+                n_jobs=clusterer.n_jobs,
+                total_ram_bytes=resolved_total_ram_bytes,
+                raw_plan_bundle=raw_plan_bundle,
+                rust_featurizer=raw_batch_featurizer,
+                partial_supervision_seed_signature_to_component=cluster_seeds_require,
+                cluster_seed_disallow_excluded_components=None,
+            )
+            if query_disallow_partners:
+                scored_batch = _scored_query_decisions_from_result(
+                    result,
+                    signature_ids_by_index=raw_batch_featurizer.signature_ids(),
+                    expected_query_signature_ids=query_batch,
                 )
-                final_limits_history.append(final_limits)
-                if len(query_batch) < len(proposed_query_batch):
-                    remaining_query_batches = [query_batch, proposed_query_batch[len(query_batch) :]]
-                    remaining_query_batches.extend(query_batch_queue)
-                    query_batch_queue.clear()
-                    del raw_window_featurizer
-                    del raw_plan_bundle
-                    _prepend_resized_windows(
-                        remaining_query_batches,
-                        safe_batch_size=len(query_batch),
-                    )
-                    raw_window_memory_replan_count += 1
-                    window_replanned = True
-                    break
-                batch_query_id_set = {str(signature_id) for signature_id in query_batch}
-                complete_disallow_query_ids = {
-                    signature_id
-                    for signature_id in batch_query_id_set
-                    if signature_id in query_disallow_components_by_id
-                    and query_disallow_components_by_id[signature_id] <= batch_query_id_set
-                }
-                complete_disallow_partner_ids = {
-                    signature_id: {
-                        partner_id
-                        for partner_id in query_disallow_partners[signature_id]
-                        if partner_id in complete_disallow_query_ids
-                    }
-                    for signature_id in complete_disallow_query_ids
-                } or None
-                raw_window_subset_start = time.perf_counter()
-                if len(query_batch) == len(query_plan_window):
-                    batch_raw_plan_bundle = raw_plan_bundle
-                else:
-                    batch_raw_plan_bundle = runtime_module.subset_raw_plan_bundle_for_query_ids(
-                        raw_plan_bundle,
-                        query_batch,
-                        zero_plan_timings=True,
-                    )
-                raw_window_planner_batch_plan_count += 1
-                raw_window_subset_seconds += time.perf_counter() - raw_window_subset_start
-                raw_window_featurizer_reused_batch_count += int(raw_window_featurizer is not None)
-                result = runtime_module._predict_incremental_link_or_abstain_from_preplanned_raw_arrow(  # noqa: SLF001
-                    clusterer,
-                    artifact,
-                    arrow_paths=arrow_path_payload,
-                    query_signature_ids=query_batch,
-                    top_k=retrieval_top_k,
-                    partial_supervision=partial_supervision,
-                    runtime_context=runtime_context,
-                    n_jobs=clusterer.n_jobs,
-                    total_ram_bytes=resolved_total_ram_bytes,
-                    raw_plan_bundle=batch_raw_plan_bundle,
-                    rust_featurizer=raw_window_featurizer,
-                    raw_arrow_featurizer_source="window",
-                    partial_supervision_seed_signature_to_component=cluster_seeds_require,
-                    cluster_seed_disallow_partner_ids=complete_disallow_partner_ids,
-                    cluster_seed_disallow_excluded_components=None,
-                )
-                if query_disallow_partners:
-                    scored_batch = _scored_query_decisions_from_result(
-                        result,
-                        signature_ids_by_index=raw_window_featurizer.signature_ids(),
-                        expected_query_signature_ids=query_batch,
-                    )
-                    for signature_id, scored in scored_batch.items():
-                        if signature_id in complete_disallow_query_ids:
-                            same_batch_finalized_disallow_query_ids.add(signature_id)
-                            same_batch_finalized_disallow_components.add(query_disallow_components_by_id[signature_id])
-                            if scored.decision.action == "link" and scored.decision.component_key is not None:
-                                linked_signature_clusters[signature_id] = str(scored.decision.component_key)
-                        elif signature_id in query_disallow_partners:
-                            initial_query_disallow_decisions[signature_id] = scored
-                        elif scored.decision.action == "link" and scored.decision.component_key is not None:
-                            linked_signature_clusters[signature_id] = str(scored.decision.component_key)
-                else:
-                    linked_signature_clusters.update(dict(result.linked_signature_clusters))
-                batch_telemetries.append(dict(result.telemetry))
-                batch_sizes.append(len(query_batch))
-                del result
-                del batch_raw_plan_bundle
-            if not window_replanned:
-                del raw_window_featurizer
-                del raw_plan_bundle
+                for signature_id, scored in scored_batch.items():
+                    if signature_id in query_disallow_partners:
+                        initial_query_disallow_decisions[signature_id] = scored
+                    elif scored.decision.action == "link" and scored.decision.component_key is not None:
+                        linked_signature_clusters[signature_id] = str(scored.decision.component_key)
+            else:
+                linked_signature_clusters.update(dict(result.linked_signature_clusters))
+            batch_telemetries.append(dict(result.telemetry))
+            batch_sizes.append(len(query_batch))
+            del result
+            del raw_batch_featurizer
+            del raw_plan_bundle
 
         global_disallow_telemetry: dict[str, int | float | str] = {}
         if query_disallow_partners:
-            expected_disallow_query_ids = set(query_disallow_partners) - same_batch_finalized_disallow_query_ids
+            expected_disallow_query_ids = set(query_disallow_partners)
             observed_disallow_query_ids = set(initial_query_disallow_decisions)
             if observed_disallow_query_ids != expected_disallow_query_ids:
                 raise ValueError(
@@ -1488,18 +1110,17 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 if rescore_outcomes
                 else {}
             )
-            raw_window_featurizer_count += len(rescore_outcomes)
-            raw_window_featurizer_seconds += float(rescore_totals.get("featurizer_seconds", 0))
-            raw_window_featurizer_signature_count += int(rescore_totals.get("featurizer_signatures", 0))
-            raw_window_planner_batch_plan_count += len(rescore_outcomes)
-            raw_window_planner_plan_call_count += len(rescore_outcomes)
-            raw_window_planner_plan_seconds += float(rescore_totals.get("planner_seconds", 0))
+            raw_batch_featurizer_count += len(rescore_outcomes)
+            raw_batch_featurizer_seconds += float(rescore_totals.get("featurizer_seconds", 0))
+            raw_batch_featurizer_signature_count += int(rescore_totals.get("featurizer_signatures", 0))
+            raw_batch_plan_count += len(rescore_outcomes)
+            raw_batch_plan_query_count += len(rescore_outcomes)
+            raw_batch_plan_seconds += float(rescore_totals.get("planner_seconds", 0))
             global_disallow_telemetry = {
                 **global_disallow_counts,
                 "global_query_disallow_rescore_candidate_row_count": int(rescore_totals.get("candidate_rows", 0)),
                 "global_query_disallow_rescore_pair_count": int(rescore_totals.get("pairs", 0)),
                 "global_query_disallow_rescore_seconds": float(rescore_totals.get("seconds", 0)),
-                "global_query_disallow_same_batch_component_count": int(len(same_batch_finalized_disallow_components)),
             }
 
         merged_telemetry = merge_promoted_incremental_batch_telemetry(
@@ -1513,14 +1134,14 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         merged_telemetry.update(global_disallow_telemetry)
         merged_telemetry["query_disallow_endpoint_count"] = int(len(query_disallow_partners))
         merged_telemetry["query_disallow_conflicted_query_count"] = int(
-            merged_telemetry.get("cluster_seed_disallow_same_batch_conflict_count", 0)
-        ) + int(merged_telemetry.get("global_query_disallow_conflict_count", 0))
+            merged_telemetry.get("global_query_disallow_conflict_count", 0)
+        )
         merged_telemetry["query_disallow_reassigned_link_count"] = int(
-            merged_telemetry.get("cluster_seed_disallow_same_batch_reassigned_link_count", 0)
-        ) + int(merged_telemetry.get("global_query_disallow_reassigned_link_count", 0))
+            merged_telemetry.get("global_query_disallow_reassigned_link_count", 0)
+        )
         merged_telemetry["query_disallow_demoted_abstain_count"] = int(
-            merged_telemetry.get("cluster_seed_disallow_same_batch_demoted_abstain_count", 0)
-        ) + int(merged_telemetry.get("global_query_disallow_demoted_abstain_count", 0))
+            merged_telemetry.get("global_query_disallow_demoted_abstain_count", 0)
+        )
         merged_telemetry["seed_signature_count"] = int(len(cluster_seeds_require))
         merged_telemetry["seed_component_count"] = int(len(cluster_seeds_require_inverse))
         merged_telemetry["raw_arrow_seed_signature_count"] = int(len(cluster_seeds_require))
@@ -1560,7 +1181,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             **seed_setup_telemetry,
             **merged_telemetry,
             **residual_phase_b_telemetry,
-            **raw_window_plan_telemetry,
             "incremental_finish_seconds": float(finish_seconds),
             "seed_arrow_assignment_seconds": float(seed_arrow_assignment_seconds),
             "seed_arrow_reused_source": int(bool(seed_arrow_reused_source)),
@@ -1568,24 +1188,14 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             "seed_arrow_disallow_count": int(len(request_disallows)),
             "arrow_promoted_incremental": 1,
             "arrow_path_count": len(arrow_path_payload),
-            "raw_arrow_window_plan_count": int(raw_window_plan_count),
-            "raw_arrow_window_plan_query_count": int(raw_window_plan_query_count),
-            "raw_arrow_window_plan_enabled": int(raw_request_planner is not None),
-            "raw_arrow_window_plan_size": int(featurizer_window_size),
-            "raw_arrow_window_plan_multiplier": int(featurizer_window_multiplier),
-            "raw_arrow_window_plan_seconds": float(raw_window_plan_seconds),
-            "raw_arrow_window_featurizer_query_window_size": int(featurizer_window_size),
-            "raw_arrow_window_featurizer_window_multiplier": int(featurizer_window_multiplier),
-            "raw_arrow_window_featurizer_count": int(raw_window_featurizer_count),
-            "raw_arrow_window_featurizer_signature_count": int(raw_window_featurizer_signature_count),
-            "raw_arrow_window_featurizer_reused_batch_count": int(raw_window_featurizer_reused_batch_count),
-            "raw_arrow_window_memory_replan_count": int(raw_window_memory_replan_count),
-            "raw_arrow_window_featurizer_seconds": float(raw_window_featurizer_seconds),
-            "raw_arrow_window_subset_seconds": float(raw_window_subset_seconds),
-            "raw_arrow_window_planner_count": int(raw_window_planner_count),
-            "raw_arrow_window_planner_batch_plan_count": int(raw_window_planner_batch_plan_count),
-            "raw_arrow_window_planner_plan_call_count": int(raw_window_planner_plan_call_count),
-            "raw_arrow_window_planner_plan_seconds": float(raw_window_planner_plan_seconds),
+            "raw_arrow_planner_build_seconds": float(raw_planner_build_seconds),
+            "raw_arrow_batch_plan_count": int(raw_batch_plan_count),
+            "raw_arrow_batch_plan_query_count": int(raw_batch_plan_query_count),
+            "raw_arrow_batch_plan_seconds": float(raw_batch_plan_seconds),
+            "raw_arrow_batch_featurizer_count": int(raw_batch_featurizer_count),
+            "raw_arrow_batch_featurizer_signature_count": int(raw_batch_featurizer_signature_count),
+            "raw_arrow_batch_featurizer_seconds": float(raw_batch_featurizer_seconds),
+            "raw_arrow_batch_memory_replan_count": int(raw_batch_memory_replan_count),
             "raw_arrow_reusable_planner_enabled": int(raw_request_planner is not None),
         }
         return payload

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-import s2and.name_counts_index as name_counts_index_module
 import s2and.name_counts_manifest as name_counts_manifest_module
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
@@ -54,36 +52,18 @@ def test_name_counts_index_open_does_not_repeat_native_material_validation_in_py
     assert first is second
 
 
-def test_name_counts_index_concurrent_open_parses_generation_once(
+def test_name_counts_index_concurrent_open_shares_published_instance(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
-    real_parser = name_counts_index_module.json.loads
-    parsing_started = threading.Event()
-    release_parsing = threading.Event()
-    parse_count = 0
-
-    def block_parsing(*args, **kwargs):
-        nonlocal parse_count
-        parse_count += 1
-        parsing_started.set()
-        if not release_parsing.wait(timeout=10):
-            raise TimeoutError("test did not release name-count manifest parsing")
-        return real_parser(*args, **kwargs)
-
-    monkeypatch.setattr(name_counts_index_module.json, "loads", block_parsing)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(NameCountsIndex.open, path)
-        assert parsing_started.wait(timeout=10)
         second_future = pool.submit(NameCountsIndex.open, path)
-        release_parsing.set()
         first = first_future.result(timeout=10)
         second = second_future.result(timeout=10)
 
     assert first is second
-    assert parse_count == 1
 
 
 def test_name_counts_index_manifest_replacement_opens_new_generation(tmp_path: Path) -> None:

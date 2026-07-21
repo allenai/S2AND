@@ -2,37 +2,28 @@
 
 Warehouse access is intentionally unavailable at import time. Use a bounded
 local JSON fixture for development, or pass ``--run-full`` explicitly on
-internal infrastructure. Outputs are written as an immutable generation and a
-pointer manifest is published last.
+internal infrastructure. The output is one data file and its metadata sidecar.
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import json
-import os
 import re
-import shutil
-import tempfile
-import uuid
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
 from itertools import combinations
 from pathlib import Path
 from typing import Any
 
 import orjson
 
-from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import _load_name_tuples_from_file
 from s2and.orcid_prefix_counts import (
     ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
     ORCID_PREFIX_DATA_FILENAME,
-    ORCID_PREFIX_MANIFEST_FILENAME,
     ORCID_PREFIX_METADATA_FILENAME,
     ORCID_PREFIX_PAIR_KEY_SEMANTICS,
     validate_orcid_prefix_counts,
@@ -298,113 +289,42 @@ def build_prefix_counts_from_sorted_rows(
     return counts, {**dict(metrics), **count_metrics}, source_digest.hexdigest()
 
 
-def _sha256_bytes(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _write_compact_json(path: Path, payload: Mapping[str, object]) -> tuple[str, int]:
+def _write_compact_json(path: Path, payload: Mapping[str, object]) -> str:
     """Write deterministic compact JSON without materializing an intermediate string."""
 
     encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
-    with path.open("wb") as output:
-        output.write(encoded)
-        output.flush()
-        os.fsync(output.fileno())
-    return _sha256_bytes(encoded), len(encoded)
+    path.write_bytes(encoded)
+    return hashlib.sha256(encoded).hexdigest()
 
 
-@contextmanager
-def _publish_lock(output_dir: Path) -> Iterator[None]:
-    """Serialize the short manifest check-and-replace boundary across processes."""
-
-    with exclusive_file_lock(output_dir / ".orcid-prefix-counts.publish.lock"):
-        yield
-
-
-def publish_generation(
+def write_artifact(
     counts: Mapping[str, Mapping[str, int]],
     *,
     output_dir: Path,
-    source_snapshot_id: str,
-    source_digest: str,
-    metrics: Mapping[str, int],
     overwrite: bool,
-) -> Path:
-    """Publish an immutable data/metadata generation and pointer manifest."""
+) -> tuple[Path, Path, str]:
+    """Write the canonical data file and adjacent metadata sidecar."""
 
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_snapshot_id) is None:
-        raise ValueError("source_snapshot_id must contain only letters, digits, '.', '_', and '-'")
-    if re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
-        raise ValueError("source_digest must be a lowercase SHA-256 digest of the selected canonical inputs")
-    outer_key_cardinality, pair_key_cardinality = validate_orcid_prefix_counts(
-        counts,
-        context="counts",
-    )
+    validate_orcid_prefix_counts(counts, context="counts")
     output_dir.mkdir(parents=True, exist_ok=True)
-    pointer_path = output_dir / ORCID_PREFIX_MANIFEST_FILENAME
-    if pointer_path.exists() and not overwrite:
-        raise FileExistsError(f"Manifest already exists; pass --overwrite to replace it: {pointer_path}")
-    generation_id = f"{source_snapshot_id}-{uuid.uuid4().hex[:12]}"
-    final_dir = output_dir / f"orcid-prefix-counts-{generation_id}"
-    if final_dir.exists():
-        raise FileExistsError(f"Generation already exists: {final_dir}")
-    staging_dir: Path | None = Path(tempfile.mkdtemp(prefix=".orcid-prefix-counts-", dir=output_dir))
-    final_dir_published = False
-    pointer_committed = False
-    pointer_tmp: Path | None = None
-    try:
-        data_path = staging_dir / ORCID_PREFIX_DATA_FILENAME
-        data_sha256, data_byte_count = _write_compact_json(data_path, counts)
-        metadata = {
-            "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
-            "normalization_version": NORMALIZATION_VERSION,
-            "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
-            "generation_id": generation_id,
-            "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
-            "source_snapshot_id": source_snapshot_id,
-            "source_digest": source_digest,
-            "data_sha256": data_sha256,
-            "data_byte_count": data_byte_count,
-            "outer_key_cardinality": outer_key_cardinality,
-            "pair_key_cardinality": pair_key_cardinality,
-            "metrics": dict(metrics),
-        }
-        metadata_bytes = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
-        (staging_dir / ORCID_PREFIX_METADATA_FILENAME).write_bytes(metadata_bytes)
-        for path in staging_dir.iterdir():
-            with path.open("r+b") as stream:
-                os.fsync(stream.fileno())
-        fsync_directory(staging_dir)
-        os.replace(staging_dir, final_dir)
-        staging_dir = None
-        final_dir_published = True
-        fsync_directory(output_dir)
-        pointer = {
-            "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
-            "generation_id": generation_id,
-            "generation_dir": final_dir.name,
-            "metadata_sha256": _sha256_bytes(metadata_bytes),
-        }
-        with _publish_lock(output_dir):
-            if pointer_path.exists() and not overwrite:
-                raise FileExistsError(f"Manifest already exists; pass --overwrite to replace it: {pointer_path}")
-            pointer_tmp = output_dir / f".{pointer_path.name}.{uuid.uuid4().hex}.tmp"
-            pointer_tmp.write_text(json.dumps(pointer, sort_keys=True, indent=2), encoding="utf-8")
-            with pointer_tmp.open("r+b") as stream:
-                os.fsync(stream.fileno())
-            os.replace(pointer_tmp, pointer_path)
-            pointer_committed = True
-            pointer_tmp = None
-            fsync_directory(output_dir)
-        return pointer_path
-    finally:
-        if pointer_tmp is not None:
-            pointer_tmp.unlink(missing_ok=True)
-        if staging_dir is not None and staging_dir.exists():
-            shutil.rmtree(staging_dir)
-        if final_dir_published and not pointer_committed and final_dir.exists():
-            shutil.rmtree(final_dir)
-            fsync_directory(output_dir)
+    data_path = output_dir / ORCID_PREFIX_DATA_FILENAME
+    metadata_path = output_dir / ORCID_PREFIX_METADATA_FILENAME
+    existing_paths = [path for path in (data_path, metadata_path) if path.exists()]
+    if existing_paths and not overwrite:
+        raise FileExistsError(
+            "ORCID prefix-count artifact already exists; pass --overwrite to replace it: "
+            + ", ".join(str(path) for path in existing_paths)
+        )
+
+    data_sha256 = _write_compact_json(data_path, counts)
+    metadata = {
+        "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
+        "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+        "data_sha256": data_sha256,
+    }
+    metadata_path.write_text(json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8")
+    return data_path, metadata_path, data_sha256
 
 
 def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]:
@@ -501,15 +421,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         name_tuples,
         max_names_per_orcid=args.max_names_per_orcid,
     )
-    pointer_path = publish_generation(
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.source_snapshot_id) is None:
+        raise ValueError("source_snapshot_id must contain only letters, digits, '.', '_', and '-'")
+    data_path, metadata_path, data_sha256 = write_artifact(
         counts,
         output_dir=args.output_dir,
-        source_snapshot_id=args.source_snapshot_id,
-        source_digest=source_digest,
-        metrics=metrics,
         overwrite=bool(args.overwrite),
     )
-    print(json.dumps({"manifest": str(pointer_path), "metrics": metrics}, indent=2))
+    print(
+        json.dumps(
+            {
+                "data": str(data_path),
+                "metadata": str(metadata_path),
+                "data_sha256": data_sha256,
+                "source_snapshot_id": args.source_snapshot_id,
+                "source_digest": source_digest,
+                "metrics": metrics,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

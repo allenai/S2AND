@@ -55,3 +55,33 @@ def test_transfer_mini_training_arrow_manifest_requires_clusters(tmp_path: Path)
 
     with pytest.raises(FileNotFoundError, match="no clusters ground truth"):
         transfer_mini_cmd._resolve_arrow_dataset_paths(str(tmp_path), "dummy", require_clusters=True)
+
+
+def test_transfer_mini_arrow_manifest_accepts_absolute_paths(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dummy"
+    dataset_root.mkdir()
+    signatures_path = tmp_path / "shared" / "signatures.arrow"
+    signatures_path.parent.mkdir()
+    signatures_path.touch()
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({"paths": {"signatures": str(signatures_path.resolve())}}),
+        encoding="utf-8",
+    )
+
+    resolved, _ = transfer_mini_cmd._resolve_arrow_dataset_paths(str(tmp_path), "dummy", require_clusters=False)
+
+    assert resolved == {"signatures": str(signatures_path.resolve())}
+
+
+@pytest.mark.parametrize("stale_path", ["old-root/signatures.arrow", "dummy/signatures.arrow"])
+def test_transfer_mini_arrow_manifest_rejects_legacy_path_fallbacks(tmp_path: Path, stale_path: str) -> None:
+    dataset_root = tmp_path / "dummy"
+    dataset_root.mkdir()
+    (dataset_root / "signatures.arrow").touch()
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({"paths": {"signatures": stale_path}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError, match="Cannot resolve arrow manifest path signatures"):
+        transfer_mini_cmd._resolve_arrow_dataset_paths(str(tmp_path), "dummy", require_clusters=False)

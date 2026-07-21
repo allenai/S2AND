@@ -3,17 +3,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import multiprocessing
 import re
-import shutil
-import threading
 import tomllib
-from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import pytest
 
@@ -33,24 +26,6 @@ def _load_module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def _publish_in_process(output_dir: str, barrier: Any, results: Any) -> None:
-    module = _load_module()
-    barrier.wait(timeout=10)
-    try:
-        module.publish_generation(
-            {"al": {"am": 7}},
-            output_dir=Path(output_dir),
-            source_snapshot_id="fixture",
-            source_digest="a" * 64,
-            metrics={"source_rows": 2},
-            overwrite=False,
-        )
-    except Exception as error:  # noqa: BLE001 - exception class is the subprocess result under test
-        results.put(("error", type(error).__name__))
-    else:
-        results.put(("ok", None))
 
 
 def test_import_is_side_effect_free_without_internal_pys2() -> None:
@@ -170,7 +145,7 @@ def test_streaming_builder_retains_the_canonical_orcid_monotonicity_check() -> N
         )
 
 
-def test_package_data_includes_versioned_orcid_count_generation_files() -> None:
+def test_legacy_orcid_counts_remain_excluded_until_regenerated() -> None:
     with (Path(PROJECT_ROOT_PATH) / "pyproject.toml").open("rb") as stream:
         setuptools = tomllib.load(stream)["tool"]["setuptools"]
     package_data = setuptools["package-data"]["s2and"]
@@ -180,8 +155,8 @@ def test_package_data_includes_versioned_orcid_count_generation_files() -> None:
     assert "data/first_k_letter_counts_from_orcid.meta.json" not in package_data
     assert "data/first_k_letter_counts_from_orcid.json" in excluded_package_data
     assert "data/first_k_letter_counts_from_orcid.meta.json" in excluded_package_data
-    assert "data/first_k_letter_counts_from_orcid.manifest.json" in package_data
-    assert "data/orcid-prefix-counts-*/*.json" in package_data
+    assert "data/first_k_letter_counts_from_orcid.manifest.json" not in package_data
+    assert "data/orcid-prefix-counts-*/*.json" not in package_data
 
 
 def test_empty_canonical_names_are_rejected_with_metrics() -> None:
@@ -230,7 +205,7 @@ def test_prefix_counts_are_unordered_and_deterministic() -> None:
     assert all(left <= right for left, nested in forward.items() for right in nested)
 
 
-def test_fixture_cli_publishes_generation_then_manifest(tmp_path: Path) -> None:
+def test_fixture_cli_writes_direct_data_and_metadata(tmp_path: Path) -> None:
     module = _load_module()
     fixture_path = tmp_path / "rows.json"
     fixture_path.write_text(
@@ -258,15 +233,17 @@ def test_fixture_cli_publishes_generation_then_manifest(tmp_path: Path) -> None:
         == 0
     )
 
-    pointer_path = output_dir / "first_k_letter_counts_from_orcid.manifest.json"
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    generation_dir = output_dir / pointer["generation_dir"]
-    metadata = json.loads((generation_dir / "first_k_letter_counts_from_orcid.meta.json").read_text(encoding="utf-8"))
-    assert metadata["normalization_version"] == NORMALIZATION_VERSION
-    assert metadata["pair_key_semantics"] == "unordered_lexicographic"
-    assert (generation_dir / "first_k_letter_counts_from_orcid.json").is_file()
+    data_path = output_dir / "first_k_letter_counts_from_orcid.json"
+    metadata_path = output_dir / "first_k_letter_counts_from_orcid.meta.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata == {
+        "schema_version": 1,
+        "normalization_version": NORMALIZATION_VERSION,
+        "pair_key_semantics": "unordered_lexicographic",
+        "data_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
+    }
 
-    with pytest.raises(FileExistsError, match="Manifest already exists"):
+    with pytest.raises(FileExistsError, match="artifact already exists"):
         module.main(
             [
                 "--input-json",
@@ -279,34 +256,57 @@ def test_fixture_cli_publishes_generation_then_manifest(tmp_path: Path) -> None:
         )
 
 
-def test_runtime_loader_is_lazy_and_verifies_the_published_generation(tmp_path: Path) -> None:
+def test_runtime_loader_is_lazy_and_verifies_the_direct_artifact(tmp_path: Path) -> None:
     module = _load_module()
     lazy_counts = _LazyCanonicalOrcidPrefixCounts(tmp_path)
 
-    with pytest.raises(FileNotFoundError, match="Missing canonical ORCID prefix-count manifest"):
+    with pytest.raises(FileNotFoundError, match="Missing canonical ORCID prefix-count metadata"):
         len(lazy_counts)
 
-    module.publish_generation(
+    module.write_artifact(
         {"al": {"am": 7}},
         output_dir=tmp_path,
-        source_snapshot_id="fixture",
-        source_digest="a" * 64,
-        metrics={"source_rows": 2},
         overwrite=False,
     )
     assert _LazyCanonicalOrcidPrefixCounts(tmp_path).load() == {"al": {"am": 7}}
+    assert lazy_counts.load() is lazy_counts.load()
     assert dict(lazy_counts) == {"al": {"am": 7}}
 
-    pointer = json.loads((tmp_path / "first_k_letter_counts_from_orcid.manifest.json").read_text(encoding="utf-8"))
-    metadata = json.loads(
-        (tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.meta.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    metadata = json.loads((tmp_path / "first_k_letter_counts_from_orcid.meta.json").read_text(encoding="utf-8"))
     assert lazy_counts.data_sha256() == metadata["data_sha256"]
-    data_path = tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.json"
+    data_path = tmp_path / "first_k_letter_counts_from_orcid.json"
     data_path.write_text('{"al":{"az":9}}', encoding="utf-8")
     with pytest.raises(ValueError, match="data SHA-256"):
+        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
+
+
+def test_runtime_loader_does_not_fall_back_to_unversioned_data(tmp_path: Path) -> None:
+    (tmp_path / "first_k_letter_counts_from_orcid.json").write_text('{"al":{"am":7}}', encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="Missing canonical ORCID prefix-count metadata"):
+        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
+
+
+@pytest.mark.parametrize(
+    ("metadata_change", "expected_error"),
+    [
+        ({"normalization_version": "legacy"}, "normalization_version"),
+        ({"unexpected": True}, "fields do not match"),
+    ],
+)
+def test_runtime_loader_enforces_the_small_metadata_contract(
+    tmp_path: Path,
+    metadata_change: dict[str, object],
+    expected_error: str,
+) -> None:
+    module = _load_module()
+    module.write_artifact({"al": {"am": 7}}, output_dir=tmp_path, overwrite=False)
+    metadata_path = tmp_path / "first_k_letter_counts_from_orcid.meta.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(metadata_change)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected_error):
         _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
@@ -316,190 +316,21 @@ def test_runtime_loader_rejects_noncanonical_prefix_tokens(
     counts: dict[str, dict[str, int]],
 ) -> None:
     module = _load_module()
-    module.publish_generation(
+    module.write_artifact(
         {"al": {"am": 7}},
         output_dir=tmp_path,
-        source_snapshot_id="fixture",
-        source_digest="a" * 64,
-        metrics={},
         overwrite=False,
     )
-    pointer_path = tmp_path / "first_k_letter_counts_from_orcid.manifest.json"
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    generation_dir = tmp_path / pointer["generation_dir"]
-    data_path = generation_dir / "first_k_letter_counts_from_orcid.json"
-    metadata_path = generation_dir / "first_k_letter_counts_from_orcid.meta.json"
+    data_path = tmp_path / "first_k_letter_counts_from_orcid.json"
+    metadata_path = tmp_path / "first_k_letter_counts_from_orcid.meta.json"
     data_bytes = json.dumps(counts, sort_keys=True, separators=(",", ":")).encode("utf-8")
     data_path.write_bytes(data_bytes)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["data_sha256"] = hashlib.sha256(data_bytes).hexdigest()
-    metadata["data_byte_count"] = len(data_bytes)
-    metadata_bytes = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
-    metadata_path.write_bytes(metadata_bytes)
-    pointer["metadata_sha256"] = hashlib.sha256(metadata_bytes).hexdigest()
-    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
     with pytest.raises(ValueError, match="lowercase printable ASCII prefixes"):
         _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
-
-
-def test_runtime_loader_rejects_manifest_path_escape(tmp_path: Path) -> None:
-    (tmp_path / "first_k_letter_counts_from_orcid.manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "generation_id": "fixture-aaaaaaaaaaaa",
-                "generation_dir": "../orcid-prefix-counts-fixture-aaaaaaaaaaaa",
-                "metadata_sha256": "a" * 64,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="generation_dir must exactly match"):
-        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
-
-
-def test_runtime_loader_rejects_boolean_cardinality(tmp_path: Path) -> None:
-    module = _load_module()
-    module.publish_generation(
-        {"al": {"am": 7}},
-        output_dir=tmp_path,
-        source_snapshot_id="fixture",
-        source_digest="a" * 64,
-        metrics={},
-        overwrite=False,
-    )
-    pointer_path = tmp_path / "first_k_letter_counts_from_orcid.manifest.json"
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    metadata_path = tmp_path / pointer["generation_dir"] / "first_k_letter_counts_from_orcid.meta.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["outer_key_cardinality"] = True
-    metadata_bytes = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
-    metadata_path.write_bytes(metadata_bytes)
-    pointer["metadata_sha256"] = hashlib.sha256(metadata_bytes).hexdigest()
-    pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="outer_key_cardinality must be a nonnegative integer"):
-        _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
-
-
-def test_publish_rechecks_no_overwrite_under_the_manifest_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_module()
-    arrivals = threading.Barrier(2)
-    serialization_lock = threading.Lock()
-
-    @contextmanager
-    def gated_publish_lock(_output_dir: Path) -> Iterator[None]:
-        arrivals.wait(timeout=5)
-        with serialization_lock:
-            yield
-
-    monkeypatch.setattr(module, "_publish_lock", gated_publish_lock)
-
-    def publish() -> Path:
-        return module.publish_generation(
-            {"al": {"am": 7}},
-            output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_digest="a" * 64,
-            metrics={"source_rows": 2},
-            overwrite=False,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(publish) for _ in range(2)]
-    failures = [future.exception() for future in futures if future.exception() is not None]
-    assert len(failures) == 1
-    assert isinstance(failures[0], FileExistsError)
-    generation_dirs = list(tmp_path.glob("orcid-prefix-counts-*"))
-    assert len(generation_dirs) == 1
-
-
-def test_publish_lock_serializes_real_processes(tmp_path: Path) -> None:
-    context = multiprocessing.get_context("spawn")
-    barrier = context.Barrier(2)
-    results = context.Queue()
-    processes = [context.Process(target=_publish_in_process, args=(str(tmp_path), barrier, results)) for _ in range(2)]
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=30)
-        assert process.exitcode == 0
-
-    observed = sorted(results.get(timeout=5) for _ in processes)
-    assert observed == [("error", "FileExistsError"), ("ok", None)]
-    assert len(list(tmp_path.glob("orcid-prefix-counts-*"))) == 1
-
-
-def test_committed_generation_is_retained_after_a_superseding_pointer(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_module()
-    pointer_path = tmp_path / "first_k_letter_counts_from_orcid.manifest.json"
-    original_replace = module.os.replace
-    committed_generation_dir: Path | None = None
-    superseding_generation_id = "superseding"
-    superseding_generation_dir = tmp_path / f"orcid-prefix-counts-{superseding_generation_id}"
-
-    def replace_then_supersede(source: Path, target: Path) -> None:
-        nonlocal committed_generation_dir
-        original_replace(source, target)
-        if Path(target) != pointer_path:
-            return
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-        committed_generation_dir = tmp_path / pointer["generation_dir"]
-        shutil.copytree(committed_generation_dir, superseding_generation_dir)
-        pointer["generation_id"] = superseding_generation_id
-        pointer["generation_dir"] = superseding_generation_dir.name
-        pointer_path.write_text(json.dumps(pointer), encoding="utf-8")
-
-    monkeypatch.setattr(module.os, "replace", replace_then_supersede)
-    module.publish_generation(
-        {"al": {"am": 7}},
-        output_dir=tmp_path,
-        source_snapshot_id="fixture",
-        source_digest="a" * 64,
-        metrics={"source_rows": 2},
-        overwrite=False,
-    )
-
-    assert committed_generation_dir is not None
-    assert committed_generation_dir.is_dir()
-    assert superseding_generation_dir.is_dir()
-
-
-def test_failed_publication_cleans_uncommitted_generation_without_reading_pointer(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_module()
-    pointer_path = tmp_path / "first_k_letter_counts_from_orcid.manifest.json"
-    pointer_path.write_text("{", encoding="utf-8")
-    original_replace = module.os.replace
-
-    def fail_pointer_replace(source: Path, target: Path) -> None:
-        if Path(target) == pointer_path:
-            raise OSError("injected primary replace failure")
-        original_replace(source, target)
-
-    monkeypatch.setattr(module.os, "replace", fail_pointer_replace)
-    with pytest.raises(OSError, match="injected primary replace failure") as exc_info:
-        module.publish_generation(
-            {"al": {"am": 7}},
-            output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_digest="a" * 64,
-            metrics={"source_rows": 2},
-            overwrite=True,
-        )
-
-    assert not getattr(exc_info.value, "__notes__", [])
-    assert list(tmp_path.glob("orcid-prefix-counts-*")) == []
 
 
 def test_streaming_source_digest_covers_selected_row_content() -> None:
@@ -530,11 +361,10 @@ def test_compact_json_writer_matches_canonical_encoding(tmp_path: Path) -> None:
     payload = {"zo": {"gian ": 2, "amy": 4}, "al": {"bob": 3}}
     path = tmp_path / "counts.json"
 
-    digest, byte_count = module._write_compact_json(path, payload)
+    digest = module._write_compact_json(path, payload)
     expected = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert path.read_bytes() == expected
-    assert byte_count == len(expected)
     assert digest == hashlib.sha256(expected).hexdigest()
 
 
@@ -563,32 +393,26 @@ def test_source_digest_covers_deduplicated_rows_and_name_tuple_content() -> None
     assert alias_digest != digest
 
 
-def test_publication_rejects_noncanonical_count_pairs_before_writing(tmp_path: Path) -> None:
+def test_writer_rejects_noncanonical_count_pairs_before_writing(tmp_path: Path) -> None:
     module = _load_module()
 
     with pytest.raises(ValueError, match="lexicographically ordered"):
-        module.publish_generation(
+        module.write_artifact(
             {"am": {"al": 7}},
             output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_digest="a" * 64,
-            metrics={},
             overwrite=False,
         )
 
     assert not list(tmp_path.iterdir())
 
 
-def test_publication_rejects_non_ascii_prefixes_before_writing(tmp_path: Path) -> None:
+def test_writer_rejects_non_ascii_prefixes_before_writing(tmp_path: Path) -> None:
     module = _load_module()
 
     with pytest.raises(ValueError, match="lowercase printable ASCII prefixes"):
-        module.publish_generation(
+        module.write_artifact(
             {"ál": {"amy": 7}},
             output_dir=tmp_path,
-            source_snapshot_id="fixture",
-            source_digest="a" * 64,
-            metrics={},
             overwrite=False,
         )
 

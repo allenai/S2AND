@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v3"
+PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v4"
 PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION = "pairwise_prediction_fixture_v1"
 PAIRWISE_PREDICTION_FIXTURE_TOLERANCE = 1e-10
-PAIRWISE_METADATA_SCHEMA_VERSION = "s2and_pairwise_native_lightgbm_v2"
 CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v4"
 
 PAIRWISE_ONLY_MANIFEST_FILES = {
     "clusterer_config": "clusterer.json",
     "pairwise_main_fixture": "pairwise/main_prediction_fixture.json",
     "pairwise_main_model": "pairwise/main.lgb",
-    "pairwise_metadata": "pairwise/metadata.json",
     "pairwise_nameless_fixture": "pairwise/nameless_prediction_fixture.json",
     "pairwise_nameless_model": "pairwise/nameless.lgb",
 }
@@ -23,7 +21,6 @@ PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES = {
 COMPLETE_MANIFEST_FILES = {
     **PAIRWISE_ONLY_MANIFEST_FILES,
     "incremental_linker_booster": "incremental_linker/booster.lgb",
-    "incremental_linker_dir": "incremental_linker",
     "incremental_linker_metadata": "incremental_linker/metadata.json",
     "incremental_linker_training_target": "reproducibility/incremental_linker_training_target.json",
 }

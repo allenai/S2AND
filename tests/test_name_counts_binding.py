@@ -9,11 +9,12 @@ import pytest
 import s2and.incremental_linking.policy as policy_module
 import s2and.model as model_module
 from s2and import feature_port
-from s2and.arrow_inputs import validate_arrow_prediction_artifacts
+from s2and.arrow_inputs import ValidatedArrowInputs, validate_arrow_prediction_artifacts
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
 from s2and.model import Clusterer
+from s2and.name_counts_manifest import ValidatedNameCountsManifest
 from s2and.runtime import build_runtime_context
 from tests.helpers import (
     build_arrow_training_dataset,
@@ -100,6 +101,12 @@ def test_name_count_model_without_complete_binding_is_rejected_at_every_runtime_
     )
     index_dir = tmp_path / "name_counts_index"
     _write_index_manifest(index_dir, provenance)
+    validated_arrow_paths = ValidatedArrowInputs(
+        paths={"name_counts_index": str(index_dir)},
+        generation_id="test-generation",
+        normalization_version=NORMALIZATION_VERSION,
+        name_counts_manifest=ValidatedNameCountsManifest.load(index_dir, context="test Arrow boundary"),
+    )
     featurizer = _PrebuiltRustFeaturizer(provenance)
 
     checks = (
@@ -107,7 +114,7 @@ def test_name_count_model_without_complete_binding_is_rejected_at_every_runtime_
             clusterer, dataset, context="dataset boundary"
         ),
         lambda: policy_module.require_arrow_name_counts_index_for_clusterer(
-            clusterer, {"name_counts_index": str(index_dir)}, context="Arrow boundary"
+            clusterer, validated_arrow_paths, context="Arrow boundary"
         ),
         lambda: policy_module.require_rust_featurizer_name_counts_binding_for_clusterer(
             clusterer, featurizer, context="Rust boundary"
@@ -179,15 +186,16 @@ def test_arrow_prediction_checks_exact_name_count_binding_before_featurizer_buil
     arrow_paths = {"name_counts_index": str(index_dir)}
     build_calls: list[dict[str, Any]] = []
 
+    validated_arrow_paths = ValidatedArrowInputs(
+        paths=arrow_paths,
+        generation_id="test-generation",
+        normalization_version=NORMALIZATION_VERSION,
+        name_counts_manifest=ValidatedNameCountsManifest.load(index_dir, context="test Arrow prediction"),
+    )
     monkeypatch.setattr(
         model_module,
         "validate_arrow_prediction_artifacts",
-        lambda paths, **_kwargs: dict(paths),
-    )
-    monkeypatch.setattr(
-        policy_module,
-        "require_name_counts_index_artifact",
-        lambda path, **_kwargs: str(path),
+        lambda _paths, **_kwargs: validated_arrow_paths,
     )
 
     def fake_build(paths: dict[str, Any], **_kwargs: Any) -> object:
@@ -238,7 +246,6 @@ def test_validated_arrow_binding_reuses_retained_name_count_manifest(
     def fail_revalidation(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("retained name-count manifest was revalidated")
 
-    monkeypatch.setattr(policy_module, "require_name_counts_index_artifact", fail_revalidation)
     monkeypatch.setattr(
         policy_module.NameCountsBinding,
         "from_arrow_name_counts_index",

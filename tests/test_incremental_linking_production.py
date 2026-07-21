@@ -5,10 +5,6 @@ from types import SimpleNamespace
 import numpy as np
 
 import s2and.incremental_linking.production as production_module
-import s2and.incremental_linking.runtime as runtime_module
-from s2and.incremental_linking.features import LinkerFeatureMatrix, promoted_linker_feature_columns
-from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
-from s2and.incremental_linking.logistic_gate import logistic_gate_config
 from s2and.incremental_linking.runtime import LinkOrAbstainDecision
 
 
@@ -72,6 +68,7 @@ def test_batch_telemetry_aggregates_all_refreshed_limits() -> None:
     assert telemetry["memory_final_predicted_peak_delta_bytes"] == 250
     assert telemetry["memory_final_predicted_peak_rss_bytes"] == 1_250
     assert telemetry["memory_final_operational_estimate_source"] == "__mixed__"
+    assert "memory_observed_calibration_applied" not in telemetry
 
 
 def _scored_query(
@@ -214,154 +211,3 @@ def test_global_query_disallow_resolution_rejects_conflicting_requires() -> None
         assert "cluster_seed_disallow_conflicts_with_require_constraint" in str(error)
     else:
         raise AssertionError("conflicting require decisions must fail")
-
-
-def test_query_disallow_components_are_undirected_and_complete() -> None:
-    components = production_module._query_disallow_components_by_id(  # noqa: SLF001
-        {"q1": {"q2"}, "q2": {"q1", "q3"}, "q3": {"q2"}, "q4": {"q5"}, "q5": {"q4"}}
-    )
-
-    assert components["q1"] == frozenset({"q1", "q2", "q3"})
-    assert components["q2"] is components["q1"]
-    assert components["q3"] is components["q1"]
-    assert components["q4"] == frozenset({"q4", "q5"})
-
-
-def test_disallow_aware_query_batches_keep_small_components_together() -> None:
-    components = production_module._query_disallow_components_by_id(  # noqa: SLF001
-        {"q1": {"q4"}, "q4": {"q1"}, "q2": {"q5"}, "q5": {"q2"}}
-    )
-
-    batches = production_module._disallow_aware_query_batches(  # noqa: SLF001
-        ["q1", "free-a", "q2", "q4", "free-b", "q5"],
-        query_batch_size=3,
-        disallow_components_by_id=components,
-    )
-
-    assert all(len(batch) <= 3 for batch in batches)
-    assert sorted(signature_id for batch in batches for signature_id in batch) == [
-        "free-a",
-        "free-b",
-        "q1",
-        "q2",
-        "q4",
-        "q5",
-    ]
-    assert any({"q1", "q4"} <= set(batch) for batch in batches)
-    assert any({"q2", "q5"} <= set(batch) for batch in batches)
-
-
-def test_disallow_aware_query_batches_are_input_order_invariant_and_well_packed() -> None:
-    partner_ids: dict[str, set[str]] = {}
-    query_ids: list[str] = []
-    for component_index, component_size in enumerate([51] * 10 + [49] * 10):
-        component = [f"c{component_index:02d}-{member:02d}" for member in range(component_size)]
-        query_ids.extend(component)
-        for signature_id in component:
-            partner_ids[signature_id] = set(component) - {signature_id}
-    components = production_module._query_disallow_components_by_id(partner_ids)  # noqa: SLF001
-
-    forward = production_module._disallow_aware_query_batches(  # noqa: SLF001
-        query_ids,
-        query_batch_size=100,
-        disallow_components_by_id=components,
-    )
-    reverse = production_module._disallow_aware_query_batches(  # noqa: SLF001
-        list(reversed(query_ids)),
-        query_batch_size=100,
-        disallow_components_by_id=components,
-    )
-
-    assert forward == reverse
-    assert len(forward) == 10
-    assert {len(batch) for batch in forward} == {100}
-
-
-def test_disallow_aware_query_batches_never_exceed_fixed_slice_batch_count() -> None:
-    partner_ids: dict[str, set[str]] = {}
-    query_ids: list[str] = []
-    components_by_members: list[set[str]] = []
-    for component_index in range(3):
-        component = {f"c{component_index}-{member}" for member in range(6)}
-        components_by_members.append(component)
-        query_ids.extend(sorted(component))
-        for signature_id in component:
-            partner_ids[signature_id] = component - {signature_id}
-    components = production_module._query_disallow_components_by_id(partner_ids)  # noqa: SLF001
-
-    batches = production_module._disallow_aware_query_batches(  # noqa: SLF001
-        query_ids,
-        query_batch_size=10,
-        disallow_components_by_id=components,
-    )
-
-    assert len(batches) == 2
-    assert sorted(len(batch) for batch in batches) == [8, 10]
-    assert any(not any(component <= set(batch) for batch in batches) for component in components_by_members)
-
-
-def test_query_batch_plan_windows_preserve_precomputed_batch_boundaries() -> None:
-    windows = production_module._query_batch_plan_windows(  # noqa: SLF001
-        [["q1", "q2"], ["q3"], ["q4", "q5"], ["q6"], ["q7"]],
-        plan_window_multiplier=2,
-    )
-
-    assert windows == [[["q1", "q2"], ["q3"]], [["q4", "q5"], ["q6"]], [["q7"]]]
-
-
-def test_resize_query_batch_plan_windows_applies_refreshed_batch_and_window_limits() -> None:
-    windows = production_module._resize_query_batch_plan_windows(  # noqa: SLF001
-        [["q1", "q2", "q3", "q4"], ["q5", "q6", "q7"], ["q8"]],
-        query_batch_size=2,
-        plan_window_multiplier=2,
-    )
-
-    assert windows == [
-        [["q1", "q2"], ["q3", "q4"]],
-        [["q5", "q6"], ["q7"]],
-        [["q8"]],
-    ]
-
-
-def test_same_batch_disallow_score_tie_uses_signature_id_not_runtime_index() -> None:
-    candidate_batch = LinkerCandidateBatch(
-        row_count=4,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-        row_query_signature_indices=np.asarray([10, 10, 11, 11], dtype=np.uint32),
-        row_component_keys=("shared", "ten-other", "shared", "eleven-other"),
-        retrieval_ranks=np.asarray([1, 2, 1, 2], dtype=np.uint16),
-    )
-    feature_matrix = LinkerFeatureMatrix(
-        matrix=np.zeros((4, len(promoted_linker_feature_columns())), dtype=np.float32),
-        feature_columns=promoted_linker_feature_columns(),
-        candidate_batch=candidate_batch,
-    )
-
-    class Artifact:
-        metadata = SimpleNamespace(
-            gate_config=logistic_gate_config(
-                feature_names=("chosen_probability",),
-                weights=np.asarray([[-200.0, 0.0, 200.0]], dtype=np.float64),
-                bias=np.asarray([100.0, -10.0, -100.0], dtype=np.float64),
-                missing_values=np.asarray([0.0], dtype=np.float64),
-                calibration_mode="test",
-            )
-        )
-
-        @staticmethod
-        def predict_probabilities(_matrix, *, num_threads=None):
-            del num_threads
-            return np.asarray([0.90, 0.80, 0.90, 0.70], dtype=np.float64)
-
-    result = runtime_module._predict_incremental_link_or_abstain_compact(  # noqa: SLF001
-        Artifact(),
-        feature_matrix,
-        row_signals={"first_name_bucket": np.asarray(["multi_letter_first"] * 4, dtype=object)},
-        disallow_partner_query_indices={10: {11}, 11: {10}},
-        disallow_query_priority_ids={10: "q-z", 11: "q-a"},
-    )
-
-    by_query = {decision.query_signature_index: decision.component_key for decision in result.decisions}
-    assert by_query == {10: "ten-other", 11: "shared"}

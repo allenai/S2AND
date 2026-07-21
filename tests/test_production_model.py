@@ -4,7 +4,6 @@ import copy
 import hashlib
 import json
 import pickle
-import stat
 from pathlib import Path
 from typing import Any
 
@@ -485,18 +484,18 @@ def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
     assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
-@pytest.mark.parametrize("unsafe_path", ("../clusterer.json", "/tmp/clusterer.json", "pairwise\\main.lgb"))
-def test_manifest_rejects_paths_outside_bundle(
+@pytest.mark.parametrize("unexpected_path", ("../clusterer.json", "/tmp/clusterer.json", "pairwise\\main.lgb"))
+def test_manifest_rejects_noncanonical_paths(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
-    unsafe_path: str,
+    unexpected_path: str,
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     manifest_path = bundle_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["files"]["clusterer_config"] = unsafe_path
+    manifest["files"]["clusterer_config"] = unexpected_path
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="bundle root|POSIX separators"):
+    with pytest.raises(ValueError, match="files contract mismatch"):
         _load_pairwise_staging_model(bundle_dir)
 
 
@@ -573,36 +572,15 @@ def test_manifest_requires_complete_checksum_coverage(
         _load_pairwise_staging_model(bundle_dir)
 
 
-def test_manifest_rejects_undeclared_runtime_file(
+def test_manifest_ignores_undeclared_runtime_file(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     (bundle_dir / "pairwise" / "stale.lgb").write_text("stale", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="undeclared or missing runtime files"):
-        _load_pairwise_staging_model(bundle_dir)
+    clusterer = _load_pairwise_staging_model(bundle_dir)
 
-
-def test_pairwise_metadata_contains_only_classifier_semantics(
-    synthetic_pairwise_bundle: tuple[Path, Clusterer],
-) -> None:
-    bundle_dir, _ = synthetic_pairwise_bundle
-    metadata_path = bundle_dir / "pairwise" / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert set(metadata) == {
-        "class_labels",
-        "distance_probability_column",
-        "model_family",
-        "positive_probability_column",
-        "schema_version",
-    }
-
-    metadata["legacy_duplicate"] = {"features_to_use": ["year_diff"]}
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _refresh_manifest_checksum(bundle_dir, "pairwise/metadata.json")
-
-    with pytest.raises(ValueError, match="Pairwise metadata field mismatch"):
-        _load_pairwise_staging_model(bundle_dir)
+    assert clusterer.production_model_bundle_status == "pairwise_only"
 
 
 @pytest.mark.parametrize(
@@ -730,16 +708,6 @@ def test_failed_finalization_leaves_source_unchanged_and_output_absent(
     assert (bundle_dir / "manifest.json").read_bytes() == original_manifest
     assert not (bundle_dir / "incremental_linker").exists()
     assert not output_bundle.exists()
-
-
-def test_bundle_fsync_accepts_read_only_artifacts(tmp_path: Path) -> None:
-    artifact = tmp_path / "model.lgb"
-    artifact.write_bytes(b"immutable model")
-    artifact.chmod(stat.S_IREAD)
-    try:
-        production_bundle_module._fsync_tree(tmp_path)  # noqa: SLF001
-    finally:
-        artifact.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
 def test_pairwise_stage_publication_failure_leaves_target_absent_and_is_retry_safe(

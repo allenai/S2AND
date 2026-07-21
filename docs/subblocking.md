@@ -15,8 +15,7 @@ Subblocking uses graph fallback for oversized groups that cannot be split by nam
 
 - Prefix and middle-name splitting still define the main subblock structure.
 - Oversized groups that cannot be split by names call the graph fallback instead of the old SPECTER fallback.
-- For Python/`ANDData` graph fallback, graph preparation or fallback-call IO failures run the old Python
-  `cluster_with_specter(...)` path for that fallback group.
+- Graph preparation and clustering failures propagate; the selected algorithm does not change at runtime.
 
 The graph configuration is available on `Clusterer`:
 
@@ -85,11 +84,10 @@ present, and malformed Arrow schemas or declared missing artifacts raise before
 graph clustering starts. This helper is not selected by the public
 Python/`ANDData` `Clusterer.predict(...)` route.
 
-For Python/`ANDData` fallback, graph fallback is intentionally wrapped with the old Python SPECTER fallback. Graph
-failures are not swallowed: warnings are logged, telemetry records the failure, and then
-`cluster_with_specter(...)` runs for the affected group. The internal Arrow
-graph helper does not use this legacy recovery path; Arrow
-read/prepare/call failures propagate.
+`Clusterer.predict(...)` selects the graph implementation directly, and graph
+read/prepare/call failures propagate. Direct callers of `make_subblocks(...)`
+that do not supply a cluster function retain the explicitly selected legacy
+`cluster_with_specter(...)` behavior.
 
 ## Python and Rust routing
 
@@ -120,18 +118,6 @@ error instead of falling back to `ANDData`.
 - pre-merge and final subblock counts
 - ORCID repair capacity skips
 - final SPECTER-labeled subblock counts
-
-Python `Clusterer.predict(..., batching_threshold=N)` also records graph hook
-telemetry on `_last_graph_subblocking_telemetry`:
-
-- `enabled`, `mode`, `source`, and `candidate_signature_count`
-- `arrow_load_seconds` and `arrow_load_metrics`
-- `fallback_invocation_count` and per-group `fallback_stats`
-- `legacy_fallback_invocation_count`
-- `graph_prepare_failed`, `graph_prepare_error`, and `graph_fallback_errors`
-
-`fallback_stats` includes per-group graph details such as candidate edge count, raw and packed component counts,
-maximum component size, edge-build seconds, and total fallback seconds.
 
 ## Incremental routing
 

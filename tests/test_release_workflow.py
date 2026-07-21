@@ -15,6 +15,7 @@ from scripts.verification.verify_production_model_distributions import verify_pr
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release-rust.yml"
+MAIN_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "main.yaml"
 
 
 def _release_workflow_jobs() -> dict[str, dict]:
@@ -33,6 +34,17 @@ def _all_action_args(jobs: dict[str, dict]) -> str:
         for step in job.get("steps", [])
         if isinstance(step.get("with"), dict) and "args" in step["with"]
     )
+
+
+def test_ci_checkout_is_the_single_lfs_hydration_authority() -> None:
+    workflow = yaml.safe_load(MAIN_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["typecheck-and-test"]
+    checkout = next(step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@"))
+    run_text = "\n".join(str(step.get("run", "")) for step in job["steps"])
+
+    assert checkout["with"]["lfs"] is True
+    assert "git lfs" not in run_text
+    assert "git-lfs.github.com/spec" not in run_text
 
 
 def test_rust_wheel_matrix_matches_supported_python_versions() -> None:

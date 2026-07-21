@@ -31,7 +31,6 @@ from s2and.name_count_binding import NameCountsBinding
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
-    PAIRWISE_METADATA_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
@@ -255,46 +254,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _validated_bundle_path(bundle_dir: Path, raw_relpath: Any, *, field: str) -> tuple[str, Path]:
-    if not isinstance(raw_relpath, str) or not raw_relpath:
-        raise ValueError(f"Production model bundle {field} must be a nonempty relative POSIX path")
-    if "\\" in raw_relpath or ":" in raw_relpath:
-        raise ValueError(f"Production model bundle {field} must use POSIX separators: {raw_relpath!r}")
-    relpath = Path(raw_relpath)
-    if relpath.is_absolute() or relpath.drive or any(part in {"", ".", ".."} for part in relpath.parts):
-        raise ValueError(f"Production model bundle {field} escapes the bundle root: {raw_relpath!r}")
-    bundle_root = bundle_dir.resolve()
-    path = (bundle_dir / relpath).resolve()
-    try:
-        path.relative_to(bundle_root)
-    except ValueError as exc:
-        raise ValueError(f"Production model bundle {field} escapes the bundle root: {raw_relpath!r}") from exc
-    normalized = relpath.as_posix()
-    return normalized, path
-
-
-def _runtime_files_on_disk(bundle_dir: Path, *, complete: bool) -> set[str]:
-    candidates = [bundle_dir / "clusterer.json", bundle_dir / "pairwise", bundle_dir / "reproducibility"]
-    if complete:
-        candidates.append(bundle_dir / "incremental_linker")
-    files: set[str] = set()
-    root = bundle_dir.resolve()
-    for candidate in candidates:
-        if candidate.is_dir():
-            descendants = (path for path in candidate.rglob("*") if path.is_file())
-        elif candidate.is_file():
-            descendants = iter((candidate,))
-        else:
-            continue
-        for path in descendants:
-            resolved = path.resolve()
-            try:
-                files.add(resolved.relative_to(root).as_posix())
-            except ValueError as exc:
-                raise ValueError(f"Production model runtime file escapes bundle root: {path}") from exc
-    return files
-
-
 def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
     manifest_path = bundle_dir / "manifest.json"
     manifest = _read_json(manifest_path)
@@ -340,15 +299,6 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
         complete=complete,
         include_pairwise_reproducibility=present_optional_keys == optional_keys,
     )
-    normalized_paths: dict[str, str] = {}
-    for key, relpath in files.items():
-        normalized, _ = _validated_bundle_path(bundle_dir, relpath, field=f"files[{key!r}]")
-        previous = normalized_paths.setdefault(normalized, str(key))
-        if previous != str(key):
-            raise ValueError(
-                f"Production model bundle files contain duplicate normalized path {normalized!r}: "
-                f"{previous!r} and {key!r}"
-            )
     if files != expected_files:
         missing = sorted(set(expected_files) - set(files))
         extra = sorted(set(files) - set(expected_files))
@@ -360,7 +310,7 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
     expected_hashes = manifest.get("sha256")
     if not isinstance(expected_hashes, dict):
         raise ValueError("Production model bundle manifest sha256 must be an object")
-    required_hashed_files = {str(value) for key, value in expected_files.items() if key != "incremental_linker_dir"}
+    required_hashed_files = {str(value) for value in expected_files.values()}
     if set(expected_hashes) != required_hashed_files:
         raise ValueError(
             "Production model bundle checksum coverage mismatch: "
@@ -368,9 +318,7 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
             f"extra={sorted(set(expected_hashes) - required_hashed_files)}"
         )
     for relpath, expected in expected_hashes.items():
-        normalized, path = _validated_bundle_path(bundle_dir, relpath, field="sha256 key")
-        if normalized != relpath:
-            raise ValueError(f"Production model bundle checksum path is not normalized: {relpath!r}")
+        path = bundle_dir / relpath
         if not path.is_file():
             raise FileNotFoundError(f"Production model bundle is missing {relpath}: {path}")
         if not isinstance(expected, str) or len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
@@ -378,13 +326,6 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
         observed = _sha256_file(path)
         if observed != expected:
             raise ValueError(f"Production model bundle checksum mismatch for {relpath}")
-    runtime_files = _runtime_files_on_disk(bundle_dir, complete=complete)
-    if runtime_files != required_hashed_files:
-        raise ValueError(
-            "Production model bundle contains undeclared or missing runtime files: "
-            f"missing={sorted(required_hashed_files - runtime_files)} "
-            f"extra={sorted(runtime_files - required_hashed_files)}"
-        )
     return manifest
 
 
@@ -528,37 +469,6 @@ def _validate_clusterer_config(payload: dict[str, Any]) -> None:
     require_canonical_artifact_hashes(feature_contract, context="Production model config feature_contract")
 
 
-def _validate_pairwise_metadata(
-    bundle_dir: Path,
-    manifest: Mapping[str, Any],
-) -> None:
-    metadata = _read_json(bundle_dir / str(manifest["files"]["pairwise_metadata"]))
-    if metadata.get("schema_version") != PAIRWISE_METADATA_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported pairwise metadata schema_version={metadata.get('schema_version')!r}")
-    if metadata.get("model_family") != "binary_lightgbm_pairwise_distance":
-        raise ValueError(f"Unsupported pairwise model_family={metadata.get('model_family')!r}")
-    if metadata.get("class_labels") != [0.0, 1.0]:
-        raise ValueError("Pairwise metadata class_labels must be [0.0, 1.0]")
-    if (
-        metadata.get("distance_probability_column") != "class_0"
-        or metadata.get("positive_probability_column") != "class_1"
-    ):
-        raise ValueError("Pairwise metadata probability-column contract is invalid")
-    expected_metadata_fields = {
-        "class_labels",
-        "distance_probability_column",
-        "model_family",
-        "positive_probability_column",
-        "schema_version",
-    }
-    if set(metadata) != expected_metadata_fields:
-        raise ValueError(
-            "Pairwise metadata field mismatch: "
-            f"missing={sorted(expected_metadata_fields - set(metadata))} "
-            f"extra={sorted(set(metadata) - expected_metadata_fields)}"
-        )
-
-
 def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
     """Return the immutable pairwise contract used to bind a linker artifact."""
 
@@ -568,7 +478,6 @@ def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
     _validate_clusterer_config(clusterer_config)
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
-    _validate_pairwise_metadata(root, manifest)
     return _pairwise_binding_from_validated_parts(manifest, clusterer_config, featurizer_info, nameless_info)
 
 
@@ -677,10 +586,6 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
             "nameless_featurizer_info": nameless_featurizer_info.featurizer_version,
         },
     )
-    _validate_pairwise_metadata(
-        bundle_dir,
-        manifest,
-    )
     classifier = NativeLightGBMBinaryClassifier(
         bundle_dir / str(manifest["files"]["pairwise_main_model"]),
     )
@@ -749,9 +654,8 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         ),
     )
     clusterer.incremental_mean_min_hybrid_weight = float(clusterer_config["incremental_mean_min_hybrid_weight"])
-    incremental_linker_relpath = manifest["files"].get("incremental_linker_dir")
-    if incremental_linker_relpath is not None:
-        incremental_linker_dir = bundle_dir / str(incremental_linker_relpath)
+    if manifest["bundle_status"] == "complete":
+        incremental_linker_dir = bundle_dir / "incremental_linker"
         incremental_linker_artifact = _validate_incremental_linker_metadata(incremental_linker_dir)
         expected_binding = _pairwise_binding_from_validated_parts(
             manifest,

@@ -34,40 +34,19 @@ class _VerifiedArrowArtifactGeneration:
     normalization_version: str | None
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class ValidatedArrowInputs(Mapping[str, str]):
     """Immutable, integrity-checked Arrow paths for one artifact generation."""
 
     paths: Mapping[str, str]
     generation_id: str
     normalization_version: str
-    name_counts_manifest: ValidatedNameCountsManifest | None
+    name_counts_manifest: ValidatedNameCountsManifest | None = None
 
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        raise TypeError(
-            "ValidatedArrowInputs cannot be constructed directly; use an Arrow artifact validation function"
-        )
-
-    def __init_subclass__(cls, **_kwargs: Any) -> None:
-        raise TypeError("ValidatedArrowInputs cannot be subclassed")
-
-    @classmethod
-    def _from_verified(
-        cls,
-        *,
-        paths: Mapping[str, str],
-        generation_id: str,
-        normalization_version: str,
-        name_counts_manifest: ValidatedNameCountsManifest | None = None,
-    ) -> ValidatedArrowInputs:
-        """Create an instance after a trusted internal validation or projection."""
-
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
-        object.__setattr__(instance, "generation_id", str(generation_id))
-        object.__setattr__(instance, "normalization_version", str(normalization_version))
-        object.__setattr__(instance, "name_counts_manifest", name_counts_manifest)
-        return instance
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paths", MappingProxyType(dict(self.paths)))
+        object.__setattr__(self, "generation_id", str(self.generation_id))
+        object.__setattr__(self, "normalization_version", str(self.normalization_version))
 
     def __getitem__(self, key: str) -> str:
         return self.paths[key]
@@ -82,7 +61,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         """Return this verified generation without request-local path entries."""
 
         removed = set(keys)
-        return self._from_verified(
+        return ValidatedArrowInputs(
             paths={key: value for key, value in self.paths.items() if key not in removed},
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
@@ -117,7 +96,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
             )
         paths = dict(self.paths)
         paths.update(normalized)
-        return self._from_verified(
+        return ValidatedArrowInputs(
             paths=paths,
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
@@ -295,16 +274,6 @@ def write_arrow_artifact_manifest(
     return manifest_path
 
 
-def _stable_file_digest_token(path: Path) -> tuple[str, int, int, str]:
-    for _attempt in range(3):
-        before = path.stat()
-        digest = _sha256_file(path)
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns):
-            return str(path.resolve()), int(after.st_size), int(after.st_mtime_ns), digest
-    raise RuntimeError(f"artifact changed during all 3 checksum attempts: {path}")
-
-
 def _arrow_artifact_manifest_path(paths: Mapping[str, str]) -> Path | None:
     explicit = paths.get("manifest")
     if explicit is not None:
@@ -416,7 +385,6 @@ def _verified_arrow_artifact_manifest(
     material_keys = sorted(
         key for key in paths if key in _ARROW_IMMUTABLE_ARTIFACT_FILE_KEYS or key in _ARROW_IMMUTABLE_BATCH_INDEX_KEYS
     )
-    verification_items: list[tuple[Path, str, int, str]] = []
     for key in material_keys:
         entry = files.get(key)
         if not isinstance(entry, Mapping):
@@ -466,16 +434,10 @@ def _verified_arrow_artifact_manifest(
             raise ValueError(f"Arrow artifact generation files.{key}.byte_count is invalid")
         if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
             raise ValueError(f"Arrow artifact generation files.{key}.sha256 is invalid")
-        stat = artifact_path.stat()
-        if stat.st_size != expected_bytes:
+        if artifact_path.stat().st_size != expected_bytes:
             raise ValueError(f"Arrow artifact generation files.{key}.byte_count mismatch: {artifact_path}")
-        verification_items.append((artifact_path, key, expected_bytes, expected_sha256))
-    for artifact_path, key, expected_bytes, expected_sha256 in verification_items:
-        _resolved, observed_bytes, _mtime_ns, observed_sha256 = _stable_file_digest_token(artifact_path)
-        if observed_bytes != expected_bytes or observed_sha256 != expected_sha256:
+        if _sha256_file(artifact_path) != expected_sha256:
             raise ValueError(f"Arrow artifact generation files.{key} checksum mismatch: {artifact_path}")
-    if manifest_path.read_bytes() != manifest_bytes:
-        raise RuntimeError(f"Arrow artifact manifest changed during verification: {manifest_path}")
 
     return _VerifiedArrowArtifactGeneration(
         generation_id=computed_generation_id,
@@ -895,7 +857,7 @@ def _validate_complete_arrow_artifacts(
             producer_hint=producer_hint,
         )
     _validate_batch_indexes(normalized)
-    return ValidatedArrowInputs._from_verified(
+    return ValidatedArrowInputs(
         paths=normalized,
         generation_id=verified.generation_id,
         normalization_version=verified.normalization_version,

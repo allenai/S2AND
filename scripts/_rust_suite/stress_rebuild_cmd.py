@@ -26,7 +26,6 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 
 from s2and.arrow_inputs import ValidatedArrowInputs  # noqa: E402
 
-BUILD_PATH_CHOICES = ("from_arrow_paths",)
 DEFAULT_ARROW_DATA_ROOT = os.path.join("s2and", "data")
 DEFAULT_ARROW_SPECTER_SUFFIX = "_specter2.pkl"
 
@@ -74,7 +73,6 @@ def _build_from_arrow_paths(
 def run_rebuild_stress(
     *,
     dataset: str,
-    build_path: str,
     repeats: int,
     num_threads: int,
     preprocess: bool = True,
@@ -87,8 +85,6 @@ def run_rebuild_stress(
 ) -> dict[str, Any]:
     if repeats <= 0:
         raise ValueError("repeats must be positive")
-    if build_path not in BUILD_PATH_CHOICES:
-        raise ValueError(f"build_path must be one of: {', '.join(BUILD_PATH_CHOICES)}")
     if int(rss_sample_ms) <= 0:
         raise ValueError("rss_sample_ms must be positive")
 
@@ -111,7 +107,7 @@ def run_rebuild_stress(
     arrow_specter_suffix = specter_suffix
     print(
         "Starting rebuild stress: "
-        f"dataset={dataset_name} build_path={build_path} repeats={repeats} "
+        f"dataset={dataset_name} repeats={repeats} "
         f"num_threads={num_threads} preprocess={preprocess} "
         f"rss_sample_ms={rss_sample_ms} "
         f"arrow_data_root={resolved_arrow_data_root} specter_suffix={arrow_specter_suffix}"
@@ -171,7 +167,6 @@ def run_rebuild_stress(
 
     result: dict[str, Any] = {
         "dataset": str(dataset_name),
-        "build_path": str(build_path),
         "repeats": int(repeats),
         "num_threads": int(max(1, int(num_threads))),
         "preprocess": bool(preprocess),
@@ -215,15 +210,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", required=True, help="Dataset name (e.g. dummy, qian, aminer)")
     parser.add_argument(
-        "--build-path",
-        choices=BUILD_PATH_CHOICES,
-        default="from_arrow_paths",
-        help="Rust build path to stress.",
-    )
-    parser.add_argument(
         "--arrow-data-root",
         default=DEFAULT_ARROW_DATA_ROOT,
-        help="Arrow data root for --build-path from_arrow_paths.",
+        help="Arrow data root for the Rust featurizer rebuild.",
     )
     parser.add_argument(
         "--specter-suffix",
@@ -264,7 +253,6 @@ def main() -> None:
     args = _parse_args()
     result = run_rebuild_stress(
         dataset=args.dataset,
-        build_path=args.build_path,
         repeats=args.repeats,
         num_threads=args.num_threads,
         preprocess=not bool(args.no_preprocess),

@@ -83,24 +83,6 @@ def version_targets() -> tuple[VersionTarget, ...]:
             rf'(?P<version>{SEMVER_PATTERN})(?P<suffix>"\r?)$',
         ),
         VersionTarget(
-            name="readme_version_workflow",
-            relative_path=Path("README.md"),
-            pattern=rf"(?m)^(?P<prefix>echo )(?P<version>{SEMVER_PATTERN})(?P<suffix> > VERSION\s*)$",
-        ),
-        VersionTarget(
-            name="development_version_workflow",
-            relative_path=Path("docs") / "development.md",
-            pattern=rf"(?m)^(?P<prefix>echo )(?P<version>{SEMVER_PATTERN})(?P<suffix> > VERSION\s*)$",
-        ),
-        VersionTarget(
-            name="rust_readme_checkout_version",
-            relative_path=Path("s2and_rust") / "README.md",
-            pattern=(
-                rf"(?m)^(?P<prefix>This checkout is `)(?P<version>{SEMVER_PATTERN})"
-                rf"(?P<suffix>`, so use a local build when working from this tree\s*)$"
-            ),
-        ),
-        VersionTarget(
             name="cargo_lock",
             relative_path=Path("s2and_rust") / "Cargo.lock",
             pattern=(

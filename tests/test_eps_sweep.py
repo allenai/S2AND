@@ -54,12 +54,32 @@ def test_load_gold_drops_unlabeled_singleton_orcid_rows(tmp_path) -> None:
     assert loaded["supervision_type"].tolist() == ["positive_repeat_orcid"]
 
 
-def test_eps_sweep_runtime_environment_sets_backend_and_threads() -> None:
-    sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(backend="python", n_jobs=2)))
+def test_eps_sweep_runtime_environment_sets_backend_and_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S2AND_BACKEND", "python")
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("RAYON_NUM_THREADS", "1")
+    sweep_eps_on_linking_gold._configure_runtime_environment(cast(Any, SimpleNamespace(n_jobs=2)))
 
-    assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "python"
+    assert sweep_eps_on_linking_gold.os.environ["S2AND_BACKEND"] == "rust"
     assert sweep_eps_on_linking_gold.os.environ["OMP_NUM_THREADS"] == "2"
     assert sweep_eps_on_linking_gold.os.environ["RAYON_NUM_THREADS"] == "2"
+
+
+def test_eps_sweep_cli_has_one_real_orcid_constraint_switch() -> None:
+    default_args = sweep_eps_on_linking_gold.parse_args(["--dataset", "dummy", "--model-path", "model"])
+    enabled_args = sweep_eps_on_linking_gold.parse_args(
+        ["--dataset", "dummy", "--model-path", "model", "--use-orcid-constraints"]
+    )
+
+    assert default_args.suppress_orcid_constraints is True
+    assert enabled_args.suppress_orcid_constraints is False
+
+
+@pytest.mark.parametrize("removed_flag", ["--backend", "--suppress-orcid-constraints"])
+def test_eps_sweep_cli_rejects_removed_no_choice_flags(removed_flag: str) -> None:
+    values = ["rust"] if removed_flag == "--backend" else []
+    with pytest.raises(SystemExit):
+        sweep_eps_on_linking_gold.parse_args(["--dataset", "dummy", "--model-path", "model", removed_flag, *values])
 
 
 def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path, monkeypatch) -> None:

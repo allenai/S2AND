@@ -311,11 +311,7 @@ def _resolve_arrow_dataset_paths(
     *,
     require_clusters: bool = True,
 ) -> tuple[dict[str, str], str | None]:
-    """Resolve a converted dataset's Arrow manifest paths for arrow ingestion.
-
-    Manifest path values vary by converter vintage (dataset-dir-relative or
-    repo-root-relative), so try both anchors plus the data root.
-    """
+    """Resolve absolute or dataset-root-relative Arrow manifest paths."""
 
     dataset_root = Path(data_dir) / dataset_name
     manifest_path = dataset_root / "manifest.json"
@@ -328,25 +324,12 @@ def _resolve_arrow_dataset_paths(
     resolved: dict[str, str] = {}
     for key, value in raw_paths.items():
         candidate_path = Path(str(value))
-        if candidate_path.is_absolute():
-            candidates = [candidate_path]
-        else:
-            candidates = [
-                dataset_root / candidate_path,
-                Path(PROJECT_ROOT) / candidate_path,
-                Path(data_dir) / candidate_path,
-                # Manifests written before a bundle was relocated may carry
-                # stale roots; re-anchor by basename at the dataset/data root.
-                dataset_root / candidate_path.name,
-                Path(data_dir) / candidate_path.name,
-            ]
-        found = next((candidate for candidate in candidates if candidate.exists()), None)
-        if found is None:
+        resolved_path = candidate_path if candidate_path.is_absolute() else dataset_root / candidate_path
+        if not resolved_path.exists():
             raise FileNotFoundError(
-                f"Cannot resolve arrow manifest path {key}={value!r} for dataset {dataset_name}. Tried: "
-                + ", ".join(str(candidate) for candidate in candidates)
+                f"Cannot resolve arrow manifest path {key}={value!r} for dataset {dataset_name}: {resolved_path}"
             )
-        resolved[str(key)] = str(found.resolve())
+        resolved[str(key)] = str(resolved_path.resolve())
     clusters_path = resolved.pop("clusters", None)
     if require_clusters and clusters_path is None:
         raise FileNotFoundError(

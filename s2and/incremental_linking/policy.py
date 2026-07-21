@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
-from s2and.arrow_inputs import ValidatedArrowInputs, require_name_counts_index_artifact
+from s2and.arrow_inputs import ValidatedArrowInputs
 from s2and.incremental_linking.feature_block import normalize_cluster_seed_disallow_pairs
 from s2and.name_count_binding import NameCountsBinding
 
@@ -32,26 +32,9 @@ def clusterer_uses_embedding_features(clusterer: Any) -> bool:
     return False
 
 
-def existing_name_counts_index_path(paths: Mapping[str, Any]) -> str | None:
-    """Return the configured name-count index path when it exists."""
-
-    path_value = paths.get("name_counts_index")
-    if path_value is not None:
-        if isinstance(paths, ValidatedArrowInputs):
-            if paths.name_counts_manifest is None:  # pragma: no cover - validated-input invariant
-                raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
-            return str(path_value)
-        return require_name_counts_index_artifact(
-            path_value,
-            context="Arrow name-count index",
-            producer_hint="pass a manifest-backed name_counts_index directory",
-        )
-    return None
-
-
 def require_arrow_name_counts_index_for_clusterer(
     clusterer: Any,
-    arrow_paths: Mapping[str, Any],
+    arrow_paths: ValidatedArrowInputs,
     *,
     context: str,
 ) -> None:
@@ -59,8 +42,7 @@ def require_arrow_name_counts_index_for_clusterer(
 
     if not clusterer_uses_name_count_features(clusterer):
         return
-    index_path = existing_name_counts_index_path(arrow_paths)
-    if index_path is None:
+    if arrow_paths.get("name_counts_index") is None:
         raise ValueError(
             f"{context} with selected name_counts features requires name_counts_index. "
             "Pass the S2AND name-count index directory in arrow_paths['name_counts_index']."
@@ -69,19 +51,13 @@ def require_arrow_name_counts_index_for_clusterer(
         getattr(clusterer, "feature_contract", None),
         context=f"{context} model feature_contract",
     )
-    if isinstance(arrow_paths, ValidatedArrowInputs):
-        manifest = arrow_paths.name_counts_manifest
-        if manifest is None:  # pragma: no cover - existing path invariant
-            raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
-        observed = NameCountsBinding.from_provenance(
-            manifest.source_provenance,
-            context=f"{context} Arrow name_counts_index source_provenance",
-        )
-    else:
-        observed = NameCountsBinding.from_arrow_name_counts_index(
-            index_path,
-            context=f"{context} Arrow name_counts_index",
-        )
+    manifest = arrow_paths.name_counts_manifest
+    if manifest is None:  # pragma: no cover - validated-input invariant
+        raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
+    observed = NameCountsBinding.from_provenance(
+        manifest.source_provenance,
+        context=f"{context} Arrow name_counts_index source_provenance",
+    )
     expected.require_matches(
         observed,
         context=context,

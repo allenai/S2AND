@@ -18,6 +18,7 @@ from s2and.incremental_linking.gate_buckets import (
     validate_query_view,
 )
 from s2and.incremental_linking.linker_pairwise import LinkerCandidateBatch
+from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 
 RAW_CANDIDATE_PLAN_SCHEMA_VERSION = "raw_arrow_candidate_plan_v2"
 RAW_CANDIDATE_PLAN_BATCH_ROW_KEYS: tuple[str, ...] = (
@@ -649,6 +650,7 @@ def build_linker_retrieval_batch_rust(
     retrieval_subblock_index: Mapping[str, Any] | None = None,
     query_candidate_component_keys_by_signature_id: Mapping[str, Sequence[str]] | None = None,
     full_first_global_backfill_count: int = 5,
+    name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
 ) -> LinkerRetrievalBatch:
     """Retrieve candidates in Rust and return the shared numeric candidate-batch contract."""
 
@@ -669,6 +671,9 @@ def build_linker_retrieval_batch_rust(
                 "queries and query_signature_ids must have equal length: "
                 f"{len(queries)} != {len(query_signature_ids)}"
             )
+        resolved_name_tuples = None
+        if retrieval_subblock_index is not None:
+            resolved_name_tuples = load_packaged_name_tuple_artifact().pairs if name_tuples is None else name_tuples
         plan = rust_retriever.top_k_hybrid_centroid_pair_plan(
             list(queries),
             query_signature_indices_array,
@@ -686,6 +691,7 @@ def build_linker_retrieval_batch_rust(
                 }
             ),
             int(full_first_global_backfill_count),
+            resolved_name_tuples,
         )
     else:
         plan = rust_retriever.top_k_hybrid_centroid_pair_plan(

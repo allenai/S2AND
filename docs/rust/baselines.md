@@ -87,7 +87,7 @@ uv run --with psutil python scripts/rust_suite.py transfer-mini \
 **4. Stress rebuild (6x)**
 ```
 uv run --with psutil python scripts/rust_suite.py stress-rebuild \
-  --dataset aminer --build-path from_arrow_paths \
+  --dataset aminer \
   --repeats 6 --num-threads 1 --rss-sample-ms 50 --require-rust-release 1 \
   --write-json scratch/baselines_YYYYMMDD/stress_rust_from_arrow_paths_aminer_6x_YYYYMMDD.json
 ```

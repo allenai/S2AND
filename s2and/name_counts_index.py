@@ -8,7 +8,6 @@ import os
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,6 @@ from s2and.name_counts_manifest import (
 )
 
 _INDEX_CACHE: weakref.WeakValueDictionary[tuple[str, str], NameCountsIndex] = weakref.WeakValueDictionary()
-_INDEX_OPENINGS: dict[tuple[str, str], Future[NameCountsIndex]] = {}
 _INDEX_CACHE_LOCK = threading.Lock()
 
 
@@ -169,43 +167,26 @@ class NameCountsIndex:
             cached = _INDEX_CACHE.get(cache_key)
             if cached is not None:
                 return cached
-            opening = _INDEX_OPENINGS.get(cache_key)
-            if opening is None:
-                opening = Future()
-                _INDEX_OPENINGS[cache_key] = opening
-                open_generation = True
-            else:
-                open_generation = False
 
-        if not open_generation:
-            return opening.result()
+        from s2and.runtime import load_s2and_rust_extension
 
-        try:
-            from s2and.runtime import load_s2and_rust_extension
-
-            native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
-            if manifest_path.read_bytes() != manifest_bytes:
-                raise RuntimeError(f"name-count index manifest changed while opening: {manifest_path}")
-            # Native open is the material-validation authority. Parse the same
-            # validated manifest generation only to retain full provenance.
-            manifest = json.loads(manifest_bytes)
-            opened = cls(
-                native=native,
-                path=resolved_path,
-                manifest_sha256=manifest_sha256,
-                normalization_version=manifest["normalization_version"],
-                source_provenance=manifest["source_provenance"],
-            )
-        except BaseException as exc:
-            with _INDEX_CACHE_LOCK:
-                _INDEX_OPENINGS.pop(cache_key, None)
-            opening.set_exception(exc)
-            raise
+        native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
+        # Native open is the material-validation authority. Parse the same
+        # manifest bytes only to retain full provenance.
+        manifest = json.loads(manifest_bytes)
+        opened = cls(
+            native=native,
+            path=resolved_path,
+            manifest_sha256=manifest_sha256,
+            normalization_version=manifest["normalization_version"],
+            source_provenance=manifest["source_provenance"],
+        )
 
         with _INDEX_CACHE_LOCK:
+            cached = _INDEX_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
             _INDEX_CACHE[cache_key] = opened
-            _INDEX_OPENINGS.pop(cache_key, None)
-        opening.set_result(opened)
         return opened
 
     def lookup_many(

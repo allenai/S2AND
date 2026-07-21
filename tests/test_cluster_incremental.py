@@ -1104,9 +1104,11 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
     assert telemetry["raw_arrow_reusable_planner_enabled"] == 1
 
 
-def test_cross_batch_require_constraint_wins_global_query_disallow_resolution(
+@pytest.mark.parametrize("batching_threshold", [1, 2])
+def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_complete_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    batching_threshold: int,
 ) -> None:
     query_ids = ["q-require", "q-score"]
     captured: dict[str, Any] = {"rescored": []}
@@ -1130,7 +1132,10 @@ def test_cross_batch_require_constraint_wins_global_query_disallow_resolution(
 
         def _finish_incremental_with_seed_links(self, *args: object, **_kwargs: object):
             captured["linked"] = dict(cast(Mapping[str, str], args[2]))
-            return {"c_seed": ["seed", *captured["linked"]]}
+            clusters = {"c_seed": ["seed"]}
+            for signature_id, component_id in captured["linked"].items():
+                clusters.setdefault(component_id, []).append(signature_id)
+            return clusters
 
     class FakeFeaturizer:
         def __init__(self, signature_ids: tuple[str, ...]) -> None:
@@ -1143,47 +1148,60 @@ def test_cross_batch_require_constraint_wins_global_query_disallow_resolution(
         return FakeFeaturizer(tuple(cast(Any, kwargs["signature_ids"])))
 
     def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
-        signature_id = str(cast(list[str], kwargs["query_signature_ids"])[0])
+        signature_ids = [str(value) for value in cast(list[str], kwargs["query_signature_ids"])]
         featurizer = cast(FakeFeaturizer, kwargs["rust_featurizer"])
         excluded = kwargs["cluster_seed_disallow_excluded_components"]
+        decisions = []
+        require_counts: list[float] = []
         if excluded is not None:
+            assert signature_ids == ["q-score"]
+            signature_id = signature_ids[0]
             captured["rescored"].append(signature_id)
-            decision = LinkOrAbstainDecision(
-                query_signature_index=featurizer.signature_ids().index(signature_id),
-                action="abstain",
-                row_index=None,
-                component_key=None,
-                score=None,
-                runner_up_score=None,
-                score_margin=None,
+            decisions.append(
+                LinkOrAbstainDecision(
+                    query_signature_index=featurizer.signature_ids().index(signature_id),
+                    action="link",
+                    row_index=0,
+                    component_key="c_outside_retained_top_k",
+                    score=0.60,
+                    runner_up_score=None,
+                    score_margin=None,
+                )
             )
-            require_count = np.asarray([], dtype=np.float32)
+            require_counts.append(0.0)
         else:
-            decision = LinkOrAbstainDecision(
-                query_signature_index=featurizer.signature_ids().index(signature_id),
-                action="link",
-                row_index=0,
-                component_key="c_seed",
-                score=0.70 if signature_id == "q-require" else 0.99,
-                runner_up_score=None,
-                score_margin=None,
-            )
-            require_count = np.asarray(
-                [1.0 if signature_id == "q-require" else 0.0],
-                dtype=np.float32,
-            )
+            for row_index, signature_id in enumerate(signature_ids):
+                decisions.append(
+                    LinkOrAbstainDecision(
+                        query_signature_index=featurizer.signature_ids().index(signature_id),
+                        action="link",
+                        row_index=row_index,
+                        component_key="c_seed",
+                        score=0.70 if signature_id == "q-require" else 0.99,
+                        runner_up_score=None,
+                        score_margin=None,
+                    )
+                )
+                require_counts.append(1.0 if signature_id == "q-require" else 0.0)
         return SimpleNamespace(
-            compact_result=SimpleNamespace(decisions=(decision,)),
+            compact_result=SimpleNamespace(decisions=tuple(decisions)),
             pairwise_model_result=SimpleNamespace(row_signals={}),
-            decision_row_signals={"constraint_require_count": require_count},
+            decision_row_signals={"constraint_require_count": np.asarray(require_counts, dtype=np.float32)},
             linked_signature_clusters={},
-            telemetry={"query_count": 1, "candidate_row_count": 1, "pair_count": 1},
+            telemetry={
+                "query_count": len(signature_ids),
+                "candidate_row_count": len(signature_ids),
+                "pair_count": len(signature_ids),
+            },
         )
 
     monkeypatch.setattr(
         production_module,
         "compute_promoted_incremental_limits",
-        lambda **kwargs: _mock_promoted_limits(query_count=int(kwargs["query_count"]), query_batch_size=1),
+        lambda **kwargs: _mock_promoted_limits(
+            query_count=int(kwargs["query_count"]),
+            query_batch_size=min(int(kwargs["query_count"]), batching_threshold),
+        ),
     )
     monkeypatch.setattr(
         production_module.runtime_module,
@@ -1207,16 +1225,22 @@ def test_cross_batch_require_constraint_wins_global_query_disallow_resolution(
         partial_supervision={},
         runtime_context=cast(Any, SimpleNamespace(run_id="test")),
         total_ram_bytes=100_000,
-        batching_threshold=1,
+        batching_threshold=batching_threshold,
     )
 
-    assert captured["linked"] == {"q-require": "c_seed"}
+    assert captured["linked"] == {
+        "q-require": "c_seed",
+        "q-score": "c_outside_retained_top_k",
+    }
     assert captured["rescored"] == ["q-score"]
-    assert result["clusters"] == {"c_seed": ["seed", "q-require"]}
+    assert result["clusters"] == {
+        "c_seed": ["seed", "q-require"],
+        "c_outside_retained_top_k": ["q-score"],
+    }
     assert result["incremental_linker_telemetry"]["global_query_disallow_rescore_count"] == 1
 
 
-def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
+def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1228,7 +1252,7 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
         )
 
     query_ids = [f"q{index:02d}" for index in range(20)]
-    captured: dict[str, Any] = {"featurizer_windows": [], "scored_batches": []}
+    captured: dict[str, Any] = {"featurizer_batches": [], "scored_batches": []}
 
     class FakeClusterer:
         n_jobs = 1
@@ -1245,7 +1269,7 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
 
     def fake_limits(**kwargs: object):
         query_count = int(kwargs["query_count"])
-        safe_size = 2 if captured["featurizer_windows"] else 10
+        safe_size = 2 if captured["featurizer_batches"] else 10
         return _mock_promoted_limits(
             query_count=query_count,
             query_batch_size=min(query_count, safe_size),
@@ -1253,7 +1277,7 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
 
     def fake_featurizer(*_args: object, **kwargs: object) -> object:
         signature_ids = tuple(cast(Any, kwargs["signature_ids"]))
-        captured["featurizer_windows"].append(signature_ids)
+        captured["featurizer_batches"].append(signature_ids)
         return object()
 
     def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
@@ -1286,11 +1310,13 @@ def test_promoted_linker_replans_window_when_post_featurizer_ram_limit_shrinks(
         batching_threshold=10,
     )
 
-    assert [len(window) for window in captured["planner_plans"]] == [20, 8, 8, 4]
-    assert [len(window) for window in captured["featurizer_windows"]] == [20, 8, 8, 4]
-    assert len(captured["scored_batches"]) == 10
-    assert {len(batch) for batch in captured["scored_batches"]} == {2}
-    assert result["incremental_linker_telemetry"]["raw_arrow_window_memory_replan_count"] == 1
+    scored_signature_ids = [signature_id for batch in captured["scored_batches"] for signature_id in batch]
+    assert scored_signature_ids == query_ids
+    assert all(1 <= len(batch) <= 2 for batch in captured["scored_batches"])
+    assert captured["featurizer_batches"] == captured["planner_plans"]
+    assert captured["featurizer_batches"][1:] == captured["scored_batches"]
+    assert result["clusters"] == {"c_seed": ["seed", *query_ids]}
+    assert result["incremental_linker_telemetry"]["raw_arrow_batch_memory_replan_count"] >= 1
 
 
 def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_query_exceeds_budget(
@@ -1451,24 +1477,6 @@ def test_predict_from_arrow_paths_passes_disallow_sidecar_to_rust_featurizer_onc
     assert captured["cluster_seeds_disallow"] == {("s1", "s2")}
 
 
-def test_raw_arrow_runtime_requires_name_counts_index_for_name_count_features() -> None:
-    clusterer = SimpleNamespace(featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]))
-
-    with pytest.raises(ValueError, match="requires name_counts_index"):
-        production_module.runtime_module.require_arrow_name_counts_index_for_clusterer(
-            clusterer,
-            {},
-            context="Raw Arrow scoring",
-        )
-
-    with pytest.raises(model_module.MissingArrowArtifactError, match="name_counts_index"):
-        production_module.runtime_module.require_arrow_name_counts_index_for_clusterer(
-            clusterer,
-            {"name_counts_index": "missing_name_counts_index"},
-            context="Raw Arrow scoring",
-        )
-
-
 def test_promoted_incremental_batch_telemetry_does_not_sum_absolute_memory_fields() -> None:
     merged = production_module.merge_promoted_incremental_batch_telemetry(
         [
@@ -1551,28 +1559,6 @@ def test_promoted_incremental_batch_telemetry_does_not_guess_unknown_numeric_sem
     assert merged["query_count"] == 2
     assert merged["new_metric"] == 3
     assert merged["new_metric_batch_conflict_count"] == 1
-
-
-def test_raw_window_plan_telemetry_marks_conflicting_string_values() -> None:
-    merged: dict[str, int | float | str] = {}
-
-    production_module._merge_raw_window_plan_telemetry(
-        merged,
-        {
-            "raw_arrow_window_plan_query_view": "full",
-            "raw_arrow_window_plan_signature_count": 3,
-        },
-    )
-    production_module._merge_raw_window_plan_telemetry(
-        merged,
-        {
-            "raw_arrow_window_plan_query_view": "initial_only",
-            "raw_arrow_window_plan_signature_count": 4,
-        },
-    )
-
-    assert merged["raw_arrow_window_plan_query_view"] == "__mixed__"
-    assert merged["raw_arrow_window_plan_signature_count"] == 7.0
 
 
 def test_predict_incremental_dont_use_cluster_seeds_flag(clusterer_dataset_factory):
@@ -1824,159 +1810,28 @@ def test_predict_subblocked_processes_subblocks_in_sorted_key_order(clusterer_da
     assert observed_order == ["block|subblock=alpha", "block|subblock=zeta"]
 
 
-def test_graph_subblocking_falls_back_to_legacy_specter_for_missing_files(clusterer_dataset_factory, monkeypatch):
-    clusterer, dataset = clusterer_dataset_factory(name="dummy_graph_io_legacy_fallback")
-    captured: dict[str, Any] = {}
+def test_clusterer_uses_graph_subblocking_directly_and_propagates_failures(
+    clusterer_dataset_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clusterer, dataset = clusterer_dataset_factory(name="dummy_graph_io_strict")
 
-    class FailingFallback:
-        load_seconds = 0.0
-        load_metrics = {}
-        stats: list[dict[str, Any]] = []
-
+    class FailingGraph:
         def __call__(self, *_args: object, **_kwargs: object) -> dict[str, list[str]]:
             raise FileNotFoundError("missing graph sidecar")
 
-    def fake_factory(*, config):
-        del config
-        return FailingFallback()
-
-    def fake_legacy(signature_ids, anddata, target_subblock_size=10000, **kwargs):
-        del anddata, target_subblock_size, kwargs
-        captured["legacy_signature_ids"] = list(signature_ids)
-        return {"legacy": list(signature_ids)}
-
-    monkeypatch.setattr(model_module, "make_dataset_graph_subblocking_cluster_fn", fake_factory)
-    monkeypatch.setattr(model_module, "cluster_with_specter", fake_legacy)
-
-    fallback = clusterer._subblocking_specter_cluster_fn(None, ["3", "4", "5"])
-    assert fallback is not None
-
-    output = fallback(["3", "4", "5"], dataset, target_subblock_size=2)
-
-    assert output == {"legacy": ["3", "4", "5"]}
-    assert captured["legacy_signature_ids"] == ["3", "4", "5"]
-    assert fallback.legacy_fallback_invocation_count == 1
-    assert fallback.graph_fallback_errors == [
-        {
-            "stage": "call",
-            "type": "FileNotFoundError",
-            "message": "missing graph sidecar",
-            "signature_count": 3,
-        }
-    ]
-    assert clusterer._last_graph_subblocking_telemetry["legacy_fallback_invocation_count"] == 1
-    assert clusterer._last_graph_subblocking_telemetry["graph_fallback_errors"] == fallback.graph_fallback_errors
-
-
-def test_predict_subblocked_publishes_graph_fallback_telemetry(clusterer_dataset_factory, monkeypatch):
-    clusterer, dataset = clusterer_dataset_factory(name="dummy_graph_fallback_telemetry")
-
-    class FailingFallback:
-        load_seconds = 0.0
-        load_metrics = {}
-        stats: list[dict[str, Any]] = []
-
-        def __call__(self, *_args: object, **_kwargs: object) -> dict[str, list[str]]:
-            raise FileNotFoundError("missing graph sidecar")
-
+    graph = FailingGraph()
     monkeypatch.setattr(
         model_module,
         "make_dataset_graph_subblocking_cluster_fn",
-        lambda *, config: FailingFallback(),
-    )
-    monkeypatch.setattr(
-        model_module,
-        "cluster_with_specter",
-        lambda signature_ids, _anddata, target_subblock_size=10000, **_kwargs: {
-            f"legacy_{index}": list(signature_ids[start : start + target_subblock_size])
-            for index, start in enumerate(range(0, len(signature_ids), target_subblock_size))
-        },
+        lambda *, config: graph,
     )
 
-    def fake_make_subblocks(
-        signatures,
-        anddata,
-        maximum_size=7500,
-        first_k_letter_counts_sorted=None,
-        *,
-        specter_cluster_fn,
-        **_kwargs,
-    ):
-        del first_k_letter_counts_sorted
-        return specter_cluster_fn(
-            signatures,
-            anddata,
-            target_subblock_size=maximum_size,
-        )
+    selected = clusterer._subblocking_graph_cluster_fn()
 
-    def fake_predict_helper(
-        self,
-        block_dict,
-        dataset,
-        dists=None,
-        cluster_model_params=None,
-        partial_supervision=None,
-        use_s2_clusters=False,
-        incremental_dont_use_cluster_seeds=False,
-        runtime_context=None,
-        total_ram_bytes=None,
-    ):
-        del self, dataset, dists, cluster_model_params, partial_supervision
-        del use_s2_clusters, incremental_dont_use_cluster_seeds, runtime_context, total_ram_bytes
-        block_key, signature_ids = next(iter(block_dict.items()))
-        return {block_key: list(signature_ids)}, None
-
-    monkeypatch.setattr(model_module, "make_subblocks", fake_make_subblocks)
-    monkeypatch.setattr(model_module, "_signature_first_for_rules", lambda _: "john")
-    monkeypatch.setattr(Clusterer, "predict_helper", fake_predict_helper)
-
-    clusterer.predict({"block": ["3", "4", "5"]}, dataset, batching_threshold=2)
-
-    assert clusterer._last_graph_subblocking_telemetry == {
-        "enabled": 1,
-        "mode": "graph",
-        "source": "anddata",
-        "candidate_signature_count": 3,
-        "legacy_fallback_invocation_count": 1,
-        "graph_prepare_failed": 0,
-        "graph_prepare_error": None,
-        "graph_fallback_errors": [
-            {
-                "stage": "call",
-                "type": "FileNotFoundError",
-                "message": "missing graph sidecar",
-                "signature_count": 3,
-            }
-        ],
-    }
-
-
-def test_arrow_graph_subblocking_io_errors_do_not_fall_back_to_legacy(clusterer_dataset_factory, monkeypatch):
-    _clusterer, dataset = clusterer_dataset_factory(name="dummy_arrow_graph_io_strict")
-
-    class FailingFallback:
-        load_seconds = 0.0
-        load_metrics = {}
-        stats: list[dict[str, Any]] = []
-
-        def __call__(self, *_args: object, **_kwargs: object) -> dict[str, list[str]]:
-            raise OSError("arrow mmap failed")
-
-    monkeypatch.setattr(
-        model_module,
-        "cluster_with_specter",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Arrow graph failures should not use legacy fallback")
-        ),
-    )
-
-    fallback = model_module._GraphSubblockingFallbackWithLegacyFallback(FailingFallback(), source="arrow")
-
-    with pytest.raises(OSError, match="arrow mmap failed"):
-        fallback(["3", "4", "5"], dataset, target_subblock_size=2)
-
-    assert fallback.legacy_fallback_invocation_count == 0
-    assert fallback.graph_fallback_errors == []
+    assert selected is graph
+    with pytest.raises(FileNotFoundError, match="missing graph sidecar"):
+        selected(["3", "4", "5"], dataset, target_subblock_size=2)
 
 
 def test_best_incremental_cluster_respects_seed_score_mode():
@@ -2474,27 +2329,6 @@ def test_cluster_seeds_arrow_read_is_request_local(monkeypatch, tmp_path: Path):
 
     assert second == {"seed0": "7", "seed1": "7"}
     assert open_file_call_count == 2
-
-
-def test_cluster_seed_disallows_arrow_read_is_request_local(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    disallow_path = tmp_path / "cluster_seed_disallows.arrow"
-    write_cluster_seed_disallows_arrow(disallow_path, [("seed0", "seed1")])
-    original_reader = model_module.read_cluster_seed_disallows_arrow
-    read_count = 0
-
-    def counting_reader(path: Path) -> tuple[tuple[str, str], ...]:
-        nonlocal read_count
-        read_count += 1
-        return original_reader(path)
-
-    monkeypatch.setattr(model_module, "read_cluster_seed_disallows_arrow", counting_reader)
-
-    assert model_module._read_cluster_seed_disallows_arrow(disallow_path) == {("seed0", "seed1")}
-    assert model_module._read_cluster_seed_disallows_arrow(disallow_path) == {("seed0", "seed1")}
-    assert read_count == 2
 
 
 def test_arrow_paths_need_current_cluster_seeds_rewrites_missing_seed_sidecar(tmp_path: Path):

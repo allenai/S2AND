@@ -65,8 +65,6 @@ exclude = ["s2and_rust*"]
 s2and = [
   "arrow_schema_contract.json",
   "data/path_config.json",
-  "data/first_k_letter_counts_from_orcid.manifest.json",
-  "data/orcid-prefix-counts-*/*.json",
   "data/s2and_name_tuples.txt",
   "data/s2and_name_tuples_filtered.txt",
   "data/s2and_name_tuples_canonical.txt",

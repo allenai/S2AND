@@ -38,20 +38,20 @@ when they do not directly alter normalization.
    digests, exact lookup parity, Python preprocessing latency, and peak RSS.
    Python and Rust runtime paths consume only this index.
 3. **Runtime validation and bundle binding complete; generation pending:**
-   regenerate the canonical versioned ORCID prefix-count generation and publish
-   `first_k_letter_counts_from_orcid.manifest.json`. Runtime loading is lazy but
-   requires the manifest, immutable generation, matching normalization/pair
-   semantics, source digest, metadata/data checksums, and exact cardinalities;
-   the unversioned JSON is no longer a fallback. Production training records
-   its exact data SHA-256 in `feature_contract`; export and load require that
-   hash to match the packaged priors used by default subblocking.
+   regenerate `first_k_letter_counts_from_orcid.json` and its adjacent
+   `.meta.json` sidecar. Runtime loading is lazy and requires the matching
+   schema, normalization version, pair semantics, and exact data SHA-256; a
+   data file without its sidecar is rejected. Production training records its
+   exact data SHA-256 in `feature_contract`; export and load require that hash
+   to match the packaged priors used by default subblocking.
 4. **Artifact validation and bundle binding complete:** deterministically
    regenerate and package `s2and/data/s2and_name_tuples_canonical.txt` with its
    strict source/data checksum, cardinality, normalization, and semantics
-   metadata. Python and Rust enforce the same validation. Production training
-   records the exact tuple-data SHA-256, and export/load compare it to the
-   packaged aliases. Future crash-atomic regeneration requires an approved
-   generation-pointer layout rather than same-path files.
+   metadata. Python validates the artifact once and supplies its frozen pairs
+   explicitly to Rust-backed flows. Production training records the exact
+   tuple-data SHA-256, and export/load compare it to the packaged aliases.
+   Future crash-atomic regeneration requires an approved generation-pointer
+   layout rather than same-path files.
 5. **Pending:** re-export benchmark training names by signature-ID join, report
    join/divergence metrics, and retrain the production v1.3 pairwise and
    incremental-linker bundle.
@@ -138,21 +138,18 @@ upstream blocks can contain both forms.
 
 ## Required Artifact Provenance
 
-Every normalization-sensitive artifact must record and validate:
+Each normalization-sensitive artifact records only the facts needed to bind its
+content and semantics. The shared minimum is an artifact schema, the
+`canonical_v2` normalization version, and a content digest. Richer source,
+generation, cardinality, or command provenance belongs only to artifacts whose
+lineage is part of the model contract, such as name counts, Arrow datasets, and
+trained model bundles. The small ORCID prior instead uses its direct data file
+and adjacent sidecar with schema, normalization, pair semantics, and data
+SHA-256.
 
-- artifact schema version;
-- `normalization_version = "canonical_v2"`;
-- immutable generation ID;
-- source snapshot/query/config digest;
-- content SHA-256 and byte size;
-- relevant row/key/cardinality/total-mass counts;
-- canonical tuple digest when tuple expansion affected generation;
-- producing git commit and dirty-state flag;
-- generation command and bounded/full-run mode.
-
-Provenance is copied from verified sources; writers must never infer it from the
-currently imported code. Data and metadata are staged, validated, fsynced, and
-published as one immutable generation with the pointer manifest replaced last.
+Provenance is copied from verified sources rather than inferred from the
+currently imported code. Each writer uses its own publication contract; there
+is no universal generation-pointer or fsync protocol.
 
 The release validator must compare, not merely parse, normalization and
 generation contracts across:
@@ -240,11 +237,12 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
   one lexicographically canonical row per unordered pair, and source
   filename/SHA-256/size. Its generation audit separately counts empty, identity,
   prefix-compatible, and duplicate canonical rows and requires those counts
-  plus the output cardinality to equal the input cardinality. Both Python and
-  Rust reject a missing, mismatched, or semantically invalid sidecar before
-  accepting aliases. An explicit custom text path must carry the same adjacent
-  strict sidecar; pass an explicit set (including an empty set) when the aliases
-  are intentionally caller-owned instead of an artifact.
+  plus the output cardinality to equal the input cardinality. Python rejects a
+  missing, mismatched, or semantically invalid sidecar before accepting aliases
+  and passes validated pairs explicitly to Rust-backed flows. An explicit custom
+  text path must carry the same adjacent strict sidecar; pass an explicit set
+  (including an empty set) when the aliases are intentionally caller-owned
+  instead of an artifact.
 - Tuple generation publishes fsynced data first and metadata last, and is only
   safe as an offline staging operation. A process crash between the two
   same-path replacements can leave a fail-closed mixed pair; rerun generation
@@ -252,11 +250,11 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
   rollback would require a generation-directory/pointer layout and therefore a
   separately approved artifact schema/layout change.
 - Tuple binding: `s2and.name_tuple_artifact.load_name_tuple_artifact` retains
-  the validated pairs and their data SHA-256. Rust applies the same strict
-  sidecar and row validation while loading aliases, without maintaining a
-  second identity-inspection API. Production `feature_contract` contains
-  `name_tuples_data_sha256` and `orcid_prefix_counts_data_sha256`; bundle export
-  and load require both to match the installed canonical data.
+  the validated pairs and their data SHA-256. Rust consumes those explicit
+  pairs without maintaining a second artifact loader or identity-inspection
+  API. Production `feature_contract` contains `name_tuples_data_sha256` and
+  `orcid_prefix_counts_data_sha256`; bundle export and load require both to
+  match the installed canonical data.
 - Frozen examples: `tests/fixtures/canonical_name_examples.json` and
   `tests/test_canonical_name_examples.py`.
 - Version-contract tests: `tests/test_normalization_version_contract.py`.

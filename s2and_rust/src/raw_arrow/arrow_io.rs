@@ -162,17 +162,6 @@ pub(crate) fn arrow_optional_f64(
         return Ok(None);
     }
     match array.data_type() {
-        DataType::Float32 => {
-            let values = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyTypeError::new_err(format!(
-                        "{context} is not a Float32 array"
-                    ))
-                })?;
-            Ok(Some(values.value(row) as f64))
-        }
         DataType::Float64 => {
             let values = array
                 .as_any()
@@ -186,7 +175,7 @@ pub(crate) fn arrow_optional_f64(
         }
         DataType::Null => Ok(None),
         other => Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "{context} must be a float column, got {other:?}"
+            "{context} must be a Float64 column, got {other:?}"
         ))),
     }
 }

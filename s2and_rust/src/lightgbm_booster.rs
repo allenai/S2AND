@@ -56,44 +56,11 @@ fn is_zero_f32(fval: f32) -> bool {
     (-K_ZERO_THRESHOLD_F32..=K_ZERO_THRESHOLD_F32).contains(&fval)
 }
 
-#[inline]
-fn previous_f32(value: f32) -> f32 {
-    if value.is_nan() || value == f32::NEG_INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return -f32::from_bits(1);
-    }
-    let bits = value.to_bits();
-    if value.is_sign_positive() {
-        f32::from_bits(bits - 1)
-    } else {
-        f32::from_bits(bits + 1)
-    }
-}
-
-#[inline]
-fn f32_comparison_floor(threshold: f64) -> f32 {
-    let rounded = threshold as f32;
-    if rounded.is_nan() || f64::from(rounded) <= threshold {
-        rounded
-    } else {
-        previous_f32(rounded)
-    }
-}
-
 #[derive(Debug, Clone)]
 struct LgbTree {
     num_leaves: usize,
-    // S2AND boosters have tens of features. Keeping indices at u16 width
-    // offsets half of the exact f32 threshold cache, so the retained model
-    // stays below the 10% memory-growth budget without slowing traversal.
     split_feature: Vec<u16>,
     threshold: Vec<f64>,
-    // Largest f32 whose lossless f64 widening is <= the model threshold.
-    // This makes the f32 scorer comparison exact without widening every split
-    // read in the hot loop.
-    threshold_f32_floor: Box<[f32]>,
     decision_type: Vec<u8>,
     left_child: Vec<i32>,
     right_child: Vec<i32>,
@@ -150,7 +117,7 @@ impl LgbTree {
                 (
                     *self.decision_type.get_unchecked(node),
                     usize::from(*self.split_feature.get_unchecked(node)),
-                    *self.threshold_f32_floor.get_unchecked(node),
+                    *self.threshold.get_unchecked(node),
                     *self.left_child.get_unchecked(node),
                     *self.right_child.get_unchecked(node),
                 )
@@ -170,7 +137,7 @@ impl LgbTree {
                 } else {
                     right_child
                 }
-            } else if fval <= threshold {
+            } else if f64::from(fval) <= threshold {
                 left_child
             } else {
                 right_child
@@ -289,7 +256,6 @@ fn parse_tree(
             num_leaves,
             split_feature: Vec::new(),
             threshold: Vec::new(),
-            threshold_f32_floor: Box::default(),
             decision_type: Vec::new(),
             left_child: Vec::new(),
             right_child: Vec::new(),
@@ -300,11 +266,6 @@ fn parse_tree(
     let internal_count = num_leaves - 1;
     let split_feature: Vec<u16> = parse_vec(fields, "split_feature")?;
     let threshold: Vec<f64> = parse_vec(fields, "threshold")?;
-    let threshold_f32_floor = threshold
-        .iter()
-        .map(|value| f32_comparison_floor(*value))
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
     let decision_type: Vec<u8> = parse_vec(fields, "decision_type")?;
     let left_child: Vec<i32> = parse_vec(fields, "left_child")?;
     let right_child: Vec<i32> = parse_vec(fields, "right_child")?;
@@ -366,7 +327,6 @@ fn parse_tree(
         num_leaves,
         split_feature,
         threshold,
-        threshold_f32_floor,
         decision_type,
         left_child,
         right_child,
@@ -622,8 +582,7 @@ impl RustLightGBMBooster {
         }
         let threads = num_threads.unwrap_or(1).max(1);
         let model = &self.model;
-        // Keep the owned GIL-independent copy at the caller's float32 width;
-        // precomputed exact f32 comparison floors avoid widening in traversal.
+        // Keep the owned GIL-independent copy at the caller's float32 width.
         let rows: Vec<f32> = features.as_array().iter().copied().collect();
         let scores = py.allow_threads(move || {
             predict_rows_f32(model, &rows, column_count, threads, apply_sigmoid)
@@ -817,6 +776,21 @@ mod tests {
         }
     }
 
+    fn previous_f32(value: f32) -> f32 {
+        if value.is_nan() || value == f32::NEG_INFINITY {
+            return value;
+        }
+        if value == 0.0 {
+            return -f32::from_bits(1);
+        }
+        let bits = value.to_bits();
+        if value.is_sign_positive() {
+            f32::from_bits(bits - 1)
+        } else {
+            f32::from_bits(bits + 1)
+        }
+    }
+
     #[test]
     fn toy_model_decision_semantics() {
         let model = parse_model(TOY_MODEL).unwrap();
@@ -891,84 +865,6 @@ mod tests {
                 predict_rows(&model, &rows_f64, 2, 1, false),
                 "decision_type={decision_type}",
             );
-        }
-    }
-
-    #[test]
-    fn float32_threshold_floor_matches_lossless_widening() {
-        let anchors = [
-            f32::NEG_INFINITY,
-            -f32::MAX,
-            -1.0,
-            -f32::from_bits(1),
-            -0.0,
-            0.0,
-            f32::from_bits(1),
-            0.1,
-            1.0,
-            f32::MAX,
-            f32::INFINITY,
-        ];
-        let mut thresholds = vec![
-            f64::NEG_INFINITY,
-            -(f32::MAX as f64) * 2.0,
-            -0.1,
-            -f64::from(f32::from_bits(1)) / 2.0,
-            -0.0,
-            0.0,
-            f64::from(f32::from_bits(1)) / 2.0,
-            0.1,
-            (f64::from(1.0_f32) + f64::from(next_f32(1.0))) / 2.0,
-            (f32::MAX as f64) * 2.0,
-            f64::INFINITY,
-            f64::NAN,
-        ];
-        thresholds.extend(anchors.iter().copied().map(f64::from));
-
-        for threshold in thresholds {
-            let floor = f32_comparison_floor(threshold);
-            let rounded = threshold as f32;
-            let candidates = [
-                f32::NEG_INFINITY,
-                previous_f32(rounded),
-                rounded,
-                next_f32(rounded),
-                -0.0,
-                0.0,
-                f32::INFINITY,
-                f32::NAN,
-            ];
-            for candidate in candidates {
-                assert_eq!(
-                    f64::from(candidate) <= threshold,
-                    candidate <= floor,
-                    "candidate={candidate:?} threshold={threshold:?} floor={floor:?}",
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn float32_threshold_floor_random_bit_patterns_match_lossless_widening() {
-        let mut state = 0x8fd5_5a2d_d1b5_4a32_u64;
-        for _ in 0..100_000 {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let threshold = f64::from_bits(state);
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let arbitrary = f32::from_bits(state as u32);
-            let floor = f32_comparison_floor(threshold);
-            let rounded = threshold as f32;
-            for candidate in [arbitrary, previous_f32(rounded), rounded, next_f32(rounded)] {
-                assert_eq!(
-                    f64::from(candidate) <= threshold,
-                    candidate <= floor,
-                    "candidate={candidate:?} threshold={threshold:?} floor={floor:?}",
-                );
-            }
         }
     }
 

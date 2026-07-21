@@ -84,6 +84,24 @@ def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path
         load_name_tuple_artifact(artifact_path)
 
 
+def test_loader_reads_data_and_metadata_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact_path = tmp_path / "aliases.txt"
+    metadata_path = Path(str(artifact_path) + ".meta.json")
+    _write_artifact(artifact_path)
+    path_type = type(artifact_path)
+    read_bytes = path_type.read_bytes
+    reads: list[Path] = []
+
+    def recording_read_bytes(path: Path) -> bytes:
+        reads.append(path)
+        return read_bytes(path)
+
+    monkeypatch.setattr(path_type, "read_bytes", recording_read_bytes)
+
+    assert load_name_tuple_artifact(artifact_path).pairs == frozenset({("alice", "ally")})
+    assert reads == [metadata_path, artifact_path]
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

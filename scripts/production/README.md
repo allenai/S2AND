@@ -24,7 +24,6 @@ production_model_vX.Y/
   pairwise/
     main.lgb
     nameless.lgb
-    metadata.json
     main_prediction_fixture.json
     nameless_prediction_fixture.json
   reproducibility/
@@ -103,12 +102,11 @@ The `counts/` scripts document production count artifacts:
   retains the full dictionaries. Models compare the exact generation/source
   binding before feature work.
 - `counts/generate_orcid_name_prefix_counts.py` writes canonical unordered
-  ORCID prefix pairs into an immutable generation and publishes
-  `first_k_letter_counts_from_orcid.manifest.json` last. The runtime accepts
-  only a fully verified generation; it never falls back to the old unversioned
-  JSON. `--max-names-per-orcid` is checked before quadratic pair expansion.
-  Publication uses deterministic native JSON encoding, validation/fsync, a
-  cross-process lock, and a pointer-last commit.
+  ORCID prefix pairs directly to `first_k_letter_counts_from_orcid.json` with
+  an adjacent `.meta.json` sidecar. The runtime verifies the normalization and
+  pair semantics plus the exact data SHA-256; it never accepts the data file
+  without its sidecar. `--max-names-per-orcid` is checked before quadratic pair
+  expansion.
 
 Both scripts are import-safe without the internal warehouse package. Start
 with `--help`, `--dry-run`, or a small `--input-json` fixture. A full internal

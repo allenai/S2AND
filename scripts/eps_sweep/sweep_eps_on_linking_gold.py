@@ -91,7 +91,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, required=True, help="Complete native production bundle path.")
     parser.add_argument("--gold-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--backend", choices=["auto", "rust"], default="rust")
     parser.add_argument("--n-jobs", type=int, default=8)
     parser.add_argument("--batching-threshold", type=int, default=5000)
     parser.add_argument("--pair-chunk-size", type=int, default=1_000_000)
@@ -100,17 +99,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use ORCID values during subblock merging. Defaults off for EPS selection.",
     )
-    orcid_constraint_group = parser.add_mutually_exclusive_group()
-    orcid_constraint_group.add_argument(
-        "--suppress-orcid-constraints",
-        action="store_true",
-        default=True,
-        help="Disable same-ORCID hard-link distance constraints. This is the default for EPS selection.",
-    )
-    orcid_constraint_group.add_argument(
+    parser.add_argument(
         "--use-orcid-constraints",
         dest="suppress_orcid_constraints",
         action="store_false",
+        default=True,
         help="Enable same-ORCID hard-link distance constraints for old-artifact parity checks.",
     )
     parser.add_argument("--eps-start", type=float, default=0.40)
@@ -1091,7 +1084,7 @@ def _loggable_metric(value: Any) -> float:
 def _configure_runtime_environment(args: argparse.Namespace) -> None:
     """Configure backend/thread environment variables."""
 
-    os.environ["S2AND_BACKEND"] = args.backend
+    os.environ["S2AND_BACKEND"] = "rust"
     os.environ["OMP_NUM_THREADS"] = str(args.n_jobs)
     os.environ["RAYON_NUM_THREADS"] = str(args.n_jobs)
 

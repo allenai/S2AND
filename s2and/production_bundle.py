@@ -6,25 +6,21 @@ import hashlib
 import json
 import os
 import shutil
-import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import lightgbm as lgb
 import numpy as np
 
-from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.model import Clusterer, _selected_feature_indices
-from s2and.model_pairwise import _validated_classifier_features
+from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
-    PAIRWISE_METADATA_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
@@ -94,21 +90,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _booster_from_model(model: Any) -> lgb.Booster:
-    if isinstance(model, lgb.Booster):
-        return model
-    inner = getattr(model, "classifier", None)
-    if inner is not None and inner is not model:
-        return _booster_from_model(inner)
-    booster = getattr(model, "booster_", None)
-    if isinstance(booster, lgb.Booster):
-        return booster
-    booster = getattr(model, "_Booster", None)
-    if isinstance(booster, lgb.Booster):
-        return booster
-    raise TypeError(f"Expected a fitted LightGBM model, got {type(model)!r}")
-
-
 def _predict_proba(model: Any, features: np.ndarray) -> np.ndarray:
     matrix = np.asarray(features, dtype=np.float64, order="C")
     predict_proba = getattr(model, "predict_proba", None)
@@ -118,7 +99,7 @@ def _predict_proba(model: Any, features: np.ndarray) -> np.ndarray:
             dtype=np.float64,
         )
     else:
-        positive = np.asarray(_booster_from_model(model).predict(matrix), dtype=np.float64).reshape(-1)
+        positive = np.asarray(lightgbm_booster(model).predict(matrix), dtype=np.float64).reshape(-1)
         probabilities = np.column_stack((1.0 - positive, positive))
     if probabilities.ndim == 1:
         probabilities = np.column_stack((1.0 - probabilities, probabilities))
@@ -190,19 +171,9 @@ def _clusterer_config_payload(
     }
 
 
-def _pairwise_metadata_payload() -> dict[str, Any]:
-    return {
-        "class_labels": [0.0, 1.0],
-        "distance_probability_column": "class_0",
-        "model_family": "binary_lightgbm_pairwise_distance",
-        "positive_probability_column": "class_1",
-        "schema_version": PAIRWISE_METADATA_SCHEMA_VERSION,
-    }
-
-
 def _write_pairwise_model(model: Any, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    _booster_from_model(model).save_model(str(path))
+    lightgbm_booster(model).save_model(str(path))
 
 
 def _write_pairwise_fixture(model: Any, path: Path, *, width: int, seed: int) -> None:
@@ -304,8 +275,6 @@ def _write_pairwise_production_bundle_stage(
         clusterer,
         nameless_featurizer_info=nameless_featurizer_info,
     )
-    pairwise_metadata_payload = _pairwise_metadata_payload()
-
     _write_pairwise_model(clusterer.classifier, pairwise_dir / "main.lgb")
     _write_pairwise_model(clusterer.nameless_classifier, pairwise_dir / "nameless.lgb")
     _write_pairwise_fixture(
@@ -319,10 +288,6 @@ def _write_pairwise_production_bundle_stage(
         pairwise_dir / "nameless_prediction_fixture.json",
         width=nameless_width,
         seed=PAIRWISE_FIXTURE_SEED + 1,
-    )
-    _write_json(
-        pairwise_dir / "metadata.json",
-        pairwise_metadata_payload,
     )
     _write_json(bundle_dir / "clusterer.json", clusterer_payload)
 
@@ -368,7 +333,6 @@ def write_pairwise_production_bundle(
             pairwise_training_summary=pairwise_training_summary,
         )
         _load_pairwise_staging_model(staging_dir)
-        _fsync_tree(staging_dir)
         _publish_staged_bundle(staging_dir, bundle_dir)
     finally:
         if staging_dir.exists():
@@ -403,48 +367,19 @@ def _copy_pairwise_stage(source_bundle_dir: Path, output_bundle_dir: Path) -> No
             _copy_path(path, output_bundle_dir / "reproducibility" / path.name)
 
 
-def _fsync_tree(root: Path) -> None:
-    for path in sorted((path for path in root.rglob("*") if path.is_file()), key=lambda item: item.as_posix()):
-        if os.name == "nt":
-            # The Windows CRT rejects fsync on a read-only descriptor. Staging
-            # files are private, so temporarily add owner-write permission,
-            # flush through a writable descriptor, then restore the copied mode.
-            original_mode = path.stat().st_mode
-            restore_mode = not bool(original_mode & stat.S_IWRITE)
-            if restore_mode:
-                path.chmod(original_mode | stat.S_IWRITE)
-            try:
-                with path.open("rb+") as handle:
-                    os.fsync(handle.fileno())
-            finally:
-                if restore_mode:
-                    path.chmod(original_mode)
-        else:
-            with path.open("rb") as handle:
-                os.fsync(handle.fileno())
-    if os.name != "nt":
-        directories = [root, *(path for path in root.rglob("*") if path.is_dir())]
-        for directory in sorted(
-            directories,
-            key=lambda item: len(item.parts),
-            reverse=True,
-        ):
-            descriptor = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-
-
 def _publish_staged_bundle(staging_dir: Path, destination: Path) -> None:
     """Rename one complete staging directory into a new destination."""
 
-    lock_path = destination.parent / f".{destination.name}.publish.lock"
-    with exclusive_file_lock(lock_path):
-        if destination.exists():
-            raise FileExistsError(f"Production bundle output already exists; choose a new directory: {destination}")
+    if destination.exists():
+        raise FileExistsError(f"Production bundle output already exists; choose a new directory: {destination}")
+    try:
         os.replace(staging_dir, destination)
-        fsync_directory(destination.parent)
+    except OSError:
+        if destination.exists():
+            raise FileExistsError(
+                f"Production bundle output already exists; choose a new directory: {destination}"
+            ) from None
+        raise
 
 
 def finalize_production_bundle(
@@ -512,7 +447,6 @@ def finalize_production_bundle(
             incremental_linker_version=str(incremental_linker_version or resolved_bundle_version),
         )
         load_production_model(staging_dir)
-        _fsync_tree(staging_dir)
         _publish_staged_bundle(staging_dir, output_bundle_dir)
     finally:
         if staging_dir.exists():

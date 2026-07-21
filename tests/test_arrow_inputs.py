@@ -386,15 +386,20 @@ def test_validated_arrow_inputs_mapping_is_immutable(tmp_path: Path) -> None:
     assert validated["signatures"] == original_signature_path
 
 
-def test_validated_arrow_inputs_rejects_direct_construction_and_subclassing() -> None:
-    with pytest.raises(TypeError, match="cannot be constructed directly"):
-        ValidatedArrowInputs(
-            paths={"signatures": "unverified.arrow"},
-            generation_id="forged-generation",
-            normalization_version="canonical_v2",
-        )
-    with pytest.raises(TypeError, match="cannot be subclassed"):
-        type("ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
+def test_validated_arrow_inputs_constructor_copies_and_normalizes_values() -> None:
+    paths = {"signatures": "signatures.arrow"}
+    validated = ValidatedArrowInputs(
+        paths=paths,
+        generation_id=123,
+        normalization_version="canonical_v2",
+    )
+
+    paths["signatures"] = "other.arrow"
+    assert validated["signatures"] == "signatures.arrow"
+    assert validated.generation_id == "123"
+    assert validated.normalization_version == "canonical_v2"
+    with pytest.raises(AttributeError):
+        validated.generation_id = "other"  # type: ignore[misc]
 
 
 def test_normalize_arrow_paths_resolves_relative_paths_at_boundary(

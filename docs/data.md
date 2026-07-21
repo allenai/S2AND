@@ -60,7 +60,7 @@ The previous production model is a native bundle directory:
 - `s2and/data/production_model_v1.21/clusterer.json`
 - `s2and/data/production_model_v1.21/pairwise/main.lgb`
 - `s2and/data/production_model_v1.21/pairwise/nameless.lgb`
-- `s2and/data/production_model_v1.21/pairwise/metadata.json`
+- `s2and/data/production_model_v1.21/pairwise/metadata.json` (legacy v1 only)
 - `s2and/data/production_model_v1.21/pairwise/main_prediction_fixture.json`
 - `s2and/data/production_model_v1.21/pairwise/nameless_prediction_fixture.json`
 - `s2and/data/production_model_v1.21/incremental_linker/booster.lgb`

@@ -6,9 +6,9 @@ This inventory records the current Python-visible `s2and_rust` surface before
 module splitting or API deletion. It is intentionally about ownership and
 cleanup risk, not a user-facing API promise.
 
-Python callers target exactly `s2and-rust==0.60.0`. Maintained calls are
-direct: the Python runtime checks the extension version once when Rust is
-requested and does not probe individual methods or constants.
+Python callers target the exact `s2and-rust` version pinned by the project.
+Maintained calls are direct: the Python runtime checks the extension version
+once when Rust is requested and does not probe individual methods or constants.
 
 ## Module Exports
 
@@ -54,7 +54,7 @@ requested and does not probe individual methods or constants.
 | `RustHybridCentroidRetriever.__new__(...)` | raw Arrow planners, training query support, tests | Maintained constructor. |
 | `top_k_hybrid_centroid_pair_plan(...)` | `s2and/incremental_linking/retrieval.py`, raw Arrow planners | Canonical runtime retrieval output. |
 | `top_k_hybrid_centroid_subset(...)` | `s2and/incremental_linking_training/query_support.py`, tests | Fixed Rust-owned training/query-support scoring surface. |
-| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; automatically selected promoted query windows use the separate constructor without a temporary empty sidecar. |
+| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; automatically selected promoted query batches use the separate constructor without a temporary empty sidecar. |
 
 ## Python Wrapper Ownership
 

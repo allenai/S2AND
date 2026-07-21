@@ -801,7 +801,7 @@ mod null_required_string_tests {
 #[cfg(test)]
 mod language_reliability_tests {
     use super::read_raw_arrow_papers_from_batches;
-    use arrow::array::{ArrayRef, BooleanArray, Float64Array, StringArray};
+    use arrow::array::{ArrayRef, BooleanArray, Float32Array, Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use pyo3::types::PyAnyMethods;
@@ -827,6 +827,18 @@ mod language_reliability_tests {
         is_reliable: Option<bool>,
         language_reliability: Option<f64>,
     ) -> RecordBatch {
+        papers_batch_with_reliability_column(
+            predicted_language,
+            is_reliable,
+            Arc::new(Float64Array::from(vec![language_reliability])),
+        )
+    }
+
+    fn papers_batch_with_reliability_column(
+        predicted_language: Option<&str>,
+        is_reliable: Option<bool>,
+        language_reliability: ArrayRef,
+    ) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("paper_id", DataType::Utf8, false),
             Field::new("title", DataType::Utf8, true),
@@ -834,7 +846,11 @@ mod language_reliability_tests {
             Field::new("journal_name", DataType::Utf8, true),
             Field::new("predicted_language", DataType::Utf8, true),
             Field::new("is_reliable", DataType::Boolean, true),
-            Field::new("language_reliability", DataType::Float64, true),
+            Field::new(
+                "language_reliability",
+                language_reliability.data_type().clone(),
+                true,
+            ),
         ]));
         let columns: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(vec![Some("p1")])),
@@ -843,9 +859,29 @@ mod language_reliability_tests {
             Arc::new(StringArray::from(vec![None::<&str>])),
             Arc::new(StringArray::from(vec![predicted_language])),
             Arc::new(BooleanArray::from(vec![is_reliable])),
-            Arc::new(Float64Array::from(vec![language_reliability])),
+            language_reliability,
         ];
         RecordBatch::try_new(schema, columns).expect("valid language-reliability batch")
+    }
+
+    #[test]
+    fn float32_language_reliability_is_rejected() {
+        let err = read_raw_arrow_papers_from_batches(
+            "<test>",
+            vec![papers_batch_with_reliability_column(
+                Some("en"),
+                Some(true),
+                Arc::new(Float32Array::from(vec![Some(0.75)])),
+            )],
+            None,
+        )
+        .err()
+        .expect("Float32 language reliability must fail");
+        let message = py_err_message(err);
+        assert!(
+            message.contains("language_reliability must be a Float64 column, got Float32"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -675,7 +675,7 @@ def test_validate_arrow_dataset_manifest_rejects_missing_contract_required_colum
     else:
         raise AssertionError(f"unexpected table_name: {table_name}")
 
-    with pytest.raises(KeyError, match=missing_column):
+    with pytest.raises(ValueError, match=missing_column):
         convert_to_arrow.validate_arrow_dataset_manifest(
             {
                 "normalization_version": NORMALIZATION_VERSION,
@@ -687,6 +687,41 @@ def test_validate_arrow_dataset_manifest_rejects_missing_contract_required_colum
                 },
             },
             require_embeddings=require_embeddings,
+            require_name_counts_index=False,
+        )
+
+
+def test_validate_arrow_dataset_manifest_rejects_malformed_optional_column(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    signatures_path = tmp_path / "signatures.arrow"
+    papers_path = tmp_path / "papers.arrow"
+    paper_authors_path = tmp_path / "paper_authors.arrow"
+    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
+    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "title": pa.array(["Notes"], type=pa.string()),
+                "venue": pa.array(["Proceedings"], type=pa.string()),
+                "journal_name": pa.array(["Journal"], type=pa.string()),
+                "language_reliability": pa.array([0.75], type=pa.float32()),
+            }
+        ),
+        papers_path,
+    )
+
+    with pytest.raises(ValueError, match="language_reliability.*expected float64"):
+        convert_to_arrow.validate_arrow_dataset_manifest(
+            {
+                "normalization_version": NORMALIZATION_VERSION,
+                "paths": {
+                    "signatures": str(signatures_path),
+                    "papers": str(papers_path),
+                    "paper_authors": str(paper_authors_path),
+                },
+            },
+            require_embeddings=False,
             require_name_counts_index=False,
         )
 

@@ -217,19 +217,16 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Single pairwise-binding authority
 
-**Status: Approved 2026-07-20; Open**
+**Status: Complete**
 
-- Make `pairwise_bundle_binding` an explicit artifact save/build argument and
-  persist it only in the validated top-level field. Today
-  `save_incremental_linking_artifact` extracts the binding from
-  `audit_metadata["pairwise_bundle_binding"]` and both copies persist.
-- Reject the reserved key in new `audit_metadata`.
-- Existing artifacts may load an old nested audit copy as inert historical
-  metadata.
-- Do not preserve two authorities by validating duplicate copies forever.
-
-Owner approved the callable API and serialized-output change; no canonical
-bundle has been generated under the old layout.
+- `pairwise_bundle_binding` is an explicit required argument on
+  `save_incremental_linking_artifact` and metadata `build`; only the validated
+  top-level field persists.
+- New `audit_metadata` rejects the reserved `pairwise_bundle_binding` key.
+- Existing artifacts load an old nested audit copy as inert historical
+  metadata (regression-tested).
+- Owner approved the callable API and serialized-output change 2026-07-20; no
+  canonical bundle was generated under the old layout.
 
 ### Single-pass bundle validation
 

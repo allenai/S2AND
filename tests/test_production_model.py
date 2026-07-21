@@ -134,7 +134,7 @@ def _write_synthetic_linker(pairwise_bundle: Path, linker_dir: Path) -> Path:
         linker_dir,
         prediction_fixture_matrix=fixture,
         gate_config=gate_config,
-        audit_metadata={"pairwise_bundle_binding": pairwise_bundle_binding(pairwise_bundle)},
+        pairwise_bundle_binding=pairwise_bundle_binding(pairwise_bundle),
     )
     target = linker_dir.parent / "target.json"
     target.write_text("{}\n", encoding="utf-8")

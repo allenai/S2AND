@@ -259,6 +259,11 @@ class IncrementalLinkingArtifactMetadata:
         fixture_matrix = tuple(tuple(float(value) for value in row) for row in prediction_fixture_matrix)
         fixture_probabilities = tuple(float(value) for value in prediction_fixture_expected_probabilities)
         resolved_audit_metadata = dict(audit_metadata or {})
+        if "pairwise_bundle_binding" in resolved_audit_metadata:
+            raise ValueError(
+                "audit_metadata key 'pairwise_bundle_binding' is reserved; "
+                "pass pairwise_bundle_binding as the explicit argument"
+            )
         resolved_audit_metadata.setdefault(
             "runtime_decision_policy",
             retrieval_constraint_decision_policy_payload(),
@@ -507,6 +512,7 @@ def save_incremental_linking_artifact(
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
     gate_config: Mapping[str, Any] | None = None,
     prediction_fixture_matrix: Sequence[Sequence[float]] | np.ndarray,
+    pairwise_bundle_binding: Mapping[str, Any],
     audit_metadata: Mapping[str, Any] | None = None,
 ) -> IncrementalLinkingArtifactMetadata:
     """Write `booster.lgb` and `metadata.json` for a fitted linker model."""
@@ -527,9 +533,9 @@ def save_incremental_linking_artifact(
     fixture_rows = tuple(tuple(float(value) for value in row) for row in fixture.tolist())
     expected_probability_values = tuple(float(value) for value in expected_probabilities.tolist())
     lightgbm_version = _required_lightgbm_version()
-    pairwise_bundle_binding = dict((audit_metadata or {}).get("pairwise_bundle_binding", {}))
+    pairwise_bundle_binding = dict(pairwise_bundle_binding)
     if not pairwise_bundle_binding:
-        raise ValueError("audit_metadata.pairwise_bundle_binding is required")
+        raise ValueError("pairwise_bundle_binding is required and must be non-empty")
 
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{artifact_dir.name}.staging-", dir=artifact_dir.parent))

@@ -262,7 +262,6 @@ def _linker_artifact_audit_metadata(
         "target_status": str(target.get("status", "")),
         "target_metrics": dict(target.get("metrics", {})),
         "pairwise_model": pairwise_model,
-        "pairwise_bundle_binding": pairwise_bundle_binding(pairwise_model_path),
         "training_source_bundle": _portable_repo_path(Path(args.source_bundle_root)),
         "training_feature_mode": str(args.feature_mode),
         "precomputed_feature_bundle": (
@@ -2273,6 +2272,7 @@ def _train_and_save_prod_artifact(
     classic_summary: Mapping[str, Any],
     output_dir: Path,
     save_artifact_to: Path,
+    artifact_pairwise_bundle_binding: Mapping[str, Any],
     artifact_audit_metadata: Mapping[str, Any] | None,
     holdout_importance_weight: float,
 ) -> dict[str, Any]:
@@ -2344,6 +2344,7 @@ def _train_and_save_prod_artifact(
         retrieval_top_k=retrieval_top_k,
         gate_config=logistic_gate_config,
         prediction_fixture_matrix=train_matrix[:5],
+        pairwise_bundle_binding=artifact_pairwise_bundle_binding,
         audit_metadata=audit_metadata,
     )
     summary = {
@@ -2596,16 +2597,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             save_artifact_to = output_dir / "production_incremental_linker"
         if save_artifact_to == production_bundle_dir or save_artifact_to.is_relative_to(production_bundle_dir):
             raise SystemExit("--save-artifact-to must be outside --save-production-bundle-to")
-    artifact_audit_metadata = (
-        _linker_artifact_audit_metadata(
+    artifact_pairwise_binding: dict[str, Any] | None = None
+    artifact_audit_metadata = None
+    if save_artifact_to is not None:
+        artifact_pairwise_binding = dict(pairwise_bundle_binding(Path(args.pairwise_model_path)))
+        artifact_audit_metadata = _linker_artifact_audit_metadata(
             args=args,
             target=target,
             feature_bundle=feature_bundle,
             featureization_summaries=featureization_summaries,
         )
-        if save_artifact_to is not None
-        else None
-    )
     summary = run_classic(
         feature_bundle,
         run_output_dir,
@@ -2628,11 +2629,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     prod_artifact_summary = None
     production_bundle_summary = None
     if save_artifact_to is not None:
+        assert artifact_pairwise_binding is not None
         prod_artifact_summary = _train_and_save_prod_artifact(
             feature_bundle=feature_bundle,
             classic_summary=summary,
             output_dir=output_dir,
             save_artifact_to=save_artifact_to,
+            artifact_pairwise_bundle_binding=artifact_pairwise_binding,
             artifact_audit_metadata=artifact_audit_metadata,
             holdout_importance_weight=float(args.prod_holdout_importance_weight),
         )

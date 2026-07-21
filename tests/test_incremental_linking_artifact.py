@@ -94,10 +94,10 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
+        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         audit_metadata={
             "artifact_version": "v1.2",
             "pairwise_model": {"version": "1.2"},
-            "pairwise_bundle_binding": synthetic_pairwise_bundle_binding(),
         },
     )
 
@@ -127,6 +127,54 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
     )
 
 
+def test_save_rejects_reserved_audit_metadata_binding_key(tmp_path: Path) -> None:
+    booster, fixture = build_tiny_promoted_booster()
+    with pytest.raises(ValueError, match="'pairwise_bundle_binding' is reserved"):
+        save_incremental_linking_artifact(
+            booster,
+            tmp_path,
+            prediction_fixture_matrix=fixture,
+            gate_config=_logistic_gate_config(),
+            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
+            audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+        )
+    assert not (tmp_path / METADATA_FILENAME).exists()
+
+
+def test_save_rejects_empty_pairwise_bundle_binding(tmp_path: Path) -> None:
+    booster, fixture = build_tiny_promoted_booster()
+    with pytest.raises(ValueError, match="pairwise_bundle_binding is required"):
+        save_incremental_linking_artifact(
+            booster,
+            tmp_path,
+            prediction_fixture_matrix=fixture,
+            gate_config=_logistic_gate_config(),
+            pairwise_bundle_binding={},
+        )
+    assert not (tmp_path / METADATA_FILENAME).exists()
+
+
+@requires_rust_lightgbm
+def test_load_accepts_legacy_nested_audit_binding_as_inert(tmp_path: Path) -> None:
+    booster, fixture = build_tiny_promoted_booster()
+    metadata = save_incremental_linking_artifact(
+        booster,
+        tmp_path,
+        prediction_fixture_matrix=fixture,
+        gate_config=_logistic_gate_config(),
+        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
+    )
+    metadata_path = tmp_path / METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["audit_metadata"]["pairwise_bundle_binding"] = {"legacy": "historical-copy"}
+    metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    loaded = load_incremental_linking_artifact(tmp_path)
+
+    assert loaded.metadata.pairwise_bundle_binding == metadata.pairwise_bundle_binding
+    assert loaded.metadata.audit_metadata["pairwise_bundle_binding"] == {"legacy": "historical-copy"}
+
+
 @requires_rust_lightgbm
 def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
     tmp_path: Path,
@@ -151,7 +199,7 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
             artifact_dir,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(),
-            audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
     assert not artifact_dir.exists()
 
@@ -161,7 +209,7 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
         artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
-        audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     load_incremental_linking_artifact(artifact_dir)
 
@@ -173,7 +221,7 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
     kwargs: dict[str, Any] = {
         "prediction_fixture_matrix": fixture,
         "gate_config": _logistic_gate_config(),
-        "audit_metadata": {"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+        "pairwise_bundle_binding": synthetic_pairwise_bundle_binding(),
     }
     save_incremental_linking_artifact(booster, artifact_dir, **kwargs)
     original_metadata = (artifact_dir / METADATA_FILENAME).read_bytes()
@@ -187,7 +235,7 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
             artifact_dir,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(link=False),
-            audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
     assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
 
@@ -247,7 +295,7 @@ def test_save_incremental_linking_artifact_requires_lightgbm_version(
             tmp_path,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(),
-            audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
 
     assert not (tmp_path / METADATA_FILENAME).exists()
@@ -272,7 +320,7 @@ def test_load_incremental_linking_artifact_rejects_digest_drift(
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
-        audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
+        pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     metadata_path = tmp_path / METADATA_FILENAME
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))

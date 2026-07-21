@@ -158,6 +158,7 @@ def test_name_tuple_loader_rejects_invalid_rows_with_valid_binding_metadata(
         dropped_identity=0,
         dropped_prefix_compatible=0,
         dropped_empty=0,
+        dropped_duplicate_canonical=0,
     )
     (tmp_path / "invalid.txt.meta.json").write_text(json.dumps(metadata), encoding="utf-8")
 

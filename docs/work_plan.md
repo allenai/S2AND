@@ -264,15 +264,16 @@ boundaries fail closed under mutation.
 
 ### Pair-ablation study
 
-**Status: Approved 2026-07-20; Open**
+**Status: Complete**
 
-- Owner approved removing the complete 2,544-line one-off study from this
-  migration PR, preserving the files in the ignored `scratch/` workspace (not
-  an experiment branch).
-- Remove its two CLIs, `_pair_ablation/`, documentation, and five tests
-  together. Do not partially prune it and leave ambiguous ownership.
-- Record the study's conclusion in documentation if it informed v1.3 training
-  decisions; the executable machinery does not ship.
+- Owner approved (2026-07-20) removing the complete 2,544-line one-off study
+  from this migration PR. Its two CLIs, `_pair_ablation/`, documentation, and
+  five tests were deleted together and preserved verbatim in the ignored
+  `scratch/pair_ablation_study/` workspace with a provenance README; git
+  history before the removal commit retains the tracked copies.
+- If the study's conclusion should inform maintained documentation, recover it
+  from the preserved `docs/pair_ablation.md`; the executable machinery does
+  not ship.
 
 ### One-off benchmark machinery
 
@@ -308,9 +309,6 @@ live batched preprocessing path before deleting the private single-row helper.
 - Remove the broken reference to an ignored canonical-example generator unless
   regeneration becomes a supported tracked workflow.
 - Correct the enabled aarch64 matrix comment.
-- If pair ablation is retained, remove the vacuous `assert rows`; keep the
-  averaging contract test using controlled predictions rather than pinned
-  trained LightGBM outputs.
 - Keep release-policy coverage, but prefer parsed workflow/policy assertions to
   brittle formatting snapshots.
 

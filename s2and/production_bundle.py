@@ -26,6 +26,7 @@ from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
     PAIRWISE_METADATA_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
+    PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
     production_manifest_files,
@@ -208,11 +209,11 @@ def _write_pairwise_fixture(model: Any, path: Path, *, width: int, seed: int) ->
     rng = np.random.default_rng(int(seed))
     features = rng.normal(size=(PAIRWISE_FIXTURE_ROWS, int(width)))
     payload = {
-        "atol": 1e-10,
+        "atol": PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
         "expected_probabilities": _predict_proba(model, features).tolist(),
         "feature_source": "numpy_default_rng_normal",
         "features": features.tolist(),
-        "rtol": 1e-10,
+        "rtol": PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
         "schema_version": PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
         "seed": int(seed),
     }

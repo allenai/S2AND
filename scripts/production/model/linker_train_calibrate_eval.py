@@ -166,9 +166,21 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _load_target(path: Path) -> dict[str, Any]:
     target = json.loads(path.read_text(encoding="utf-8"))
-    features = tuple(str(feature) for feature in target["features"])
-    if len(features) != int(target["feature_count"]):
+    if not isinstance(target, dict):
+        raise ValueError(f"Promoted target must be a JSON object in {path}")
+    raw_features = target.get("features")
+    if not isinstance(raw_features, list) or any(
+        not isinstance(feature, str) or not feature for feature in raw_features
+    ):
+        raise ValueError(f"Promoted target features must be a list of nonempty strings in {path}")
+    feature_count = target.get("feature_count")
+    if isinstance(feature_count, bool) or not isinstance(feature_count, int) or feature_count < 0:
+        raise ValueError(f"Promoted target feature_count must be a nonnegative integer in {path}")
+    features = tuple(raw_features)
+    if len(features) != feature_count:
         raise ValueError(f"Promoted target feature_count mismatch in {path}")
+    if len(features) != len(set(features)):
+        raise ValueError(f"Promoted target contains duplicate features in {path}")
     unknown_pw = sorted(
         feature for feature in features if feature.startswith("pw_") and feature not in PROMOTED_PAIRWISE_COLUMNS
     )

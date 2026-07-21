@@ -33,6 +33,7 @@ from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
     PAIRWISE_METADATA_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
+    PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
     production_manifest_files,
@@ -414,6 +415,8 @@ def _require_featurizer_version_match(model_path: Path, versions: Mapping[str, i
 
 
 def _require_finite_number(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"Production model config {field} must be numeric, got {value!r}")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
@@ -610,10 +613,16 @@ def _validate_pairwise_fixture(
     matrix = np.asarray(fixture["features"], dtype=np.float64)
     expected = np.asarray(fixture["expected_probabilities"], dtype=np.float64)
     observed = classifier.predict_proba(matrix)
-    rtol = float(fixture.get("rtol", 1e-10))
-    atol = float(fixture.get("atol", 1e-10))
+    rtol = _require_finite_number(fixture.get("rtol"), field="pairwise prediction fixture rtol")
+    atol = _require_finite_number(fixture.get("atol"), field="pairwise prediction fixture atol")
+    if rtol != PAIRWISE_PREDICTION_FIXTURE_TOLERANCE or atol != PAIRWISE_PREDICTION_FIXTURE_TOLERANCE:
+        raise ValueError(
+            f"Pairwise prediction fixture tolerances must both equal {PAIRWISE_PREDICTION_FIXTURE_TOLERANCE}"
+        )
     if observed.shape != expected.shape:
         raise ValueError(f"Pairwise prediction fixture shape mismatch: {observed.shape} != {expected.shape}")
+    if not np.all(np.isfinite(expected)) or np.any((expected < 0) | (expected > 1)):
+        raise ValueError(f"Pairwise prediction fixture probabilities must be finite and in [0, 1]: {fixture_path}")
     if not np.allclose(observed, expected, rtol=rtol, atol=atol):
         raise ValueError(f"Pairwise prediction fixture mismatch for {fixture_path}")
 
@@ -746,7 +755,7 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         clusterer.incremental_linker_artifact = incremental_linker_artifact
     clusterer.production_model_bundle_dir = bundle_dir
     clusterer.production_model_bundle_version = str(manifest["bundle_version"])
-    clusterer.production_model_bundle_status = str(manifest.get("bundle_status", "complete"))
+    clusterer.production_model_bundle_status = str(manifest["bundle_status"])
     return clusterer
 
 

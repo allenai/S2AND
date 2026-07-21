@@ -86,6 +86,22 @@ def test_load_target_rejects_removed_promoted_features(tmp_path) -> None:
         _load_target(target_path)
 
 
+def test_load_target_rejects_duplicate_features(tmp_path) -> None:
+    target_path = tmp_path / "duplicate_target.json"
+    target_path.write_text(
+        json.dumps(
+            {
+                "feature_count": 2,
+                "features": ["min_distance", "min_distance"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate features"):
+        _load_target(target_path)
+
+
 def test_semantic_row_nan_policy_marks_undefined_non_pairwise_features() -> None:
     batch = LinkerCandidateBatch(
         row_count=4,

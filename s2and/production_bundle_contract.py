@@ -4,6 +4,7 @@ from __future__ import annotations
 
 PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v3"
 PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION = "pairwise_prediction_fixture_v1"
+PAIRWISE_PREDICTION_FIXTURE_TOLERANCE = 1e-10
 PAIRWISE_METADATA_SCHEMA_VERSION = "s2and_pairwise_native_lightgbm_v2"
 CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v4"
 

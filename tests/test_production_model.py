@@ -609,6 +609,11 @@ def test_pairwise_metadata_contains_only_classifier_semantics(
     ("mutate", "message"),
     (
         (lambda payload: payload["cluster_model"].update({"eps": float("nan")}), "must be finite"),
+        (lambda payload: payload["cluster_model"].update({"eps": True}), "must be numeric"),
+        (
+            lambda payload: payload.update({"incremental_mean_min_hybrid_weight": False}),
+            "must be numeric",
+        ),
         (lambda payload: payload["cluster_model"].update({"family": "Other"}), "family"),
         (lambda payload: payload.update({"unknown_runtime_field": 1}), "field mismatch"),
         (
@@ -630,6 +635,21 @@ def test_clusterer_config_rejects_nonfinite_unknown_and_contradictory_values(
     _refresh_manifest_checksum(bundle_dir, "clusterer.json")
 
     with pytest.raises(ValueError, match=message):
+        _load_pairwise_staging_model(bundle_dir)
+
+
+def test_pairwise_fixture_cannot_relax_tolerance_to_accept_wrong_predictions(
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    fixture_path = bundle_dir / "pairwise" / "main_prediction_fixture.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixture["expected_probabilities"] = np.ones_like(fixture["expected_probabilities"]).tolist()
+    fixture["rtol"] = 1e9
+    fixture_path.write_text(json.dumps(fixture, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _refresh_manifest_checksum(bundle_dir, "pairwise/main_prediction_fixture.json")
+
+    with pytest.raises(ValueError, match="tolerances must both equal"):
         _load_pairwise_staging_model(bundle_dir)
 
 

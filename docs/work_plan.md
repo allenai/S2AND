@@ -208,12 +208,15 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Pairwise fixture and config hardening
 
-**Status: Preserved candidate in `328c79d12f15`**
+**Status: Complete (recovered from `328c79d12f15`)**
 
-- Fixed prediction-fixture tolerances, probability bounds, Boolean numeric
-  rejection, and direct required-manifest access are coherent but belong in a
-  separate Phase 2 commit.
-- Recover only their hunks from the mixed production bundle/model files.
+- The pairwise prediction fixture pins both tolerances to the shared
+  `PAIRWISE_PREDICTION_FIXTURE_TOLERANCE` constant (a relaxed fixture is
+  rejected), requires finite probabilities in [0, 1], and rejects Boolean
+  numeric config values.
+- Bundle loading reads `bundle_status` as a required manifest field, and
+  `_load_target` validates target JSON structure and rejects duplicate
+  features.
 
 ### Single pairwise-binding authority
 

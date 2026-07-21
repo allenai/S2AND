@@ -80,15 +80,11 @@ unexplained product-code changes.
 
 ### P0 - pair-feature cache lineage
 
-**Status: Complete (`ff3f3f2`)**
-
-- Namespace persistent pair-feature cache keys by the proven feature inputs:
-  normalization, Arrow generation, name-count provenance, and canonical name
-  tuples.
-- Let old rows safely miss under the new namespace. Do not add cache migration,
-  deletion, or fallback behavior.
-- Document this narrowly; it does not claim to fingerprint every mutable field
-  of an arbitrary Python dataset.
+**Status: Superseded** — the persistent pair-feature SQLite cache was removed
+entirely (2026-07-20) in favor of the training-boundary feature snapshot cache
+(`s2and/feature_cache.py`, see docs/caching.md); snapshot keys fingerprint the
+ingested source bytes, name-count binding, name tuples, featurizer
+  configuration, and exact pair lists.
 
 ### P0 - mandatory name-count binding
 
@@ -168,11 +164,17 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Name-tuple artifact v3
 
-**Status: Decision; preserved in `328c79d12f15`**
+**Status: Approved 2026-07-20; recover from `328c79d12f15`**
 
-- The v2-to-v3 metadata change is a serialization-format change.
-- Recover the Python loader, packaged metadata, generator, Rust loader, tests,
-  and migration documentation as one unit only after explicit owner approval.
+- The v2-to-v3 metadata change is a serialization-format change: it adds the
+  `dropped_duplicate_canonical` generation count and a load-time invariant that
+  every input pair is accounted for. Current v2 metadata leaves 3,768 of 9,925
+  input pairs unaccounted.
+- Owner approved recovering the Python loader, packaged metadata, generator,
+  Rust loader, tests, and migration documentation as one unit, before canonical
+  artifact generation so the immutable v1.3 tuple artifact is generated once
+  under the complete-accounting schema. The `ingest_dataset.rs` hunks live in a
+  mixed stash file and need hunk-level recovery.
 
 ## Phase 2: artifact and bundle integrity
 
@@ -215,17 +217,19 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Single pairwise-binding authority
 
-**Status: Decision + Open**
+**Status: Approved 2026-07-20; Open**
 
-- Recommended decision: make `pairwise_bundle_binding` an explicit artifact
-  save/build argument and persist it only in the validated top-level field.
+- Make `pairwise_bundle_binding` an explicit artifact save/build argument and
+  persist it only in the validated top-level field. Today
+  `save_incremental_linking_artifact` extracts the binding from
+  `audit_metadata["pairwise_bundle_binding"]` and both copies persist.
 - Reject the reserved key in new `audit_metadata`.
 - Existing artifacts may load an old nested audit copy as inert historical
   metadata.
 - Do not preserve two authorities by validating duplicate copies forever.
 
-This changes a callable API and serialized output and therefore requires owner
-approval before implementation.
+Owner approved the callable API and serialized-output change; no canonical
+bundle has been generated under the old layout.
 
 ### Single-pass bundle validation
 
@@ -265,17 +269,15 @@ boundaries fail closed under mutation.
 
 ### Pair-ablation study
 
-**Status: Decision**
+**Status: Approved 2026-07-20; Open**
 
-- Recommended decision: remove the complete 2,544-line one-off study from this
-  migration PR and preserve it on a separate experiment branch or ignored
-  `scratch/` workspace.
+- Owner approved removing the complete 2,544-line one-off study from this
+  migration PR, preserving the files in the ignored `scratch/` workspace (not
+  an experiment branch).
 - Remove its two CLIs, `_pair_ablation/`, documentation, and five tests
   together. Do not partially prune it and leave ambiguous ownership.
-- If it is intended to become maintained tooling, give it a separate PR and
-  explicit owner instead.
-
-This is a broad deletion and requires explicit approval before implementation.
+- Record the study's conclusion in documentation if it informed v1.3 training
+  decisions; the executable machinery does not ship.
 
 ### One-off benchmark machinery
 
@@ -359,7 +361,7 @@ Run focused tests first:
 
 ```powershell
 uv run pytest -q tests/test_incremental_linking_production.py
-uv run pytest -q tests/test_pair_feature_cache_backend.py tests/test_name_counts_binding.py
+uv run pytest -q tests/test_feature_snapshot_cache.py tests/test_name_counts_binding.py
 uv run pytest -q tests/test_arrow_training_ingestion.py
 uv run pytest -q tests/test_generate_orcid_name_prefix_counts.py
 uv run pytest -q tests/test_incremental_linking_artifact.py tests/test_production_model.py tests/test_production_bundle_publication.py

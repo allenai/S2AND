@@ -283,7 +283,7 @@ def _is_windows() -> bool:
 
 def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
     try:
-        import psutil  # ty: ignore[unresolved-import]
+        import psutil
     except Exception:
         return None
     try:
@@ -297,7 +297,7 @@ def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
 
 def _psutil_process_rss_bytes_best_effort() -> int | None:
     try:
-        import psutil  # ty: ignore[unresolved-import]
+        import psutil
     except Exception:
         return None
     try:

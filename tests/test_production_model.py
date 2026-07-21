@@ -129,15 +129,17 @@ def _write_synthetic_linker(pairwise_bundle: Path, linker_dir: Path) -> Path:
         missing_values=np.asarray([0.0], dtype=np.float64),
         calibration_mode="test",
     )
+    target_spec: dict[str, Any] = {}
     save_incremental_linking_artifact(
         booster,
         linker_dir,
         prediction_fixture_matrix=fixture,
         gate_config=gate_config,
+        target_spec=target_spec,
         pairwise_bundle_binding=pairwise_bundle_binding(pairwise_bundle),
     )
     target = linker_dir.parent / "target.json"
-    target.write_text("{}\n", encoding="utf-8")
+    target.write_text(json.dumps(target_spec) + "\n", encoding="utf-8")
     return target
 
 
@@ -878,6 +880,52 @@ def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
 
     assert not output_bundle.exists()
     assert _load_pairwise_staging_model(bundle_dir).production_model_bundle_status == "pairwise_only"
+
+
+def test_finalization_rejects_target_different_from_linker_training_target(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
+    target_json.write_text('{"variant": "wrong"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="target_spec_digest does not match target JSON"):
+        finalize_production_bundle(
+            pairwise_bundle_dir=bundle_dir,
+            output_bundle_dir=tmp_path / "production_model_v9.8",
+            incremental_linker_artifact_dir=linker_dir,
+            target_json=target_json,
+            bundle_version="9.8",
+            pairwise_model_version="9.9",
+            incremental_linker_version="9.9",
+        )
+
+
+def test_complete_bundle_rejects_target_tampering_even_with_refreshed_manifest(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    output_bundle = tmp_path / "production_model_v9.8"
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(bundle_dir, linker_dir)
+    finalize_production_bundle(
+        pairwise_bundle_dir=bundle_dir,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        bundle_version="9.8",
+        pairwise_model_version="9.9",
+        incremental_linker_version="9.9",
+    )
+    bundled_target = output_bundle / "reproducibility" / "incremental_linker_training_target.json"
+    bundled_target.write_text('{"variant": "tampered"}\n', encoding="utf-8")
+    _refresh_manifest_checksum(output_bundle, bundled_target.relative_to(output_bundle).as_posix())
+
+    with pytest.raises(ValueError, match="target_spec_digest does not match enclosing bundle target JSON"):
+        load_production_model(output_bundle)
 
 
 def test_bundle_directory_version_must_match_explicit_version(

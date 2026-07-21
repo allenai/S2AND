@@ -178,13 +178,15 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Linker artifact v4 and target identity
 
-**Status: Preserved candidate in `328c79d12f15`**
+**Status: Complete (recovered from `328c79d12f15`)**
 
-- Keep `incremental_linking_artifact_v4` bound to the canonical digest of the
-  complete training target JSON.
-- Final bundle assembly and production loading must reject a target changed
-  after checksums or manifests are refreshed.
-- Verify the new target-digest field through writer, loader, finalizer,
+- `incremental_linking_artifact_v4` binds the canonical digest of the complete
+  training target JSON; `save_incremental_linking_artifact` requires the
+  target spec.
+- Final bundle assembly and production loading both reject a target changed
+  after checksums or manifests are refreshed (regression-tested, including a
+  refreshed-manifest tamper case).
+- The target-digest field is verified through writer, loader, finalizer,
   corruption, and installed-smoke paths.
 
 ### Precomputed promoted-feature reuse

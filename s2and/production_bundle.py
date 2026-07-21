@@ -19,6 +19,7 @@ import numpy as np
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.featurizer import FeaturizationInfo
+from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.model import Clusterer, _selected_feature_indices
 from s2and.model_pairwise import _validated_classifier_features
 from s2and.production_bundle_contract import (
@@ -487,6 +488,9 @@ def finalize_production_bundle(
     linker_metadata = _read_json(incremental_linker_artifact_dir / "metadata.json")
     if linker_metadata.get("pairwise_bundle_binding") != pairwise_binding:
         raise ValueError("Incremental linker pairwise_bundle_binding does not match pairwise bundle")
+    target_spec_digest = canonical_json_digest(_read_json(target_json))
+    if linker_metadata.get("target_spec_digest") != target_spec_digest:
+        raise ValueError("Incremental linker target_spec_digest does not match target JSON")
 
     output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_bundle_dir.name}.staging-", dir=output_bundle_dir.parent))

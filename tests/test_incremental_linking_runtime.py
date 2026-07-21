@@ -1265,6 +1265,7 @@ def test_compact_link_or_abstain_scores_artifact_rows_and_applies_gate(tmp_path:
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(0.0),
+        target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     artifact = load_incremental_linking_artifact(tmp_path)
@@ -1305,6 +1306,7 @@ def test_compact_link_or_abstain_abstains_when_artifact_score_threshold_too_high
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_promoted_gate_config(1.1),
+        target_spec={},
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     artifact = load_incremental_linking_artifact(tmp_path)

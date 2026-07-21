@@ -2272,6 +2272,7 @@ def _train_and_save_prod_artifact(
     classic_summary: Mapping[str, Any],
     output_dir: Path,
     save_artifact_to: Path,
+    target_spec: Mapping[str, Any],
     artifact_pairwise_bundle_binding: Mapping[str, Any],
     artifact_audit_metadata: Mapping[str, Any] | None,
     holdout_importance_weight: float,
@@ -2344,6 +2345,7 @@ def _train_and_save_prod_artifact(
         retrieval_top_k=retrieval_top_k,
         gate_config=logistic_gate_config,
         prediction_fixture_matrix=train_matrix[:5],
+        target_spec=target_spec,
         pairwise_bundle_binding=artifact_pairwise_bundle_binding,
         audit_metadata=audit_metadata,
     )
@@ -2353,6 +2355,7 @@ def _train_and_save_prod_artifact(
         "feature_schema_digest": artifact_metadata.feature_schema_digest,
         "production_contract_digest": artifact_metadata.production_contract_digest,
         "retrieval_stack_digest": artifact_metadata.retrieval_stack_digest,
+        "target_spec_digest": artifact_metadata.target_spec_digest,
         "training_summary": {
             "rows": int(len(prod_training_data.rows)),
             "queries": int(prod_training_data.rows["query_group_id"].astype(str).nunique()),
@@ -2635,6 +2638,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             classic_summary=summary,
             output_dir=output_dir,
             save_artifact_to=save_artifact_to,
+            target_spec=target,
             artifact_pairwise_bundle_binding=artifact_pairwise_binding,
             artifact_audit_metadata=artifact_audit_metadata,
             holdout_importance_weight=float(args.prod_holdout_importance_weight),

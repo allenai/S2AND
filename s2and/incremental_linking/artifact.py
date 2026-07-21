@@ -23,6 +23,7 @@ from s2and.incremental_linking.contracts import (
     DEFAULT_RETRIEVAL_TOP_K,
     GATE_SURFACE_PROMOTED_LOGISTIC,
     MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER,
+    canonical_json_digest,
     production_contract_digest,
     promoted_linker_feature_schema_digest,
     retrieval_constraint_decision_policy_payload,
@@ -53,6 +54,7 @@ _METADATA_FIELDS = frozenset(
         "retrieval_stack_digest",
         "retrieval_top_k",
         "schema_version",
+        "target_spec_digest",
     }
 )
 
@@ -163,11 +165,12 @@ class IncrementalLinkingArtifactMetadata:
     prediction_fixture_expected_probabilities: tuple[float, ...]
     booster_sha256: str
     lightgbm_version: str
+    target_spec_digest: str
     pairwise_bundle_binding: Mapping[str, Any]
     audit_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Validate the v2 contract and make all stored containers immutable."""
+        """Validate the v4 contract and make all stored containers immutable."""
 
         string_fields = (
             "schema_version",
@@ -178,6 +181,7 @@ class IncrementalLinkingArtifactMetadata:
             "gate_surface",
             "booster_sha256",
             "lightgbm_version",
+            "target_spec_digest",
         )
         for field_name in string_fields:
             value = getattr(self, field_name)
@@ -250,6 +254,7 @@ class IncrementalLinkingArtifactMetadata:
         prediction_fixture_expected_probabilities: Sequence[float],
         booster_sha256: str,
         lightgbm_version: str,
+        target_spec_digest: str,
         pairwise_bundle_binding: Mapping[str, Any],
         audit_metadata: Mapping[str, Any] | None = None,
     ) -> IncrementalLinkingArtifactMetadata:
@@ -282,13 +287,14 @@ class IncrementalLinkingArtifactMetadata:
             prediction_fixture_expected_probabilities=fixture_probabilities,
             booster_sha256=str(booster_sha256),
             lightgbm_version=str(lightgbm_version),
+            target_spec_digest=str(target_spec_digest),
             pairwise_bundle_binding=dict(pairwise_bundle_binding),
             audit_metadata=resolved_audit_metadata,
         )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> IncrementalLinkingArtifactMetadata:
-        """Load an exact, strictly typed v3 metadata mapping."""
+        """Load an exact, strictly typed v4 metadata mapping."""
 
         if not isinstance(payload, Mapping):
             raise ValueError("Incremental linker artifact metadata must be a JSON object")
@@ -299,7 +305,7 @@ class IncrementalLinkingArtifactMetadata:
             missing = sorted(_METADATA_FIELDS - observed_fields)
             unknown = sorted(observed_fields - _METADATA_FIELDS)
             raise ValueError(
-                "Incremental linker artifact metadata fields do not match the v3 schema: "
+                "Incremental linker artifact metadata fields do not match the v4 schema: "
                 f"missing={missing} unknown={unknown}"
             )
 
@@ -321,6 +327,7 @@ class IncrementalLinkingArtifactMetadata:
             prediction_fixture_expected_probabilities=fixture_probabilities,
             booster_sha256=_require_metadata_string(payload, "booster_sha256"),
             lightgbm_version=_require_metadata_string(payload, "lightgbm_version"),
+            target_spec_digest=_require_metadata_string(payload, "target_spec_digest"),
             pairwise_bundle_binding=_require_metadata_mapping(payload, "pairwise_bundle_binding"),
             audit_metadata=_require_metadata_mapping(payload, "audit_metadata"),
         )
@@ -342,6 +349,7 @@ class IncrementalLinkingArtifactMetadata:
             "prediction_fixture_expected_probabilities": list(self.prediction_fixture_expected_probabilities),
             "booster_sha256": self.booster_sha256,
             "lightgbm_version": self.lightgbm_version,
+            "target_spec_digest": self.target_spec_digest,
             "pairwise_bundle_binding": _json_compatible_value(self.pairwise_bundle_binding),
             "audit_metadata": _json_compatible_value(self.audit_metadata),
         }
@@ -512,6 +520,7 @@ def save_incremental_linking_artifact(
     retrieval_top_k: int = DEFAULT_RETRIEVAL_TOP_K,
     gate_config: Mapping[str, Any] | None = None,
     prediction_fixture_matrix: Sequence[Sequence[float]] | np.ndarray,
+    target_spec: Mapping[str, Any],
     pairwise_bundle_binding: Mapping[str, Any],
     audit_metadata: Mapping[str, Any] | None = None,
 ) -> IncrementalLinkingArtifactMetadata:
@@ -551,6 +560,7 @@ def save_incremental_linking_artifact(
             prediction_fixture_expected_probabilities=expected_probability_values,
             booster_sha256=_sha256_file(booster_path),
             lightgbm_version=lightgbm_version,
+            target_spec_digest=canonical_json_digest(dict(target_spec)),
             pairwise_bundle_binding=pairwise_bundle_binding,
             audit_metadata=audit_metadata,
         )

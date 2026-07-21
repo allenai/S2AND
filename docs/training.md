@@ -171,6 +171,12 @@ canonical name tuples and records two data hashes in `feature_contract`:
 does not synthesize missing hashes. Export and load both compare the recorded
 values with the canonical artifacts installed in the package.
 
+The promoted incremental-linker artifact uses the strict
+`incremental_linking_artifact_v4` contract. It records the canonical digest of
+the complete training target JSON. Final bundle assembly and production loading
+both reject a different target, including a target modified after manifest
+checksums are refreshed.
+
 After a bundle passes those gates, reload it explicitly:
 
 ```python

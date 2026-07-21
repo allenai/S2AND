@@ -11,7 +11,7 @@ from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION
 from s2and.incremental_linking.features import PROMOTED_NON_PAIRWISE_FEATURE_COLUMNS, promoted_linker_feature_columns
 from s2and.incremental_linking.linker_pairwise import promoted_pairwise_aggregate_columns
 
-ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v3"
+ARTIFACT_SCHEMA_VERSION = "incremental_linking_artifact_v4"
 CONTRACT_SCHEMA_VERSION = "incremental_linking_contract_v1"
 MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER = "classic_lightgbm_linker"
 GATE_SURFACE_PROMOTED_LOGISTIC = "promoted_numpy_logistic_gate"
@@ -180,6 +180,13 @@ def validate_artifact_contract_metadata(metadata: Mapping[str, Any]) -> None:
         raise ValueError("Incremental linker artifact retrieval_stack_digest mismatch")
     if metadata.get("gate_surface") != GATE_SURFACE_PROMOTED_LOGISTIC:
         raise ValueError(f"Unsupported incremental linker gate_surface: {metadata.get('gate_surface')!r}")
+    target_spec_digest = metadata.get("target_spec_digest")
+    if (
+        not isinstance(target_spec_digest, str)
+        or len(target_spec_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in target_spec_digest)
+    ):
+        raise ValueError("Incremental linker artifact target_spec_digest is not a SHA-256")
     binding = metadata.get("pairwise_bundle_binding")
     required_binding_fields = {
         "normalization_version",

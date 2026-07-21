@@ -739,6 +739,9 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         expected_binding = pairwise_bundle_binding(bundle_dir)
         if dict(incremental_linker_artifact.metadata.pairwise_bundle_binding) != expected_binding:
             raise ValueError("Incremental linker pairwise_bundle_binding does not match enclosing bundle")
+        target_path = bundle_dir / str(manifest["files"]["incremental_linker_training_target"])
+        if canonical_json_digest(_read_json(target_path)) != incremental_linker_artifact.metadata.target_spec_digest:
+            raise ValueError("Incremental linker target_spec_digest does not match enclosing bundle target JSON")
         clusterer.incremental_linker_artifact_dir = incremental_linker_dir
         clusterer.incremental_linker_artifact = incremental_linker_artifact
     clusterer.production_model_bundle_dir = bundle_dir

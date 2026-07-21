@@ -23,6 +23,7 @@ from s2and.incremental_linking.artifact import (
     save_incremental_linking_artifact,
 )
 from s2and.incremental_linking.contracts import (
+    canonical_json_digest,
     retrieval_constraint_decision_policy_payload,
     retrieval_stack_contract_payload,
 )
@@ -36,6 +37,7 @@ requires_rust_lightgbm = pytest.mark.skipif(
     not _HAS_RUST_LIGHTGBM,
     reason=f"s2and_rust unavailable: {_RUST_LIGHTGBM_PAYLOAD!r}",
 )
+_TEST_TARGET_SPEC = {"variant": "test"}
 
 
 def _logistic_gate_config(link: bool = True) -> dict[str, object]:
@@ -57,6 +59,7 @@ def _valid_metadata_payload() -> dict[str, Any]:
         prediction_fixture_expected_probabilities=(0.5,),
         booster_sha256="a" * 64,
         lightgbm_version="test-version",
+        target_spec_digest=canonical_json_digest(_TEST_TARGET_SPEC),
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         audit_metadata={"nested": {"values": [1, 2]}},
     ).to_json_dict()
@@ -94,6 +97,7 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
+        target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         audit_metadata={
             "artifact_version": "v1.2",
@@ -107,6 +111,7 @@ def test_save_and_load_incremental_linking_artifact_round_trip(tmp_path: Path) -
 
     assert loaded.metadata.feature_columns == promoted_linker_feature_columns()
     assert loaded.metadata.feature_schema_digest == metadata.feature_schema_digest
+    assert loaded.metadata.target_spec_digest == canonical_json_digest(_TEST_TARGET_SPEC)
     assert loaded.metadata.audit_metadata["artifact_version"] == "v1.2"
     assert loaded.metadata.audit_metadata["pairwise_model"]["version"] == "1.2"
     assert (
@@ -135,6 +140,7 @@ def test_save_rejects_reserved_audit_metadata_binding_key(tmp_path: Path) -> Non
             tmp_path,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(),
+            target_spec=_TEST_TARGET_SPEC,
             pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
             audit_metadata={"pairwise_bundle_binding": synthetic_pairwise_bundle_binding()},
         )
@@ -149,6 +155,7 @@ def test_save_rejects_empty_pairwise_bundle_binding(tmp_path: Path) -> None:
             tmp_path,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(),
+            target_spec=_TEST_TARGET_SPEC,
             pairwise_bundle_binding={},
         )
     assert not (tmp_path / METADATA_FILENAME).exists()
@@ -162,6 +169,7 @@ def test_load_accepts_legacy_nested_audit_binding_as_inert(tmp_path: Path) -> No
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
+        target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     metadata_path = tmp_path / METADATA_FILENAME
@@ -199,6 +207,7 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
             artifact_dir,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(),
+            target_spec=_TEST_TARGET_SPEC,
             pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
     assert not artifact_dir.exists()
@@ -209,6 +218,7 @@ def test_artifact_publication_failure_leaves_target_absent_and_is_retry_safe(
         artifact_dir,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
+        target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     load_incremental_linking_artifact(artifact_dir)
@@ -221,6 +231,7 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
     kwargs: dict[str, Any] = {
         "prediction_fixture_matrix": fixture,
         "gate_config": _logistic_gate_config(),
+        "target_spec": _TEST_TARGET_SPEC,
         "pairwise_bundle_binding": synthetic_pairwise_bundle_binding(),
     }
     save_incremental_linking_artifact(booster, artifact_dir, **kwargs)
@@ -235,6 +246,7 @@ def test_artifact_publication_is_immutable_or_byte_identical(tmp_path: Path) -> 
             artifact_dir,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(link=False),
+            target_spec=_TEST_TARGET_SPEC,
             pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
     assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
@@ -295,6 +307,7 @@ def test_save_incremental_linking_artifact_requires_lightgbm_version(
             tmp_path,
             prediction_fixture_matrix=fixture,
             gate_config=_logistic_gate_config(),
+            target_spec=_TEST_TARGET_SPEC,
             pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
         )
 
@@ -320,6 +333,7 @@ def test_load_incremental_linking_artifact_rejects_digest_drift(
         tmp_path,
         prediction_fixture_matrix=fixture,
         gate_config=_logistic_gate_config(),
+        target_spec=_TEST_TARGET_SPEC,
         pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
     )
     metadata_path = tmp_path / METADATA_FILENAME
@@ -340,19 +354,36 @@ def test_retrieval_stack_contract_records_constraint_decision_policy() -> None:
 
 
 @pytest.mark.parametrize("field_name", sorted(_valid_metadata_payload()))
-def test_metadata_v3_rejects_every_deleted_top_level_field(field_name: str) -> None:
+def test_metadata_v4_rejects_every_deleted_top_level_field(field_name: str) -> None:
     payload = _valid_metadata_payload()
     del payload[field_name]
 
-    with pytest.raises(ValueError, match="fields do not match the v3 schema"):
+    with pytest.raises(ValueError, match="fields do not match the v4 schema"):
         IncrementalLinkingArtifactMetadata.from_mapping(payload)
 
 
-def test_metadata_v3_rejects_unknown_top_level_fields() -> None:
+def test_metadata_v4_rejects_unknown_top_level_fields() -> None:
     payload = _valid_metadata_payload()
     payload["future_implicit_default"] = True
 
     with pytest.raises(ValueError, match="unknown=.*future_implicit_default"):
+        IncrementalLinkingArtifactMetadata.from_mapping(payload)
+
+
+def test_metadata_v4_rejects_v3_schema() -> None:
+    payload = _valid_metadata_payload()
+    payload["schema_version"] = "incremental_linking_artifact_v3"
+
+    with pytest.raises(ValueError, match="Unsupported incremental linker artifact schema_version"):
+        IncrementalLinkingArtifactMetadata.from_mapping(payload)
+
+
+@pytest.mark.parametrize("invalid_value", ("A" * 64, "a" * 63, "not-a-digest"))
+def test_metadata_rejects_invalid_target_spec_digest(invalid_value: str) -> None:
+    payload = _valid_metadata_payload()
+    payload["target_spec_digest"] = invalid_value
+
+    with pytest.raises(ValueError, match="target_spec_digest is not a SHA-256"):
         IncrementalLinkingArtifactMetadata.from_mapping(payload)
 
 
@@ -374,6 +405,7 @@ def test_metadata_rejects_non_integer_pairwise_featurizer_version(invalid_value:
         ("schema_version", ""),
         ("booster_sha256", ""),
         ("lightgbm_version", ""),
+        ("target_spec_digest", ""),
         ("feature_columns", []),
         ("prediction_fixture_matrix", []),
         ("prediction_fixture_expected_probabilities", []),
@@ -381,7 +413,7 @@ def test_metadata_rejects_non_integer_pairwise_featurizer_version(invalid_value:
         ("pairwise_bundle_binding", {}),
     ),
 )
-def test_metadata_v3_rejects_empty_required_values(field_name: str, empty_value: object) -> None:
+def test_metadata_v4_rejects_empty_required_values(field_name: str, empty_value: object) -> None:
     payload = _valid_metadata_payload()
     payload[field_name] = empty_value
 
@@ -401,7 +433,7 @@ def test_metadata_v3_rejects_empty_required_values(field_name: str, empty_value:
         "out_of_range_probability",
     ),
 )
-def test_metadata_v3_rejects_invalid_prediction_fixtures(case: str) -> None:
+def test_metadata_v4_rejects_invalid_prediction_fixtures(case: str) -> None:
     payload = _valid_metadata_payload()
     matrix = payload["prediction_fixture_matrix"]
     probabilities = payload["prediction_fixture_expected_probabilities"]

@@ -142,6 +142,7 @@ def _write_synthetic_bundle(root: Path) -> Path:
         linker_dir,
         prediction_fixture_matrix=fixture,
         gate_config=gate_config,
+        target_spec={},
         pairwise_bundle_binding=pairwise_bundle_binding(pairwise_bundle_dir),
     )
     target_json = root / "incremental_linker_training_target.json"

@@ -1,5 +1,5 @@
 {
-  "artifact_version": 2,
+  "artifact_version": 3,
   "data": {
     "filename": "s2and_name_tuples_canonical.txt",
     "pair_count": 3684,
@@ -9,12 +9,13 @@
   "generated_at": "2026-07-19T04:03:33.421567+00:00",
   "generation_counts": {
     "dropped_empty": 0,
+    "dropped_duplicate_canonical": 3768,
     "dropped_identity": 1385,
     "dropped_prefix_compatible": 1088,
     "input_pair_count": 9925
   },
   "normalization_version": "canonical_v2",
-  "schema_version": "s2and_name_tuples_v2",
+  "schema_version": "s2and_name_tuples_v3",
   "semantics": {
     "canonicalizer": "canonicalize_name_text",
     "directionality": "canonical_unordered_rows",

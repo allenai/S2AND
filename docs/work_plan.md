@@ -164,17 +164,15 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Name-tuple artifact v3
 
-**Status: Approved 2026-07-20; recover from `328c79d12f15`**
+**Status: Complete (recovered from `328c79d12f15`)**
 
-- The v2-to-v3 metadata change is a serialization-format change: it adds the
-  `dropped_duplicate_canonical` generation count and a load-time invariant that
-  every input pair is accounted for. Current v2 metadata leaves 3,768 of 9,925
-  input pairs unaccounted.
-- Owner approved recovering the Python loader, packaged metadata, generator,
-  Rust loader, tests, and migration documentation as one unit, before canonical
-  artifact generation so the immutable v1.3 tuple artifact is generated once
-  under the complete-accounting schema. The `ingest_dataset.rs` hunks live in a
-  mixed stash file and need hunk-level recovery.
+- v3 adds the `dropped_duplicate_canonical` generation count and a load-time
+  invariant (Python and Rust) that every input pair is accounted for. The v2
+  metadata left 3,768 of 9,925 input pairs unaccounted.
+- Owner approved the serialization-format change 2026-07-20. The Python loader,
+  packaged metadata, generator, Rust loader, tests, and migration documentation
+  landed as one unit, before canonical artifact generation, so the immutable
+  v1.3 tuple artifact is generated once under the complete-accounting schema.
 
 ## Phase 2: artifact and bundle integrity
 

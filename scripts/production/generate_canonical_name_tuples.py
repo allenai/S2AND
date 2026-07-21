@@ -20,7 +20,7 @@ Usage:
     uv run python scripts/production/generate_canonical_name_tuples.py [--output PATH]
 
 Default output is ``s2and/data/s2and_name_tuples_canonical.txt`` with a JSON
-provenance sidecar under the strict ``s2and_name_tuples_v2`` contract. Data is
+provenance sidecar under the strict ``s2and_name_tuples_v3`` contract. Data is
 replaced first and the fsynced sidecar last as the generation commit marker.
 Ship both in the same release unit as the other canonical_v2 artifacts; the
 loader keeps the "name1,name2" line format. Generate into an offline staging
@@ -86,6 +86,7 @@ def regenerate(source_path: str, output_path: str) -> dict:
     dropped_identity = 0
     dropped_prefix_compatible = 0
     dropped_empty = 0
+    dropped_duplicate_canonical = 0
     for raw_a, raw_b in raw_pairs:
         name_a = canonicalize_name_text(raw_a)
         name_b = canonicalize_name_text(raw_b)
@@ -98,7 +99,11 @@ def regenerate(source_path: str, output_path: str) -> dict:
         if same_prefix_tokens(name_a, name_b):
             dropped_prefix_compatible += 1
             continue
-        canonical_pairs.add(canonical_name_tuple_pair(name_a, name_b))
+        canonical_pair = canonical_name_tuple_pair(name_a, name_b)
+        if canonical_pair in canonical_pairs:
+            dropped_duplicate_canonical += 1
+        else:
+            canonical_pairs.add(canonical_pair)
 
     ordered_pairs = sorted(canonical_pairs)
     data_bytes = "".join(f"{name_a},{name_b}\n" for name_a, name_b in ordered_pairs).encode("utf-8")
@@ -113,6 +118,7 @@ def regenerate(source_path: str, output_path: str) -> dict:
         dropped_identity=dropped_identity,
         dropped_prefix_compatible=dropped_prefix_compatible,
         dropped_empty=dropped_empty,
+        dropped_duplicate_canonical=dropped_duplicate_canonical,
     )
     metadata_bytes = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode("utf-8")
 

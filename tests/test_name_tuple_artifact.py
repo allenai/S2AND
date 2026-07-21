@@ -35,17 +35,27 @@ def _write_artifact(
         dropped_identity=0,
         dropped_prefix_compatible=0,
         dropped_empty=0,
+        dropped_duplicate_canonical=0,
     )
     path.write_bytes(data)
     Path(str(path) + ".meta.json").write_text(json.dumps(metadata), encoding="utf-8")
     return metadata
 
 
+def _set_pair_count(metadata: dict, pair_count: int) -> None:
+    metadata["data"]["pair_count"] = pair_count
+    metadata["generation_counts"]["input_pair_count"] = pair_count
+
+
 def test_checked_in_canonical_name_tuple_hash_matches_unchanged_data() -> None:
     artifact = load_name_tuple_artifact(Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt")
+    metadata = json.loads(
+        (Path(_PACKAGE_DATA_DIR) / "s2and_name_tuples_canonical.txt.meta.json").read_text(encoding="utf-8")
+    )
 
     assert len(artifact.pairs) == 3684
     assert artifact.data_sha256 == "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b"
+    assert metadata["generation_counts"]["dropped_duplicate_canonical"] == 3768
 
 
 def test_packaged_artifact_cache_is_immutable_and_avoids_rehashing() -> None:
@@ -78,8 +88,20 @@ def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path
     ("mutation", "message"),
     [
         (lambda metadata: metadata.update(schema_version="unknown"), "schema_version"),
-        (lambda metadata: metadata["data"].update(pair_count=4), "pair_count mismatch"),
+        (lambda metadata: _set_pair_count(metadata, 4), "pair_count mismatch"),
         (lambda metadata: metadata["semantics"].update(directionality="one_way"), "unsupported semantics"),
+        (
+            lambda metadata: metadata["generation_counts"].update(input_pair_count=1 << 64),
+            "unsigned 64-bit integer",
+        ),
+        (
+            lambda metadata: metadata["generation_counts"].pop("dropped_duplicate_canonical"),
+            "dropped_duplicate_canonical",
+        ),
+        (
+            lambda metadata: metadata["generation_counts"].update(input_pair_count=2),
+            "do not account for every input pair",
+        ),
     ],
 )
 def test_metadata_contract_rejects_schema_cardinality_and_semantic_drift(
@@ -125,6 +147,26 @@ def test_generator_publishes_metadata_last_and_output_loads(tmp_path: Path, monk
     assert replaced_destinations == [output_path, Path(str(output_path) + ".meta.json")]
     assert metadata["semantics"] == NAME_TUPLE_ARTIFACT_SEMANTICS
     assert load_name_tuple_artifact(output_path).pairs == frozenset({("alice", "ally"), ("bob", "robert")})
+
+
+def test_generator_audits_each_filtered_and_duplicate_input_row(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.txt"
+    output_path = tmp_path / "aliases.txt"
+    source_path.write_text(
+        "Alice,Ally\n" "ally,alice\n" "ALICE,ALLY\n" "Alice,Alice\n" "Ann,Anna\n" "',Alice\n",
+        encoding="utf-8",
+    )
+
+    metadata = generate_canonical_name_tuples.regenerate(str(source_path), str(output_path))
+
+    assert metadata["generation_counts"] == {
+        "input_pair_count": 6,
+        "dropped_identity": 1,
+        "dropped_prefix_compatible": 1,
+        "dropped_empty": 1,
+        "dropped_duplicate_canonical": 2,
+    }
+    assert metadata["data"]["pair_count"] == 1
 
 
 def test_concurrent_generators_leave_one_complete_loadable_artifact(tmp_path: Path) -> None:

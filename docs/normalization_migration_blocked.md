@@ -228,14 +228,16 @@ of old code with canonical artifacts or canonical code with legacy artifacts.
 - Canonical tuple artifact:
   `s2and/data/s2and_name_tuples_canonical.txt` and its metadata.
   The adjacent `<artifact>.meta.json` uses
-  `schema_version = "s2and_name_tuples_v2"` and binds the exact data filename,
+  `schema_version = "s2and_name_tuples_v3"` and binds the exact data filename,
   SHA-256, byte size, unordered-pair cardinality, canonical-v2 normalization,
   one lexicographically canonical row per unordered pair, and source
-  filename/SHA-256/size. Both Python and Rust reject a missing, mismatched, or
-  semantically invalid sidecar before accepting aliases. An explicit custom
-  text path must carry the same adjacent strict sidecar; pass an explicit set
-  (including an empty set) when the aliases are intentionally caller-owned
-  instead of an artifact.
+  filename/SHA-256/size. Its generation audit separately counts empty, identity,
+  prefix-compatible, and duplicate canonical rows and requires those counts
+  plus the output cardinality to equal the input cardinality. Both Python and
+  Rust reject a missing, mismatched, or semantically invalid sidecar before
+  accepting aliases. An explicit custom text path must carry the same adjacent
+  strict sidecar; pass an explicit set (including an empty set) when the aliases
+  are intentionally caller-owned instead of an artifact.
 - Tuple generation publishes fsynced data first and metadata last, and is only
   safe as an offline staging operation. A process crash between the two
   same-path replacements can leave a fail-closed mixed pair; rerun generation

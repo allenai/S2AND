@@ -13,8 +13,8 @@ from typing import Any
 from s2and.consts import _PACKAGE_DATA_DIR, NORMALIZATION_VERSION
 from s2and.text import canonicalize_name_text, same_prefix_tokens
 
-NAME_TUPLE_ARTIFACT_SCHEMA_VERSION = "s2and_name_tuples_v2"
-NAME_TUPLE_ARTIFACT_VERSION = 2
+NAME_TUPLE_ARTIFACT_SCHEMA_VERSION = "s2and_name_tuples_v3"
+NAME_TUPLE_ARTIFACT_VERSION = 3
 NAME_TUPLE_ARTIFACT_SEMANTICS: dict[str, Any] = {
     "encoding": "utf-8",
     "line_format": "name_a,name_b",
@@ -53,8 +53,8 @@ def _require_string(value: Any, *, field: str, metadata_path: Path) -> str:
 
 
 def _require_nonnegative_int(value: Any, *, field: str, metadata_path: Path) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"Name-tuple metadata {metadata_path} requires nonnegative integer field {field!r}")
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 1 << 64:
+        raise ValueError(f"Name-tuple metadata {metadata_path} requires unsigned 64-bit integer field {field!r}")
     return value
 
 
@@ -77,6 +77,7 @@ def build_name_tuple_artifact_metadata(
     dropped_identity: int,
     dropped_prefix_compatible: int,
     dropped_empty: int,
+    dropped_duplicate_canonical: int,
 ) -> dict[str, Any]:
     """Build canonical metadata for a generated tuple artifact."""
 
@@ -102,6 +103,7 @@ def build_name_tuple_artifact_metadata(
             "dropped_identity": dropped_identity,
             "dropped_prefix_compatible": dropped_prefix_compatible,
             "dropped_empty": dropped_empty,
+            "dropped_duplicate_canonical": dropped_duplicate_canonical,
         },
     }
 
@@ -238,9 +240,27 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
     generation_counts = _require_object(
         metadata.get("generation_counts"), field="generation_counts", metadata_path=metadata_path
     )
-    for field in ("input_pair_count", "dropped_identity", "dropped_prefix_compatible", "dropped_empty"):
-        _require_nonnegative_int(
+    generation_count_fields = (
+        "input_pair_count",
+        "dropped_identity",
+        "dropped_prefix_compatible",
+        "dropped_empty",
+        "dropped_duplicate_canonical",
+    )
+    validated_generation_counts = {
+        field: _require_nonnegative_int(
             generation_counts.get(field), field=f"generation_counts.{field}", metadata_path=metadata_path
+        )
+        for field in generation_count_fields
+    }
+    accounted_pair_count = pair_count + sum(
+        validated_generation_counts[field] for field in generation_count_fields if field != "input_pair_count"
+    )
+    if validated_generation_counts["input_pair_count"] != accounted_pair_count:
+        raise ValueError(
+            f"Name-tuple metadata {metadata_path} generation_counts do not account for every input pair: "
+            f"input_pair_count={validated_generation_counts['input_pair_count']} "
+            f"accounted_pair_count={accounted_pair_count}"
         )
 
     pairs = _parse_and_validate_pairs(

@@ -675,8 +675,8 @@ pub(crate) fn default_name_tuples_path(py: Python<'_>) -> PyResult<String> {
     path_obj.call_method0("as_posix")?.extract()
 }
 
-const NAME_TUPLE_ARTIFACT_SCHEMA_VERSION: &str = "s2and_name_tuples_v2";
-const NAME_TUPLE_ARTIFACT_VERSION: u64 = 2;
+const NAME_TUPLE_ARTIFACT_SCHEMA_VERSION: &str = "s2and_name_tuples_v3";
+const NAME_TUPLE_ARTIFACT_VERSION: u64 = 3;
 const NAME_TUPLE_NORMALIZATION_VERSION: &str = "canonical_v2";
 
 fn name_tuple_value_error(metadata_path: &Path, message: impl AsRef<str>) -> PyErr {
@@ -927,17 +927,38 @@ fn validated_name_tuple_artifact(
     }
     let generation_counts =
         required_name_tuple_object(&metadata, "generation_counts", &metadata_path)?;
+    let input_pair_count = required_name_tuple_u64(
+        generation_counts.get("input_pair_count"),
+        "generation_counts.input_pair_count",
+        &metadata_path,
+    )?;
+    let mut accounted_pair_count = pair_count;
     for field in [
-        "input_pair_count",
         "dropped_identity",
         "dropped_prefix_compatible",
         "dropped_empty",
+        "dropped_duplicate_canonical",
     ] {
-        required_name_tuple_u64(
+        let count = required_name_tuple_u64(
             generation_counts.get(field),
             &format!("generation_counts.{field}"),
             &metadata_path,
         )?;
+        accounted_pair_count = accounted_pair_count.checked_add(count).ok_or_else(|| {
+            name_tuple_value_error(
+                &metadata_path,
+                "generation_counts overflow while accounting for input pairs",
+            )
+        })?;
+    }
+    if input_pair_count != accounted_pair_count {
+        return Err(name_tuple_value_error(
+            &metadata_path,
+            format!(
+                "generation_counts do not account for every input pair: \
+                 input_pair_count={input_pair_count} accounted_pair_count={accounted_pair_count}"
+            ),
+        ));
     }
 
     let text = std::str::from_utf8(&data_bytes).map_err(|_| {
@@ -1234,8 +1255,8 @@ mod name_tuple_artifact_tests {
         let digest = python_sha256_hex(py, data.as_bytes()).expect("hash fixture");
         fs::write(path, data).expect("write tuple fixture");
         let metadata = serde_json::json!({
-            "schema_version": "s2and_name_tuples_v2",
-            "artifact_version": 2,
+            "schema_version": "s2and_name_tuples_v3",
+            "artifact_version": 3,
             "normalization_version": "canonical_v2",
             "generated_at": "2026-07-10T00:00:00+00:00",
             "source": {
@@ -1261,10 +1282,11 @@ mod name_tuple_artifact_tests {
                 "drop_prefix_compatible": true,
             },
             "generation_counts": {
-                "input_pair_count": 1,
+                "input_pair_count": pair_count,
                 "dropped_identity": 0,
                 "dropped_prefix_compatible": 0,
                 "dropped_empty": 0,
+                "dropped_duplicate_canonical": 0,
             },
         });
         fs::write(
@@ -1350,6 +1372,30 @@ mod name_tuple_artifact_tests {
                 .unwrap()
                 .to_string()
                 .contains("name_a must be lexicographically less than name_b"));
+
+            let miscounted = std::env::temp_dir().join(format!(
+                "s2and-miscounted-name-tuples-{}.txt",
+                std::process::id()
+            ));
+            write_artifact(py, &miscounted, "alice,ally\n", 1);
+            let miscounted_metadata_path = metadata_path(&miscounted);
+            let mut metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(&miscounted_metadata_path).unwrap()).unwrap();
+            metadata["generation_counts"]["input_pair_count"] = serde_json::json!(2);
+            fs::write(
+                &miscounted_metadata_path,
+                serde_json::to_vec(&metadata).unwrap(),
+            )
+            .unwrap();
+            let miscounted_error = load_name_tuples_from_text_path(py, miscounted.to_str())
+                .expect_err("miscounted tuple inputs must fail");
+            remove_artifact(&miscounted);
+            assert!(miscounted_error
+                .value(py)
+                .str()
+                .unwrap()
+                .to_string()
+                .contains("do not account for every input pair"));
         });
     }
 }

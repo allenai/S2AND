@@ -41,17 +41,13 @@ def test_dry_run_does_not_query_or_write(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 def test_fixture_generation_publishes_data_before_manifest(tmp_path: Path) -> None:
+    rows = [
+        {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
+        {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
+        {"first_name": "", "last_name": "", "count": 2},
+    ]
     fixture_path = tmp_path / "rows.json"
-    fixture_path.write_text(
-        json.dumps(
-            [
-                {"first_name": "Abd-al", "last_name": "Sattar", "count": 4},
-                {"first_name": "Abd al", "last_name": "Sattar", "count": 3},
-                {"first_name": "", "last_name": "", "count": 2},
-            ]
-        ),
-        encoding="utf-8",
-    )
+    fixture_path.write_text(json.dumps(rows), encoding="utf-8")
 
     assert (
         generate_name_counts.main(
@@ -83,6 +79,18 @@ def test_fixture_generation_publishes_data_before_manifest(tmp_path: Path) -> No
     assert provenance["selected_row_count"] == 3
     assert len(provenance["selected_rows_sha256"]) == 64
     assert provenance["rejected_row_count"] == 1
+    assert "manifest_path" not in provenance
+
+    index_manifest = json.loads((tmp_path / "name_counts_index" / "manifest.json").read_text(encoding="utf-8"))
+    assert index_manifest["source_provenance"] == provenance
+
+    from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+
+    mappings, _row_metrics = generate_name_counts.build_name_count_dicts(
+        generate_name_counts._fixture_rows(fixture_path, None)
+    )
+    _index_path, reuse_metrics = write_name_counts_index(tmp_path, mappings, provenance)
+    assert reuse_metrics == {"reused": True}
 
     with pytest.raises(FileExistsError, match="--overwrite"):
         generate_name_counts.main(

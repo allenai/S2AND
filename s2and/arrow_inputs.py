@@ -8,7 +8,7 @@ import os
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import MappingProxyType
 from typing import Any
 
@@ -34,19 +34,40 @@ class _VerifiedArrowArtifactGeneration:
     normalization_version: str | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ValidatedArrowInputs(Mapping[str, str]):
     """Immutable, integrity-checked Arrow paths for one artifact generation."""
 
     paths: Mapping[str, str]
     generation_id: str
     normalization_version: str
-    name_counts_manifest: ValidatedNameCountsManifest | None = None
+    name_counts_manifest: ValidatedNameCountsManifest | None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "paths", MappingProxyType(dict(self.paths)))
-        object.__setattr__(self, "generation_id", str(self.generation_id))
-        object.__setattr__(self, "normalization_version", str(self.normalization_version))
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError(
+            "ValidatedArrowInputs cannot be constructed directly; use an Arrow artifact validation function"
+        )
+
+    def __init_subclass__(cls, **_kwargs: Any) -> None:
+        raise TypeError("ValidatedArrowInputs cannot be subclassed")
+
+    @classmethod
+    def _from_verified(
+        cls,
+        *,
+        paths: Mapping[str, str],
+        generation_id: str,
+        normalization_version: str,
+        name_counts_manifest: ValidatedNameCountsManifest | None = None,
+    ) -> ValidatedArrowInputs:
+        """Create an instance after a trusted internal validation or projection."""
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "paths", MappingProxyType(dict(paths)))
+        object.__setattr__(instance, "generation_id", str(generation_id))
+        object.__setattr__(instance, "normalization_version", str(normalization_version))
+        object.__setattr__(instance, "name_counts_manifest", name_counts_manifest)
+        return instance
 
     def __getitem__(self, key: str) -> str:
         return self.paths[key]
@@ -61,7 +82,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         """Return this verified generation without request-local path entries."""
 
         removed = set(keys)
-        return ValidatedArrowInputs(
+        return self._from_verified(
             paths={key: value for key, value in self.paths.items() if key not in removed},
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
@@ -96,7 +117,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
             )
         paths = dict(self.paths)
         paths.update(normalized)
-        return ValidatedArrowInputs(
+        return self._from_verified(
             paths=paths,
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
@@ -171,17 +192,46 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _shared_name_counts_relative_path(path: Path, manifest_root: Path, *, artifact_key: str) -> Path | None:
+    """Return an allowed relative path for a known shared name-count layout."""
+
+    if artifact_key != "name_counts_index":
+        return None
+    candidates = [(manifest_root.parent / "name_counts_index", Path("..") / "name_counts_index")]
+    if manifest_root.parent.name == "datasets":
+        candidates.extend(
+            [
+                (
+                    manifest_root.parent.parent / "name_counts_index",
+                    Path("..") / ".." / "name_counts_index",
+                ),
+                (
+                    manifest_root.parent.parent.parent / "name_counts_index",
+                    Path("..") / ".." / ".." / "name_counts_index",
+                ),
+            ]
+        )
+    return next((relative for candidate, relative in candidates if path == candidate), None)
+
+
+def _portable_manifest_path(path: PurePath) -> str:
+    """Serialize a manifest path with platform-independent separators."""
+
+    return path.as_posix()
+
+
 def _manifest_relative_path(path_value: Any, manifest_dir: Path, *, artifact_key: str) -> str:
     path = Path(os.fspath(path_value)).resolve()
     root = manifest_dir.resolve()
     try:
         relative_path = path.relative_to(root)
     except ValueError as exc:
-        shared_name_counts_path = root.parent / "name_counts_index"
-        if artifact_key == "name_counts_index" and path == shared_name_counts_path:
-            return os.fspath(Path("..") / "name_counts_index")
-        raise ValueError(f"Arrow artifact path must remain within manifest directory: path={path} root={root}") from exc
-    return os.fspath(relative_path)
+        relative_path = _shared_name_counts_relative_path(path, root, artifact_key=artifact_key)
+        if relative_path is None:
+            raise ValueError(
+                f"Arrow artifact path must remain within manifest directory: path={path} root={root}"
+            ) from exc
+    return _portable_manifest_path(relative_path)
 
 
 def _build_arrow_artifact_generation(paths: Mapping[str, Any], manifest_dir: str | Path) -> dict[str, Any]:
@@ -393,24 +443,22 @@ def _verified_arrow_artifact_manifest(
         if not isinstance(raw_declared_path, str) or not raw_declared_path.strip():
             raise ValueError(f"Arrow artifact generation files.{key}.path is invalid: {manifest_path}")
         supplied_path = Path(os.path.abspath(os.fspath(paths[key])))
-        declared_path = Path(raw_declared_path)
-        if declared_path.is_absolute():
+        declared_relative_path = Path(raw_declared_path)
+        if declared_relative_path.is_absolute():
             raise ValueError(
                 f"Arrow artifact generation files.{key}.path must be manifest-relative: {raw_declared_path!r}"
             )
         manifest_root = manifest_path.parent.resolve()
-        declared_path = (manifest_root / declared_path).resolve()
+        declared_path = (manifest_root / declared_relative_path).resolve()
         try:
             declared_path.relative_to(manifest_root)
         except ValueError as exc:
-            shared_name_counts_path = manifest_root.parent / "name_counts_index"
-            if (
-                key == "name_counts_index"
-                and Path(raw_declared_path) == Path("..") / "name_counts_index"
-                and declared_path == shared_name_counts_path
-            ):
-                pass
-            else:
+            allowed_relative_path = _shared_name_counts_relative_path(
+                declared_path,
+                manifest_root,
+                artifact_key=key,
+            )
+            if declared_relative_path != allowed_relative_path:
                 raise ValueError(
                     f"Arrow artifact generation files.{key}.path escapes the manifest directory: "
                     f"{raw_declared_path!r}"
@@ -857,7 +905,7 @@ def _validate_complete_arrow_artifacts(
             producer_hint=producer_hint,
         )
     _validate_batch_indexes(normalized)
-    return ValidatedArrowInputs(
+    return ValidatedArrowInputs._from_verified(
         paths=normalized,
         generation_id=verified.generation_id,
         normalization_version=verified.normalization_version,

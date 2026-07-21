@@ -251,7 +251,11 @@ def publish_name_counts(
             manifest_tmp.replace(manifest_path)
             manifest_committed = True
             fsync_directory(root)
-        return {**metadata, "manifest_path": str(manifest_path.resolve())}
+        # Return the exact persisted provenance payload.  Callers embed this
+        # value in derived artifacts, so adding machine-local publication
+        # details here would make their lineage differ from the authoritative
+        # sidecar written above.
+        return metadata
     finally:
         manifest_tmp.unlink(missing_ok=True)
         if staging.exists():

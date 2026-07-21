@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from scripts._rust_suite import prod_inference_cmd
+from scripts._rust_suite import featurizer_reuse_cmd, prod_inference_cmd
 
 
 def test_single_run_arrow_requires_rust_backend() -> None:
@@ -19,6 +19,29 @@ def test_single_run_arrow_requires_rust_backend() -> None:
             profile_output_path="profile.txt",
             model_path="model",
             input_format="arrow",
+        )
+
+
+def test_single_run_json_rejects_rust_before_loading_data() -> None:
+    with pytest.raises(ValueError, match="rust requires --input-format arrow"):
+        prod_inference_cmd._single_run(  # noqa: SLF001
+            backend="rust",
+            dataset_name="qian",
+            n_jobs=2,
+            profile_output_path="profile.txt",
+            model_path="missing-model",
+            input_format="json",
+        )
+
+
+def test_featurizer_reuse_rejects_json_before_loading_rust_or_data() -> None:
+    with pytest.raises(ValueError, match="requires --input-format arrow"):
+        featurizer_reuse_cmd.run_reuse_profile(
+            dataset_name="qian",
+            n_jobs=1,
+            repeats=1,
+            model_path="missing-model",
+            input_format="json",
         )
 
 

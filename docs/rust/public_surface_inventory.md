@@ -34,7 +34,7 @@ once when Rust is requested and does not probe individual methods or constants.
 
 | Method | Owner / caller | Status |
 |---|---|---|
-| `from_arrow_paths(...)` | `feature_port.build_rust_featurizer_from_arrow_paths(...)`; full predict, subblocked predict, raw Arrow scoring | Production Arrow constructor. The Python production wrapper requires batch indexes for filtered reads. |
+| `from_arrow_paths(...)` | `feature_port.build_rust_featurizer_from_arrow_paths(...)`; full predict, subblocked predict, raw Arrow scoring | Production Arrow constructor. The Python production wrapper requires batch indexes for filtered reads. Its optional planner-derived `name_counts_index` handle reuses one validated mmap generation and must match `paths["name_counts_index"]` by canonical root and manifest identity. |
 | `update_cluster_seeds(...)` and `update_signature_name_counts(...)` | cache/seed update helpers in `feature_port.py` and tests | Compatibility/training lifecycle helpers. |
 | `signature_ids(...)` | pairwise matrix wrappers, promoted incremental runtime, parity scripts | Shared index-order contract; keep. |
 | `signature_rule_metadata(...)`, `signature_name_counts_present(...)`, `cluster_seeds_require(...)` | `predict_from_rust_featurizer(...)`, parity tests, and state restoration checks | Required metadata for direct Rust-featurizer prediction and parity. |
@@ -54,7 +54,7 @@ once when Rust is requested and does not probe individual methods or constants.
 | `RustHybridCentroidRetriever.__new__(...)` | raw Arrow planners, training query support, tests | Maintained constructor. |
 | `top_k_hybrid_centroid_pair_plan(...)` | `s2and/incremental_linking/retrieval.py`, raw Arrow planners | Canonical runtime retrieval output. |
 | `top_k_hybrid_centroid_subset(...)` | `s2and/incremental_linking_training/query_support.py`, tests | Fixed Rust-owned training/query-support scoring surface. |
-| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; automatically selected promoted query batches use the separate constructor without a temporary empty sidecar. |
+| `RawBlockQueryCandidatePlanner.from_query_signatures(...)`, `from_auto_queries(...)`, `plan_query_signatures(...)`, `build_telemetry(...)`, `name_counts_index(...)`, `plan(...)` | `s2and/incremental_linking/production.py`, `s2and/incremental_linking/runtime.py`; tests | Canonical reusable production raw Arrow planner. Explicit query-view requests enter through typed `query_signatures.arrow`; automatically selected promoted query batches use the separate constructor without a temporary empty sidecar. `plan(..., additional_cluster_seed_disallows=...)` applies validated per-call exclusions without retaining them in planner state. |
 
 ## Python Wrapper Ownership
 
@@ -142,3 +142,7 @@ once when Rust is requested and does not probe individual methods or constants.
 - Status 2026-05-28: callable PyO3 exports, module constants, and
   `get_build_info()` diagnostics were rechecked against the local
   `s2and_rust` module.
+- Status 2026-07-21: promoted incremental batches reuse the planner's validated
+  name-count mmap handle. The native constructor rejects missing or mismatched
+  path identity, while per-rescore planner disallows remain request-local and
+  non-sticky.

@@ -9,15 +9,14 @@ if ! git diff --cached --name-only --diff-filter=ACM | grep -qx "VERSION"; then
   exit 0
 fi
 
-VERSION_FILES=(
-  "VERSION"
-  "pyproject.toml"
-  "s2and_rust/pyproject.toml"
-  "s2and_rust/Cargo.toml"
-  "s2and/runtime.py"
-  "uv.lock"
-  "s2and_rust/Cargo.lock"
-)
+VERSION_TARGETS="$(uv run python scripts/sync_version.py --print-targets)"
+VERSION_FILES=()
+while IFS= read -r version_file; do
+  version_file="${version_file%$'\r'}"
+  if [[ -n "$version_file" ]]; then
+    VERSION_FILES+=("$version_file")
+  fi
+done <<< "$VERSION_TARGETS"
 
 if uv run python scripts/sync_version.py --check; then
   exit 0

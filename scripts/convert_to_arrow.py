@@ -29,6 +29,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from s2and._atomic_io import exclusive_file_lock  # noqa: E402
 from s2and.arrow_inputs import (  # noqa: E402
     build_arrow_artifact_manifest,
     require_name_counts_index_artifact,
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 BENCHMARK_DATASETS = ("aminer", "arnetminer", "inspire", "kisti", "medline", "pubmed", "qian", "zbmath")
 ROOT_MANIFEST_SCHEMA = "inference_arrow_bundle_v1"
+_ROOT_MANIFEST_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -99,9 +101,9 @@ def _resolve_manifest_path(path_value: Any, base_dir: Path | None) -> Path:
 def _manifest_relative_path(path_value: Any, manifest_dir: Path) -> str:
     path = Path(str(path_value))
     try:
-        return os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))
+        return Path(os.path.relpath(str(path.resolve()), str(manifest_dir.resolve()))).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _file_sha256(path: Path) -> str:
@@ -133,132 +135,6 @@ def _git_commit_metadata() -> dict[str, Any]:
         "git_commit": _git_output(["rev-parse", "HEAD"]),
         "git_dirty": None if status is None else bool(status),
     }
-
-
-class _RootManifestLock:
-    """Small same-directory lock for root manifest read-modify-write."""
-
-    def __init__(self, path: Path, *, attempts: int = 50, sleep_seconds: float = 0.1) -> None:
-        self.path = path
-        self.attempts = attempts
-        self.sleep_seconds = sleep_seconds
-        self._fd: int | None = None
-        self._payload: str | None = None
-
-    def _try_create_lock_file(self) -> bool:
-        payload = f"{os.getpid()}\n"
-        fd: int | None = None
-        try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, payload.encode("ascii"))
-        except FileExistsError:
-            return False
-        except Exception:
-            self.path.unlink(missing_ok=True)
-            raise
-        finally:
-            if fd is not None:
-                os.close(fd)
-        self._payload = payload
-        return True
-
-    def __enter__(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        for attempt in range(1, self.attempts + 1):
-            if self._try_create_lock_file():
-                self._fd = None
-                return
-            if _remove_dead_pid_lock(self.path) and self._try_create_lock_file():
-                self._fd = None
-                return
-            if attempt == self.attempts:
-                lock_pid = _lock_pid(self.path)
-                pid_context = f" held by pid {lock_pid}" if lock_pid is not None else ""
-                raise TimeoutError(
-                    f"timed out waiting for root manifest lock {self.path}{pid_context} "
-                    f"after {self.attempts} attempts; remove the lock file if no converter is running"
-                )
-            time.sleep(self.sleep_seconds)
-
-    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-        if self._payload is None:
-            return
-        try:
-            current_payload = self.path.read_text(encoding="ascii")
-        except FileNotFoundError:
-            return
-        except OSError:
-            return
-        if current_payload == self._payload:
-            self.path.unlink(missing_ok=True)
-        self._payload = None
-
-
-def _lock_pid(path: Path) -> int | None:
-    try:
-        raw_pid = path.read_text(encoding="ascii").splitlines()[0].strip()
-    except OSError:
-        return None
-    except IndexError:
-        return None
-    if not raw_pid:
-        return None
-    try:
-        pid = int(raw_pid)
-    except ValueError:
-        return None
-    return pid if pid > 0 else None
-
-
-def _pid_is_running(pid: int) -> bool:
-    if pid == os.getpid():
-        return True
-    if os.name == "nt":
-        import ctypes
-
-        process_query_limited_information = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, int(pid))
-        if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
-
-
-def _remove_dead_pid_lock(path: Path) -> bool:
-    try:
-        raw_pid = path.read_text(encoding="ascii").splitlines()[0].strip()
-    except OSError:
-        return False
-    except IndexError:
-        raw_pid = ""
-    if raw_pid:
-        try:
-            pid = int(raw_pid)
-        except ValueError:
-            pid = None
-    else:
-        pid = None
-    if pid is not None and pid > 0 and _pid_is_running(pid):
-        return False
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def _root_manifest_entries(root_manifest_path: Path, dataset_name: str) -> list[dict[str, Any]]:
@@ -619,7 +495,7 @@ def _write_root_manifest(
 def _upsert_root_manifest(output_root: Path, *, dataset_name: str, dataset_dir: Path) -> None:
     root_manifest_path = output_root / "manifest.json"
     lock_path = root_manifest_path.with_suffix(root_manifest_path.suffix + ".lock")
-    with _RootManifestLock(lock_path):
+    with exclusive_file_lock(lock_path, timeout_seconds=_ROOT_MANIFEST_LOCK_TIMEOUT_SECONDS):
         existing_root_manifest: Mapping[str, Any] = {}
         if root_manifest_path.exists():
             loaded_root_manifest = _load_json(root_manifest_path)

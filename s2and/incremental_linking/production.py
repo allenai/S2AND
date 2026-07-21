@@ -161,8 +161,9 @@ class _QueryDisallowRescoreContext:
 
     clusterer: Any
     artifact: artifact_module.IncrementalLinkingArtifact
+    planner: Any
+    name_counts_index: Any | None
     arrow_paths: ValidatedArrowInputs
-    raw_request_planner: Any
     expected_normalization_version: str
     name_tuples: Any
     retrieval_top_k: int
@@ -170,6 +171,7 @@ class _QueryDisallowRescoreContext:
     runtime_context: RuntimeContext
     total_ram_bytes: int
     cluster_seeds_require: Mapping[str, int | str]
+    cluster_seed_representative_by_component: Mapping[str, str]
     orcid_fanout_by_query: Mapping[str, tuple[int, int]]
     component_sizes: Mapping[str, int]
     memory_layout: _PromotedIncrementalMemoryLayout
@@ -320,6 +322,56 @@ def _scored_query_decisions_from_result(
     return scored
 
 
+def _cluster_seed_representatives(cluster_seeds_require: Mapping[str, int | str]) -> dict[str, str]:
+    """Return one deterministic seed from each definitive post-split component."""
+
+    representatives: dict[str, str] = {}
+    for seed_id, component_key in cluster_seeds_require.items():
+        normalized_seed_id = str(seed_id)
+        normalized_component_key = str(component_key)
+        current = representatives.get(normalized_component_key)
+        if current is None or normalized_seed_id < current:
+            representatives[normalized_component_key] = normalized_seed_id
+    return representatives
+
+
+def _query_seed_disallows_for_rescore(
+    context: _QueryDisallowRescoreContext,
+    signature_id: str,
+    excluded_components: set[str],
+) -> set[tuple[str, str]]:
+    """Return singleton-query disallows that the planner can apply before top-k."""
+
+    query_id = str(signature_id)
+    seed_representative_by_component = context.cluster_seed_representative_by_component
+    normalized_excluded_components = {str(component_key) for component_key in excluded_components}
+    missing_components = {
+        component_key
+        for component_key in normalized_excluded_components
+        if component_key not in seed_representative_by_component
+    }
+    if missing_components:
+        raise ValueError(
+            "Cross-batch query disallow references unknown seed components: "
+            f"signature_id={query_id!r} component_keys={sorted(missing_components)!r}"
+        )
+
+    return {
+        (query_id, seed_representative_by_component[component_key]) for component_key in normalized_excluded_components
+    }
+
+
+def _plan_query_with_excluded_components(
+    context: _QueryDisallowRescoreContext,
+    signature_id: str,
+    excluded_components: set[str],
+) -> RawArrowPlanBundle:
+    """Build a singleton plan whose exclusions are applied before retrieval top-k."""
+
+    additional_disallows = sorted(_query_seed_disallows_for_rescore(context, signature_id, excluded_components))
+    return RawArrowPlanBundle.from_mapping(context.planner.plan([str(signature_id)], additional_disallows))
+
+
 def _rescore_query_disallow_endpoint(
     context: _QueryDisallowRescoreContext,
     signature_id: str,
@@ -329,7 +381,7 @@ def _rescore_query_disallow_endpoint(
 
     rescore_started = time.perf_counter()
     plan_started = time.perf_counter()
-    raw_plan_bundle = RawArrowPlanBundle.from_mapping(context.raw_request_planner.plan([signature_id]))
+    raw_plan_bundle = _plan_query_with_excluded_components(context, signature_id, excluded_components)
     planner_seconds = time.perf_counter() - plan_started
 
     featurizer_started = time.perf_counter()
@@ -341,6 +393,7 @@ def _rescore_query_disallow_endpoint(
         load_name_counts=clusterer_uses_name_count_features(context.clusterer),
         preprocess=True,
         num_threads=context.clusterer.n_jobs,
+        name_counts_index=context.name_counts_index,
     )
     featurizer_seconds = time.perf_counter() - featurizer_started
     _, limits = _memory_safe_promoted_query_batch(
@@ -393,6 +446,20 @@ def _request_cluster_seed_disallows(
 ) -> tuple[set[tuple[str, str]], set[tuple[str, str]], set[tuple[str, str]]]:
     arrow_disallows = cluster_seed_disallows_from_arrow_paths(arrow_paths)
     return request_cluster_seed_disallow_parts(dataset, arrow_disallows)
+
+
+def _plan_time_cluster_seed_disallows(
+    request_disallows: set[tuple[str, str]],
+    unassigned_signature_ids: Sequence[str],
+) -> set[tuple[str, str]]:
+    """Remove query-query pairs that cannot exclude a component before either query links."""
+
+    query_ids = {str(signature_id) for signature_id in unassigned_signature_ids}
+    return {
+        (str(left), str(right))
+        for left, right in request_disallows
+        if not (str(left) in query_ids and str(right) in query_ids)
+    }
 
 
 def _query_disallow_partner_ids(
@@ -666,19 +733,6 @@ def compute_promoted_incremental_limits(
     )
 
 
-def raise_if_promoted_incremental_batch_over_budget(limits: memory_budget.PromotedPhaseALimits) -> None:
-    if not bool(limits.single_query_exceeds_budget):
-        return
-    raise MemoryError(
-        "Promoted incremental linker cannot fit a single query under the memory budget: "
-        f"single_query_predicted_persistent_bytes={int(limits.single_query_predicted_persistent_bytes)} "
-        f"stage_budget_bytes={int(limits.stage_budget_bytes)} "
-        f"total_ram_bytes={int(limits.total_ram_bytes)} "
-        f"current_rss_bytes={int(limits.current_rss_bytes)} "
-        f"safety_margin_bytes={int(limits.safety_margin_bytes)}"
-    )
-
-
 def _memory_safe_promoted_query_batch(
     proposed_query_signature_ids: Sequence[str],
     *,
@@ -715,7 +769,6 @@ def _memory_safe_promoted_query_batch(
             candidate_rows_total_floor=batch_row_total_floor,
             pairs_total_floor=batch_pair_total_floor,
         )
-        raise_if_promoted_incremental_batch_over_budget(limits)
         safe_size = max(1, min(len(query_batch), int(limits.query_batch_size or 1)))
         if safe_size == len(query_batch):
             return query_batch, limits
@@ -871,7 +924,6 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         pairs_total_floor=initial_pair_total_floor,
     )
     resolved_total_ram_bytes = int(initial_limits.total_ram_bytes)
-    raise_if_promoted_incremental_batch_over_budget(initial_limits)
     linked_signature_clusters: dict[str, int | str] = {}
     batch_telemetries: list[Mapping[str, int | float | str]] = []
     batch_sizes: list[int] = []
@@ -891,6 +943,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         request_disallows,
         partial_supervision,
     )
+    planner_disallows = _plan_time_cluster_seed_disallows(request_disallows, unassigned_signature_ids)
     initial_query_disallow_decisions: dict[str, _ScoredQueryDecision] = {}
     seed_arrow_start = time.perf_counter()
     seed_arrow_matches_cluster_seeds_require = _cluster_seeds_arrow_matches(
@@ -901,7 +954,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         str(seed_setup_telemetry.get("seed_setup_cluster_seeds_source", "")) == "arrow"
         and len(recluster_map) == 0
         and seed_arrow_matches_cluster_seeds_require
-        and request_disallows == arrow_disallows
+        and planner_disallows == arrow_disallows
     )
     arrow_path_context: AbstractContextManager[Mapping[str, Any]]
     if seed_arrow_reused_source:
@@ -911,7 +964,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             base_arrow_path_payload,
             cluster_seeds_require,
             prefix="s2and_arrow_incremental_cluster_seeds_",
-            cluster_seeds_disallow=request_disallows,
+            cluster_seeds_disallow=planner_disallows,
         )
     with arrow_path_context as request_arrow_paths:
         arrow_path_payload: ValidatedArrowInputs = base_arrow_path_payload
@@ -937,6 +990,8 @@ def predict_incremental_promoted_linker_from_arrow_paths(
         final_limits_history: list[memory_budget.PromotedPhaseALimits] = []
 
         raw_request_planner: Any | None = None
+        shared_name_counts_index: Any | None = None
+        use_name_counts = clusterer_uses_name_count_features(clusterer)
         if unassigned_signature_ids:
             planner_build_start = time.perf_counter()
             raw_request_planner = feature_port._require_rust_runtime().RawBlockQueryCandidatePlanner.from_auto_queries(  # noqa: SLF001
@@ -946,6 +1001,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 num_threads=clusterer.n_jobs,
                 max_exemplars=4,
             )
+            if use_name_counts:
+                shared_name_counts_index = raw_request_planner.name_counts_index()
+                if shared_name_counts_index is None:
+                    raise RuntimeError("Raw Arrow planner did not retain the required name-count index")
             raw_planner_build_seconds = time.perf_counter() - planner_build_start
         query_batch_queue = deque(
             unassigned_signature_ids[start : start + query_batch_size]
@@ -1003,9 +1062,10 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 expected_normalization_version=expected_normalization_version,
                 signature_ids=signature_ids,
                 name_tuples=name_tuples,
-                load_name_counts=clusterer_uses_name_count_features(clusterer),
+                load_name_counts=use_name_counts,
                 preprocess=True,
                 num_threads=clusterer.n_jobs,
+                name_counts_index=shared_name_counts_index,
             )
             raw_batch_featurizer_seconds += time.perf_counter() - featurizer_start
             raw_batch_featurizer_count += 1
@@ -1066,8 +1126,9 @@ def predict_incremental_promoted_linker_from_arrow_paths(
             rescore_context = _QueryDisallowRescoreContext(
                 clusterer=clusterer,
                 artifact=artifact,
+                planner=raw_request_planner,
+                name_counts_index=shared_name_counts_index,
                 arrow_paths=arrow_path_payload,
-                raw_request_planner=raw_request_planner,
                 expected_normalization_version=expected_normalization_version,
                 name_tuples=name_tuples,
                 retrieval_top_k=retrieval_top_k,
@@ -1075,6 +1136,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 runtime_context=runtime_context,
                 total_ram_bytes=resolved_total_ram_bytes,
                 cluster_seeds_require=cluster_seeds_require,
+                cluster_seed_representative_by_component=_cluster_seed_representatives(cluster_seeds_require),
                 orcid_fanout_by_query=orcid_fanout_by_query,
                 component_sizes=component_sizes,
                 memory_layout=memory_layout,

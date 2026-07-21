@@ -15,6 +15,7 @@ from s2and.arrow_inputs import (
 )
 from s2and.consts import CLUSTER_SEEDS_LOOKUP
 from s2and.data import ANDData
+from s2and.name_count_binding import NameCountsBinding
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.runtime import load_s2and_rust_extension
 from s2and.rust_calls import (
@@ -412,14 +413,6 @@ def _rust_featurizer_build_count_key(
     return "from_arrow_paths"
 
 
-def _increment_rust_featurizer_build_count(
-    dataset: ANDData,
-    cache_key: _RustFeaturizerCacheKey | None = None,
-) -> int:
-    with _RUST_FEATURIZER_CACHE_LOCK:
-        return _increment_rust_featurizer_build_count_locked(dataset, cache_key)
-
-
 def _increment_rust_featurizer_build_count_locked(
     dataset: ANDData,
     cache_key: _RustFeaturizerCacheKey | None = None,
@@ -455,8 +448,14 @@ def build_rust_featurizer_from_arrow_paths(
     cluster_seed_require_value: float = 0.0,
     cluster_seed_disallow_value: float = 10000.0,
     num_threads: int | None = None,
+    name_counts_index: Any | None = None,
 ) -> Any:
-    """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths."""
+    """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths.
+
+    ``name_counts_index`` is an already validated native handle shared by a
+    request-scoped candidate planner. Supplying it avoids reopening and
+    exhaustively validating the same immutable index for every query batch.
+    """
 
     method = _require_rust_runtime().RustFeaturizer.from_arrow_paths
     expected_version = require_normalization_version(
@@ -474,13 +473,38 @@ def build_rust_featurizer_from_arrow_paths(
     normalized_paths.pop("query_signatures", None)
     normalized_paths.pop("manifest", None)
     if not load_name_counts:
+        if name_counts_index is not None:
+            raise ValueError("name_counts_index requires load_name_counts=True")
         normalized_paths.pop("name_counts_index", None)
+    elif name_counts_index is not None:
+        manifest = paths.name_counts_manifest
+        if manifest is None:
+            raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
+        observed_normalization_version = getattr(name_counts_index, "normalization_version", None)
+        if observed_normalization_version != manifest.normalization_version:
+            raise ValueError(
+                "shared name-count handle normalization mismatch: "
+                f"handle={observed_normalization_version!r} manifest={manifest.normalization_version!r}"
+            )
+        expected_binding = NameCountsBinding.from_provenance(
+            manifest.source_provenance,
+            context="Arrow name-count manifest source_provenance",
+        )
+        observed_binding = NameCountsBinding.from_rust_featurizer(
+            name_counts_index,
+            context="shared name-count handle",
+        )
+        expected_binding.require_matches(
+            observed_binding,
+            context="RustFeaturizer.from_arrow_paths",
+            source="shared NameCountsIndex handle",
+        )
     resolved_name_tuples = name_tuples
     if name_tuples is None:
         # Package data is immutable for the process lifetime. Reuse only the
         # frozen validated artifact so repeated Arrow requests do not rehash it.
         resolved_name_tuples = load_packaged_name_tuple_artifact().pairs
-    return method(
+    args = (
         normalized_paths,
         None if signature_ids is None else [str(value) for value in signature_ids],
         resolved_name_tuples,
@@ -489,6 +513,9 @@ def build_rust_featurizer_from_arrow_paths(
         float(cluster_seed_disallow_value),
         None if num_threads is None else resolve_n_jobs(num_threads),
     )
+    if name_counts_index is None:
+        return method(*args)
+    return method(*args, name_counts_index)
 
 
 def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:

@@ -11,11 +11,6 @@ from scripts.production.model import clean_linker_dataset_bundles as clean_modul
 from scripts.production.model.clean_linker_dataset_bundles import _bundle_child_path, migrate_bundle
 
 
-def test_default_bundle_roots_do_not_include_missing_legacy_bundle() -> None:
-    assert not any("20260513" in str(path) for path in clean_module.DEFAULT_BUNDLE_ROOTS)
-    assert any("20260525" in str(path) for path in clean_module.DEFAULT_BUNDLE_ROOTS)
-
-
 def _write_parquet(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(path, index=False)

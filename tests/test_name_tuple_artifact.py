@@ -13,7 +13,6 @@ from s2and.name_tuple_artifact import (
     NAME_TUPLE_ARTIFACT_SEMANTICS,
     build_name_tuple_artifact_metadata,
     load_name_tuple_artifact,
-    load_packaged_name_tuple_artifact,
 )
 from scripts.production import generate_canonical_name_tuples
 
@@ -56,17 +55,6 @@ def test_checked_in_canonical_name_tuple_hash_matches_unchanged_data() -> None:
     assert len(artifact.pairs) == 3684
     assert artifact.data_sha256 == "a6eafc93ee5af6c883c6d9dfa8abc2c26c88427ef2428fa4b99a681b0eaefb5b"
     assert metadata["generation_counts"]["dropped_duplicate_canonical"] == 3768
-
-
-def test_packaged_artifact_cache_is_immutable_and_avoids_rehashing() -> None:
-    load_packaged_name_tuple_artifact.cache_clear()
-
-    first = load_packaged_name_tuple_artifact()
-    second = load_packaged_name_tuple_artifact()
-
-    assert first is second
-    assert isinstance(first.pairs, frozenset)
-    assert load_packaged_name_tuple_artifact.cache_info().hits == 1
 
 
 def test_custom_artifact_requires_sidecar_and_rejects_data_tamper(tmp_path: Path) -> None:

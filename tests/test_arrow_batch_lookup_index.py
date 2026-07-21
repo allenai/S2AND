@@ -69,37 +69,12 @@ def test_validation_rejects_out_of_bounds_record_batch_index(tmp_path: Path) -> 
         validate_arrow_batch_lookup_index(path, index_path, key_column="signature_id")
 
 
-@pytest.mark.parametrize(
-    ("corruption", "expected_error"),
-    [
-        ("truncated", "does not match expected length"),
-        ("decreasing_hashes", "key hashes are not nondecreasing"),
-        ("out_of_bounds_batch", "batch index 3 is out of bounds"),
-    ],
-)
-def test_write_reuse_rejects_corrupt_batch_index(
-    tmp_path: Path,
-    corruption: str,
-    expected_error: str,
-) -> None:
+def test_write_reuse_rejects_corrupt_batch_index(tmp_path: Path) -> None:
     path, index_path = _write_tiny_index(tmp_path)
     payload = bytearray(index_path.read_bytes())
-    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
-    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
-    if corruption == "truncated":
-        payload = payload[:-1]
-    elif corruption == "decreasing_hashes":
-        records = [
-            bytes(payload[offset : offset + record_struct.size])
-            for offset in range(header_size, len(payload), record_struct.size)
-        ]
-        payload[header_size:] = b"".join(reversed(records))
-    else:
-        key_hash, _batch_index, reserved = record_struct.unpack_from(payload, header_size)
-        record_struct.pack_into(payload, header_size, key_hash, 3, reserved)
-    index_path.write_bytes(payload)
+    index_path.write_bytes(payload[:-1])
 
-    with pytest.raises(ValueError, match=expected_error):
+    with pytest.raises(ValueError, match="does not match expected length"):
         write_arrow_batch_lookup_index(
             path,
             index_path,

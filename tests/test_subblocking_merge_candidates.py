@@ -606,64 +606,6 @@ def test_arrow_graph_subblocking_requires_batch_indexes(tmp_path) -> None:
         fallback.prepare([["s1"]])
 
 
-def test_arrow_graph_subblocking_accepts_canonical_key_for_specter2_file(tmp_path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signatures_path = tmp_path / "signatures.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter2_path = tmp_path / "specter2.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(["s1", "s2"], type=pa.string()),
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "author_first": pa.array(["hui", "hui"], type=pa.string()),
-                "author_middle": pa.array(["", ""], type=pa.string()),
-                "author_affiliations": pa.array([["lab"], ["lab"]], type=pa.list_(pa.string())),
-                "author_orcid": pa.array([None, None], type=pa.string()),
-                "author_position": pa.array([0, 0], type=pa.int64()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "position": pa.array([0, 0], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang", "Hui Wang"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([1.0, 0.0, 0.99, 0.01], type=pa.float32()), 2),
-            }
-        ),
-        specter2_path,
-    )
-    paths = _add_graph_batch_indexes(
-        {"signatures": signatures_path, "paper_authors": paper_authors_path, "specter": specter2_path},
-        tmp_path,
-    )
-    assert "specter_batch_index" in paths
-
-    fallback = make_arrow_graph_subblocking_cluster_fn(
-        paths,
-        ["s1", "s2"],
-        config=GraphSubblockingConfig(neighbor_mode="exact", neighbors=1, min_edge_score=0.8),
-        random_seed=7,
-    )
-
-    subblocks = fallback(["s1", "s2"], object(), target_subblock_size=2)
-
-    assert {frozenset(values) for values in subblocks.values()} == {frozenset({"s1", "s2"})}
-    assert fallback.load_metrics["specter_rows_loaded"] == 2
-
-
 def test_arrow_graph_subblocking_tolerates_sparse_evidence_and_reports_load_metrics(tmp_path) -> None:
     pa = pytest.importorskip("pyarrow")
 

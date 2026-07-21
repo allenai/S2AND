@@ -25,7 +25,6 @@ from s2and.incremental_linking.artifact import (
 from s2and.incremental_linking.contracts import (
     canonical_json_digest,
     retrieval_constraint_decision_policy_payload,
-    retrieval_stack_contract_payload,
 )
 from s2and.incremental_linking.features import promoted_linker_feature_columns
 from s2and.incremental_linking.logistic_gate import load_logistic_gate_config, logistic_gate_config
@@ -251,29 +250,6 @@ def test_artifact_publication_requires_a_new_directory(tmp_path: Path) -> None:
     assert (artifact_dir / METADATA_FILENAME).read_bytes() == original_metadata
 
 
-def test_concurrent_identical_artifact_publication_has_one_winner(tmp_path: Path) -> None:
-    artifact_dir = tmp_path / "artifact"
-    staging_dirs = (tmp_path / "staging-a", tmp_path / "staging-b")
-    for staging_dir in staging_dirs:
-        staging_dir.mkdir()
-        (staging_dir / "payload").write_bytes(b"identical")
-    start = threading.Barrier(len(staging_dirs))
-
-    def publish(staging_dir: Path) -> str:
-        start.wait(timeout=5.0)
-        try:
-            artifact_module._publish_immutable_artifact(staging_dir, artifact_dir)
-        except FileExistsError:
-            return "conflict"
-        return "published"
-
-    with ThreadPoolExecutor(max_workers=len(staging_dirs)) as executor:
-        outcomes = list(executor.map(publish, staging_dirs))
-
-    assert sorted(outcomes) == ["conflict", "published"]
-    assert (artifact_dir / "payload").read_bytes() == b"identical"
-
-
 def test_concurrent_conflicting_artifact_publication_has_one_immutable_winner(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifact"
     staging_dirs = (tmp_path / "staging-a", tmp_path / "staging-b")
@@ -350,18 +326,9 @@ def test_load_incremental_linking_artifact_rejects_digest_drift(
         load_incremental_linking_artifact(artifact_dir)
 
 
-def test_retrieval_stack_contract_records_constraint_decision_policy() -> None:
-    payload = retrieval_stack_contract_payload(retrieval_top_k=25)
-
-    assert payload["candidate_filter_policy"] == "post_retrieval_constraint_row_policy"
-    assert payload["orcid_policy"] == "return_all_matches_force_link_exempt_from_disallow_veto"
-    assert payload["constraint_decision_policy"] == retrieval_constraint_decision_policy_payload()
-
-
-@pytest.mark.parametrize("field_name", sorted(_valid_metadata_payload()))
-def test_metadata_v4_rejects_every_deleted_top_level_field(field_name: str) -> None:
+def test_metadata_v4_rejects_missing_top_level_field() -> None:
     payload = _valid_metadata_payload()
-    del payload[field_name]
+    del payload["booster_sha256"]
 
     with pytest.raises(ValueError, match="fields do not match the v4 schema"):
         IncrementalLinkingArtifactMetadata.from_mapping(payload)

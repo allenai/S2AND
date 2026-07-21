@@ -407,11 +407,10 @@ def has_name_dash(value: str | None) -> bool:
 
 
 # ------------------------ canonical_v2 name canonicalization ------------------------
-# Migration step 2 of docs/normalization_migration_blocked.md. These functions are the
-# canonical normalization surface asserted by tests/test_canonical_name_examples.py.
-# They are NOT yet consumed by the live pipeline: the single-mode cutover (Open
-# Decision 4) wires them in together with regenerated canonical_v2 artifacts and the
-# v1.3 retrain. Policy decisions D1-D8 are recorded in the fixture's decisions registry.
+# These functions are the live canonical normalization surface used by ingestion,
+# feature extraction, subblocking, and query adaptation. The remaining release work
+# in docs/normalization_migration_blocked.md concerns artifact regeneration and model
+# retraining. Policy decisions D1-D8 are recorded in the fixture's decisions registry.
 
 # D3 apostrophe-like marks: ASCII apostrophe, backtick, spacing acute, curly quotes,
 # modifier letters (okina/apostrophe), primes, saltillo, U+FE4D (classified with

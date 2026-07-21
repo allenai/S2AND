@@ -101,7 +101,7 @@ def test_name_count_model_without_complete_binding_is_rejected_at_every_runtime_
     )
     index_dir = tmp_path / "name_counts_index"
     _write_index_manifest(index_dir, provenance)
-    validated_arrow_paths = ValidatedArrowInputs(
+    validated_arrow_paths = ValidatedArrowInputs._from_verified(
         paths={"name_counts_index": str(index_dir)},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
@@ -186,7 +186,7 @@ def test_arrow_prediction_checks_exact_name_count_binding_before_featurizer_buil
     arrow_paths = {"name_counts_index": str(index_dir)}
     build_calls: list[dict[str, Any]] = []
 
-    validated_arrow_paths = ValidatedArrowInputs(
+    validated_arrow_paths = ValidatedArrowInputs._from_verified(
         paths=arrow_paths,
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,

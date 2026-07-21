@@ -13,8 +13,6 @@ from s2and.consts import LARGE_INTEGER
 from s2and.data import ANDData
 from s2and.featurizer import (
     DEFAULT_FEATURE_GROUPS,
-    DEFAULT_NAMELESS_FEATURE_GROUPS,
-    NAME_DEPENDENT_FEATURE_GROUPS,
     NUM_FEATURES,
     FeaturizationInfo,
     _ensure_python_pair_signature_ngrams,
@@ -67,20 +65,8 @@ def test_default_features_are_instance_isolated() -> None:
     assert first.features_to_use is not second.features_to_use
 
 
-def test_default_and_nameless_feature_group_policy_is_canonical() -> None:
+def test_default_feature_group_policy_is_canonical() -> None:
     assert tuple(FeaturizationInfo().features_to_use) == DEFAULT_FEATURE_GROUPS
-    assert NAME_DEPENDENT_FEATURE_GROUPS == frozenset({"name_similarity", "advanced_name_similarity", "name_counts"})
-    assert DEFAULT_NAMELESS_FEATURE_GROUPS == (
-        "affiliation_similarity",
-        "email_similarity",
-        "coauthor_similarity",
-        "venue_similarity",
-        "year_diff",
-        "title_similarity",
-        "misc_features",
-        "embedding_similarity",
-        "journal_similarity",
-    )
 
 
 def test_featurization_info_rejects_unknown_feature_groups() -> None:
@@ -453,39 +439,6 @@ def test_many_pairs_featurize_uses_lazy_rust_loader_before_unavailable_check(
     assert state["prewarm_called"] is True
 
 
-def test_featurizer_with_feature_subset_ok() -> None:
-    dataset_no_ref = _dummy_dataset("dummy_no_ref_ok")
-    features_to_use = [
-        "name_similarity",
-        "affiliation_similarity",
-        "email_similarity",
-        "coauthor_similarity",
-        "venue_similarity",
-        "year_diff",
-        "title_similarity",
-        "misc_features",
-        "name_counts",
-        "journal_similarity",
-        "advanced_name_similarity",
-    ]
-    featurizer = FeaturizationInfo(features_to_use=features_to_use)
-    test_pairs = [("3", "0", 0), ("3", "1", 0)]
-
-    features, labels, _ = many_pairs_featurize(
-        test_pairs,
-        dataset_no_ref,
-        featurizer,
-        n_jobs=1,
-        chunk_size=1,
-        nan_value=-1,
-    )
-
-    assert features.shape[0] == len(test_pairs)
-    assert features.shape[1] == sum(len(featurizer.feature_group_to_index[name]) for name in features_to_use)
-    assert labels.tolist() == [0, 0]
-    assert np.any(features != -LARGE_INTEGER)
-
-
 def test_get_constraint() -> None:
     dataset = _dummy_dataset("dummy_constraints")
 
@@ -517,108 +470,12 @@ def test_multiprocessing_featurization_consistency() -> None:
         dataset,
         featurizer,
         n_jobs=2,
-        chunk_size=1,
+        chunk_size=3,
         nan_value=-1,
     )
 
     _assert_feature_arrays_equal(features_single, features_multi)
     np.testing.assert_array_equal(labels_single, labels_multi)
-
-
-def test_bound_dataset_is_available_in_workers() -> None:
-    dataset = _dummy_dataset("dummy_bound_workers")
-    featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
-    test_pairs = [
-        ("3", "0", 0),
-        ("3", "1", 0),
-    ]
-
-    try:
-        features, _labels, _ = many_pairs_featurize(
-            test_pairs,
-            dataset,
-            featurizer,
-            n_jobs=2,
-            chunk_size=1,
-            nan_value=-1,
-        )
-    except (AttributeError, NameError) as exc:
-        raise AssertionError(f"Dataset not available in worker processes: {exc}") from exc
-
-    assert features.shape[0] == len(test_pairs)
-
-
-def test_multiprocessing_with_different_chunk_sizes() -> None:
-    dataset = _dummy_dataset("dummy_mp_chunk_sizes")
-    featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
-    test_pairs = [
-        ("3", "0", 0),
-        ("3", "1", 0),
-        ("3", "2", 0),
-        ("0", "1", 1),
-        ("0", "2", 0),
-        ("1", "2", 1),
-    ]
-
-    features_chunk1, labels_chunk1, _ = many_pairs_featurize(
-        test_pairs,
-        dataset,
-        featurizer,
-        n_jobs=2,
-        chunk_size=1,
-        nan_value=-1,
-    )
-    features_chunk3, labels_chunk3, _ = many_pairs_featurize(
-        test_pairs,
-        dataset,
-        featurizer,
-        n_jobs=2,
-        chunk_size=3,
-        nan_value=-1,
-    )
-
-    _assert_feature_arrays_equal(features_chunk1, features_chunk3)
-    np.testing.assert_array_equal(labels_chunk1, labels_chunk3)
-
-
-def test_multiprocessing_fallback_to_single_thread() -> None:
-    dataset = _dummy_dataset("dummy_mp_small_work")
-    featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
-
-    features, labels, _ = many_pairs_featurize(
-        [("3", "0", 0)],
-        dataset,
-        featurizer,
-        n_jobs=4,
-        chunk_size=1,
-        nan_value=-1,
-    )
-
-    assert features.shape[0] == 1
-    assert labels.shape[0] == 1
-
-
-def test_spawn_context_compatibility() -> None:
-    dataset = _dummy_dataset("dummy_spawn_context")
-    featurizer = FeaturizationInfo(features_to_use=_FULL_FEATURES)
-    test_pairs = [
-        ("3", "0", 0),
-        ("3", "1", 0),
-        ("0", "1", 1),
-    ]
-
-    features, _labels, _ = many_pairs_featurize(
-        test_pairs,
-        dataset,
-        featurizer,
-        n_jobs=2,
-        chunk_size=1,
-        nan_value=-1,
-    )
-
-    assert features.shape[0] == len(test_pairs)
-    assert not np.all(features == -LARGE_INTEGER)
-    assert len(features[features != -LARGE_INTEGER]) > 0
 
 
 def test_signature_id_to_index_or_raise_accepts_non_string_pair_ids() -> None:

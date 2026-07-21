@@ -138,7 +138,6 @@ class PromotedPhaseALimits:
     pair_chunk_count: int
     pair_chunk_stage_budget_bytes: int
     single_query_predicted_persistent_bytes: int
-    single_query_exceeds_budget: bool
     predicted_scorer_full_input_bytes: int = 0
     predicted_scorer_persistent_output_bytes: int = 0
     predicted_scorer_chunk_rows: int = 0
@@ -1103,7 +1102,6 @@ def compute_promoted_phase_a_limits(
         pair_chunk_count=pair_chunk_count,
         pair_chunk_stage_budget_bytes=int(pair_plan.stage_budget_bytes),
         single_query_predicted_persistent_bytes=single_query_predicted_persistent_bytes,
-        single_query_exceeds_budget=single_query_predicted_persistent_bytes > stage_budget_bytes,
         predicted_scorer_full_input_bytes=predicted_scorer_full_input_bytes,
         predicted_scorer_persistent_output_bytes=predicted_scorer_persistent_output_bytes,
         predicted_scorer_chunk_rows=predicted_scorer_chunk_rows,

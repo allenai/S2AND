@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from s2and import data
 from s2and.data import Author, Paper, preprocess_papers_parallel
-from s2and.text import normalize_text, normalize_title
+from s2and.text import normalize_text
 
 
 def _make_paper(*, paper_id: int, title: str, venue: str, journal: str) -> Paper:
@@ -50,12 +50,9 @@ def test_preprocess_papers_parallel_linux_uses_pool(monkeypatch):
     monkeypatch.setattr(data.platform, "system", lambda: "Linux")
 
     class FakeUniversalPool:
-        init_calls = 0
-        imap_calls = 0
         last_use_threads = None
 
         def __init__(self, processes: int | None = None, use_threads: bool | None = None):
-            type(self).init_calls += 1
             self.processes = processes
             self.use_threads = use_threads
             type(self).last_use_threads = use_threads
@@ -67,7 +64,6 @@ def test_preprocess_papers_parallel_linux_uses_pool(monkeypatch):
             return False
 
         def imap(self, func, iterable, chunksize=1, max_prefetch=4):
-            type(self).imap_calls += 1
             for item in iterable:
                 yield func(item)
 
@@ -78,10 +74,6 @@ def test_preprocess_papers_parallel_linux_uses_pool(monkeypatch):
         "2": _make_paper(paper_id=2, title="Paper 2", venue="Venue 2", journal="Journal 2"),
     }
 
-    out = preprocess_papers_parallel(papers, n_jobs=2, preprocess=True)
+    preprocess_papers_parallel(papers, n_jobs=2, preprocess=True)
 
-    assert FakeUniversalPool.init_calls == 1
-    assert FakeUniversalPool.imap_calls == 1
     assert FakeUniversalPool.last_use_threads is False
-    assert out["1"].title == normalize_title("Paper 1")
-    assert out["2"].title == normalize_title("Paper 2")

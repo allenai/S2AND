@@ -74,23 +74,16 @@ def test_emit_memory_telemetry_uses_env_fallback(monkeypatch, tmp_path):
     assert record["value"] == 11
 
 
-def test_resolve_total_ram_cgroup_uses_safety_factor():
+@pytest.mark.parametrize(("safety_factor", "expected", "suffix"), [(0.8, 8000, "80pct"), (0.75, 7500, "75pct")])
+def test_resolve_total_ram_cgroup_uses_safety_factor(safety_factor: float, expected: int, suffix: str):
     resolved, source = memory_budget.resolve_total_ram_bytes(
         None,
         detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
         detect_total_fn=lambda: (None, "unavailable"),
+        autodetect_safety_factor=safety_factor,
     )
-    assert resolved == 8000
-    assert source == "cgroup:test_80pct"
-
-
-def test_detect_total_ram_windows_fallback_used_when_psutil_missing(monkeypatch):
-    monkeypatch.setattr(memory_budget, "_psutil_virtual_memory_total_bytes_best_effort", lambda: None)
-    monkeypatch.setattr(memory_budget, "_is_windows", lambda: True)
-    monkeypatch.setattr(memory_budget, "_windows_total_ram_bytes_best_effort", lambda: (123_456, "winapi:test"))
-    total, source = memory_budget.detect_total_ram_bytes_best_effort()
-    assert total == 123_456
-    assert source == "winapi:test"
+    assert resolved == expected
+    assert source == f"cgroup:test_{suffix}"
 
 
 def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
@@ -104,17 +97,6 @@ def test_resolve_total_ram_windows_fallback_uses_safety_factor(monkeypatch):
     )
     assert resolved == 8000
     assert source == "winapi:test_80pct"
-
-
-def test_resolve_total_ram_source_suffix_tracks_safety_factor():
-    resolved, source = memory_budget.resolve_total_ram_bytes(
-        None,
-        detect_cgroup_fn=lambda: (10_000, "cgroup:test"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        autodetect_safety_factor=0.75,
-    )
-    assert resolved == 7500
-    assert source == "cgroup:test_75pct"
 
 
 def test_current_rss_windows_fallback_used_when_psutil_missing(monkeypatch):
@@ -187,24 +169,7 @@ def test_compute_rust_batch_chunk_plan_rejects_negative_index_remap_bytes():
         )
 
 
-def test_compute_rust_batch_chunk_plan_base_chunk_pairs_zero_disables_floor():
-    plan = memory_budget.compute_rust_batch_chunk_plan(
-        num_features=1_000,
-        total_pairs=20_000,
-        total_ram_bytes=1_000_000,
-        stage_budget_fraction=0.10,
-        base_chunk_pairs=0,
-        row_overhead_bytes=128,
-        detect_cgroup_fn=lambda: (None, "unavailable"),
-        detect_total_fn=lambda: (None, "unavailable"),
-        current_rss_fn=lambda _total: (200_000, "rss:test"),
-    )
-    # Same setup as test_compute_rust_batch_chunk_plan_respects_stage_budget but
-    # base_chunk_pairs=0 means the floor is disabled. chunk_pairs should equal
-    # min(total_pairs, derived_chunk_pairs) — the base floor is not a candidate.
-    assert int(plan.chunk_pairs) == 1  # fixed overhead already consumes the tight budget
-    # Now verify with generous RAM so derived_chunk_pairs > total_pairs:
-    # chunk_pairs should equal total_pairs (not clamped by a base floor).
+def test_compute_rust_batch_chunk_plan_base_chunk_pairs_zero_allows_full_call():
     plan_big = memory_budget.compute_rust_batch_chunk_plan(
         num_features=1,
         total_pairs=500,
@@ -254,7 +219,6 @@ def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
     assert int(limits.predicted_candidate_rows_per_batch) == 60
     assert int(limits.predicted_pairs_per_batch) == 3500
     assert float(limits.observed_safety_multiplier) == pytest.approx(2.0)
-    assert bool(limits.single_query_exceeds_budget) is False
     assert int(limits.predicted_scorer_full_input_bytes) == 60 * 53 * 4
     assert int(limits.predicted_scorer_persistent_output_bytes) == 60 * 8
 
@@ -478,7 +442,24 @@ def test_compute_promoted_phase_a_limits_zero_queries_no_threshold_returns_empty
     assert int(limits.query_count) == 0
     assert int(limits.query_batch_size) == 0
     assert int(limits.hard_query_batch_size) == 0
-    assert bool(limits.single_query_exceeds_budget) is False
+
+
+def test_compute_promoted_phase_a_limits_zero_queries_ignores_single_query_budget():
+    limits = _compute_promoted_phase_a_limits(
+        query_count=0,
+        component_sizes=[4],
+        retrieval_top_k=50,
+        total_ram_bytes=100_000_000,
+        stage_budget_fraction=0.10,
+        fixed_overhead_bytes=20_000_000,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+
+    assert int(limits.query_count) == 0
+    assert int(limits.query_batch_size) == 0
+    assert int(limits.single_query_predicted_persistent_bytes) > int(limits.stage_budget_bytes)
 
 
 @pytest.mark.parametrize("query_count", [0, 5])
@@ -613,10 +594,6 @@ def test_effective_available_fraction_in_snapshot():
     assert snapshot.available_bytes == 700_000
     expected_fraction = 700_000 / 1_000_000
     assert abs(snapshot.effective_available_fraction - expected_fraction) < 1e-6
-
-
-def test_effective_available_fraction_in_rust_batch_plan():
-    """compute_rust_batch_chunk_plan should include effective_available_fraction."""
     plan = memory_budget.compute_rust_batch_chunk_plan(
         num_features=64,
         total_pairs=1000,

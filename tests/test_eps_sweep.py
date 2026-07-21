@@ -75,13 +75,6 @@ def test_eps_sweep_cli_has_one_real_orcid_constraint_switch() -> None:
     assert enabled_args.suppress_orcid_constraints is False
 
 
-@pytest.mark.parametrize("removed_flag", ["--backend", "--suppress-orcid-constraints"])
-def test_eps_sweep_cli_rejects_removed_no_choice_flags(removed_flag: str) -> None:
-    values = ["rust"] if removed_flag == "--backend" else []
-    with pytest.raises(SystemExit):
-        sweep_eps_on_linking_gold.parse_args(["--dataset", "dummy", "--model-path", "model", removed_flag, *values])
-
-
 def test_ensure_distance_caches_skips_singleton_without_compute_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         sweep_eps_on_linking_gold,

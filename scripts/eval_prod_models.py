@@ -143,17 +143,14 @@ from s2and.arrow_inputs import ValidatedArrowInputs
 
 TRAIN_MODE_ANDDATA_CURRENT = "anddata-current"
 TRAIN_MODE_ANDDATA_PYTHON = "anddata-python"
-TRAIN_MODE_JSON_RUST = "json-rust"
 TRAIN_MODE_ARROW_RUST = "arrow-rust"
 TRAIN_MODE_CHOICES = (
     TRAIN_MODE_ANDDATA_CURRENT,
     TRAIN_MODE_ANDDATA_PYTHON,
-    TRAIN_MODE_JSON_RUST,
     TRAIN_MODE_ARROW_RUST,
 )
 TRAIN_MODE_COMPARISON = (
     TRAIN_MODE_ANDDATA_PYTHON,
-    TRAIN_MODE_JSON_RUST,
     TRAIN_MODE_ARROW_RUST,
 )
 SPECTER1_SUFFIX = "_specter.pickle"
@@ -379,8 +376,6 @@ def _temporary_s2and_backend(backend: str | None):
 def _backend_for_train_mode(train_mode: str) -> str | None:
     if train_mode == TRAIN_MODE_ANDDATA_PYTHON:
         return "python"
-    if train_mode == TRAIN_MODE_JSON_RUST:
-        return "rust"
     return None
 
 
@@ -1310,18 +1305,6 @@ def main() -> None:
                     if train is None or val is None:
                         raise RuntimeError("Training mode did not produce train/val features")
                     evaluation_anddata = anddata
-                    if backend == "rust":
-                        with _temporary_s2and_backend("python"):
-                            evaluation_anddata = build_eval_anddata(
-                                data_root=data_original,
-                                dataset_name=dataset_name,
-                                specter_suffix=specter_suffix,
-                                n_jobs=n_jobs,
-                                random_seed=random_seed,
-                                train_pairs_size=int(args.train_pairs_size),
-                                val_pairs_size=int(args.val_pairs_size),
-                                test_pairs_size=int(args.test_pairs_size),
-                            )
                     clusterer = build_pairwise_clusterer_from_features(
                         cast(tuple[np.ndarray, np.ndarray, np.ndarray | None], train),
                         cast(tuple[np.ndarray, np.ndarray, np.ndarray | None], val),

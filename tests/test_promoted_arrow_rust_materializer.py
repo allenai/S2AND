@@ -53,8 +53,8 @@ def _validate_resolved_arrow_path_keys(
     return paths
 
 
-def test_load_target_accepts_current_supported_promoted_features(tmp_path) -> None:
-    target_path = tmp_path / "current_target.json"
+def test_load_target_accepts_current_and_rejects_removed_promoted_features(tmp_path) -> None:
+    target_path = tmp_path / "target.json"
     target_path.write_text(
         json.dumps(
             {
@@ -69,9 +69,6 @@ def test_load_target_accepts_current_supported_promoted_features(tmp_path) -> No
 
     assert target["features"] == ["min_distance", "pw_max_affiliation_overlap", "strong_positive_anchor_score"]
 
-
-def test_load_target_rejects_removed_promoted_features(tmp_path) -> None:
-    target_path = tmp_path / "unsupported_target.json"
     target_path.write_text(
         json.dumps(
             {

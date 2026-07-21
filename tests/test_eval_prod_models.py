@@ -70,114 +70,36 @@ def _bypass_arrow_artifact_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_first_missing_arrow_dataset_error_reports_failing_pair(monkeypatch) -> None:
-    def fake_resolve(_arrow_root: str, dataset_name: str, specter_suffix: str) -> dict[str, str]:
-        if dataset_name == "second" and specter_suffix == "_specter2.pkl":
-            raise FileNotFoundError("missing specter2.arrow")
-        return {}
-
-    monkeypatch.setattr(eval_prod_models, "resolve_arrow_dataset_paths", fake_resolve)
-
-    error = eval_prod_models.first_missing_arrow_dataset_error(
-        "arrow-root",
-        ["first", "second"],
-        ["_specter.pickle", "_specter2.pkl"],
-    )
-
-    assert error is not None
-    assert "dataset='second'" in str(error)
-    assert "specter_suffix='_specter2.pkl'" in str(error)
-
-
-def test_empty_optional_dataset_and_specter_lists_fall_back_to_defaults() -> None:
-    assert eval_prod_models._resolve_requested_datasets(["pubmed", "qian"], [], "mini") == ["pubmed", "qian"]
-    assert eval_prod_models._resolve_requested_specter_suffixes(["s1", "s2"], []) == ["s1", "s2"]
-
-
-def test_arrow_eval_defaults_include_full_release_root() -> None:
-    project_root = str(Path("repo").resolve())
-
-    assert eval_prod_models._supports_arrow_eval("mini") is True
-    assert eval_prod_models._supports_arrow_eval("full") is True
-    assert eval_prod_models._supports_arrow_eval("inventors_s2and") is False
-    assert eval_prod_models._default_arrow_data_root(project_root, "mini") == str(
-        Path(project_root) / "s2and" / "data" / "s2and_mini_arrow"
-    )
-    assert eval_prod_models._default_arrow_data_root(project_root, "full") == str(Path(project_root) / "s2and" / "data")
-
-
-def test_arrow_eval_auto_selects_any_available_supported_bundle() -> None:
-    assert (
-        eval_prod_models._should_use_arrow_eval(
-            force_arrow=False,
-            no_arrow=False,
-            arrow_available=True,
-        )
-        is True
-    )
-    assert (
-        eval_prod_models._should_use_arrow_eval(
-            force_arrow=False,
-            no_arrow=True,
-            arrow_available=True,
-        )
-        is False
-    )
-    assert (
-        eval_prod_models._should_use_arrow_eval(
-            force_arrow=True,
-            no_arrow=True,
-            arrow_available=False,
-        )
-        is True
-    )
-
-
-def test_train_mode_resolution_preserves_default_and_comparison() -> None:
-    assert eval_prod_models._resolve_requested_train_modes(None, compare_train_modes=False) == ["anddata-current"]
-    assert eval_prod_models._resolve_requested_train_modes(["json-rust"], compare_train_modes=False) == ["json-rust"]
+def test_train_mode_validation_rejects_conflicting_request_or_wrong_dataset() -> None:
     assert eval_prod_models._resolve_requested_train_modes(None, compare_train_modes=True) == [
         "anddata-python",
-        "json-rust",
         "arrow-rust",
     ]
     with pytest.raises(ValueError, match="either --compare-train-modes or --train-modes"):
-        eval_prod_models._resolve_requested_train_modes(["json-rust"], compare_train_modes=True)
-
-
-def test_non_default_train_modes_are_qian_only_for_now() -> None:
-    eval_prod_models._validate_train_mode_scope(["anddata-current"], ["pubmed"])
-    eval_prod_models._validate_train_mode_scope(["json-rust", "arrow-rust"], ["qian"])
-
+        eval_prod_models._resolve_requested_train_modes(["arrow-rust"], compare_train_modes=True)
     with pytest.raises(ValueError, match="qian-only"):
         eval_prod_models._validate_train_mode_scope(["arrow-rust"], ["pubmed"])
 
 
-def test_training_mode_metric_assertion_accepts_identical_metrics() -> None:
+def test_training_mode_metric_assertion_accepts_identical_and_rejects_different_metrics() -> None:
     results = {
         ("_specter2.pkl", "anddata-python"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
-        ("_specter2.pkl", "json-rust"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
+        ("_specter2.pkl", "arrow-rust"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
     }
 
     eval_prod_models._assert_training_mode_metrics_identical(
         results,
         specter_suffixes_to_check=["_specter2.pkl"],
-        train_modes=["anddata-python", "json-rust"],
+        train_modes=["anddata-python", "arrow-rust"],
         datasets=["qian"],
     )
-
-
-def test_training_mode_metric_assertion_rejects_different_metrics() -> None:
-    results = {
-        ("_specter2.pkl", "anddata-python"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.3)}],
-        ("_specter2.pkl", "json-rust"): [{"B3 (P, R, F1)": (0.1, 0.2, 0.4)}],
-    }
+    results[("_specter2.pkl", "arrow-rust")][0]["B3 (P, R, F1)"] = (0.1, 0.2, 0.4)
 
     with pytest.raises(AssertionError, match="Training mode metrics differ"):
         eval_prod_models._assert_training_mode_metrics_identical(
             results,
             specter_suffixes_to_check=["_specter2.pkl"],
-            train_modes=["anddata-python", "json-rust"],
+            train_modes=["anddata-python", "arrow-rust"],
             datasets=["qian"],
         )
 
@@ -333,7 +255,7 @@ def test_arrow_training_feature_splits_loads_selected_name_counts(monkeypatch, n
         return FakeRustFeaturizer()
 
     monkeypatch.setattr(feature_port, "build_rust_featurizer_from_arrow_paths", fake_build)
-    validated_paths = ValidatedArrowInputs(
+    validated_paths = ValidatedArrowInputs._from_verified(
         paths={"signatures": "signatures.arrow", "name_counts_index": "name_counts_index"},
         generation_id="generation",
         normalization_version=NORMALIZATION_VERSION,
@@ -596,7 +518,7 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
     )
     monkeypatch.setattr(eval_prod_models, "read_signature_to_cluster_id", lambda _path: {"s1": "truth"})
 
-    arrow_paths = ValidatedArrowInputs(
+    arrow_paths = ValidatedArrowInputs._from_verified(
         paths={
             "signatures": "signatures.arrow",
             "papers": "papers.arrow",
@@ -695,40 +617,17 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
     assert captured["clusterer"].model_path == model_path
 
 
-def test_eval_main_requires_explicit_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["eval_prod_models.py", "--dataset", "mini", "--specter-suffixes", "_specter2.pkl"],
+def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = (
+        (["--dataset", "mini", "--specter-suffixes", "_specter2.pkl"], "requires an explicit model path"),
+        (["--train", "--specter2-model-path", "unused-model"], "cannot be combined with --train"),
+        (["--dataset", "mini", "--use-arrow", "--train"], "cannot be combined with --train"),
+        (["--dataset", "inventors_s2and", "--use-arrow"], "supports --dataset mini and --dataset full only"),
     )
-
-    with pytest.raises(ValueError, match="requires an explicit model path"):
-        eval_prod_models.main()
-
-
-def test_eval_main_rejects_explicit_model_path_with_train(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["eval_prod_models.py", "--train", "--specter2-model-path", "unused-model"],
-    )
-
-    with pytest.raises(ValueError, match="cannot be combined with --train"):
-        eval_prod_models.main()
-
-
-def test_eval_main_use_arrow_rejects_train(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", "--dataset", "mini", "--use-arrow", "--train"])
-
-    with pytest.raises(ValueError, match="cannot be combined with --train"):
-        eval_prod_models.main()
-
-
-def test_eval_main_use_arrow_rejects_unsupported_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", "--dataset", "inventors_s2and", "--use-arrow"])
-
-    with pytest.raises(ValueError, match="supports --dataset mini and --dataset full only"):
-        eval_prod_models.main()
+    for argv, message in cases:
+        monkeypatch.setattr(sys, "argv", ["eval_prod_models.py", *argv])
+        with pytest.raises(ValueError, match=message):
+            eval_prod_models.main()
 
 
 def test_construct_cluster_to_signatures_reports_missing_assignments() -> None:

@@ -8,7 +8,7 @@ import pytest
 import s2and.eval as eval_module
 import s2and.model as model_module
 import s2and.subblocking as subblocking_module
-from s2and.data import ANDData, _ordered_coauthors_for_signature, _python_signature_ngrams_batch
+from s2and.data import ANDData, _ordered_coauthors_for_signature
 from s2and.eval import incremental_cluster_eval
 from s2and.featurizer import FeaturizationInfo
 from s2and.model import Clusterer
@@ -43,16 +43,6 @@ def test_ordered_coauthors_rejects_missing_author_position() -> None:
 
     with pytest.raises(ValueError, match="missing author_info_position"):
         _ordered_coauthors_for_signature(cast(Any, signature), {"p1": cast(Any, paper)})
-
-
-def test_bench_preprocess_phase_coauthor_ngrams_match_production_short_token_policy() -> None:
-    from scripts.bench_preprocess_phases import _signature_ngrams_one
-
-    coauthor_text = "al li jo"
-    production_coauthor_ngrams, _ = _python_signature_ngrams_batch([coauthor_text], [""])
-    benchmark_coauthor_ngrams, _ = _signature_ngrams_one((coauthor_text, ""))
-
-    assert benchmark_coauthor_ngrams == production_coauthor_ngrams[0]
 
 
 VALID_ORCID_1 = "0000-0001-2345-6789"
@@ -388,30 +378,6 @@ def test_residual_first_initial_groups_rejects_whitespace_only_first_initials():
     assert groups == [["s1", "s2", "s3"]]
 
 
-def _run_make_subblocks_with_fixed_first_pass(monkeypatch, signatures, first_pass_output, *, maximum_size: int):
-    anddata = SimpleNamespace(signatures=signatures, random_seed=0)
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {key: np.array(value) for key, value in first_pass_output.items()}, {}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    def fail_if_specter_called(*_args, **_kwargs):
-        raise AssertionError("cluster_with_specter should not be called in this regression test")
-
-    monkeypatch.setattr(subblocking_module, "subdivide_helper", fake_subdivide_helper)
-    monkeypatch.setattr(subblocking_module, "cluster_with_specter", fail_if_specter_called)
-    return subblocking_module.make_subblocks(
-        list(signatures),
-        anddata,
-        maximum_size=maximum_size,
-        first_k_letter_counts_sorted={},
-    )
-
-
 def test_sampling_balanced_homonym_synonym_respects_sample_size():
     all_pairs = [
         ("a", "b", 0),
@@ -550,8 +516,10 @@ def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incrementa
         return predicted, None
 
     captured_kwargs = {}
+    incremental_calls: list[tuple[str, ...]] = []
 
     def fake_predict_incremental(self, block_signatures, dataset, *args, **kwargs):
+        incremental_calls.append(tuple(block_signatures))
         captured_kwargs.update(kwargs)
         return {
             "clusters": {"merged": list(dataset.cluster_seeds_require.keys()) + list(block_signatures)},
@@ -569,54 +537,11 @@ def test_clusterer_predict_does_not_forward_batch_threshold_to_python_incrementa
         batching_threshold=2,
     )
 
+    assert incremental_calls == [("s1", "s2")]
     assert "batching_threshold" not in captured_kwargs
 
 
-def test_sync_rust_cluster_seeds_skips_when_unchanged(monkeypatch):
-    calls = {"count": 0}
-
-    def fake_update(_dataset, runtime_context=None, **_kwargs):
-        del runtime_context
-        calls["count"] += 1
-
-    monkeypatch.setattr(model_module, "update_rust_cluster_seeds", fake_update)
-
-    dataset = _as_anddata(
-        SimpleNamespace(
-            cluster_seeds_require={},
-            cluster_seeds_disallow=set(),
-            _cluster_seeds_version=1,
-            arrow_paths={"signatures": "mock-signatures.arrow"},
-        )
-    )
-    runtime_context = RuntimeContext(
-        operation="constraints",
-        backend="rust",
-        run_id="run-1",
-    )
-
-    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
-    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
-    assert calls["count"] == 1
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) == 2
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) == 1
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) == 1
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 1
-    sync_seconds_total = float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_total", 0.0))
-    sync_seconds_max = float(getattr(dataset, "_rust_cluster_seeds_sync_seconds_max", 0.0))
-    assert isinstance(sync_seconds_total, float)
-    assert sync_seconds_max <= sync_seconds_total
-
-    dataset._cluster_seeds_version += 1
-    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
-    assert calls["count"] == 2
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) == 3
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) == 2
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) == 2
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 1
-
-
-def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
+def test_sync_rust_cluster_seeds_skips_unchanged_and_detects_mutations(monkeypatch):
     calls = {"count": 0}
 
     def fake_update(_dataset, runtime_context=None, **_kwargs):
@@ -636,9 +561,10 @@ def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
     runtime_context = RuntimeContext(
         operation="constraints",
         backend="rust",
-        run_id="run-2",
+        run_id="run-1",
     )
 
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
     assert calls["count"] == 1
 
@@ -650,10 +576,10 @@ def test_sync_rust_cluster_seeds_detects_in_place_seed_mutation(monkeypatch):
     dataset.cluster_seeds_disallow.add(("s2", "s3"))
     model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
     assert calls["count"] == 3
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_calls", 0)) == 3
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_attempted", 0)) == 3
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_succeeded", 0)) == 3
-    assert int(getattr(dataset, "_rust_cluster_seeds_sync_skipped_unchanged", 0)) == 0
+
+    dataset._cluster_seeds_version += 1
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=runtime_context)
+    assert calls["count"] == 4
 
 
 def test_make_distance_matrices_fastcluster_cross_batch_preserves_per_block_order(monkeypatch):

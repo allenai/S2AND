@@ -54,7 +54,6 @@ import io
 import json
 import os
 import pstats
-import random
 import subprocess
 import sys
 import time
@@ -113,29 +112,6 @@ def _pair_count_with_singleton_fix(cluster_size: int) -> int:
     if cluster_size == 1:
         return 1
     return cluster_size * (cluster_size - 1) // 2
-
-
-def _sample_unique_pair_indices(n: int, sample_pairs: int, rng: random.Random) -> list[tuple[int, int]]:
-    if sample_pairs <= 0:
-        return []
-    max_pairs = n * (n - 1) // 2
-    if sample_pairs >= max_pairs:
-        return [(i, j) for i in range(n) for j in range(i + 1, n)]
-    seen: set[tuple[int, int]] = set()
-    pairs: list[tuple[int, int]] = []
-    while len(pairs) < sample_pairs:
-        i = rng.randrange(n)
-        j = rng.randrange(n - 1)
-        if j >= i:
-            j += 1
-        if i > j:
-            i, j = j, i
-        pair = (i, j)
-        if pair in seen:
-            continue
-        seen.add(pair)
-        pairs.append(pair)
-    return pairs
 
 
 def _pairwise_precision_recall_fscore_with_singleton_fix(
@@ -328,8 +304,6 @@ def _run_single(
     max_block_size: int = 0,
     run_label: str = "",
     quality_check: bool = False,
-    constraint_sample: int = 0,
-    constraint_sample_seed: int = 42,
     emit_signature_map: bool = False,
     require_rust_release: bool = False,
     input_format: str = "json",
@@ -351,7 +325,6 @@ def _run_single(
             max_block_size=max_block_size,
             run_label=run_label,
             quality_check=quality_check,
-            constraint_sample=constraint_sample,
             emit_signature_map=emit_signature_map,
             require_rust_release=require_rust_release,
         )
@@ -506,97 +479,6 @@ def _run_single(
                     break
         quality_metrics = _quality_metrics_for_block(block_sigs, pred_clusters, signature_to_true_cluster_id)
 
-    constraint_parity: dict[str, Any] | None = None
-    if constraint_sample > 0:
-        if len(block_sigs) < 2:
-            constraint_parity = {
-                "sample_pairs_requested": int(constraint_sample),
-                "sample_pairs_effective": 0,
-                "mismatch_count": 0,
-                "mismatch_rate": 0.0,
-                "note": "Block too small for pair sampling.",
-            }
-        else:
-            try:
-                from s2and.feature_port import _get_rust_featurizer, get_constraints_matrix_indexed_rust
-            except Exception as exc:  # pragma: no cover - rust extension optional
-                raise RuntimeError(
-                    "Constraint parity sampling requires the Rust extension. "
-                    "Build it (maturin develop) or run with --constraint-sample 0."
-                ) from exc
-
-            rng = random.Random(int(constraint_sample_seed))
-            n = len(block_sigs)
-            max_pairs = n * (n - 1) // 2
-            sample_pairs = min(int(constraint_sample), int(max_pairs))
-
-            rust_featurizer = _get_rust_featurizer(anddata)
-            signature_index = {
-                str(signature_id): index for index, signature_id in enumerate(rust_featurizer.signature_ids())
-            }
-
-            mismatch_count = 0
-            mismatch_python_none = 0
-            mismatch_rust_none = 0
-            mismatch_value_diff = 0
-            python_constraint_hits = 0
-            rust_constraint_hits = 0
-            examples: list[dict[str, Any]] = []
-
-            dont_merge = bool(getattr(clusterer, "dont_merge_cluster_seeds", True))
-            for i, j in _sample_unique_pair_indices(n, sample_pairs, rng):
-                sig_a = block_sigs[i]
-                sig_b = block_sigs[j]
-
-                py_val = anddata.get_constraint(
-                    sig_a,
-                    sig_b,
-                    dont_merge_cluster_seeds=dont_merge,
-                    incremental_dont_use_cluster_seeds=False,
-                )
-                rust_val = get_constraints_matrix_indexed_rust(
-                    [(signature_index[str(sig_a)], signature_index[str(sig_b)])],
-                    featurizer=rust_featurizer,
-                    dont_merge_cluster_seeds=dont_merge,
-                    incremental_dont_use_cluster_seeds=False,
-                )[0]
-
-                if py_val is not None:
-                    python_constraint_hits += 1
-                if rust_val is not None:
-                    rust_constraint_hits += 1
-
-                if py_val != rust_val:
-                    mismatch_count += 1
-                    if py_val is None:
-                        mismatch_python_none += 1
-                    elif rust_val is None:
-                        mismatch_rust_none += 1
-                    else:
-                        mismatch_value_diff += 1
-                    if len(examples) < 10:
-                        examples.append(
-                            {
-                                "sig_a": sig_a,
-                                "sig_b": sig_b,
-                                "python": py_val,
-                                "rust": rust_val,
-                            }
-                        )
-
-            constraint_parity = {
-                "sample_pairs_requested": int(constraint_sample),
-                "sample_pairs_effective": int(sample_pairs),
-                "python_constraint_hits": int(python_constraint_hits),
-                "rust_constraint_hits": int(rust_constraint_hits),
-                "mismatch_count": int(mismatch_count),
-                "mismatch_rate": round(mismatch_count / sample_pairs, 6) if sample_pairs > 0 else 0.0,
-                "mismatch_python_none": int(mismatch_python_none),
-                "mismatch_rust_none": int(mismatch_rust_none),
-                "mismatch_value_diff": int(mismatch_value_diff),
-                "mismatch_examples": examples,
-            }
-
     result = {
         "backend": backend,
         "backend_label": run_label or backend,
@@ -622,7 +504,6 @@ def _run_single(
         "input_signature_ids_digest": canonical_sha256([str(signature_id) for signature_id in block_sigs]),
         "signature_to_cluster_fingerprint": signature_to_cluster_fingerprint,
         "quality_metrics": quality_metrics,
-        "constraint_parity": constraint_parity,
         "profile_output_path": profile_output_path,
         "rust_extension_identity": rust_extension_identity,
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
@@ -643,7 +524,6 @@ def _run_single_arrow(
     max_block_size: int,
     run_label: str,
     quality_check: bool,
-    constraint_sample: int,
     emit_signature_map: bool,
     require_rust_release: bool,
 ) -> dict[str, Any]:
@@ -651,8 +531,6 @@ def _run_single_arrow(
         raise ValueError("--input-format arrow requires --backend rust")
     if not str(arrow_data_root).strip():
         raise ValueError("--input-format arrow requires an explicit --arrow-data-root")
-    if constraint_sample > 0:
-        raise ValueError("--constraint-sample requires JSON/ANDData input")
 
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
     os.environ["S2AND_BACKEND"] = "rust"
@@ -764,7 +642,6 @@ def _run_single_arrow(
         "input_signature_ids_digest": canonical_sha256([str(signature_id) for signature_id in block_sigs]),
         "signature_to_cluster_fingerprint": signature_to_cluster_fingerprint,
         "quality_metrics": quality_metrics,
-        "constraint_parity": None,
         "profile_output_path": profile_output_path,
         "arrow_predict_telemetry": dict(getattr(clusterer, "_last_arrow_predict_telemetry", {}) or {}),
         "rust_extension_identity": rust_extension_identity,
@@ -831,8 +708,6 @@ def _run_single_subprocess(
     run_label: str,
     timeout_seconds: int,
     quality_check: bool,
-    constraint_sample: int,
-    constraint_sample_seed: int,
     emit_signature_map: bool,
     require_rust_release: bool,
     input_format: str = "json",
@@ -876,9 +751,6 @@ def _run_single_subprocess(
         cmd.extend(["--max-block-size", str(max_block_size)])
     if quality_check:
         cmd.append("--quality-check")
-    if constraint_sample > 0:
-        cmd.extend(["--constraint-sample", str(constraint_sample)])
-        cmd.extend(["--constraint-sample-seed", str(constraint_sample_seed)])
     if emit_signature_map:
         cmd.append("--emit-signature-map")
 
@@ -953,11 +825,6 @@ def _compare_runs(args: argparse.Namespace) -> None:
         raise ValueError("--mode compare requires a positive --max-block-size")
     if not str(args.arrow_data_root).strip():
         raise ValueError("--mode compare requires an explicit --arrow-data-root")
-    if int(args.constraint_sample) > 0:
-        raise ValueError(
-            "--constraint-sample is not supported in compare mode; use "
-            "scripts/verification/compare_full_predict_arrow_parity.py"
-        )
 
     # Auto-detect largest block if not specified
     if not dataset_name or not block_key:
@@ -982,8 +849,6 @@ def _compare_runs(args: argparse.Namespace) -> None:
         run_label="python",
         timeout_seconds=timeout_seconds,
         quality_check=bool(args.quality_check),
-        constraint_sample=0,
-        constraint_sample_seed=int(args.constraint_sample_seed),
         emit_signature_map=True,
         require_rust_release=bool(args.require_rust_release),
         input_format="json",
@@ -1002,8 +867,6 @@ def _compare_runs(args: argparse.Namespace) -> None:
         run_label="rust",
         timeout_seconds=timeout_seconds,
         quality_check=bool(args.quality_check),
-        constraint_sample=int(args.constraint_sample),
-        constraint_sample_seed=int(args.constraint_sample_seed),
         emit_signature_map=True,
         require_rust_release=bool(args.require_rust_release),
         input_format="arrow",
@@ -1143,29 +1006,6 @@ def _compare_runs(args: argparse.Namespace) -> None:
             print(
                 "  Delta (Rust-Python): "
                 f"B3 F1={quality_delta.get('b3_f1_delta')} | Pairwise F1={quality_delta.get('pairwise_f1_delta')}"
-            )
-
-    python_constraint_parity = python_result.get("constraint_parity")
-    rust_constraint_parity = rust_result.get("constraint_parity")
-    if python_constraint_parity is not None or rust_constraint_parity is not None:
-        print("\nConstraint parity sample (python vs rust constraints):")
-        if isinstance(python_constraint_parity, dict):
-            print(
-                "  Python-run: "
-                f"mismatch_rate={python_constraint_parity.get('mismatch_rate')} "
-                f"mismatches={python_constraint_parity.get('mismatch_count')}/"
-                f"{python_constraint_parity.get('sample_pairs_effective')} "
-                f"python_hits={python_constraint_parity.get('python_constraint_hits')} "
-                f"rust_hits={python_constraint_parity.get('rust_constraint_hits')}"
-            )
-        if isinstance(rust_constraint_parity, dict):
-            print(
-                "  Rust-run:   "
-                f"mismatch_rate={rust_constraint_parity.get('mismatch_rate')} "
-                f"mismatches={rust_constraint_parity.get('mismatch_count')}/"
-                f"{rust_constraint_parity.get('sample_pairs_effective')} "
-                f"python_hits={rust_constraint_parity.get('python_constraint_hits')} "
-                f"rust_hits={rust_constraint_parity.get('rust_constraint_hits')}"
             )
 
     print(f"\nPython cProfile: {python_profile_path}")
@@ -1310,21 +1150,6 @@ def main() -> None:
         help="Compute block-level quality metrics vs ground truth clusters (requires clusters.json).",
     )
     parser.add_argument(
-        "--constraint-sample",
-        type=int,
-        default=0,
-        help=(
-            "Sample N random pairs for --mode single with JSON input. Compare mode rejects this; "
-            "use compare_full_predict_arrow_parity.py for cross-representation constraint parity."
-        ),
-    )
-    parser.add_argument(
-        "--constraint-sample-seed",
-        type=int,
-        default=42,
-        help="RNG seed for --constraint-sample (reproducible).",
-    )
-    parser.add_argument(
         "--emit-signature-map",
         action="store_true",
         help="Include signature->cluster fingerprint mapping in single-run JSON (debug; can be large).",
@@ -1366,8 +1191,6 @@ def main() -> None:
             max_block_size=args.max_block_size,
             run_label=args.run_label or args.backend,
             quality_check=bool(args.quality_check),
-            constraint_sample=int(args.constraint_sample),
-            constraint_sample_seed=int(args.constraint_sample_seed),
             emit_signature_map=bool(args.emit_signature_map),
             require_rust_release=bool(args.require_rust_release),
             input_format=args.input_format,

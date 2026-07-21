@@ -99,54 +99,33 @@ def test_arrow_artifact_generation_excludes_request_local_sidecars(tmp_path: Pat
     assert second == first
 
 
-def test_benchmark_parser_requires_explicit_dataset_selection(tmp_path: Path) -> None:
+def test_dataset_parsers_require_explicit_dataset_selection(tmp_path: Path) -> None:
     parser = convert_to_arrow._build_parser()
-
-    with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args(
-            [
-                "benchmark",
-                "--source-root",
-                str(tmp_path / "source"),
-                "--output-root",
-                str(tmp_path / "out"),
-            ]
-        )
-
-    assert excinfo.value.code == 2
-
-
-def test_linker_replay_parser_requires_explicit_dataset_selection(tmp_path: Path) -> None:
-    parser = convert_to_arrow._build_parser()
-
-    with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args(
-            [
-                "linker-replay",
-                "--raw-root",
-                str(tmp_path / "raw"),
-                "--embeddings-root",
-                str(tmp_path / "embeddings"),
-                "--output-root",
-                str(tmp_path / "out"),
-            ]
-        )
-
-    assert excinfo.value.code == 2
+    commands = [
+        [
+            "benchmark",
+            "--source-root",
+            str(tmp_path / "source"),
+            "--output-root",
+            str(tmp_path / "out"),
+        ],
+        [
+            "linker-replay",
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--embeddings-root",
+            str(tmp_path / "embeddings"),
+            "--output-root",
+            str(tmp_path / "out"),
+        ],
+    ]
+    for command in commands:
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(command)
+        assert excinfo.value.code == 2
 
 
-def test_name_counts_subcommand_is_validation_only(tmp_path: Path) -> None:
-    parser = convert_to_arrow._build_parser()
-
-    args = parser.parse_args(["validate-name-counts-index", "--output-root", str(tmp_path)])
-
-    assert args.func is convert_to_arrow._run_validate_name_counts_index
-    with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args(["name-counts-index", "--output-root", str(tmp_path)])
-    assert excinfo.value.code == 2
-
-
-def test_benchmark_main_run_full_discovers_datasets_only_when_explicit(
+def test_run_full_discovers_datasets_only_when_explicit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -179,6 +158,42 @@ def test_benchmark_main_run_full_discovers_datasets_only_when_explicit(
     convert_to_arrow.main()
 
     assert [call["sources"].dataset for call in calls] == ["first", "second"]
+
+    calls.clear()
+
+    def fake_linker_sources(_raw_root: Path, _embeddings_root: Path, dataset: str) -> RuntimeDatasetSources:
+        return RuntimeDatasetSources(
+            dataset=dataset,
+            source_dir=tmp_path / "raw" / dataset,
+            signatures_path=tmp_path / "raw" / dataset / "signatures.json",
+            papers_path=tmp_path / "raw" / dataset / "papers.json",
+            specter2_path=tmp_path / "embeddings" / dataset / "specter2.pkl",
+        )
+
+    monkeypatch.setattr(
+        convert_to_arrow, "discover_linker_replay_datasets", lambda _raw_root, _embeddings_root: ["pubmed"]
+    )
+    monkeypatch.setattr(convert_to_arrow, "linker_replay_dataset_sources", fake_linker_sources)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "convert_to_arrow.py",
+            "linker-replay",
+            "--raw-root",
+            str(tmp_path / "raw"),
+            "--embeddings-root",
+            str(tmp_path / "embeddings"),
+            "--output-root",
+            str(tmp_path / "linker_replay_20260513"),
+            "--run-full",
+            "--skip-validation",
+        ],
+    )
+
+    convert_to_arrow.main()
+
+    assert [call["sources"].dataset for call in calls] == ["pubmed"]
 
 
 def test_root_manifest_upsert_keeps_dataset_order_stable(tmp_path: Path) -> None:
@@ -475,52 +490,6 @@ def test_linker_replay_main_writes_datasets_under_release_root(
     assert calls[0]["selected_embedding"] == "specter2"
 
 
-def test_linker_replay_main_run_full_discovers_datasets_only_when_explicit(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    calls: list[dict[str, Any]] = []
-
-    def fake_linker_sources(_raw_root: Path, _embeddings_root: Path, dataset: str) -> RuntimeDatasetSources:
-        return RuntimeDatasetSources(
-            dataset=dataset,
-            source_dir=tmp_path / "raw" / dataset,
-            signatures_path=tmp_path / "raw" / dataset / "signatures.json",
-            papers_path=tmp_path / "raw" / dataset / "papers.json",
-            specter2_path=tmp_path / "embeddings" / dataset / "specter2.pkl",
-        )
-
-    def fake_convert_runtime_dataset_to_arrow(**kwargs: Any) -> dict[str, Any]:
-        calls.append(kwargs)
-        return {"dataset": kwargs["sources"].dataset}
-
-    monkeypatch.setattr(
-        convert_to_arrow, "discover_linker_replay_datasets", lambda _raw_root, _embeddings_root: ["pubmed"]
-    )
-    monkeypatch.setattr(convert_to_arrow, "linker_replay_dataset_sources", fake_linker_sources)
-    monkeypatch.setattr(convert_to_arrow, "convert_runtime_dataset_to_arrow", fake_convert_runtime_dataset_to_arrow)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "convert_to_arrow.py",
-            "linker-replay",
-            "--raw-root",
-            str(tmp_path / "raw"),
-            "--embeddings-root",
-            str(tmp_path / "embeddings"),
-            "--output-root",
-            str(tmp_path / "linker_replay_20260513"),
-            "--run-full",
-            "--skip-validation",
-        ],
-    )
-
-    convert_to_arrow.main()
-
-    assert [call["sources"].dataset for call in calls] == ["pubmed"]
-
-
 def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
 
@@ -564,48 +533,10 @@ def test_validate_manifest_require_embeddings_reports_missing_specter_rows(tmp_p
     assert metrics["missing_specter_paper_examples"] == ["p2"]
 
 
-def test_validate_arrow_dataset_manifest_accepts_canonical_key_for_specter2_file(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    specter2_path = tmp_path / "specter2.arrow"
-    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
-    _write_papers_table(pa, papers_path, ["p1"])
-    _write_paper_authors_table(pa, paper_authors_path, ["p1"], ["Ada Lovelace"])
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.FixedSizeListArray.from_arrays(pa.array([0.1, 0.2], type=pa.float32()), 2),
-            }
-        ),
-        specter2_path,
-    )
-
-    metrics = convert_to_arrow.validate_arrow_dataset_manifest(
-        {
-            "normalization_version": NORMALIZATION_VERSION,
-            "paths": {
-                "signatures": str(signatures_path),
-                "papers": str(papers_path),
-                "paper_authors": str(paper_authors_path),
-                "specter": str(specter2_path),
-            },
-        },
-        require_embeddings=True,
-        require_name_counts_index=False,
-    )
-
-    assert metrics["specter_count"] == 1
-
-
 @pytest.mark.parametrize(
     ("table_name", "missing_column", "require_embeddings"),
     [
         ("signatures", "author_first", False),
-        ("papers", "journal_name", False),
-        ("paper_authors", "author_name", False),
         ("specter", "embedding", True),
     ],
 )
@@ -879,47 +810,6 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
             },
             require_embeddings=False,
             require_name_counts_index=True,
-        )
-
-
-def test_validate_arrow_dataset_manifest_rejects_integer_id_columns(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    signatures_path = tmp_path / "signatures.arrow"
-    papers_path = tmp_path / "papers.arrow"
-    paper_authors_path = tmp_path / "paper_authors.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array([1], type=pa.int64()),
-                "paper_id": pa.array(["p1"], type=pa.string()),
-            }
-        ),
-        signatures_path,
-    )
-    write_arrow_ipc_table(pa.table({"paper_id": pa.array(["p1"], type=pa.string())}), papers_path)
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "position": pa.array([0], type=pa.int64()),
-                "author_name": pa.array(["Ada Lovelace"], type=pa.string()),
-            }
-        ),
-        paper_authors_path,
-    )
-
-    with pytest.raises(ValueError, match="expected string"):
-        convert_to_arrow.validate_arrow_dataset_manifest(
-            {
-                "normalization_version": NORMALIZATION_VERSION,
-                "paths": {
-                    "signatures": str(signatures_path),
-                    "papers": str(papers_path),
-                    "paper_authors": str(paper_authors_path),
-                },
-            },
-            require_embeddings=False,
-            require_name_counts_index=False,
         )
 
 

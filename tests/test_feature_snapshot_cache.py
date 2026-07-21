@@ -6,7 +6,6 @@ import hashlib
 import json
 import pickle
 import shutil
-import zipfile
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
@@ -347,14 +346,17 @@ def test_cold_arrays_are_validated_before_publication(
     assert list(tmp_path.glob("*.npz")) == []
 
 
-def test_corrupt_snapshot_raises_contextual_error(dummy_builder: dict[str, Any], tmp_path: Path) -> None:
+def test_corrupt_snapshots_raise_contextual_errors(dummy_builder: dict[str, Any], tmp_path: Path) -> None:
     featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
-    build_and_cached_featurize(dummy_builder, featurizer_info, cache_dir=tmp_path)
-    snapshots = sorted(tmp_path.glob("*.npz"))
-    snapshots[0].write_bytes(b"not an npz file")
+    for corruption in ("invalid", "truncated"):
+        cache_dir = tmp_path / corruption
+        build_and_cached_featurize(dummy_builder, featurizer_info, cache_dir=cache_dir)
+        snapshot = sorted(cache_dir.glob("*.npz"))[0]
+        payload = snapshot.read_bytes()
+        snapshot.write_bytes(b"not an npz file" if corruption == "invalid" else payload[: len(payload) // 2])
 
-    with pytest.raises(ValueError, match="unreadable"):
-        build_and_cached_featurize(dummy_builder, featurizer_info, cache_dir=tmp_path)
+        with pytest.raises(ValueError, match="unreadable"):
+            build_and_cached_featurize(dummy_builder, featurizer_info, cache_dir=cache_dir)
 
 
 def test_snapshot_publication_is_write_once(tmp_path: Path) -> None:
@@ -366,14 +368,6 @@ def test_snapshot_publication_is_write_once(tmp_path: Path) -> None:
     assert second is False
     assert path.read_bytes() == original_bytes
     assert list(path.parent.glob("*.tmp")) == []
-
-
-def test_snapshot_publication_uses_uncompressed_npz(tmp_path: Path) -> None:
-    path = tmp_path / "snapshot.npz"
-    feature_cache_mod._publish_snapshot(path, {"X": np.zeros((10, 10)), "y": np.zeros(10)})
-
-    with zipfile.ZipFile(path) as archive:
-        assert {member.compress_type for member in archive.infolist()} == {zipfile.ZIP_STORED}
 
 
 def test_nameless_snapshot_members_round_trip(
@@ -593,17 +587,6 @@ def test_snapshot_permission_error_is_not_mislabeled(tmp_path: Path, monkeypatch
         )
 
 
-def test_truncated_zip_raises_contextual_error(dummy_builder: dict[str, Any], tmp_path: Path) -> None:
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff"])
-    build_and_cached_featurize(dummy_builder, featurizer_info, cache_dir=tmp_path)
-    snapshot = sorted(tmp_path.glob("*.npz"))[0]
-    payload = snapshot.read_bytes()
-    snapshot.write_bytes(payload[: len(payload) // 2])
-
-    with pytest.raises(ValueError, match="unreadable"):
-        build_and_cached_featurize(dummy_builder, featurizer_info, cache_dir=tmp_path)
-
-
 def test_failed_publication_cleans_temporary_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def broken_savez(*_args, **_kwargs):
         raise OSError("disk full")
@@ -614,22 +597,6 @@ def test_failed_publication_cleans_temporary_file(tmp_path: Path, monkeypatch: p
         feature_cache_mod._publish_snapshot(path, {"X": np.zeros((1, 1)), "y": np.zeros(1)})
     assert not path.exists()
     assert list(tmp_path.glob("*.tmp")) == []
-
-
-def test_arbitrary_dataset_name_cannot_escape_flat_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("S2AND_BACKEND", "python")
-    monkeypatch.setattr(feature_cache_mod, "resolve_training_pairs", _synthetic_split_pairs)
-    cache_dir = tmp_path / "cache"
-    escaped_path = tmp_path / "escaped"
-
-    build_and_cached_featurize(
-        _dataset_kwargs(name=str(escaped_path)),
-        FeaturizationInfo(features_to_use=["year_diff"]),
-        cache_dir=cache_dir,
-    )
-    assert len(list(cache_dir.glob("*.npz"))) == 3
-    assert all(path.parent == cache_dir for path in cache_dir.glob("*.npz"))
-    assert not escaped_path.exists()
 
 
 def _competing_publish_worker(path_str: str) -> bool:

@@ -16,7 +16,6 @@ def test_memory_safe_query_batch_shrinks_to_refreshed_limit(monkeypatch) -> None
         calls.append(query_count)
         return SimpleNamespace(
             query_batch_size=min(2, query_count),
-            single_query_exceeds_budget=False,
         )
 
     monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)

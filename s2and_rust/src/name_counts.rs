@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::{
     fnv64, fnv64_update, read_f64_le_unchecked, read_u32_le_unchecked, read_u64_le_unchecked,
@@ -26,7 +27,7 @@ pub(crate) struct NameCountsData {
 
 #[derive(Default)]
 pub(crate) struct RawNameCountMaps {
-    pub(crate) index: Option<RawNameCountIndex>,
+    pub(crate) index: Option<Arc<RawNameCountIndex>>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,13 +61,14 @@ pub(crate) struct RawNameCountIndex {
     last_first_initial: RawNameCountIndexFile,
     normalization_version: String,
     provenance_binding: NameCountsProvenanceBinding,
+    identity: NameCountsIndexIdentity,
 }
 
 /// Python-facing, immutable handle over four manifest- and digest-verified
 /// memory-mapped name-count indexes.
 #[pyclass(frozen)]
 pub(crate) struct NameCountsIndex {
-    index: RawNameCountIndex,
+    index: Arc<RawNameCountIndex>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +77,12 @@ pub(crate) struct NameCountsProvenanceBinding {
     pub(crate) pickle_sha256: String,
     pub(crate) source_snapshot_id: String,
     pub(crate) selected_rows_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NameCountsIndexIdentity {
+    canonical_root: PathBuf,
+    manifest_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +129,7 @@ struct RawNameCountIndexPaths {
     last_first_initial: PathBuf,
     normalization_version: String,
     provenance_binding: NameCountsProvenanceBinding,
+    identity: NameCountsIndexIdentity,
 }
 
 impl RawNameCountIndex {
@@ -164,6 +173,7 @@ impl RawNameCountIndex {
             )?,
             normalization_version: paths.normalization_version.clone(),
             provenance_binding: paths.provenance_binding.clone(),
+            identity: paths.identity.clone(),
         })
     }
 
@@ -234,6 +244,32 @@ fn lookup_name_count_columns<S: AsRef<str> + Sync>(
     (first, last, first_last, last_first_initial)
 }
 
+impl NameCountsIndex {
+    pub(crate) fn from_shared(index: Arc<RawNameCountIndex>) -> Self {
+        Self { index }
+    }
+
+    pub(crate) fn shared_index(&self) -> Arc<RawNameCountIndex> {
+        Arc::clone(&self.index)
+    }
+
+    pub(crate) fn validate_path_identity(&self, path: &str) -> PyResult<()> {
+        let requested = read_name_counts_index_identity(path)?;
+        if requested != self.index.identity {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "name_counts_index handle does not match paths['name_counts_index']: \
+                 handle_root={} requested_root={} handle_manifest_sha256={} \
+                 requested_manifest_sha256={}",
+                self.index.identity.canonical_root.display(),
+                requested.canonical_root.display(),
+                self.index.identity.manifest_sha256,
+                requested.manifest_sha256,
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[pymethods]
 impl NameCountsIndex {
     /// Open a manifest-backed name-count index after independently verifying
@@ -241,7 +277,7 @@ impl NameCountsIndex {
     #[staticmethod]
     fn open(path: &str) -> PyResult<Self> {
         Ok(Self {
-            index: RawNameCountIndex::open(path)?,
+            index: Arc::new(RawNameCountIndex::open(path)?),
         })
     }
 
@@ -529,7 +565,17 @@ impl RawNameCountIndexFile {
 
 impl RawNameCountMaps {
     pub(crate) fn from_index(index: RawNameCountIndex) -> Self {
+        Self {
+            index: Some(Arc::new(index)),
+        }
+    }
+
+    pub(crate) fn from_shared_index(index: Arc<RawNameCountIndex>) -> Self {
         Self { index: Some(index) }
+    }
+
+    pub(crate) fn shared_index(&self) -> Option<Arc<RawNameCountIndex>> {
+        self.index.as_ref().map(Arc::clone)
     }
 
     pub(crate) fn has_data(&self) -> bool {
@@ -646,6 +692,12 @@ pub(crate) fn sha256_file(path: &Path) -> PyResult<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 fn validated_name_counts_index_manifest_path(
     index_dir: &Path,
     canonical_index_dir: &Path,
@@ -736,7 +788,11 @@ fn validated_name_counts_index_manifest_path(
 }
 
 impl NameCountsManifest {
-    fn into_paths(self, index_dir: &Path) -> PyResult<RawNameCountIndexPaths> {
+    fn into_paths(
+        self,
+        index_dir: &Path,
+        manifest_sha256: String,
+    ) -> PyResult<RawNameCountIndexPaths> {
         let manifest_path = index_dir.join("manifest.json");
         if self.schema_version != NAME_COUNTS_INDEX_SCHEMA_VERSION {
             return Err(manifest_value_error(
@@ -792,22 +848,64 @@ impl NameCountsManifest {
             last_first_initial,
             normalization_version: self.normalization_version,
             provenance_binding,
+            identity: NameCountsIndexIdentity {
+                canonical_root: canonical_index_dir,
+                manifest_sha256,
+            },
         })
     }
 }
 
 fn read_name_counts_index_manifest(index_dir: &Path) -> PyResult<RawNameCountIndexPaths> {
     let manifest_path = index_dir.join("manifest.json");
-    let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
+    let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
         pyo3::exceptions::PyIOError::new_err(format!(
             "failed to read name-count index manifest {}: {}",
             manifest_path.display(),
             err
         ))
     })?;
-    let manifest: NameCountsManifest = serde_json::from_str(&manifest_text)
+    let manifest_sha256 = sha256_bytes(&manifest_bytes);
+    let manifest: NameCountsManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|err| manifest_value_error(&manifest_path, format!("failed to parse: {err}")))?;
-    manifest.into_paths(index_dir)
+    manifest.into_paths(index_dir, manifest_sha256)
+}
+
+fn unresolved_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
+    let direct = PathBuf::from(path);
+    let nested = direct.join("name_counts_index");
+    for index_dir in [&direct, &nested] {
+        if index_dir.join("manifest.json").exists() {
+            return Ok(index_dir.clone());
+        }
+    }
+    Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+        "name-count index path {} does not contain manifest.json",
+        path
+    )))
+}
+
+fn read_name_counts_index_identity(path: &str) -> PyResult<NameCountsIndexIdentity> {
+    let index_root = unresolved_name_counts_index_root(path)?;
+    let canonical_root = fs::canonicalize(&index_root).map_err(|err| {
+        pyo3::exceptions::PyIOError::new_err(format!(
+            "failed to resolve name-count index directory {}: {}",
+            index_root.display(),
+            err
+        ))
+    })?;
+    let manifest_path = canonical_root.join("manifest.json");
+    let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
+        pyo3::exceptions::PyIOError::new_err(format!(
+            "failed to read name-count index manifest {}: {}",
+            manifest_path.display(),
+            err
+        ))
+    })?;
+    Ok(NameCountsIndexIdentity {
+        canonical_root,
+        manifest_sha256: sha256_bytes(&manifest_bytes),
+    })
 }
 
 /// Return the `normalization_version` from a fully validated name-count index.
@@ -817,17 +915,8 @@ pub(crate) fn read_name_counts_index_normalization_version(path: &str) -> PyResu
 }
 
 fn resolve_name_counts_index_paths(path: &str) -> PyResult<RawNameCountIndexPaths> {
-    let direct = PathBuf::from(path);
-    let nested = direct.join("name_counts_index");
-    for index_dir in [&direct, &nested] {
-        if index_dir.join("manifest.json").exists() {
-            return read_name_counts_index_manifest(index_dir);
-        }
-    }
-    Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
-        "name-count index path {} does not contain manifest.json",
-        path
-    )))
+    let index_root = unresolved_name_counts_index_root(path)?;
+    read_name_counts_index_manifest(&index_root)
 }
 
 fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, u64) {
@@ -845,10 +934,12 @@ mod name_counts_tests {
     use super::{
         lookup_name_count_column, name_counts_index_hashes,
         read_name_counts_index_normalization_version, sha256_file, validate_lookup_column_lengths,
-        NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind,
+        NameCountsIndex, NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile,
+        RawNameCountKind, RawNameCountMaps,
     };
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     // A valid 32-byte name-count index header describing zero records; the
     // manifest reader only checks the files exist.
@@ -1145,6 +1236,60 @@ mod name_counts_tests {
         assert!(values[2].is_nan());
         assert_eq!(values[3], 3.0);
         assert_eq!(values[4], 1.0);
+    }
+
+    #[test]
+    fn native_handle_and_raw_maps_share_one_index() {
+        let dir = write_lookup_artifact();
+        let shared = Arc::new(
+            RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path"))
+                .expect("open lookup index"),
+        );
+        let maps = RawNameCountMaps::from_shared_index(Arc::clone(&shared));
+        let handle =
+            NameCountsIndex::from_shared(maps.shared_index().expect("maps retain a shared index"));
+        let handle_index = handle.shared_index();
+
+        assert!(Arc::ptr_eq(&shared, &handle_index));
+
+        drop(handle_index);
+        drop(handle);
+        drop(maps);
+        drop(shared);
+        std::fs::remove_dir_all(&dir).expect("remove lookup artifact");
+    }
+
+    #[test]
+    fn native_handle_requires_matching_root_and_manifest_identity() {
+        let first = write_lookup_artifact();
+        let second = write_lookup_artifact();
+        let handle = NameCountsIndex::from_shared(Arc::new(
+            RawNameCountIndex::open(first.to_str().expect("utf-8 temp path"))
+                .expect("open lookup index"),
+        ));
+
+        handle
+            .validate_path_identity(first.to_str().expect("utf-8 temp path"))
+            .expect("same root and manifest must match");
+        let root_mismatch = handle
+            .validate_path_identity(second.to_str().expect("utf-8 temp path"))
+            .expect_err("different root must fail");
+        assert!(py_err_message(root_mismatch).contains("does not match paths['name_counts_index']"));
+
+        let manifest_path = first.join("manifest.json");
+        let mut manifest = std::fs::read(&manifest_path).expect("read manifest");
+        manifest.push(b'\n');
+        std::fs::write(&manifest_path, manifest).expect("rewrite manifest");
+        let manifest_mismatch = handle
+            .validate_path_identity(first.to_str().expect("utf-8 temp path"))
+            .expect_err("changed manifest must fail");
+        assert!(
+            py_err_message(manifest_mismatch).contains("does not match paths['name_counts_index']")
+        );
+
+        drop(handle);
+        std::fs::remove_dir_all(&first).expect("remove first lookup artifact");
+        std::fs::remove_dir_all(&second).expect("remove second lookup artifact");
     }
 
     #[test]

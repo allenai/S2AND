@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,25 @@ def test_transfer_mini_resolve_ingest_auto_is_backend_specific() -> None:
 def test_transfer_mini_compare_rejects_explicit_ingest() -> None:
     with pytest.raises(ValueError, match="--mode compare requires --ingest auto"):
         transfer_mini_cmd._resolve_workload(SimpleNamespace(mode="compare", ingest="arrow"))
+
+
+def test_transfer_mini_rejects_borrowed_prediction_arrow_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["transfer_mini_cmd.py", "--prediction-arrow-data-dir", "converted"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        transfer_mini_cmd.main()
+
+    assert exc_info.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "unrecognized arguments" in stderr
+    assert "--prediction-arrow-data-dir" in stderr
 
 
 def test_transfer_mini_prediction_arrow_manifest_does_not_require_clusters(tmp_path: Path) -> None:

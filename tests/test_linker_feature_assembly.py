@@ -45,13 +45,9 @@ def test_promoted_linker_feature_columns_match_promoted_target_file() -> None:
     target_path = Path("s2and/data/production_model_v1.21/reproducibility/incremental_linker_training_target.json")
     target = json.loads(target_path.read_text(encoding="utf-8"))
 
-    assert features.promoted_linker_feature_columns() == tuple(target["features"])
-
-
-def test_promoted_linker_feature_columns_are_promoted_53_without_rank_fractions() -> None:
     promoted = features.promoted_linker_feature_columns()
 
-    assert len(promoted) == 53
+    assert promoted == tuple(target["features"])
     assert not any(column.endswith("_rank_fraction") for column in promoted)
 
 

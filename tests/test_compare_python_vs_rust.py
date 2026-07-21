@@ -4,22 +4,8 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-from scripts import rust_suite
 from scripts._rust_suite import compare_cmd
-
-
-def test_language_feature_indices_detect_expected_columns():
-    feature_names = [
-        "f0",
-        "english_count",
-        "same_language",
-        "language_reliability_min",
-        "f4",
-    ]
-    indices = compare_cmd._language_feature_indices(feature_names)
-    assert indices == [1, 2, 3]
 
 
 def test_feature_parity_rejects_any_language_mismatch():
@@ -54,7 +40,7 @@ def test_feature_parity_rejects_any_language_mismatch():
     assert parity["pass"] is False
 
 
-def test_feature_parity_fails_on_non_language_mismatch():
+def test_feature_parity_fails_on_non_language_or_discrete_mismatch():
     feature_names = ["first_names_equal", "english_count", "year_diff"]
     python_features = np.array([[1.0, 2.0, 3.0]], dtype=np.float64)
     rust_features = np.array([[1.0, 2.0, 3.5]], dtype=np.float64)
@@ -70,9 +56,7 @@ def test_feature_parity_fails_on_non_language_mismatch():
     assert parity["non_language"]["pass"] is False
     assert parity["pass"] is False
 
-
-def test_feature_parity_requires_exact_discrete_values() -> None:
-    parity = compare_cmd._compute_feature_parity(
+    discrete_parity = compare_cmd._compute_feature_parity(
         np.asarray([[1.0]], dtype=np.float64),
         np.asarray([[1.0 + 1e-7]], dtype=np.float64),
         ["english_count"],
@@ -80,7 +64,7 @@ def test_feature_parity_requires_exact_discrete_values() -> None:
         non_language_atol=1e-6,
     )
 
-    assert parity["pass"] is False
+    assert discrete_parity["pass"] is False
 
 
 def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
@@ -127,16 +111,3 @@ def test_load_dataset_inputs_force_paths_writes_limited_json(tmp_path):
 
     assert len(signatures_limited) == 2
     assert set(papers_limited.keys()) == {"1", "2"}
-
-
-def test_compare_parser_defaults_to_legacy_json_root() -> None:
-    args = compare_cmd._build_parser().parse_args([])
-
-    assert args.dataset == "qian"
-    assert Path(args.data_root) == compare_cmd.DEFAULT_JSON_DATA_ROOT
-
-
-def test_rust_suite_requires_subcommand():
-    with pytest.raises(SystemExit) as exc_info:
-        rust_suite.main([])
-    assert exc_info.value.code not in (0, None)

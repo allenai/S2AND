@@ -107,30 +107,10 @@ def test_get_constraint_suppress_orcid_python() -> None:
     assert dataset.get_constraint("same_a", "same_b", suppress_orcid=True) is None
 
 
-def test_get_constraint_suppress_orcid_rust_parity(tmp_path) -> None:
-    _require_rust()
-    source_dataset = _feature_safe_dataset()
-    arrow_dataset = build_arrow_training_dataset(source_dataset, tmp_path, name_counts="empty")
-    clear_rust_featurizer_cache()
-    rust_featurizer = _get_rust_featurizer(arrow_dataset)
-    signature_index = {str(sig_id): idx for idx, sig_id in enumerate(rust_featurizer.signature_ids())}
-    indexed_pairs = [(signature_index["same_a"], signature_index["same_b"])]
-
-    assert get_constraints_matrix_indexed_rust(
-        indexed_pairs,
-        featurizer=rust_featurizer,
-    ) == [source_dataset.get_constraint("same_a", "same_b")]
-    assert get_constraints_matrix_indexed_rust(
-        indexed_pairs,
-        featurizer=rust_featurizer,
-        suppress_orcid=True,
-    ) == [source_dataset.get_constraint("same_a", "same_b", suppress_orcid=True)]
-
-
 def test_cached_rust_featurizer_respects_suppress_orcid_per_call(tmp_path) -> None:
     _require_rust()
-    dataset = _feature_safe_dataset()
-    dataset = build_arrow_training_dataset(dataset, tmp_path, name_counts="empty")
+    source_dataset = _feature_safe_dataset()
+    dataset = build_arrow_training_dataset(source_dataset, tmp_path, name_counts="empty")
     clear_rust_featurizer_cache()
     rust_featurizer = _get_rust_featurizer(dataset)
     signature_index = {str(sig_id): idx for idx, sig_id in enumerate(rust_featurizer.signature_ids())}
@@ -152,14 +132,14 @@ def test_cached_rust_featurizer_respects_suppress_orcid_per_call(tmp_path) -> No
         suppress_orcid=False,
     )
 
-    assert default_values == [0.0]
-    assert suppressed_values == [None]
-    assert default_values_again == [0.0]
+    assert default_values == [source_dataset.get_constraint("same_a", "same_b")]
+    assert suppressed_values == [source_dataset.get_constraint("same_a", "same_b", suppress_orcid=True)]
+    assert default_values_again == default_values
 
 
 def test_orcid_positive_label_count_unchanged() -> None:
     dataset = _feature_safe_dataset()
-    runtime_context = build_runtime_context("feature_safe_view_test")
+    runtime_context = build_runtime_context("feature_safe_view_test", backend="python")
     backend_default = model_module._build_incremental_constraint_backend(
         dataset,
         use_default_constraints_as_supervision=True,

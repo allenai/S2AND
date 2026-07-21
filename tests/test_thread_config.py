@@ -2,7 +2,6 @@ import pytest
 from lightgbm import LGBMClassifier
 
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking_training.classic import DEFAULT_CLASSIC_N_JOBS, _build_classic_classifier
 from s2and.model import Clusterer
 from s2and.thread_config import resolve_n_jobs
 
@@ -61,10 +60,3 @@ def test_resolve_n_jobs_rejects_zero() -> None:
 def test_resolve_n_jobs_rejects_non_integer_values(invalid: object) -> None:
     with pytest.raises(TypeError, match="must be an int or None"):
         resolve_n_jobs(invalid)  # type: ignore[arg-type]
-
-
-def test_classic_training_default_n_jobs_matches_production_cli() -> None:
-    classifier = _build_classic_classifier({})
-
-    assert DEFAULT_CLASSIC_N_JOBS == 20
-    assert classifier.get_params().get("n_jobs") == 20

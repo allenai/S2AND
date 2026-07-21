@@ -2821,12 +2821,34 @@ class Clusterer:
 
         model_predict_seconds = 0.0
         if use_rust_blockwise:
+            selected_count = _count_selected_features(self.featurizer_info)
+            nameless_count = (
+                _count_selected_features(self.nameless_featurizer_info)
+                if self.nameless_featurizer_info is not None
+                else 0
+            )
+            batch_chunk_plan = _compute_predict_batch_chunk_plan(
+                self.featurizer_info.number_of_features,
+                selected_feature_count=selected_count,
+                nameless_feature_count=nameless_count,
+                total_pairs=num_pairs,
+                total_ram_bytes=total_ram_bytes,
+            )
+            pair_chunk_size = max(
+                1,
+                min(
+                    int(self.batch_size),
+                    int(batch_chunk_plan.chunk_pairs) if batch_chunk_plan is not None else int(self.batch_size),
+                ),
+            )
             for prediction_chunk in self._iter_rust_predicted_distance_matrix_chunks(
                 block_dict,
                 dataset,
                 partial_supervision,
                 incremental_dont_use_cluster_seeds=incremental_dont_use_cluster_seeds,
                 runtime_context=runtime_context,
+                pair_chunk_size=pair_chunk_size,
+                total_ram_bytes=total_ram_bytes,
             ):
                 chunk = prediction_chunk.chunk
                 batch_predictions = prediction_chunk.predictions

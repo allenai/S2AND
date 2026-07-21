@@ -11,7 +11,7 @@ import shutil
 import struct
 import tempfile
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1160,7 +1160,7 @@ def _write_name_count_sort_run(path: Path, records: list[tuple[int, int, bytes, 
     return path.stat().st_size
 
 
-def _iter_name_count_sort_run(path: Path) -> Iterator[tuple[int, int, bytes, float]]:
+def _iter_name_count_sort_run(path: Path) -> Generator[tuple[int, int, bytes, float], None, None]:
     with path.open("rb") as source:
         while header := source.read(_NAME_COUNTS_SORT_RUN_RECORD_STRUCT.size):
             if len(header) != _NAME_COUNTS_SORT_RUN_RECORD_STRUCT.size:
@@ -1259,6 +1259,7 @@ def _write_name_count_index_file(
     record_count = len(mapping)
     buffered: list[tuple[int, int, bytes, float]] = []
     run_paths: list[Path] = []
+    run_iterators: list[Generator[tuple[int, int, bytes, float], None, None]] = []
     run_bytes = 0
     peak_buffered_records = 0
     kind_hash_seed = _name_counts_index_kind_hash_seed(kind)
@@ -1281,8 +1282,9 @@ def _write_name_count_index_file(
                 run_bytes += _write_name_count_sort_run(run_path, buffered)
                 run_paths.append(run_path)
                 buffered = []
+            run_iterators = [_iter_name_count_sort_run(run_path) for run_path in run_paths]
             sorted_records: Iterable[tuple[int, int, bytes, float]] = heapq.merge(
-                *(_iter_name_count_sort_run(run_path) for run_path in run_paths),
+                *run_iterators,
                 key=lambda item: (item[0], item[1], item[2]),
             )
         else:
@@ -1294,6 +1296,8 @@ def _write_name_count_index_file(
             record_count=record_count,
         )
     finally:
+        for run_iterator in run_iterators:
+            run_iterator.close()
         for run_path in run_paths:
             run_path.unlink(missing_ok=True)
     return {

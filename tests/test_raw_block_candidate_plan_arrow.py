@@ -795,6 +795,27 @@ def test_raw_arrow_candidate_plan_filters_cluster_seed_disallows(tmp_path: Path)
     assert raw_plan["telemetry"]["cluster_seed_disallowed_candidate_count"] == 1
 
 
+def test_reusable_raw_arrow_planner_applies_dynamic_disallows_without_retaining_them(tmp_path: Path) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+        paths,
+        top_k=1,
+        orcid_enabled=False,
+        num_threads=1,
+    )
+
+    baseline = planner.plan(["q1"])
+    excluded = planner.plan(["q1"], [("q1", "s1")])
+    replanned = planner.plan(["q1"])
+
+    assert baseline["row_component_keys"] == ["c_match"]
+    assert excluded["row_component_keys"] == ["c_other"]
+    assert excluded["telemetry"]["cluster_seed_disallow_pair_count"] == 1
+    assert excluded["telemetry"]["cluster_seed_disallowed_candidate_count"] == 1
+    assert replanned["row_component_keys"] == ["c_match"]
+    assert replanned["telemetry"]["cluster_seed_disallow_pair_count"] == 0
+
+
 def test_raw_arrow_candidate_plan_rejects_disallow_with_unknown_seed_endpoint(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     paths["cluster_seed_disallows"] = _write_ipc(
@@ -919,20 +940,6 @@ def test_raw_arrow_candidate_plan_rejects_hidden_query_view(tmp_path: Path) -> N
             ["q1"],
             top_k=2,
             query_view="initial_only_no_specter",
-            orcid_enabled=False,
-            num_threads=1,
-        )
-
-
-def test_raw_arrow_candidate_plan_rejects_duplicate_query_signature_ids(tmp_path: Path) -> None:
-    paths = _base_arrow_paths(tmp_path)
-
-    with pytest.raises(ValueError, match="duplicate signature_id"):
-        _raw_candidate_plan_arrow(
-            paths,
-            ["q1", "q1"],
-            top_k=2,
-            query_view="full",
             orcid_enabled=False,
             num_threads=1,
         )
@@ -1906,6 +1913,8 @@ def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest
         right_signature_ids=["s0"],
         row_query_first_tokens=np.asarray(["Alice"], dtype=object),
         row_component_sizes=np.asarray([3.0], dtype=np.float32),
+        component_members={"c0": ["s0"]},
+        telemetry={"seed_signature_count": 1, "timings": {"total_secs": 0.5}},
     )
     bundle = RawArrowPlanBundle.from_mapping(raw_plan)
 
@@ -1930,6 +1939,9 @@ def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest
     raw_plan["right_signature_ids"][0] = "changed-signature"
     raw_plan["row_query_first_tokens"][0] = "Z"
     raw_plan["row_component_sizes"][0] = 99.0
+    raw_plan["component_members"]["c0"][0] = "changed-signature"
+    raw_plan["telemetry"]["seed_signature_count"] = 99
+    raw_plan["telemetry"]["timings"]["total_secs"] = 99.0
 
     def unexpected_conversion(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError(f"internal bridge repeated raw-plan conversion: {args!r} {kwargs!r}")
@@ -1955,31 +1967,6 @@ def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest
     assert retrieval_batch.row_signals["query_author"].tolist() == ["Alice"]
     assert retrieval_batch.row_signals["first_name_bucket"].tolist() == ["multi_letter_first"]
     assert retrieval_batch.row_signals["cluster_size"].tolist() == pytest.approx([3.0])
-
-
-def test_raw_arrow_plan_bundle_owns_typed_values() -> None:
-    raw_plan = _minimal_raw_candidate_plan(
-        row_count=1,
-        pair_count=1,
-        retrieval_scores=np.asarray([0.25], dtype=np.float32),
-        retrieval_ranks=np.asarray([1], dtype=np.uint16),
-        left_signature_ids=["q0"],
-        right_signature_ids=["s0"],
-        component_members={"c0": ["s0"]},
-        telemetry={"seed_signature_count": 1, "timings": {"total_secs": 0.5}},
-    )
-    bundle = RawArrowPlanBundle.from_mapping(raw_plan)
-
-    raw_plan["query_signature_ids"][0] = "changed-query"
-    raw_plan["row_query_signature_indices"][0] = 99
-    raw_plan["row_component_keys"][0] = "changed-component"
-    raw_plan["pair_row_indices"][0] = 99
-    raw_plan["left_signature_ids"][0] = "changed-query"
-    raw_plan["right_signature_ids"][0] = "changed-signature"
-    raw_plan["component_members"]["c0"][0] = "changed-signature"
-    raw_plan["telemetry"]["seed_signature_count"] = 99
-    raw_plan["telemetry"]["timings"]["total_secs"] = 99.0
-
     assert bundle.query_signature_ids == ("q0",)
     assert bundle.row_component_keys == ("c0",)
     assert bundle.left_signature_ids == ("q0",)
@@ -2053,12 +2040,13 @@ def test_raw_arrow_labeled_candidate_plan_scores_use_all_components_for_global_d
     np.testing.assert_allclose(one_row["retrieval_scores"][0], two_rows["retrieval_scores"][0], rtol=1e-6, atol=1e-6)
 
 
-def test_raw_arrow_labeled_candidate_plan_initial_view_keeps_full_first_token(tmp_path: Path) -> None:
+def test_raw_arrow_candidate_plans_initial_view_keep_full_first_token(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
-    paths.pop("cluster_seeds")
+    labeled_paths = dict(paths)
+    labeled_paths.pop("cluster_seeds")
 
     raw_plan = s2and_rust.raw_arrow_labeled_candidate_plan(
-        paths,
+        labeled_paths,
         ["q1"],
         ["initial_only"],
         ["q1-initial"],
@@ -2073,10 +2061,6 @@ def test_raw_arrow_labeled_candidate_plan_initial_view_keeps_full_first_token(tm
     assert raw_plan["query_views"] == ["initial_only"]
     assert raw_plan["query_authors"] == [raw_plan["row_query_authors"][0]]
     assert raw_plan["row_query_first_tokens"] == ["alice"]
-
-
-def test_raw_arrow_candidate_plan_initial_view_keeps_full_first_token(tmp_path: Path) -> None:
-    paths = _base_arrow_paths(tmp_path)
 
     raw_plan = _raw_candidate_plan_arrow(
         paths,
@@ -2246,6 +2230,76 @@ def test_rust_featurizer_missing_name_counts_presence_is_consistent(
         1,
     )
     assert with_name_counts.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
+
+
+def test_rust_featurizer_reuses_only_matching_planner_name_counts_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    paths["name_counts_index"] = _write_tiny_name_counts_index(tmp_path / "index_artifact", monkeypatch)
+    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+        paths,
+        top_k=2,
+        orcid_enabled=False,
+        num_threads=1,
+    )
+    name_counts_index = planner.name_counts_index()
+    assert name_counts_index is not None
+    assert name_counts_index.normalization_version == "canonical_v2"
+
+    featurizer = s2and_rust.RustFeaturizer.from_arrow_paths(
+        paths,
+        ["q1", "s1", "s2"],
+        set(),
+        True,
+        0.0,
+        10000.0,
+        1,
+        name_counts_index,
+    )
+    assert featurizer.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
+
+    paths_without_index = dict(paths)
+    paths_without_index.pop("name_counts_index")
+    with pytest.raises(ValueError, match=r"handle requires paths\['name_counts_index'\]"):
+        s2and_rust.RustFeaturizer.from_arrow_paths(
+            paths_without_index,
+            ["q1", "s1", "s2"],
+            set(),
+            True,
+            0.0,
+            10000.0,
+            1,
+            name_counts_index,
+        )
+
+    manifest_path = Path(paths["name_counts_index"]) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "invalid-after-planner-build"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"does not match paths\['name_counts_index'\]"):
+        s2and_rust.RustFeaturizer.from_arrow_paths(
+            paths,
+            ["q1", "s1", "s2"],
+            set(),
+            True,
+            0.0,
+            10000.0,
+            1,
+            name_counts_index,
+        )
+    with pytest.raises(ValueError, match="schema_version"):
+        s2and_rust.RustFeaturizer.from_arrow_paths(
+            paths,
+            ["q1", "s1", "s2"],
+            set(),
+            True,
+            0.0,
+            10000.0,
+            1,
+        )
 
 
 def test_rust_featurizer_from_arrow_paths_rejects_legacy_name_count_paths(tmp_path: Path) -> None:

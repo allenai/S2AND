@@ -115,7 +115,6 @@ def _single_run(
     arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
     specter_file: str = "",
     specter_suffix: str = "_specter2.pkl",
-    rust_warm_featurizer_before_predict: int = 0,
     run_label: str | None = None,
     require_rust_release: bool = False,
     input_format: str = "json",
@@ -135,17 +134,13 @@ def _single_run(
         )
     if input_format != "json":
         raise ValueError(f"Unsupported input_format: {input_format}")
-    if backend not in {"python", "rust"}:
+    if backend == "rust":
+        raise ValueError("--backend rust requires --input-format arrow; JSON/ANDData is the Python reference route")
+    if backend != "python":
         raise ValueError(f"Unsupported backend: {backend}")
 
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
-    os.environ["S2AND_BACKEND"] = backend
-    rust_extension_identity: dict[str, Any] | None = None
-    if backend == "rust":
-        rust_extension_identity = collect_rust_extension_identity(
-            require_release=bool(require_rust_release),
-            fail_if_unavailable=True,
-        )
+    os.environ["S2AND_BACKEND"] = "python"
 
     from s2and.consts import NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
@@ -187,14 +182,6 @@ def _single_run(
         )
         anddata_seconds = time.perf_counter() - anddata_start
 
-        warm_rust_featurizer_seconds = 0.0
-        if backend == "rust" and int(rust_warm_featurizer_before_predict) == 1:
-            from s2and.feature_port import warm_rust_featurizer
-
-            warm_start = time.perf_counter()
-            warm_rust_featurizer(anddata)
-            warm_rust_featurizer_seconds = time.perf_counter() - warm_start
-
         profiler = cProfile.Profile()
         prediction_start = time.perf_counter()
         profiler.enable()
@@ -209,16 +196,14 @@ def _single_run(
     cluster = _as_triplet(cluster_metrics, "Cluster (P, R F1)")
     cluster_macro = _as_triplet(cluster_metrics, "Cluster Macro (P, R, F1)")
     return {
-        "backend": backend,
-        "backend_label": run_label or backend,
+        "backend": "python",
+        "backend_label": run_label or "python",
         "input_format": "json",
         "dataset": dataset_name,
         "n_jobs": n_jobs,
         "model_path": resolved_model_path,
         "data_root": _resolve_path(PROJECT_ROOT_PATH, data_root),
         "specter_file": specter_file or f"{dataset_name}_specter.pickle",
-        "rust_warm_featurizer_before_predict": int(rust_warm_featurizer_before_predict) if backend == "rust" else 0,
-        "rust_warm_featurizer_seconds": round(warm_rust_featurizer_seconds, 3),
         "total_latency_seconds": round(total_seconds, 3),
         "anddata_build_seconds": round(anddata_seconds, 3),
         "prediction_seconds": round(prediction_seconds, 3),
@@ -228,7 +213,7 @@ def _single_run(
         "cluster_macro": [round(v, 3) for v in cluster_macro],
         "profile_output_path": profile_output_path,
         "raw_cluster_metrics": cluster_metrics,
-        "rust_extension_identity": rust_extension_identity,
+        "rust_extension_identity": None,
         "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
     }
 
@@ -292,8 +277,6 @@ def _single_arrow_run(
         "model_path": resolved_model_path,
         "arrow_data_root": resolved_arrow_root,
         "specter_suffix": specter_suffix,
-        "rust_warm_featurizer_before_predict": 0,
-        "rust_warm_featurizer_seconds": 0.0,
         "total_latency_seconds": round(total_seconds, 3),
         "anddata_build_seconds": 0.0,
         "prediction_seconds": round(prediction_seconds, 3),
@@ -336,7 +319,6 @@ def _run_single_subprocess(
     arrow_data_root: str = DEFAULT_ARROW_DATA_ROOT,
     specter_file: str = "",
     specter_suffix: str = "_specter2.pkl",
-    rust_warm_featurizer_before_predict: int = 0,
     single_write_json: str = "",
     run_label: str = "",
     require_rust_release: int = 0,
@@ -370,8 +352,6 @@ def _run_single_subprocess(
     ]
     if specter_file:
         cmd.extend(["--specter-file", specter_file])
-    if rust_warm_featurizer_before_predict in {0, 1}:
-        cmd.extend(["--rust-warm-featurizer-before-predict", str(int(rust_warm_featurizer_before_predict))])
     if single_write_json:
         cmd.extend(["--single-write-json", single_write_json])
     if run_label:
@@ -444,7 +424,6 @@ def _compare_runs(args: argparse.Namespace) -> None:
             "arrow_data_root": args.arrow_data_root,
             "specter_file": args.specter_file or f"{args.dataset_name}_specter.pickle",
             "specter_suffix": args.specter_suffix,
-            "rust_warm_featurizer_before_predict": args.rust_warm_featurizer_before_predict,
             "results": results,
             "run_metadata": build_run_metadata(script_path=Path(__file__).resolve()),
         }
@@ -487,13 +466,6 @@ def main() -> None:
         choices=["_specter.pickle", "_specter2.pkl"],
         default="_specter2.pkl",
         help="Embedding/model suffix used to select the Arrow embedding file.",
-    )
-    parser.add_argument(
-        "--rust-warm-featurizer-before-predict",
-        type=int,
-        choices=[0, 1],
-        default=0,
-        help="When mode=single and backend=rust, call warm_rust_featurizer before cluster_eval.",
     )
     parser.add_argument(
         "--profile-output-path",
@@ -542,7 +514,6 @@ def main() -> None:
             arrow_data_root=args.arrow_data_root,
             specter_file=args.specter_file,
             specter_suffix=args.specter_suffix,
-            rust_warm_featurizer_before_predict=args.rust_warm_featurizer_before_predict,
             run_label=args.run_label or None,
             require_rust_release=bool(args.require_rust_release),
             input_format=args.input_format,

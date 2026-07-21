@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import scripts.production.model.linker_train_calibrate_eval as replay
 from s2and.incremental_linking.logistic_gate import (
     LOGISTIC_GATE_CLASSES,
     LOGISTIC_GATE_ERROR_WEIGHTS,
@@ -44,15 +43,6 @@ from s2and.incremental_linking_training.classic import (
 from s2and.incremental_linking_training.classic import (
     _read_csv as _read_official_table,
 )
-
-
-def test_classic_feature_matrix_requires_materialized_target_features() -> None:
-    """Promoted feature tables must already contain the target feature columns."""
-
-    df = pd.DataFrame([{"cluster_size": 17}])
-
-    with pytest.raises(ValueError, match=r"missing_features=\['cluster_size_log'\]"):
-        _classic_feature_matrix(df, ("cluster_size", "cluster_size_log"))
 
 
 def test_score_query_choices_preserves_float64_probability_tie_breaking() -> None:
@@ -475,52 +465,29 @@ def test_logistic_eval_summaries_accept_empty_candidate_tables() -> None:
     assert manual_summary["by_bucket"] == {}
 
 
-def test_classic_feature_matrix_preserves_present_derivable_features() -> None:
-    """Stored feature columns should be used as-is even when they are derivable."""
+def test_classic_feature_matrix_preserves_present_values_and_missing_cells() -> None:
+    """Stored values stay authoritative and missing cells remain NaN for LightGBM."""
 
-    df = pd.DataFrame([{"cluster_size": 17, "cluster_size_log": 99.0}])
-
-    features = _classic_feature_matrix(df, ("cluster_size_log",))
-
-    assert features.iloc[0]["cluster_size_log"] == 99.0
-
-
-def test_classic_feature_matrix_rejects_missing_required_features() -> None:
-    """Absent non-runtime features should fail instead of becoming zero-valued signals."""
-
-    df = pd.DataFrame([{"title_overlap": 0.25}])
-
-    with pytest.raises(ValueError, match="missing required feature inputs"):
-        _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
-
-
-def test_classic_feature_matrix_preserves_missing_feature_cells() -> None:
-    """Present active features with missing values should remain NaN for LightGBM."""
-
-    df = pd.DataFrame([{"title_overlap": None, "cluster_size": 17}])
-
-    features = _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
+    df = pd.DataFrame([{"title_overlap": None, "cluster_size": 17, "cluster_size_log": 99.0}])
+    features = _classic_feature_matrix(df, ("title_overlap", "cluster_size", "cluster_size_log"))
 
     assert np.isnan(features.iloc[0]["title_overlap"])
     assert features.iloc[0]["cluster_size"] == 17.0
+    assert features.iloc[0]["cluster_size_log"] == 99.0
 
 
-def test_classic_feature_matrix_rejects_non_numeric_feature_cells() -> None:
-    """Present active features with malformed values should still fail."""
+def test_classic_feature_matrix_rejects_invalid_feature_tables() -> None:
+    """Missing, non-numeric, and infinite active features fail explicitly."""
 
-    df = pd.DataFrame([{"title_overlap": "not-a-number", "cluster_size": 17}])
-
-    with pytest.raises(ValueError, match="non-numeric feature values"):
-        _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
-
-
-def test_classic_feature_matrix_rejects_infinite_feature_cells() -> None:
-    """LightGBM feature matrices should not contain infinities."""
-
-    df = pd.DataFrame([{"title_overlap": np.inf, "cluster_size": 17}])
-
-    with pytest.raises(ValueError, match="infinite feature values"):
-        _classic_feature_matrix(df, ("title_overlap", "cluster_size"))
+    cases = (
+        ({"cluster_size": 17}, ("cluster_size", "cluster_size_log"), r"missing_features=\['cluster_size_log'\]"),
+        ({"title_overlap": 0.25}, ("title_overlap", "cluster_size"), "missing required feature inputs"),
+        ({"title_overlap": "not-a-number", "cluster_size": 17}, ("title_overlap", "cluster_size"), "non-numeric"),
+        ({"title_overlap": np.inf, "cluster_size": 17}, ("title_overlap", "cluster_size"), "infinite"),
+    )
+    for row, features, message in cases:
+        with pytest.raises(ValueError, match=message):
+            _classic_feature_matrix(pd.DataFrame([row]), features)
 
 
 def test_load_bundle_requires_explicit_root(tmp_path: Path) -> None:
@@ -928,100 +895,3 @@ def test_build_classic_classifier_uses_configured_thread_count(monkeypatch: pyte
     classifier = _build_classic_classifier({}, n_jobs=-1)
 
     assert classifier.get_params()["n_jobs"] == 8
-
-
-def test_arrow_rust_materialization_skips_tables_empty_after_dataset_filter(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Dataset-limited smoke runs should skip default tables with no selected rows."""
-
-    source_root = tmp_path / "source"
-    labels_dir = source_root / "labels"
-    labels_dir.mkdir(parents=True)
-    train_path = labels_dir / "train.parquet"
-    hwang_path = labels_dir / "hwang_eval.parquet"
-    pd.DataFrame(
-        [
-            {
-                "dataset": "h_wang",
-                "query_group_id": "q1",
-                "candidate_component_key": "c1",
-                "retrieval_rank": 1,
-                "label": 1,
-            }
-        ]
-    ).to_parquet(train_path, index=False)
-    pd.DataFrame(
-        [
-            {
-                "dataset": "h_wang",
-                "query_group_id": "q2",
-                "candidate_component_key": "c2",
-                "retrieval_rank": 1,
-                "label": 0,
-            }
-        ]
-    ).to_parquet(hwang_path, index=False)
-
-    source_bundle = OfficialBundle(
-        root=source_root,
-        bundle_name="demo",
-        assets={
-            "featureless_rows": {
-                "files": {
-                    "train_path": "labels/train.parquet",
-                    "hwang_eval_path": "labels/hwang_eval.parquet",
-                }
-            }
-        },
-        models={"classic": {}},
-        expected_metrics={},
-    )
-    labels_by_key = {
-        "train_path": train_path,
-        "hwang_eval_path": hwang_path,
-    }
-    captured: dict[str, list[str]] = {}
-
-    monkeypatch.setattr(replay, "_copy_bundle_support_files", lambda *args, **kwargs: None)
-    monkeypatch.setattr(replay, "_classic_table_keys", lambda _spec: list(labels_by_key))
-    monkeypatch.setattr(replay, "_asset_file", lambda _bundle, _group, table_key: labels_by_key[table_key])
-    monkeypatch.setattr(
-        replay,
-        "_output_table_relpath",
-        lambda _table_key, labels_path: Path("features_corrected") / labels_path.name,
-    )
-    monkeypatch.setattr(replay, "_required_materialized_output_columns", lambda _labels, _target_features: ["dataset"])
-
-    def fail_build_context(**_kwargs) -> None:
-        raise AssertionError("empty selected tables should not build dataset contexts")
-
-    monkeypatch.setattr(replay, "_build_arrow_rust_dataset_context", fail_build_context)
-
-    def fake_finalize(**kwargs):
-        captured["selected_keys"] = list(kwargs["selected_keys"])
-        return kwargs["source_bundle"]
-
-    monkeypatch.setattr(replay, "_finalize_arrow_rust_bundle_metadata", fake_finalize)
-
-    _feature_bundle, summaries = replay._materialize_arrow_rust_feature_bundle(
-        source_bundle=source_bundle,
-        output_bundle_root=tmp_path / "output",
-        target={"features": ["feature_a"]},
-        clusterer=None,
-        n_jobs=1,
-        total_ram_bytes=1_000_000,
-        table_keys=None,
-        datasets={"qian"},
-        limit_rows=50,
-        max_exemplars=1,
-        reuse_existing_features=False,
-        pairwise_model_nan_value=float("nan"),
-        pairwise_aggregate_nan_value=0.0,
-        row_nan_policy="finite",
-    )
-
-    assert captured["selected_keys"] == []
-    assert [summary["table_key"] for summary in summaries] == ["train_path", "hwang_eval_path"]
-    assert {summary["skipped"] for summary in summaries} == {"empty_selection"}

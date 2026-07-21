@@ -6,6 +6,25 @@ validation, crash-safety, and Python↔Rust parity. Immediately cuttable: **~150
 ~4,000–4,300 lines (~10%)**. Another **~1,900 lines** unlock conditionally (dead-code deletion +
 post-migration teardown).
 
+## Implementation status (2026-07-20)
+
+The safe-now cleanup is applied. Relative to the audited working-tree baseline:
+
+- test modules: 96 -> 90
+- test function definitions: 1,188 -> 1,042 (-146)
+- collected pytest cases: 1,761 -> 1,283 (-478, 27%)
+- test Python lines: 38,910 -> 36,525 (-2,385)
+
+Verification after the cleanup:
+
+- `uv run ruff check .`: passed
+- `git diff --check`: passed
+- `uv run pytest -q`: 1,281 passed, 2 skipped
+
+Tier 2 dead production surfaces and Tier 4 migration teardown remain intentionally deferred. The
+independent linker row-feature oracle, single-read artifact integrity test, CI path check, and explicit
+Arrow disallow merge contract were retained after source tracing showed they protect distinct behavior.
+
 Theatre concentrates in five genres:
 1. **Tombstones** — tests asserting removed flags/helpers/subcommands *stay* removed.
 2. **Mock-the-code-under-test** — collaborator mocked, test asserts the mock got called / kwargs echoed.

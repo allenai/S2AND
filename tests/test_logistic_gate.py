@@ -8,8 +8,14 @@ import pytest
 from s2and.incremental_linking.logistic_gate import (
     build_logistic_gate_matrix,
     default_logistic_gate_feature_names,
+    load_logistic_gate_config,
     ranked_query_rows,
 )
+
+
+def test_load_logistic_gate_config_rejects_unknown_model_type() -> None:
+    with pytest.raises(ValueError, match="Unsupported logistic gate model_type"):
+        load_logistic_gate_config({"model_type": "unknown"})
 
 
 def test_ranked_query_rows_groups_in_first_seen_order_without_repeated_scans() -> None:

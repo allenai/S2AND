@@ -975,7 +975,8 @@ impl RustFeaturizer {
             preprocess = true,
             cluster_seed_require_value = 0.0,
             cluster_seed_disallow_value = 10000.0,
-            num_threads = None
+            num_threads = None,
+            name_counts_index = None
         )
     )]
     fn from_arrow_paths(
@@ -987,6 +988,7 @@ impl RustFeaturizer {
         cluster_seed_require_value: f64,
         cluster_seed_disallow_value: f64,
         num_threads: Option<usize>,
+        name_counts_index: Option<Py<NameCountsIndex>>,
     ) -> PyResult<Self> {
         let signatures_path =
             extract_path_mapping_string(paths, "signatures", true)?.ok_or_else(|| {
@@ -1105,9 +1107,21 @@ impl RustFeaturizer {
             extract_required_string_set(&text_module.getattr("VENUE_STOP_WORDS")?)?;
         let name_prefixes = extract_required_string_set(&text_module.getattr("NAME_PREFIXES")?)?;
         let affiliation_stopwords = extract_affiliation_stopwords(py)?;
-        let raw_name_counts = match name_counts_index_path.as_ref() {
-            Some(path) => read_raw_name_counts_index(path)?,
-            None => RawNameCountMaps::default(),
+        let raw_name_counts = match name_counts_index {
+            Some(index) => {
+                let path = name_counts_index_path.as_deref().ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "name_counts_index handle requires paths['name_counts_index']",
+                    )
+                })?;
+                let index = index.borrow(py);
+                index.validate_path_identity(path)?;
+                RawNameCountMaps::from_shared_index(index.shared_index())
+            }
+            None => match name_counts_index_path.as_ref() {
+                Some(path) => read_raw_name_counts_index(path)?,
+                None => RawNameCountMaps::default(),
+            },
         };
         let mut unidecode_char_map: HashMap<char, String> = HashMap::new();
         ensure_unidecode_for_raw_arrow_inputs(
@@ -1746,16 +1760,16 @@ impl RustFeaturizer {
         nan_value: f64,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let row_count = pairs.len();
+        let full_cols = self.full_feature_count();
+        let indices = resolve_feature_indices("selected_indices", selected_indices, full_cols)?;
+        let out_cols = indices.len();
         if row_count == 0 {
-            let empty = numpy::ndarray::Array2::<f64>::zeros((0, 0));
+            let empty = numpy::ndarray::Array2::<f64>::zeros((0, out_cols));
             return Ok(empty.to_pyarray(py));
         }
 
         let lookup = self.adaptive_signature_paper_lookup_for_pair_tuples(&mut pairs)?;
 
-        let full_cols = self.full_feature_count();
-        let indices = resolve_feature_indices("selected_indices", selected_indices, full_cols)?;
-        let out_cols = indices.len();
         if out_cols == 0 {
             let empty_cols = numpy::ndarray::Array2::<f64>::zeros((row_count, 0));
             return Ok(empty_cols.to_pyarray(py));
@@ -2082,11 +2096,6 @@ impl RustFeaturizer {
         num_threads: Option<usize>,
         nan_value: f64,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        if block_signature_indices.len() <= 1 {
-            let empty = numpy::ndarray::Array2::<f64>::zeros((0, 0));
-            return Ok(empty.to_pyarray(py));
-        }
-
         let signature_ids = self.signature_id_order();
         let signature_count = signature_ids.len();
         for signature_index in block_signature_indices.iter() {
@@ -2098,6 +2107,9 @@ impl RustFeaturizer {
                 )));
             }
         }
+        let full_cols = self.full_feature_count();
+        let indices = resolve_feature_indices("selected_indices", selected_indices, full_cols)?;
+        let out_cols = indices.len();
 
         let mut block_lookup: Vec<(&SignatureData, &PaperData)> =
             Vec::with_capacity(block_signature_indices.len());
@@ -2118,13 +2130,10 @@ impl RustFeaturizer {
             upper_triangle_pairs_for_range(block_lookup.len(), start_offset, max_pairs)?;
         let row_count = local_pairs.len();
         if row_count == 0 {
-            let empty = numpy::ndarray::Array2::<f64>::zeros((0, 0));
+            let empty = numpy::ndarray::Array2::<f64>::zeros((0, out_cols));
             return Ok(empty.to_pyarray(py));
         }
 
-        let full_cols = self.full_feature_count();
-        let indices = resolve_feature_indices("selected_indices", selected_indices, full_cols)?;
-        let out_cols = indices.len();
         if out_cols == 0 {
             let empty_cols = numpy::ndarray::Array2::<f64>::zeros((row_count, 0));
             return Ok(empty_cols.to_pyarray(py));

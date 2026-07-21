@@ -52,6 +52,7 @@ def test_extract_phase_a_sample_prefers_sampled_accumulator_count():
     assert sample is not None
     assert sample.accumulator_entries_peak == 6
     assert effective_accumulator_entry_bytes(sample) == pytest.approx(200.0)
+    assert extract_phase_a_sample({"stage": "pair_featurization_rust_batch"}) is None
 
 
 def test_extract_phase_a_sample_uses_accumulator_count_when_sample_missing():
@@ -69,10 +70,6 @@ def test_extract_phase_a_sample_uses_accumulator_count_when_sample_missing():
     assert sample.accumulator_entries_peak == 50
     assert sample.phase_a_pair_buffer_peak_bytes == 0
     assert effective_accumulator_entry_bytes(sample) == pytest.approx(12.0)
-
-
-def test_extract_phase_a_sample_ignores_other_stages():
-    assert extract_phase_a_sample({"stage": "pair_featurization_rust_batch"}) is None
 
 
 def test_extract_phase_a_sample_rejects_malformed_matching_stage():
@@ -108,9 +105,6 @@ def test_extract_rust_batch_sample_parses_pair_featurization_memory_contract():
     assert sample.predicted_fixed_overhead_bytes == 40
     assert sample.observed_peak_delta_bytes == 1190
     assert effective_rust_batch_persistent_row_overhead_bytes(sample) == pytest.approx(100.0)
-
-
-def test_extract_rust_batch_sample_ignores_other_stages():
     assert extract_rust_batch_sample({"stage": "phase_a_seed_distances"}) is None
 
 

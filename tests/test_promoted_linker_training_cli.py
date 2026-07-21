@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +9,9 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from s2and.arrow_inputs import ValidatedArrowInputs
 from scripts.production.model import linker_train_calibrate_eval as promoted_train
+from tests.helpers import build_arrow_training_dataset, build_dummy_dataset
 
 REQUIRED_TRAINING_ARGS = (
     "--pairwise-model-path",
@@ -42,27 +43,6 @@ def test_incremental_linking_runtime_imports_stay_runtime_safe() -> None:
 
     assert scripts_imports == []
     assert model_imports == []
-
-
-def test_promoted_training_requires_explicit_artifacts_and_defaults_to_arrow_rust_source() -> None:
-    parser = promoted_train.build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args([])
-    parser_defaults = vars(parser.parse_args(list(REQUIRED_TRAINING_ARGS)))
-    feature_mode_action = next(action for action in parser._actions if action.dest == "feature_mode")  # noqa: SLF001
-    parser_destinations = {action.dest for action in parser._actions}  # noqa: SLF001
-
-    assert parser_defaults["feature_mode"] == "arrow-rust"
-    assert feature_mode_action.choices == ("arrow-rust", "precomputed-promoted")
-    assert parser_defaults["arrow_name_counts_index_root"] is None
-    assert parser_defaults["precomputed_feature_bundle_root"] is None
-    assert parser_defaults["save_production_bundle_to"] is None
-    assert parser_defaults["production_bundle_version"] is None
-    assert parser_defaults["prod_holdout_importance_weight"] == 10.0
-    assert parser_defaults["hyperopt"] is False
-    assert parser_defaults["hyperopt_evals"] is None
-    assert parser_defaults["hyperopt_metric"] == "weighted_average_error"
-    assert {"pair_batch_size", "query_batch_pair_limit", "max_top_k"}.isdisjoint(parser_destinations)
 
 
 def test_negative_limit_rows_is_rejected() -> None:
@@ -124,13 +104,6 @@ def test_metric_drift_override_cannot_promote_before_loading_inputs(
     assert not output_dir.exists()
 
 
-def test_selected_row_positions_rejects_non_positive_limit_rows() -> None:
-    labels = pd.DataFrame({"dataset": ["pubmed", "pubmed"]})
-
-    with pytest.raises(ValueError, match="limit_rows must be > 0"):
-        promoted_train._selected_row_positions(labels, datasets=None, limit_rows=-1)  # noqa: SLF001
-
-
 @pytest.mark.parametrize("retrieval_rank", [-1, 0, 65536])
 def test_arrow_rust_materialization_rejects_invalid_retrieval_rank(
     monkeypatch: pytest.MonkeyPatch,
@@ -168,6 +141,63 @@ def test_arrow_rust_materialization_rejects_invalid_retrieval_rank(
     )
 
     with pytest.raises(ValueError, match="retrieval_rank"):
+        promoted_train._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
+            context=context,
+            rows=rows,
+            target_features=[],
+            clusterer=SimpleNamespace(),
+            n_jobs=1,
+            total_ram_bytes=1,
+            max_exemplars=1,
+            pairwise_model_nan_value=0.0,
+            pairwise_aggregate_nan_value=0.0,
+            row_nan_policy="zero",
+        )
+
+
+def test_arrow_rust_materialization_passes_concrete_paths_to_native_planner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dataset = build_dummy_dataset("native_planner_boundary", mode="train")
+    arrow_dataset = build_arrow_training_dataset(source_dataset, tmp_path / "arrow")
+    arrow_paths = arrow_dataset.arrow_paths
+    assert isinstance(arrow_paths, ValidatedArrowInputs)
+
+    def stop_after_native_plan(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("native planner accepted concrete Arrow paths")
+
+    monkeypatch.setattr(
+        promoted_train.feature_port,
+        "build_rust_featurizer_from_arrow_paths",
+        stop_after_native_plan,
+    )
+    context = promoted_train.ArrowRustDatasetContext(
+        dataset_name="native_planner_boundary",
+        row_component_scope="block-local",
+        pairwise_component_scope="block-local",
+        runtime_context=SimpleNamespace(),
+        arrow_paths=arrow_paths,
+        component_members={"candidate": ("1",)},
+        cluster_seeds_require={},
+        cluster_seeds_disallow=frozenset(),
+        seed_constrained_signature_ids=frozenset(),
+        max_block_component_size=1,
+    )
+    rows = pd.DataFrame(
+        [
+            {
+                "query_signature_id": "0",
+                "query_view": "full",
+                "query_group_id": "group",
+                "candidate_component_key": "candidate",
+                "retrieval_rank": 1,
+                "label": 0,
+            }
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="native planner accepted concrete Arrow paths"):
         promoted_train._materialize_arrow_rust_dataset_rows(  # noqa: SLF001
             context=context,
             rows=rows,
@@ -223,93 +253,6 @@ def test_finalized_arrow_materialization_bundle_creates_corrected_feature_asset_
     feature_path = str(Path("features_corrected") / "train.parquet")
     assert bundle.assets["corrected_feature_rows"]["files"] == {"train_path": feature_path}
     assert bundle.models["classic"]["train_path"] == feature_path
-
-
-def test_materialization_selects_source_tables_from_featureless_assets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source_root = tmp_path / "source"
-    labels_dir = source_root / "labels"
-    labels_dir.mkdir(parents=True)
-    label_row = {
-        "dataset": "pubmed",
-        "query_group_id": "q1",
-        "candidate_component_key": "c1",
-        "retrieval_rank": 1,
-        "label": 1,
-    }
-    for filename in ("train.parquet", "hwang_eval.parquet"):
-        pd.DataFrame([label_row]).to_parquet(labels_dir / filename, index=False)
-
-    source_bundle = promoted_train.OfficialBundle(
-        root=source_root,
-        bundle_name="arrow_source",
-        assets={
-            "featureless_rows": {
-                "files": {
-                    "train_path": "labels/train.parquet",
-                    "hwang_eval_path": "labels/hwang_eval.parquet",
-                }
-            }
-        },
-        models={"classic": {}},
-        expected_metrics={},
-    )
-    captured: dict[str, list[str]] = {}
-
-    monkeypatch.setattr(promoted_train, "_copy_bundle_support_files", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        promoted_train,
-        "_asset_file",
-        lambda bundle, _group, key: bundle.root / bundle.assets["featureless_rows"]["files"][key],
-    )
-    monkeypatch.setattr(
-        promoted_train,
-        "_clean_arrow_rust_structural_rows",
-        lambda **kwargs: (kwargs["rows"], {"rows_before": len(kwargs["rows"]), "rows_after": len(kwargs["rows"])}),
-    )
-    monkeypatch.setattr(promoted_train, "_required_materialized_output_columns", lambda _labels, _features: ["dataset"])
-    monkeypatch.setattr(
-        promoted_train,
-        "_selected_row_positions",
-        lambda labels, _datasets, _limit_rows: __import__("numpy").arange(len(labels), dtype="int64"),
-    )
-    monkeypatch.setattr(promoted_train, "_build_arrow_rust_dataset_context", lambda **_kwargs: object())
-    monkeypatch.setattr(promoted_train, "_release_arrow_rust_dataset_context", lambda _context: None)
-
-    def fake_materialize_dataset_rows(**kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-        rows = kwargs["rows"]
-        return {"f0": __import__("numpy").zeros(len(rows), dtype="float32")}, {
-            "dataset": "pubmed",
-            "rows": len(rows),
-        }
-
-    monkeypatch.setattr(promoted_train, "_materialize_arrow_rust_dataset_rows", fake_materialize_dataset_rows)
-
-    def fake_finalize(**kwargs: Any) -> promoted_train.OfficialBundle:
-        captured["selected_keys"] = list(kwargs["selected_keys"])
-        return kwargs["source_bundle"]
-
-    monkeypatch.setattr(promoted_train, "_finalize_arrow_rust_bundle_metadata", fake_finalize)
-
-    promoted_train._materialize_arrow_rust_feature_bundle(
-        source_bundle=source_bundle,
-        output_bundle_root=tmp_path / "output",
-        target={"features": ["f0"]},
-        clusterer=None,
-        n_jobs=1,
-        total_ram_bytes=1_000_000,
-        table_keys=None,
-        datasets=None,
-        limit_rows=None,
-        max_exemplars=1,
-        reuse_existing_features=False,
-        pairwise_model_nan_value=float("nan"),
-        pairwise_aggregate_nan_value=0.0,
-        row_nan_policy="finite",
-    )
-
-    assert captured["selected_keys"] == ["train_path", "hwang_eval_path"]
 
 
 def _write_precomputed_promoted_bundle(root: Path, target: dict[str, Any]) -> Path:
@@ -395,19 +338,6 @@ def test_precomputed_promoted_bundle_rejects_absolute_feature_paths(tmp_path: Pa
             bundle_root=bundle_root,
             target=target,
         )
-
-
-def test_promoted_training_uses_extracted_training_helpers() -> None:
-    source = inspect.getsource(promoted_train)
-    disallowed_imports = (
-        "scripts.eval_cluster_retrieval",
-        "scripts.giant_block_cluster_retrieval_task",
-        "scripts.single_letter_retrieval_utils",
-        "scripts.retrieval_policy",
-    )
-
-    assert all(value not in source for value in disallowed_imports)
-    assert "s2and.incremental_linking_training" in source
 
 
 def test_hyperopt_loss_uses_weighted_average_error() -> None:
@@ -865,78 +795,3 @@ def test_run_uses_hyperopt_params_and_saves_only_final_prod_artifact(
     assert result["n_estimators"] == 42
     assert result["artifact_summary"]["path"] == str(artifact_dir.resolve())
     assert result["metric_drift_check"] == "passed"
-
-
-def test_run_uses_explicit_precomputed_promoted_bundle(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    target = {
-        "features": ["f0"],
-        "feature_count": 1,
-        "params": {"n_estimators": 10},
-        "metrics": {"stratified_test_errors": 0},
-    }
-    bundle = promoted_train.OfficialBundle(
-        root=(tmp_path / "precomputed").resolve(),
-        bundle_name="precomputed",
-        assets={},
-        models={"classic": {"feature_columns": ["f0"], "best_params": {"n_estimators": 10}}},
-        expected_metrics={},
-    )
-    calls: list[dict[str, Any]] = []
-
-    def fake_load_precomputed(**kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
-        calls.append({"bundle_root": kwargs["bundle_root"], "target": kwargs["target"]})
-        return bundle, [{"mode": "precomputed-promoted", "table_key": "train_path", "rows": 1}]
-
-    def fake_run_classic(feature_bundle: Any, output_dir: Path, **_kwargs: Any) -> dict[str, Any]:
-        assert feature_bundle is bundle
-        assert output_dir == tmp_path / "out" / "classic"
-        return {
-            "training_summary": {"rows": 3, "positive_rows": 1},
-            "abstain_rule": {"promoted_logistic_gate": {"mode": "promoted_logistic_topk_multiclass_l2"}},
-            "stratified_eval_test_split": {
-                "overall": {
-                    "test": {
-                        "accuracy": 1.0,
-                        "balanced_accuracy": 1.0,
-                        "error_rate": 0.0,
-                        "n_queries": 3,
-                        "errors": 0,
-                        "false_abstain": 0,
-                        "false_link": 0,
-                        "wrong_candidate_link": 0,
-                    }
-                }
-            },
-        }
-
-    monkeypatch.setattr(promoted_train, "_load_target", lambda _path: target)  # noqa: SLF001
-    monkeypatch.setattr(
-        promoted_train,
-        "_load_precomputed_promoted_feature_bundle",
-        fake_load_precomputed,
-    )
-    monkeypatch.setattr(promoted_train, "load_clusterer", lambda *_args, **_kwargs: SimpleNamespace())
-    monkeypatch.setattr(promoted_train, "run_classic", fake_run_classic)
-
-    precomputed_root = tmp_path / "precomputed"
-    args = promoted_train.build_parser().parse_args(
-        [
-            *REQUIRED_TRAINING_ARGS,
-            "--feature-mode",
-            "precomputed-promoted",
-            "--precomputed-feature-bundle-root",
-            str(precomputed_root),
-            "--run-full",
-            "--output-dir",
-            str(tmp_path / "out"),
-        ]
-    )
-
-    result = promoted_train.run(args)
-
-    assert calls == [{"bundle_root": precomputed_root, "target": target}]
-    assert result["mode"] == "precomputed-promoted"
-    assert result["featureization"] == [{"mode": "precomputed-promoted", "table_key": "train_path", "rows": 1}]

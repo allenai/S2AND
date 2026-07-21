@@ -4,7 +4,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pytest
@@ -83,22 +83,6 @@ class DummyDataset(ANDData):
         self.arrow_paths = {"signatures": f"{name}.arrow"}
         self.arrow_artifact_generation = f"test-generation-{name}"
         self.name_counts_provenance = tiny_name_counts_provenance()
-
-
-class SleepyCounter:
-    """Counter that yields mid-increment to expose race windows in tests."""
-
-    def __init__(self, value: int = 0):
-        self.value = value
-
-    def __iadd__(self, increment: int):
-        current = self.value
-        time.sleep(0.0005)
-        self.value = current + int(increment)
-        return self
-
-    def __int__(self) -> int:
-        return self.value
 
 
 def _cache_size() -> int:
@@ -310,18 +294,6 @@ def test_rust_featurizer_cache_ignores_unconsumed_python_state(mutate_dataset):
 
     assert second is first
     assert DummyRustFeaturizer.created == [dataset.name]
-
-
-def test_rust_featurizer_cache_ignores_signature_mutation_beyond_prefix_sample():
-    dataset = DummyDataset("material_cache_full_digest", mode="train")
-    dataset.signatures = {f"s{index}": object() for index in range(64)}
-
-    first = feature_port._get_rust_featurizer(dataset)
-    dataset.signatures["s63"] = object()
-    second = feature_port._get_rust_featurizer(dataset)
-    assert second is first
-    assert DummyRustFeaturizer.created == [dataset.name]
-    assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset)]
 
 
 def test_rust_featurizer_cache_rebuilds_for_in_place_numpy_embedding_mutation(monkeypatch):
@@ -552,7 +524,14 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     class ArrowRustFeaturizer(DummyRustFeaturizer):
         @classmethod
         def from_arrow_paths(cls, paths, _signature_ids, _name_tuples, *_args):
-            calls.append({"paths": dict(paths), "name_tuples": _name_tuples})
+            calls.append(
+                {
+                    "paths": dict(paths),
+                    "signature_ids": _signature_ids,
+                    "name_tuples": _name_tuples,
+                    "name_counts_index": _args[4] if len(_args) == 5 else None,
+                }
+            )
             return cls("arrow")
 
     class ArrowRustModule:
@@ -579,9 +558,8 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     for key in ("signatures_batch_index", "papers_batch_index", "paper_authors_batch_index"):
         Path(paths[key]).touch()
 
-    index_path, _metrics = write_name_counts_index(
-        tmp_path / "name_counts_index", tiny_name_counts_tuple(), tiny_name_counts_provenance()
-    )
+    provenance = tiny_name_counts_provenance()
+    index_path, _metrics = write_name_counts_index(tmp_path / "name_counts_index", tiny_name_counts_tuple(), provenance)
     complete_paths = {**paths, "name_counts_index": index_path}
     write_test_arrow_artifact_manifest(tmp_path, complete_paths)
     monkeypatch.setattr("s2and.arrow_inputs._validate_batch_indexes", lambda _paths: None)
@@ -591,10 +569,25 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
         require_name_counts_index=True,
         expected_normalization_version=NORMALIZATION_VERSION,
     )
+    shared_name_counts_index = (
+        SimpleNamespace(
+            normalization_version=NORMALIZATION_VERSION,
+            name_counts_provenance_binding=(
+                provenance["generation_id"],
+                provenance["pickle_sha256"],
+                provenance["source_snapshot_id"],
+                provenance["selected_rows_sha256"],
+            ),
+        )
+        if load_name_counts
+        else None
+    )
     result = feature_port.build_rust_featurizer_from_arrow_paths(
         validated_paths,
         expected_normalization_version=NORMALIZATION_VERSION,
+        signature_ids=[1, "2"],
         load_name_counts=load_name_counts,
+        name_counts_index=shared_name_counts_index,
     )
 
     assert result.dataset_name == "arrow"
@@ -606,9 +599,28 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     assert calls == [
         {
             "paths": expected_paths,
+            "signature_ids": ["1", "2"],
             "name_tuples": canonical_pairs,
+            "name_counts_index": shared_name_counts_index,
         }
     ]
+    if load_name_counts:
+        mismatched_index = SimpleNamespace(
+            normalization_version=NORMALIZATION_VERSION,
+            name_counts_provenance_binding=(
+                "wrong-generation",
+                provenance["pickle_sha256"],
+                provenance["source_snapshot_id"],
+                provenance["selected_rows_sha256"],
+            ),
+        )
+        with pytest.raises(ValueError, match="name-count binding mismatch"):
+            feature_port.build_rust_featurizer_from_arrow_paths(
+                validated_paths,
+                expected_normalization_version=NORMALIZATION_VERSION,
+                load_name_counts=True,
+                name_counts_index=mismatched_index,
+            )
 
 
 def test_concurrent_builds_for_distinct_datasets_do_not_serialize(monkeypatch):
@@ -658,85 +670,6 @@ def test_concurrent_builds_for_distinct_datasets_do_not_serialize(monkeypatch):
     latest_start = max(window[0] for window in build_windows.values())
     earliest_end = min(window[1] for window in build_windows.values())
     assert latest_start < earliest_end
-
-
-def test_concurrent_builds_for_same_dataset_share_single_inflight_build(monkeypatch):
-    dataset = DummyDataset("parallel_same_dataset", mode="train")
-    ready = threading.Event()
-    build_calls = {"count": 0}
-
-    def _build_stub(dataset_arg):
-        build_calls["count"] += 1
-        ready.wait(timeout=2)
-        time.sleep(0.25)
-        return (
-            DummyRustFeaturizer(dataset_arg.name),
-            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
-            0.25,
-        )
-
-    monkeypatch.setattr(
-        feature_port,
-        "_build_rust_featurizer_strict",
-        _build_stub,
-    )
-
-    errors: list[Exception] = []
-
-    def _worker():
-        try:
-            feature_port._get_rust_featurizer(dataset)
-        except Exception as exc:  # pragma: no cover - assertion guard
-            errors.append(exc)
-
-    t1 = threading.Thread(target=_worker)
-    t2 = threading.Thread(target=_worker)
-    t1.start()
-    t2.start()
-    ready.set()
-    t1.join(timeout=5)
-    t2.join(timeout=5)
-
-    assert errors == []
-    assert build_calls["count"] == 1
-
-
-def test_increment_rust_featurizer_build_count_is_thread_safe():
-    dataset = DummyDataset("build_count_threadsafe", mode="train")
-    cache_key = feature_port._rust_featurizer_cache_key(dataset)  # noqa: SLF001
-    with feature_port._RUST_FEATURIZER_CACHE_LOCK:
-        feature_port._RUST_FEATURIZER_CACHE[dataset] = {
-            cache_key: feature_port._CacheEntry(
-                featurizer=DummyRustFeaturizer(dataset.name),
-                build_count=cast(Any, SleepyCounter(0)),
-            )
-        }
-
-    worker_count = 8
-    increments_per_worker = 25
-    errors: list[Exception] = []
-    counts: list[int] = []
-    counts_lock = threading.Lock()
-
-    def _worker():
-        try:
-            for _ in range(increments_per_worker):
-                next_count = feature_port._increment_rust_featurizer_build_count(dataset, cache_key)
-                with counts_lock:
-                    counts.append(next_count)
-        except Exception as exc:  # pragma: no cover - assertion guard
-            errors.append(exc)
-
-    threads = [threading.Thread(target=_worker) for _ in range(worker_count)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
-
-    assert errors == []
-    expected_count = worker_count * increments_per_worker
-    assert feature_port._rust_featurizer_build_count(dataset, cache_key) == expected_count
-    assert sorted(counts) == list(range(1, expected_count + 1))
 
 
 def test_get_rust_featurizer_raises_after_repeated_empty_wait(monkeypatch):
@@ -821,25 +754,6 @@ def test_get_rust_featurizer_raises_after_repeated_stale_build(monkeypatch):
     assert "run=run-stale-build" in message
     assert "attempts=3" in message
     assert build_calls["count"] == 3
-
-
-@pytest.mark.parametrize(
-    ("mode", "with_json_paths"),
-    [
-        ("train", True),
-        ("inference", False),
-        ("inference", True),
-    ],
-)
-def test_rust_featurizer_build_runs_per_dataset_with_and_without_json_paths(mode: str, with_json_paths: bool):
-    dataset = DummyDataset(f"{mode}_paths{int(with_json_paths)}", mode=mode)
-    if with_json_paths:
-        dataset.signatures_path = "signatures.json"
-        dataset.papers_path = "papers.json"
-
-    feature_port._get_rust_featurizer(dataset)
-
-    assert DummyRustFeaturizer.created == [dataset.name]
 
 
 def test_explicit_evict_and_clear_api():

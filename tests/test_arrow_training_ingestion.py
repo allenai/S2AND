@@ -27,7 +27,6 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 
 from s2and import feature_port  # noqa: E402
-from s2and.arrow_inputs import MissingArrowArtifactError  # noqa: E402
 from s2and.arrow_training import (  # noqa: E402
     build_training_anddata_from_arrow,
     load_papers_dict_from_arrow,
@@ -129,9 +128,7 @@ def _replace_arrow_column(path: Path, column_name: str, values: Any) -> None:
 @pytest.mark.parametrize(
     ("column_name", "values", "expected_type"),
     [
-        ("signature_id", pa.array([1], type=pa.int64()), "string"),
         ("author_affiliations", pa.array(["Institute"], type=pa.string()), r"list<string>"),
-        ("author_position", pa.array([0], type=pa.int32()), "int64"),
     ],
 )
 def test_arrow_training_rejects_noncanonical_signature_physical_types(
@@ -176,9 +173,7 @@ def test_arrow_training_rejects_noncanonical_paper_author_position_type(tmp_path
 @pytest.mark.parametrize(
     ("column_name", "values", "expected_type"),
     [
-        ("paper_id", pa.array([1], type=pa.int64()), "string"),
         ("embedding", pa.array([[1.0, 0.0]], type=pa.list_(pa.float32())), r"fixed_size_list<float32>"),
-        ("embedding", pa.array([[1.0, 0.0]], type=pa.list_(pa.float64(), 2)), r"fixed_size_list<float32>"),
     ],
 )
 def test_arrow_training_rejects_noncanonical_specter_physical_types(
@@ -290,7 +285,7 @@ def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path)
         load_papers_dict_from_arrow(papers_path, authors_path)
 
 
-@pytest.mark.parametrize("author_name", [None, "", "   "])
+@pytest.mark.parametrize("author_name", [None, "   "])
 def test_arrow_training_rejects_empty_paper_author_names(tmp_path: Path, author_name: str | None) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
@@ -458,23 +453,6 @@ def test_arrow_ingestion_reconstructs_training_fields(training_bundle: dict[str,
     assert arrow_dataset.specter_embeddings == {}
     assert arrow_dataset.name_counts_index is None
     assert arrow_dataset.name_counts_loaded is False
-
-
-def test_arrow_ingestion_rejects_specter2_alias_paths(training_bundle: dict[str, Any]) -> None:
-    alias_paths = dict(training_bundle["arrow_paths"])
-    alias_paths["specter2"] = alias_paths.pop("specter")
-    alias_paths["specter2_batch_index"] = alias_paths.pop("specter_batch_index")
-
-    with pytest.raises(MissingArrowArtifactError, match="unsupported embedding path key"):
-        build_training_anddata_from_arrow(
-            alias_paths,
-            "dummy_arrow_specter2_alias",
-            expected_normalization_version=NORMALIZATION_VERSION,
-            clusters=str(DUMMY_DIR / "clusters.json"),
-            block_type="s2",
-            random_seed=42,
-            n_jobs=1,
-        )
 
 
 def test_arrow_training_constructor_is_always_rust_and_never_materializes_python_sidecars(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -201,6 +201,49 @@ def test_artifact_generation_writer_rejects_path_outside_manifest_directory(tmp_
         )
 
 
+def test_canonical_manifest_accepts_linker_replay_shared_name_counts_index(tmp_path: Path) -> None:
+    release_root = tmp_path / "release"
+    bundle_dir = release_root / "replay-bundle" / "datasets" / "tiny"
+    bundle_dir.mkdir(parents=True)
+    signatures_path = bundle_dir / "signatures.arrow"
+    signatures_path.write_bytes(b"signatures")
+    name_counts_path = release_root / "name_counts_index"
+    name_counts_path.mkdir()
+    (name_counts_path / "manifest.json").write_text("{}", encoding="utf-8")
+
+    paths = {
+        "signatures": signatures_path,
+        "name_counts_index": name_counts_path,
+    }
+    manifest = build_arrow_artifact_manifest(paths, bundle_dir)
+    write_arrow_artifact_manifest(manifest, bundle_dir)
+
+    assert manifest["paths"]["name_counts_index"] == "../../../name_counts_index"
+    assert manifest["artifact_generation"]["files"]["name_counts_index"]["path"] == "../../../name_counts_index"
+    assert (
+        verified_arrow_artifact_generation({**paths, "manifest": bundle_dir / "manifest.json"})
+        == manifest["artifact_generation"]["generation_id"]
+    )
+
+
+def test_manifest_path_serialization_normalizes_windows_separators() -> None:
+    relative_path = PureWindowsPath("..") / ".." / ".." / "name_counts_index"
+
+    assert arrow_inputs_module._portable_manifest_path(relative_path) == "../../../name_counts_index"
+
+
+def test_linker_replay_shared_name_counts_exception_rejects_other_escaped_directories(tmp_path: Path) -> None:
+    release_root = tmp_path / "release"
+    bundle_dir = release_root / "replay-bundle" / "datasets" / "tiny"
+    bundle_dir.mkdir(parents=True)
+    outside_index = release_root / "other-index"
+    outside_index.mkdir()
+    (outside_index / "manifest.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must remain within manifest directory"):
+        build_arrow_artifact_manifest({"name_counts_index": outside_index}, bundle_dir)
+
+
 def test_canonical_manifest_builder_owns_runtime_fields_and_publication(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     signatures_path.write_bytes(b"signatures")
@@ -267,33 +310,6 @@ def test_generation_manifest_rejects_paths_outside_manifest_authority(
         )
 
 
-def test_retained_generation_is_returned_without_rehashing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path)
-    validated = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=False,
-        require_name_counts_index=False,
-    )
-    monkeypatch.setattr(
-        arrow_inputs_module,
-        "_sha256_file",
-        lambda _path: (_ for _ in ()).throw(AssertionError("retained generation rehashed a file")),
-    )
-
-    assert verified_arrow_artifact_generation(validated) == validated.generation_id
-    assert (
-        validate_arrow_prediction_artifacts(
-            validated,
-            require_specter=False,
-            require_name_counts_index=False,
-        )
-        is validated
-    )
-
-
 def test_retained_validated_profile_reuses_in_memory_contract_without_io(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -306,6 +322,15 @@ def test_retained_validated_profile_reuses_in_memory_contract_without_io(
         expected_normalization_version="canonical_v2",
     )
     assert validated.name_counts_manifest is not None
+    original_signature_path = validated["signatures"]
+    paths["signatures"] = "other.arrow"
+    assert validated["signatures"] == original_signature_path
+    with pytest.raises(TypeError):
+        operator.setitem(validated, "signatures", "other.arrow")
+    with pytest.raises(TypeError):
+        operator.setitem(validated.paths, "signatures", "other.arrow")
+    with pytest.raises(AttributeError):
+        validated.generation_id = "other"  # type: ignore[misc]
 
     def fail_io(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("retained validation performed filesystem I/O")
@@ -322,6 +347,7 @@ def test_retained_validated_profile_reuses_in_memory_contract_without_io(
     ):
         monkeypatch.setattr(arrow_inputs_module, helper_name, fail_io)
 
+    assert verified_arrow_artifact_generation(validated) == validated.generation_id
     assert (
         validate_arrow_prediction_artifacts(
             validated,
@@ -368,38 +394,15 @@ def test_retained_validated_profile_projects_unused_specter_paths(
     assert "specter" in validated
 
 
-def test_validated_arrow_inputs_mapping_is_immutable(tmp_path: Path) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path)
-    validated = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=False,
-        require_name_counts_index=False,
-    )
-
-    assert isinstance(validated, ValidatedArrowInputs)
-    with pytest.raises(TypeError):
-        operator.setitem(validated, "signatures", "other.arrow")
-    with pytest.raises(TypeError):
-        operator.setitem(validated.paths, "signatures", "other.arrow")
-    original_signature_path = validated["signatures"]
-    paths["signatures"] = "other.arrow"
-    assert validated["signatures"] == original_signature_path
-
-
-def test_validated_arrow_inputs_constructor_copies_and_normalizes_values() -> None:
-    paths = {"signatures": "signatures.arrow"}
-    validated = ValidatedArrowInputs(
-        paths=paths,
-        generation_id=123,
-        normalization_version="canonical_v2",
-    )
-
-    paths["signatures"] = "other.arrow"
-    assert validated["signatures"] == "signatures.arrow"
-    assert validated.generation_id == "123"
-    assert validated.normalization_version == "canonical_v2"
-    with pytest.raises(AttributeError):
-        validated.generation_id = "other"  # type: ignore[misc]
+def test_validated_arrow_inputs_rejects_direct_construction_and_subclassing() -> None:
+    with pytest.raises(TypeError, match="cannot be constructed directly"):
+        ValidatedArrowInputs(
+            paths={"signatures": "unverified.arrow"},
+            generation_id="forged-generation",
+            normalization_version="canonical_v2",
+        )
+    with pytest.raises(TypeError, match="cannot be subclassed"):
+        type("ForgedValidatedArrowInputs", (ValidatedArrowInputs,), {})
 
 
 def test_normalize_arrow_paths_resolves_relative_paths_at_boundary(
@@ -741,19 +744,6 @@ def test_repeated_raw_validation_detects_name_counts_file_mutation(tmp_path: Pat
             require_specter=False,
             require_name_counts_index=True,
         )
-
-
-def test_validate_arrow_prediction_artifacts_ignores_unused_specter_path(tmp_path: Path) -> None:
-    paths = _write_valid_prediction_bundle(tmp_path, specter_key="specter")
-
-    normalized = validate_arrow_prediction_artifacts(
-        paths,
-        require_specter=False,
-        require_name_counts_index=False,
-    )
-
-    assert "specter" not in normalized
-    assert "specter_batch_index" not in normalized
 
 
 def test_validate_arrow_prediction_artifacts_rejects_specter2_aliases(tmp_path: Path) -> None:

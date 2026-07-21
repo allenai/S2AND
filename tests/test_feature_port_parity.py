@@ -201,8 +201,59 @@ def constraint_pairs(source_dataset, sample_pairs):
     return pairs
 
 
-def test_rust_extension_available():
-    assert HAS_RUST, f"s2and_rust not available: {_RUST_IMPORT_ERROR}"
+def test_rust_indexed_pair_featurization_preserves_empty_selected_width(arrow_dataset):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
+
+    matrix = np.asarray(
+        rust_featurizer.featurize_pairs_matrix_indexed([], [0, 1], 1, np.nan),
+        dtype=np.float64,
+    )
+
+    assert matrix.shape == (0, 2)
+    with pytest.raises(ValueError, match="selected_indices contains out-of-range index"):
+        rust_featurizer.featurize_pairs_matrix_indexed([], [10_000], 1, np.nan)
+
+
+def test_rust_indexed_block_featurization_preserves_empty_selected_width(arrow_dataset):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
+    signature_count = len(rust_featurizer.signature_ids())
+    assert signature_count >= 2
+
+    singleton = np.asarray(
+        rust_featurizer.featurize_block_upper_triangle_matrix_indexed([0], 0, None, [0, 1], 1, np.nan),
+        dtype=np.float64,
+    )
+    empty_block = np.asarray(
+        rust_featurizer.featurize_block_upper_triangle_matrix_indexed([], 0, None, [0, 1], 1, np.nan),
+        dtype=np.float64,
+    )
+    capped_empty = np.asarray(
+        rust_featurizer.featurize_block_upper_triangle_matrix_indexed([0, 1], 0, 0, [0, 1], 1, np.nan),
+        dtype=np.float64,
+    )
+
+    assert singleton.shape == (0, 2)
+    assert empty_block.shape == (0, 2)
+    assert capped_empty.shape == (0, 2)
+
+
+def test_rust_indexed_block_featurization_validates_empty_inputs(arrow_dataset):
+    rust_featurizer = _get_rust_featurizer(arrow_dataset)
+    signature_count = len(rust_featurizer.signature_ids())
+
+    with pytest.raises(ValueError, match="selected_indices contains out-of-range index"):
+        rust_featurizer.featurize_block_upper_triangle_matrix_indexed([0], 0, None, [10_000], 1, np.nan)
+    with pytest.raises(ValueError, match="selected_indices contains out-of-range index"):
+        rust_featurizer.featurize_block_upper_triangle_matrix_indexed([0, 1], 0, 0, [10_000], 1, np.nan)
+    with pytest.raises(IndexError, match="block signature index out of range"):
+        rust_featurizer.featurize_block_upper_triangle_matrix_indexed(
+            [signature_count],
+            0,
+            None,
+            [0, 1],
+            1,
+            np.nan,
+        )
 
 
 def test_arrow_training_helper_does_not_reuse_source_records(source_dataset, arrow_dataset):

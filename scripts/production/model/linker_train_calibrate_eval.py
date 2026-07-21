@@ -1609,7 +1609,7 @@ def _materialize_arrow_rust_dataset_rows(
         pd.to_numeric(dataset_rows["retrieval_rank"], errors="raise").to_numpy(),
     )
     raw_plan = plan_fn(
-        context.arrow_paths,
+        dict(context.arrow_paths),
         dataset_rows["query_signature_id"].astype(str).tolist(),
         dataset_rows["query_view"].astype(str).tolist(),
         dataset_rows["query_group_id"].astype(str).tolist(),

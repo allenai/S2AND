@@ -2,7 +2,9 @@
 
 This test module enforces ``tests/fixtures/canonical_name_examples.json``, the
 step-1 artifact of ``docs/normalization_migration_blocked.md``, in four
-layers. The live pipeline and the fixture both use canonical_v2:
+layers. The live pipeline and the fixture both use canonical_v2. The pure
+contracts remain parametrized for useful case IDs, while the live pipeline is
+batched once to exercise the production vectorized path:
 
 - Canonical contract: the fixture's ``canonical`` values are asserted against
   ``s2and.text.canonicalize_name_parts`` and
@@ -101,7 +103,7 @@ def canonical_name_counts_index(tmp_path_factory) -> NameCountsIndex:
     return NameCountsIndex.open(path)
 
 
-def _live_canonical_name_counts(case, index: NameCountsIndex):
+def _live_canonical_name_counts(index: NameCountsIndex):
     """Run the real batched ANDData preprocessing count path with a seeded index.
 
     Each dict maps only the fixture's expected canonical key (when non-None) to
@@ -111,38 +113,42 @@ def _live_canonical_name_counts(case, index: NameCountsIndex):
     NaN. The skeleton signature carries only raw name fields, forcing the
     batch to recompute the canonical fields itself.
     """
-    raw = case["input"]
     dataset = ANDData.__new__(ANDData)
-    dataset.signatures = {
-        "case": _skeleton_signature(raw["last"])._replace(
+    dataset.signatures = {}
+    for case in CASES:
+        raw = case["input"]
+        case_id = case["id"]
+        dataset.signatures[case_id] = _skeleton_signature(raw["last"])._replace(
             author_info_first=raw["first"],
             author_info_middle=raw["middle"],
-            signature_id="case",
+            signature_id=case_id,
         )
-    }
     dataset.papers = {}
     dataset.preprocess = True
     dataset.arrow_paths = None
     dataset.name_counts_index = index
     dataset.runtime_context = build_runtime_context("canonical-name-example-test", backend="python")
     dataset.preprocess_signatures()
-    return dataset.signatures["case"].author_info_name_counts
+    return {case_id: signature.author_info_name_counts for case_id, signature in dataset.signatures.items()}
 
 
-@pytest.mark.parametrize("case", CASE_PARAMS)
-def test_canonical_count_keys_via_live_anddata_path(case, canonical_name_counts_index):
-    counts = _live_canonical_name_counts(case, canonical_name_counts_index)
-    keys = case["canonical"]["count_keys"]
-    for name, count_value in [
-        ("first", counts.first),
-        ("last", counts.last),
-        ("first_last", counts.first_last),
-        ("last_first_initial", counts.last_first_initial),
-    ]:
-        if keys[name] is None:
-            assert math.isnan(count_value), f"{name} should be NaN (no lookup) but was {count_value}"
-        else:
-            assert count_value == _COUNT_SENTINELS[name], f"{name} lookup did not hit the seeded key {keys[name]!r}"
+def test_canonical_count_keys_via_live_anddata_path(canonical_name_counts_index):
+    counts_by_id = _live_canonical_name_counts(canonical_name_counts_index)
+    for case in CASES:
+        counts = counts_by_id[case["id"]]
+        keys = case["canonical"]["count_keys"]
+        for name, count_value in [
+            ("first", counts.first),
+            ("last", counts.last),
+            ("first_last", counts.first_last),
+            ("last_first_initial", counts.last_first_initial),
+        ]:
+            if keys[name] is None:
+                assert math.isnan(count_value), f"{case['id']}: {name} should be NaN (no lookup) but was {count_value}"
+            else:
+                assert (
+                    count_value == _COUNT_SENTINELS[name]
+                ), f"{case['id']}: {name} lookup did not hit the seeded key {keys[name]!r}"
 
 
 def test_compare_time_first_name_compatibility():
@@ -200,7 +206,8 @@ def test_decision_references_are_wellformed():
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
-def test_canonical_values_are_in_normalized_form(case):
+def test_canonical_pure_contract(case):
+    raw = case["input"]
     canonical = case["canonical"]
     for field in ("first", "middle", "last"):
         value = canonical[field]
@@ -211,18 +218,10 @@ def test_canonical_values_are_in_normalized_form(case):
             assert key_value == " ".join(key_value.split()), f"count key {key_name} malformed: {key_value!r}"
             assert key_value != "", f"count key {key_name} must be null instead of empty"
 
-
-@pytest.mark.parametrize("case", CASE_PARAMS)
-def test_canonical_fields(case):
-    raw = case["input"]
-    expected = case["canonical"]
     parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
-    assert (parts.first, parts.middle, parts.last) == (expected["first"], expected["middle"], expected["last"])
-
-
-@pytest.mark.parametrize("case", CASE_PARAMS)
-def test_canonical_count_keys(case):
-    raw = case["input"]
-    expected = case["canonical"]["count_keys"]
-    parts = canonicalize_name_parts(raw["first"], raw["middle"], raw["last"])
-    assert canonical_name_count_keys(parts) == expected
+    assert (parts.first, parts.middle, parts.last) == (
+        canonical["first"],
+        canonical["middle"],
+        canonical["last"],
+    )
+    assert canonical_name_count_keys(parts) == canonical["count_keys"]

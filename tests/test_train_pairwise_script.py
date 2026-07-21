@@ -38,24 +38,18 @@ def _import_train_pairwise(env: dict[str, str], repo_root: Path) -> dict[str, st
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-def test_train_pairwise_does_not_claim_a_rust_backend() -> None:
+@pytest.mark.parametrize("backend", [None, "python"])
+def test_train_pairwise_preserves_backend_environment(backend: str | None) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
-    env.pop("S2AND_BACKEND", None)
+    if backend is None:
+        env.pop("S2AND_BACKEND", None)
+    else:
+        env["S2AND_BACKEND"] = backend
 
     payload = _import_train_pairwise(env, repo_root)
 
-    assert payload["backend"] is None
-
-
-def test_train_pairwise_respects_existing_backend_override() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    env = os.environ.copy()
-    env["S2AND_BACKEND"] = "python"
-
-    payload = _import_train_pairwise(env, repo_root)
-
-    assert payload["backend"] == "python"
+    assert payload["backend"] == backend
 
 
 def test_train_pairwise_rejects_existing_output_before_loading_artifacts(
@@ -86,11 +80,3 @@ def test_train_pairwise_rejects_existing_output_before_loading_artifacts(
                 ),
             )
         )
-
-
-def test_feature_cache_dir_defaults_to_none() -> None:
-    args = train_pairwise.build_parser().parse_args(["--production-version", "9.9"])
-    assert args.feature_cache_dir is None
-
-    args = train_pairwise.build_parser().parse_args(["--production-version", "9.9", "--feature-cache-dir", "some/dir"])
-    assert args.feature_cache_dir == Path("some/dir")

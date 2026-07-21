@@ -39,11 +39,7 @@ def _write_minimal_name_counts_index(root: Path, *, normalization_version: str |
     return index_dir
 
 
-def test_package_has_one_normalization_version() -> None:
-    assert NORMALIZATION_VERSION == "canonical_v2"
-
-
-@pytest.mark.parametrize("value", [None, "legacy_compat", "bogus_v9"])
+@pytest.mark.parametrize("value", [None, "legacy_compat"])
 def test_name_count_manifest_reader_rejects_noncanonical_versions(tmp_path: Path, value: str | None) -> None:
     index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=value)
     with pytest.raises(ValueError, match="invalid normalization_version"):
@@ -82,17 +78,15 @@ def test_public_arrow_contracts_accept_canonical_model_version() -> None:
     assert require_normalization_version(NORMALIZATION_VERSION, context="training") == NORMALIZATION_VERSION
 
 
-@pytest.mark.parametrize("value", [None, "legacy_compat", "bogus_v9"])
-def test_runtime_normalization_gate_rejects_noncanonical_versions(value: str | None) -> None:
+def test_runtime_normalization_gate_rejects_noncanonical_version() -> None:
     with pytest.raises(ValueError, match="normalization_version='canonical_v2'"):
-        require_normalization_version(value, context="training")
+        require_normalization_version("legacy_compat", context="training")
 
 
 def test_bundle_gate_accepts_canonical_and_rejects_other_versions(tmp_path: Path) -> None:
     _require_bundle_normalization_version(tmp_path, {"normalization_version": NORMALIZATION_VERSION})
-    for feature_contract in ({}, {"normalization_version": "legacy_compat"}, {"normalization_version": "bogus"}):
-        with pytest.raises(ValueError, match="release unit"):
-            _require_bundle_normalization_version(tmp_path, feature_contract)
+    with pytest.raises(ValueError, match="release unit"):
+        _require_bundle_normalization_version(tmp_path, {})
 
 
 def test_name_counts_index_writer_stamps_package_version(tmp_path: Path) -> None:

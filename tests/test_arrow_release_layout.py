@@ -238,12 +238,6 @@ def test_validate_release_root_reports_missing_batch_index_path(tmp_path: Path) 
         validate_release_root(release_root, include_replay_bundles=False)
 
 
-def test_validate_release_root_accepts_canonical_keys_for_specter2_files(tmp_path: Path) -> None:
-    release_root, _dataset_name = _build_arrow_release_fixture(tmp_path)
-
-    assert validate_release_root(release_root, include_replay_bundles=False)["dataset_manifest_count"] == 1
-
-
 def test_validate_release_root_reports_missing_canonical_specter_batch_index(tmp_path: Path) -> None:
     release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
     dataset_manifest = json.loads((release_root / dataset_name / "manifest.json").read_text(encoding="utf-8"))

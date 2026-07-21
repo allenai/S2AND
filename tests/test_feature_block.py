@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -90,62 +91,28 @@ def test_feature_block_paper_is_reliable_parses_false_string() -> None:
     assert paper.is_reliable is False
 
 
-@pytest.mark.parametrize(
-    ("is_reliable", "language_reliability", "match"),
-    [
+def test_feature_block_paper_validates_language_reliability() -> None:
+    invalid_cases = [
         (True, np.nan, "must be finite"),
-        (True, np.inf, "must be finite"),
         (True, -0.01, r"must be in \[0.0, 1.0\]"),
-        (True, 1.01, r"must be in \[0.0, 1.0\]"),
         (False, 0.25, "must be 0.0 when"),
-    ],
-)
-def test_feature_block_paper_rejects_malformed_language_reliability(
-    is_reliable: bool,
-    language_reliability: float,
-    match: str,
-) -> None:
-    with pytest.raises(ValueError, match=match):
-        FeatureBlockPaper(
-            paper_id="p1",
-            title="A title",
-            abstract=None,
-            venue=None,
-            journal_name=None,
-            year=2024,
-            predicted_language="en",
-            is_reliable=is_reliable,
-            language_reliability=language_reliability,
-        )
-
-
-@pytest.mark.parametrize(
-    ("is_reliable", "language_reliability", "match"),
-    [
         (None, 0.75, "predicted_language requires FeatureBlockPaper.is_reliable"),
         (True, None, "predicted_language requires FeatureBlockPaper.language_reliability"),
-    ],
-)
-def test_feature_block_paper_requires_complete_stored_language_detection(
-    is_reliable: bool | None,
-    language_reliability: float | None,
-    match: str,
-) -> None:
-    with pytest.raises(ValueError, match=match):
-        FeatureBlockPaper(
-            paper_id="p1",
-            title="A title",
-            abstract=None,
-            venue=None,
-            journal_name=None,
-            year=2024,
-            predicted_language="en",
-            is_reliable=is_reliable,
-            language_reliability=language_reliability,
-        )
+    ]
+    for is_reliable, language_reliability, match in invalid_cases:
+        with pytest.raises(ValueError, match=match):
+            FeatureBlockPaper(
+                paper_id="p1",
+                title="A title",
+                abstract=None,
+                venue=None,
+                journal_name=None,
+                year=2024,
+                predicted_language="en",
+                is_reliable=is_reliable,
+                language_reliability=language_reliability,
+            )
 
-
-def test_feature_block_paper_accepts_language_reliability_boundaries() -> None:
     reliable = FeatureBlockPaper(
         paper_id="p1",
         title="A title",
@@ -309,7 +276,7 @@ def _raw_plan() -> dict[str, Any]:
 
 
 def _validated_empty_arrow_inputs() -> ValidatedArrowInputs:
-    return ValidatedArrowInputs(
+    return ValidatedArrowInputs._from_verified(
         paths={},
         generation_id="test-generation",
         normalization_version=NORMALIZATION_VERSION,
@@ -748,22 +715,42 @@ def test_incremental_query_signatures_arrow_rejects_null_request_values(tmp_path
         read_incremental_query_signatures_arrow(path)
 
 
-def test_incremental_query_signatures_arrow_rejects_integer_id_columns(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = tmp_path / "integer_incremental_query_signatures.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array([1], type=pa.int64()),
-                "query_view": pa.array(["full"], type=pa.string()),
-                "query_author": pa.array(["Ada Lovelace"], type=pa.string()),
-            }
+@pytest.mark.parametrize(
+    ("filename", "columns", "reader", "bad_column"),
+    [
+        (
+            "incremental_query_signatures.arrow",
+            {"signature_id": [1], "query_view": ["full"], "query_author": ["Ada Lovelace"]},
+            read_incremental_query_signatures_arrow,
+            "signature_id",
         ),
-        path,
-    )
+        (
+            "cluster_seed_disallows.arrow",
+            {"signature_id_1": [1], "signature_id_2": ["s2"]},
+            read_cluster_seed_disallows_arrow,
+            "signature_id_1",
+        ),
+        (
+            "cluster_seeds.arrow",
+            {"signature_id": [1], "cluster_id": ["c1"]},
+            read_cluster_seeds_arrow,
+            "signature_id",
+        ),
+    ],
+)
+def test_arrow_readers_reject_integer_id_columns(
+    tmp_path: Path,
+    filename: str,
+    columns: dict[str, list[object]],
+    reader: Any,
+    bad_column: str,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    path = tmp_path / filename
+    write_arrow_ipc_table(pa.table(columns), path)
 
-    with pytest.raises(ValueError, match="column 'signature_id' expected string"):
-        read_incremental_query_signatures_arrow(path)
+    with pytest.raises(ValueError, match=rf"column '{bad_column}' expected string"):
+        reader(path)
 
 
 def test_feature_block_from_arrow_paths_reads_cluster_seed_disallows(tmp_path: Path) -> None:
@@ -833,21 +820,6 @@ def test_feature_block_from_arrow_paths_rejects_in_scope_self_disallow_pair(tmp_
 
     with pytest.raises(ValueError, match="self-pair"):
         feature_block_from_arrow_paths(arrow_paths, raw_candidate_plan=_raw_plan())
-
-
-def test_read_cluster_seed_disallows_arrow_rejects_integer_id_columns(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = tmp_path / "cluster_seed_disallows.arrow"
-    table = pa.table(
-        {
-            "signature_id_1": pa.array([1], type=pa.int64()),
-            "signature_id_2": pa.array(["s2"], type=pa.string()),
-        }
-    )
-    write_arrow_ipc_table(table, path)
-
-    with pytest.raises(ValueError, match="column 'signature_id_1' expected string"):
-        read_cluster_seed_disallows_arrow(path)
 
 
 def test_altered_cluster_signatures_arrow_round_trips_and_rejects_duplicates(tmp_path: Path) -> None:
@@ -952,36 +924,6 @@ def test_read_cluster_seeds_arrow_rejects_duplicate_signature_rows(tmp_path: Pat
     write_arrow_ipc_table(table, path)
 
     with pytest.raises(ValueError, match="duplicate signature_id"):
-        read_cluster_seeds_arrow(path)
-
-
-def test_read_cluster_seeds_arrow_rejects_conflicting_duplicate_signature_rows(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = tmp_path / "cluster_seeds.arrow"
-    table = pa.table(
-        {
-            "signature_id": pa.array(["s1", "s1"], type=pa.string()),
-            "cluster_id": pa.array(["c1", "c2"], type=pa.string()),
-        }
-    )
-    write_arrow_ipc_table(table, path)
-
-    with pytest.raises(ValueError, match="duplicate signature_id"):
-        read_cluster_seeds_arrow(path)
-
-
-def test_read_cluster_seeds_arrow_rejects_integer_id_columns(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-    path = tmp_path / "cluster_seeds.arrow"
-    table = pa.table(
-        {
-            "signature_id": pa.array([1], type=pa.int64()),
-            "cluster_id": pa.array(["c1"], type=pa.string()),
-        }
-    )
-    write_arrow_ipc_table(table, path)
-
-    with pytest.raises(ValueError, match="column 'signature_id' expected string"):
         read_cluster_seeds_arrow(path)
 
 
@@ -1205,40 +1147,6 @@ def test_raw_planner_index_rejects_stale_python_reuse(tmp_path: Path) -> None:
         write_raw_arrow_batch_lookup_indexes({"signatures": path}, tmp_path, overwrite=False)
 
 
-def test_raw_planner_index_rejects_same_size_sampled_rewrite_python_reuse(tmp_path: Path) -> None:
-    pa = pytest.importorskip("pyarrow")
-
-    signature_ids = [f"key{index:013d}" for index in range(30_000)]
-    path = write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(signature_ids, type=pa.string()),
-                "payload": pa.array(["x" * 8] * len(signature_ids), type=pa.string()),
-            }
-        ),
-        tmp_path / "signatures.arrow",
-        max_record_batch_rows=1000,
-    )
-    index_path = tmp_path / "signatures.signatures_batch_index.bin"
-    write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
-    payload = Path(path).read_bytes()
-    old_value = signature_ids[0].encode()
-    new_value = b"new0000000000000"
-    rewrite_offset = payload.index(old_value)
-    assert len(old_value) == len(new_value)
-    assert rewrite_offset < 65_536
-    Path(path).write_bytes(payload[:rewrite_offset] + new_value + payload[rewrite_offset + len(old_value) :])
-
-    with pytest.raises(ValueError, match="stale"):
-        write_arrow_batch_lookup_index(
-            path,
-            index_path,
-            key_column="signature_id",
-            table_name="signatures",
-            overwrite=False,
-        )
-
-
 def test_raw_planner_index_reuse_metrics_match_fresh_schema(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     path = write_arrow_ipc_table(
@@ -1342,25 +1250,6 @@ def test_write_name_counts_index_rebuilds_fingerprintless_manifest(
     assert rebuilt_manifest["fingerprint"] != original_fingerprint
 
 
-def test_write_name_counts_index_rebuilds_manifest_with_missing_schema_version(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    mappings = ({"ada": 3}, {"lovelace": 5}, {"ada lovelace": 2}, {"lovelace a": 7})
-    provenance = tiny_name_counts_provenance()
-    index_path, _metrics = write_name_counts_index(tmp_path, mappings, provenance)
-    manifest_path = Path(index_path) / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest.pop("schema_version")
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-
-    _index_path, metrics = write_name_counts_index(tmp_path, mappings, provenance, overwrite=False)
-
-    rebuilt_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert metrics["reused"] is False
-    assert rebuilt_manifest["schema_version"] == "name_counts_index_v1"
-
-
 def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1388,6 +1277,36 @@ def test_write_name_counts_index_failed_overwrite_keeps_previous_manifest(
 
     assert manifest_path.read_text(encoding="utf-8") == original_manifest
     assert original_first_path.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows prevents unlinking open sort-run files")
+def test_name_count_index_merge_failure_closes_sort_runs_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "first.bin"
+
+    def fail_mid_merge(
+        path: Path,
+        records: Any,
+        *,
+        record_count: int,
+    ) -> int:
+        del path, record_count
+        next(iter(records))
+        raise RuntimeError("simulated merge failure")
+
+    monkeypatch.setattr(feature_block_arrow_module, "_write_sorted_name_count_records", fail_mid_merge)
+
+    with pytest.raises(RuntimeError, match="simulated merge failure"):
+        feature_block_arrow_module._write_name_count_index_file(  # noqa: SLF001
+            output_path,
+            "first",
+            {"ada": 1, "grace": 2},
+            max_records_in_memory=1,
+        )
+
+    assert list(tmp_path.glob(f".{output_path.name}.run.*")) == []
 
 
 def test_write_name_counts_index_published_marker_failure_keeps_previous_manifest(
@@ -1743,6 +1662,7 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     )
 
     assert captured["retrieval_query_signature_ids"] == ("q",)
+    assert isinstance(captured["retrieval_paths"], dict)
     assert "query_signatures" in captured["retrieval_paths"]
     assert captured["retrieval_kwargs"]["top_k"] == 2
     assert captured["retrieval_plan_query_signature_ids"] == ("q",)

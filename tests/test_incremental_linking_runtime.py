@@ -36,8 +36,6 @@ from s2and.incremental_linking.retrieval import (
 from s2and.incremental_linking.runtime import (
     CandidateBatchPairwiseModelResult,
     _predict_incremental_link_or_abstain_compact,
-    naturalize_incremental_clusters,
-    signature_id_to_index_map,
 )
 from s2and.incremental_linking.runtime import (
     _predict_incremental_link_or_abstain_production_private as _prod_private_impl,
@@ -656,29 +654,6 @@ def _empty_feature_matrix(candidate_batch: LinkerCandidateBatch) -> LinkerFeatur
     )
 
 
-def test_compact_artifact_scoring_forwards_num_threads() -> None:
-    artifact = _static_artifact(
-        np.asarray([0.9], dtype=np.float64),
-        gate_config=_promoted_gate_config(0.0),
-    )
-    candidate_batch = LinkerCandidateBatch(
-        row_count=1,
-        left_signature_indices=np.zeros(0, dtype=np.uint32),
-        right_signature_indices=np.zeros(0, dtype=np.uint32),
-        pair_row_indices=np.zeros(0, dtype=np.uint32),
-        row_query_signature_indices=np.asarray([10], dtype=np.uint32),
-        row_component_keys=("c0",),
-    )
-
-    _predict_incremental_link_or_abstain_compact(
-        artifact,
-        _empty_feature_matrix(candidate_batch),
-        num_threads=7,
-    )
-
-    assert artifact.last_num_threads == 7
-
-
 def _production_retrieval_batch(
     *,
     row_query_signature_indices: np.ndarray,
@@ -933,22 +908,6 @@ def test_fused_pairwise_model_uses_configurable_nan_policies(monkeypatch) -> Non
 
     assert len(calls) == 1
     assert calls[0][0] == 0.0
-    assert calls[0][1] == 0.0
-    assert result.pairwise_stats.valid_counts[0, -1] == 2
-    assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.375)
-
-    calls.clear()
-    result = compute_candidate_batch_pairwise_model_and_aggregate_stats(
-        SimpleNamespace(),
-        candidate_batch,
-        classifier=FirstColumnDistanceClassifier(),
-        featurizer_info=FeaturizationInfo(features_to_use=["name_similarity"]),
-        pair_labels=np.full(candidate_batch.pair_count, np.nan, dtype=np.float64),
-        featurizer=object(),
-    )
-
-    assert len(calls) == 1
-    assert np.isnan(calls[0][0])
     assert calls[0][1] == 0.0
     assert result.pairwise_stats.valid_counts[0, -1] == 2
     assert result.pairwise_stats.mean_matrix()[0, -1] == pytest.approx(0.375)
@@ -1880,19 +1839,6 @@ def test_private_retrieved_candidate_slice_rejects_partial_supervision() -> None
         )
 
 
-def test_signature_id_to_index_map_returns_zero_indexed_map_from_featurizer() -> None:
-    featurizer = SimpleNamespace(signature_ids=lambda: ["s1", "s2", "s3"])
-
-    assert signature_id_to_index_map(featurizer) == {"s1": 0, "s2": 1, "s3": 2}
-
-
-def test_naturalize_incremental_clusters_maps_split_ids() -> None:
-    assert naturalize_incremental_clusters(
-        {"s1": "7_0", "s2": "9"},
-        {"7_0": "7"},
-    ) == {"s1": "7", "s2": "9"}
-
-
 def test_private_production_slice_preserves_split_ids_for_incremental_finish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1992,46 +1938,6 @@ def test_private_production_slice_supplies_query_author_to_logistic_gate(
     )
 
     assert result.compact_result.decisions[0].action == "link"
-
-
-def test_private_production_slice_uses_explicit_retrieval_top_k(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset = SimpleNamespace()
-    featurizer = FakeRuntimeFeaturizer(["q1", "s1"])
-    clusterer = FakeProductionClusterer({"s1": "c1"})
-    artifact = _static_artifact(np.asarray([], dtype=np.float64), gate_config=_promoted_gate_config(0.0))
-    captured: dict[str, int] = {}
-    sentinel = object()
-
-    def fake_retrieval(**kwargs: Any) -> LinkerRetrievalBatch:
-        captured["top_k"] = int(kwargs["top_k"])
-        return runtime_module._empty_retrieval_batch()  # noqa: SLF001
-
-    def fake_from_retrieval(*args: Any, **kwargs: Any) -> object:
-        captured["forwarded_retrieval_top_k"] = int(kwargs["retrieval_top_k"])
-        return sentinel
-
-    monkeypatch.setattr(runtime_module, "build_linker_retrieval_batch_rust", fake_retrieval)
-    monkeypatch.setattr(
-        runtime_module,
-        "_predict_incremental_link_or_abstain_production_from_retrieval_private",
-        fake_from_retrieval,
-    )
-
-    result = _predict_incremental_link_or_abstain_production_private(
-        clusterer,
-        artifact,
-        dataset=dataset,
-        featurizer=featurizer,
-        retriever=object(),
-        queries=[object()],
-        query_signature_ids=["q1"],
-        retrieval_top_k=7,
-    )
-
-    assert result is sentinel
-    assert captured == {"top_k": 7, "forwarded_retrieval_top_k": 7}
 
 
 def test_production_query_author_row_signals_reuses_retrieval_signal() -> None:

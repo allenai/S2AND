@@ -313,42 +313,38 @@ def test_convert_service_json_to_arrow_emits_empty_specter_for_empty_embeddings(
     )
 
 
-def test_root_manifest_lock_removes_dead_pid_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    lock_path = tmp_path / "manifest.json.lock"
-    lock_path.write_text("999999", encoding="ascii")
-    monkeypatch.setattr(convert_module, "_pid_is_running", lambda _pid: False)
-
-    with convert_module._RootManifestLock(lock_path, attempts=1):
-        assert lock_path.exists()
-
-    assert not lock_path.exists()
-
-
-def test_root_manifest_lock_does_not_remove_replaced_lock(tmp_path: Path) -> None:
-    lock_path = tmp_path / "manifest.json.lock"
-
-    with convert_module._RootManifestLock(lock_path, attempts=1):
-        lock_path.write_text("123456\nreplacement-token\n", encoding="ascii")
-
-    assert lock_path.read_text(encoding="ascii") == "123456\nreplacement-token\n"
-
-
-def test_root_manifest_lock_surfaces_create_errors(
+def test_root_manifest_upsert_uses_bounded_shared_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     lock_path = tmp_path / "manifest.json.lock"
+    observed: dict[str, object] = {}
 
-    def raise_permission_error(*_args: object, **_kwargs: object) -> int:
-        raise PermissionError("denied")
+    class FailingLock:
+        def __enter__(self) -> None:
+            raise TimeoutError("simulated contention")
 
-    monkeypatch.setattr(convert_module.os, "open", raise_permission_error)
+        def __exit__(self, *_args: object) -> None:
+            return None
 
-    with pytest.raises(PermissionError, match="denied"):
-        with convert_module._RootManifestLock(lock_path, attempts=1):
-            pass
+    def failing_lock(path: Path, *, timeout_seconds: float) -> FailingLock:
+        observed["path"] = path
+        observed["timeout_seconds"] = timeout_seconds
+        return FailingLock()
 
-    assert not lock_path.exists()
+    monkeypatch.setattr(convert_module, "exclusive_file_lock", failing_lock)
+
+    with pytest.raises(TimeoutError, match="simulated contention"):
+        convert_module._upsert_root_manifest(
+            tmp_path,
+            dataset_name="tiny",
+            dataset_dir=tmp_path / "tiny",
+        )
+
+    assert observed == {
+        "path": lock_path,
+        "timeout_seconds": convert_module._ROOT_MANIFEST_LOCK_TIMEOUT_SECONDS,
+    }
 
 
 def test_convert_service_json_to_arrow_reports_missing_specter_embeddings(

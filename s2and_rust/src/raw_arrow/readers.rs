@@ -470,6 +470,31 @@ pub(crate) fn read_raw_arrow_cluster_seeds(
     Ok((component_order, members_by_component))
 }
 
+pub(crate) fn insert_canonical_cluster_seed_disallow(
+    out: &mut HashSet<(String, String)>,
+    left: String,
+    right: String,
+    label: &str,
+) -> PyResult<()> {
+    if left.is_empty() || right.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{label} cannot contain empty signature_id values"
+        )));
+    }
+    if left == right {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{label} contains a self-pair for signature_id={left:?}"
+        )));
+    }
+    let pair = canonical_signature_pair_owned(left, right);
+    if !out.insert(pair.clone()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{label} contains duplicate pair: {pair:?}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn read_raw_arrow_cluster_seed_disallows(
     path: &str,
 ) -> PyResult<HashSet<(String, String)>> {
@@ -488,22 +513,12 @@ pub(crate) fn read_raw_arrow_cluster_seed_disallows(
             let right = right_values
                 .required_value(row, "signature_id_2")?
                 .into_owned();
-            if left.is_empty() || right.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "cluster_seed_disallows cannot contain empty signature_id values",
-                ));
-            }
-            if left == right {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "cluster_seed_disallows contains a self-pair for signature_id={left:?}"
-                )));
-            }
-            let pair = canonical_signature_pair_owned(left, right);
-            if !out.insert(pair.clone()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "cluster_seed_disallows contains duplicate pair: {pair:?}"
-                )));
-            }
+            insert_canonical_cluster_seed_disallow(
+                &mut out,
+                left,
+                right,
+                "cluster_seed_disallows",
+            )?;
         }
     }
     Ok(out)

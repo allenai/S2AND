@@ -15,11 +15,9 @@ from s2and.arrow_inputs import (  # noqa: E402
 from scripts.verification import compare_full_predict_arrow_parity as parity_module  # noqa: E402
 from scripts.verification.compare_full_predict_arrow_parity import (  # noqa: E402
     _assert_exact,
-    _build_arg_parser,
     _cluster_partition,
     _feature_constraint_report,
     _fixture_meta_path,
-    _jsonable,
     _load_cluster_seeds_require,
     _numeric_report,
     _write_raw_planner_indexes_and_layout,
@@ -102,99 +100,6 @@ def test_cluster_partition_ignores_cluster_labels_and_member_order() -> None:
 
     assert _cluster_partition(incumbent) == _cluster_partition(arrow)
     assert _cluster_partition(incumbent) != _cluster_partition({"a": ["s1"], "b": ["s2", "s3"]})
-
-
-def test_jsonable_converts_validated_arrow_mapping() -> None:
-    from s2and.arrow_inputs import ValidatedArrowInputs
-    from s2and.consts import NORMALIZATION_VERSION
-
-    paths = ValidatedArrowInputs(
-        paths={"signatures": "signatures.arrow"},
-        generation_id="generation",
-        normalization_version=NORMALIZATION_VERSION,
-    )
-
-    assert _jsonable(paths) == {"signatures": "signatures.arrow"}
-
-
-def test_parity_parser_compares_features_by_default(tmp_path) -> None:
-    args = _build_arg_parser().parse_args(
-        [
-            "--fixture-dir",
-            str(tmp_path),
-            "--output-dir",
-            str(tmp_path / "out"),
-            "--output-json",
-            str(tmp_path / "out.json"),
-            "--model-path",
-            str(tmp_path / "model"),
-            "--block-size",
-            "2",
-        ]
-    )
-
-    assert args.compare_features is True
-    assert args.name_counts_index is None
-
-    args = _build_arg_parser().parse_args(
-        [
-            "--fixture-dir",
-            str(tmp_path),
-            "--output-dir",
-            str(tmp_path / "out"),
-            "--output-json",
-            str(tmp_path / "out.json"),
-            "--model-path",
-            str(tmp_path / "model"),
-            "--block-size",
-            "2",
-            "--no-compare-features",
-        ]
-    )
-
-    assert args.compare_features is False
-
-
-def test_parity_parser_accepts_direct_name_counts_index(tmp_path) -> None:
-    index_path = tmp_path / "index"
-    args = _build_arg_parser().parse_args(
-        [
-            "--fixture-dir",
-            str(tmp_path),
-            "--output-dir",
-            str(tmp_path / "out"),
-            "--output-json",
-            str(tmp_path / "out.json"),
-            "--model-path",
-            str(tmp_path / "model"),
-            "--block-size",
-            "2",
-            "--name-counts-index",
-            str(index_path),
-        ]
-    )
-
-    assert args.name_counts_index == index_path
-
-
-def test_parity_parser_rejects_removed_name_artifact_dir(tmp_path) -> None:
-    with pytest.raises(SystemExit):
-        _build_arg_parser().parse_args(
-            [
-                "--fixture-dir",
-                str(tmp_path),
-                "--output-dir",
-                str(tmp_path / "out"),
-                "--output-json",
-                str(tmp_path / "out.json"),
-                "--model-path",
-                str(tmp_path / "model"),
-                "--block-size",
-                "2",
-                "--name-artifact-dir",
-                str(tmp_path / "legacy"),
-            ]
-        )
 
 
 def test_parity_main_writes_output_json_before_asserting_mismatch(tmp_path, monkeypatch) -> None:

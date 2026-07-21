@@ -395,6 +395,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--limit must be positive")
     if args.max_names_per_orcid < 2:
         raise ValueError("--max-names-per-orcid must be at least 2")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.source_snapshot_id) is None:
+        raise ValueError("source_snapshot_id must contain only letters, digits, '.', '_', and '-'")
     if args.input_json is None and not args.run_full:
         raise ValueError("Choose --input-json for a fixture or explicitly authorize warehouse access with --run-full")
     source_context = {
@@ -421,8 +423,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         name_tuples,
         max_names_per_orcid=args.max_names_per_orcid,
     )
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.source_snapshot_id) is None:
-        raise ValueError("source_snapshot_id must contain only letters, digits, '.', '_', and '-'")
     data_path, metadata_path, data_sha256 = write_artifact(
         counts,
         output_dir=args.output_dir,

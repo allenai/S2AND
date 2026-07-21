@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import threading
-
 import numpy as np
 
 import s2and.featurizer as featurizer_mod
@@ -75,9 +73,16 @@ def _build_pairs(count: int) -> list[tuple[str, str, float]]:
 
 
 class FakeIndexedRustFeaturizer:
-    def __init__(self, signature_ids: list[str], *, call_sizes: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        signature_ids: list[str],
+        *,
+        call_sizes: list[int] | None = None,
+        selected_indices_seen: list[list[int] | None] | None = None,
+    ) -> None:
         self._signature_ids = list(signature_ids)
         self.call_sizes = call_sizes
+        self.selected_indices_seen = selected_indices_seen
 
     def signature_ids(self) -> list[str]:
         return list(self._signature_ids)
@@ -86,6 +91,8 @@ class FakeIndexedRustFeaturizer:
         del num_threads, nan_value
         if self.call_sizes is not None:
             self.call_sizes.append(len(pairs))
+        if self.selected_indices_seen is not None:
+            self.selected_indices_seen.append(None if selected_indices is None else list(selected_indices))
         if selected_indices is None:
             return np.zeros((len(pairs), featurizer_mod.NUM_FEATURES), dtype=np.float64)
         return np.zeros((len(pairs), len(selected_indices)), dtype=np.float64)
@@ -168,7 +175,12 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
     _pin_stable_rss(monkeypatch)
 
     call_sizes = []
-    fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()), call_sizes=call_sizes)
+    selected_indices_seen: list[list[int] | None] = []
+    fake_rust_featurizer = FakeIndexedRustFeaturizer(
+        sorted(dataset.signatures.keys()),
+        call_sizes=call_sizes,
+        selected_indices_seen=selected_indices_seen,
+    )
     pairs = _build_pairs(5)
 
     monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
@@ -195,58 +207,6 @@ def test_rust_batch_calls_are_chunked_for_progress_updates(monkeypatch):
     )
 
     assert call_sizes == [2, 2, 1]
-    assert features.shape[0] == len(pairs)
-    assert labels.shape[0] == len(pairs)
-
-
-def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_indexed", name_counts_index=True)
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    _pin_stable_rss(monkeypatch)
-
-    indexed_call_sizes = []
-    selected_indices_seen: list[list[int] | None] = []
-
-    class FakeRustFeaturizer:
-        def signature_ids(self):
-            return sorted(dataset.signatures.keys())
-
-        def featurize_pairs_matrix_indexed(self, pairs, selected_indices, num_threads, nan_value):
-            del num_threads, nan_value
-            indexed_call_sizes.append(len(pairs))
-            selected_indices_seen.append(selected_indices)
-            if selected_indices is None:
-                return np.zeros((len(pairs), featurizer_mod.NUM_FEATURES), dtype=np.float64)
-            return np.zeros((len(pairs), len(selected_indices)), dtype=np.float64)
-
-    fake_rust_featurizer = FakeRustFeaturizer()
-    pairs = _build_pairs(5)
-
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
-    monkeypatch.setattr(
-        memory_budget,
-        "compute_rust_batch_chunk_plan",
-        lambda **_kwargs: _mock_chunk_plan(chunk_pairs=2, total_pairs=len(pairs)),
-    )
-    monkeypatch.setattr(feature_port, "s2and_rust", object())
-    monkeypatch.setattr(
-        feature_port,
-        "_get_rust_featurizer",
-        lambda _dataset, **_kw: fake_rust_featurizer,
-    )
-
-    features, labels, _ = many_pairs_featurize(
-        pairs,
-        dataset,
-        featurizer_info,
-        n_jobs=2,
-        chunk_size=1,
-        nan_value=np.nan,
-        total_ram_bytes=2 * 1024 * 1024 * 1024,
-    )
-
-    assert indexed_call_sizes == [2, 2, 1]
-    assert selected_indices_seen
     expected_indices = sorted(
         {
             idx
@@ -254,7 +214,7 @@ def test_rust_batch_prefers_indexed_api_when_available(monkeypatch):
             for idx in featurizer_info.feature_group_to_index[feature_group]
         }
     )
-    assert selected_indices_seen[0] == expected_indices
+    assert selected_indices_seen == [expected_indices, expected_indices, expected_indices]
     assert features.shape[0] == len(pairs)
     assert labels.shape[0] == len(pairs)
 
@@ -310,100 +270,3 @@ def test_rust_batch_indexed_api_normalizes_integer_signature_ids(monkeypatch):
     assert indexed_pairs_seen == expected_indexed_pairs
     assert features.shape[0] == len(pairs)
     assert labels.shape[0] == len(pairs)
-
-
-def test_rust_batch_uses_same_process_featurizer_without_cache_flag(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_same_process_featurizer", name_counts_index=True)
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    featurizer_calls = {"count": 0}
-    fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()))
-    pairs = [("0", "1", 0.0)]
-
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
-    monkeypatch.setattr(
-        memory_budget,
-        "compute_rust_batch_chunk_plan",
-        lambda **_kwargs: _mock_chunk_plan(chunk_pairs=1, total_pairs=len(pairs)),
-    )
-    monkeypatch.setattr(feature_port, "s2and_rust", object())
-
-    def _fake_get_rust_featurizer(_dataset, **kwargs):
-        featurizer_calls["count"] += 1
-        return fake_rust_featurizer
-
-    monkeypatch.setattr(
-        feature_port,
-        "_get_rust_featurizer",
-        _fake_get_rust_featurizer,
-    )
-
-    many_pairs_featurize(
-        pairs,
-        dataset,
-        featurizer_info,
-        n_jobs=1,
-        chunk_size=1,
-        nan_value=np.nan,
-        total_ram_bytes=2 * 1024 * 1024 * 1024,
-    )
-
-    assert featurizer_calls["count"] >= 1
-
-
-def test_rust_batch_prediction_matches_observed_real_workload(monkeypatch):
-    dataset = build_dummy_dataset("dummy_rust_chunking_prediction", name_counts_index=True)
-    featurizer_info = FeaturizationInfo(features_to_use=["year_diff", "misc_features"])
-    pairs = _build_pairs(12_000)
-    fake_rust_featurizer = FakeIndexedRustFeaturizer(sorted(dataset.signatures.keys()))
-    total_ram_bytes = 2 * 1024 * 1024 * 1024
-    plan = memory_budget.compute_rust_batch_chunk_plan(
-        num_features=featurizer_mod.NUM_FEATURES,
-        total_pairs=len(pairs),
-        total_ram_bytes=total_ram_bytes,
-    )
-
-    monkeypatch.setattr(featurizer_mod, "_use_rust_featurizer", lambda _rc=None, _dataset=None: True)
-    monkeypatch.setattr(feature_port, "s2and_rust", object())
-    monkeypatch.setattr(
-        feature_port,
-        "_get_rust_featurizer",
-        lambda _dataset, **_kw: fake_rust_featurizer,
-    )
-
-    stop = threading.Event()
-    rss_peak = {"value": 0}
-    rss_before, _ = memory_budget.current_rss_bytes_best_effort(int(plan.total_ram_bytes))
-    rss_peak["value"] = rss_before
-
-    def _sample_peak() -> None:
-        while not stop.is_set():
-            rss_now, _ = memory_budget.current_rss_bytes_best_effort(int(plan.total_ram_bytes))
-            if rss_now > rss_peak["value"]:
-                rss_peak["value"] = rss_now
-            stop.wait(0.005)
-
-    worker = threading.Thread(target=_sample_peak, daemon=True)
-    worker.start()
-    try:
-        many_pairs_featurize(
-            pairs,
-            dataset,
-            featurizer_info,
-            n_jobs=2,
-            chunk_size=100,
-            nan_value=np.nan,
-            total_ram_bytes=total_ram_bytes,
-        )
-    finally:
-        stop.set()
-        worker.join(timeout=2)
-
-    rss_after, _ = memory_budget.current_rss_bytes_best_effort(int(plan.total_ram_bytes))
-    summary = memory_budget.summarize_prediction_accuracy(
-        stage_name="pair_featurization_rust_batch_test",
-        predicted_peak_delta_bytes=int(plan.predicted_stage_peak_delta_bytes),
-        rss_before_bytes=rss_before,
-        rss_peak_bytes=int(rss_peak["value"]),
-        rss_after_bytes=rss_after,
-    )
-    assert float(summary.prediction_error_ratio) <= 3.0

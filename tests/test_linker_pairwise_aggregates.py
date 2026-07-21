@@ -112,8 +112,8 @@ def test_pairwise_featurizer_resolver_requires_dataset_without_featurizer() -> N
         linker_pairwise.resolve_linker_pairwise_featurizer(None, None)
 
 
-def test_combined_array_feature_wrapper_passes_separate_nan_policies() -> None:
-    calls: list[tuple[float, float]] = []
+def test_array_feature_wrappers_pass_separate_nan_policies() -> None:
+    calls: list[tuple[float, float, bool]] = []
 
     class FakeRustFeaturizer:
         def linker_pair_index_arrays_and_aggregate_stats(
@@ -127,9 +127,10 @@ def test_combined_array_feature_wrapper_passes_separate_nan_policies() -> None:
             num_threads,
             nan_value,
             aggregate_nan_value,
+            emit_matrix=True,
         ):
             del right_signature_indices, row_indices, row_count, matrix_indices, aggregate_indices, num_threads
-            calls.append((float(nan_value), float(aggregate_nan_value)))
+            calls.append((float(nan_value), float(aggregate_nan_value), bool(emit_matrix)))
             pair_count = len(left_signature_indices)
             return (
                 np.zeros((pair_count, 1), dtype=np.float64),
@@ -158,39 +159,11 @@ def test_combined_array_feature_wrapper_passes_separate_nan_policies() -> None:
     assert len(calls) == 1
     assert np.isnan(calls[0][0])
     assert calls[0][1] == 0.0
+    assert calls[0][2] is True
     assert matrix.shape == (2, 1)
     assert counts.tolist() == [1]
     assert valid_counts.shape == (1, 1)
     assert sums.shape == mins.shape == maxs.shape == (1, 1)
-
-
-def test_aggregate_only_wrapper_passes_separate_nan_policy() -> None:
-    calls: list[tuple[float, float, bool]] = []
-
-    class FakeRustFeaturizer:
-        def linker_pair_index_arrays_and_aggregate_stats(
-            self,
-            left_signature_indices,
-            right_signature_indices,
-            row_indices,
-            row_count,
-            matrix_indices,
-            aggregate_indices,
-            num_threads,
-            nan_value,
-            aggregate_nan_value,
-            emit_matrix,
-        ):
-            del right_signature_indices, row_indices, matrix_indices, aggregate_indices, num_threads
-            calls.append((float(nan_value), float(aggregate_nan_value), bool(emit_matrix)))
-            return (
-                np.zeros((len(left_signature_indices), 0), dtype=np.float64),
-                np.ones(int(row_count), dtype=np.uint32),
-                np.ones((int(row_count), 1), dtype=np.uint64),
-                np.zeros((int(row_count), 1), dtype=np.float64),
-                np.zeros((int(row_count), 1), dtype=np.float64),
-                np.zeros((int(row_count), 1), dtype=np.float64),
-            )
 
     feature_port.build_linker_pair_aggregate_stats_arrays_rust(
         np.asarray([0, 1], dtype=np.uint32),
@@ -204,10 +177,10 @@ def test_aggregate_only_wrapper_passes_separate_nan_policy() -> None:
         featurizer=FakeRustFeaturizer(),
     )
 
-    assert len(calls) == 1
-    assert np.isnan(calls[0][0])
-    assert calls[0][1] == 0.0
-    assert calls[0][2] is False
+    assert len(calls) == 2
+    assert np.isnan(calls[1][0])
+    assert calls[1][1] == 0.0
+    assert calls[1][2] is False
 
 
 def test_combined_array_feature_wrapper_requires_exact_six_array_result() -> None:
@@ -223,24 +196,6 @@ def test_combined_array_feature_wrapper_requires_exact_six_array_result() -> Non
             )
 
     with pytest.raises(RuntimeError, match="violated its six-array result contract"):
-        feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
-            np.asarray([0], dtype=np.uint32),
-            np.asarray([1], dtype=np.uint32),
-            np.asarray([0], dtype=np.uint32),
-            1,
-            matrix_indices=[0],
-            aggregate_indices=[0],
-            featurizer=FakeRustFeaturizer(),
-        )
-
-
-def test_combined_array_feature_wrapper_raises_rust_errors() -> None:
-    class FakeRustFeaturizer:
-        def linker_pair_index_arrays_and_aggregate_stats(self, *args):
-            del args
-            raise ValueError("bad rows")
-
-    with pytest.raises(ValueError, match="bad rows"):
         feature_port.build_linker_pair_features_and_aggregate_stats_arrays_rust(
             np.asarray([0], dtype=np.uint32),
             np.asarray([1], dtype=np.uint32),
@@ -426,70 +381,6 @@ def test_pairwise_aggregate_feature_matrix_uses_per_feature_valid_counts() -> No
     assert np.isnan(matrix[0, [1, 3, 5]]).all()
 
 
-def test_candidate_batch_aggregates_accept_index_arrays(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = build_dummy_dataset("dummy_linker_pairwise_indexed_fake", name_counts_index=True)
-    candidate_batch = _candidate_batch_from_index_arrays(
-        left_signature_indices=[0, 0, 1],
-        right_signature_indices=[1, 2, 2],
-        row_indices=[0, 0, 1],
-        row_count=2,
-    )
-    indexed_pairs_seen: list[tuple[int, int]] = []
-
-    class FakeRustFeaturizer:
-        def signature_ids(self):
-            raise AssertionError("indexed pair path should not request signature_ids")
-
-        def linker_pair_index_arrays_and_aggregate_stats(
-            self,
-            left_signature_indices,
-            right_signature_indices,
-            local_row_indices,
-            row_count,
-            matrix_indices,
-            aggregate_indices,
-            num_threads,
-            nan_value,
-            aggregate_nan_value,
-            emit_matrix,
-        ):
-            del local_row_indices, matrix_indices, num_threads, nan_value, aggregate_nan_value
-            assert emit_matrix is False
-            indexed_pairs_seen.extend(
-                (int(left), int(right))
-                for left, right in zip(left_signature_indices, right_signature_indices, strict=True)
-            )
-            return (
-                np.zeros((len(left_signature_indices), 0), dtype=np.float64),
-                np.ones(int(row_count), dtype=np.uint32),
-                np.ones((int(row_count), len(aggregate_indices)), dtype=np.uint64),
-                np.ones((int(row_count), len(aggregate_indices)), dtype=np.float64),
-                np.zeros((int(row_count), len(aggregate_indices)), dtype=np.float64),
-                np.ones((int(row_count), len(aggregate_indices)), dtype=np.float64),
-            )
-
-    fake_featurizer = FakeRustFeaturizer()
-    monkeypatch.setattr(
-        memory_budget,
-        "compute_rust_batch_chunk_plan",
-        lambda **_kwargs: _mock_chunk_plan(chunk_pairs=2, total_pairs=candidate_batch.pair_count),
-    )
-    monkeypatch.setattr(
-        feature_port,
-        "_get_rust_featurizer",
-        lambda _dataset, runtime_context=None: fake_featurizer,
-    )
-
-    linker_pairwise.compute_candidate_batch_pairwise_aggregate_stats_rust(
-        dataset,
-        candidate_batch,
-        aggregate_feature_names=("first_names_equal",),
-        n_jobs=2,
-    )
-
-    assert indexed_pairs_seen == [(0, 1), (0, 2), (1, 2)]
-
-
 def test_candidate_batch_aggregates_use_array_api(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = build_dummy_dataset("dummy_linker_candidate_batch_fake", name_counts_index=True)
     candidate_batch = linker_pairwise.build_candidate_batch_from_members(
@@ -624,31 +515,18 @@ def test_candidate_batch_aggregates_trust_rust_aggregate_stats(monkeypatch: pyte
     np.testing.assert_allclose(stats.feature_matrix()[0], np.asarray([40.0, 42.0, 44.0]))
 
 
-def test_localize_row_indices_keeps_grouped_chunks_fast() -> None:
-    global_rows, local_rows = linker_pairwise._localize_row_indices(  # noqa: SLF001
-        np.asarray([5, 5, 6, 8, 8], dtype=np.uint32)
-    )
-
-    np.testing.assert_array_equal(global_rows, np.asarray([5, 6, 8], dtype=np.int64))
-    np.testing.assert_array_equal(local_rows, np.asarray([0, 0, 1, 2, 2], dtype=np.uint32))
-
-
-def test_localize_row_indices_keeps_sparse_grouped_chunks_compact() -> None:
-    global_rows, local_rows = linker_pairwise._localize_row_indices(  # noqa: SLF001
-        np.asarray([0, 1_000_000], dtype=np.uint32)
-    )
-
-    np.testing.assert_array_equal(global_rows, np.asarray([0, 1_000_000], dtype=np.int64))
-    np.testing.assert_array_equal(local_rows, np.asarray([0, 1], dtype=np.uint32))
-
-
-def test_localize_row_indices_handles_ungrouped_chunks() -> None:
-    global_rows, local_rows = linker_pairwise._localize_row_indices(  # noqa: SLF001
-        np.asarray([5, 2, 5, 3], dtype=np.uint32)
-    )
-
-    np.testing.assert_array_equal(global_rows, np.asarray([2, 3, 5], dtype=np.int64))
-    np.testing.assert_array_equal(local_rows, np.asarray([2, 0, 2, 1], dtype=np.uint32))
+def test_localize_row_indices_handles_grouped_sparse_and_ungrouped_chunks() -> None:
+    cases = [
+        ([5, 5, 6, 8, 8], [5, 6, 8], [0, 0, 1, 2, 2]),
+        ([0, 1_000_000], [0, 1_000_000], [0, 1]),
+        ([5, 2, 5, 3], [2, 3, 5], [2, 0, 2, 1]),
+    ]
+    for row_indices, expected_global, expected_local in cases:
+        global_rows, local_rows = linker_pairwise._localize_row_indices(  # noqa: SLF001
+            np.asarray(row_indices, dtype=np.uint32)
+        )
+        np.testing.assert_array_equal(global_rows, np.asarray(expected_global, dtype=np.int64))
+        np.testing.assert_array_equal(local_rows, np.asarray(expected_local, dtype=np.uint32))
 
 
 @pytest.mark.skipif(

@@ -93,7 +93,6 @@ def _build_workload(
     train_pairs_size_mode: str,
     ingest: str = "auto",
     data_dir: str = "",
-    prediction_arrow_data_dir: str = "",
 ) -> dict[str, Any]:
     return {
         "datasets": list(datasets),
@@ -105,7 +104,6 @@ def _build_workload(
         "train_pairs_size_mode": str(train_pairs_size_mode),
         "ingest": str(ingest),
         "data_dir": str(data_dir),
-        "prediction_arrow_data_dir": str(prediction_arrow_data_dir),
     }
 
 
@@ -161,7 +159,6 @@ def _resolve_workload(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
         train_pairs_size_mode=train_pairs_size_mode,
         ingest=ingest,
         data_dir=str(args.data_dir),
-        prediction_arrow_data_dir=str(args.prediction_arrow_data_dir),
     )
     return workload, _workload_id(workload)
 
@@ -422,7 +419,6 @@ def _single_run(
     rust_cleanup_boundary: bool,
     ingest: str = "auto",
     data_dir: str = "",
-    prediction_arrow_data_dir: str = "",
 ) -> dict[str, Any]:
     ingest = _resolve_ingest(str(ingest), str(backend))
     os.environ["OMP_NUM_THREADS"] = str(max(1, n_jobs))
@@ -528,16 +524,6 @@ def _single_run(
                     train_pairs_size_mode=train_pairs_size_mode,
                 )
                 anddata = ANDData(**anddata_kwargs)
-                if prediction_arrow_data_dir:
-                    # Rust production prediction (cluster_eval) requires explicit
-                    # dataset.arrow_paths; JSON-ingested runs borrow them from the
-                    # converted bundle so the eval stage rides identical artifacts.
-                    prediction_arrow_paths, _prediction_clusters = _resolve_arrow_dataset_paths(
-                        prediction_arrow_data_dir,
-                        dataset_name,
-                        require_clusters=False,
-                    )
-                    anddata.arrow_paths = prediction_arrow_paths
             dt["anddata_build_seconds"] = round(time.perf_counter() - t0, 3)
             dt["anddata_train_pairs_size"] = int(effective_train_pairs_size)
             dt["rss_after_anddata_build_gb"] = round(monitor.sample_gb(), 3)
@@ -783,7 +769,6 @@ def _run_subprocess(
     rust_cleanup_boundary: int = 1,
     ingest: str = "auto",
     data_dir: str = "",
-    prediction_arrow_data_dir: str = "",
 ) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -795,7 +780,6 @@ def _run_subprocess(
         "--ingest",
         ingest,
         *(["--data-dir", data_dir] if data_dir else []),
-        *(["--prediction-arrow-data-dir", prediction_arrow_data_dir] if prediction_arrow_data_dir else []),
         "--datasets",
         *datasets,
         "--target",
@@ -879,7 +863,6 @@ def _compare(args: argparse.Namespace, workload: dict[str, Any], workload_id: st
             run_label=config["run_label"],
             ingest=_resolve_ingest(str(common.get("ingest", "auto")), config["backend"]),
             data_dir=str(common.get("data_dir", "")),
-            prediction_arrow_data_dir=str(common.get("prediction_arrow_data_dir", "")),
         )
         results.append(result)
 
@@ -1160,14 +1143,6 @@ def main() -> None:
         default="",
         help="Override the dataset root directory (defaults to the configured data dir).",
     )
-    parser.add_argument(
-        "--prediction-arrow-data-dir",
-        default="",
-        help=(
-            "For --ingest json: attach dataset.arrow_paths from this converted Arrow bundle root so the "
-            "Rust cluster_eval prediction stage (which requires explicit Arrow artifacts) can run."
-        ),
-    )
     parser.add_argument("--datasets", nargs="+", default=None, help="Override workload preset datasets.")
     parser.add_argument("--target", default=None, help="Override workload preset target dataset.")
     parser.add_argument("--n-jobs", type=int, default=None, help="Override workload preset n_jobs.")
@@ -1236,7 +1211,6 @@ def main() -> None:
             rust_cleanup_boundary=bool(args.rust_cleanup_boundary),
             ingest=workload["ingest"],
             data_dir=workload["data_dir"],
-            prediction_arrow_data_dir=workload["prediction_arrow_data_dir"],
         )
         if args.write_json:
             out_path = Path(args.write_json)

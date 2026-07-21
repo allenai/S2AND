@@ -1967,7 +1967,7 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
     stage_start = time.perf_counter()
     rust_module = feature_port._require_rust_runtime()  # noqa: SLF001
     raw_planner = rust_module.RawBlockQueryCandidatePlanner.from_query_signatures(
-        arrow_path_payload,
+        dict(arrow_path_payload),
         top_k=top_k_resolved,
         orcid_enabled=resolved_orcid_enabled,
         num_threads=n_jobs_resolved,

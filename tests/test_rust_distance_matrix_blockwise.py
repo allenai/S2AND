@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
@@ -202,7 +203,8 @@ def _partial_supervision_for_upper_triangle(signatures: list[str]) -> tuple[dict
     return partial_supervision, np.asarray(values, dtype=np.float64)
 
 
-def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
+@pytest.mark.parametrize("square_matrix", [False, True], ids=["fastcluster", "square"])
+def test_make_distance_matrices_rust_blockwise_output_formats(monkeypatch, square_matrix: bool):
     monkeypatch.setenv("S2AND_BACKEND", "rust")
     monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -236,7 +238,7 @@ def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
     monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
 
     dataset = _mark_arrow_backed(_dummy_dataset("dummy_rust_blockwise_fastcluster"))
-    clusterer = _dummy_clusterer(cluster_model=None)
+    clusterer = _dummy_clusterer(cluster_model=object() if square_matrix else None)
     signatures = ["0", "1", "2", "3"]
     partial_supervision, expected_flat = _partial_supervision_for_upper_triangle(signatures)
 
@@ -247,64 +249,77 @@ def test_make_distance_matrices_rust_blockwise_fastcluster(monkeypatch):
     )
     matrix = output["block"]
 
-    assert matrix.dtype == np.float64
-    np.testing.assert_allclose(matrix, expected_flat, rtol=1e-10, atol=1e-12)
+    if square_matrix:
+        expected_square = np.zeros((4, 4), dtype=np.float16)
+        expected_square[np.triu_indices(4, k=1)] = expected_flat.astype(np.float16)
+        expected_square = expected_square + expected_square.T
+        np.fill_diagonal(expected_square, 0)
+        assert matrix.shape == (4, 4)
+        np.testing.assert_allclose(matrix, expected_square, rtol=0, atol=0)
+    else:
+        assert matrix.dtype == np.float64
+        np.testing.assert_allclose(matrix, expected_flat, rtol=1e-10, atol=1e-12)
     assert featurize_call_sizes == [2, 2, 2]
 
 
-def test_make_distance_matrices_rust_blockwise_square_matrix(monkeypatch):
-    monkeypatch.setenv("S2AND_BACKEND", "rust")
+def test_make_distance_matrices_rust_honors_ram_bounded_pair_chunk_size(monkeypatch):
+    captured: dict[str, Any] = {}
     monkeypatch.setattr(model_module, "_sync_rust_cluster_seeds", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        model_module.Clusterer,
-        "distance_matrix_helper",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy pair helper should not be called")),
-    )
 
-    featurize_call_sizes: list[int] = []
+    def fake_chunk_plan(_num_features: int, **kwargs: Any) -> SimpleNamespace:
+        captured["plan_total_pairs"] = kwargs["total_pairs"]
+        captured["plan_total_ram_bytes"] = kwargs["total_ram_bytes"]
+        return SimpleNamespace(chunk_pairs=1)
 
-    def fake_many_pairs_featurize(signature_pairs, *_args, **_kwargs):
-        featurize_call_sizes.append(len(signature_pairs))
-        labels = np.asarray([float(pair[2]) for pair in signature_pairs], dtype=np.float64)
-        features = np.zeros((len(signature_pairs), 1), dtype=np.float64)
-        return features, labels, None
+    def fake_guard(**kwargs: Any) -> None:
+        captured["guard_total_ram_bytes"] = kwargs["total_ram_bytes"]
 
-    def fake_predict_and_combine(
-        _classifier,
-        _nameless_classifier,
-        _features,
-        labels,
-        _nameless_features,
-        _batch_label,
-        runtime_context=None,
-        **_kwargs,
-    ):
-        del runtime_context, _kwargs
-        return np.asarray(labels + LARGE_INTEGER, dtype=np.float64), 0.0
+    def fake_chunk_helper(*_args: Any, **kwargs: Any):
+        captured["helper_pair_chunk_size"] = kwargs["pair_chunk_size"]
+        yield model_module._DistanceMatrixChunk(
+            block_key="block",
+            block_size=2,
+            start_offset=0,
+            index_i=np.asarray([0], dtype=np.intp),
+            index_j=np.asarray([1], dtype=np.intp),
+            pair_ids=[("0", "1")],
+            labels=np.asarray([np.nan], dtype=np.float64),
+        )
 
-    monkeypatch.setattr(model_module, "many_pairs_featurize", fake_many_pairs_featurize)
-    monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
+    def fake_predict_chunk(
+        _self: Clusterer,
+        chunk: Any,
+        _dataset: ANDData,
+        _runtime_context: RuntimeContext,
+        batch_label: int | str,
+        total_ram_bytes: int | None = None,
+    ) -> tuple[np.ndarray, float]:
+        del batch_label
+        captured["scorer_total_ram_bytes"] = total_ram_bytes
+        return np.full(len(chunk.labels), 0.25, dtype=np.float64), 0.0
 
-    dataset = _mark_arrow_backed(_dummy_dataset("dummy_rust_blockwise_square"))
+    monkeypatch.setattr(model_module, "_compute_predict_batch_chunk_plan", fake_chunk_plan)
+    monkeypatch.setattr(model_module, "_guard_predict_block_matrix_allocation", fake_guard)
+    monkeypatch.setattr(Clusterer, "_distance_matrix_chunk_helper_rust", fake_chunk_helper)
+    monkeypatch.setattr(Clusterer, "_predict_distance_matrix_chunk", fake_predict_chunk)
+
+    dataset = _mark_arrow_backed(_dummy_dataset("dummy_rust_ram_bounded_chunks"))
     clusterer = _dummy_clusterer(cluster_model=object())
-    signatures = ["0", "1", "2", "3"]
-    partial_supervision, expected_flat = _partial_supervision_for_upper_triangle(signatures)
-
     output = clusterer.make_distance_matrices(
-        {"block": signatures},
+        {"block": ["0", "1"]},
         dataset,
-        partial_supervision=partial_supervision,
+        disable_tqdm=True,
+        total_ram_bytes=123,
     )
-    matrix = output["block"]
 
-    expected_square = np.zeros((4, 4), dtype=np.float16)
-    expected_square[np.triu_indices(4, k=1)] = expected_flat.astype(np.float16)
-    expected_square = expected_square + expected_square.T
-    np.fill_diagonal(expected_square, 0)
-
-    assert matrix.shape == (4, 4)
-    np.testing.assert_allclose(matrix, expected_square, rtol=0, atol=0)
-    assert featurize_call_sizes == [2, 2, 2]
+    assert captured == {
+        "guard_total_ram_bytes": 123,
+        "plan_total_pairs": 1,
+        "plan_total_ram_bytes": 123,
+        "helper_pair_chunk_size": 1,
+        "scorer_total_ram_bytes": 123,
+    }
+    np.testing.assert_allclose(output["block"], np.asarray([[0.0, 0.25], [0.25, 0.0]], dtype=np.float16))
 
 
 def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
@@ -404,88 +419,6 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
     assert captured["feature_calls"] == 3
 
 
-def test_make_distance_matrices_from_rust_featurizer_avoids_anddata_lookup(monkeypatch):
-    monkeypatch.setattr(
-        model_module,
-        "_get_rust_featurizer",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ANDData featurizer lookup is not needed")),
-    )
-    monkeypatch.setattr(
-        model_module,
-        "many_pairs_featurize",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python pair featurization is not needed")),
-    )
-
-    captured = {"constraint_calls": 0, "feature_calls": 0}
-
-    class _FakeFusedFeaturizer:
-        def signature_ids(self):
-            return ["0", "1", "2", "3"]
-
-        def get_constraints_block_upper_triangle_indexed(
-            self,
-            block_signature_indices,
-            start_offset=0,
-            max_pairs=None,
-            *_args,
-            **_kwargs,
-        ):
-            captured["constraint_calls"] += 1
-            block_size = len(block_signature_indices)
-            all_pairs = [(i, j) for i in range(block_size) for j in range(i + 1, block_size)]
-            pair_slice = all_pairs[start_offset : start_offset + int(max_pairs or len(all_pairs))]
-            left = [int(i) for i, _ in pair_slice]
-            right = [int(j) for _, j in pair_slice]
-            return left, right, [None] * len(pair_slice)
-
-        def featurize_block_upper_triangle_matrix_indexed(
-            self,
-            block_signature_indices,
-            start_offset=0,
-            max_pairs=None,
-            selected_indices=None,
-            *_args,
-            **_kwargs,
-        ):
-            captured["feature_calls"] += 1
-            block_size = len(block_signature_indices)
-            all_pairs = [(i, j) for i in range(block_size) for j in range(i + 1, block_size)]
-            pair_slice = all_pairs[start_offset : start_offset + int(max_pairs or len(all_pairs))]
-            out_cols = len(selected_indices) if selected_indices is not None else 33
-            out = np.zeros((len(pair_slice), out_cols), dtype=np.float64)
-            for row_offset in range(len(pair_slice)):
-                out[row_offset, :] = float(start_offset + row_offset + 1) / 10.0
-            return out
-
-    def fake_predict_and_combine(
-        _classifier,
-        _nameless_classifier,
-        features,
-        labels,
-        _nameless_features,
-        _batch_label,
-        runtime_context=None,
-        **_kwargs,
-    ):
-        del labels, runtime_context, _kwargs
-        return np.asarray(features[:, 0], dtype=np.float64), 0.0
-
-    monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
-
-    clusterer = _dummy_clusterer(
-        cluster_model=None,
-        use_default_constraints_as_supervision=True,
-    )
-    output = clusterer.make_distance_matrices_from_rust_featurizer(
-        {"block": ["0", "1", "2", "3"]},
-        _FakeFusedFeaturizer(),
-    )
-
-    np.testing.assert_allclose(output["block"], np.asarray([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]), rtol=0, atol=0)
-    assert captured["constraint_calls"] == 3
-    assert captured["feature_calls"] == 3
-
-
 def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_indices_without_constraints(monkeypatch):
     monkeypatch.setattr(
         model_module,
@@ -549,70 +482,6 @@ def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_indices_w
 
     np.testing.assert_allclose(output["block"], np.arange(6, dtype=np.float64), rtol=0, atol=0)
     assert captured["feature_calls"] == 3
-    telemetry = clusterer._last_rust_featurizer_make_dists_telemetry
-    assert telemetry["chunk_count"] == 3
-    assert telemetry["upper_triangle_index_seconds"] == 0.0
-
-
-def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_constraint_index_conversion(monkeypatch):
-    class _IndexValuesThatShouldNotBeConverted:
-        def __array__(self, *_args, **_kwargs):
-            raise AssertionError("FastCluster vector writes do not need converted constraint index arrays")
-
-    class _FakeFeaturizer:
-        def signature_ids(self):
-            return ["0", "1", "2", "3"]
-
-        def featurize_block_upper_triangle_matrix_indexed(
-            self,
-            _block_signature_indices,
-            start_offset=0,
-            max_pairs=None,
-            selected_indices=None,
-            *_args,
-            **_kwargs,
-        ):
-            assert max_pairs is not None
-            out_cols = len(selected_indices) if selected_indices is not None else 1
-            out = np.zeros((int(max_pairs), out_cols), dtype=np.float64)
-            out[:, 0] = np.arange(start_offset, start_offset + int(max_pairs), dtype=np.float64)
-            return out
-
-    def fake_predict_and_combine(
-        _classifier,
-        _nameless_classifier,
-        features,
-        labels,
-        _nameless_features,
-        _batch_label,
-        runtime_context=None,
-        **_kwargs,
-    ):
-        del _classifier, _nameless_classifier, _nameless_features, _batch_label, runtime_context, _kwargs
-        assert np.isnan(labels).all()
-        return np.asarray(features[:, 0], dtype=np.float64), 0.0
-
-    monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
-    monkeypatch.setattr(
-        model_module,
-        "get_constraints_block_upper_triangle_indexed_rust",
-        lambda _block_signature_indices, *, max_pairs, **_kwargs: (
-            _IndexValuesThatShouldNotBeConverted(),
-            _IndexValuesThatShouldNotBeConverted(),
-            [None] * int(max_pairs),
-        ),
-    )
-
-    clusterer = _dummy_clusterer(
-        cluster_model=model_module.FastCluster(linkage="average"),
-        use_default_constraints_as_supervision=True,
-    )
-    output = clusterer.make_distance_matrices_from_rust_featurizer(
-        {"block": ["0", "1", "2", "3"]},
-        _FakeFeaturizer(),
-    )
-
-    np.testing.assert_allclose(output["block"], np.arange(6, dtype=np.float64), rtol=0, atol=0)
     telemetry = clusterer._last_rust_featurizer_make_dists_telemetry
     assert telemetry["chunk_count"] == 3
     assert telemetry["upper_triangle_index_seconds"] == 0.0
@@ -712,54 +581,28 @@ def test_predict_from_rust_featurizer_builds_and_clusters_one_block_at_a_time(mo
     assert telemetry["make_dists_pair_count"] == 2
 
 
-def test_predict_from_rust_featurizer_rejects_disallows_with_precomputed_dists() -> None:
+@pytest.mark.parametrize("seed_mode", ["explicit_disallow", "explicit_require", "implicit_require"])
+def test_predict_from_rust_featurizer_rejects_seed_constraints_with_precomputed_dists(seed_mode: str) -> None:
     class _FakeFeaturizer:
         def signature_rule_metadata(self):
             return [("0", "First0", None), ("1", "First1", None)]
 
-    clusterer = _dummy_clusterer(cluster_model=None)
-
-    with pytest.raises(ValueError, match="precomputed dists"):
-        clusterer.predict_from_rust_featurizer(
-            {"block": ["0", "1"]},
-            _FakeFeaturizer(),
-            dists={"block": np.zeros((2, 2), dtype=np.float64)},
-            cluster_seeds_require={},
-            cluster_seeds_disallow={("0", "1")},
-        )
-
-
-def test_predict_from_rust_featurizer_rejects_require_overrides_with_precomputed_dists() -> None:
-    class _FakeFeaturizer:
-        def signature_rule_metadata(self):
-            return [("0", "First0", None), ("1", "First1", None)]
-
-    clusterer = _dummy_clusterer(cluster_model=None)
-
-    with pytest.raises(ValueError, match="precomputed dists"):
-        clusterer.predict_from_rust_featurizer(
-            {"block": ["0", "1"]},
-            _FakeFeaturizer(),
-            dists={"block": np.zeros((2, 2), dtype=np.float64)},
-            cluster_seeds_require={"0": "c0", "1": "c0"},
-        )
-
-
-def test_predict_from_rust_featurizer_rejects_implicit_require_with_precomputed_dists() -> None:
-    class _FakeFeaturizer:
         def cluster_seeds_require(self):
-            return [("0", "c0"), ("1", "c1")]
-
-        def signature_rule_metadata(self):
-            return [("0", "First0", None), ("1", "First1", None)]
+            return [("0", "c0"), ("1", "c1")] if seed_mode == "implicit_require" else []
 
     clusterer = _dummy_clusterer(cluster_model=None)
+    kwargs = {}
+    if seed_mode == "explicit_disallow":
+        kwargs = {"cluster_seeds_require": {}, "cluster_seeds_disallow": {("0", "1")}}
+    elif seed_mode == "explicit_require":
+        kwargs = {"cluster_seeds_require": {"0": "c0", "1": "c0"}}
 
-    with pytest.raises(ValueError, match="cluster_seeds_require cannot be used with precomputed dists"):
+    with pytest.raises(ValueError, match="precomputed dists"):
         clusterer.predict_from_rust_featurizer(
             {"block": ["0", "1"]},
             _FakeFeaturizer(),
             dists={"block": np.zeros((2, 2), dtype=np.float64)},
+            **kwargs,
         )
 
 

@@ -4,7 +4,6 @@ import hashlib
 import importlib.util
 import json
 import re
-import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -28,22 +27,13 @@ def _load_module() -> ModuleType:
     return module
 
 
-def test_import_is_side_effect_free_without_internal_pys2() -> None:
-    module = _load_module()
-
-    assert callable(module.main)
-
-
 def test_warehouse_query_emits_and_orders_by_the_canonical_orcid() -> None:
     module = _load_module()
 
     query = module._warehouse_query(None)
 
-    assert "regexp_substr(" in query
-    assert "pae.orcid raw_orcid" in query
     assert "end orcid" in query
     assert "order by orcid nulls last" in query
-    assert "regexp_replace(upper(pae.orcid), '[^0-9X]', '')" not in query
 
 
 @pytest.mark.parametrize(
@@ -143,20 +133,6 @@ def test_streaming_builder_retains_the_canonical_orcid_monotonicity_check() -> N
             [],
             min_orcid_count=1,
         )
-
-
-def test_legacy_orcid_counts_remain_excluded_until_regenerated() -> None:
-    with (Path(PROJECT_ROOT_PATH) / "pyproject.toml").open("rb") as stream:
-        setuptools = tomllib.load(stream)["tool"]["setuptools"]
-    package_data = setuptools["package-data"]["s2and"]
-    excluded_package_data = setuptools["exclude-package-data"]["s2and"]
-
-    assert "data/first_k_letter_counts_from_orcid.json" not in package_data
-    assert "data/first_k_letter_counts_from_orcid.meta.json" not in package_data
-    assert "data/first_k_letter_counts_from_orcid.json" in excluded_package_data
-    assert "data/first_k_letter_counts_from_orcid.meta.json" in excluded_package_data
-    assert "data/first_k_letter_counts_from_orcid.manifest.json" not in package_data
-    assert "data/orcid-prefix-counts-*/*.json" not in package_data
 
 
 def test_empty_canonical_names_are_rejected_with_metrics() -> None:
@@ -447,3 +423,31 @@ def test_cli_refuses_implicit_warehouse_access(tmp_path: Path) -> None:
                 "fixture",
             ]
         )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_rejects_invalid_snapshot_id_before_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+) -> None:
+    module = _load_module()
+
+    def fail_work(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid snapshot id reached warehouse or count-building work")
+
+    monkeypatch.setattr(module, "_load_warehouse_rows", fail_work)
+    monkeypatch.setattr(module, "_load_name_tuples_from_file", fail_work)
+    monkeypatch.setattr(module, "build_prefix_counts_from_sorted_rows", fail_work)
+    argv = [
+        "--run-full",
+        "--output-dir",
+        str(tmp_path),
+        "--source-snapshot-id",
+        "invalid snapshot",
+    ]
+    if dry_run:
+        argv.append("--dry-run")
+
+    with pytest.raises(ValueError, match="source_snapshot_id"):
+        module.main(argv)

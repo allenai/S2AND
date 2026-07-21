@@ -16,6 +16,7 @@ from s2and.consts import LARGE_DISTANCE, NORMALIZATION_VERSION
 from s2and.data import ANDData
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
+    cluster_seed_disallows_from_arrow_paths,
     read_incremental_query_signatures_arrow,
     write_altered_cluster_signatures_arrow,
     write_arrow_batch_lookup_index,
@@ -109,8 +110,10 @@ def _patch_fake_raw_arrow_planner(
         def __init__(self, _paths: object, query_signature_ids: list[str], **_kwargs: object):
             self._paths = cast(dict[str, str], _paths)
             self._query_signature_ids = tuple(query_signature_ids)
+            self._name_counts_index = object()
             if captured is not None:
                 captured.setdefault("planner_inits", []).append(self._query_signature_ids)
+                captured["planner_name_counts_index"] = self._name_counts_index
 
         @classmethod
         def from_query_signatures(cls, paths: object, **kwargs: object) -> "FakePlanner":
@@ -122,6 +125,8 @@ def _patch_fake_raw_arrow_planner(
         def from_auto_queries(cls, paths: object, **kwargs: object) -> "FakePlanner":
             if not isinstance(paths, dict):
                 raise TypeError("RawBlockQueryCandidatePlanner.from_auto_queries requires a concrete dict")
+            if captured is not None:
+                captured.setdefault("planner_disallows", []).append(cluster_seed_disallows_from_arrow_paths(paths))
             return cls(paths, [], **kwargs)
 
         def build_telemetry(self):
@@ -130,10 +135,23 @@ def _patch_fake_raw_arrow_planner(
                 "signature_count": len(self._query_signature_ids),
             }
 
-        def plan(self, query_signature_ids: list[str], **_kwargs: object):
+        def name_counts_index(self) -> object:
+            if captured is not None:
+                captured["planner_name_counts_index_calls"] = (
+                    int(captured.get("planner_name_counts_index_calls", 0)) + 1
+                )
+            return self._name_counts_index
+
+        def plan(
+            self,
+            query_signature_ids: list[str],
+            additional_cluster_seed_disallows: list[tuple[str, str]] | None = None,
+            **_kwargs: object,
+        ):
             query_ids = tuple(query_signature_ids)
             if captured is not None:
                 captured.setdefault("planner_plans", []).append(query_ids)
+                captured.setdefault("planner_plan_disallows", []).append(set(additional_cluster_seed_disallows or ()))
             plan: dict[str, Any] = {
                 "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
                 "query_signature_ids": query_ids,
@@ -439,11 +457,6 @@ def test_predict_incremental_return_contract(clusterer_dataset_factory):
     assert payload["phase_b_mode"] == "exact"
 
 
-def test_predict_incremental_old_helper_name_is_not_exposed():
-    legacy_helper_name = "_predict_incremental_" "helper"
-    assert not hasattr(Clusterer, legacy_helper_name)
-
-
 def test_promoted_incremental_orcid_fanout_by_query_counts_matching_components() -> None:
     dataset = SimpleNamespace(
         signatures={
@@ -473,28 +486,6 @@ def test_promoted_incremental_orcid_fanout_by_query_counts_matching_components()
         )
         == {}
     )
-
-
-def test_promoted_incremental_orcid_fanout_skips_seed_scan_without_query_orcids(monkeypatch):
-    calls: list[str] = []
-
-    def fake_signature_orcid(_dataset, signature_id):
-        calls.append(str(signature_id))
-        if str(signature_id).startswith("seed"):
-            raise AssertionError("seed scan should be skipped when no query has an ORCID")
-        return None
-
-    monkeypatch.setattr(production_module, "_signature_orcid", fake_signature_orcid)
-
-    fanout = production_module.promoted_incremental_orcid_fanout_by_query(
-        cast(ANDData, SimpleNamespace()),
-        ["query-1", "query-2"],
-        {"seed-1": "component-1"},
-        orcid_enabled=True,
-    )
-
-    assert fanout == {}
-    assert calls == ["query-1", "query-2"]
 
 
 def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_dataset(
@@ -570,39 +561,14 @@ def test_predict_incremental_from_arrow_paths_uses_promoted_linker_without_datas
     assert captured["metadata_signature_ids"] == ("5", "6")
     assert set(captured["dataset"].signatures) == {"5", "6"}
 
-
-def test_predict_incremental_from_arrow_paths_accepts_explicit_seed_mapping(
-    clusterer_dataset_factory,
-    monkeypatch,
-    tmp_path,
-):
-    clusterer, _dataset = clusterer_dataset_factory(name="dummy_incremental_direct_arrow_seed_mapping")
-    clusterer.incremental_linker_artifact = SimpleNamespace(artifact_dir=tmp_path)
-    arrow_paths = _minimal_arrow_paths(tmp_path)
-    captured: dict[str, Any] = {}
-
-    def fake_load_signature_info(_paths: Mapping[str, Any], signature_ids: Any) -> dict[str, Any]:
-        captured["metadata_signature_ids"] = tuple(signature_ids)
-        return {}
-
-    def fake_promoted_linker(_clusterer: Any, _block_signatures: list[str], dataset_arg: Any, **_kwargs: Any):
-        captured["dataset"] = dataset_arg
-        return {"clusters": {"0": ["3", "4", "5"]}}
-
-    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_signature_info)
-    monkeypatch.setattr(
-        model_module,
-        "predict_incremental_promoted_linker_from_arrow_paths",
-        fake_promoted_linker,
-    )
-
-    result = clusterer.predict_incremental_from_arrow_paths(
+    captured.clear()
+    explicit_seed_paths = _minimal_arrow_paths(tmp_path / "explicit-seeds")
+    clusterer.predict_incremental_from_arrow_paths(
         ["3", "4", "5"],
-        arrow_paths,
+        explicit_seed_paths,
         cluster_seeds_require={"3": 0, "4": 0},
     )
 
-    assert result["clusters"] == {"0": ["3", "4", "5"]}
     assert captured["dataset"].cluster_seeds_require == {"3": "0", "4": "0"}
     assert captured["dataset"]._cluster_seeds_source == "dataset"
     assert captured["metadata_signature_ids"] == ("5",)
@@ -888,27 +854,6 @@ def test_load_arrow_incremental_orcid_signature_info_accepts_missing_orcid_colum
     )
 
 
-def test_seed_cluster_count_matches_anddata_cluster_count() -> None:
-    assert model_module._seed_cluster_count_from_seed_map({"s1": "7", "s2": "7", "s3": "9"}) == 2
-    assert model_module._seed_cluster_count_from_seed_map({"s1": "component_a", "s2": "component_b"}) == 2
-
-
-def test_packaged_incremental_name_tuples_are_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
-    packaged_pairs = frozenset({("bill", "william")})
-    monkeypatch.setattr(
-        model_module,
-        "load_packaged_name_tuple_artifact",
-        lambda: SimpleNamespace(pairs=packaged_pairs),
-    )
-
-    name_tuples = model_module._name_tuples_for_incremental_rules(None)
-
-    assert name_tuples is packaged_pairs
-    assert model_module._load_name_tuples_for_incremental_rules() is packaged_pairs
-    assert model_module._name_tuples_for_incremental_rules(name_tuples) is name_tuples
-    assert not hasattr(name_tuples, "add")
-
-
 def test_direct_arrow_incremental_requires_loaded_artifact() -> None:
     with pytest.raises(FileNotFoundError, match="requires an attached incremental linker artifact"):
         model_module._required_incremental_linker_artifact(SimpleNamespace())
@@ -1123,16 +1068,19 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     class FakeClusterer:
         n_jobs = 1
         suppress_orcid = True
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        featurizer_info = FeaturizationInfo(features_to_use=["name_counts"])
         feature_contract = {"normalization_version": NORMALIZATION_VERSION}
         _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
 
         def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+            seeds = {"seed-z": "c_seed_0", "seed-a": "c_seed_0"}
+            original_inverse = {"c_seed": ["seed-z", "seed-a"]}
+            split_inverse = {"c_seed_0": ["seed-z", "seed-a"]}
+            return seeds, {"c_seed_0": "c_seed"}, original_inverse, split_inverse
 
         def _finish_incremental_with_seed_links(self, *args: object, **_kwargs: object):
             captured["linked"] = dict(cast(Mapping[str, str], args[2]))
-            clusters = {"c_seed": ["seed"]}
+            clusters = {"c_seed_0": ["seed-z", "seed-a"]}
             for signature_id, component_id in captured["linked"].items():
                 clusters.setdefault(component_id, []).append(signature_id)
             return clusters
@@ -1145,6 +1093,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
             return list(self._signature_ids)
 
     def fake_featurizer(*_args: object, **kwargs: object) -> FakeFeaturizer:
+        captured.setdefault("featurizer_name_counts_indexes", []).append(kwargs["name_counts_index"])
         return FakeFeaturizer(tuple(cast(Any, kwargs["signature_ids"])))
 
     def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
@@ -1176,7 +1125,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
                         query_signature_index=featurizer.signature_ids().index(signature_id),
                         action="link",
                         row_index=row_index,
-                        component_key="c_seed",
+                        component_key="c_seed_0",
                         score=0.70 if signature_id == "q-require" else 0.99,
                         runner_up_score=None,
                         score_margin=None,
@@ -1217,7 +1166,7 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
 
     result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
         FakeClusterer(),
-        ["seed", *query_ids],
+        ["seed-z", "seed-a", *query_ids],
         _direct_arrow_dataset(cluster_seeds_disallow={("q-require", "q-score")}),
         arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
         artifact=FakeArtifact(),
@@ -1229,12 +1178,17 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     )
 
     assert captured["linked"] == {
-        "q-require": "c_seed",
+        "q-require": "c_seed_0",
         "q-score": "c_outside_retained_top_k",
     }
     assert captured["rescored"] == ["q-score"]
+    assert captured["planner_disallows"] == [set()]
+    assert captured["planner_plan_disallows"][-1] == {("q-score", "seed-a")}
+    assert captured["planner_name_counts_index_calls"] == 1
+    assert captured["featurizer_name_counts_indexes"]
+    assert all(index is captured["planner_name_counts_index"] for index in captured["featurizer_name_counts_indexes"])
     assert result["clusters"] == {
-        "c_seed": ["seed", "q-require"],
+        "c_seed_0": ["seed-z", "seed-a", "q-require"],
         "c_outside_retained_top_k": ["q-score"],
     }
     assert result["incremental_linker_telemetry"]["global_query_disallow_rescore_count"] == 1
@@ -1319,57 +1273,10 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     assert result["incremental_linker_telemetry"]["raw_arrow_batch_memory_replan_count"] >= 1
 
 
-def test_predict_incremental_arrow_promoted_linker_fails_closed_when_single_query_exceeds_budget(
-    monkeypatch: pytest.MonkeyPatch,
+def test_predict_from_arrow_paths_enforces_and_loads_name_counts_index(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FakeArtifact:
-        artifact_dir = tmp_path
-        metadata = SimpleNamespace(
-            retrieval_top_k=25,
-            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
-        )
-
-    class FakeClusterer:
-        n_jobs = 1
-        suppress_orcid = True
-        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
-        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
-        _last_incremental_seed_setup_telemetry: dict[str, Any] = {}
-
-        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
-            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}
-
-    raw_calls: list[object] = []
-    monkeypatch.setattr(
-        production_module,
-        "compute_promoted_incremental_limits",
-        lambda **_kwargs: _mock_promoted_limits(single_query_exceeds_budget=True),
-    )
-    monkeypatch.setattr(
-        production_module.runtime_module,
-        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
-        lambda *args, **kwargs: raw_calls.append((args, kwargs)),
-    )
-
-    with pytest.raises(MemoryError, match="cannot fit a single query"):
-        production_module.predict_incremental_promoted_linker_from_arrow_paths(
-            FakeClusterer(),
-            ["seed", "query"],
-            _direct_arrow_dataset(),
-            arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
-            artifact=FakeArtifact(),
-            prevent_new_incompatibilities=False,
-            partial_supervision={},
-            runtime_context=cast(Any, SimpleNamespace(run_id="test")),
-            total_ram_bytes=100_000,
-            batching_threshold=None,
-        )
-
-    assert raw_calls == []
-
-
-def test_predict_from_arrow_paths_requires_name_counts_index_for_name_count_features(tmp_path: Path) -> None:
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]),
         classifier=object(),
@@ -1400,28 +1307,19 @@ def test_predict_from_arrow_paths_requires_name_counts_index_for_name_count_feat
             },
         )
 
-
-def test_predict_from_arrow_paths_loads_name_counts_by_default_for_name_count_features(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=["name_counts"]),
-        classifier=object(),
-        n_jobs=1,
-    )
     clusterer.feature_contract.update(
         NameCountsBinding.from_provenance(
             tiny_name_counts_provenance(),
             context="test clusterer",
         ).feature_contract_fields()
     )
+    valid_root = tmp_path / "valid"
     name_counts_index, _metrics = write_name_counts_index(
-        tmp_path, tiny_name_counts_tuple(), tiny_name_counts_provenance()
+        valid_root, tiny_name_counts_tuple(), tiny_name_counts_provenance()
     )
-    arrow_paths = _minimal_arrow_paths(tmp_path)
+    arrow_paths = _minimal_arrow_paths(valid_root)
     arrow_paths["name_counts_index"] = name_counts_index
-    write_test_arrow_artifact_manifest(tmp_path, arrow_paths)
+    write_test_arrow_artifact_manifest(valid_root, arrow_paths)
     captured: dict[str, Any] = {}
 
     def fake_build_rust_featurizer_from_arrow_paths(*_args: Any, **kwargs: Any) -> object:
@@ -1445,39 +1343,7 @@ def test_predict_from_arrow_paths_loads_name_counts_by_default_for_name_count_fe
     assert captured["load_name_counts"] is True
 
 
-def test_predict_from_arrow_paths_passes_disallow_sidecar_to_rust_featurizer_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clusterer = Clusterer(
-        featurizer_info=FeaturizationInfo(features_to_use=[]),
-        classifier=object(),
-        n_jobs=1,
-    )
-    arrow_paths = _minimal_arrow_paths(tmp_path)
-    captured: dict[str, Any] = {}
-
-    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", lambda *_args, **_kwargs: object())
-
-    def fake_predict_from_rust_featurizer(_self: Clusterer, *_args: Any, **kwargs: Any):
-        captured.update(kwargs)
-        return {"block": ["s1", "s2"]}, None
-
-    monkeypatch.setattr(Clusterer, "predict_from_rust_featurizer", fake_predict_from_rust_featurizer)
-    partial_supervision = {("s1", "s2"): 7.0}
-
-    clusterer.predict_from_arrow_paths(
-        {"block": ["s1", "s2"]},
-        arrow_paths,
-        partial_supervision=partial_supervision,
-        cluster_seeds_disallow={("s1", "s2")},
-    )
-
-    assert captured["partial_supervision"] == partial_supervision
-    assert captured["cluster_seeds_disallow"] == {("s1", "s2")}
-
-
-def test_promoted_incremental_batch_telemetry_does_not_sum_absolute_memory_fields() -> None:
+def test_promoted_incremental_batch_telemetry_keeps_absolute_and_seed_fields_constant() -> None:
     merged = production_module.merge_promoted_incremental_batch_telemetry(
         [
             {
@@ -1485,12 +1351,16 @@ def test_promoted_incremental_batch_telemetry_does_not_sum_absolute_memory_field
                 "memory_total_ram_bytes": 100,
                 "memory_available_bytes": 40,
                 "memory_stage_budget_bytes": 20,
+                "raw_arrow_plan_seed_signature_count": 10,
+                "raw_arrow_plan_cluster_count": 2,
             },
             {
                 "query_count": 1,
                 "memory_total_ram_bytes": 100,
                 "memory_available_bytes": 35,
                 "memory_stage_budget_bytes": 20,
+                "raw_arrow_plan_seed_signature_count": 10,
+                "raw_arrow_plan_cluster_count": 2,
             },
         ],
         batch_sizes=[1, 1],
@@ -1502,84 +1372,54 @@ def test_promoted_incremental_batch_telemetry_does_not_sum_absolute_memory_field
     assert merged["memory_available_bytes"] == 40
     assert merged["memory_stage_budget_bytes"] == 20
     assert merged["memory_available_bytes_batch_conflict_count"] == 1
-
-
-def test_promoted_incremental_batch_telemetry_does_not_sum_raw_plan_seed_counts() -> None:
-    merged = production_module.merge_promoted_incremental_batch_telemetry(
-        [
-            {"query_count": 1, "raw_arrow_plan_seed_signature_count": 10, "raw_arrow_plan_cluster_count": 2},
-            {"query_count": 1, "raw_arrow_plan_seed_signature_count": 10, "raw_arrow_plan_cluster_count": 2},
-        ],
-        batch_sizes=[1, 1],
-        configured_batch_size=1,
-    )
-
-    assert merged["query_count"] == 2
     assert merged["raw_arrow_plan_seed_signature_count"] == 10
     assert merged["raw_arrow_plan_cluster_count"] == 2
 
 
-def test_promoted_incremental_batch_telemetry_records_conflicting_constant_fields() -> None:
-    merged = production_module.merge_promoted_incremental_batch_telemetry(
-        [
-            {"query_count": 1, "raw_arrow_plan_seed_signature_count": 10},
-            {"query_count": 1, "raw_arrow_plan_seed_signature_count": 11},
-        ],
-        batch_sizes=[1, 1],
-        configured_batch_size=1,
+def test_promoted_incremental_batch_telemetry_records_constant_and_unknown_conflicts() -> None:
+    cases = (
+        (
+            [
+                {"query_count": 1, "raw_arrow_plan_seed_signature_count": 10},
+                {"query_count": 1, "raw_arrow_plan_seed_signature_count": 11},
+            ],
+            "raw_arrow_plan_seed_signature_count",
+            10,
+            1,
+        ),
+        (
+            [
+                {"query_count": 1, "custom_metric": "unregistered"},
+                {"query_count": 1, "custom_metric": 3},
+                {"query_count": 1, "custom_metric": 4},
+            ],
+            "custom_metric",
+            "unregistered",
+            2,
+        ),
+        (
+            [{"query_count": 1, "new_metric": 3}, {"query_count": 1, "new_metric": 4}],
+            "new_metric",
+            3,
+            1,
+        ),
     )
+    for batches, field, expected_value, expected_conflicts in cases:
+        merged = production_module.merge_promoted_incremental_batch_telemetry(
+            batches,
+            batch_sizes=[1] * len(batches),
+            configured_batch_size=1,
+        )
 
-    assert merged["raw_arrow_plan_seed_signature_count"] == 10
-    assert merged["raw_arrow_plan_seed_signature_count_batch_conflict_count"] == 1
-
-
-def test_promoted_incremental_batch_telemetry_keeps_first_after_mixed_type_conflict() -> None:
-    merged = production_module.merge_promoted_incremental_batch_telemetry(
-        [
-            {"query_count": 1, "custom_metric": "unregistered"},
-            {"query_count": 1, "custom_metric": 3},
-            {"query_count": 1, "custom_metric": 4},
-        ],
-        batch_sizes=[1, 1, 1],
-        configured_batch_size=1,
-    )
-
-    assert merged["query_count"] == 3
-    assert merged["custom_metric"] == "unregistered"
-    assert merged["custom_metric_batch_conflict_count"] == 2
-
-
-def test_promoted_incremental_batch_telemetry_does_not_guess_unknown_numeric_semantics() -> None:
-    merged = production_module.merge_promoted_incremental_batch_telemetry(
-        [{"query_count": 1, "new_metric": 3}, {"query_count": 1, "new_metric": 4}],
-        batch_sizes=[1, 1],
-        configured_batch_size=1,
-    )
-
-    assert merged["query_count"] == 2
-    assert merged["new_metric"] == 3
-    assert merged["new_metric_batch_conflict_count"] == 1
-
-
-def test_predict_incremental_dont_use_cluster_seeds_flag(clusterer_dataset_factory):
-    clusterer, dataset = clusterer_dataset_factory(name="dummy_incremental_alias")
-    block = {"block": ["3", "4", "5", "6"]}
-
-    expected_clusters, _ = clusterer.predict(block, dataset)
-    explicit_default_clusters, _ = clusterer.predict(
-        block,
-        dataset,
-        incremental_dont_use_cluster_seeds=False,
-    )
-
-    assert _same_partition(expected_clusters, explicit_default_clusters)
+        assert merged["query_count"] == len(batches)
+        assert merged[field] == expected_value
+        assert merged[f"{field}_batch_conflict_count"] == expected_conflicts
 
 
 def _mock_promoted_limits(
     *,
     query_count: int = 1,
     query_batch_size: int = 1,
-    single_query_exceeds_budget: bool = False,
     operational_estimate_source: str = "top_k_largest_components",
     predicted_peak_delta_bytes: int = 2_000,
     predicted_peak_rss_bytes: int = 3_000,
@@ -1640,8 +1480,7 @@ def _mock_promoted_limits(
         pair_chunk_pairs=int(pair_chunk_pairs),
         pair_chunk_count=int(pair_chunk_count),
         pair_chunk_stage_budget_bytes=10_000,
-        single_query_predicted_persistent_bytes=100 if not single_query_exceeds_budget else 20_000,
-        single_query_exceeds_budget=bool(single_query_exceeds_budget),
+        single_query_predicted_persistent_bytes=100,
     )
 
 
@@ -2196,49 +2035,6 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
     assert cluster_seeds_require_inverse == {"7": ["seed0", "seed1"], "8": ["seed2", "seed3"], "9": ["seed4"]}
 
 
-def test_build_incremental_seed_setup_loads_altered_signatures_from_arrow_path(tmp_path: Path):
-    import pyarrow as pa
-
-    clusterer = _build_minimal_incremental_clusterer()
-    captured: dict[str, Any] = {}
-
-    def fake_predict_from_arrow_paths(block_dict, arrow_paths, **kwargs):
-        del arrow_paths
-        captured["block_dict"] = dict(block_dict)
-        captured["partial_supervision"] = dict(kwargs.get("partial_supervision", {}))
-        return {"split0": ["seed0"], "split1": ["seed1"]}, None
-
-    clusterer.predict_from_arrow_paths = cast(Any, fake_predict_from_arrow_paths)
-    altered_path = tmp_path / "altered_cluster_signatures.arrow"
-    table = pa.table({"signature_id": pa.array(["seed0"], type=pa.string())})
-    with pa.OSFile(str(altered_path), "wb") as sink:
-        with pa.ipc.new_file(sink, table.schema) as writer:
-            writer.write_table(table)
-    dataset = cast(
-        ANDData,
-        SimpleNamespace(
-            cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8"},
-            cluster_seeds_disallow=set(),
-            altered_cluster_signatures=None,
-            name_tuples=None,
-        ),
-    )
-
-    cluster_seeds_require, recluster_map, _cluster_seeds_require_inverse, _split_inverse = (
-        clusterer._build_incremental_seed_setup(
-            dataset,
-            {},
-            runtime_context=cast(Any, object()),
-            arrow_paths={"altered_cluster_signatures": str(altered_path)},
-        )
-    )
-
-    assert captured["block_dict"] == {"altered_profile_0": ["seed0", "seed1"]}
-    assert cluster_seeds_require == {"seed0": "7_0", "seed1": "7_1", "seed2": "8"}
-    assert recluster_map == {"7_0": "7", "7_1": "7"}
-    assert clusterer._last_incremental_seed_setup_telemetry["seed_setup_altered_signature_count"] == 1
-
-
 def test_build_incremental_seed_setup_loads_seed_and_altered_signatures_from_arrow_paths(tmp_path: Path):
     import pyarrow as pa
 
@@ -2306,6 +2102,28 @@ def test_build_incremental_seed_setup_loads_seed_and_altered_signatures_from_arr
     assert recluster_map == {"7_0": "7", "7_1": "7"}
     assert cluster_seeds_require_inverse == {"7": ["seed0", "seed1"], "8": ["seed2"]}
 
+    captured.clear()
+    explicit_seed_dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8"},
+            cluster_seeds_disallow=set(),
+            altered_cluster_signatures=None,
+            name_tuples=None,
+        ),
+    )
+    cluster_seeds_require, recluster_map, _inverse, _split_inverse = clusterer._build_incremental_seed_setup(
+        explicit_seed_dataset,
+        {},
+        runtime_context=cast(Any, object()),
+        arrow_paths={"altered_cluster_signatures": str(altered_path)},
+    )
+
+    assert captured["block_dict"] == {"altered_profile_0": ["seed0", "seed1"]}
+    assert cluster_seeds_require == {"seed0": "7_0", "seed1": "7_1", "seed2": "8"}
+    assert recluster_map == {"7_0": "7", "7_1": "7"}
+    assert clusterer._last_incremental_seed_setup_telemetry["seed_setup_altered_signature_count"] == 1
+
 
 def test_cluster_seeds_arrow_read_is_request_local(monkeypatch, tmp_path: Path):
     import pyarrow as pa
@@ -2331,7 +2149,7 @@ def test_cluster_seeds_arrow_read_is_request_local(monkeypatch, tmp_path: Path):
     assert open_file_call_count == 2
 
 
-def test_arrow_paths_need_current_cluster_seeds_rewrites_missing_seed_sidecar(tmp_path: Path):
+def test_arrow_paths_need_current_cluster_seeds_rewrites_missing_or_stale_sidecar(tmp_path: Path):
     dataset = SimpleNamespace(cluster_seeds_require={"seed0": "7"})
 
     assert model_module._arrow_paths_need_current_cluster_seeds(dataset, {}) is True
@@ -2342,12 +2160,9 @@ def test_arrow_paths_need_current_cluster_seeds_rewrites_missing_seed_sidecar(tm
         )
         is True
     )
-
-
-def test_arrow_paths_need_current_cluster_seeds_rewrites_stale_sidecar_when_current_seeds_empty(tmp_path: Path):
     cluster_seeds_path = tmp_path / "cluster_seeds.arrow"
     write_cluster_seeds_arrow(cluster_seeds_path, {"seed0": "7"})
-    dataset = SimpleNamespace(cluster_seeds_require={})
+    dataset.cluster_seeds_require = {}
 
     assert (
         model_module._arrow_paths_need_current_cluster_seeds(

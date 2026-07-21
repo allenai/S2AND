@@ -78,6 +78,91 @@ fn validate_raw_arrow_query_signature_ids(query_signature_ids: &[String]) -> PyR
     validate_raw_arrow_query_signature_ids_allow_empty(query_signature_ids)
 }
 
+fn validate_additional_cluster_seed_disallows(
+    pairs: Vec<(String, String)>,
+) -> PyResult<HashSet<(String, String)>> {
+    let mut out = HashSet::with_capacity(pairs.len());
+    for (left, right) in pairs {
+        crate::raw_arrow::readers::insert_canonical_cluster_seed_disallow(
+            &mut out,
+            left,
+            right,
+            "additional_cluster_seed_disallows",
+        )?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod additional_cluster_seed_disallow_tests {
+    use super::{
+        raw_arrow_excluded_candidate_indices_by_query, validate_additional_cluster_seed_disallows,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn additional_pairs_are_canonicalized() {
+        let pairs = validate_additional_cluster_seed_disallows(vec![(
+            "seed-z".to_string(),
+            "query-a".to_string(),
+        )])
+        .expect("valid pair");
+
+        assert!(pairs.contains(&("query-a".to_string(), "seed-z".to_string())));
+    }
+
+    #[test]
+    fn additional_pairs_reject_invalid_and_reversed_duplicates() {
+        assert!(validate_additional_cluster_seed_disallows(vec![(
+            "same".to_string(),
+            "same".to_string(),
+        )])
+        .is_err());
+        assert!(validate_additional_cluster_seed_disallows(vec![(
+            String::new(),
+            "seed".to_string(),
+        )])
+        .is_err());
+        assert!(validate_additional_cluster_seed_disallows(vec![
+            ("query".to_string(), "seed".to_string()),
+            ("seed".to_string(), "query".to_string()),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn stored_and_additional_pairs_are_streamed_as_an_exact_union() {
+        let query_ids = vec!["query".to_string()];
+        let component_order = vec!["component".to_string()];
+        let component_keys_by_member = HashMap::from([
+            ("seed-a".to_string(), vec!["component".to_string()]),
+            ("seed-b".to_string(), vec!["component".to_string()]),
+        ]);
+        let stored = HashSet::from([("query".to_string(), "seed-a".to_string())]);
+        let additional = HashSet::from([
+            ("query".to_string(), "seed-a".to_string()),
+            ("query".to_string(), "seed-b".to_string()),
+        ]);
+
+        let (excluded, candidate_count, pair_count) =
+            raw_arrow_excluded_candidate_indices_by_query(
+                &query_ids,
+                &component_order,
+                &component_keys_by_member,
+                &stored,
+                Some(&additional),
+            )
+            .expect("valid streamed union");
+
+        assert_eq!(pair_count, 2);
+        assert_eq!(candidate_count, 1);
+        assert_eq!(
+            excluded.expect("one query exclusion")[0],
+            Some(HashSet::from([0]))
+        );
+    }
+}
+
 fn validate_required_raw_arrow_paper_metadata(
     required_paper_ids: &HashSet<String>,
     papers: &HashMap<String, RawArrowPaper>,
@@ -216,11 +301,12 @@ fn raw_arrow_excluded_candidate_indices_by_query(
     component_order: &[String],
     component_keys_by_member: &HashMap<String, Vec<String>>,
     cluster_seed_disallows: &HashSet<(String, String)>,
-) -> PyResult<(Option<Vec<Option<HashSet<usize>>>>, usize)> {
+    additional_cluster_seed_disallows: Option<&HashSet<(String, String)>>,
+) -> PyResult<(Option<Vec<Option<HashSet<usize>>>>, usize, usize)> {
     let query_signature_id_set: HashSet<&str> =
         query_signature_ids.iter().map(String::as_str).collect();
     let mut disallowed_members_by_query = HashMap::<String, HashSet<String>>::new();
-    for (left, right) in cluster_seed_disallows.iter() {
+    let mut register_pair = |left: &String, right: &String| -> PyResult<()> {
         let left_is_query = query_signature_id_set.contains(left.as_str());
         let right_is_query = query_signature_id_set.contains(right.as_str());
         let left_is_seed = component_keys_by_member.contains_key(left);
@@ -246,6 +332,20 @@ fn raw_arrow_excluded_candidate_indices_by_query(
                 .entry(right.clone())
                 .or_default()
                 .insert(left.clone());
+        }
+        Ok(())
+    };
+    for (left, right) in cluster_seed_disallows.iter() {
+        register_pair(left, right)?;
+    }
+    let mut cluster_seed_disallow_pair_count = cluster_seed_disallows.len();
+    if let Some(additional) = additional_cluster_seed_disallows {
+        for pair in additional.iter() {
+            if cluster_seed_disallows.contains(pair) {
+                continue;
+            }
+            register_pair(&pair.0, &pair.1)?;
+            cluster_seed_disallow_pair_count += 1;
         }
     }
     let excluded_indices_by_query = if disallowed_members_by_query.is_empty() {
@@ -297,6 +397,7 @@ fn raw_arrow_excluded_candidate_indices_by_query(
     Ok((
         excluded_indices_by_query,
         cluster_seed_disallowed_candidate_count,
+        cluster_seed_disallow_pair_count,
     ))
 }
 
@@ -966,12 +1067,28 @@ impl RawBlockQueryCandidatePlanner {
                 "RawBlockQueryCandidatePlanner.from_auto_queries requires explicit plan(query_signature_ids)",
             ));
         }
-        self.plan(py, self.planner_query_signature_ids.clone())
+        self.plan(py, self.planner_query_signature_ids.clone(), None)
     }
 
-    #[pyo3(signature = (query_signature_ids))]
-    fn plan(&mut self, py: Python<'_>, query_signature_ids: Vec<String>) -> PyResult<Py<PyDict>> {
+    fn name_counts_index(&self) -> Option<NameCountsIndex> {
+        self.state
+            .raw_name_counts
+            .shared_index()
+            .map(NameCountsIndex::from_shared)
+    }
+
+    #[pyo3(signature = (query_signature_ids, additional_cluster_seed_disallows = None))]
+    fn plan(
+        &mut self,
+        py: Python<'_>,
+        query_signature_ids: Vec<String>,
+        additional_cluster_seed_disallows: Option<Vec<(String, String)>>,
+    ) -> PyResult<Py<PyDict>> {
         validate_raw_arrow_query_signature_ids(&query_signature_ids)?;
+        let additional_cluster_seed_disallows = additional_cluster_seed_disallows
+            .map(validate_additional_cluster_seed_disallows)
+            .transpose()?
+            .unwrap_or_default();
         if matches!(self.query_mode, RawPlannerQueryMode::Declared) {
             let missing: Vec<&String> = query_signature_ids
                 .iter()
@@ -1161,13 +1278,21 @@ impl RawBlockQueryCandidatePlanner {
             )?;
         let component_members_secs = component_members_start.elapsed().as_secs_f64();
 
-        let (excluded_candidate_indices_by_query, cluster_seed_disallowed_candidate_count) =
-            raw_arrow_excluded_candidate_indices_by_query(
-                &query_signature_ids,
-                component_order,
-                &self.state.component_keys_by_member,
-                &self.state.cluster_seed_disallows,
-            )?;
+        let (
+            excluded_candidate_indices_by_query,
+            cluster_seed_disallowed_candidate_count,
+            cluster_seed_disallow_pair_count,
+        ) = raw_arrow_excluded_candidate_indices_by_query(
+            &query_signature_ids,
+            component_order,
+            &self.state.component_keys_by_member,
+            &self.state.cluster_seed_disallows,
+            if additional_cluster_seed_disallows.is_empty() {
+                None
+            } else {
+                Some(&additional_cluster_seed_disallows)
+            },
+        )?;
 
         let retrieval_start = Instant::now();
         let query_results: Vec<Result<RetrievalPairPlanQueryResult, RetrievalError>> = py
@@ -1523,7 +1648,7 @@ impl RawBlockQueryCandidatePlanner {
         telemetry.set_item("excluded_query_seed_count", excluded_query_seed_count)?;
         telemetry.set_item(
             "cluster_seed_disallow_pair_count",
-            self.state.cluster_seed_disallows.len(),
+            cluster_seed_disallow_pair_count,
         )?;
         telemetry.set_item(
             "cluster_seed_disallowed_candidate_count",

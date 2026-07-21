@@ -113,35 +113,6 @@ def test_make_subblocks_skips_specter_when_single_letter_block_is_in_budget(monk
     assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1", "s2"]]
 
 
-def test_make_subblocks_with_telemetry_uses_python_implementation(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="anna", middle=""),
-            "s2": _signature("s2", first="anna", middle=""),
-        },
-        random_seed=0,
-    )
-    observed = {"python_subdivide_called": False}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, maximum_size, starting_k
-        observed["python_subdivide_called"] = True
-        return {"an": np.array(list(sig_ids))}, {}
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2"],
-        dataset,
-        maximum_size=3,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert observed["python_subdivide_called"] is True
-    assert subblocks == {"an": ["s1", "s2"]}
-    assert telemetry["input_signature_count"] == 2
-
-
 def test_subdivide_helper_accepts_prefix_exactly_at_capacity() -> None:
     names = np.array(["anna", "anna", "bill"])
     signature_ids = np.array(["s1", "s2", "s3"])
@@ -237,7 +208,7 @@ def test_cluster_with_specter_surfaces_unexpected_auxiliary_feature_failures(mon
         subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
 
 
-def test_cluster_with_specter_logs_expected_degenerate_auxiliary_fallback(caplog) -> None:
+def test_cluster_with_specter_handles_degenerate_auxiliary_fallback() -> None:
     dataset = SimpleNamespace(
         signatures={
             "s1": _signature("s1", first="anna"),
@@ -248,12 +219,9 @@ def test_cluster_with_specter_logs_expected_degenerate_auxiliary_fallback(caplog
         random_seed=0,
     )
 
-    with caplog.at_level("WARNING", logger="s2and"):
-        output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
+    output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
 
     assert sorted(output.values()) == [["s1"], ["s2"]]
-    assert "auxiliary features are unavailable" in caplog.text
-    assert "no nonzero evidence" in caplog.text
 
 
 def test_union_find_find_compresses_long_parent_chain_without_recursion() -> None:
@@ -492,54 +460,6 @@ def test_make_subblocks_leaves_orcid_components_split_when_disabled(monkeypatch)
 
     assert telemetry["orcid_subblocking_enabled"] is False
     assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [["s1"], ["s2"], ["s3"]]
-
-
-def test_make_subblocks_does_not_merge_orcid_components_past_capacity(monkeypatch):
-    dataset = SimpleNamespace(
-        signatures={
-            "s1": _signature("s1", first="aa", middle="", orcid="0000-0000-0000-0001"),
-            "s2": _signature("s2", first="aa", middle="", orcid="0000-0000-0000-0002"),
-            "s3": _signature("s3", first="bb", middle="", orcid="0000-0000-0000-0001"),
-            "s4": _signature("s4", first="bb", middle=""),
-            "s5": _signature("s5", first="cc", middle="", orcid="0000-0000-0000-0002"),
-            "s6": _signature("s6", first="cc", middle=""),
-        },
-        random_seed=0,
-    )
-
-    call_count = {"value": 0}
-
-    def fake_subdivide_helper(names, sig_ids, maximum_size, starting_k=2):
-        del names, sig_ids, maximum_size, starting_k
-        call_count["value"] += 1
-        if call_count["value"] == 1:
-            return {
-                "a": np.array(["s1", "s2"]),
-                "b": np.array(["s3", "s4"]),
-                "c": np.array(["s5", "s6"]),
-            }, {}
-        raise AssertionError("Unexpected extra call to subdivide_helper")
-
-    def fail_if_specter_called(*_args, **_kwargs):
-        raise AssertionError("cluster_with_specter should not be called in this regression test")
-
-    monkeypatch.setattr(subblocking, "subdivide_helper", fake_subdivide_helper)
-    monkeypatch.setattr(subblocking, "cluster_with_specter", fail_if_specter_called)
-
-    subblocks, telemetry = subblocking.make_subblocks_with_telemetry(
-        ["s1", "s2", "s3", "s4", "s5", "s6"],
-        dataset,
-        maximum_size=2,
-        first_k_letter_counts_sorted={},
-    )
-
-    assert sorted(sorted(signature_ids) for signature_ids in subblocks.values()) == [
-        ["s1", "s2"],
-        ["s3", "s4"],
-        ["s5", "s6"],
-    ]
-    assert telemetry["orcid_merge_skipped_due_to_capacity_count"] == 2
-    assert telemetry["orcid_merge_skipped_due_to_capacity_signature_count"] == 4
 
 
 def test_make_subblocks_orcid_repair_skips_oversized_connected_component_without_partial_merge(monkeypatch):

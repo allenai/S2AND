@@ -224,6 +224,69 @@ def test_cluster_with_specter_handles_degenerate_auxiliary_fallback() -> None:
     assert sorted(output.values()) == [["s1"], ["s2"]]
 
 
+def test_cluster_with_specter_returns_capacity_sized_input_without_clustering(monkeypatch) -> None:
+    dataset = SimpleNamespace(signatures={}, papers={}, specter_embeddings={}, random_seed=0)
+
+    def _raise_if_called(*_args, **_kwargs):
+        raise AssertionError("Genie should not run when the input already fits")
+
+    monkeypatch.setattr(subblocking.genieclust, "Genie", _raise_if_called)
+
+    output = subblocking.cluster_with_specter(["s1"], dataset, target_subblock_size=1)
+
+    assert output == {"0": ["s1"]}
+
+
+def test_cluster_with_specter_clusters_nonzero_embeddings() -> None:
+    dataset = SimpleNamespace(
+        signatures={
+            "s1": _signature("s1", first="anna"),
+            "s2": _signature("s2", first="anne"),
+        },
+        papers={},
+        specter_embeddings={
+            "1": np.ones(768, dtype=np.float64),
+            "2": np.concatenate((np.zeros(767, dtype=np.float64), np.ones(1, dtype=np.float64))),
+        },
+        random_seed=0,
+    )
+
+    output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
+
+    assert sorted(output.values()) == [["s1"], ["s2"]]
+
+
+def test_cluster_with_specter_caps_requested_clusters_below_sample_count(monkeypatch) -> None:
+    requested_clusters: list[int] = []
+
+    class StrictGenie:
+        def __init__(self, *, n_clusters: int, gini_threshold: float) -> None:
+            requested_clusters.append(n_clusters)
+            assert gini_threshold == 0.01
+
+        def fit_predict(self, values: np.ndarray) -> np.ndarray:
+            return np.zeros(values.shape[0], dtype=int)
+
+    monkeypatch.setattr(subblocking.genieclust, "Genie", StrictGenie)
+    dataset = SimpleNamespace(
+        signatures={
+            "s1": _signature("s1", first="anna"),
+            "s2": _signature("s2", first="anne"),
+        },
+        papers={},
+        specter_embeddings={
+            "1": np.ones(768, dtype=np.float64),
+            "2": np.ones(768, dtype=np.float64),
+        },
+        random_seed=0,
+    )
+
+    output = subblocking.cluster_with_specter(["s1", "s2"], dataset, target_subblock_size=1)
+
+    assert requested_clusters == [1]
+    assert sorted(output.values()) == [["s1"], ["s2"]]
+
+
 def test_union_find_find_compresses_long_parent_chain_without_recursion() -> None:
     union_find = subblocking._UnionFind(1500)  # noqa: SLF001
     union_find.parent = list(range(1, 1500)) + [1499]

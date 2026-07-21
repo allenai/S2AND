@@ -120,9 +120,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     command_lines = [f"  - {name}: {spec['help']}" for name, spec in _COMMANDS.items()]
     command_help = "\n".join(command_lines)
     parser = argparse.ArgumentParser(
-        description=(
-            "Canonical Rust test/benchmark/stress/calibration CLI for S2AND.\n\n" "Commands:\n" f"{command_help}"
-        ),
+        description=(f"Canonical Rust test/benchmark/stress/calibration CLI for S2AND.\n\nCommands:\n{command_help}"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("command", choices=sorted(_COMMANDS.keys()))

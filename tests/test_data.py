@@ -13,6 +13,25 @@ from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
 from tests.helpers import tiny_name_counts_provenance
 
 
+def test_split_ratios_reject_default_isclose_near_miss() -> None:
+    with pytest.raises(ValueError, match="must add to 1"):
+        data_module._validate_split_ratios(5e-10, 0.5, 0.5000000004)
+
+
+def test_split_ratios_do_not_create_a_partition_for_tolerated_roundoff() -> None:
+    train, val, test = data_module._split_train_val_test(
+        ["a", "b"],
+        1.0 - 5e-13,
+        0.0,
+        0.0,
+        random_seed=0,
+    )
+
+    assert train == ["a", "b"]
+    assert val == []
+    assert test == []
+
+
 def test_maybe_load_list_empty_file_returns_empty_list(tmp_path):
     empty_path = tmp_path / "empty.txt"
     empty_path.write_text("", encoding="utf-8")
@@ -301,6 +320,39 @@ class TestData(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 0 and 1"):
             self.qian_dataset.split_cluster_signatures()
 
+    def test_split_cluster_signatures_allows_empty_ratio_partitions(self):
+        cases = [
+            ((1.0, 0.0, 0.0), {"val", "test"}),
+            ((0.8, 0.2, 0.0), {"test"}),
+            ((0.8, 0.0, 0.2), {"val"}),
+        ]
+        for unit_of_data_split in ("blocks", "signatures"):
+            for ratios, empty_partitions in cases:
+                with self.subTest(unit_of_data_split=unit_of_data_split, ratios=ratios):
+                    self.qian_dataset.unit_of_data_split = unit_of_data_split
+                    (
+                        self.qian_dataset.train_ratio,
+                        self.qian_dataset.val_ratio,
+                        self.qian_dataset.test_ratio,
+                    ) = ratios
+
+                    train_blocks, val_blocks, test_blocks = self.qian_dataset.split_cluster_signatures()
+
+                    split_signatures = {
+                        "train": {signature for block in train_blocks.values() for signature in block},
+                        "val": {signature for block in val_blocks.values() for signature in block},
+                        "test": {signature for block in test_blocks.values() for signature in block},
+                    }
+                    expected_signatures = set(self.qian_dataset.signatures)
+                    self.assertEqual(set().union(*split_signatures.values()), expected_signatures)
+                    self.assertFalse(split_signatures["train"] & split_signatures["val"])
+                    self.assertFalse(split_signatures["train"] & split_signatures["test"])
+                    self.assertFalse(split_signatures["val"] & split_signatures["test"])
+                    for partition in empty_partitions:
+                        self.assertEqual(split_signatures[partition], set())
+                    for partition in {"train", "val", "test"} - empty_partitions:
+                        self.assertTrue(split_signatures[partition])
+
     def test_fixed_block_split_allows_empty_partitions(self):
         block_ids = list(self.qian_dataset.get_blocks())
         self.qian_dataset.train_blocks = block_ids
@@ -491,17 +543,17 @@ class TestData(unittest.TestCase):
 
             # Check that key preprocessed fields are identical
             assert paper_single.title == paper_multi.title, f"Title mismatch for paper {paper_id}"
-            assert (
-                paper_single.predicted_language == paper_multi.predicted_language
-            ), f"Language mismatch for paper {paper_id}"
+            assert paper_single.predicted_language == paper_multi.predicted_language, (
+                f"Language mismatch for paper {paper_id}"
+            )
             assert paper_single.is_english == paper_multi.is_english, f"is_english mismatch for paper {paper_id}"
             assert paper_single.is_reliable == paper_multi.is_reliable, f"is_reliable mismatch for paper {paper_id}"
 
             # Check ngrams are identical
             if paper_single.title_ngrams_words is not None and paper_multi.title_ngrams_words is not None:
-                assert (
-                    paper_single.title_ngrams_words == paper_multi.title_ngrams_words
-                ), f"Title ngrams mismatch for paper {paper_id}"
+                assert paper_single.title_ngrams_words == paper_multi.title_ngrams_words, (
+                    f"Title ngrams mismatch for paper {paper_id}"
+                )
 
 
 def test_preprocessing_name_counts_use_single_character_initial(tmp_path):

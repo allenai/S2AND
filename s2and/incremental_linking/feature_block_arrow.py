@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import math
 import mmap
 import os
 import shutil
@@ -717,7 +718,7 @@ def validate_arrow_batch_lookup_index(
     )
     if source_mismatch is not None:
         raise ValueError(
-            f"Arrow batch lookup index '{index_path_obj!s}' is stale for '{arrow_path_obj!s}': " f"{source_mismatch}"
+            f"Arrow batch lookup index '{index_path_obj!s}' is stale for '{arrow_path_obj!s}': {source_mismatch}"
         )
     if expected_row_count is not None and int(header["record_count"]) != int(expected_row_count):
         raise ValueError(
@@ -1076,8 +1077,9 @@ def _name_counts_arrow_fingerprint(mappings: Mapping[str, Mapping[Any, Any]]) ->
         square_accumulator = 0
         kind_seed = _fnv64_text(_fnv64_bytes(b"s2and-name-count-entry-v1\x00"), kind)
         for raw_name, raw_count in mapping.items():
-            entry_digest = _fnv64_text(kind_seed, str(raw_name))
-            entry_digest = _fnv64_text(entry_digest, float(raw_count).hex())
+            name, count = _validated_name_count_entry(kind, raw_name, raw_count)
+            entry_digest = _fnv64_text(kind_seed, name)
+            entry_digest = _fnv64_text(entry_digest, float(count).hex())
             xor_accumulator ^= entry_digest
             sum_accumulator = (sum_accumulator + entry_digest) & 0xFFFFFFFFFFFFFFFF
             square_accumulator = (square_accumulator + (entry_digest * entry_digest)) & 0xFFFFFFFFFFFFFFFF
@@ -1087,6 +1089,24 @@ def _name_counts_arrow_fingerprint(mappings: Mapping[str, Mapping[Any, Any]]) ->
         digest = _fnv64_update(digest, sum_accumulator.to_bytes(8, "little", signed=False))
         digest = _fnv64_update(digest, square_accumulator.to_bytes(8, "little", signed=False))
     return digest
+
+
+def _validated_name_count_entry(kind: str, raw_name: Any, raw_count: Any) -> tuple[str, float]:
+    """Return one strict name-count entry at the public artifact boundary."""
+
+    if not isinstance(raw_name, str):
+        raise TypeError(f"name-count {kind} keys must be strings, got {type(raw_name).__name__}: {raw_name!r}")
+    try:
+        count: float = float(raw_count)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"name-count {kind} value for {raw_name!r} must be a finite positive number, got {raw_count!r}"
+        ) from error
+    if not math.isfinite(count) or count <= 0.0:
+        raise ValueError(
+            f"name-count {kind} value for {raw_name!r} must be a finite positive number, got {raw_count!r}"
+        )
+    return raw_name, count
 
 
 def _fnv64_update(digest: int, value: bytes) -> int:
@@ -1189,9 +1209,14 @@ def _write_sorted_name_count_records(
     blob_size = 0
     record_buffer = bytearray()
     blob_buffer = bytearray()
+    previous_sort_key: tuple[int, int, bytes] | None = None
     try:
         with record_tmp.open("wb") as record_output, blob_tmp.open("wb") as blob_output:
             for hash_1, hash_2, name_bytes, count in records:
+                sort_key = (hash_1, hash_2, name_bytes)
+                if sort_key == previous_sort_key:
+                    raise ValueError(f"name-count index contains duplicate UTF-8 name {name_bytes.decode('utf-8')!r}")
+                previous_sort_key = sort_key
                 record_buffer.extend(
                     _NAME_COUNTS_INDEX_RECORD_STRUCT.pack(
                         hash_1,
@@ -1265,10 +1290,11 @@ def _write_name_count_index_file(
     kind_hash_seed = _name_counts_index_kind_hash_seed(kind)
     try:
         for raw_name, raw_count in mapping.items():
-            name_bytes = str(raw_name).encode("utf-8")
+            name, count = _validated_name_count_entry(kind, raw_name, raw_count)
+            name_bytes = name.encode("utf-8")
             hash_1 = _fnv64_bytes(name_bytes)
             hash_2 = _fnv64_update(kind_hash_seed, name_bytes)
-            buffered.append((hash_1, hash_2, name_bytes, float(raw_count)))
+            buffered.append((hash_1, hash_2, name_bytes, count))
             peak_buffered_records = max(peak_buffered_records, len(buffered))
             if len(buffered) >= max_records_in_memory and record_count > max_records_in_memory:
                 run_path = path.parent / f".{path.name}.run.{len(run_paths)}.{uuid.uuid4().hex}"
@@ -1326,26 +1352,54 @@ def _name_counts_index_manifest_paths(index_dir: Path) -> dict[str, Path] | None
     manifest_path = index_dir / "manifest.json"
     if not manifest_path.exists():
         return None
-    manifest = ValidatedNameCountsManifest.load(index_dir, context="name-count index generation")
+    manifest_bytes = manifest_path.read_bytes()
+    # Cleanup holds the publication lock and only needs to protect the exact
+    # generation referenced by this root snapshot. Validate declarations,
+    # containment, markers, and byte counts without hashing 1.8 GB under lock.
+    manifest = ValidatedNameCountsManifest._from_manifest_bytes(
+        index_dir,
+        manifest_bytes,
+        context="name-count index generation",
+        verify_file_digests=False,
+    )
     return {kind: entry.path for kind, entry in manifest.files.items()}
 
 
-def _name_counts_index_complete(
+def _name_counts_manifest_sha256(index_dir: Path) -> str | None:
+    """Return the small root-manifest identity without reading material files."""
+
+    try:
+        manifest_bytes = (index_dir / "manifest.json").read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(manifest_bytes).hexdigest()
+
+
+def _name_counts_index_reuse_snapshot(
     index_dir: Path,
     *,
     expected_fingerprint: int,
     expected_source_provenance: Mapping[str, Any],
-) -> bool:
+) -> tuple[str | None, bool]:
+    """Fully validate one exact reuse candidate outside the publication lock."""
+
     try:
-        manifest = ValidatedNameCountsManifest.load(
+        manifest_bytes = (index_dir / "manifest.json").read_bytes()
+    except OSError:
+        return None, False
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    try:
+        manifest = ValidatedNameCountsManifest._from_manifest_bytes(
             index_dir,
+            manifest_bytes,
             context="reusing name-count index",
+            verify_file_digests=True,
         )
     except (OSError, RuntimeError, TypeError, ValueError):
-        return False
+        return manifest_sha256, False
     if "fingerprint" not in manifest.payload:
-        return False
-    return (
+        return manifest_sha256, False
+    return manifest_sha256, (
         manifest.payload.get("fingerprint") == expected_fingerprint
         and manifest.source_provenance == expected_source_provenance
     )
@@ -1432,12 +1486,18 @@ def write_name_counts_index(
             "last_first_initial": last_first_initial_dict,
         }
     )
-    if not overwrite and _name_counts_index_complete(
-        index_dir,
-        expected_fingerprint=fingerprint,
-        expected_source_provenance=source_provenance,
-    ):
-        return str(index_dir), {"reused": True}
+    reuse_manifest_sha256: str | None = None
+    reuse_matches = False
+    if not overwrite:
+        reuse_manifest_sha256, reuse_matches = _name_counts_index_reuse_snapshot(
+            index_dir,
+            expected_fingerprint=fingerprint,
+            expected_source_provenance=source_provenance,
+        )
+        if reuse_matches:
+            with _exclusive_name_counts_publish_lock(index_dir):
+                if _name_counts_manifest_sha256(index_dir) == reuse_manifest_sha256:
+                    return str(index_dir), {"reused": True}
 
     named_mappings = (
         ("first", first_dict),
@@ -1515,14 +1575,17 @@ def write_name_counts_index(
             os.fsync(marker_output.fileno())
         fsync_directory(tmp_generation_dir)
 
-        with _exclusive_name_counts_publish_lock(index_dir):
-            # Another writer may have completed the same generation while this
-            # process was sorting. Reuse it rather than overwriting its manifest.
-            if not overwrite and _name_counts_index_complete(
+        if not overwrite and _name_counts_manifest_sha256(index_dir) != reuse_manifest_sha256:
+            # Another writer published while this process was sorting. Perform
+            # its one heavy validation outside the short publication lock, then
+            # bind that result to the exact root-manifest digest under the lock.
+            reuse_manifest_sha256, reuse_matches = _name_counts_index_reuse_snapshot(
                 index_dir,
                 expected_fingerprint=fingerprint,
                 expected_source_provenance=source_provenance,
-            ):
+            )
+        with _exclusive_name_counts_publish_lock(index_dir):
+            if not overwrite and reuse_matches and _name_counts_manifest_sha256(index_dir) == reuse_manifest_sha256:
                 return str(index_dir), {"reused": True}
             tmp_generation_dir.rename(generation_dir)
             generation_renamed = True

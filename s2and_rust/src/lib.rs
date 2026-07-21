@@ -27,7 +27,7 @@ mod rust_featurizer;
 mod subblocking;
 mod text_compat;
 
-use arrow_batch_lookup::IndexedArrowReadStats;
+use arrow_batch_lookup::{ArrowBatchLookupIndex, IndexedArrowReadStats};
 use constraints::{
     first_names_name_compatible, lasts_equivalent_for_constraint, same_prefix_tokens,
 };

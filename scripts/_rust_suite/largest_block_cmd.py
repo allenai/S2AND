@@ -692,7 +692,7 @@ def _assert_comparison_inputs_identical(
     effective_block_size = int(python_result["effective_block_size"])
     if effective_block_size > max_block_size:
         raise AssertionError(
-            "Comparison input exceeded --max-block-size: " f"effective={effective_block_size} limit={max_block_size}"
+            f"Comparison input exceeded --max-block-size: effective={effective_block_size} limit={max_block_size}"
         )
 
 
@@ -754,10 +754,10 @@ def _run_single_subprocess(
     if emit_signature_map:
         cmd.append("--emit-signature-map")
 
-    print(f"\n{'='*70}")
-    print(f"Launching subprocess: {backend} (timeout={timeout_seconds}s = {timeout_seconds/3600:.1f}h)")
+    print(f"\n{'=' * 70}")
+    print(f"Launching subprocess: {backend} (timeout={timeout_seconds}s = {timeout_seconds / 3600:.1f}h)")
     print(f"  Dataset: {dataset_name}, Block: {block_key!r}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     try:
         completed = subprocess.run(
@@ -920,9 +920,9 @@ def _compare_runs(args: argparse.Namespace) -> None:
     rust_result.pop("signature_to_cluster_fingerprint", None)
 
     # Summary
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("COMPARISON SUMMARY")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Dataset:    {dataset_name}")
     print(f"Block:      {block_key!r}")
     print(f"Block size: {python_result['effective_block_size']} signatures")
@@ -1015,11 +1015,11 @@ def _compare_runs(args: argparse.Namespace) -> None:
     py_pred = python_result["predict_seconds"]
     rust_pred = rust_result["predict_seconds"]
     if rust_pred > 0:
-        print(f"\nPredict speedup (Python/Rust): {py_pred/rust_pred:.2f}x")
+        print(f"\nPredict speedup (Python/Rust): {py_pred / rust_pred:.2f}x")
     py_total = python_result["total_seconds"]
     rust_total = rust_result["total_seconds"]
     if rust_total > 0:
-        print(f"Total speedup (Python/Rust):   {py_total/rust_total:.2f}x")
+        print(f"Total speedup (Python/Rust):   {py_total / rust_total:.2f}x")
 
     # Write JSON
     if args.write_json:
@@ -1066,9 +1066,7 @@ def main() -> None:
         "--mode",
         choices=["compare", "single"],
         default="compare",
-        help=(
-            "'compare' runs Python JSON/ANDData versus Rust Arrow subprocesses; " "'single' runs one route in-process."
-        ),
+        help=("'compare' runs Python JSON/ANDData versus Rust Arrow subprocesses; 'single' runs one route in-process."),
     )
     parser.add_argument(
         "--backend",
@@ -1091,7 +1089,7 @@ def main() -> None:
         "--max-block-size",
         type=int,
         default=1000,
-        help=("Limit block to first N signatures (default: 1000). " "Compare mode requires a positive bound."),
+        help=("Limit block to first N signatures (default: 1000). Compare mode requires a positive bound."),
     )
     parser.add_argument(
         "--model-path",

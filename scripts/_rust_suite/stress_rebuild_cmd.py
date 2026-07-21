@@ -194,7 +194,7 @@ def run_rebuild_stress(
     if not rss_growth_gate_pass:
         assert rss_growth_max_fraction is not None
         raise RuntimeError(
-            "rss_growth_fraction exceeded threshold: " f"{rss_growth_fraction} > {float(rss_growth_max_fraction)}"
+            f"rss_growth_fraction exceeded threshold: {rss_growth_fraction} > {float(rss_growth_max_fraction)}"
         )
 
     return result

@@ -459,7 +459,7 @@ def test_indexed_pair_matrix_rust_parity(source_dataset, arrow_dataset, sample_p
         assert len(ref_features) == len(rust_features)
         for idx, (ref_val, got_val) in enumerate(zip(ref_features, rust_features, strict=True)):
             assert equalish(ref_val, got_val), (
-                f"Featurize pair mismatch at index {idx} for pair {s1},{s2}: " f"ref={ref_val}, got={got_val}"
+                f"Featurize pair mismatch at index {idx} for pair {s1},{s2}: ref={ref_val}, got={got_val}"
             )
 
 
@@ -679,9 +679,9 @@ def test_get_constraints_matrix_indexed_rust_parity(source_dataset, arrow_datase
         indexed_values,
         strict=True,
     ):
-        assert (
-            ref_val == indexed_val
-        ), f"Batch indexed constraint mismatch for pair {pair}: ref={ref_val}, indexed={indexed_val}"
+        assert ref_val == indexed_val, (
+            f"Batch indexed constraint mismatch for pair {pair}: ref={ref_val}, indexed={indexed_val}"
+        )
 
 
 def test_linker_constraint_labels_index_arrays_match_indexed_constraints_large(arrow_dataset, constraint_pairs):
@@ -783,6 +783,6 @@ def test_get_constraints_matrix_indexed_rust_flag_parity(
     )
 
     for pair, ref_val, indexed_val in zip(constraint_pairs, expected, got_indexed, strict=True):
-        assert (
-            ref_val == indexed_val
-        ), f"Flag parity mismatch (indexed) for pair {pair}: ref={ref_val}, got={indexed_val}"
+        assert ref_val == indexed_val, (
+            f"Flag parity mismatch (indexed) for pair {pair}: ref={ref_val}, got={indexed_val}"
+        )

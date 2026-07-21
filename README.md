@@ -68,8 +68,11 @@ commands, WSL notes, and install variants, see [docs/install.md](docs/install.md
 
 Rust/Arrow dataset download:
 
+The AWS CLI is not a runtime dependency; `uvx` installs and runs it in an
+isolated environment for this command.
+
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
+uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
 ```
 
 Expected size is about `10.1 GiB`; use a narrower S3 prefix when only one

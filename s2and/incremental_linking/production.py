@@ -1000,6 +1000,7 @@ def predict_incremental_promoted_linker_from_arrow_paths(
                 orcid_enabled=bool(orcid_enabled),
                 num_threads=clusterer.n_jobs,
                 max_exemplars=4,
+                name_counts_index=arrow_path_payload._retained_native_name_counts_index(),  # noqa: SLF001
             )
             if use_name_counts:
                 shared_name_counts_index = raw_request_planner.name_counts_index()

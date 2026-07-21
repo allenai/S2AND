@@ -569,8 +569,11 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
         require_name_counts_index=True,
         expected_normalization_version=NORMALIZATION_VERSION,
     )
+    validated_manifest = validated_paths.name_counts_manifest
+    assert validated_manifest is not None
     shared_name_counts_index = (
         SimpleNamespace(
+            manifest_sha256=validated_manifest.manifest_sha256,
             normalization_version=NORMALIZATION_VERSION,
             name_counts_provenance_binding=(
                 provenance["generation_id"],
@@ -606,6 +609,7 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     ]
     if load_name_counts:
         mismatched_index = SimpleNamespace(
+            manifest_sha256=validated_manifest.manifest_sha256,
             normalization_version=NORMALIZATION_VERSION,
             name_counts_provenance_binding=(
                 "wrong-generation",

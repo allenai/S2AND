@@ -517,7 +517,7 @@ def _raw_plan_retrieval_ranks(plan: Mapping[str, Any], expected_length: int) -> 
     )
     if len(ranks) != int(expected_length):
         raise ValueError(
-            "raw candidate plan key 'retrieval_ranks' must be 1D with length " f"{expected_length}, got {ranks.shape}"
+            f"raw candidate plan key 'retrieval_ranks' must be 1D with length {expected_length}, got {ranks.shape}"
         )
     return ranks
 
@@ -668,8 +668,7 @@ def build_linker_retrieval_batch_rust(
             )
         if len(query_signature_ids) != len(queries):
             raise ValueError(
-                "queries and query_signature_ids must have equal length: "
-                f"{len(queries)} != {len(query_signature_ids)}"
+                f"queries and query_signature_ids must have equal length: {len(queries)} != {len(query_signature_ids)}"
             )
         resolved_name_tuples = None
         if retrieval_subblock_index is not None:

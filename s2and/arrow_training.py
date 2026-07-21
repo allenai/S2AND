@@ -168,9 +168,7 @@ def load_papers_dict_from_arrow(
         position = int(raw_position)
         author_key = (paper_id, position)
         if author_key in paper_author_keys:
-            raise ValueError(
-                "paper_authors Arrow contains duplicate " f"(paper_id, position)=({paper_id!r}, {position})"
-            )
+            raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position)=({paper_id!r}, {position})")
         paper_author_keys.add(author_key)
         authors_by_paper_id.setdefault(paper_id, []).append({"author_name": raw_author_name, "position": position})
 
@@ -197,8 +195,7 @@ def load_papers_dict_from_arrow(
     unknown_author_paper_ids = sorted(set(authors_by_paper_id).difference(papers))
     if unknown_author_paper_ids:
         raise ValueError(
-            "paper_authors Arrow references paper_id values absent from papers Arrow: "
-            f"{unknown_author_paper_ids[:10]}"
+            f"paper_authors Arrow references paper_id values absent from papers Arrow: {unknown_author_paper_ids[:10]}"
         )
     return papers
 

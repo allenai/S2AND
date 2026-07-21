@@ -610,6 +610,28 @@ def test_raw_arrow_candidate_planner_can_plan_bounded_auto_queries(tmp_path: Pat
         reusable_planner.plan_query_signatures()
 
 
+def test_reusable_raw_arrow_candidate_planner_owns_lookup_index_snapshots(tmp_path: Path) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    planner = s2and_rust.RawBlockQueryCandidatePlanner.from_auto_queries(
+        paths,
+        top_k=2,
+        orcid_enabled=False,
+        num_threads=1,
+    )
+    for key in (
+        "signatures_batch_index",
+        "papers_batch_index",
+        "paper_authors_batch_index",
+    ):
+        Path(paths[key]).unlink()
+
+    first = planner.plan(["q1"])
+    second = planner.plan(["q1"])
+
+    _assert_raw_candidate_plans_equal(first, second)
+    assert first["telemetry"]["planner_seed_state_reused"] == 1
+
+
 @pytest.mark.parametrize(
     ("table_name", "expected_error"),
     [
@@ -2279,17 +2301,17 @@ def test_rust_featurizer_reuses_only_matching_planner_name_counts_handle(
     manifest["schema_version"] = "invalid-after-planner-build"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match=r"does not match paths\['name_counts_index'\]"):
-        s2and_rust.RustFeaturizer.from_arrow_paths(
-            paths,
-            ["q1", "s1", "s2"],
-            set(),
-            True,
-            0.0,
-            10000.0,
-            1,
-            name_counts_index,
-        )
+    reused_snapshot = s2and_rust.RustFeaturizer.from_arrow_paths(
+        paths,
+        ["q1", "s1", "s2"],
+        set(),
+        True,
+        0.0,
+        10000.0,
+        1,
+        name_counts_index,
+    )
+    assert reused_snapshot.signature_name_counts_present() == [("q1", True), ("s1", True), ("s2", True)]
     with pytest.raises(ValueError, match="schema_version"):
         s2and_rust.RustFeaturizer.from_arrow_paths(
             paths,

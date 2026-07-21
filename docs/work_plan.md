@@ -194,20 +194,22 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Precomputed promoted-feature reuse
 
-**Status: Blocked; preserved in `328c79d12f15`**
+**Status: Complete**
 
-- The candidate identity omits per-dataset Arrow manifests/files and the
-  effective default name-count index even though materialization consumes
-  them. `--reuse-existing-features` can therefore silently reuse stale output.
-- Persisted bundle-relative paths currently use `str(Path)`, which writes
-  backslashes on Windows and breaks replay on POSIX. Persist portable paths
-  with `.as_posix()`.
-- Bind reuse to source and pairwise bundles, target JSON, feature schema, NaN
-  policy, exemplar cap, selected rows, every consumed Arrow generation, and
-  the explicit or effective name-count index.
-- Reuse must fail closed when any materialization input differs.
-- Portable reusable metadata uses bundle-relative paths; replay must not depend
-  on historical scratch paths.
+- Every reusable complete table and dataset partial has an adjacent
+  `.materialization.json` sidecar. Its canonical digest binds the source bundle
+  and label files, pairwise bundle contract, target and feature schema, NaN
+  policies, exemplar cap, row selection, candidate-member files, every
+  validated Arrow generation, and the effective name-count manifest.
+- `--reuse-existing-features` validates all existing sidecars before copying a
+  fresh source `bundle.json` or split metadata into the output. Missing or
+  mismatched identities fail closed and require a clean rematerialization.
+- Portable precomputed bundles use schema
+  `precomputed_promoted_feature_bundle_v2`, retain each table's materialization
+  digest, and validate the current pairwise bundle binding before training.
+- Persisted bundle paths are canonical POSIX-relative paths. Replay rejects
+  absolute paths, backslashes, and parent-directory traversal independent of
+  the host operating system.
 
 ### Pairwise fixture and config hardening
 
@@ -380,8 +382,8 @@ approval before the expensive commands run.
 9. Train the pairwise model from the exact immutable dataset/count/tuple/ORCID
    identities.
 10. Train the promoted linker against that exact pairwise bundle and target
-   digest. Do not reuse promoted features until the blocked materialization
-   identity is corrected and verified.
+   digest. Reuse promoted features only when every v1 materialization sidecar
+   verifies against the current inputs.
 11. Finalize the complete bundle, reload it, and verify every cross-artifact
    identity before evaluation.
 12. Run pairwise, clustering, subblocking, parity, quality, throughput, and

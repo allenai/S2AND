@@ -196,6 +196,7 @@ pub(crate) fn read_subblocking_signature_rows_with_optional_index(
     read_raw_arrow_with_optional_index(
         path,
         index_path,
+        None,
         "signature_id",
         keep_signature_ids,
         read_subblocking_signature_rows_from_batches,
@@ -1676,11 +1677,13 @@ pub(crate) fn build_native_graph_evidence_store(
     let (paper_authors, paper_author_stats) = read_raw_arrow_paper_authors_with_optional_index(
         &graph_paths.paper_authors_path,
         Some(&graph_paths.paper_authors_batch_index_path),
+        None,
         &paper_ids,
     )?;
     let (specter_by_paper_id, specter_stats) = read_raw_arrow_specter_with_optional_index(
         &graph_paths.specter_path,
         Some(&graph_paths.specter_batch_index_path),
+        None,
         &paper_ids,
     )?;
     telemetry.load_metrics.paper_authors_record_batches_scanned = paper_author_stats.batches_read;

@@ -103,7 +103,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
-          maturin-version: v1.12.4
+          maturin-version: v1.14.1
           command: build
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
@@ -151,7 +151,7 @@ jobs:
         env:
           ARCHFLAGS: "-arch x86_64 -arch arm64"
         with:
-          maturin-version: v1.12.4
+          maturin-version: v1.14.1
           command: build
           args: --release --locked --compatibility pypi --out dist
           working-directory: s2and_rust
@@ -197,7 +197,7 @@ jobs:
       - name: Build wheels (manylinux/musllinux)
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
-          maturin-version: v1.12.4
+          maturin-version: v1.14.1
           command: build
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
@@ -222,7 +222,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
-          maturin-version: v1.12.4
+          maturin-version: v1.14.1
           command: sdist
           args: --out dist
           working-directory: s2and_rust

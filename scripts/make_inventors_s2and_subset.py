@@ -24,7 +24,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 try:
-    import ijson  # type: ignore[unresolved-import]
+    import ijson  # ty: ignore[unresolved-import]
 except ModuleNotFoundError:
     ijson = None
 
@@ -311,8 +311,13 @@ def main() -> None:
     if len(block_counts) <= args.n_blocks:
         raise ValueError(f"Need > {args.n_blocks} unique blocks to sample from; found {len(block_counts):,}.")
 
-    all_blocks = np.array(list(block_counts.keys()))
-    all_sizes = np.array([block_counts[b] for b in all_blocks], dtype=np.int32)
+    all_block_keys = list(block_counts)
+    all_blocks = np.asarray(all_block_keys)
+    all_sizes = np.fromiter(
+        (block_counts[block] for block in all_block_keys),
+        dtype=np.int32,
+        count=len(all_block_keys),
+    )
     sampled_blocks, sample_bins_used, sample_was_stratified = stratified_take(
         items=all_blocks,
         sizes=all_sizes,
@@ -322,8 +327,7 @@ def main() -> None:
     )
     seed_blocks = set(str(x) for x in sampled_blocks.tolist())
     print(
-        f"Seed sampled blocks={len(seed_blocks):,} "
-        f"(stratified={sample_was_stratified}, strata_bins={sample_bins_used})"
+        f"Seed sampled blocks={len(seed_blocks):,} (stratified={sample_was_stratified}, strata_bins={sample_bins_used})"
     )
 
     print("Pass 2/9-4/9: closure expansion over block/signature/cluster graph...")
@@ -488,16 +492,19 @@ def main() -> None:
                     kept_paper_count += 1
                 if scanned_papers % PAPER_LOG_INTERVAL == 0:
                     elapsed = time.time() - start
-                    print(
-                        f"  papers scanned={scanned_papers:,}, kept={kept_paper_count:,}, " f"elapsed={elapsed:,.1f}s"
-                    )
+                    print(f"  papers scanned={scanned_papers:,}, kept={kept_paper_count:,}, elapsed={elapsed:,.1f}s")
                 if args.limit_papers is not None and scanned_papers >= args.limit_papers:
                     break
         out.write("}")
 
     print("Pass 9/9: train/val split on merged blocks...")
-    merged_blocks = np.array(sorted(merged_block_counts.keys()))
-    merged_sizes = np.array([merged_block_counts[b] for b in merged_blocks], dtype=np.int32)
+    merged_block_keys = sorted(merged_block_counts)
+    merged_blocks = np.asarray(merged_block_keys)
+    merged_sizes = np.fromiter(
+        (merged_block_counts[block] for block in merged_block_keys),
+        dtype=np.int32,
+        count=len(merged_block_keys),
+    )
     train_blocks, val_blocks, split_bins_used, split_was_stratified = stratified_train_val_split(
         blocks=merged_blocks,
         sizes=merged_sizes,

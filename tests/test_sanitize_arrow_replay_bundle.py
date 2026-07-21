@@ -70,7 +70,7 @@ def test_sanitize_arrow_replay_bundle_removes_legacy_runtime_assets(tmp_path: Pa
         bundle_root,
         write=True,
         legacy_source_bundle_name="s2and_and_big_blocks_linker_dataset_20260513",
-        legacy_source_url=("s3://ai2-s2-research-public/s2and-release/" "s2and_and_big_blocks_linker_dataset_20260513"),
+        legacy_source_url=("s3://ai2-s2-research-public/s2and-release/s2and_and_big_blocks_linker_dataset_20260513"),
     )
 
     bundle_payload = json.loads((bundle_root / "bundle.json").read_text(encoding="utf-8"))

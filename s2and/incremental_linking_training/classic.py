@@ -421,7 +421,7 @@ def _promoted_stratified_gate_spec(spec: dict[str, Any]) -> dict[str, Any] | Non
     unsupported_keys = sorted(_UNSUPPORTED_STRATIFIED_THRESHOLD_GATE_KEYS.intersection(out))
     if unsupported_keys:
         raise ValueError(
-            "classic.promoted_stratified_gate no longer supports threshold calibration keys: " f"{unsupported_keys}"
+            f"classic.promoted_stratified_gate no longer supports threshold calibration keys: {unsupported_keys}"
         )
     out["mode"] = _PROMOTED_LOGISTIC_GATE_MODE
     split_spec = spec.get("stratified_eval_test_split")
@@ -545,7 +545,7 @@ def _validate_classic_feature_inputs(df: pd.DataFrame, feature_columns: tuple[st
     missing_required = [str(column) for column in feature_columns if str(column) not in df.columns]
     if missing_required:
         raise ValueError(
-            "Classic feature matrix is missing required feature inputs: " f"missing_features={missing_required}"
+            f"Classic feature matrix is missing required feature inputs: missing_features={missing_required}"
         )
 
 
@@ -777,7 +777,7 @@ def _score_query_choices(
             row["candidate_kind"] = "multi_candidate" if len(ranked) > 1 else "single_candidate"
             row["top1_correct"] = int(chosen["label"])
         rows.append(row)
-    output = pd.DataFrame(rows, columns=output_columns)
+    output = pd.DataFrame(rows, columns=pd.Index(output_columns))
     if include_margin:
         for column in ("second_probability", "score_margin"):
             output[column] = pd.to_numeric(output[column], errors="coerce").astype(np.float64)
@@ -900,7 +900,7 @@ def _fit_multiclass_logistic_gate(
     scaled = scaler.fit_transform(filled)
     model = LogisticRegression(
         C=float(c_value),
-        penalty="l2",
+        l1_ratio=0.0,
         solver="lbfgs",
         max_iter=4000,
         random_state=20260517,
@@ -1218,9 +1218,7 @@ def _drop_shadowed_calibration_source_rows(rows: pd.DataFrame) -> pd.DataFrame:
         on=query_source_key,
         how="left",
     )
-    shadowed = marked["source_kind"].astype(str).eq("calibration_source") & marked["_has_public_source_rows"].fillna(
-        False
-    )
+    shadowed = marked["source_kind"].astype(str).eq("calibration_source") & marked["_has_public_source_rows"].eq(True)
     return marked.loc[~shadowed].drop(columns=["_has_public_source_rows"]).copy()
 
 
@@ -1432,7 +1430,10 @@ def _score_classic_stratified_eval_test(
     """Load and score the promoted stratified calibration/test split once."""
 
     split_rows, assignments = _load_classic_stratified_eval_rows(bundle, spec, split_spec)
-    probabilities = model.predict_proba(_classic_feature_matrix(split_rows, feature_columns))[:, 1]
+    probabilities = np.asarray(
+        model.predict_proba(_classic_feature_matrix(split_rows, feature_columns)),
+        dtype=np.float64,
+    )[:, 1]
     choices = _score_query_choices(
         split_rows,
         probabilities,
@@ -1580,6 +1581,14 @@ def _metric_factor_row(factor: str, group: str, metrics: dict[str, Any]) -> list
     ]
 
 
+def _validated_metric_dict(metrics: Any, *, context: str) -> dict[str, Any]:
+    """Return one metric breakdown mapping or reject a malformed summary payload."""
+
+    if not isinstance(metrics, dict):
+        raise TypeError(f"{context} metrics must be a dict, got {type(metrics).__name__}")
+    return cast(dict[str, Any], metrics)
+
+
 def _markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     """Render a markdown table from string cells."""
 
@@ -1608,7 +1617,10 @@ def format_classic_selected_gate_tables(summary: dict[str, Any]) -> str:
     lines.extend(["## By Dataset Slice, Selected Gate", ""])
     source_breakdown = dict(breakdowns.get("source_key", {}))
     source_rows = [
-        _metric_breakdown_row(str(slice_name), dict(metrics))
+        _metric_breakdown_row(
+            str(slice_name),
+            _validated_metric_dict(metrics, context=f"source_key[{slice_name!r}]"),
+        )
         for slice_name, metrics in sorted(source_breakdown.items(), key=lambda item: str(item[0]))
     ]
     lines.extend(
@@ -1642,7 +1654,13 @@ def format_classic_selected_gate_tables(summary: dict[str, Any]) -> str:
         if not isinstance(factor_breakdown, dict):
             continue
         for group_name, metrics in sorted(factor_breakdown.items(), key=lambda item: str(item[0])):
-            factor_rows.append(_metric_factor_row(factor, str(group_name), dict(metrics)))
+            factor_rows.append(
+                _metric_factor_row(
+                    factor,
+                    str(group_name),
+                    _validated_metric_dict(metrics, context=f"{factor}[{group_name!r}]"),
+                )
+            )
     lines.extend(
         _markdown_table(
             [
@@ -1744,7 +1762,10 @@ def run_classic(
         gate_source_eval,
         context="classic_gate_source",
     )
-    gate_source_probabilities = model.predict_proba(_classic_feature_matrix(gate_source_eval, feature_columns))[:, 1]
+    gate_source_probabilities = np.asarray(
+        model.predict_proba(_classic_feature_matrix(gate_source_eval, feature_columns)),
+        dtype=np.float64,
+    )[:, 1]
     calibration_limit = int(spec.get("classic_gate_calibration_retrieval_limit", 50))
     gate_source_query_choices = _score_eval_candidate_rows(
         gate_source_eval,
@@ -1821,18 +1842,27 @@ def run_classic(
     }
 
     s2and_eval = _read_csv(_resolve_path(bundle, spec["s2and_eval_path"]), compression="gzip")
-    s2and_probabilities = model.predict_proba(_classic_feature_matrix(s2and_eval, feature_columns))[:, 1]
+    s2and_probabilities = np.asarray(
+        model.predict_proba(_classic_feature_matrix(s2and_eval, feature_columns)),
+        dtype=np.float64,
+    )[:, 1]
     s2and_eval_summary = _evaluate_logistic_scored_windows(
         s2and_eval,
         s2and_probabilities,
         logistic_gate_config,
     )
     hwang_eval = _read_csv(_resolve_path(bundle, spec["hwang_eval_path"]), compression="gzip")
-    hwang_probabilities = model.predict_proba(_classic_feature_matrix(hwang_eval, feature_columns))[:, 1]
+    hwang_probabilities = np.asarray(
+        model.predict_proba(_classic_feature_matrix(hwang_eval, feature_columns)),
+        dtype=np.float64,
+    )[:, 1]
     optional_eval_summaries: dict[str, dict[str, dict[str, Any]]] = {}
     for dataset_name, path_like in _iter_extra_eval_paths(spec):
         eval_df = _read_csv(_resolve_path(bundle, path_like), compression="gzip")
-        eval_probabilities = model.predict_proba(_classic_feature_matrix(eval_df, feature_columns))[:, 1]
+        eval_probabilities = np.asarray(
+            model.predict_proba(_classic_feature_matrix(eval_df, feature_columns)),
+            dtype=np.float64,
+        )[:, 1]
         optional_eval_summaries[_summary_key_for_eval_dataset(dataset_name)] = _evaluate_logistic_scored_windows(
             eval_df,
             eval_probabilities,
@@ -1909,7 +1939,10 @@ def run_classic(
     manual_holdout_path = spec.get("manual_holdout_candidates_path")
     if manual_holdout_path:
         manual_holdout = _read_csv(_resolve_path(bundle, manual_holdout_path), low_memory=False)
-        manual_probabilities = model.predict_proba(_classic_feature_matrix(manual_holdout, feature_columns))[:, 1]
+        manual_probabilities = np.asarray(
+            model.predict_proba(_classic_feature_matrix(manual_holdout, feature_columns)),
+            dtype=np.float64,
+        )[:, 1]
         summary["manual_holdout"] = _evaluate_logistic_manual_holdout(
             manual_holdout,
             manual_probabilities,

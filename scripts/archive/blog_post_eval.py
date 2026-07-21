@@ -257,11 +257,13 @@ def main(
 
     block_keys = sorted(
         filter(
-            lambda x: not x.endswith(".json")
-            and not x.endswith(".pickle")
-            and not x.endswith(".py")
-            and not x.endswith(".vscode")
-            and not x.endswith(".csv"),
+            lambda x: (
+                not x.endswith(".json")
+                and not x.endswith(".pickle")
+                and not x.endswith(".py")
+                and not x.endswith(".vscode")
+                and not x.endswith(".csv")
+            ),
             os.listdir(BLOCK_DATASETS_DIR),
         ),
         key=lambda x: os.path.getsize(os.path.join(os.path.join(BLOCK_DATASETS_DIR, x), "claims_signatures.json")),

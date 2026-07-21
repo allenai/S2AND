@@ -63,6 +63,19 @@ production_model_vX.Y/
   manifest.json
 ```
 
+Arrow feature rematerialization writes `.materialization.json` beside every
+complete feature table and dataset partial. `--reuse-existing-features` accepts
+an existing artifact only when that sidecar exactly matches the current source
+labels and candidate members, pairwise bundle, target/schema, policies,
+selection, Arrow generations, and effective name-count manifest. Validation
+happens before source bundle metadata is refreshed. A mismatch is intentionally
+fatal; rerun without the reuse flag to produce a clean feature bundle.
+
+Portable `precomputed-promoted` inputs use
+`precomputed_promoted_feature_bundle_v2`, POSIX-relative table paths, and the
+same table identity digests. They are rejected when used with a different
+pairwise bundle.
+
 After this step, users load the model with:
 
 ```python
@@ -106,7 +119,8 @@ The `counts/` scripts document production count artifacts:
   an adjacent `.meta.json` sidecar. The runtime verifies the normalization and
   pair semantics plus the exact data SHA-256; it never accepts the data file
   without its sidecar. `--max-names-per-orcid` is checked before quadratic pair
-  expansion.
+  expansion. Install its JSON serializer with `uv sync --extra orcid-counts`
+  before running the producer.
 
 Both scripts are import-safe without the internal warehouse package. Start
 with `--help`, `--dry-run`, or a small `--input-json` fixture. A full internal

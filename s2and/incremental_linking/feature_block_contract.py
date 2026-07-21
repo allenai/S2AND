@@ -563,7 +563,7 @@ def _feature_block_specter_from_mapping(
         key_list = list(keys)
         if len(key_list) != int(matrix_array.shape[0]):
             raise ValueError(
-                "SPECTER tuple key count must match matrix rows: " f"keys={len(key_list)}, rows={matrix_array.shape[0]}"
+                f"SPECTER tuple key count must match matrix rows: keys={len(key_list)}, rows={matrix_array.shape[0]}"
             )
         specter_mapping: Mapping[Any, Any] = {
             str(key): np.ascontiguousarray(matrix_array[index], dtype=np.float32) for index, key in enumerate(key_list)

@@ -314,8 +314,7 @@ def main() -> None:
     if args.limit is None and missing_required:
         example_missing = sorted(missing_required)[:5]
         raise ValueError(
-            f"{len(missing_required)} signature paper ids were not found in papers.json. "
-            f"Examples: {example_missing}"
+            f"{len(missing_required)} signature paper ids were not found in papers.json. Examples: {example_missing}"
         )
     if args.limit is not None and missing_required:
         LOGGER.info(

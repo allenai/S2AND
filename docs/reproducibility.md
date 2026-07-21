@@ -47,9 +47,14 @@ replay scripts should not depend on machine-local analysis artifacts.
 
 For repeated promoted-linker replay, materialized feature bundles can be reused
 only through the explicit `precomputed-promoted` mode. The bundle must be
-portable and validated against the replay target JSON. Feature-table metadata in
-the reusable input bundle must use bundle-relative paths; finalized production
-artifact audit metadata may still record historical scratch/provenance paths,
-but replay must not depend on them.
+portable and validated against the replay target JSON and exact pairwise bundle
+binding. Each reusable table and intermediate dataset partial carries an
+adjacent `.materialization.json` identity that binds the source labels,
+candidate members, validated Arrow and name-count generations, target/schema,
+selection, exemplar cap, and missing-value policies. A missing or changed input
+identity is an error under `--reuse-existing-features`; rerun without that flag
+to rematerialize. Feature-table metadata uses canonical `/`-separated
+bundle-relative paths, so replay never depends on historical scratch paths or
+the host path separator.
 
 See [production_inference.md](production_inference.md) for the current inference contract.

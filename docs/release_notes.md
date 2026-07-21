@@ -80,7 +80,7 @@
   installed wheels and itself carries the strict canonical Arrow manifest.
   Rust-enabled CI fails hard on import/ABI drift, and Windows/macOS jobs execute
   their built wheels. The Rust build-system floor and release action are aligned
-  at Maturin 1.12.4. A real declared-bundle smoke remains an external gate on
+  at Maturin 1.14.1. A real declared-bundle smoke remains an external gate on
   the new v1.3 artifacts.
 - Arrow training iterates record batches and avoids duplicate full-table
   materialization. Paper-author inputs reject duplicate positions, empty names,

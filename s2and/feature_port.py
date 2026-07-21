@@ -452,9 +452,8 @@ def build_rust_featurizer_from_arrow_paths(
 ) -> Any:
     """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths.
 
-    ``name_counts_index`` is an already validated native handle shared by a
-    request-scoped candidate planner. Supplying it avoids reopening and
-    exhaustively validating the same immutable index for every query batch.
+    ``name_counts_index`` is an already validated native snapshot. When it is
+    omitted, the handle retained by Arrow validation is reused automatically.
     """
 
     method = _require_rust_runtime().RustFeaturizer.from_arrow_paths
@@ -476,10 +475,18 @@ def build_rust_featurizer_from_arrow_paths(
         if name_counts_index is not None:
             raise ValueError("name_counts_index requires load_name_counts=True")
         normalized_paths.pop("name_counts_index", None)
-    elif name_counts_index is not None:
+    elif name_counts_index is None:
+        name_counts_index = paths._retained_native_name_counts_index()  # noqa: SLF001
+    if load_name_counts and name_counts_index is not None:
         manifest = paths.name_counts_manifest
         if manifest is None:
             raise RuntimeError("validated Arrow inputs lost the retained name-count manifest")
+        observed_manifest_sha256 = getattr(name_counts_index, "manifest_sha256", None)
+        if observed_manifest_sha256 != manifest.manifest_sha256:
+            raise ValueError(
+                "shared name-count handle manifest mismatch: "
+                f"handle={observed_manifest_sha256!r} manifest={manifest.manifest_sha256!r}"
+            )
         observed_normalization_version = getattr(name_counts_index, "normalization_version", None)
         if observed_normalization_version != manifest.normalization_version:
             raise ValueError(
@@ -655,7 +662,7 @@ def _get_or_wait_for_cached(
             return entry.featurizer, None
         if entries:
             logger.info(
-                "Telemetry: rust_featurizer_cache cache=option_miss dataset=%s mode=%s op=%s run=%s " "cached_keys=%s",
+                "Telemetry: rust_featurizer_cache cache=option_miss dataset=%s mode=%s op=%s run=%s cached_keys=%s",
                 build_context.dataset_name_for_logs,
                 build_context.dataset_mode,
                 build_context.operation,

@@ -216,9 +216,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compare-train-modes",
         action="store_true",
-        help=(
-            "Run the qian-only pairwise training parity harness: ANDData/Python, " "and Arrow/Rust from_arrow_paths."
-        ),
+        help=("Run the qian-only pairwise training parity harness: ANDData/Python, and Arrow/Rust from_arrow_paths."),
     )
     parser.add_argument(
         "--use-arrow",
@@ -538,8 +536,7 @@ def _resolve_eval_name_counts_index_path(dataset_root: Path) -> str | None:
                     if resolved.exists():
                         return str(resolved.resolve())
                 raise FileNotFoundError(
-                    f"Arrow manifest {manifest_path} specifies name_counts_index path that does not exist: "
-                    f"{path_value}"
+                    f"Arrow manifest {manifest_path} specifies name_counts_index path that does not exist: {path_value}"
                 )
     for candidate in (
         dataset_root / "name_counts_index",

@@ -34,7 +34,7 @@ def _import_train_pairwise(env: dict[str, str], repo_root: Path) -> dict[str, st
         check=False,
         timeout=60,
     )
-    assert completed.returncode == 0, f"stdout:\n{completed.stdout}\n" f"stderr:\n{completed.stderr}"
+    assert completed.returncode == 0, f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 

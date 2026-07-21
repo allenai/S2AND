@@ -1150,8 +1150,7 @@ def validate_arrow_dataset_manifest(
     manifest_normalization = manifest.get("normalization_version")
     if manifest_normalization != NORMALIZATION_VERSION:
         raise ValueError(
-            f"manifest has invalid normalization_version {manifest_normalization!r}; "
-            f"expected {NORMALIZATION_VERSION!r}"
+            f"manifest has invalid normalization_version {manifest_normalization!r}; expected {NORMALIZATION_VERSION!r}"
         )
     if not isinstance(manifest.get("paths"), Mapping):
         raise ValueError("manifest is missing paths")
@@ -1290,8 +1289,7 @@ def validate_arrow_dataset_manifest(
                 actual_max_rows = int(raw_layout.get("actual_max_batch_rows", 0))
                 if max_rows > 0 and actual_max_rows > max_rows:
                     raise ValueError(
-                        f"physical_layout.tables.{table_name} exceeds max batch rows: "
-                        f"{actual_max_rows} > {max_rows}"
+                        f"physical_layout.tables.{table_name} exceeds max batch rows: {actual_max_rows} > {max_rows}"
                     )
                 if bool(raw_layout.get("batch_index_present", False)):
                     if table_key not in paths:

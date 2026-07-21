@@ -119,9 +119,9 @@ def _assert_parity(lgb_booster: lgb.Booster, rust_booster: Any, features: np.nda
     raw_python = np.asarray(lgb_booster.predict(features, raw_score=True), dtype=np.float64)
     raw_rust = np.asarray(rust_booster.predict_raw(features), dtype=np.float64)
     assert raw_python.shape == raw_rust.shape
-    assert (
-        raw_python.tobytes() == raw_rust.tobytes()
-    ), f"raw scores not bit-exact: max abs diff {np.max(np.abs(raw_python - raw_rust))}"
+    assert raw_python.tobytes() == raw_rust.tobytes(), (
+        f"raw scores not bit-exact: max abs diff {np.max(np.abs(raw_python - raw_rust))}"
+    )
 
     proba_python = np.asarray(lgb_booster.predict(features), dtype=np.float64)
     proba_rust = np.asarray(rust_booster.predict_proba_positive(features), dtype=np.float64)

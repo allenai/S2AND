@@ -506,17 +506,16 @@ def save_incremental_linking_artifact(
             shutil.rmtree(staging_dir)
 
 
-def load_incremental_linking_artifact(artifact_dir: Path) -> IncrementalLinkingArtifact:
-    """Load and validate an incremental linker artifact.
-
-    Booster scoring always runs through the pinned Rust evaluator.
-    """
-
+def _load_incremental_linking_artifact(
+    artifact_dir: Path,
+    *,
+    verified_booster_sha256: str | None,
+) -> IncrementalLinkingArtifact:
     artifact_dir = Path(artifact_dir).resolve(strict=True)
     metadata_payload = json.loads((artifact_dir / METADATA_FILENAME).read_text(encoding="utf-8"))
     metadata = IncrementalLinkingArtifactMetadata.from_mapping(metadata_payload)
     booster_path = artifact_dir / BOOSTER_FILENAME
-    observed_booster_sha256 = _sha256_file(booster_path)
+    observed_booster_sha256 = _sha256_file(booster_path) if verified_booster_sha256 is None else verified_booster_sha256
     if observed_booster_sha256 != metadata.booster_sha256:
         raise ValueError("Incremental linker artifact booster_sha256 mismatch")
     booster = _load_rust_lightgbm_booster(booster_path)
@@ -531,3 +530,28 @@ def load_incremental_linking_artifact(artifact_dir: Path) -> IncrementalLinkingA
     if not np.allclose(observed, expected, rtol=PREDICTION_FIXTURE_RTOL, atol=PREDICTION_FIXTURE_ATOL):
         raise ValueError("Incremental linker artifact prediction fixture mismatch")
     return artifact
+
+
+def _load_incremental_linking_artifact_from_verified_booster(
+    artifact_dir: Path,
+    *,
+    booster_sha256: str,
+) -> IncrementalLinkingArtifact:
+    """Load an artifact whose booster was hashed by an enclosing manifest."""
+
+    return _load_incremental_linking_artifact(
+        artifact_dir,
+        verified_booster_sha256=booster_sha256,
+    )
+
+
+def load_incremental_linking_artifact(artifact_dir: Path) -> IncrementalLinkingArtifact:
+    """Load and validate an incremental linker artifact.
+
+    Booster scoring always runs through the pinned Rust evaluator.
+    """
+
+    return _load_incremental_linking_artifact(
+        artifact_dir,
+        verified_booster_sha256=None,
+    )

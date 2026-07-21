@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +19,28 @@ from s2and.arrow_inputs import require_name_counts_index_artifact
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.name_count_binding import NameCountsBinding
 from s2and.name_counts_manifest import (
+    ValidatedNameCountsManifest,
     readonly_name_counts_provenance,
     validated_name_counts_provenance,
 )
 
 _INDEX_CACHE: weakref.WeakValueDictionary[tuple[str, str], NameCountsIndex] = weakref.WeakValueDictionary()
 _INDEX_CACHE_LOCK = threading.Lock()
+_INDEX_INFLIGHT: dict[tuple[str, str], Future[NameCountsIndex]] = {}
+_MANIFEST_OPEN_ATTEMPTS = 3
+logger = logging.getLogger(__name__)
+
+
+class _ManifestGenerationChanged(RuntimeError):
+    """Signal that publication changed the root manifest during native open."""
+
+    def __init__(self, *, expected_sha256: str, observed_sha256: Any) -> None:
+        self.expected_sha256 = expected_sha256
+        self.observed_sha256 = observed_sha256
+        super().__init__(
+            "name-count manifest changed during native open: "
+            f"expected_sha256={expected_sha256} observed_sha256={observed_sha256!r}"
+        )
 
 
 def _lookup_many_deduplicated(
@@ -109,8 +127,7 @@ class NameCountsIndex:
     ) -> None:
         if normalization_version != NORMALIZATION_VERSION:
             raise ValueError(
-                f"NameCountsIndex normalization_version={normalization_version!r}; "
-                f"expected {NORMALIZATION_VERSION!r}"
+                f"NameCountsIndex normalization_version={normalization_version!r}; expected {NORMALIZATION_VERSION!r}"
             )
         provenance = validated_name_counts_provenance(
             source_provenance,
@@ -125,6 +142,12 @@ class NameCountsIndex:
             raise ValueError(
                 "NameCountsIndex native normalization mismatch: "
                 f"native={native_normalization!r} expected={normalization_version!r}"
+            )
+        native_manifest_sha256 = getattr(native, "manifest_sha256", None)
+        if native_manifest_sha256 != manifest_sha256:
+            raise ValueError(
+                "NameCountsIndex native manifest mismatch: "
+                f"native={native_manifest_sha256!r} expected={manifest_sha256!r}"
             )
         native_binding = getattr(native, "name_counts_provenance_binding", None)
         expected_binding_tuple = (
@@ -145,49 +168,175 @@ class NameCountsIndex:
         self.source_provenance = readonly_name_counts_provenance(provenance)
 
     @classmethod
+    def _open_manifest_snapshot(
+        cls,
+        *,
+        resolved_path: str,
+        manifest_bytes: bytes,
+        manifest_sha256: str,
+    ) -> NameCountsIndex:
+        """Open one exact manifest generation with per-generation single-flight."""
+
+        cache_key = (resolved_path, manifest_sha256)
+        with _INDEX_CACHE_LOCK:
+            cached = _INDEX_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+            in_flight = _INDEX_INFLIGHT.get(cache_key)
+            if in_flight is None:
+                in_flight = Future()
+                _INDEX_INFLIGHT[cache_key] = in_flight
+                owns_open = True
+            else:
+                owns_open = False
+
+        if not owns_open:
+            return in_flight.result()
+
+        try:
+            from s2and.runtime import load_s2and_rust_extension
+
+            native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
+            native_manifest_sha256 = getattr(native, "manifest_sha256", None)
+            if native_manifest_sha256 != manifest_sha256:
+                raise _ManifestGenerationChanged(
+                    expected_sha256=manifest_sha256,
+                    observed_sha256=native_manifest_sha256,
+                )
+            # Native open is the material-validation authority. Parse the
+            # exact matched manifest bytes only to retain full provenance.
+            manifest = json.loads(manifest_bytes)
+            opened = cls(
+                native=native,
+                path=resolved_path,
+                manifest_sha256=manifest_sha256,
+                normalization_version=manifest["normalization_version"],
+                source_provenance=manifest["source_provenance"],
+            )
+        except Exception as error:
+            with _INDEX_CACHE_LOCK:
+                _INDEX_INFLIGHT.pop(cache_key, None)
+            in_flight.set_exception(error)
+            raise
+
+        with _INDEX_CACHE_LOCK:
+            cached = _INDEX_CACHE.get(cache_key)
+            result = opened if cached is None else cached
+            if cached is None:
+                _INDEX_CACHE[cache_key] = opened
+            _INDEX_INFLIGHT.pop(cache_key, None)
+        in_flight.set_result(result)
+        return result
+
+    @classmethod
     def open(cls, path: str | os.PathLike[str]) -> NameCountsIndex:
-        """Verify and share the exact manifest generation at ``path``."""
+        """Verify and share one complete manifest generation at ``path``."""
+
+        opened, _manifest = cls._open_generation(path, manifest_context=None)
+        return opened
+
+    @classmethod
+    def _open_with_manifest(
+        cls,
+        path: str | os.PathLike[str],
+        *,
+        context: str,
+    ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest]:
+        """Open native material and retain facts from the exact same manifest bytes."""
+
+        opened, manifest = cls._open_generation(path, manifest_context=context)
+        if manifest is None:  # pragma: no cover - private helper invariant
+            raise RuntimeError("name-count manifest facts were not retained")
+        return opened, manifest
+
+    @classmethod
+    def _open_generation(
+        cls,
+        path: str | os.PathLike[str],
+        *,
+        manifest_context: str | None,
+    ) -> tuple[NameCountsIndex, ValidatedNameCountsManifest | None]:
+        """Open one publication-stable generation, retrying root replacement races."""
 
         path_text = os.fspath(path)
         resolved_path = str(Path(path_text).resolve())
         manifest_path = Path(resolved_path) / "manifest.json"
-        try:
-            manifest_bytes = manifest_path.read_bytes()
-        except OSError:
-            require_name_counts_index_artifact(
-                path_text,
-                context="Python name-count index",
-                producer_hint="publish a manifest-backed name_counts_index directory",
+        last_change: _ManifestGenerationChanged | None = None
+        for attempt in range(1, _MANIFEST_OPEN_ATTEMPTS + 1):
+            try:
+                manifest_bytes = manifest_path.read_bytes()
+            except OSError as error:
+                if manifest_context is not None and isinstance(error, FileNotFoundError):
+                    raise FileNotFoundError(f"{manifest_path} (missing manifest.json)") from None
+                require_name_counts_index_artifact(
+                    path_text,
+                    context="Python name-count index",
+                    producer_hint="publish a manifest-backed name_counts_index directory",
+                )
+                raise
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            try:
+                manifest = (
+                    None
+                    if manifest_context is None
+                    else ValidatedNameCountsManifest._from_manifest_bytes(
+                        resolved_path,
+                        manifest_bytes,
+                        context=manifest_context,
+                        verify_file_digests=False,
+                    )
+                )
+                opened = cls._open_manifest_snapshot(
+                    resolved_path=resolved_path,
+                    manifest_bytes=manifest_bytes,
+                    manifest_sha256=manifest_sha256,
+                )
+            except _ManifestGenerationChanged as error:
+                last_change = error
+            except Exception as error:
+                # A publisher may replace the root manifest and clean generation
+                # A after native parsed A but before all four files are mapped.
+                # Retry only when the root identity actually changed; otherwise
+                # preserve the native validation failure verbatim.
+                try:
+                    current_manifest_bytes = manifest_path.read_bytes()
+                except OSError:
+                    current_manifest_sha256 = None
+                else:
+                    current_manifest_sha256 = hashlib.sha256(current_manifest_bytes).hexdigest()
+                if current_manifest_sha256 == manifest_sha256:
+                    raise
+                last_change = _ManifestGenerationChanged(
+                    expected_sha256=manifest_sha256,
+                    observed_sha256=current_manifest_sha256,
+                )
+                last_change.__cause__ = error
+            else:
+                return opened, manifest
+
+            if attempt < _MANIFEST_OPEN_ATTEMPTS:
+                logger.warning(
+                    "name-count manifest changed during open; retrying attempt=%d max_attempts=%d "
+                    "path=%s expected_sha256=%s observed_sha256=%r",
+                    attempt,
+                    _MANIFEST_OPEN_ATTEMPTS,
+                    resolved_path,
+                    last_change.expected_sha256,
+                    last_change.observed_sha256,
+                )
+                continue
+            logger.error(
+                "name-count manifest kept changing during open; final_failure attempt=%d "
+                "max_attempts=%d path=%s expected_sha256=%s observed_sha256=%r",
+                attempt,
+                _MANIFEST_OPEN_ATTEMPTS,
+                resolved_path,
+                last_change.expected_sha256,
+                last_change.observed_sha256,
             )
-            raise
-        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-        cache_key = (resolved_path, manifest_sha256)
-
-        with _INDEX_CACHE_LOCK:
-            cached = _INDEX_CACHE.get(cache_key)
-            if cached is not None:
-                return cached
-
-        from s2and.runtime import load_s2and_rust_extension
-
-        native = load_s2and_rust_extension().NameCountsIndex.open(resolved_path)
-        # Native open is the material-validation authority. Parse the same
-        # manifest bytes only to retain full provenance.
-        manifest = json.loads(manifest_bytes)
-        opened = cls(
-            native=native,
-            path=resolved_path,
-            manifest_sha256=manifest_sha256,
-            normalization_version=manifest["normalization_version"],
-            source_provenance=manifest["source_provenance"],
-        )
-
-        with _INDEX_CACHE_LOCK:
-            cached = _INDEX_CACHE.get(cache_key)
-            if cached is not None:
-                return cached
-            _INDEX_CACHE[cache_key] = opened
-        return opened
+        raise RuntimeError(
+            f"name-count manifest changed during all {_MANIFEST_OPEN_ATTEMPTS} open attempts for {resolved_path}"
+        ) from last_change
 
     def lookup_many(
         self,

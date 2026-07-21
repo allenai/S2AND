@@ -131,6 +131,33 @@ class ValidatedNameCountsManifest:
         if not manifest_path.is_file():
             raise FileNotFoundError(f"{manifest_path} (missing manifest.json)")
         manifest_bytes = manifest_path.read_bytes()
+        return cls._from_manifest_bytes(
+            root,
+            manifest_bytes,
+            context=context,
+            verify_file_digests=True,
+        )
+
+    @classmethod
+    def _from_manifest_bytes(
+        cls,
+        index_dir: str | os.PathLike[str],
+        manifest_bytes: bytes,
+        *,
+        context: str,
+        verify_file_digests: bool,
+    ) -> ValidatedNameCountsManifest:
+        """Validate one exact manifest snapshot.
+
+        ``verify_file_digests=False`` is reserved for exact-snapshot callers:
+        either facts bound to a native handle with the same manifest digest,
+        or publication-locked cleanup that needs safe generation reachability
+        rather than material integrity. Native open remains the sole material-
+        digest and record-semantics authority on runtime paths.
+        """
+
+        root = Path(index_dir).resolve()
+        manifest_path = root / "manifest.json"
         try:
             manifest = json.loads(manifest_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -176,8 +203,7 @@ class ValidatedNameCountsManifest:
                 resolved_path.relative_to(root)
             except ValueError as exc:
                 raise ValueError(
-                    f"{context} manifest files.{file_key}.path escapes the name_counts_index directory: "
-                    f"{resolved_path}"
+                    f"{context} manifest files.{file_key}.path escapes the name_counts_index directory: {resolved_path}"
                 ) from exc
             if not resolved_path.is_file():
                 raise ValueError(f"{context} manifest files.{file_key}.path target is not a file: {resolved_path}")
@@ -196,7 +222,7 @@ class ValidatedNameCountsManifest:
             )
             if resolved_path.stat().st_size != byte_count:
                 raise ValueError(f"{context} manifest files.{file_key}.byte_count mismatch: {resolved_path}")
-            if _sha256_file(resolved_path) != expected_sha256:
+            if verify_file_digests and _sha256_file(resolved_path) != expected_sha256:
                 raise ValueError(f"{context} manifest files.{file_key} SHA-256 mismatch: {resolved_path}")
             files[file_key] = ValidatedNameCountsFile(
                 path=resolved_path,

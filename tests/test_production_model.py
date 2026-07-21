@@ -965,19 +965,27 @@ def test_normal_load_hashes_each_declared_file_exactly_once(
         incremental_linker_version="9.9",
     )
 
-    hashed: list[str] = []
-    real_sha256 = production_model_module._sha256_file
+    manifest_hashes: list[str] = []
+    standalone_artifact_hashes: list[str] = []
+    real_manifest_sha256 = production_model_module._sha256_file
+    real_artifact_sha256 = incremental_artifact_module._sha256_file
 
-    def counting_sha256(path: Path) -> str:
-        hashed.append(Path(path).resolve().as_posix())
-        return real_sha256(path)
+    def counting_manifest_sha256(path: Path) -> str:
+        manifest_hashes.append(Path(path).resolve().as_posix())
+        return real_manifest_sha256(path)
 
-    monkeypatch.setattr(production_model_module, "_sha256_file", counting_sha256)
+    def counting_artifact_sha256(path: Path) -> str:
+        standalone_artifact_hashes.append(Path(path).resolve().as_posix())
+        return real_artifact_sha256(path)
+
+    monkeypatch.setattr(production_model_module, "_sha256_file", counting_manifest_sha256)
+    monkeypatch.setattr(incremental_artifact_module, "_sha256_file", counting_artifact_sha256)
     load_production_model(output_bundle)
 
     manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     expected = sorted((output_bundle / relpath).resolve().as_posix() for relpath in manifest["sha256"])
-    assert sorted(hashed) == expected
+    assert sorted(manifest_hashes) == expected
+    assert standalone_artifact_hashes == []
 
 
 def test_bundle_directory_version_must_match_explicit_version(

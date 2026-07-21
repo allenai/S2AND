@@ -417,7 +417,7 @@ def _prepare_output_dir(output_dir: Path, *, overwrite: bool) -> dict[str, Path]
     if existing and not overwrite:
         existing_names = ", ".join(path.name for path in existing)
         raise FileExistsError(
-            f"Output directory already contains target files ({existing_names}). " "Use --overwrite to replace them."
+            f"Output directory already contains target files ({existing_names}). Use --overwrite to replace them."
         )
     return targets
 

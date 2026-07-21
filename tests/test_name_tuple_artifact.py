@@ -159,7 +159,7 @@ def test_generator_audits_each_filtered_and_duplicate_input_row(tmp_path: Path) 
     source_path = tmp_path / "source.txt"
     output_path = tmp_path / "aliases.txt"
     source_path.write_text(
-        "Alice,Ally\n" "ally,alice\n" "ALICE,ALLY\n" "Alice,Alice\n" "Ann,Anna\n" "',Alice\n",
+        "Alice,Ally\nally,alice\nALICE,ALLY\nAlice,Alice\nAnn,Anna\n',Alice\n",
         encoding="utf-8",
     )
 

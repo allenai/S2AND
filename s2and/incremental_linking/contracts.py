@@ -162,9 +162,7 @@ def validate_artifact_contract_metadata(metadata: Mapping[str, Any]) -> None:
     """Validate artifact metadata fields that are independent of LightGBM loading."""
 
     if metadata.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
-        raise ValueError(
-            "Unsupported incremental linker artifact schema_version: " f"{metadata.get('schema_version')!r}"
-        )
+        raise ValueError(f"Unsupported incremental linker artifact schema_version: {metadata.get('schema_version')!r}")
     if metadata.get("model_family") != MODEL_FAMILY_CLASSIC_LIGHTGBM_LINKER:
         raise ValueError(f"Unsupported incremental linker model_family: {metadata.get('model_family')!r}")
     feature_columns = validate_promoted_feature_columns(tuple(metadata.get("feature_columns", ())))

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,8 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 import s2and.name_counts_manifest as name_counts_manifest_module
+import s2and.runtime as runtime_module
 from s2and.data import ANDData
-from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+from s2and.incremental_linking.feature_block_arrow import (
+    cleanup_stale_name_counts_generations,
+    write_name_counts_index,
+)
 from s2and.name_counts_index import NameCountsIndex
 from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
@@ -54,16 +61,142 @@ def test_name_counts_index_open_does_not_repeat_native_material_validation_in_py
 
 def test_name_counts_index_concurrent_open_shares_published_instance(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
+    real_extension = runtime_module.load_s2and_rust_extension()
+    native_open_started = threading.Event()
+    release_native_open = threading.Event()
+    call_lock = threading.Lock()
+    native_open_calls = 0
+
+    class BlockingNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            with call_lock:
+                native_open_calls += 1
+            native_open_started.set()
+            if not release_native_open.wait(timeout=10):
+                raise TimeoutError("test did not release native name-count open")
+            return real_extension.NameCountsIndex.open(path_arg)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=BlockingNativeNameCountsIndex),
+    )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(NameCountsIndex.open, path)
+        assert native_open_started.wait(timeout=10)
         second_future = pool.submit(NameCountsIndex.open, path)
+        try:
+            deadline = time.monotonic() + 10
+            while not second_future.running() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert second_future.running()
+        finally:
+            release_native_open.set()
         first = first_future.result(timeout=10)
         second = second_future.result(timeout=10)
 
     assert first is second
+    assert native_open_calls == 1
+
+
+def test_name_counts_index_open_retries_manifest_replacement_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one", first_count=10)
+    manifest_path = (Path(path) / "manifest.json").resolve()
+    real_read_bytes = Path.read_bytes
+    replaced = False
+
+    def replace_after_read(target: Path) -> bytes:
+        nonlocal replaced
+        payload = real_read_bytes(target)
+        if target.resolve() == manifest_path and not replaced:
+            replaced = True
+            _write_index(tmp_path, generation_id="generation-two", first_count=99)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+
+    with caplog.at_level(logging.WARNING, logger="s2and.name_counts_index"):
+        opened = NameCountsIndex.open(path)
+
+    assert replaced is True
+    assert opened.source_provenance["generation_id"] == "generation-two"
+    assert opened.lookup_many(["abdul"], [None], [None], [None])[0].tolist() == [99.0]
+    assert "retrying attempt=1 max_attempts=3" in caplog.text
+
+
+def test_name_counts_index_open_retries_when_publisher_cleans_parsed_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one", first_count=10)
+    real_extension = runtime_module.load_s2and_rust_extension()
+    native_open_calls = 0
+
+    class CleanupRacingNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            native_open_calls += 1
+            if native_open_calls == 1:
+                _write_index(tmp_path, generation_id="generation-two", first_count=99)
+                cleanup_stale_name_counts_generations(path_arg)
+                raise FileNotFoundError("generation-one disappeared before mmap")
+            return real_extension.NameCountsIndex.open(path_arg)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=CleanupRacingNativeNameCountsIndex),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="s2and.name_counts_index"):
+        opened = NameCountsIndex.open(path)
+
+    assert native_open_calls == 2
+    assert opened.source_provenance["generation_id"] == "generation-two"
+    assert opened.lookup_many(["abdul"], [None], [None], [None])[0].tolist() == [99.0]
+    assert "retrying attempt=1 max_attempts=3" in caplog.text
+
+
+def test_name_counts_index_open_bounds_and_instruments_manifest_race_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one")
+    native_open_calls = 0
+
+    class AlwaysMismatchedNativeNameCountsIndex:
+        @staticmethod
+        def open(_path_arg: str):
+            nonlocal native_open_calls
+            native_open_calls += 1
+            return SimpleNamespace(manifest_sha256="0" * 64)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=AlwaysMismatchedNativeNameCountsIndex),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="s2and.name_counts_index"):
+        with pytest.raises(RuntimeError, match="changed during all 3 open attempts"):
+            NameCountsIndex.open(path)
+
+    assert native_open_calls == 3
+    assert caplog.text.count("retrying attempt=") == 2
+    assert "final_failure attempt=3 max_attempts=3" in caplog.text
 
 
 def test_name_counts_index_manifest_replacement_opens_new_generation(tmp_path: Path) -> None:
@@ -103,6 +236,7 @@ def test_name_counts_index_constructor_revalidates_native_binding() -> None:
     provenance = tiny_name_counts_provenance()
     native = SimpleNamespace(
         normalization_version="canonical_v2",
+        manifest_sha256="2" * 64,
         name_counts_provenance_binding=("wrong-generation", "0" * 64, "snapshot", "1" * 64),
     )
 

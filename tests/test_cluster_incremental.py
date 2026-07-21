@@ -1607,9 +1607,9 @@ def test_predict_incremental_batch_constraint_path_parity(clusterer_dataset_fact
     monkeypatch.setattr(model_module, "get_constraints_matrix_indexed_rust", _fake_get_constraints_matrix_indexed_rust)
 
     batch_output = _clusters(batch_clusterer.predict_incremental(block, batch_dataset))
-    assert _same_partition(
-        batch_output, baseline
-    ), f"Batch-constraint and baseline partitions differ:\n  batch={batch_output}\n  baseline={baseline}"
+    assert _same_partition(batch_output, baseline), (
+        f"Batch-constraint and baseline partitions differ:\n  batch={batch_output}\n  baseline={baseline}"
+    )
     assert calls["batch"] > 0
 
 

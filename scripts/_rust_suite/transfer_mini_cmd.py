@@ -1,7 +1,7 @@
 """
 Mini transfer-experiment profiler.
 
-Reproduces the Rust-hot code paths of transfer_experiment_internal.py
+Reproduces the Rust-hot code paths of the historical internal transfer workload
 at reduced scale so a full Python-vs-Rust A/B completes in ~30 min
 instead of ~10 hours.
 
@@ -59,7 +59,7 @@ from _rust_suite.common import (  # type: ignore  # noqa: E402
 
 RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
 
-# Match transfer_experiment_internal.py defaults
+# Match the historical internal transfer-workload defaults.
 SPECTER_SUFFIX = "_specter.pickle"
 BLOCK_TYPE = "s2"
 PREPROCESS = True
@@ -185,7 +185,7 @@ def _snapshot_stage_rss(stage_rss: dict[str, float], monitor: ProcessTreeRSSMoni
 
 def _effective_train_pairs_size(n_train_pairs: int, mode: str) -> int:
     if mode == "exact_internal":
-        # Matches transfer_experiment_internal.py behavior exactly.
+        # Matches the historical internal transfer-workload behavior exactly.
         return max(int(n_train_pairs), 100000)
     if mode == "scaled":
         return max(1, int(n_train_pairs))
@@ -599,9 +599,7 @@ def _single_run(
             gc_collected = int(gc.collect())
             stage_timings["rust_cleanup_gc_collected"] = gc_collected
             _snapshot_stage_rss(stage_rss_gb, monitor, "post_rust_cleanup")
-            print(
-                f"  [{run_label}] Post-Rust cleanup RSS snapshot: " f"{stage_rss_gb.get('post_rust_cleanup', 'n/a')} GB"
-            )
+            print(f"  [{run_label}] Post-Rust cleanup RSS snapshot: {stage_rss_gb.get('post_rust_cleanup', 'n/a')} GB")
 
         # ----- union pairwise model -----
         print(f"  [{run_label}] Training union pairwise model...")
@@ -802,9 +800,9 @@ def _run_subprocess(
         run_label or backend,
     ]
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Starting subprocess: {run_label or backend}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     env = dict(os.environ)
     # Improve log/progress visibility for long-running child processes.
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -867,9 +865,9 @@ def _compare(args: argparse.Namespace, workload: dict[str, Any], workload_id: st
         results.append(result)
 
     # Summary table
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("SUMMARY")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     header = f"{'Config':<25} {'Total(s)':>10} {'RSS(GB)':>10} {'B3 F1':>8} {'Cl F1':>8} {'ClM F1':>8}"
     print(header)
     print("-" * len(header))
@@ -1048,8 +1046,7 @@ def _gate(args: argparse.Namespace) -> None:
 
     if runtime_delta_fraction is not None and runtime_delta_fraction > float(args.max_runtime_regression_fraction):
         violations.append(
-            f"runtime regression {runtime_delta_fraction:.6f} exceeds "
-            f"{float(args.max_runtime_regression_fraction):.6f}"
+            f"runtime regression {runtime_delta_fraction:.6f} exceeds {float(args.max_runtime_regression_fraction):.6f}"
         )
     if peak_rss_delta_fraction is not None and peak_rss_delta_fraction > float(args.max_peak_rss_regression_fraction):
         violations.append(
@@ -1154,7 +1151,7 @@ def main() -> None:
         help=(
             "How to set ANDData train_pairs_size. "
             "'scaled' uses --n-train-pairs directly; "
-            "'exact_internal' matches transfer_experiment_internal.py (max(n_train_pairs, 100000))."
+            "'exact_internal' matches the historical internal workload (max(n_train_pairs, 100000))."
         ),
     )
     parser.add_argument("--n-iter", type=int, default=None, help="Override workload preset hyperopt iterations.")

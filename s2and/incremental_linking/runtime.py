@@ -89,12 +89,11 @@ def _unpack_seed_setup(
     Mapping[str, Sequence[str]],
     Mapping[str, Sequence[str]] | None,
 ]:
-    seed_setup_values: Sequence[Any] = list(seed_setup)
-    if len(seed_setup_values) == 3:
-        return seed_setup_values[0], seed_setup_values[1], seed_setup_values[2], None
-    if len(seed_setup_values) == 4:
-        return seed_setup_values[0], seed_setup_values[1], seed_setup_values[2], seed_setup_values[3]
-    raise ValueError(f"seed_setup must have 3 or 4 elements, got {len(seed_setup_values)}")
+    if len(seed_setup) == 3:
+        seed_to_component, seed_to_original_cluster, component_to_signatures = seed_setup
+        return seed_to_component, seed_to_original_cluster, component_to_signatures, None
+    seed_to_component, seed_to_original_cluster, component_to_signatures, split_component_to_signatures = seed_setup
+    return seed_to_component, seed_to_original_cluster, component_to_signatures, split_component_to_signatures
 
 
 @dataclass(frozen=True)
@@ -1471,7 +1470,7 @@ def _predict_incremental_link_or_abstain_production_private(
 
     if len(queries) != len(query_signature_ids):
         raise ValueError(
-            "queries and query_signature_ids must have equal length: " f"{len(queries)} != {len(query_signature_ids)}"
+            f"queries and query_signature_ids must have equal length: {len(queries)} != {len(query_signature_ids)}"
         )
     resolved_runtime_context = runtime_context or build_runtime_context(
         "incremental_link_or_abstain_private",
@@ -1611,7 +1610,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
 
     if len(queries) != len(query_signature_ids):
         raise ValueError(
-            "queries and query_signature_ids must have equal length: " f"{len(queries)} != {len(query_signature_ids)}"
+            f"queries and query_signature_ids must have equal length: {len(queries)} != {len(query_signature_ids)}"
         )
     resolved_runtime_context = runtime_context or build_runtime_context(
         "incremental_link_or_abstain_from_retrieval_private",
@@ -1705,7 +1704,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     )
     if pair_labels.shape != (candidate_batch.pair_count,):
         raise ValueError(
-            "constraint label count must match pair_count: " f"{pair_labels.shape} != ({candidate_batch.pair_count},)"
+            f"constraint label count must match pair_count: {pair_labels.shape} != ({candidate_batch.pair_count},)"
         )
     constraint_row_signals = _constraint_row_signals(candidate_batch, pair_labels)
 
@@ -1972,6 +1971,7 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         orcid_enabled=resolved_orcid_enabled,
         num_threads=n_jobs_resolved,
         max_exemplars=int(max_exemplars),
+        name_counts_index=arrow_path_payload._retained_native_name_counts_index(),  # noqa: SLF001
     )
     raw_candidate_plan_mapping = raw_planner.plan_query_signatures()
     if not isinstance(raw_candidate_plan_mapping, MutableMapping):
@@ -1989,6 +1989,9 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         load_name_counts,
         context="raw Arrow scoring",
     )
+    shared_name_counts_index = raw_planner.name_counts_index() if resolved_load_name_counts else None
+    if resolved_load_name_counts and shared_name_counts_index is None:
+        raise RuntimeError("Raw Arrow planner did not retain the requested name-count index")
     featurizer_start = time.perf_counter()
     rust_featurizer = feature_port.build_rust_featurizer_from_arrow_paths(
         scoring_arrow_paths,
@@ -2001,6 +2004,7 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
         load_name_counts=resolved_load_name_counts,
         preprocess=True,
         num_threads=n_jobs_resolved,
+        name_counts_index=shared_name_counts_index,
     )
     raw_arrow_featurizer_seconds = time.perf_counter() - featurizer_start
 

@@ -78,8 +78,6 @@ attempt to rerun one needs an explicit bounded migration plan first.
 | `archive/make_claims_dataset.py` | Historical private-data workflow | Records how block-local Semantic Scholar corrections datasets were constructed |
 | `archive/make_s2and_mini_dataset.py` | Legacy JSON/pickle recipe | Records the source-selection policy for the mini datasets still used in evaluation and conversion |
 | `archive/sota.py` | Historical private-data workflow | Preserves post-paper SOTA splits, metrics, and multi-seed aggregation fixes |
-| `archive/test_s2aff.py` | Historical result record | Preserves the legacy S2AFF/ROR comparison and diagnostics |
-| `archive/transfer_experiment_internal.py` | Historical workload specification | Defines the full internal workload referenced by `rust_suite.py transfer-mini` |
 | `archive/transform_all_datasets.py` | Legacy dry-run utility | Preserves the old-schema conversion and curated dataset corrections |
 
 The following former archive files remain intentionally deleted:
@@ -90,6 +88,7 @@ The following former archive files remain intentionally deleted:
 | `archive/find_largest_block.py` | Replaced by `rust_suite.py largest-block` |
 | `archive/make_s2and_name_tuples.py` | Obsolete legacy producer; use `production/generate_canonical_name_tuples.py` |
 | `archive/paper_experiments.sh` | Use the authoritative command set on the `s2and_paper` branch |
+| `archive/test_s2aff.py` | Deleted-model/private-path tombstone. Its historical result was unchanged B3 for original and S2AFF-replaced data: `[0.979, 0.978, 0.959, 0.984, 0.969, 0.961]` (mean 0.9717). Use git history for the script. |
 | `archive/test_specter2.ipynb` | Replaced by the maintained and tested `eval_prod_models.py` workflow |
 
 ## Notes

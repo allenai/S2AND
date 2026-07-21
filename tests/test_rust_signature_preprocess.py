@@ -164,7 +164,7 @@ def test_signature_preprocess_pair_features_and_constraints_parity_with_arrow_fi
         assert len(python_features) == len(rust_features)
         for idx, (python_value, rust_value) in enumerate(zip(python_features, rust_features, strict=True)):
             assert equalish(python_value, rust_value), (
-                f"Feature mismatch for pair ({s1}, {s2}) at idx={idx}: " f"python={python_value} rust={rust_value}"
+                f"Feature mismatch for pair ({s1}, {s2}) at idx={idx}: python={python_value} rust={rust_value}"
             )
 
         python_constraint = dataset_python.get_constraint(s1, s2)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,9 +11,16 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.feature_block_arrow as feature_block_arrow_module
-from s2and.arrow_inputs import MissingArrowArtifactError, ValidatedArrowInputs
+import s2and.name_counts_manifest as name_counts_manifest_module
+import s2and.runtime as runtime_module
+from s2and.arrow_inputs import (
+    MissingArrowArtifactError,
+    ValidatedArrowInputs,
+    validate_arrow_prediction_artifacts,
+)
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData, NameCounts
+from s2and.feature_port import build_rust_featurizer_from_arrow_paths
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
     RAW_PLANNER_ARROW_MAX_RECORD_BATCH_ROWS,
@@ -1565,11 +1573,19 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    base_arrow_paths = _write_feature_block_arrow_paths(tmp_path)
+    name_counts_index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        tiny_name_counts_tuple(),
+        tiny_name_counts_provenance(),
+    )
+    base_arrow_paths["name_counts_index"] = name_counts_index_path
     arrow_paths = _with_query_signatures(
-        _with_fake_batch_indexes(_write_feature_block_arrow_paths(tmp_path), tmp_path),
+        _with_fake_batch_indexes(base_arrow_paths, tmp_path),
         tmp_path,
     )
     captured: dict[str, Any] = {}
+    shared_name_counts_index = object()
 
     class FakePlanner:
         def __init__(
@@ -1601,6 +1617,9 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
         def build_telemetry(self) -> dict[str, Any]:
             return {"timings": {}}
 
+        def name_counts_index(self) -> object:
+            return shared_name_counts_index
+
     class FakeRustModule:
         RawBlockQueryCandidatePlanner = FakePlanner
 
@@ -1611,6 +1630,7 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     def fake_build_rust_featurizer_from_arrow_paths(paths_arg: Any, **kwargs: Any) -> FakeFeaturizer:
         captured["featurizer_paths"] = paths_arg
         captured["featurizer_signature_ids"] = tuple(kwargs["signature_ids"])
+        captured["featurizer_name_counts_index"] = kwargs["name_counts_index"]
         return FakeFeaturizer()
 
     def fake_from_retrieval(**kwargs: Any) -> LinkOrAbstainProductionResult:
@@ -1657,7 +1677,7 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
         arrow_paths=arrow_paths,
         top_k=2,
         n_jobs=1,
-        load_name_counts=False,
+        load_name_counts=True,
         name_tuples=set(),
     )
 
@@ -1668,6 +1688,7 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     assert captured["retrieval_plan_query_signature_ids"] == ("q",)
     assert captured["retrieval_plan_kwargs"] == {}
     assert captured["featurizer_signature_ids"] == ("q", "s1", "s2", "s3")
+    assert captured["featurizer_name_counts_index"] is shared_name_counts_index
     assert captured["retrieval_left_indices"] == [0, 0, 0]
     assert captured["retrieval_right_indices"] == [1, 2, 3]
     assert captured["retrieval_query_author"] == ["Ada Lovelace", "Ada Lovelace"]
@@ -1688,6 +1709,111 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     retrieval_paths_without_query_request.pop("query_signatures")
     assert isinstance(captured["featurizer_paths"], ValidatedArrowInputs)
     assert retrieval_paths_without_query_request == dict(captured["featurizer_paths"])
+
+
+def test_arrow_validation_and_planner_share_one_native_name_count_snapshot_across_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_arrow_paths = _write_feature_block_arrow_paths(tmp_path)
+    mappings = tiny_name_counts_tuple()
+    name_counts_index_path, _metrics = write_name_counts_index(
+        tmp_path,
+        mappings,
+        tiny_name_counts_provenance(),
+    )
+    base_arrow_paths["name_counts_index"] = name_counts_index_path
+    arrow_paths = _with_query_signatures(
+        _with_fake_batch_indexes(base_arrow_paths, tmp_path),
+        tmp_path,
+        query_author="ada lovelace",
+    )
+    real_extension = runtime_module.load_s2and_rust_extension()
+    native_open_calls = 0
+
+    class CountingNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            native_open_calls += 1
+            return real_extension.NameCountsIndex.open(path_arg)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=CountingNativeNameCountsIndex),
+    )
+
+    def unexpected_python_material_hash(*_args: Any, **_kwargs: Any) -> str:
+        pytest.fail("Arrow validation must use native name-count material validation")
+
+    monkeypatch.setattr(name_counts_manifest_module, "_sha256_file", unexpected_python_material_hash)
+    validated = validate_arrow_prediction_artifacts(
+        arrow_paths,
+        require_specter=False,
+        require_name_counts_index=True,
+        require_cluster_seeds=True,
+        required_request_sidecars=("query_signatures",),
+        expected_normalization_version=NORMALIZATION_VERSION,
+    )
+    retained_manifest = validated.name_counts_manifest
+    assert retained_manifest is not None
+    manifest_a_sha256 = retained_manifest.manifest_sha256
+    retained_native = validated._retained_native_name_counts_index()  # noqa: SLF001
+    assert retained_native is not None
+
+    replacement_mappings = tiny_name_counts_tuple()
+    replacement_mappings[0]["ada"] = 999
+    write_name_counts_index(
+        tmp_path,
+        replacement_mappings,
+        {**tiny_name_counts_provenance(), "generation_id": "generation-b"},
+        overwrite=True,
+    )
+    manifest_b_sha256 = hashlib.sha256((Path(name_counts_index_path) / "manifest.json").read_bytes()).hexdigest()
+    assert manifest_b_sha256 != manifest_a_sha256
+
+    labeled_plan = real_extension.raw_arrow_labeled_candidate_plan(
+        dict(validated),
+        ["q"],
+        ["full"],
+        ["group-q"],
+        ["c_ada"],
+        [1],
+        {"c_ada": ["s1"]},
+        orcid_enabled=False,
+        num_threads=1,
+        max_exemplars=4,
+        name_counts_index=retained_native,
+    )
+    assert labeled_plan["telemetry"]["reused_name_counts_index"] is True
+    assert native_open_calls == 1
+
+    planner = real_extension.RawBlockQueryCandidatePlanner.from_query_signatures(
+        dict(validated),
+        top_k=2,
+        orcid_enabled=False,
+        num_threads=1,
+        max_exemplars=4,
+        name_counts_index=retained_native,
+    )
+    plan = planner.plan_query_signatures()
+
+    assert int(plan["row_count"]) > 0
+    assert native_open_calls == 1
+    assert planner.build_telemetry()["reused_name_counts_index"] is True
+    assert planner.name_counts_index().manifest_sha256 == manifest_a_sha256
+    featurizer = build_rust_featurizer_from_arrow_paths(
+        validated.without("query_signatures"),
+        expected_normalization_version=NORMALIZATION_VERSION,
+        signature_ids=("q", "s1"),
+        name_tuples=set(),
+        load_name_counts=True,
+        preprocess=True,
+        num_threads=1,
+    )
+    assert featurizer.name_counts_provenance_binding == retained_native.name_counts_provenance_binding
+    assert native_open_calls == 1
 
 
 def test_raw_arrow_rejects_candidate_plan_without_component_members() -> None:

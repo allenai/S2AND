@@ -128,7 +128,7 @@ def run_calibration(argv: list[str], *, profile_key: str) -> int:
 
     summary = _summarize(effective_values)
     if not summary:
-        print("No calibration samples found " f"({profile.matched_record_key}={matched_records}, effective_samples=0).")
+        print(f"No calibration samples found ({profile.matched_record_key}={matched_records}, effective_samples=0).")
         return 2
 
     recommended_p95 = int(math.ceil(summary["p95"]))

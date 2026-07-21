@@ -54,7 +54,7 @@ def _run_cli(
         env={**os.environ, "S2AND_BACKEND": "python", **dict(env_overrides or {})},
     )
     assert completed.returncode == 0, (
-        f"Command failed: {[sys.executable, *args]}\n" f"stdout:\n{completed.stdout}\n" f"stderr:\n{completed.stderr}"
+        f"Command failed: {[sys.executable, *args]}\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
     )
     return completed
 
@@ -134,7 +134,11 @@ def _candidate_rows(
     return pd.DataFrame(rows, columns=output_columns)
 
 
-def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -> None:
+def _write_tiny_promoted_feature_bundle(
+    feature_root: Path,
+    target_path: Path,
+    pairwise_bundle_dir: Path,
+) -> None:
     from scripts.production.model import linker_train_calibrate_eval as promoted_train
 
     feature_root.mkdir(parents=True, exist_ok=True)
@@ -188,7 +192,8 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
         ),
     }
     for key, rel_path in paths.items():
-        frames[key].to_parquet(feature_root / rel_path, index=False)
+        table_path = feature_root / rel_path
+        frames[key].to_parquet(table_path, index=False)
 
     pd.DataFrame({"base_group_id": ["cal_base_neg"]}).to_csv(
         feature_root / "splits" / "classic_gate_internal_eval_base_groups.csv",
@@ -257,10 +262,58 @@ def _write_tiny_promoted_feature_bundle(feature_root: Path, target_path: Path) -
         encoding="utf-8",
     )
 
+    pairwise_binding = production_model_module.pairwise_bundle_binding(pairwise_bundle_dir)
+    for table_key, rel_path in paths.items():
+        input_datasets = sorted(set(frames[table_key]["dataset"].astype(str)))
+        identity = {
+            "schema_version": promoted_train.MATERIALIZATION_IDENTITY_SCHEMA_VERSION,
+            "source_bundle": {
+                "bundle_json_sha256": "4" * 64,
+                "labels_path": f"labels/{table_key}.parquet",
+                "labels_sha256": "5" * 64,
+            },
+            "pairwise_bundle_binding": dict(pairwise_binding),
+            "target_spec_digest": promoted_train._target_spec_digest(target),
+            "feature_schema_digest": promoted_train.promoted_linker_feature_schema_digest(feature_columns),
+            "feature_columns": feature_columns,
+            "feature_policies": {
+                "pairwise_model_nan_value": "nan",
+                "pairwise_aggregate_nan_value": 0.0,
+                "row_nan_policy": "finite",
+                "max_exemplars": 4,
+            },
+            "selection": {
+                "table_key": table_key,
+                "datasets": None,
+                "limit_rows": None,
+                "selected_row_count": len(frames[table_key]),
+                "selected_rows_digest": "9" * 64,
+                "input_datasets": input_datasets,
+            },
+            "datasets": {
+                dataset_name: {
+                    "arrow": {
+                        "generation_id": "6" * 64,
+                        "normalization_version": "canonical_v2",
+                        "name_counts_manifest_sha256": "7" * 64,
+                    },
+                    "candidate_members_path": f"components/{dataset_name}.parquet",
+                    "candidate_members_sha256": "8" * 64,
+                }
+                for dataset_name in input_datasets
+            },
+        }
+        reuse_metadata = promoted_train._materialization_reuse_metadata(
+            identity,
+            artifact={"kind": "complete_table", "table_key": table_key, "rows": len(frames[table_key])},
+        )
+        promoted_train._write_materialization_sidecar(feature_root / rel_path, reuse_metadata)
+
     bundle_payload["precomputed_promoted_feature_bundle"] = promoted_train._precomputed_promoted_bundle_metadata(
         bundle=load_bundle(feature_root),
         target=target,
         source_mode="tiny-flow-pytest",
+        pairwise_model_binding=pairwise_binding,
     )
     (feature_root / "bundle.json").write_text(
         json.dumps(bundle_payload, indent=2, sort_keys=True) + "\n",
@@ -342,7 +395,7 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
 
     feature_root = tmp_path / "tiny_linker_feature_bundle"
     target_path = tmp_path / "incremental_linker_training_target.json"
-    _write_tiny_promoted_feature_bundle(feature_root, target_path)
+    _write_tiny_promoted_feature_bundle(feature_root, target_path, pairwise_bundle_dir)
 
     _run_cli(
         [

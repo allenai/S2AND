@@ -63,7 +63,7 @@ def _load_config() -> dict[str, Any]:
     resolved_main_data_dir = os.path.abspath(str(main_data_dir))
     if not os.path.exists(resolved_main_data_dir):
         raise FileNotFoundError(
-            "The `main_data_dir` specified in path_config.json doesn't exist: " f"{resolved_main_data_dir!r}."
+            f"The `main_data_dir` specified in path_config.json doesn't exist: {resolved_main_data_dir!r}."
         )
     config["main_data_dir"] = resolved_main_data_dir
     return config

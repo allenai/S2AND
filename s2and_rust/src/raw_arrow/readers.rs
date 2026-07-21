@@ -2,7 +2,10 @@ use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use crate::arrow_batch_lookup::{read_indexed_arrow_batches, IndexedArrowReadStats};
+use crate::arrow_batch_lookup::{
+    read_indexed_arrow_batches, read_indexed_arrow_batches_from_index, ArrowBatchLookupIndex,
+    IndexedArrowReadStats,
+};
 use crate::name_counts::{NameCountsData, RawNameCountIndex, RawNameCountMaps};
 use crate::orcid::normalize_orcid_owned;
 use crate::raw_arrow::arrow_io::{
@@ -120,7 +123,10 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
     keep_signature_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowSignature>> {
     let mut out = HashMap::new();
-    let mut seen_all_signature_ids: HashSet<String> = HashSet::new();
+    // Filtered scans need a separate set to reject duplicates among rows that
+    // are skipped. Full scans can use `out` itself and avoid storing every ID
+    // twice.
+    let mut seen_filtered_scan_ids = keep_signature_ids.map(|_| HashSet::<String>::new());
     for batch in batches {
         let signature_id_col = batch.column(arrow_column_index(&batch, "signature_id", path)?);
         let signature_id_values =
@@ -178,14 +184,13 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
                     "signatures Arrow cannot contain empty signature_id values",
                 ));
             }
-            // Detect duplicates regardless of the keep-filter so that an upstream
-            // corruption is caught symmetrically (a filtered scan must not be more
-            // permissive than a full scan).
-            if !seen_all_signature_ids.insert(signature_id_value.as_ref().to_string()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "signatures Arrow contains duplicate signature_id: {:?}",
-                    signature_id_value.as_ref()
-                )));
+            if let Some(seen_ids) = seen_filtered_scan_ids.as_mut() {
+                if !seen_ids.insert(signature_id_value.as_ref().to_string()) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "signatures Arrow contains duplicate signature_id: {:?}",
+                        signature_id_value.as_ref()
+                    )));
+                }
             }
             if keep_signature_ids.map_or(false, |keep| !keep.contains(signature_id_value.as_ref()))
             {
@@ -193,9 +198,12 @@ pub(crate) fn read_raw_arrow_signatures_from_batches(
             }
             let signature_id = signature_id_value.into_owned();
             match out.entry(signature_id) {
-                Entry::Occupied(_) => unreachable!(
-                    "duplicate signature_id should be caught by the pre-filter check above"
-                ),
+                Entry::Occupied(entry) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "signatures Arrow contains duplicate signature_id: {:?}",
+                        entry.key()
+                    )))
+                }
                 Entry::Vacant(entry) => {
                     let paper_id = paper_id_values
                         .required_value(row, "paper_id")?
@@ -243,7 +251,7 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, RawArrowPaper>> {
     let mut out = HashMap::new();
-    let mut seen_all_paper_ids = HashSet::<String>::new();
+    let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<String>::new());
     for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -289,41 +297,43 @@ pub(crate) fn read_raw_arrow_papers_from_batches(
                     "papers Arrow cannot contain empty paper_id values",
                 ));
             }
-            // Detect duplicates regardless of the keep-filter so that an upstream
-            // corruption is caught symmetrically (a filtered scan must not be more
-            // permissive than a full scan).
-            if !seen_all_paper_ids.insert(paper_id_value.as_ref().to_string()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "papers Arrow contains duplicate paper_id: {:?}",
-                    paper_id_value.as_ref()
-                )));
+            if let Some(seen_ids) = seen_filtered_scan_ids.as_mut() {
+                if !seen_ids.insert(paper_id_value.as_ref().to_string()) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "papers Arrow contains duplicate paper_id: {:?}",
+                        paper_id_value.as_ref()
+                    )));
+                }
             }
             if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
                 continue;
             }
             let paper_id = paper_id_value.into_owned();
-            let predicted_language = predicted_language_values
-                .as_ref()
-                .and_then(|col| col.optional_owned(row));
-            let is_reliable = match is_reliable_col {
-                Some(col) => arrow_optional_bool(col, row, "is_reliable")?,
-                None => None,
-            };
-            let language_reliability = match language_reliability_col {
-                Some(col) => arrow_optional_f64(col, row, "language_reliability")?,
-                None => None,
-            };
-            validate_stored_language_detection(
-                &paper_id,
-                predicted_language.as_deref(),
-                is_reliable,
-                language_reliability,
-            )?;
             match out.entry(paper_id) {
-                Entry::Occupied(_) => unreachable!(
-                    "duplicate paper_id should be caught by the pre-filter check above"
-                ),
+                Entry::Occupied(entry) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "papers Arrow contains duplicate paper_id: {:?}",
+                        entry.key()
+                    )))
+                }
                 Entry::Vacant(entry) => {
+                    let predicted_language = predicted_language_values
+                        .as_ref()
+                        .and_then(|col| col.optional_owned(row));
+                    let is_reliable = match is_reliable_col {
+                        Some(col) => arrow_optional_bool(col, row, "is_reliable")?,
+                        None => None,
+                    };
+                    let language_reliability = match language_reliability_col {
+                        Some(col) => arrow_optional_f64(col, row, "language_reliability")?,
+                        None => None,
+                    };
+                    validate_stored_language_detection(
+                        entry.key(),
+                        predicted_language.as_deref(),
+                        is_reliable,
+                        language_reliability,
+                    )?;
                     entry.insert(RawArrowPaper {
                         // title/venue/journal_name are serialized with the same
                         // ""/None -> NULL producer convention, so NULL means
@@ -598,7 +608,7 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
     keep_paper_ids: Option<&HashSet<String>>,
 ) -> PyResult<HashMap<String, Vec<f32>>> {
     let mut out = HashMap::new();
-    let mut seen_paper_ids = HashSet::<String>::new();
+    let mut seen_filtered_scan_ids = keep_paper_ids.map(|_| HashSet::<String>::new());
     for batch in batches {
         let paper_id_col = batch.column(arrow_column_index(&batch, "paper_id", path)?);
         let paper_id_values =
@@ -611,31 +621,43 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
                     "specter Arrow cannot contain empty paper_id values",
                 ));
             }
-            // Detect duplicates regardless of the keep-filter so that an upstream
-            // corruption is caught symmetrically (a filtered scan must not be more
-            // permissive than a full scan).
-            if !seen_paper_ids.insert(paper_id_value.as_ref().to_string()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "specter Arrow contains duplicate paper_id: {:?}",
-                    paper_id_value.as_ref()
-                )));
+            if let Some(seen_ids) = seen_filtered_scan_ids.as_mut() {
+                if !seen_ids.insert(paper_id_value.as_ref().to_string()) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "specter Arrow contains duplicate paper_id: {:?}",
+                        paper_id_value.as_ref()
+                    )));
+                }
             }
             if keep_paper_ids.map_or(false, |keep| !keep.contains(paper_id_value.as_ref())) {
                 continue;
             }
             let paper_id = paper_id_value.into_owned();
-            let vector = arrow_optional_f32_vector(embedding_col.as_ref(), row, "embedding")?
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "specter Arrow cannot contain null embedding values: {paper_id:?}"
-                    ))
-                })?;
-            if vector.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "specter Arrow cannot contain zero-dimension embedding values: {paper_id:?}"
-                )));
+            match out.entry(paper_id) {
+                Entry::Occupied(entry) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "specter Arrow contains duplicate paper_id: {:?}",
+                        entry.key()
+                    )))
+                }
+                Entry::Vacant(entry) => {
+                    let vector =
+                        arrow_optional_f32_vector(embedding_col.as_ref(), row, "embedding")?
+                            .ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "specter Arrow cannot contain null embedding values: {:?}",
+                                    entry.key()
+                                ))
+                            })?;
+                    if vector.is_empty() {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "specter Arrow cannot contain zero-dimension embedding values: {:?}",
+                            entry.key()
+                        )));
+                    }
+                    entry.insert(vector);
+                }
             }
-            out.insert(paper_id, vector);
         }
     }
     Ok(out)
@@ -644,6 +666,7 @@ pub(crate) fn read_raw_arrow_specter_from_batches(
 pub(crate) fn read_raw_arrow_with_optional_index<T, F>(
     path: &str,
     index_path: Option<&str>,
+    index: Option<&ArrowBatchLookupIndex>,
     key_column: &str,
     keep_ids: Option<&HashSet<String>>,
     read_from_batches: F,
@@ -652,7 +675,12 @@ where
     F: Fn(&str, Vec<RecordBatch>, Option<&HashSet<String>>) -> PyResult<T>,
 {
     if let (Some(index_path), Some(keep_ids)) = (index_path, keep_ids) {
-        let (batches, stats) = read_indexed_arrow_batches(path, index_path, key_column, keep_ids)?;
+        let (batches, stats) = match index {
+            Some(index) => {
+                read_indexed_arrow_batches_from_index(path, index_path, index, keep_ids)?
+            }
+            None => read_indexed_arrow_batches(path, index_path, key_column, keep_ids)?,
+        };
         return Ok((read_from_batches(path, batches, Some(keep_ids))?, stats));
     }
     if keep_ids.is_some() && index_path.is_none() {
@@ -673,11 +701,13 @@ where
 pub(crate) fn read_raw_arrow_signatures_with_optional_index(
     path: &str,
     index_path: Option<&str>,
+    index: Option<&ArrowBatchLookupIndex>,
     keep_signature_ids: Option<&HashSet<String>>,
 ) -> PyResult<(HashMap<String, RawArrowSignature>, IndexedArrowReadStats)> {
     read_raw_arrow_with_optional_index(
         path,
         index_path,
+        index,
         "signature_id",
         keep_signature_ids,
         read_raw_arrow_signatures_from_batches,
@@ -687,11 +717,13 @@ pub(crate) fn read_raw_arrow_signatures_with_optional_index(
 pub(crate) fn read_raw_arrow_papers_with_optional_index(
     path: &str,
     index_path: Option<&str>,
+    index: Option<&ArrowBatchLookupIndex>,
     keep_paper_ids: &HashSet<String>,
 ) -> PyResult<(HashMap<String, RawArrowPaper>, IndexedArrowReadStats)> {
     read_raw_arrow_with_optional_index(
         path,
         index_path,
+        index,
         "paper_id",
         Some(keep_paper_ids),
         read_raw_arrow_papers_from_batches,
@@ -701,11 +733,13 @@ pub(crate) fn read_raw_arrow_papers_with_optional_index(
 pub(crate) fn read_raw_arrow_paper_authors_with_optional_index(
     path: &str,
     index_path: Option<&str>,
+    index: Option<&ArrowBatchLookupIndex>,
     keep_paper_ids: &HashSet<String>,
 ) -> PyResult<(HashMap<String, Vec<(i64, String)>>, IndexedArrowReadStats)> {
     read_raw_arrow_with_optional_index(
         path,
         index_path,
+        index,
         "paper_id",
         Some(keep_paper_ids),
         read_raw_arrow_paper_authors_from_batches,
@@ -715,11 +749,13 @@ pub(crate) fn read_raw_arrow_paper_authors_with_optional_index(
 pub(crate) fn read_raw_arrow_specter_with_optional_index(
     path: &str,
     index_path: Option<&str>,
+    index: Option<&ArrowBatchLookupIndex>,
     keep_paper_ids: &HashSet<String>,
 ) -> PyResult<(HashMap<String, Vec<f32>>, IndexedArrowReadStats)> {
     read_raw_arrow_with_optional_index(
         path,
         index_path,
+        index,
         "paper_id",
         Some(keep_paper_ids),
         read_raw_arrow_specter_from_batches,
@@ -1083,6 +1119,16 @@ mod filtered_duplicate_detection_tests {
     }
 
     #[test]
+    fn papers_duplicate_without_keep_filter_is_rejected() {
+        let batch = papers_batch(&["p1", "p1"]);
+        let err = read_raw_arrow_papers_from_batches("<test>", vec![batch], None)
+            .err()
+            .expect("duplicate paper_id must be detected without an auxiliary keep-filter set");
+        let message = py_err_message(err);
+        assert!(message.contains("duplicate paper_id"), "{message}");
+    }
+
+    #[test]
     fn papers_unique_ids_with_keep_filter_read_ok() {
         let batch = papers_batch(&["p1", "p2"]);
         let keep_ids = keep(&["p2"]);
@@ -1099,6 +1145,16 @@ mod filtered_duplicate_detection_tests {
         let err = read_raw_arrow_specter_from_batches("<test>", vec![batch], Some(&keep_ids))
             .err()
             .expect("duplicate paper_id must be detected even when filtered out");
+        let message = py_err_message(err);
+        assert!(message.contains("duplicate paper_id"), "{message}");
+    }
+
+    #[test]
+    fn specter_duplicate_without_keep_filter_is_rejected() {
+        let batch = specter_batch(&["p1", "p1"]);
+        let err = read_raw_arrow_specter_from_batches("<test>", vec![batch], None)
+            .err()
+            .expect("duplicate paper_id must be detected without an auxiliary keep-filter set");
         let message = py_err_message(err);
         assert!(message.contains("duplicate paper_id"), "{message}");
     }

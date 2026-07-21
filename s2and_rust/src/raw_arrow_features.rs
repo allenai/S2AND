@@ -95,7 +95,7 @@ pub(crate) fn build_raw_arrow_feature(
         (
             term_set_from_normalized_text(&normalized_venue),
             term_set_from_normalized_text(&normalized_title),
-            paper_data.year,
+            paper_data.year.filter(|year| *year > 0),
         )
     } else {
         (HashSet::new(), HashSet::new(), None)
@@ -771,5 +771,52 @@ mod tests {
         assert_eq!(feature.query_author, "b smith phd");
         assert!(feature.query.title_hashes.contains(&fnv64(b"1")));
         assert!(feature.query.title_hashes.contains(&fnv64(b"co3o4")));
+    }
+
+    #[test]
+    fn raw_feature_treats_none_zero_and_negative_years_as_missing() {
+        for year in [None, Some(0), Some(-1)] {
+            let signature = RawArrowSignature {
+                paper_id: "p1".to_string(),
+                author_first: "Alice".to_string(),
+                author_middle: String::new(),
+                author_last: "Smith".to_string(),
+                author_suffix: String::new(),
+                author_block: None,
+                affiliations: Vec::new(),
+                email: None,
+                orcid: None,
+                position: Some(0),
+            };
+            let paper = RawArrowPaper {
+                title: String::new(),
+                abstract_text: String::new(),
+                venue: String::new(),
+                journal_name: String::new(),
+                year,
+                predicted_language: None,
+                is_reliable: None,
+                language_reliability: None,
+            };
+            let feature = build_raw_arrow_feature(
+                &signature,
+                Some(&paper),
+                None,
+                None,
+                &RawNameCountMaps::default(),
+                &HashSet::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+                false,
+            );
+
+            assert_eq!(feature.query.year, None, "raw year={year:?}");
+            let features = HashMap::from([("s1".to_string(), feature)]);
+            let summary = build_raw_arrow_summary("cluster", &["s1".to_string()], &features, 1)
+                .expect("missing years must produce a valid retrieval summary");
+            assert_eq!(summary.year_min, None, "raw year={year:?}");
+            assert_eq!(summary.year_max, None, "raw year={year:?}");
+            assert_eq!(summary.year_mean, None, "raw year={year:?}");
+        }
     }
 }

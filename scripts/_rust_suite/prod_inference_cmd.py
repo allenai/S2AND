@@ -67,7 +67,7 @@ def _resolve_dataset_file(
     if os.path.exists(fallback_path):
         return fallback_path
     raise FileNotFoundError(
-        "Missing dataset file for " f"'{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
+        f"Missing dataset file for '{dataset_name}'. Tried '{preferred_path}' and '{fallback_path}'."
     )
 
 

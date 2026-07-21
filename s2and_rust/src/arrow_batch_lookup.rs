@@ -1,5 +1,6 @@
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::record_batch::RecordBatch;
+use memmap2::Mmap;
 use pyo3::PyResult;
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -37,8 +38,8 @@ fn source_file_fingerprint(path: &str, source_size: u64) -> PyResult<u64> {
     Ok(digest)
 }
 
-struct ArrowBatchLookupIndex {
-    bytes: Box<[u8]>,
+pub(crate) struct ArrowBatchLookupIndex {
+    bytes: Mmap,
     record_count: usize,
     max_batch_index: Option<u32>,
 }
@@ -60,7 +61,11 @@ impl ArrowBatchLookupIndex {
         )
     }
 
-    fn open_for_request(path: &str, source_arrow_path: &str, key_column: &str) -> PyResult<Self> {
+    pub(crate) fn open_for_request(
+        path: &str,
+        source_arrow_path: &str,
+        key_column: &str,
+    ) -> PyResult<Self> {
         Self::open_with_source_validation(
             path,
             source_arrow_path,
@@ -75,14 +80,22 @@ impl ArrowBatchLookupIndex {
         key_column: &str,
         source_validation: SourceValidationMode,
     ) -> PyResult<Self> {
-        let bytes = fs::read(path)
-            .map_err(|err| io_error_to_py("failed to read Arrow batch lookup index", path, err))?
-            .into_boxed_slice();
-        if bytes.len() < ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN {
+        let file = File::open(path)
+            .map_err(|err| io_error_to_py("failed to open Arrow batch lookup index", path, err))?;
+        let index_len = file
+            .metadata()
+            .map_err(|err| io_error_to_py("failed to stat Arrow batch lookup index", path, err))?
+            .len();
+        if index_len < ARROW_BATCH_LOOKUP_INDEX_HEADER_LEN as u64 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Arrow batch lookup index '{path}' is shorter than its header"
             )));
         }
+        // The planner's artifact bundle is immutable for the lifetime of its
+        // reusable handles, so retaining a read-only mapping is safe.
+        let bytes = unsafe { Mmap::map(&file) }.map_err(|err| {
+            io_error_to_py("failed to memory-map Arrow batch lookup index", path, err)
+        })?;
         let magic = &bytes[0..8];
         if magic != ARROW_BATCH_LOOKUP_INDEX_MAGIC {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -302,6 +315,18 @@ pub(crate) fn read_indexed_arrow_batches(
         return Ok((Vec::new(), IndexedArrowReadStats::default()));
     }
     let index = ArrowBatchLookupIndex::open_for_request(index_path, path, key_column)?;
+    read_indexed_arrow_batches_from_index(path, index_path, &index, keep_ids)
+}
+
+pub(crate) fn read_indexed_arrow_batches_from_index(
+    path: &str,
+    index_path: &str,
+    index: &ArrowBatchLookupIndex,
+    keep_ids: &HashSet<String>,
+) -> PyResult<(Vec<RecordBatch>, IndexedArrowReadStats)> {
+    if keep_ids.is_empty() {
+        return Ok((Vec::new(), IndexedArrowReadStats::default()));
+    }
     let mut batch_indices: Vec<usize> =
         index.batch_indices_for_keys(keep_ids).into_iter().collect();
     batch_indices.sort_unstable();

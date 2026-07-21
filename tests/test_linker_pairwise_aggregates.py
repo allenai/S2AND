@@ -595,6 +595,64 @@ def test_candidate_batch_aggregates_match_existing_rust_matrix_path(tmp_path) ->
     not HAS_RUST,
     reason=f"s2and_rust unavailable: {RUST_IMPORT_ERROR}",
 )
+def test_native_combined_matrix_and_aggregates_apply_independent_nan_policies(tmp_path) -> None:
+    dataset = build_dummy_dataset("dummy_linker_independent_nan_policies", name_counts_index=True)
+    dataset = build_arrow_training_dataset(dataset, tmp_path)
+    rust_featurizer = feature_port._get_rust_featurizer(dataset)  # noqa: SLF001
+
+    raw_matrix = np.asarray(
+        rust_featurizer.featurize_pairs_matrix_indexed(
+            [(0, 1)],
+            None,
+            1,
+            np.nan,
+        )
+    )
+    nan_positions = np.flatnonzero(np.isnan(raw_matrix[0]))
+    assert nan_positions.size > 0, "dummy pair must exercise a genuinely missing native feature"
+    selected_indices = [int(nan_positions[0])]
+    left = np.asarray([0], dtype=np.uint32)
+    right = np.asarray([1], dtype=np.uint32)
+    rows = np.asarray([0], dtype=np.uint32)
+
+    def combined(matrix_nan_value: float, aggregate_nan_value: float):
+        return tuple(
+            np.asarray(value)
+            for value in rust_featurizer.linker_pair_index_arrays_and_aggregate_stats(
+                left,
+                right,
+                rows,
+                1,
+                selected_indices,
+                selected_indices,
+                1,
+                matrix_nan_value,
+                aggregate_nan_value,
+                True,
+            )
+        )
+
+    matrix, counts, valid_counts, sums, mins, maxs = combined(0.0, np.nan)
+    np.testing.assert_array_equal(matrix, np.asarray([[0.0]]))
+    np.testing.assert_array_equal(counts, np.asarray([1], dtype=np.uint32))
+    np.testing.assert_array_equal(valid_counts, np.asarray([[0]], dtype=np.uint64))
+    np.testing.assert_array_equal(sums, np.asarray([[0.0]]))
+    assert np.isposinf(mins[0, 0])
+    assert np.isneginf(maxs[0, 0])
+
+    matrix, counts, valid_counts, sums, mins, maxs = combined(np.nan, 0.0)
+    assert np.isnan(matrix[0, 0])
+    np.testing.assert_array_equal(counts, np.asarray([1], dtype=np.uint32))
+    np.testing.assert_array_equal(valid_counts, np.asarray([[1]], dtype=np.uint64))
+    np.testing.assert_array_equal(sums, np.asarray([[0.0]]))
+    np.testing.assert_array_equal(mins, np.asarray([[0.0]]))
+    np.testing.assert_array_equal(maxs, np.asarray([[0.0]]))
+
+
+@pytest.mark.skipif(
+    not HAS_RUST,
+    reason=f"s2and_rust unavailable: {RUST_IMPORT_ERROR}",
+)
 def test_dense_and_sparse_signature_index_layouts_produce_identical_features(tmp_path) -> None:
     dataset = build_dummy_dataset("dummy_linker_signature_index_layouts", name_counts_index=True)
     template_signature = next(iter(dataset.signatures.values()))

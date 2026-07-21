@@ -25,8 +25,7 @@ def _get_shap_module() -> Any:
         _SHAP_MODULE = importlib.import_module("shap")
     except Exception as exc:
         raise RuntimeError(
-            "Failed to import shap. Install a NumPy-1.24-compatible SHAP version "
-            "(for example, `uv add 'shap>=0.45'`)."
+            "Failed to import shap. Install the supported SHAP dependency (for example, `uv sync`)."
         ) from exc
     return _SHAP_MODULE
 
@@ -205,9 +204,9 @@ def compute_shap_summary_plots(
         vals_a = _shap_values_for_tree_model(base_a, X, class_index)
         pairs.append((classifier, X, shap_feature_names, f"{base_name}_shap_0.png"))
 
-        assert (
-            nameless_X is not None and nameless_feature_names is not None
-        ), "Provide nameless_X and nameless_feature_names when nameless_classifier is set."
+        assert nameless_X is not None and nameless_feature_names is not None, (
+            "Provide nameless_X and nameless_feature_names when nameless_classifier is set."
+        )
         base_b = _base_estimator(nameless_classifier)
         vals_b = _shap_values_for_tree_model(base_b, nameless_X, class_index)
 

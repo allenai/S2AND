@@ -18,7 +18,10 @@ from s2and.consts import (
     NORMALIZATION_VERSION,
 )
 from s2and.featurizer import FeaturizationInfo
-from s2and.incremental_linking.artifact import IncrementalLinkingArtifact, load_incremental_linking_artifact
+from s2and.incremental_linking.artifact import (
+    IncrementalLinkingArtifact,
+    _load_incremental_linking_artifact_from_verified_booster,
+)
 from s2and.incremental_linking.contracts import canonical_json_digest
 from s2and.model import (
     Clusterer,
@@ -302,9 +305,9 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
     if files != expected_files:
         missing = sorted(set(expected_files) - set(files))
         extra = sorted(set(files) - set(expected_files))
-        changed = sorted(key for key in set(files) & set(expected_files) if files[key] != expected_files[key])
+        changed = sorted(key for key in expected_files if key in files and files[key] != expected_files[key])
         raise ValueError(
-            "Production model bundle files contract mismatch: " f"missing={missing} extra={extra} changed={changed}"
+            f"Production model bundle files contract mismatch: missing={missing} extra={extra} changed={changed}"
         )
 
     expected_hashes = manifest.get("sha256")
@@ -544,14 +547,21 @@ def _validate_pairwise_fixture(
         raise ValueError(f"Pairwise prediction fixture mismatch for {fixture_path}")
 
 
-def _validate_incremental_linker_metadata(linker_dir: Path) -> IncrementalLinkingArtifact:
+def _validate_incremental_linker_metadata(
+    linker_dir: Path,
+    *,
+    verified_booster_sha256: str,
+) -> IncrementalLinkingArtifact:
     metadata_path = linker_dir / "metadata.json"
     booster_path = linker_dir / "booster.lgb"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Incremental linker metadata is missing: {metadata_path}")
     if not booster_path.exists():
         raise FileNotFoundError(f"Incremental linker booster is missing: {booster_path}")
-    return load_incremental_linking_artifact(linker_dir)
+    return _load_incremental_linking_artifact_from_verified_booster(
+        linker_dir,
+        booster_sha256=verified_booster_sha256,
+    )
 
 
 def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Mapping[str, Any]) -> None:
@@ -656,7 +666,11 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     clusterer.incremental_mean_min_hybrid_weight = float(clusterer_config["incremental_mean_min_hybrid_weight"])
     if manifest["bundle_status"] == "complete":
         incremental_linker_dir = bundle_dir / "incremental_linker"
-        incremental_linker_artifact = _validate_incremental_linker_metadata(incremental_linker_dir)
+        incremental_booster_relpath = str(manifest["files"]["incremental_linker_booster"])
+        incremental_linker_artifact = _validate_incremental_linker_metadata(
+            incremental_linker_dir,
+            verified_booster_sha256=str(manifest["sha256"][incremental_booster_relpath]),
+        )
         expected_binding = _pairwise_binding_from_validated_parts(
             manifest,
             clusterer_config,

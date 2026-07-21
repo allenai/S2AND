@@ -42,6 +42,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
     generation_id: str
     normalization_version: str
     name_counts_manifest: ValidatedNameCountsManifest | None
+    _name_counts_index: Any | None
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise TypeError(
@@ -59,6 +60,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         generation_id: str,
         normalization_version: str,
         name_counts_manifest: ValidatedNameCountsManifest | None = None,
+        name_counts_index: Any | None = None,
     ) -> ValidatedArrowInputs:
         """Create an instance after a trusted internal validation or projection."""
 
@@ -67,6 +69,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
         object.__setattr__(instance, "generation_id", str(generation_id))
         object.__setattr__(instance, "normalization_version", str(normalization_version))
         object.__setattr__(instance, "name_counts_manifest", name_counts_manifest)
+        object.__setattr__(instance, "_name_counts_index", name_counts_index)
         return instance
 
     def __getitem__(self, key: str) -> str:
@@ -87,6 +90,7 @@ class ValidatedArrowInputs(Mapping[str, str]):
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
             name_counts_manifest=(None if "name_counts_index" in removed else self.name_counts_manifest),
+            name_counts_index=(None if "name_counts_index" in removed else self._name_counts_index),
         )
 
     def with_request_sidecars(
@@ -122,7 +126,40 @@ class ValidatedArrowInputs(Mapping[str, str]):
             generation_id=self.generation_id,
             normalization_version=self.normalization_version,
             name_counts_manifest=self.name_counts_manifest,
+            name_counts_index=self._name_counts_index,
         )
+
+    def _retained_native_name_counts_index(self) -> Any | None:
+        """Return the exact native snapshot bound to retained manifest facts."""
+
+        manifest = self.name_counts_manifest
+        index = self._name_counts_index
+        if manifest is None and index is None:
+            return None
+        if manifest is None or index is None:
+            raise RuntimeError("validated Arrow inputs lost retained name-count snapshot state")
+        if index.path != self.paths.get("name_counts_index"):
+            raise RuntimeError("retained name-count handle path does not match validated Arrow inputs")
+        if index.manifest_sha256 != manifest.manifest_sha256:
+            raise RuntimeError("retained name-count handle manifest does not match validated Arrow inputs")
+        if index.normalization_version != manifest.normalization_version:
+            raise RuntimeError("retained name-count handle normalization does not match validated Arrow inputs")
+        if index.source_provenance != manifest.source_provenance:
+            raise RuntimeError("retained name-count handle provenance does not match validated Arrow inputs")
+        native = index._native  # noqa: SLF001 - paired internal snapshot contract
+        expected_binding = (
+            manifest.source_provenance["generation_id"],
+            manifest.source_provenance["pickle_sha256"],
+            manifest.source_provenance["source_snapshot_id"],
+            manifest.source_provenance["selected_rows_sha256"],
+        )
+        if getattr(native, "manifest_sha256", None) != manifest.manifest_sha256:
+            raise RuntimeError("retained native name-count handle manifest does not match validated Arrow inputs")
+        if getattr(native, "normalization_version", None) != manifest.normalization_version:
+            raise RuntimeError("retained native name-count handle normalization does not match validated Arrow inputs")
+        if getattr(native, "name_counts_provenance_binding", None) != expected_binding:
+            raise RuntimeError("retained native name-count handle provenance does not match validated Arrow inputs")
+        return native
 
 
 RAW_PLANNER_ARROW_BATCH_INDEX_CONTRACTS = (
@@ -279,7 +316,7 @@ def build_arrow_artifact_manifest(
     extra = {} if metadata is None else dict(metadata)
     conflicting_fields = sorted(_ARROW_ARTIFACT_MANIFEST_OWNED_FIELDS.intersection(extra))
     if conflicting_fields:
-        raise ValueError("Arrow artifact manifest metadata cannot override canonical fields: " f"{conflicting_fields}")
+        raise ValueError(f"Arrow artifact manifest metadata cannot override canonical fields: {conflicting_fields}")
     return {
         **extra,
         "normalization_version": NORMALIZATION_VERSION,
@@ -460,8 +497,7 @@ def _verified_arrow_artifact_manifest(
             )
             if declared_relative_path != allowed_relative_path:
                 raise ValueError(
-                    f"Arrow artifact generation files.{key}.path escapes the manifest directory: "
-                    f"{raw_declared_path!r}"
+                    f"Arrow artifact generation files.{key}.path escapes the manifest directory: {raw_declared_path!r}"
                 ) from exc
         actual_path = supplied_path.resolve()
         if declared_path != actual_path:
@@ -855,6 +891,7 @@ def _validate_complete_arrow_artifacts(
         required_or_declared_keys.difference({"name_counts_index"}),
     )
     name_counts_manifest: ValidatedNameCountsManifest | None = None
+    name_counts_index: Any | None = None
     if "name_counts_index" in normalized:
         index_path = Path(normalized["name_counts_index"])
         if not index_path.exists():
@@ -863,7 +900,13 @@ def _validate_complete_arrow_artifacts(
             missing_files["name_counts_index"] = f"{index_path} (expected directory)"
         else:
             try:
-                name_counts_manifest = ValidatedNameCountsManifest.load(
+                # Local import avoids the name_counts_index -> arrow_inputs
+                # error-reporting cycle. This opens and material-validates one
+                # exact native generation while parsing its matched manifest
+                # bytes without a duplicate Python material hash.
+                from s2and.name_counts_index import NameCountsIndex
+
+                name_counts_index, name_counts_manifest = NameCountsIndex._open_with_manifest(
                     index_path,
                     context=f"{context} name_counts_index",
                 )
@@ -910,6 +953,7 @@ def _validate_complete_arrow_artifacts(
         generation_id=verified.generation_id,
         normalization_version=verified.normalization_version,
         name_counts_manifest=name_counts_manifest,
+        name_counts_index=name_counts_index,
     )
 
 

@@ -437,7 +437,7 @@ def _load_arrow_incremental_signature_info(
         missing_columns = sorted(required_columns.difference(reader.schema.names))
         if missing_columns:
             raise ValueError(
-                "signatures Arrow is missing required columns for incremental metadata: " f"{missing_columns}"
+                f"signatures Arrow is missing required columns for incremental metadata: {missing_columns}"
             )
         selected_columns = required_columns.union({"author_orcid"}.intersection(reader.schema.names))
         required_column_names = sorted(selected_columns)
@@ -501,7 +501,7 @@ def _load_arrow_incremental_orcid_signature_info(
         missing_columns = sorted(required_columns.difference(reader.schema.names))
         if missing_columns:
             raise ValueError(
-                "signatures Arrow is missing required columns for incremental ORCID metadata: " f"{missing_columns}"
+                f"signatures Arrow is missing required columns for incremental ORCID metadata: {missing_columns}"
             )
         if "author_orcid" not in reader.schema.names:
             return {}
@@ -1002,7 +1002,7 @@ def _ensure_lightgbm_fitted(clf: Any) -> None:
     booster = getattr(clf, "_Booster", None)
     if booster is None:
         raise RuntimeError(
-            "LightGBM estimator has no fitted booster (_Booster is None); " "fit the estimator before prediction."
+            "LightGBM estimator has no fitted booster (_Booster is None); fit the estimator before prediction."
         )
     if not getattr(clf, "fitted_", False):
         logger.debug("Patching missing LightGBM fitted_ flag for estimator=%s", type(clf).__name__)
@@ -1085,7 +1085,7 @@ def _resolve_clusterer_normalization_version(clusterer: Any) -> str:
     value = contract.get("normalization_version") if isinstance(contract, Mapping) else None
     if value != NORMALIZATION_VERSION:
         raise ValueError(
-            "Clusterer feature_contract requires " f"normalization_version={NORMALIZATION_VERSION!r}, got {value!r}"
+            f"Clusterer feature_contract requires normalization_version={NORMALIZATION_VERSION!r}, got {value!r}"
         )
     return NORMALIZATION_VERSION
 
@@ -1401,7 +1401,7 @@ class _VersionedClusterSeedSet(set[tuple[Any, Any]]):
         super().remove(element)
         self._mark_mutated()
 
-    def discard(self, element: tuple[Any, Any]) -> None:
+    def discard(self, element: object) -> None:
         if element in self:
             super().discard(element)
             self._mark_mutated()
@@ -1596,7 +1596,7 @@ def _resolve_constraint_api_mode(
 
 
 def _build_signature_index_by_id(rust_featurizer: object) -> dict[str, int]:
-    signature_ids = rust_featurizer.signature_ids()  # type: ignore[attr-defined]
+    signature_ids = cast(Any, rust_featurizer).signature_ids()
     return {str(sig_id): idx for idx, sig_id in enumerate(signature_ids)}
 
 
@@ -2111,10 +2111,10 @@ class Clusterer:
                 f"{raw_seed_score_mode!r}; expected one of {sorted(valid_seed_score_modes)}"
             )
         if not 0.0 <= raw_hybrid_weight <= 1.0:
-            raise ValueError("incremental_mean_min_hybrid_weight must be in [0, 1]; " f"got {raw_hybrid_weight!r}")
+            raise ValueError(f"incremental_mean_min_hybrid_weight must be in [0, 1]; got {raw_hybrid_weight!r}")
         return _IncrementalExperimentConfig(
-            precluster_broadcast_mode=raw_broadcast_mode,  # type: ignore[arg-type]
-            seed_score_mode=raw_seed_score_mode,  # type: ignore[arg-type]
+            precluster_broadcast_mode=cast(IncrementalBroadcastMode, raw_broadcast_mode),
+            seed_score_mode=cast(IncrementalSeedScoreMode, raw_seed_score_mode),
             mean_min_hybrid_weight=float(raw_hybrid_weight),
         )
 
@@ -4402,7 +4402,7 @@ class Clusterer:
                 altered_signature_key = str(altered_signature_id)
                 altered_cluster_num: int | str = cluster_seeds_require[altered_signature_key]
                 altered_cluster_nums.add(altered_cluster_num)
-            sorted_altered_cluster_nums = cast(list[int | str], sorted(altered_cluster_nums, key=str))
+            sorted_altered_cluster_nums = sorted(altered_cluster_nums, key=str)
             altered_cluster_count = len(sorted_altered_cluster_nums)
             model_cache_fingerprint = _model_presplit_cache_fingerprint(self)
             name_tuples = getattr(dataset, "name_tuples", None)

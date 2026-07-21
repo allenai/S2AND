@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from tqdm import tqdm
@@ -39,6 +39,7 @@ from s2and.text import (
 logger = logging.getLogger("s2and")
 
 TupleOfArrays = tuple[np.ndarray, np.ndarray, np.ndarray | None]
+_PreprocessedValueT = TypeVar("_PreprocessedValueT")
 
 # This order defines persisted model columns and is shared by training,
 # evaluation, and linker aggregation.
@@ -316,7 +317,7 @@ def _maybe_calibrate_rust_batch_fixed_overhead_bytes(
         with _RUST_BATCH_CALIBRATION_LOCK:
             _RUST_BATCH_CALIBRATION_ATTEMPTED = True
         logger.warning(
-            "Rust batch startup calibration failed; using configured fixed overhead " "(run_id=%s error=%s)",
+            "Rust batch startup calibration failed; using configured fixed overhead (run_id=%s error=%s)",
             run_id,
             exc,
         )
@@ -764,6 +765,18 @@ def _specter_vector_or_none(embedding: Any, *, paper_id: str) -> np.ndarray | No
     return vector
 
 
+def _require_preprocessed_value(
+    value: _PreprocessedValueT | None,
+    *,
+    field: str,
+) -> _PreprocessedValueT:
+    """Return a materialized Python featurization value or surface the lifecycle error."""
+
+    if value is None:
+        raise RuntimeError(f"Python pair featurization requires preprocessed field {field}")
+    return value
+
+
 def _single_pair_featurize(
     work_input: tuple[str, str],
     index: int = -1,
@@ -807,53 +820,107 @@ def _single_pair_featurize(
     paper_1 = dataset.papers[str(paper_id_1)]
     paper_2 = dataset.papers[str(paper_id_2)]
 
+    first_1 = _require_preprocessed_value(
+        signature_1.author_info_first_normalized_without_apostrophe,
+        field="signature_1.author_info_first_normalized_without_apostrophe",
+    )
+    first_2 = _require_preprocessed_value(
+        signature_2.author_info_first_normalized_without_apostrophe,
+        field="signature_2.author_info_first_normalized_without_apostrophe",
+    )
+    middle_1 = _require_preprocessed_value(
+        signature_1.author_info_middle_normalized_without_apostrophe,
+        field="signature_1.author_info_middle_normalized_without_apostrophe",
+    )
+    middle_2 = _require_preprocessed_value(
+        signature_2.author_info_middle_normalized_without_apostrophe,
+        field="signature_2.author_info_middle_normalized_without_apostrophe",
+    )
+    affiliation_ngrams_1 = _require_preprocessed_value(
+        signature_1.author_info_affiliations_n_grams,
+        field="signature_1.author_info_affiliations_n_grams",
+    )
+    affiliation_ngrams_2 = _require_preprocessed_value(
+        signature_2.author_info_affiliations_n_grams,
+        field="signature_2.author_info_affiliations_n_grams",
+    )
+    coauthor_blocks_1 = _require_preprocessed_value(
+        signature_1.author_info_coauthor_blocks,
+        field="signature_1.author_info_coauthor_blocks",
+    )
+    coauthor_blocks_2 = _require_preprocessed_value(
+        signature_2.author_info_coauthor_blocks,
+        field="signature_2.author_info_coauthor_blocks",
+    )
+    coauthor_ngrams_1 = _require_preprocessed_value(
+        signature_1.author_info_coauthor_n_grams,
+        field="signature_1.author_info_coauthor_n_grams",
+    )
+    coauthor_ngrams_2 = _require_preprocessed_value(
+        signature_2.author_info_coauthor_n_grams,
+        field="signature_2.author_info_coauthor_n_grams",
+    )
+    coauthors_1 = _require_preprocessed_value(
+        signature_1.author_info_coauthors,
+        field="signature_1.author_info_coauthors",
+    )
+    coauthors_2 = _require_preprocessed_value(
+        signature_2.author_info_coauthors,
+        field="signature_2.author_info_coauthors",
+    )
+    signature_name_counts_1 = _require_preprocessed_value(
+        signature_1.author_info_name_counts,
+        field="signature_1.author_info_name_counts",
+    )
+    signature_name_counts_2 = _require_preprocessed_value(
+        signature_2.author_info_name_counts,
+        field="signature_2.author_info_name_counts",
+    )
+    venue_ngrams_1 = _require_preprocessed_value(paper_1.venue_ngrams, field="paper_1.venue_ngrams")
+    venue_ngrams_2 = _require_preprocessed_value(paper_2.venue_ngrams, field="paper_2.venue_ngrams")
+    title_word_ngrams_1 = _require_preprocessed_value(
+        paper_1.title_ngrams_words,
+        field="paper_1.title_ngrams_words",
+    )
+    title_word_ngrams_2 = _require_preprocessed_value(
+        paper_2.title_ngrams_words,
+        field="paper_2.title_ngrams_words",
+    )
+    title_char_ngrams_1 = _require_preprocessed_value(
+        paper_1.title_ngrams_chars,
+        field="paper_1.title_ngrams_chars",
+    )
+    title_char_ngrams_2 = _require_preprocessed_value(
+        paper_2.title_ngrams_chars,
+        field="paper_2.title_ngrams_chars",
+    )
+    has_abstract_1 = _require_preprocessed_value(paper_1.has_abstract, field="paper_1.has_abstract")
+    has_abstract_2 = _require_preprocessed_value(paper_2.has_abstract, field="paper_2.has_abstract")
+    journal_ngrams_1 = _require_preprocessed_value(paper_1.journal_ngrams, field="paper_1.journal_ngrams")
+    journal_ngrams_2 = _require_preprocessed_value(paper_2.journal_ngrams, field="paper_2.journal_ngrams")
+
     features.extend(
         [
             equal(
-                signature_1.author_info_first_normalized_without_apostrophe,
-                signature_2.author_info_first_normalized_without_apostrophe,
+                first_1,
+                first_2,
             ),
             counter_jaccard(
-                Counter(
-                    [
-                        p[0]
-                        for p in signature_1.author_info_middle_normalized_without_apostrophe.split(" ")
-                        if len(p) > 0
-                    ]
-                ),
-                Counter(
-                    [
-                        p[0]
-                        for p in signature_2.author_info_middle_normalized_without_apostrophe.split(" ")
-                        if len(p) > 0
-                    ]
-                ),
+                Counter([p[0] for p in middle_1.split(" ") if len(p) > 0]),
+                Counter([p[0] for p in middle_2.split(" ") if len(p) > 0]),
             ),
-            equal_middle(
-                signature_1.author_info_middle_normalized_without_apostrophe,
-                signature_2.author_info_middle_normalized_without_apostrophe,
-            ),
-            (
-                len(signature_1.author_info_middle_normalized_without_apostrophe) == 0
-                and len(signature_2.author_info_middle_normalized_without_apostrophe) != 0
-            )
-            or (
-                len(signature_2.author_info_middle_normalized_without_apostrophe) == 0
-                and len(signature_1.author_info_middle_normalized_without_apostrophe) != 0
-            ),
-            len(signature_1.author_info_first_normalized_without_apostrophe) == 1
-            or len(signature_2.author_info_first_normalized_without_apostrophe) == 1,
-            any(len(middle) == 1 for middle in signature_1.author_info_middle_normalized_without_apostrophe.split(" "))
-            or any(
-                len(middle) == 1 for middle in signature_2.author_info_middle_normalized_without_apostrophe.split(" ")
-            ),
+            equal_middle(middle_1, middle_2),
+            (len(middle_1) == 0 and len(middle_2) != 0) or (len(middle_2) == 0 and len(middle_1) != 0),
+            len(first_1) == 1 or len(first_2) == 1,
+            any(len(middle) == 1 for middle in middle_1.split(" "))
+            or any(len(middle) == 1 for middle in middle_2.split(" ")),
         ]
     )
 
     features.append(
         counter_jaccard(
-            signature_1.author_info_affiliations_n_grams,
-            signature_2.author_info_affiliations_n_grams,
+            affiliation_ngrams_1,
+            affiliation_ngrams_2,
         )
     )
 
@@ -887,17 +954,17 @@ def _single_pair_featurize(
 
     features.extend(
         [
-            jaccard(signature_1.author_info_coauthor_blocks, signature_2.author_info_coauthor_blocks),
+            jaccard(coauthor_blocks_1, coauthor_blocks_2),
             counter_jaccard(
-                signature_1.author_info_coauthor_n_grams,
-                signature_2.author_info_coauthor_n_grams,
+                coauthor_ngrams_1,
+                coauthor_ngrams_2,
                 denominator_max=5000,
             ),
-            jaccard(signature_1.author_info_coauthors, signature_2.author_info_coauthors),
+            jaccard(coauthors_1, coauthors_2),
         ]
     )
 
-    features.append(counter_jaccard(paper_1.venue_ngrams, paper_2.venue_ngrams))
+    features.append(counter_jaccard(venue_ngrams_1, venue_ngrams_2))
 
     features.append(
         np.minimum(
@@ -911,8 +978,8 @@ def _single_pair_featurize(
 
     features.extend(
         [
-            counter_jaccard(paper_1.title_ngrams_words, paper_2.title_ngrams_words),
-            counter_jaccard(paper_1.title_ngrams_chars, paper_2.title_ngrams_chars),
+            counter_jaccard(title_word_ngrams_1, title_word_ngrams_2),
+            counter_jaccard(title_char_ngrams_1, title_char_ngrams_2),
         ]
     )
 
@@ -929,7 +996,7 @@ def _single_pair_featurize(
                 ),
                 50,
             ),
-            int(paper_1.has_abstract) + int(paper_2.has_abstract),
+            int(has_abstract_1) + int(has_abstract_2),
             english_or_unknown_count,
             paper_1.predicted_language == paper_2.predicted_language,
             min(float(paper_1.language_reliability or 0.0), float(paper_2.language_reliability or 0.0)),
@@ -938,8 +1005,8 @@ def _single_pair_featurize(
 
     features.extend(
         name_counts(
-            signature_1.author_info_name_counts,
-            signature_2.author_info_name_counts,
+            signature_name_counts_1,
+            signature_name_counts_2,
         )
     )
 
@@ -964,12 +1031,12 @@ def _single_pair_featurize(
 
     features.append(specter_sim)  # , abstract_count, english_count])
 
-    features.append(counter_jaccard(paper_1.journal_ngrams, paper_2.journal_ngrams))
+    features.append(counter_jaccard(journal_ngrams_1, journal_ngrams_2))
 
     features.extend(
         name_text_features(
-            signature_1.author_info_first_normalized_without_apostrophe,
-            signature_2.author_info_first_normalized_without_apostrophe,
+            first_1,
+            first_2,
         )
     )
 
@@ -1384,7 +1451,7 @@ def many_pairs_featurize(
             )
             rust_module_available = True
         except Exception as exc:
-            raise RuntimeError("Rust featurizer init failed " f"(run_id={runtime_context.run_id} error={exc})") from exc
+            raise RuntimeError(f"Rust featurizer init failed (run_id={runtime_context.run_id} error={exc})") from exc
         try:
             rust_batch_total_ram_for_stage, _ = memory_budget.resolve_total_ram_bytes(total_ram_bytes)
             rust_batch_rss_before_bytes, rust_batch_rss_source = memory_budget.current_rss_bytes_best_effort(

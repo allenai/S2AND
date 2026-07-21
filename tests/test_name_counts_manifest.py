@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ def test_valid_manifest_has_identical_python_and_rust_binding(tmp_path: Path) ->
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
 
     assert python_manifest.normalization_version == rust_index.normalization_version
+    assert rust_index.manifest_sha256 == hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
     assert not hasattr(rust_index, "lookup_many")
     assert callable(rust_index._lookup_many_unique)
     assert rust_index.name_counts_provenance_binding == (

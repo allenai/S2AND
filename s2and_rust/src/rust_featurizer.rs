@@ -821,6 +821,30 @@ impl RustFeaturizer {
         }
     }
 
+    fn update_pair_aggregate_cell(
+        valid_count: &mut u64,
+        sum: &mut f64,
+        min: &mut f64,
+        max: &mut f64,
+        mut value: f64,
+        nan_value: f64,
+    ) {
+        if value.is_nan() {
+            if nan_value.is_nan() {
+                return;
+            }
+            value = nan_value;
+        }
+        *valid_count = valid_count.saturating_add(1);
+        *sum += value;
+        if value < *min {
+            *min = value;
+        }
+        if value > *max {
+            *max = value;
+        }
+    }
+
     fn aggregate_pair_index_arrays_grouped<'data, Lookup>(
         &'data self,
         left_indices: &[u32],
@@ -867,22 +891,14 @@ impl RustFeaturizer {
                         for (aggregate_position, feature_index) in
                             aggregate_indices.iter().enumerate()
                         {
-                            let mut value = row[*feature_index];
-                            if value.is_nan() && !nan_value.is_nan() {
-                                value = nan_value;
-                            }
-                            if value.is_nan() {
-                                continue;
-                            }
-                            valid_counts_row[aggregate_position] =
-                                valid_counts_row[aggregate_position].saturating_add(1);
-                            sums_row[aggregate_position] += value;
-                            if value < mins_row[aggregate_position] {
-                                mins_row[aggregate_position] = value;
-                            }
-                            if value > maxs_row[aggregate_position] {
-                                maxs_row[aggregate_position] = value;
-                            }
+                            Self::update_pair_aggregate_cell(
+                                &mut valid_counts_row[aggregate_position],
+                                &mut sums_row[aggregate_position],
+                                &mut mins_row[aggregate_position],
+                                &mut maxs_row[aggregate_position],
+                                row[*feature_index],
+                                nan_value,
+                            );
                         }
                     }
                 },
@@ -934,22 +950,15 @@ impl RustFeaturizer {
             let (s2, p2) = lookup(right_indices[pair_offset]);
             let row = self.featurize_pair_data(s1, s2, p1, p2);
             for (aggregate_position, feature_index) in aggregate_indices.iter().enumerate() {
-                let mut value = row[*feature_index];
-                if value.is_nan() && !nan_value.is_nan() {
-                    value = nan_value;
-                }
-                if value.is_nan() {
-                    continue;
-                }
                 let stats_index = aggregate_row_start + aggregate_position;
-                out.valid_counts[stats_index] = out.valid_counts[stats_index].saturating_add(1);
-                out.sums[stats_index] += value;
-                if value < out.mins[stats_index] {
-                    out.mins[stats_index] = value;
-                }
-                if value > out.maxs[stats_index] {
-                    out.maxs[stats_index] = value;
-                }
+                Self::update_pair_aggregate_cell(
+                    &mut out.valid_counts[stats_index],
+                    &mut out.sums[stats_index],
+                    &mut out.mins[stats_index],
+                    &mut out.maxs[stats_index],
+                    row[*feature_index],
+                    nan_value,
+                );
             }
         }
         out
@@ -1029,6 +1038,7 @@ impl RustFeaturizer {
         let (raw_signatures, _) = read_raw_arrow_signatures_with_optional_index(
             &signatures_path,
             signatures_batch_index_path.as_deref(),
+            None,
             keep_signature_ids.as_ref(),
         )?;
         let mut signature_ids = match requested_signature_ids {
@@ -1061,11 +1071,13 @@ impl RustFeaturizer {
         let (raw_papers, _) = read_raw_arrow_papers_with_optional_index(
             &papers_path,
             papers_batch_index_path.as_deref(),
+            None,
             &needed_paper_ids,
         )?;
         let (mut raw_authors_by_paper, _) = read_raw_arrow_paper_authors_with_optional_index(
             &paper_authors_path,
             paper_authors_batch_index_path.as_deref(),
+            None,
             &needed_paper_ids,
         )?;
         let specter_by_paper = match specter_path.as_ref() {
@@ -1073,6 +1085,7 @@ impl RustFeaturizer {
                 read_raw_arrow_specter_with_optional_index(
                     path,
                     specter_batch_index_path.as_deref(),
+                    None,
                     &needed_paper_ids,
                 )?
                 .0
@@ -1115,7 +1128,7 @@ impl RustFeaturizer {
                     )
                 })?;
                 let index = index.borrow(py);
-                index.validate_path_identity(path)?;
+                index.validate_path_root(path)?;
                 RawNameCountMaps::from_shared_index(index.shared_index())
             }
             None => match name_counts_index_path.as_ref() {
@@ -1962,14 +1975,16 @@ impl RustFeaturizer {
         let out_cols = resolved_matrix_indices.len();
         let aggregate_cols = resolved_aggregate_indices.len();
         let resolved_aggregate_nan_value = aggregate_nan_value.unwrap_or(nan_value);
-        let matrix_buffer = py.allow_threads(|| {
+        // Preserve raw NaNs until aggregate statistics have applied their own
+        // missing-value policy. The returned matrix policy is applied below.
+        let mut matrix_buffer = py.allow_threads(|| {
             let compute = || match &lookup {
                 BorrowedSignaturePaperLookup::Dense(dense_lookup) => self
                     .featurize_pair_index_arrays_matrix(
                         left_indices,
                         right_indices,
                         &resolved_matrix_indices,
-                        nan_value,
+                        f64::NAN,
                         &|index| {
                             dense_lookup[index as usize]
                                 .expect("dense signature index was validated before featurization")
@@ -1983,7 +1998,7 @@ impl RustFeaturizer {
                     compact_left,
                     compact_right,
                     &resolved_matrix_indices,
-                    nan_value,
+                    f64::NAN,
                     &|index| compact_lookup[index as usize],
                 ),
             };
@@ -2004,28 +2019,31 @@ impl RustFeaturizer {
                 for (aggregate_position, matrix_position) in
                     aggregate_matrix_positions.iter().enumerate()
                 {
-                    let mut value = matrix_buffer[matrix_row_start + *matrix_position];
-                    if value.is_nan() {
-                        if resolved_aggregate_nan_value.is_nan() {
-                            continue;
-                        }
-                        value = resolved_aggregate_nan_value;
-                    }
                     let stats_index = aggregate_row_start + aggregate_position;
-                    valid_counts[stats_index] = valid_counts[stats_index].saturating_add(1);
-                    sums[stats_index] += value;
-                    if value < mins[stats_index] {
-                        mins[stats_index] = value;
-                    }
-                    if value > maxs[stats_index] {
-                        maxs[stats_index] = value;
-                    }
+                    Self::update_pair_aggregate_cell(
+                        &mut valid_counts[stats_index],
+                        &mut sums[stats_index],
+                        &mut mins[stats_index],
+                        &mut maxs[stats_index],
+                        matrix_buffer[matrix_row_start + *matrix_position],
+                        resolved_aggregate_nan_value,
+                    );
                 }
             }
         } else {
             for row_index in owner_row_indices.iter() {
                 counts[*row_index as usize] = counts[*row_index as usize].saturating_add(1);
             }
+        }
+
+        if !nan_value.is_nan() {
+            py.allow_threads(|| {
+                matrix_buffer.par_iter_mut().for_each(|value| {
+                    if value.is_nan() {
+                        *value = nan_value;
+                    }
+                });
+            });
         }
 
         let matrix_array =

@@ -223,7 +223,9 @@ def _signature_coauthor_blocks(signature: Any, dataset: ANDData) -> frozenset[st
             return EMPTY_STRING_SET
         coauthors = []
         for author in paper.authors:
-            raw_position = author.get("position") if isinstance(author, Mapping) else getattr(author, "position", None)
+            raw_position: Any = (
+                author.get("position") if isinstance(author, Mapping) else getattr(author, "position", None)
+            )
             if raw_position is None:
                 position = None
             else:

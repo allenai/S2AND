@@ -283,7 +283,7 @@ def _is_windows() -> bool:
 
 def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
     try:
-        import psutil
+        import psutil  # ty: ignore[unresolved-import]
     except Exception:
         return None
     try:
@@ -297,7 +297,7 @@ def _psutil_virtual_memory_total_bytes_best_effort() -> int | None:
 
 def _psutil_process_rss_bytes_best_effort() -> int | None:
     try:
-        import psutil
+        import psutil  # ty: ignore[unresolved-import]
     except Exception:
         return None
     try:
@@ -700,7 +700,7 @@ def compute_rust_batch_chunk_plan(
     chunk_feature_count = max(1, selected_feature_count_bounded + nameless_feature_count_bounded)
     parsed_index_remap_bytes_per_pair = int(index_remap_bytes_per_pair)
     if parsed_index_remap_bytes_per_pair < 0:
-        raise ValueError("index_remap_bytes_per_pair must be non-negative, " f"got {index_remap_bytes_per_pair}")
+        raise ValueError(f"index_remap_bytes_per_pair must be non-negative, got {index_remap_bytes_per_pair}")
     bytes_per_pair_row = max(
         1,
         chunk_feature_count * 8 + row_overhead_bytes + parsed_index_remap_bytes_per_pair,

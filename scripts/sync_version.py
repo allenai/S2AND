@@ -142,7 +142,7 @@ def _replacement_from_match(match: re.Match[str], version: str) -> str:
     groups = match.groupdict()
     if groups.get("indent") is not None:
         return f'{groups["indent"]}"s2and-rust=={version}{groups["suffix"]}'
-    return f'{groups["prefix"]}{version}{groups["suffix"]}'
+    return f"{groups['prefix']}{version}{groups['suffix']}"
 
 
 def sync_target(root: Path, target: VersionTarget, version: str) -> None:

@@ -231,7 +231,8 @@ def _publish_snapshot(path: Path, arrays: dict[str, np.ndarray]) -> bool:
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".npz.tmp", delete=False) as handle:
             tmp_path = Path(handle.name)
-            np.savez(handle, **arrays)
+            # NumPy's stub cannot express this dynamically named array mapping.
+            np.savez(handle, **arrays)  # ty: ignore[invalid-argument-type]
         with exclusive_file_lock(f"{path}.lock"):
             if path.exists():
                 tmp_path.unlink()

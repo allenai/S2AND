@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tarfile
 import tomllib
 import zipfile
@@ -62,6 +63,25 @@ def test_rust_wheel_matrix_matches_supported_python_versions() -> None:
     assert "python3.10" not in _all_run_text(jobs)
 
 
+def test_release_maturin_action_matches_rust_build_system_floor() -> None:
+    rust_project = tomllib.loads((REPO_ROOT / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8"))
+    maturin_requirement = next(
+        requirement for requirement in rust_project["build-system"]["requires"] if requirement.startswith("maturin")
+    )
+    floor_match = re.search(r">=([^,]+)", maturin_requirement)
+    assert floor_match is not None
+    expected_action_version = f"v{floor_match.group(1)}"
+
+    maturin_action_versions = [
+        step["with"]["maturin-version"]
+        for job in _release_workflow_jobs().values()
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith("PyO3/maturin-action@")
+    ]
+    assert maturin_action_versions
+    assert set(maturin_action_versions) == {expected_action_version}
+
+
 def test_release_workflow_consumes_only_final_policy_outputs() -> None:
     jobs = _release_workflow_jobs()
 
@@ -89,6 +109,13 @@ def test_python_package_data_is_explicit() -> None:
     package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
     assert "arrow_schema_contract.json" in package_data
     assert all("production_model" not in pattern for pattern in package_data)
+    assert set(package_data).isdisjoint(
+        {
+            "data/s2and_name_tuples.txt",
+            "data/s2and_name_tuples_filtered.txt",
+            "data/s2and_unnormalized_filtered_name_tuples.txt",
+        }
+    )
 
 
 def _write_distribution_fixture(

@@ -43,13 +43,13 @@ def _validated_classifier_features(
     expected_count = getattr(classifier, "n_features_in_", None)
     if expected_count is not None and int(expected_count) != values.shape[1]:
         raise ValueError(
-            "Classifier feature count does not match fitted schema: " f"{values.shape[1]} != {int(expected_count)}"
+            f"Classifier feature count does not match fitted schema: {values.shape[1]} != {int(expected_count)}"
         )
 
     supplied_names = tuple(str(name) for name in feature_names) if feature_names is not None else None
     if supplied_names is not None and len(supplied_names) != values.shape[1]:
         raise ValueError(
-            "Classifier feature names do not match matrix width: " f"{len(supplied_names)} != {values.shape[1]}"
+            f"Classifier feature names do not match matrix width: {len(supplied_names)} != {values.shape[1]}"
         )
 
     fitted_names_raw = getattr(classifier, "feature_names_in_", None)
@@ -62,15 +62,13 @@ def _validated_classifier_features(
         if columns is not None:
             actual_names = tuple(str(name) for name in columns)
     if actual_names is not None and actual_names != fitted_names:
-        raise ValueError(
-            "Classifier feature names do not match fitted schema: " f"{actual_names!r} != {fitted_names!r}"
-        )
+        raise ValueError(f"Classifier feature names do not match fitted schema: {actual_names!r} != {fitted_names!r}")
     if getattr(features, "columns", None) is not None:
         return features
 
     import pandas as pd
 
-    return pd.DataFrame(values, columns=list(fitted_names), copy=False)
+    return pd.DataFrame(values, columns=pd.Index(fitted_names), copy=False)
 
 
 def predict_pairwise_class0(classifier: Any, features: np.ndarray) -> np.ndarray:
@@ -170,10 +168,10 @@ class PairwiseModeler:
 
     def fit(
         self,
-        X_train: np.ndarray[Any, Any] | None | Any,
-        y_train: np.ndarray[Any, Any] | None | Any,
-        X_val: np.ndarray[Any, Any] | None | Any,
-        y_val: np.ndarray[Any, Any] | None | Any,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
     ) -> Trials | dict[Any, Any]:
         """
         Fits the classifier
@@ -199,7 +197,7 @@ class PairwiseModeler:
                 params = {k: intify(v) for k, v in params.items()}
                 self.estimator.set_params(**params)
                 self.estimator.fit(X_train, y_train)
-                y_pred_proba = self.estimator.predict_proba(X_val)[:, 1]
+                y_pred_proba = np.asarray(self.estimator.predict_proba(X_val), dtype=np.float64)[:, 1]
                 return -roc_auc_score(y_val, y_pred_proba)
 
             self.hyperopt_trials_store = Trials()

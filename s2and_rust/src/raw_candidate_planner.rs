@@ -16,6 +16,7 @@ struct RawArrowPlannerBuildTelemetry {
     paper_author_index_stats: IndexedArrowReadStats,
     specter_index_stats: IndexedArrowReadStats,
     indexed_arrow_candidate_plan: bool,
+    reused_name_counts_index: bool,
 }
 
 struct ReusableRawArrowCandidatePlanState {
@@ -53,6 +54,48 @@ struct RawArrowQueryInputReadResult {
     read_paper_authors_secs: f64,
     read_specter_secs: f64,
     metadata_reads_parallel_secs: f64,
+}
+
+struct RawArrowQueryLookupIndexes {
+    signatures: Option<ArrowBatchLookupIndex>,
+    papers: Option<ArrowBatchLookupIndex>,
+    paper_authors: Option<ArrowBatchLookupIndex>,
+    specter: Option<ArrowBatchLookupIndex>,
+}
+
+impl RawArrowQueryLookupIndexes {
+    fn open(paths: &RawArrowPlannerPaths) -> PyResult<Self> {
+        let open = |index_path: Option<&str>, source_path: &str, key_column: &str| {
+            index_path
+                .map(|path| ArrowBatchLookupIndex::open_for_request(path, source_path, key_column))
+                .transpose()
+        };
+        Ok(Self {
+            signatures: open(
+                paths.signatures_batch_index_path.as_deref(),
+                &paths.signatures_path,
+                "signature_id",
+            )?,
+            papers: open(
+                paths.papers_batch_index_path.as_deref(),
+                &paths.papers_path,
+                "paper_id",
+            )?,
+            paper_authors: open(
+                paths.paper_authors_batch_index_path.as_deref(),
+                &paths.paper_authors_path,
+                "paper_id",
+            )?,
+            specter: match paths.specter_path.as_deref() {
+                Some(source_path) => open(
+                    paths.specter_batch_index_path.as_deref(),
+                    source_path,
+                    "paper_id",
+                )?,
+                None => None,
+            },
+        })
+    }
 }
 
 fn validate_raw_arrow_query_signature_ids_allow_empty(
@@ -471,6 +514,7 @@ pub(crate) fn raw_arrow_summary_signals_for_members_cached<'a>(
 fn read_reusable_raw_arrow_query_inputs(
     py: Python<'_>,
     paths: &RawArrowPlannerPaths,
+    indexes: &RawArrowQueryLookupIndexes,
     query_signature_ids: &[String],
     num_threads: Option<usize>,
 ) -> PyResult<RawArrowQueryInputReadResult> {
@@ -479,6 +523,7 @@ fn read_reusable_raw_arrow_query_inputs(
     let (signatures, signature_index_stats) = read_raw_arrow_signatures_with_optional_index(
         &paths.signatures_path,
         paths.signatures_batch_index_path.as_deref(),
+        indexes.signatures.as_ref(),
         Some(&query_signature_id_set),
     )?;
     let read_signatures_secs = read_signatures_start.elapsed().as_secs_f64();
@@ -512,6 +557,7 @@ fn read_reusable_raw_arrow_query_inputs(
                                 let (loaded, stats) = read_raw_arrow_papers_with_optional_index(
                                     &paths.papers_path,
                                     paths.papers_batch_index_path.as_deref(),
+                                    indexes.papers.as_ref(),
                                     &needed_paper_ids,
                                 )?;
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
@@ -526,6 +572,7 @@ fn read_reusable_raw_arrow_query_inputs(
                                     read_raw_arrow_paper_authors_with_optional_index(
                                         &paths.paper_authors_path,
                                         paths.paper_authors_batch_index_path.as_deref(),
+                                        indexes.paper_authors.as_ref(),
                                         &needed_paper_ids,
                                     )?;
                                 Ok((loaded, stats, start.elapsed().as_secs_f64()))
@@ -540,11 +587,13 @@ fn read_reusable_raw_arrow_query_inputs(
                         let start = Instant::now();
                         let (loaded, stats) = match paths.specter_path.as_ref() {
                             Some(path) => {
-                                let (loaded, stats) = read_raw_arrow_specter_with_optional_index(
-                                    path,
-                                    paths.specter_batch_index_path.as_deref(),
-                                    &needed_paper_ids,
-                                )?;
+                                let (loaded, stats) =
+                                    read_raw_arrow_specter_with_optional_index(
+                                        path,
+                                        paths.specter_batch_index_path.as_deref(),
+                                        indexes.specter.as_ref(),
+                                        &needed_paper_ids,
+                                    )?;
                                 (loaded, stats)
                             }
                             None => (HashMap::new(), IndexedArrowReadStats::default()),
@@ -599,6 +648,7 @@ enum RawPlannerQueryMode {
 #[pyclass]
 pub(crate) struct RawBlockQueryCandidatePlanner {
     paths: RawArrowPlannerPaths,
+    query_lookup_indexes: RawArrowQueryLookupIndexes,
     state: ReusableRawArrowCandidatePlanState,
     planner_query_signature_ids: Vec<String>,
     planner_query_signature_count: usize,
@@ -620,11 +670,27 @@ impl RawBlockQueryCandidatePlanner {
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
+        name_counts_index: Option<Py<NameCountsIndex>>,
     ) -> PyResult<Self> {
         validate_retrieval_rank_top_k(top_k)?;
         validate_raw_arrow_query_signature_ids_allow_empty(&query_signature_ids)?;
         let planner_query_signature_id_set = query_signature_ids.iter().cloned().collect();
         let paths = RawArrowPlannerPaths::from_py_dict(paths)?;
+        let query_lookup_indexes = RawArrowQueryLookupIndexes::open(&paths)?;
+        let shared_name_counts_index = match name_counts_index {
+            Some(index) => {
+                let path = paths.name_counts_index_path.as_deref().ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "name_counts_index handle requires paths['name_counts_index']",
+                    )
+                })?;
+                let index = index.borrow(py);
+                index.validate_path_root(path)?;
+                Some(index.shared_index())
+            }
+            None => None,
+        };
+        let reused_name_counts_index = shared_name_counts_index.is_some();
 
         let read_cluster_seeds_start = Instant::now();
         let (component_order, members_by_component) =
@@ -660,6 +726,7 @@ impl RawBlockQueryCandidatePlanner {
             read_raw_arrow_signatures_with_optional_index(
                 &paths.signatures_path,
                 paths.signatures_batch_index_path.as_deref(),
+                query_lookup_indexes.signatures.as_ref(),
                 Some(&seed_signature_id_set),
             )?
         };
@@ -700,6 +767,7 @@ impl RawBlockQueryCandidatePlanner {
                                     read_raw_arrow_papers_with_optional_index(
                                         &paths.papers_path,
                                         paths.papers_batch_index_path.as_deref(),
+                                        query_lookup_indexes.papers.as_ref(),
                                         &needed_paper_ids,
                                     )?
                                 };
@@ -717,6 +785,7 @@ impl RawBlockQueryCandidatePlanner {
                                     read_raw_arrow_paper_authors_with_optional_index(
                                         &paths.paper_authors_path,
                                         paths.paper_authors_batch_index_path.as_deref(),
+                                        query_lookup_indexes.paper_authors.as_ref(),
                                         &needed_paper_ids,
                                     )?
                                 };
@@ -738,6 +807,7 @@ impl RawBlockQueryCandidatePlanner {
                                             read_raw_arrow_specter_with_optional_index(
                                                 path,
                                                 paths.specter_batch_index_path.as_deref(),
+                                                query_lookup_indexes.specter.as_ref(),
                                                 &needed_paper_ids,
                                             )?;
                                         (loaded, stats)
@@ -758,9 +828,14 @@ impl RawBlockQueryCandidatePlanner {
                             },
                             || -> PyResult<(RawNameCountMaps, f64)> {
                                 let start = Instant::now();
-                                let loaded = match paths.name_counts_index_path.as_ref() {
-                                    Some(path) => read_raw_name_counts_index(path)?,
-                                    None => RawNameCountMaps::default(),
+                                let loaded = match shared_name_counts_index.as_ref() {
+                                    Some(index) => {
+                                        RawNameCountMaps::from_shared_index(Arc::clone(index))
+                                    }
+                                    None => match paths.name_counts_index_path.as_ref() {
+                                        Some(path) => read_raw_name_counts_index(path)?,
+                                        None => RawNameCountMaps::default(),
+                                    },
                                 };
                                 Ok((loaded, start.elapsed().as_secs_f64()))
                             },
@@ -865,6 +940,7 @@ impl RawBlockQueryCandidatePlanner {
 
         Ok(Self {
             paths,
+            query_lookup_indexes,
             state: ReusableRawArrowCandidatePlanState {
                 features_by_signature_id,
                 signatures,
@@ -902,6 +978,7 @@ impl RawBlockQueryCandidatePlanner {
                     paper_author_index_stats,
                     specter_index_stats,
                     indexed_arrow_candidate_plan,
+                    reused_name_counts_index,
                 },
             },
             planner_query_signature_ids: query_signature_ids.clone(),
@@ -925,7 +1002,8 @@ impl RawBlockQueryCandidatePlanner {
         top_k,
         orcid_enabled = true,
         num_threads = None,
-        max_exemplars = 4
+        max_exemplars = 4,
+        name_counts_index = None
     ))]
     fn from_query_signatures(
         py: Python<'_>,
@@ -934,6 +1012,7 @@ impl RawBlockQueryCandidatePlanner {
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
+        name_counts_index: Option<Py<NameCountsIndex>>,
     ) -> PyResult<Self> {
         let query_signatures_path = required_path_from_py_dict(paths, "query_signatures")?;
         let query_requests = read_raw_arrow_query_signatures(&query_signatures_path)?;
@@ -950,6 +1029,7 @@ impl RawBlockQueryCandidatePlanner {
             orcid_enabled,
             num_threads,
             max_exemplars,
+            name_counts_index,
         )?;
         planner.planner_query_signature_ids = query_signature_ids;
         planner.planner_query_signature_count = query_requests.len();
@@ -966,7 +1046,8 @@ impl RawBlockQueryCandidatePlanner {
         top_k,
         orcid_enabled = true,
         num_threads = None,
-        max_exemplars = 4
+        max_exemplars = 4,
+        name_counts_index = None
     ))]
     fn from_auto_queries(
         py: Python<'_>,
@@ -975,6 +1056,7 @@ impl RawBlockQueryCandidatePlanner {
         orcid_enabled: bool,
         num_threads: Option<usize>,
         max_exemplars: usize,
+        name_counts_index: Option<Py<NameCountsIndex>>,
     ) -> PyResult<Self> {
         let mut planner = Self::build_from_query_signature_ids(
             py,
@@ -984,6 +1066,7 @@ impl RawBlockQueryCandidatePlanner {
             orcid_enabled,
             num_threads,
             max_exemplars,
+            name_counts_index,
         )?;
         planner.query_mode = RawPlannerQueryMode::Auto;
         Ok(planner)
@@ -1022,6 +1105,10 @@ impl RawBlockQueryCandidatePlanner {
         payload.set_item(
             "indexed_arrow_candidate_plan",
             telemetry.indexed_arrow_candidate_plan,
+        )?;
+        payload.set_item(
+            "reused_name_counts_index",
+            telemetry.reused_name_counts_index,
         )?;
         payload.set_item(
             "signature_batches_read",
@@ -1106,6 +1193,7 @@ impl RawBlockQueryCandidatePlanner {
         let query_inputs = read_reusable_raw_arrow_query_inputs(
             py,
             &self.paths,
+            &self.query_lookup_indexes,
             &query_signature_ids,
             self.num_threads,
         )?;
@@ -2060,7 +2148,8 @@ fn raw_arrow_counter_present(counter: &Option<CounterData>) -> bool {
     component_members,
     orcid_enabled = false,
     num_threads = None,
-    max_exemplars = 4
+    max_exemplars = 4,
+    name_counts_index = None
 ))]
 pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     py: Python<'py>,
@@ -2074,6 +2163,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     orcid_enabled: bool,
     num_threads: Option<usize>,
     max_exemplars: usize,
+    name_counts_index: Option<Py<NameCountsIndex>>,
 ) -> PyResult<Py<PyDict>> {
     let total_start = Instant::now();
     let row_count = row_component_keys.len();
@@ -2158,11 +2248,30 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
         }
     }
 
-    let query_inputs =
-        read_reusable_raw_arrow_query_inputs(py, &paths, &needed_signature_ids, num_threads)?;
-    let raw_name_counts = match paths.name_counts_index_path.as_ref() {
-        Some(path) => read_raw_name_counts_index(path)?,
-        None => RawNameCountMaps::default(),
+    let query_lookup_indexes = RawArrowQueryLookupIndexes::open(&paths)?;
+    let query_inputs = read_reusable_raw_arrow_query_inputs(
+        py,
+        &paths,
+        &query_lookup_indexes,
+        &needed_signature_ids,
+        num_threads,
+    )?;
+    let reused_name_counts_index = name_counts_index.is_some();
+    let raw_name_counts = match name_counts_index {
+        Some(index) => {
+            let path = paths.name_counts_index_path.as_deref().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "name_counts_index handle requires paths['name_counts_index']",
+                )
+            })?;
+            let index = index.borrow(py);
+            index.validate_path_root(path)?;
+            RawNameCountMaps::from_shared_index(index.shared_index())
+        }
+        None => match paths.name_counts_index_path.as_ref() {
+            Some(path) => read_raw_name_counts_index(path)?,
+            None => RawNameCountMaps::default(),
+        },
     };
 
     let text_context_start = Instant::now();
@@ -2707,6 +2816,7 @@ pub(crate) fn raw_arrow_labeled_candidate_plan<'py>(
     telemetry.set_item("pair_count", left_signature_ids.len())?;
     telemetry.set_item("component_scope", "block-local")?;
     telemetry.set_item("orcid_enabled", orcid_enabled)?;
+    telemetry.set_item("reused_name_counts_index", reused_name_counts_index)?;
     telemetry.set_item(
         "signature_batches_read",
         query_inputs.signature_index_stats.batches_read,

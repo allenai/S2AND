@@ -146,9 +146,9 @@ def test_canonical_count_keys_via_live_anddata_path(canonical_name_counts_index)
             if keys[name] is None:
                 assert math.isnan(count_value), f"{case['id']}: {name} should be NaN (no lookup) but was {count_value}"
             else:
-                assert (
-                    count_value == _COUNT_SENTINELS[name]
-                ), f"{case['id']}: {name} lookup did not hit the seeded key {keys[name]!r}"
+                assert count_value == _COUNT_SENTINELS[name], (
+                    f"{case['id']}: {name} lookup did not hit the seeded key {keys[name]!r}"
+                )
 
 
 def test_compare_time_first_name_compatibility():
@@ -157,9 +157,9 @@ def test_compare_time_first_name_compatibility():
     for group in groups:
         firsts = {case_id: CASES_BY_ID[case_id]["canonical"]["first"] for case_id in group}
         for (id_a, first_a), (id_b, first_b) in itertools.combinations(firsts.items(), 2):
-            assert same_prefix_tokens(
-                first_a, first_b
-            ), f"{id_a} ({first_a!r}) and {id_b} ({first_b!r}) must be compare-time compatible"
+            assert same_prefix_tokens(first_a, first_b), (
+                f"{id_a} ({first_a!r}) and {id_b} ({first_b!r}) must be compare-time compatible"
+            )
 
 
 def test_compare_time_first_name_incompatibility():

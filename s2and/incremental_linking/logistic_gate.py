@@ -203,9 +203,7 @@ class NumpyLogisticGate:
 
         n_features = len(feature_names)
         if weights.shape != (n_features, len(classes)):
-            raise ValueError(
-                "logistic gate weights shape must be " f"({n_features}, {len(classes)}), got {weights.shape}"
-            )
+            raise ValueError(f"logistic gate weights shape must be ({n_features}, {len(classes)}), got {weights.shape}")
         if bias.shape != (len(classes),):
             raise ValueError(f"logistic gate bias shape must be ({len(classes)},), got {bias.shape}")
         if missing_values.shape != (n_features,):

@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, TypedDict, cast
 
 import numpy as np
 import pandas as pd
@@ -153,10 +153,77 @@ def _validate_split_ratios(train_ratio: float, val_ratio: float, test_ratio: flo
             "train/val/test ratios must each be between 0 and 1; "
             f"got train={train_ratio}, val={val_ratio}, test={test_ratio}"
         )
-    if not math.isclose(sum(ratios), 1.0):
+    if not math.isclose(sum(ratios), 1.0, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError(
             f"train/val/test ratios must add to 1; got train={train_ratio}, val={val_ratio}, test={test_ratio}"
         )
+
+
+def _split_train_val_test(
+    items: list[str],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    random_seed: int,
+    stratify: Any = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """Split items while allowing any partition to have a zero ratio.
+
+    Args:
+        items: Identifiers to split.
+        train_ratio: Fraction assigned to training.
+        val_ratio: Fraction assigned to validation.
+        test_ratio: Fraction assigned to testing.
+        random_seed: Random seed passed to scikit-learn.
+        stratify: Optional labels aligned with ``items`` for stratified splits.
+
+    Returns:
+        Training, validation, and test identifiers.
+    """
+
+    _validate_split_ratios(train_ratio, val_ratio, test_ratio)
+    ratio_total = math.fsum((train_ratio, val_ratio, test_ratio))
+    train_ratio, val_ratio, test_ratio = (
+        train_ratio / ratio_total,
+        val_ratio / ratio_total,
+        test_ratio / ratio_total,
+    )
+
+    heldout_ratio = 1.0 - train_ratio
+    if train_ratio == 0.0:
+        train_items: list[str] = []
+        val_test_items = list(items)
+        val_test_stratify = stratify
+    elif heldout_ratio == 0.0:
+        return list(items), [], []
+    elif stratify is None:
+        train_items, val_test_items = train_test_split(
+            items,
+            test_size=heldout_ratio,
+            random_state=random_seed,
+        )
+        val_test_stratify = None
+    else:
+        train_items, val_test_items, _, val_test_stratify = train_test_split(
+            items,
+            stratify,
+            test_size=heldout_ratio,
+            stratify=stratify,
+            random_state=random_seed,
+        )
+
+    if val_ratio == 0.0:
+        return train_items, [], val_test_items
+    if test_ratio == 0.0:
+        return train_items, val_test_items, []
+
+    val_items, test_items = train_test_split(
+        val_test_items,
+        test_size=test_ratio / (val_ratio + test_ratio),
+        stratify=val_test_stratify,
+        random_state=random_seed,
+    )
+    return train_items, val_items, test_items
 
 
 def _map_fixed_pair_labels(pair_frame: pd.DataFrame, split_name: str) -> pd.DataFrame:
@@ -333,6 +400,25 @@ class Paper(NamedTuple):
     journal_ngrams: Counter | None
     year: int | None
     paper_id: int
+
+
+class _SignaturePreprocessRow(TypedDict):
+    """Typed intermediate values for one signature preprocessing batch row."""
+
+    signature_id: str
+    signature: Signature
+    first_without_apostrophe: str | None
+    middle_without_apostrophe: str | None
+    last_normalized: str | None
+    suffix_normalized: str | None
+    coauthor_set: set[str] | None
+    coauthor_blocks: set[str] | None
+    affiliations: list[str]
+    full_name: str | None
+    count_keys: tuple[str | None, str | None, str | None, str | None] | None
+    normalized_orcid: str | None
+    coauthor_text: str
+    affiliation_text: str
 
 
 class ANDData:
@@ -633,7 +719,7 @@ class ANDData:
         cluster_seeds_dict = self.maybe_load_json(cluster_seeds)
         self.altered_cluster_signatures = self.maybe_load_list(altered_cluster_signatures)
         self.cluster_seeds_disallow = set()
-        self.cluster_seeds_require = {}
+        self.cluster_seeds_require: dict[str, int | str] = {}
         self.max_seed_cluster_id = None
         if cluster_seeds_dict is not None:
             cluster_num = 0
@@ -845,7 +931,7 @@ class ANDData:
         with tqdm(total=len(signature_ids), desc="Preprocessing signatures") as progress_bar:
             for batch_start in range(0, len(signature_ids), SIGNATURE_PREPROCESS_BATCH_SIZE):
                 batch_signature_ids = signature_ids[batch_start : batch_start + SIGNATURE_PREPROCESS_BATCH_SIZE]
-                batch_rows = []
+                batch_rows: list[_SignaturePreprocessRow] = []
                 batch_coauthor_texts: list[str] = []
                 batch_affiliation_texts: list[str] = []
 
@@ -981,9 +1067,12 @@ class ANDData:
                             for _row in batch_rows
                         ]
                     else:
-                        key_rows = [row["count_keys"] for row in batch_rows]
-                        if any(keys is None for keys in key_rows):  # pragma: no cover - construction invariant
-                            raise RuntimeError("name-count index batch is missing canonical keys")
+                        key_rows: list[tuple[str | None, str | None, str | None, str | None]] = []
+                        for row in batch_rows:
+                            keys = row["count_keys"]
+                            if keys is None:  # pragma: no cover - construction invariant
+                                raise RuntimeError("name-count index batch is missing canonical keys")
+                            key_rows.append(keys)
                         first_keys = [keys[0] for keys in key_rows]
                         last_keys = [keys[1] for keys in key_rows]
                         first_last_keys = [keys[2] for keys in key_rows]
@@ -1000,7 +1089,7 @@ class ANDData:
                         ]
 
                 for idx, row in enumerate(batch_rows):
-                    replace_kwargs = {
+                    replace_kwargs: dict[str, Any] = {
                         "author_info_first_normalized_without_apostrophe": row["first_without_apostrophe"],
                         "author_info_middle_normalized_without_apostrophe": row["middle_without_apostrophe"],
                         "author_info_last_normalized": row["last_normalized"],
@@ -1455,18 +1544,13 @@ class ANDData:
         ).fit(np.array(y).reshape(-1, 1))
         y_group = clustering_model.labels_
 
-        train_blocks, val_test_blocks, _, val_test_length = train_test_split(
+        train_blocks, val_blocks, test_blocks = _split_train_val_test(
             x,
-            y_group,
-            test_size=self.val_ratio + self.test_ratio,
+            self.train_ratio,
+            self.val_ratio,
+            self.test_ratio,
+            self.random_seed,
             stratify=y_group,
-            random_state=self.random_seed,
-        )
-        val_blocks, test_blocks = train_test_split(
-            val_test_blocks,
-            test_size=self.test_ratio / (self.val_ratio + self.test_ratio),
-            stratify=val_test_length,
-            random_state=self.random_seed,
         )
 
         train_block_dict = {k: blocks_dict[k] for k in train_blocks}
@@ -1509,15 +1593,12 @@ class ANDData:
 
         if self.unit_of_data_split == "signatures":
             signature_keys = list(self.signatures.keys())
-            train_signatures, val_test_signatures = train_test_split(
+            train_signatures, val_signatures, test_signatures = _split_train_val_test(
                 signature_keys,
-                test_size=self.val_ratio + self.test_ratio,
-                random_state=self.random_seed,
-            )
-            val_signatures, test_signatures = train_test_split(
-                val_test_signatures,
-                test_size=self.test_ratio / (self.val_ratio + self.test_ratio),
-                random_state=self.random_seed,
+                self.train_ratio,
+                self.val_ratio,
+                self.test_ratio,
+                self.random_seed,
             )
             train_block_dict = self.group_signature_helper(train_signatures)
             val_block_dict = self.group_signature_helper(val_signatures)
@@ -1537,11 +1618,11 @@ class ANDData:
             for signature_id, signature in self.signatures.items():
                 # paper_id should be kept as string, so it can be matched to papers.json
                 paper_id = str(signature.paper_id)
-                if self.papers[paper_id].year is None:
+                year = self.papers[paper_id].year
+                if year is None:
                     signature_to_year[signature_id] = 0
                 else:
-                    # mypy: year is Optional[int] on Paper; guarded above, so cast to int here
-                    signature_to_year[signature_id] = int(self.papers[paper_id].year)
+                    signature_to_year[signature_id] = int(year)
 
             train_size = int(len(signature_to_year) * self.train_ratio)
             val_size = int(len(signature_to_year) * self.val_ratio)
@@ -1758,9 +1839,9 @@ class ANDData:
         -------
         train/val/test pairs, where each pair is (signature_id_1, signature_id_2, label)
         """
-        assert (
-            self.train_pairs is not None and self.test_pairs is not None
-        ), "You need to pass in train and test pairs to use this function"
+        assert self.train_pairs is not None and self.test_pairs is not None, (
+            "You need to pass in train and test pairs to use this function"
+        )
         train_pairs_df = _map_fixed_pair_labels(self.train_pairs, "train")
         if self.val_pairs is not None:
             val_pairs_df = _map_fixed_pair_labels(self.val_pairs, "val")

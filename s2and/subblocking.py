@@ -212,8 +212,7 @@ def _resolve_graph_subblocking_config(raw_config: object) -> GraphSubblockingCon
     if isinstance(raw_config, Mapping):
         return GraphSubblockingConfig(**dict(raw_config))
     raise ValueError(
-        "subblocking_graph_config must be a GraphSubblockingConfig, mapping, or None; "
-        f"got {type(raw_config).__name__}"
+        f"subblocking_graph_config must be a GraphSubblockingConfig, mapping, or None; got {type(raw_config).__name__}"
     )
 
 
@@ -1333,7 +1332,7 @@ class ArrowGraphSubblockingFallback:
         ]
         if missing_signature_ids:
             raise ValueError(
-                "Arrow graph subblocking evidence is missing required signatures: " f"{missing_signature_ids[:10]}"
+                f"Arrow graph subblocking evidence is missing required signatures: {missing_signature_ids[:10]}"
             )
         return dataset
 
@@ -1461,7 +1460,7 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
     """
     if len(signature_ids) == 0:
         return {}
-    elif len(signature_ids) < target_subblock_size:
+    elif len(signature_ids) <= target_subblock_size:
         return {"0": signature_ids}
 
     # extract all the specter stuff in order of the signatures
@@ -1505,7 +1504,10 @@ def cluster_with_specter(signature_ids, anddata, target_subblock_size=10000, com
 
     # how many subblocks do we want given this data and target subblock size?
     # should be at least 2 if we end up here otherwise there is no point
-    num_desired_subblocks = int(np.ceil(len(signature_ids) / target_subblock_size))
+    num_desired_subblocks = min(
+        int(np.ceil(len(signature_ids) / target_subblock_size)),
+        len(signature_ids) - 1,
+    )
 
     if np.any(X):
         g = genieclust.Genie(n_clusters=num_desired_subblocks, gini_threshold=0.01)
@@ -1639,13 +1641,16 @@ def _sorted_subblock_merge_candidates(
     """Return legacy subblock merge candidates with key metadata parsed once."""
 
     small_enough_keys = [key for key, value in output.items() if len(value) < maximum_size]
-    metadata = {}
-    mergeable_keys = []
+    metadata: dict[str, tuple[int, str, str | None, str, str | None]] = {}
+    mergeable_keys: list[str] = []
     for key in small_enough_keys:
-        row = _subblock_merge_candidate_metadata(key, len(output[key]))
-        if row[3] is None:
+        size, first_name, middle_name, name_for_splits, lookup = _subblock_merge_candidate_metadata(
+            key,
+            len(output[key]),
+        )
+        if name_for_splits is None:
             continue
-        metadata[key] = row
+        metadata[key] = (size, first_name, middle_name, name_for_splits, lookup)
         mergeable_keys.append(key)
     candidates: list[tuple[tuple[str, str], float]] = []
     for pair in combinations(mergeable_keys, 2):

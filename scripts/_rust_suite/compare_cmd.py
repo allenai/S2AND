@@ -148,7 +148,7 @@ def _featurize_pairs_with_rust(
         }
     )
     if missing_signature_ids:
-        raise ValueError("Arrow Rust featurizer is missing sampled signature ids: " f"{missing_signature_ids[:10]}")
+        raise ValueError(f"Arrow Rust featurizer is missing sampled signature ids: {missing_signature_ids[:10]}")
     indexed_pairs = [
         (signature_id_to_index[left_signature_id], signature_id_to_index[right_signature_id])
         for left_signature_id, right_signature_id, _label in pairs

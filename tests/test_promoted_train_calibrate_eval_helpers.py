@@ -677,6 +677,20 @@ def test_format_classic_selected_gate_tables_includes_requested_breakdowns() -> 
     assert "| has_positive_candidate | True | 2 | 1 | 1 | 0.2500 | 1 | 0 | 0 |" in tables
 
 
+def test_format_classic_selected_gate_tables_rejects_malformed_metrics() -> None:
+    summary = {
+        "stratified_eval_test_split": {
+            "test_breakdowns": {
+                "source_key": {},
+                "has_positive_candidate": {"True": 42},
+            }
+        }
+    }
+
+    with pytest.raises(TypeError, match=r"has_positive_candidate\['True'\] metrics must be a dict, got int"):
+        format_classic_selected_gate_tables(summary)
+
+
 def test_summarize_training_gate_buckets_counts_queries_and_rows() -> None:
     """Training bucket counts should reflect the post-filter query windows."""
 

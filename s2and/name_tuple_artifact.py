@@ -147,8 +147,7 @@ def _parse_and_validate_pairs(
 
     if len(pairs) != expected_pair_count:
         raise ValueError(
-            f"Name-tuple artifact {data_path} pair_count mismatch: "
-            f"metadata={expected_pair_count} actual={len(pairs)}"
+            f"Name-tuple artifact {data_path} pair_count mismatch: metadata={expected_pair_count} actual={len(pairs)}"
         )
     return frozenset(pairs)
 
@@ -232,8 +231,7 @@ def load_name_tuple_artifact(path: str | Path) -> NameTupleArtifact:
     semantics = _require_object(metadata.get("semantics"), field="semantics", metadata_path=metadata_path)
     if semantics != NAME_TUPLE_ARTIFACT_SEMANTICS:
         raise ValueError(
-            f"Name-tuple metadata {metadata_path} has unsupported semantics; "
-            f"expected {NAME_TUPLE_ARTIFACT_SEMANTICS!r}"
+            f"Name-tuple metadata {metadata_path} has unsupported semantics; expected {NAME_TUPLE_ARTIFACT_SEMANTICS!r}"
         )
     generation_counts = _require_object(
         metadata.get("generation_counts"), field="generation_counts", metadata_path=metadata_path

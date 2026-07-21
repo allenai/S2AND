@@ -324,6 +324,8 @@ def main(
 
         if USE_NAMELESS_MODEL:
             logger.info(f"nameless fitting pairwise for {dataset_name}")
+            if nameless_X_train is None or nameless_X_val is None:
+                raise RuntimeError("nameless model training requires nameless train and validation features")
             nameless_pairwise_modeler = PairwiseModeler(
                 n_iter=N_ITER,
                 monotone_constraints=NAMELESS_MONOTONE_CONSTRAINTS if USE_MONOTONE_CONSTRAINTS else None,

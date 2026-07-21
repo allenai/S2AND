@@ -13,7 +13,7 @@ Download the Arrow-native production runtime release into `s2and/data/` for
 Rust/Arrow prediction and evaluation:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
+uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow s2and/data/
 ```
 
 Expected size is about `10.1 GiB`. The currently published release root contains
@@ -24,7 +24,7 @@ Download the legacy JSON/pickle S2AND release only when you need paper-era
 `ANDData` inputs:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
+uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
 ```
 
 Expected legacy release size is about `55.5 GiB`.
@@ -32,7 +32,7 @@ Expected legacy release size is about `55.5 GiB`.
 The promoted-linker replay subbundle can also be downloaded by itself:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
+uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
 ```
 
 `s2and/data/s2and_and_big_blocks_linker_dataset_20260525` is the canonical
@@ -98,7 +98,7 @@ Arrow release prefix. Download it when you need to rebuild or audit the
 promoted linker artifact:
 
 ```bash
-aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
+uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
 ```
 
 This source bundle is the default `--source-bundle-root` for

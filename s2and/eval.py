@@ -395,8 +395,13 @@ def facet_eval(
             _signature_dict["multiple_authors"] = 0
 
         if block_type == "original":
-            block_len_f1[block_len_dict[signature.author_info_given_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[signature.author_info_given_block]
+            given_block = signature.author_info_given_block
+            if given_block is None:
+                raise ValueError(
+                    f"facet_eval requires author_info_given_block for original blocking; signature_id={signature_key!r}"
+                )
+            block_len_f1[block_len_dict[given_block]].append(f1)
+            _signature_dict["block size"] = block_len_dict[given_block]
         elif block_type == "s2":
             block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
             _signature_dict["block size"] = block_len_dict[signature.author_info_block]
@@ -530,8 +535,8 @@ def pairwise_eval(
 
     plt.figure(0, figsize=(15, 15))
     plt.plot(fpr, tpr, lw=2, label=f"ROC curve (area = {roc_auc:0.2f})")
-    plt.xlim([-0.01, 1.0])
-    plt.ylim([0.0, 1.05])
+    plt.xlim((-0.01, 1.0))
+    plt.ylim((0.0, 1.05))
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
     plt.title(f"ROC Curve for {title}")
@@ -897,13 +902,14 @@ def _shap_values_for_tree_model_preserving_booster_params(
     base_estimator = shap_utils._base_estimator(classifier)
     booster = getattr(base_estimator, "booster_", None)
     booster_params = getattr(booster, "params", None)
-    original_params = dict(booster_params) if isinstance(booster_params, dict) else None
+    booster_params_dict = booster_params if isinstance(booster_params, dict) else None
+    original_params = dict(booster_params_dict) if booster_params_dict is not None else None
     try:
         return shap_utils._shap_values_for_tree_model(base_estimator, features, class_index=1)
     finally:
-        if original_params is not None:
-            booster_params.clear()
-            booster_params.update(original_params)
+        if booster_params_dict is not None and original_params is not None:
+            booster_params_dict.clear()
+            booster_params_dict.update(original_params)
 
 
 def _write_claims_eval_shap_plots(

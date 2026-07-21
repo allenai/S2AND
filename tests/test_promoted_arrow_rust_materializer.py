@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -252,6 +252,264 @@ def test_arrow_rust_partial_writer_reuses_label_columns_as_features(tmp_path) ->
     assert out.columns.tolist() == ["_row_position", "retrieval_rank", "query_group_id", "label", "title_overlap"]
     assert out["retrieval_rank"].tolist() == [1.0, 2.0]
     assert out["title_overlap"].tolist() == pytest.approx([0.4, 0.1])
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        {"kind": "complete_table", "table_key": "train_path", "rows": 1},
+        {
+            "kind": "dataset_partial",
+            "table_key": "train_path",
+            "dataset": "toy",
+            "rows": 1,
+            "row_positions_sha256": "3" * 64,
+        },
+    ],
+)
+def test_reusable_parquet_rejects_changed_materialization_input_identity(
+    tmp_path: Path,
+    artifact: dict[str, Any],
+) -> None:
+    parquet_path = tmp_path / f"{artifact['kind']}.parquet"
+    pd.DataFrame({"f0": [0.5]}).to_parquet(parquet_path, index=False)
+    original_identity = {
+        "schema_version": promoted_train.MATERIALIZATION_IDENTITY_SCHEMA_VERSION,
+        "source_bundle": {
+            "bundle_json_sha256": "0" * 64,
+            "labels_path": "labels/train.parquet",
+            "labels_sha256": "1" * 64,
+        },
+        "pairwise_bundle_binding": {"main_booster_sha256": "2" * 64},
+        "target_spec_digest": "3" * 64,
+        "feature_schema_digest": "4" * 64,
+        "feature_columns": ["f0"],
+        "feature_policies": {
+            "pairwise_model_nan_value": "nan",
+            "pairwise_aggregate_nan_value": 0.0,
+            "row_nan_policy": "finite",
+            "max_exemplars": 4,
+        },
+        "selection": {
+            "table_key": "train_path",
+            "datasets": None,
+            "limit_rows": None,
+            "selected_row_count": 1,
+            "selected_rows_digest": "6" * 64,
+            "input_datasets": [],
+        },
+        "datasets": {},
+    }
+    promoted_train._write_materialization_sidecar(  # noqa: SLF001
+        parquet_path,
+        promoted_train._materialization_reuse_metadata(  # noqa: SLF001
+            original_identity,
+            artifact=artifact,
+        ),
+    )
+    changed_identity = {
+        **original_identity,
+        "source_bundle": {**original_identity["source_bundle"], "labels_sha256": "5" * 64},
+    }
+
+    with pytest.raises(ValueError, match="materialization identity mismatch"):
+        promoted_train._validate_materialization_sidecar(  # noqa: SLF001
+            parquet_path,
+            promoted_train._materialization_reuse_metadata(  # noqa: SLF001
+                changed_identity,
+                artifact=artifact,
+            ),
+            context="reuse regression",
+        )
+
+
+def test_reuse_rejects_changed_labels_before_copying_fresh_bundle_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source"
+    output_root = tmp_path / "output"
+    labels_path = source_root / "labels" / "train.parquet"
+    members_path = source_root / "components" / "toy.parquet"
+    labels_path.parent.mkdir(parents=True)
+    members_path.parent.mkdir(parents=True)
+    labels = pd.DataFrame(
+        [
+            {
+                "dataset": "toy",
+                "query_group_id": "q1",
+                "query_signature_id": "q1",
+                "candidate_component_key": "candidate",
+                "label": 0,
+            }
+        ]
+    )
+    labels.to_parquet(labels_path, index=False)
+    pd.DataFrame([{"candidate_component_key": "candidate", "member_index": 0, "signature_id": "neighbor"}]).to_parquet(
+        members_path, index=False
+    )
+    bundle_payload = {
+        "bundle_name": "reuse_source",
+        "assets": {
+            "featureless_rows": {"files": {"train_path": "labels/train.parquet"}},
+            "candidate_members": {"datasets": {"toy": "components/toy.parquet"}},
+        },
+        "models": {"classic": {"feature_columns": [], "best_params": {}}},
+        "expected_metrics": {},
+    }
+    (source_root / "bundle.json").write_text(
+        json.dumps(bundle_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    source_bundle = OfficialBundle(
+        root=source_root.resolve(),
+        bundle_name="reuse_source",
+        assets=bundle_payload["assets"],
+        models=bundle_payload["models"],
+        expected_metrics={},
+    )
+    target = {
+        "feature_count": 1,
+        "features": ["min_distance"],
+        "params": {"n_estimators": 1},
+        "metrics": {},
+    }
+    pairwise_binding = {"main_booster_sha256": "1" * 64}
+    validated_paths = promoted_train.ValidatedArrowInputs._from_verified(  # noqa: SLF001
+        paths={},
+        generation_id="2" * 64,
+        normalization_version="canonical_v2",
+        name_counts_manifest=cast(Any, SimpleNamespace(manifest_sha256="3" * 64)),
+    )
+    original_identity = promoted_train._table_materialization_identity(  # noqa: SLF001
+        source_bundle=source_bundle,
+        table_key="train_path",
+        labels_path=labels_path,
+        selected_rows=labels,
+        input_dataset_names=("toy",),
+        arrow_paths_cache={"toy": validated_paths},
+        target=target,
+        pairwise_model_binding=pairwise_binding,
+        datasets=None,
+        limit_rows=None,
+        max_exemplars=4,
+        pairwise_model_nan_value=np.nan,
+        pairwise_aggregate_nan_value=0.0,
+        row_nan_policy="finite",
+    )
+    output_path = output_root / "features_corrected" / "train.parquet"
+    output_path.parent.mkdir(parents=True)
+    labels.assign(min_distance=0.5).to_parquet(output_path, index=False)
+    promoted_train._write_materialization_sidecar(  # noqa: SLF001
+        output_path,
+        promoted_train._materialization_reuse_metadata(  # noqa: SLF001
+            original_identity,
+            artifact={"kind": "complete_table", "table_key": "train_path", "rows": 1},
+        ),
+    )
+
+    labels.assign(label=1).to_parquet(labels_path, index=False)
+    monkeypatch.setattr(promoted_train, "_arrow_paths_for_dataset", lambda *_args, **_kwargs: validated_paths)
+    monkeypatch.setattr(
+        promoted_train,
+        "_copy_bundle_support_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("fresh bundle metadata must not be copied before reuse validation")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="materialization identity mismatch"):
+        promoted_train._materialize_arrow_rust_feature_bundle(  # noqa: SLF001
+            source_bundle=source_bundle,
+            output_bundle_root=output_root,
+            target=target,
+            clusterer=SimpleNamespace(),
+            pairwise_model_binding=pairwise_binding,
+            n_jobs=1,
+            total_ram_bytes=1,
+            table_keys=None,
+            datasets=None,
+            limit_rows=None,
+            max_exemplars=4,
+            reuse_existing_features=True,
+            pairwise_model_nan_value=np.nan,
+            pairwise_aggregate_nan_value=0.0,
+            row_nan_policy="finite",
+        )
+
+
+def test_materialization_identity_hashes_shared_inputs_once_per_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle_root = tmp_path / "bundle"
+    member_path = bundle_root / "components" / "toy.parquet"
+    first_labels_path = bundle_root / "labels" / "first.parquet"
+    second_labels_path = bundle_root / "labels" / "second.parquet"
+    member_path.parent.mkdir(parents=True)
+    first_labels_path.parent.mkdir(parents=True)
+    for path, content in (
+        (bundle_root / "bundle.json", b"bundle"),
+        (member_path, b"members"),
+        (first_labels_path, b"first"),
+        (second_labels_path, b"second"),
+    ):
+        path.write_bytes(content)
+    source_bundle = OfficialBundle(
+        root=bundle_root.resolve(),
+        bundle_name="cache",
+        assets={"candidate_members": {"datasets": {"toy": "components/toy.parquet"}}},
+        models={},
+        expected_metrics={},
+    )
+    rows = pd.DataFrame({"dataset": ["toy"], "label": [0]})
+    validated_paths = promoted_train.ValidatedArrowInputs._from_verified(  # noqa: SLF001
+        paths={},
+        generation_id="1" * 64,
+        normalization_version="canonical_v2",
+        name_counts_manifest=cast(Any, SimpleNamespace(manifest_sha256="2" * 64)),
+    )
+    target = {
+        "feature_count": 1,
+        "features": ["min_distance"],
+        "params": {"n_estimators": 1},
+        "metrics": {},
+    }
+    original_sha256_file = promoted_train._sha256_file  # noqa: SLF001
+    hashed_paths: list[Path] = []
+
+    def recording_sha256(path: Path) -> str:
+        hashed_paths.append(path.resolve())
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(promoted_train, "_sha256_file", recording_sha256)
+    sha256_cache: dict[Path, str] = {}
+    for table_key, labels_path in (
+        ("train_path", first_labels_path),
+        ("s2and_eval_path", second_labels_path),
+    ):
+        promoted_train._table_materialization_identity(  # noqa: SLF001
+            source_bundle=source_bundle,
+            table_key=table_key,
+            labels_path=labels_path,
+            selected_rows=rows,
+            input_dataset_names=("toy",),
+            arrow_paths_cache={"toy": validated_paths},
+            target=target,
+            pairwise_model_binding={"main_booster_sha256": "3" * 64},
+            datasets=None,
+            limit_rows=None,
+            max_exemplars=4,
+            pairwise_model_nan_value=np.nan,
+            pairwise_aggregate_nan_value=0.0,
+            row_nan_policy="finite",
+            sha256_cache=sha256_cache,
+        )
+
+    assert hashed_paths.count((bundle_root / "bundle.json").resolve()) == 1
+    assert hashed_paths.count(member_path.resolve()) == 1
+    assert hashed_paths.count(first_labels_path.resolve()) == 1
+    assert hashed_paths.count(second_labels_path.resolve()) == 1
 
 
 def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:

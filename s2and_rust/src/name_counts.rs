@@ -4,9 +4,11 @@ use pyo3::pybacked::PyBackedStr;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[cfg(test)]
+use std::io::Read;
 
 use crate::{
     fnv64, fnv64_update, read_f64_le_unchecked, read_u32_le_unchecked, read_u64_le_unchecked,
@@ -53,6 +55,7 @@ const NAME_COUNTS_INDEX_MAGIC: &[u8; 8] = b"S2NCI001";
 const NAME_COUNTS_INDEX_HASH_DOMAIN: &[u8] = b"s2and-name-counts-index-v1\0";
 const NAME_COUNTS_INDEX_HEADER_LEN: usize = 32;
 const NAME_COUNTS_INDEX_RECORD_LEN: usize = 40;
+const NAME_COUNTS_SHA256_RECORD_CHUNK_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct RawNameCountIndex {
     first: RawNameCountIndexFile,
@@ -123,54 +126,73 @@ struct NameCountsManifestFile {
 }
 
 struct RawNameCountIndexPaths {
-    first: PathBuf,
-    last: PathBuf,
-    first_last: PathBuf,
-    last_first_initial: PathBuf,
+    first: RawNameCountIndexFileSpec,
+    last: RawNameCountIndexFileSpec,
+    first_last: RawNameCountIndexFileSpec,
+    last_first_initial: RawNameCountIndexFileSpec,
     normalization_version: String,
     provenance_binding: NameCountsProvenanceBinding,
     identity: NameCountsIndexIdentity,
 }
 
+#[derive(Debug)]
+struct RawNameCountIndexFileSpec {
+    path: PathBuf,
+    expected_sha256: String,
+}
+
 impl RawNameCountIndex {
+    #[cfg(test)]
     pub(crate) fn open(path: &str) -> PyResult<Self> {
-        let paths = resolve_name_counts_index_paths(path)?;
-        Self::open_resolved(&paths)
+        Self::open_fully_validated(path)
     }
 
-    /// Open and exhaustively validate every record for direct native artifact
-    /// boundaries that have no prior Python digest verification.
+    /// Open and exhaustively validate every record at public artifact boundaries.
     pub(crate) fn open_fully_validated(path: &str) -> PyResult<Self> {
         let paths = resolve_name_counts_index_paths(path)?;
-        let index = Self::open_resolved(&paths)?;
-        index
-            .first
-            .validate_all_records(&paths.first, RawNameCountKind::First)?;
-        index
-            .last
-            .validate_all_records(&paths.last, RawNameCountKind::Last)?;
-        index
-            .first_last
-            .validate_all_records(&paths.first_last, RawNameCountKind::FirstLast)?;
-        index.last_first_initial.validate_all_records(
-            &paths.last_first_initial,
-            RawNameCountKind::LastFirstInitial,
-        )?;
-        Ok(index)
-    }
-
-    fn open_resolved(paths: &RawNameCountIndexPaths) -> PyResult<Self> {
+        let ((first, last), (first_last, last_first_initial)) = rayon::join(
+            || {
+                rayon::join(
+                    || {
+                        RawNameCountIndexFile::open_manifest_validated(
+                            &paths.first.path,
+                            RawNameCountKind::First,
+                            &paths.first.expected_sha256,
+                        )
+                    },
+                    || {
+                        RawNameCountIndexFile::open_manifest_validated(
+                            &paths.last.path,
+                            RawNameCountKind::Last,
+                            &paths.last.expected_sha256,
+                        )
+                    },
+                )
+            },
+            || {
+                rayon::join(
+                    || {
+                        RawNameCountIndexFile::open_manifest_validated(
+                            &paths.first_last.path,
+                            RawNameCountKind::FirstLast,
+                            &paths.first_last.expected_sha256,
+                        )
+                    },
+                    || {
+                        RawNameCountIndexFile::open_manifest_validated(
+                            &paths.last_first_initial.path,
+                            RawNameCountKind::LastFirstInitial,
+                            &paths.last_first_initial.expected_sha256,
+                        )
+                    },
+                )
+            },
+        );
         Ok(Self {
-            first: RawNameCountIndexFile::open(&paths.first, RawNameCountKind::First)?,
-            last: RawNameCountIndexFile::open(&paths.last, RawNameCountKind::Last)?,
-            first_last: RawNameCountIndexFile::open(
-                &paths.first_last,
-                RawNameCountKind::FirstLast,
-            )?,
-            last_first_initial: RawNameCountIndexFile::open(
-                &paths.last_first_initial,
-                RawNameCountKind::LastFirstInitial,
-            )?,
+            first: first?,
+            last: last?,
+            first_last: first_last?,
+            last_first_initial: last_first_initial?,
             normalization_version: paths.normalization_version.clone(),
             provenance_binding: paths.provenance_binding.clone(),
             identity: paths.identity.clone(),
@@ -245,6 +267,13 @@ fn lookup_name_count_columns<S: AsRef<str> + Sync>(
 }
 
 impl NameCountsIndex {
+    #[cfg(test)]
+    fn open(path: &str) -> PyResult<Self> {
+        Ok(Self {
+            index: Arc::new(RawNameCountIndex::open_fully_validated(path)?),
+        })
+    }
+
     pub(crate) fn from_shared(index: Arc<RawNameCountIndex>) -> Self {
         Self { index }
     }
@@ -253,17 +282,14 @@ impl NameCountsIndex {
         Arc::clone(&self.index)
     }
 
-    pub(crate) fn validate_path_identity(&self, path: &str) -> PyResult<()> {
-        let requested = read_name_counts_index_identity(path)?;
-        if requested != self.index.identity {
+    pub(crate) fn validate_path_root(&self, path: &str) -> PyResult<()> {
+        let requested_root = canonical_name_counts_index_root(path)?;
+        if requested_root != self.index.identity.canonical_root {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "name_counts_index handle does not match paths['name_counts_index']: \
-                 handle_root={} requested_root={} handle_manifest_sha256={} \
-                 requested_manifest_sha256={}",
+                 handle_root={} requested_root={}",
                 self.index.identity.canonical_root.display(),
-                requested.canonical_root.display(),
-                self.index.identity.manifest_sha256,
-                requested.manifest_sha256,
+                requested_root.display(),
             )));
         }
         Ok(())
@@ -275,15 +301,23 @@ impl NameCountsIndex {
     /// Open a manifest-backed name-count index after independently verifying
     /// its schema, provenance, paths, byte counts, and file digests.
     #[staticmethod]
-    fn open(path: &str) -> PyResult<Self> {
+    #[pyo3(name = "open")]
+    fn open_py(py: Python<'_>, path: &str) -> PyResult<Self> {
+        let index = py.allow_threads(|| RawNameCountIndex::open_fully_validated(path))?;
         Ok(Self {
-            index: Arc::new(RawNameCountIndex::open(path)?),
+            index: Arc::new(index),
         })
     }
 
     #[getter]
     fn normalization_version(&self) -> &str {
         &self.index.normalization_version
+    }
+
+    /// Return the digest of the exact manifest snapshot this handle opened.
+    #[getter]
+    fn manifest_sha256(&self) -> &str {
+        &self.index.identity.manifest_sha256
     }
 
     /// Return the exact four-field model-binding tuple used by RustFeaturizer.
@@ -346,9 +380,9 @@ impl NameCountsIndex {
 
 struct RawNameCountIndexFile {
     // Memory-mapped index file. Bulk of the file is the variable-length
-    // name blob (hundreds of MB per kind); mmap avoids reading or
-    // allocating that bulk up front. Lookups page-fault only the records
-    // section pages they touch plus the matched name range.
+    // name blob (hundreds of MB per kind); mmap avoids a second allocated
+    // copy while cold-open digest and semantic validation stream its pages.
+    // Subsequent lookups reuse the validated mapping.
     mmap: Mmap,
     record_count: usize,
     blob_offset: usize,
@@ -356,7 +390,7 @@ struct RawNameCountIndexFile {
 }
 
 impl RawNameCountIndexFile {
-    fn open(path: &Path, kind: RawNameCountKind) -> PyResult<Self> {
+    fn mmap(path: &Path) -> PyResult<Mmap> {
         let file = File::open(path).map_err(|err| {
             pyo3::exceptions::PyIOError::new_err(format!(
                 "failed to open name-count index file {}: {}",
@@ -374,7 +408,14 @@ impl RawNameCountIndexFile {
                 err
             ))
         })?;
-        let bytes: &[u8] = &mmap;
+        Ok(mmap)
+    }
+
+    fn validated_layout(
+        bytes: &[u8],
+        path: &Path,
+        kind: RawNameCountKind,
+    ) -> PyResult<(usize, usize, usize)> {
         if bytes.len() < NAME_COUNTS_INDEX_HEADER_LEN {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "name-count index file {} is shorter than the header",
@@ -420,6 +461,13 @@ impl RawNameCountIndexFile {
                 path.display()
             )));
         }
+        Ok((record_count, blob_offset, blob_len))
+    }
+
+    #[cfg(test)]
+    fn open(path: &Path, kind: RawNameCountKind) -> PyResult<Self> {
+        let mmap = Self::mmap(path)?;
+        let (record_count, blob_offset, blob_len) = Self::validated_layout(&mmap, path, kind)?;
         Ok(Self {
             mmap,
             record_count,
@@ -428,70 +476,180 @@ impl RawNameCountIndexFile {
         })
     }
 
-    /// Exhaustively validate every record and the global hash-pair ordering.
-    /// The Python handle skips this O(N) scan after digest verification;
-    /// direct native Arrow ingestion calls it at its artifact boundary.
-    fn validate_all_records(&self, path: &Path, kind: RawNameCountKind) -> PyResult<()> {
+    fn open_manifest_validated(
+        path: &Path,
+        kind: RawNameCountKind,
+        expected_sha256: &str,
+    ) -> PyResult<Self> {
+        let mmap = Self::mmap(path)?;
+        let layout = Self::validated_layout(&mmap, path, kind);
+        let (record_count, blob_offset, blob_len) = match layout {
+            Ok(layout) => layout,
+            Err(layout_error) => {
+                validate_name_count_manifest_sha256(&mmap, path, kind, expected_sha256)?;
+                return Err(layout_error);
+            }
+        };
+        let index = Self {
+            mmap,
+            record_count,
+            blob_offset,
+            blob_len,
+        };
+        index.validate_all_records(path, kind, expected_sha256)?;
+        Ok(index)
+    }
+
+    fn validate_record(
+        &self,
+        path: &Path,
+        kind: RawNameCountKind,
+        index: usize,
+        previous_record: Option<(usize, (u64, u64), usize, usize)>,
+    ) -> PyResult<(usize, (u64, u64), usize, usize)> {
         let bytes: &[u8] = &self.mmap;
-        for index in 0..self.record_count {
-            let record_offset = NAME_COUNTS_INDEX_HEADER_LEN + index * NAME_COUNTS_INDEX_RECORD_LEN;
-            let name_offset_raw = read_u64_le_unchecked(bytes, record_offset + 16);
-            let name_offset = usize::try_from(name_offset_raw).map_err(|_| {
-                pyo3::exceptions::PyOverflowError::new_err(format!(
-                    "name-count index file {} record {} for kind {} has name offset that overflows usize: {}",
-                    path.display(),
-                    index,
-                    kind.key(),
-                    name_offset_raw
-                ))
-            })?;
-            let name_len = read_u32_le_unchecked(bytes, record_offset + 24) as usize;
-            let name_end = name_offset.checked_add(name_len).ok_or_else(|| {
-                pyo3::exceptions::PyOverflowError::new_err(format!(
-                    "name-count index file {} record {} for kind {} name range overflows",
-                    path.display(),
-                    index,
-                    kind.key()
-                ))
-            })?;
-            if name_end > self.blob_len {
+        let record_offset = NAME_COUNTS_INDEX_HEADER_LEN + index * NAME_COUNTS_INDEX_RECORD_LEN;
+        let pair = (
+            read_u64_le_unchecked(bytes, record_offset),
+            read_u64_le_unchecked(bytes, record_offset + 8),
+        );
+        let name_offset_raw = read_u64_le_unchecked(bytes, record_offset + 16);
+        let name_offset = usize::try_from(name_offset_raw).map_err(|_| {
+            pyo3::exceptions::PyOverflowError::new_err(format!(
+                "name-count index file {} record {} for kind {} has name offset that overflows usize: {}",
+                path.display(),
+                index,
+                kind.key(),
+                name_offset_raw
+            ))
+        })?;
+        let name_len = read_u32_le_unchecked(bytes, record_offset + 24) as usize;
+        let name_end = name_offset.checked_add(name_len).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err(format!(
+                "name-count index file {} record {} for kind {} name range overflows",
+                path.display(),
+                index,
+                kind.key()
+            ))
+        })?;
+        if name_end > self.blob_len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index file {} record {} for kind {} has name range [{}, {}) outside blob length {}",
+                path.display(),
+                index,
+                kind.key(),
+                name_offset,
+                name_end,
+                self.blob_len
+            )));
+        }
+        let reserved = read_u32_le_unchecked(bytes, record_offset + 28);
+        if reserved != 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index file {} record {} for kind {} has nonzero reserved field: {}",
+                path.display(),
+                index,
+                kind.key(),
+                reserved
+            )));
+        }
+        let count = read_f64_le_unchecked(bytes, record_offset + 32);
+        if !count.is_finite() || count <= 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index file {} record {} for kind {} has count {}; expected a finite positive value",
+                path.display(),
+                index,
+                kind.key(),
+                count
+            )));
+        }
+        let name_start = self.blob_offset + name_offset;
+        let name_end = self.blob_offset + name_end;
+        let expected_pair = name_counts_index_hashes(kind, &bytes[name_start..name_end]);
+        if pair != expected_pair {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "name-count index file {} record {} for kind {} has hash pair {:?}, expected {:?} for its stored name",
+                path.display(),
+                index,
+                kind.key(),
+                pair,
+                expected_pair
+            )));
+        }
+        if let Some((previous_index, previous_pair, previous_name_start, previous_name_end)) =
+            previous_record
+        {
+            let previous_name = &bytes[previous_name_start..previous_name_end];
+            let name = &bytes[name_start..name_end];
+            if pair < previous_pair || (pair == previous_pair && name < previous_name) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "name-count index file {} record {} for kind {} has name range [{}, {}) outside blob length {}",
+                    "name-count index file {} is not sorted for kind {}: record {} ({:?}, {:?}) follows record {} ({:?}, {:?})",
                     path.display(),
-                    index,
                     kind.key(),
-                    name_offset,
-                    name_end,
-                    self.blob_len
+                    index,
+                    pair,
+                    String::from_utf8_lossy(name),
+                    previous_index,
+                    previous_pair,
+                    String::from_utf8_lossy(previous_name)
+                )));
+            }
+            if pair == previous_pair && name == previous_name {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "name-count index file {} contains duplicate UTF-8 name {:?} for kind {} at records {} and {}",
+                    path.display(),
+                    String::from_utf8_lossy(name),
+                    kind.key(),
+                    previous_index,
+                    index
                 )));
             }
         }
-        if self.record_count > 1 {
-            let read_pair = |index: usize| {
-                let offset = NAME_COUNTS_INDEX_HEADER_LEN + index * NAME_COUNTS_INDEX_RECORD_LEN;
-                (
-                    read_u64_le_unchecked(bytes, offset),
-                    read_u64_le_unchecked(bytes, offset + 8),
-                )
-            };
-            let mut previous_index = 0usize;
-            let mut previous_pair = read_pair(0);
-            for index in 1..self.record_count {
-                let pair = read_pair(index);
-                if pair < previous_pair {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "name-count index file {} is not sorted for kind {}: record {} {:?} follows record {} {:?}",
-                        path.display(),
-                        kind.key(),
-                        index,
-                        pair,
-                        previous_index,
-                        previous_pair
-                    )));
+        Ok((index, pair, name_start, name_end))
+    }
+
+    /// Validate the declared digest and every record in one record-table pass.
+    ///
+    /// SHA-256 requires file order, while record validation follows offsets
+    /// into the later name blob. Hash record-table chunks immediately before
+    /// validating their records, then hash the post-record tail once. This
+    /// avoids the former separate full-file stream while keeping validation
+    /// bounded-memory and SHA updates coarse-grained.
+    fn validate_all_records(
+        &self,
+        path: &Path,
+        kind: RawNameCountKind,
+        expected_sha256: &str,
+    ) -> PyResult<()> {
+        let bytes: &[u8] = &self.mmap;
+        let records_end =
+            NAME_COUNTS_INDEX_HEADER_LEN + self.record_count * NAME_COUNTS_INDEX_RECORD_LEN;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes[..NAME_COUNTS_INDEX_HEADER_LEN]);
+        let mut previous_record: Option<(usize, (u64, u64), usize, usize)> = None;
+        let mut semantic_error = None;
+        let records_per_hash_chunk =
+            (NAME_COUNTS_SHA256_RECORD_CHUNK_BYTES / NAME_COUNTS_INDEX_RECORD_LEN).max(1);
+        for chunk_start in (0..self.record_count).step_by(records_per_hash_chunk) {
+            let chunk_end = (chunk_start + records_per_hash_chunk).min(self.record_count);
+            let byte_start =
+                NAME_COUNTS_INDEX_HEADER_LEN + chunk_start * NAME_COUNTS_INDEX_RECORD_LEN;
+            let byte_end = NAME_COUNTS_INDEX_HEADER_LEN + chunk_end * NAME_COUNTS_INDEX_RECORD_LEN;
+            hasher.update(&bytes[byte_start..byte_end]);
+            for index in chunk_start..chunk_end {
+                if semantic_error.is_none() {
+                    match self.validate_record(path, kind, index, previous_record) {
+                        Ok(validated_record) => previous_record = Some(validated_record),
+                        Err(error) => semantic_error = Some(error),
+                    }
                 }
-                previous_index = index;
-                previous_pair = pair;
             }
+        }
+        hasher.update(&bytes[records_end..]);
+        let actual_sha256 = format!("{:x}", hasher.finalize());
+        require_name_count_manifest_sha256(path, kind, expected_sha256, &actual_sha256)?;
+        if let Some(error) = semantic_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -499,7 +657,8 @@ impl RawNameCountIndexFile {
     #[cfg(test)]
     fn open_fully_validated(path: &Path, kind: RawNameCountKind) -> PyResult<Self> {
         let index = Self::open(path, kind)?;
-        index.validate_all_records(path, kind)?;
+        let expected_sha256 = sha256_bytes(&index.mmap);
+        index.validate_all_records(path, kind, &expected_sha256)?;
         Ok(index)
     }
 
@@ -666,6 +825,7 @@ impl NameCountsProvenance {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn sha256_file(path: &Path) -> PyResult<String> {
     let mut input = File::open(path).map_err(|err| {
         pyo3::exceptions::PyIOError::new_err(format!(
@@ -698,12 +858,38 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn require_name_count_manifest_sha256(
+    path: &Path,
+    kind: RawNameCountKind,
+    expected_sha256: &str,
+    actual_sha256: &str,
+) -> PyResult<()> {
+    if actual_sha256 != expected_sha256 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "name-count index manifest files.{} SHA-256 mismatch: {}",
+            kind.key(),
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_name_count_manifest_sha256(
+    bytes: &[u8],
+    path: &Path,
+    kind: RawNameCountKind,
+    expected_sha256: &str,
+) -> PyResult<()> {
+    let actual_sha256 = sha256_bytes(bytes);
+    require_name_count_manifest_sha256(path, kind, expected_sha256, &actual_sha256)
+}
+
 fn validated_name_counts_index_manifest_path(
     index_dir: &Path,
     canonical_index_dir: &Path,
     entry: NameCountsManifestFile,
     kind: &str,
-) -> PyResult<PathBuf> {
+) -> PyResult<RawNameCountIndexFileSpec> {
     let manifest_path = index_dir.join("manifest.json");
     if entry.path.trim().is_empty() {
         return Err(manifest_value_error(
@@ -775,16 +961,10 @@ fn validated_name_counts_index_manifest_path(
             canonical_resolved.display()
         )));
     }
-    let actual_sha256 = sha256_file(&canonical_resolved)?;
-    if actual_sha256 != entry.sha256 {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "name-count index manifest {} files.{} SHA-256 mismatch: {}",
-            manifest_path.display(),
-            kind,
-            canonical_resolved.display()
-        )));
-    }
-    Ok(canonical_resolved)
+    Ok(RawNameCountIndexFileSpec {
+        path: canonical_resolved,
+        expected_sha256: entry.sha256,
+    })
 }
 
 impl NameCountsManifest {
@@ -827,7 +1007,7 @@ impl NameCountsManifest {
             ("first_last", files.first_last),
             ("last_first_initial", files.last_first_initial),
         ];
-        let paths: [PathBuf; 4] = entries
+        let paths: [RawNameCountIndexFileSpec; 4] = entries
             .into_iter()
             .map(|(kind, entry)| {
                 validated_name_counts_index_manifest_path(
@@ -885,33 +1065,21 @@ fn unresolved_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
     )))
 }
 
-fn read_name_counts_index_identity(path: &str) -> PyResult<NameCountsIndexIdentity> {
+fn canonical_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
     let index_root = unresolved_name_counts_index_root(path)?;
-    let canonical_root = fs::canonicalize(&index_root).map_err(|err| {
+    fs::canonicalize(&index_root).map_err(|err| {
         pyo3::exceptions::PyIOError::new_err(format!(
             "failed to resolve name-count index directory {}: {}",
             index_root.display(),
             err
         ))
-    })?;
-    let manifest_path = canonical_root.join("manifest.json");
-    let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
-        pyo3::exceptions::PyIOError::new_err(format!(
-            "failed to read name-count index manifest {}: {}",
-            manifest_path.display(),
-            err
-        ))
-    })?;
-    Ok(NameCountsIndexIdentity {
-        canonical_root,
-        manifest_sha256: sha256_bytes(&manifest_bytes),
     })
 }
 
 /// Return the `normalization_version` from a fully validated name-count index.
 #[pyfunction]
 pub(crate) fn read_name_counts_index_normalization_version(path: &str) -> PyResult<String> {
-    Ok(resolve_name_counts_index_paths(path)?.normalization_version)
+    Ok(RawNameCountIndex::open_fully_validated(path)?.normalization_version)
 }
 
 fn resolve_name_counts_index_paths(path: &str) -> PyResult<RawNameCountIndexPaths> {
@@ -933,9 +1101,10 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 mod name_counts_tests {
     use super::{
         lookup_name_count_column, name_counts_index_hashes,
-        read_name_counts_index_normalization_version, sha256_file, validate_lookup_column_lengths,
-        NameCountsIndex, NameCountsProvenance, RawNameCountIndex, RawNameCountIndexFile,
-        RawNameCountKind, RawNameCountMaps,
+        read_name_counts_index_normalization_version, resolve_name_counts_index_paths, sha256_file,
+        validate_lookup_column_lengths, NameCountsIndex, NameCountsProvenance, RawNameCountIndex,
+        RawNameCountIndexFile, RawNameCountKind, RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN,
+        NAME_COUNTS_INDEX_RECORD_LEN,
     };
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1101,6 +1270,21 @@ mod name_counts_tests {
         dir
     }
 
+    fn refresh_manifest_file_digest(dir: &std::path::Path, kind: &str) {
+        let manifest_path = dir.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        let path = dir.join(format!("{kind}.bin"));
+        manifest["files"][kind]["sha256"] =
+            serde_json::Value::String(sha256_file(&path).expect("hash mutated index"));
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write checksum-consistent manifest");
+    }
+
     fn read_version(dir: &std::path::Path) -> pyo3::PyResult<String> {
         read_name_counts_index_normalization_version(dir.to_str().expect("utf-8 temp path"))
     }
@@ -1183,6 +1367,172 @@ mod name_counts_tests {
     }
 
     #[test]
+    fn manifest_resolution_defers_payload_digest_to_integrated_validation() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut bytes = std::fs::read(&path).expect("read first index");
+        let last = bytes.last_mut().expect("fixture has a name blob");
+        *last ^= 1;
+        std::fs::write(&path, bytes).expect("corrupt first index payload");
+
+        resolve_name_counts_index_paths(dir.to_str().expect("utf-8 temp path"))
+            .expect("manifest resolution must remain metadata-only");
+        let error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("integrated validation must enforce the declared digest"),
+            Err(error) => error,
+        };
+        let message = py_err_message(error);
+        assert!(
+            message.contains("files.first SHA-256 mismatch"),
+            "{message}"
+        );
+        std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+    }
+
+    #[test]
+    fn integrated_digest_mismatch_precedes_record_semantic_error() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut bytes = std::fs::read(&path).expect("read first index");
+        let name_offset = NAME_COUNTS_INDEX_HEADER_LEN + 16;
+        bytes[name_offset..name_offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&path, bytes).expect("corrupt first record name offset");
+
+        let digest_error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("undeclared semantic corruption must fail its digest first"),
+            Err(error) => error,
+        };
+        assert!(py_err_message(digest_error).contains("files.first SHA-256 mismatch"));
+
+        refresh_manifest_file_digest(&dir, "first");
+        let semantic_error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("checksum-consistent semantic corruption must still fail"),
+            Err(error) => error,
+        };
+        assert!(py_err_message(semantic_error).contains("name range overflows"));
+        std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+    }
+
+    #[test]
+    fn native_handle_rejects_checksum_consistent_unsorted_records() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut bytes = std::fs::read(&path).expect("read first index");
+        let first_start = NAME_COUNTS_INDEX_HEADER_LEN;
+        let second_start = first_start + NAME_COUNTS_INDEX_RECORD_LEN;
+        let records_end = second_start + NAME_COUNTS_INDEX_RECORD_LEN;
+        let first_record = bytes[first_start..second_start].to_vec();
+        let second_record = bytes[second_start..records_end].to_vec();
+        bytes[first_start..second_start].copy_from_slice(&second_record);
+        bytes[second_start..records_end].copy_from_slice(&first_record);
+        std::fs::write(&path, bytes).expect("write unsorted first index");
+        refresh_manifest_file_digest(&dir, "first");
+
+        let error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("public native handle must reject unsorted records"),
+            Err(error) => error,
+        };
+        let message = py_err_message(error);
+        assert!(
+            message.contains("is not sorted for kind first"),
+            "{message}"
+        );
+        std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+    }
+
+    #[test]
+    fn native_handle_rejects_checksum_consistent_hash_name_mismatch() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut bytes = std::fs::read(&path).expect("read first index");
+        let first_start = NAME_COUNTS_INDEX_HEADER_LEN;
+        let second_start = first_start + NAME_COUNTS_INDEX_RECORD_LEN;
+        let first_pair = bytes[first_start..first_start + 16].to_vec();
+        bytes[second_start..second_start + 16].copy_from_slice(&first_pair);
+        std::fs::write(&path, bytes).expect("write hash/name mismatch");
+        refresh_manifest_file_digest(&dir, "first");
+
+        let error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("public native handle must reject a hash/name mismatch"),
+            Err(error) => error,
+        };
+        let message = py_err_message(error);
+        assert!(message.contains("has hash pair"), "{message}");
+        assert!(message.contains("expected"), "{message}");
+        std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+    }
+
+    #[test]
+    fn native_handle_rejects_checksum_consistent_nonzero_reserved_field() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut bytes = std::fs::read(&path).expect("read first index");
+        let reserved_offset = NAME_COUNTS_INDEX_HEADER_LEN + 28;
+        bytes[reserved_offset..reserved_offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+        std::fs::write(&path, bytes).expect("write nonzero reserved field");
+        refresh_manifest_file_digest(&dir, "first");
+
+        let error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("public native handle must reject a nonzero reserved field"),
+            Err(error) => error,
+        };
+        let message = py_err_message(error);
+        assert!(message.contains("nonzero reserved field"), "{message}");
+        std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+    }
+
+    #[test]
+    fn native_handle_rejects_checksum_consistent_duplicate_name() {
+        let dir = write_lookup_artifact();
+        let path = dir.join("first.bin");
+        let mut bytes = std::fs::read(&path).expect("read first index");
+        let first_start = NAME_COUNTS_INDEX_HEADER_LEN;
+        let second_start = first_start + NAME_COUNTS_INDEX_RECORD_LEN;
+        let first_record = bytes[first_start..second_start].to_vec();
+        bytes[second_start..second_start + NAME_COUNTS_INDEX_RECORD_LEN]
+            .copy_from_slice(&first_record);
+        std::fs::write(&path, bytes).expect("write duplicate first-name record");
+        refresh_manifest_file_digest(&dir, "first");
+
+        let error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+            Ok(_) => panic!("public native handle must reject duplicate names"),
+            Err(error) => error,
+        };
+        let message = py_err_message(error);
+        assert!(message.contains("duplicate UTF-8 name"), "{message}");
+        std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+    }
+
+    #[test]
+    fn native_handle_rejects_checksum_consistent_invalid_counts() {
+        for (case, count) in [
+            ("nan", f64::NAN),
+            ("positive_infinity", f64::INFINITY),
+            ("zero", 0.0),
+            ("negative", -3.0),
+        ] {
+            let dir = write_lookup_artifact();
+            let path = dir.join("first.bin");
+            let mut bytes = std::fs::read(&path).expect("read first index");
+            let count_offset = NAME_COUNTS_INDEX_HEADER_LEN + 32;
+            bytes[count_offset..count_offset + 8].copy_from_slice(&count.to_le_bytes());
+            std::fs::write(&path, bytes).expect("write invalid first-name count");
+            refresh_manifest_file_digest(&dir, "first");
+
+            let error = match NameCountsIndex::open(dir.to_str().expect("utf-8 temp path")) {
+                Ok(_) => panic!("public native handle must reject {case} count"),
+                Err(error) => error,
+            };
+            let message = py_err_message(error);
+            assert!(
+                message.contains("finite positive value"),
+                "{case}: {message}"
+            );
+            std::fs::remove_dir_all(&dir).expect("remove corrupt artifact");
+        }
+    }
+
+    #[test]
     fn manifest_rejects_file_path_outside_index_directory() {
         let dir = write_lookup_artifact();
         let other = write_lookup_artifact();
@@ -1260,7 +1610,7 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn native_handle_requires_matching_root_and_manifest_identity() {
+    fn native_handle_requires_matching_root_but_keeps_opened_manifest_snapshot() {
         let first = write_lookup_artifact();
         let second = write_lookup_artifact();
         let handle = NameCountsIndex::from_shared(Arc::new(
@@ -1269,23 +1619,27 @@ mod name_counts_tests {
         ));
 
         handle
-            .validate_path_identity(first.to_str().expect("utf-8 temp path"))
-            .expect("same root and manifest must match");
+            .validate_path_root(first.to_str().expect("utf-8 temp path"))
+            .expect("same root must match");
         let root_mismatch = handle
-            .validate_path_identity(second.to_str().expect("utf-8 temp path"))
+            .validate_path_root(second.to_str().expect("utf-8 temp path"))
             .expect_err("different root must fail");
         assert!(py_err_message(root_mismatch).contains("does not match paths['name_counts_index']"));
 
         let manifest_path = first.join("manifest.json");
-        let mut manifest = std::fs::read(&manifest_path).expect("read manifest");
-        manifest.push(b'\n');
-        std::fs::write(&manifest_path, manifest).expect("rewrite manifest");
-        let manifest_mismatch = handle
-            .validate_path_identity(first.to_str().expect("utf-8 temp path"))
-            .expect_err("changed manifest must fail");
-        assert!(
-            py_err_message(manifest_mismatch).contains("does not match paths['name_counts_index']")
-        );
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        manifest["source_provenance"]["generation_id"] =
+            serde_json::Value::String("generation-b".to_string());
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize replacement manifest"),
+        )
+        .expect("publish replacement manifest");
+        handle
+            .validate_path_root(first.to_str().expect("utf-8 temp path"))
+            .expect("opened snapshot remains authoritative after same-root publication");
 
         drop(handle);
         std::fs::remove_dir_all(&first).expect("remove first lookup artifact");

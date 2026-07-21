@@ -564,7 +564,6 @@ def save_incremental_linking_artifact(
             pairwise_bundle_binding=pairwise_bundle_binding,
             audit_metadata=audit_metadata,
         )
-        validate_artifact_contract_metadata(metadata.to_json_dict())
         (staging_dir / METADATA_FILENAME).write_text(
             json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

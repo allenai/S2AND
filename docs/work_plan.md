@@ -243,13 +243,13 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Artifact save validation
 
-**Status: Open**
+**Status: Complete**
 
-- Remove only the explicit contract-validation call immediately after metadata
-  construction; `__post_init__` already performs it.
-- Keep the staged reload because it verifies serialized bytes, booster checksum,
-  Rust loading, and prediction fixtures.
-- Keep atomic staging, fsync, publication locks, and manifest hashing.
+- The explicit contract-validation call immediately after metadata
+  construction is removed; `__post_init__` performs it on construction.
+- The staged reload remains because it verifies serialized bytes, booster
+  checksum, Rust loading, and prediction fixtures. Atomic staging, fsync,
+  publication locks, and manifest hashing are unchanged.
 
 ### Rust/Arrow production boundary coverage
 

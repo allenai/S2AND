@@ -24,7 +24,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 try:
-    import ijson  # ty: ignore[unresolved-import]
+    import ijson
 except ModuleNotFoundError:
     ijson = None
 

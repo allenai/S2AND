@@ -559,9 +559,12 @@ def _require_groups_from_service_payload(value: Any) -> list[list[str]]:
             for signature_id, component_key in value.items():
                 groups_by_component.setdefault(str(component_key), []).append(str(signature_id))
             return list(groups_by_component.values())
-        if all(isinstance(item, Sequence) and not isinstance(item, str | bytes) for item in values):
-            return [[str(signature_id) for signature_id in members] for members in values]
-        raise TypeError("cluster_seeds.require must be either signature->cluster or cluster->signature-list")
+        groups: list[list[str]] = []
+        for members in values:
+            if not isinstance(members, Sequence) or isinstance(members, str | bytes):
+                raise TypeError("cluster_seeds.require must be either signature->cluster or cluster->signature-list")
+            groups.append([str(signature_id) for signature_id in members])
+        return groups
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         groups: list[list[str]] = []
         for item in value:
@@ -1243,7 +1246,7 @@ def validate_arrow_dataset_manifest(
         for left, right in zip(left_ids, right_ids, strict=True):
             if left == right:
                 raise ValueError(f"cluster_seed_disallows contains self-pair: {left!r}")
-            pair = tuple(sorted((left, right)))
+            pair = (left, right) if left < right else (right, left)
             if pair in normalized_pairs:
                 raise ValueError(f"cluster_seed_disallows contains duplicate undirected pair: {pair!r}")
             normalized_pairs.add(pair)

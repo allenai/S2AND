@@ -24,7 +24,7 @@ import platform
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from typing import Any, TypeVar
@@ -234,7 +234,7 @@ def _bench_phase(
     run_once: Callable[[bool | None], tuple[float, float, int]],
     n_jobs: int,
     rounds: int,
-    configs: list[tuple[str, bool | None]] | None = None,
+    configs: Sequence[tuple[str, bool | None]] | None = None,
 ) -> None:
     resolved_configs = configs or [
         ("serial", None),
@@ -282,7 +282,7 @@ def _bench_signatures_preprocess(
     ngram_chunk_size: int,
     name_counts_index: Any = None,
     show_breakdown: bool = False,
-    configs: list[tuple[str, bool | None]] | None = None,
+    configs: Sequence[tuple[str, bool | None]] | None = None,
 ) -> None:
     import s2and.data as data_mod
     from s2and.data import ANDData
@@ -535,7 +535,7 @@ def main() -> None:
 
     # --- Signatures ---
     if not args.skip_signatures:
-        signature_configs = {
+        signature_configs: Sequence[tuple[str, bool | None]] | None = {
             "all": None,
             "serial": [("serial", None)],
             "threads": [(f"threads x{args.n_jobs}", True)],

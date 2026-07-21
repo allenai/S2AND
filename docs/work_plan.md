@@ -253,13 +253,13 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Rust/Arrow production boundary coverage
 
-**Status: Open**
+**Status: Complete**
 
-- Add a production-entrypoint test proving filtered or incremental Arrow
-  prediction rejects unindexed input.
-- Keep small direct checks for intentionally removed public Rust APIs.
-- Do not restore repository-wide regex scanners or tests whose only assertion is
-  that no call sites exist.
+- Production-entrypoint tests prove both `predict_from_arrow_paths` and
+  `predict_incremental_from_arrow_paths` reject Arrow inputs missing the
+  raw-planner batch indexes with `MissingArrowArtifactError`.
+- Small direct checks for intentionally removed public Rust APIs remain; no
+  repository-wide regex scanners were restored.
 
 Phase 2 exit condition: artifact metadata has one authority for each identity,
 normal loads do not repeat full checksum work, and all save/load/finalize

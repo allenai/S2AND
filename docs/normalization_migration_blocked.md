@@ -26,7 +26,14 @@ when they do not directly alter normalization.
    infrastructure with required source/version/checksum provenance. The v1
    publisher records the source pickle identity for model-lineage compatibility
    and writes `name_counts_index/` directly from the resident mappings, without
-   reloading the pickle.
+   reloading the pickle. Publication is deliberately not transactional across
+   the counts and index manifests (owner decision 2026-07-20): each publish is
+   individually atomic, a crash between them leaves a torn state that every
+   consumer rejects at name-count binding time (the index manifest embeds the
+   counts generation provenance and models carry the four-field binding), and
+   rerunning the generation command with `--overwrite` repairs it. The
+   crash-window behavior is regression-tested in
+   `tests/test_generate_name_counts_script.py`.
 2. **Pending:** validate the canonical `name_counts_index/` cardinalities,
    digests, exact lookup parity, Python preprocessing latency, and peak RSS.
    Python and Rust runtime paths consume only this index.

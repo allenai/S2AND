@@ -148,19 +148,19 @@ unbound counts, invalid blocks, or the wrong require/ORCID semantics.
 
 ### Name-count source/index publication
 
-**Status: Blocked; preserved in `328c79d12f15`**
+**Status: Complete (contract narrowed; owner decision 2026-07-20)**
 
-- The preserved callback/rollback candidate is not transactional across the
-  source and binary-index manifests.
-- A crash after publishing the source pointer leaves source=new/index=old. A
-  late failure after publishing the index can roll the source back while
-  leaving index=new.
-- The current synthetic callback test never inspects actual index state, and
-  catching `BaseException` conflicts with the repository's narrow-exception
-  rule.
-- Redesign around one authoritative pointer that binds both generations, or
-  explicitly narrow the contract and add real integration failure tests before
-  recovering this candidate.
+- The owner chose narrowing over a transactional redesign: publication stays
+  two sequential individually-atomic publishes, and the crash window between
+  them is an accepted, documented, detected, and repairable state.
+- The torn state is fail-closed at consumption: the index manifest embeds the
+  counts generation provenance and every consumer validates the four-field
+  name-count binding, so counts=new/index=stale raises a binding mismatch.
+  Rerunning generation with `--overwrite` repairs the tear.
+- A real integration test publishes a generation, injects a crash between the
+  counts and index publishes on a superseding run, inspects the actual torn
+  on-disk state, proves the binding rejects it, and proves the rerun repairs
+  it. The stashed callback/rollback candidate is not recovered.
 
 ### Name-tuple artifact v3
 

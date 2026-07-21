@@ -255,3 +255,78 @@ def test_failed_publication_cleans_uncommitted_generation_without_reading_manife
 
     assert not getattr(exc_info.value, "__notes__", [])
     assert list((root / "generations").iterdir()) == []
+
+
+def test_crash_between_counts_and_index_publication_fails_closed_and_repairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A torn publish (counts=new, index=stale) is detected at binding time and repaired by rerun."""
+
+    import s2and.incremental_linking.feature_block_arrow as feature_block_arrow
+    from s2and.name_count_binding import NameCountsBinding
+
+    fixture_path = tmp_path / "rows.json"
+    fixture_path.write_text(
+        json.dumps([{"first_name": "Ada", "last_name": "Lovelace", "count": 4}]),
+        encoding="utf-8",
+    )
+    root = tmp_path / "name_counts"
+    index_dir = tmp_path / "name_counts_index"
+
+    def run(snapshot_id: str, *, overwrite: bool) -> None:
+        args = [
+            "--fixture-input",
+            str(fixture_path),
+            "--source-snapshot-id",
+            snapshot_id,
+            "--output-dir",
+            str(tmp_path),
+        ]
+        if overwrite:
+            args.append("--overwrite")
+        assert generate_name_counts.main(args) == 0
+
+    run("fixture-gen-a", overwrite=False)
+    manifest_a = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    index_binding_a = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="torn-publish test")
+    assert index_binding_a.generation_id == manifest_a["generation_id"]
+
+    real_write_index = feature_block_arrow.write_name_counts_index
+
+    def crash_before_index(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected crash between counts and index publication")
+
+    monkeypatch.setattr(feature_block_arrow, "write_name_counts_index", crash_before_index)
+    with pytest.raises(RuntimeError, match="injected crash between counts and index publication"):
+        generate_name_counts.main(
+            [
+                "--fixture-input",
+                str(fixture_path),
+                "--source-snapshot-id",
+                "fixture-gen-b",
+                "--output-dir",
+                str(tmp_path),
+                "--overwrite",
+            ]
+        )
+
+    manifest_b = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest_b["generation_id"] != manifest_a["generation_id"]
+    stale_index_binding = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="torn-publish test")
+    assert stale_index_binding == index_binding_a
+
+    provenance_b = json.loads((root / manifest_b["files"]["provenance"]).read_text(encoding="utf-8"))
+    expected_binding = NameCountsBinding.from_provenance(provenance_b, context="torn-publish test")
+    with pytest.raises(ValueError, match="name-count binding mismatch"):
+        expected_binding.require_matches(
+            stale_index_binding,
+            context="torn-publish test",
+            source=str(index_dir),
+        )
+
+    monkeypatch.setattr(feature_block_arrow, "write_name_counts_index", real_write_index)
+    run("fixture-gen-b", overwrite=True)
+    manifest_repaired = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    repaired_binding = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="torn-publish test")
+    assert repaired_binding.generation_id == manifest_repaired["generation_id"]

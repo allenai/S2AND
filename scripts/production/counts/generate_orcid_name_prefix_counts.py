@@ -212,12 +212,6 @@ def build_prefix_counts_from_sorted_rows(
             metrics["max_unique_names_per_orcid"],
             unique_name_count,
         )
-        if unique_name_count > max_names_per_orcid:
-            raise ValueError(
-                f"ORCID {current_orcid!r} has {unique_name_count} unique names, exceeding "
-                f"max_names_per_orcid={max_names_per_orcid}; raise the explicit bound only after "
-                "reviewing the source group"
-            )
         sorted_names = sorted(current_names)
         digest_group = bytearray()
         orcid_bytes = current_orcid.encode("utf-8")

@@ -125,6 +125,8 @@ The `counts/` scripts document production count artifacts:
   `uv sync --extra orcid-counts` before running the producer.
 
 Both scripts are import-safe without the internal warehouse package. Start
-with `--help`, `--dry-run`, or a small `--input-json` fixture. A full internal
-query requires `--run-full`, an explicit `--output-dir`, and a reviewed
-`--source-snapshot-id`; it is not part of the local verification suite.
+with `--help`, `--dry-run`, or a small fixture: `--fixture-input` for
+`generate_name_counts.py` and `--input-json` for
+`generate_orcid_name_prefix_counts.py`. A full internal query requires
+`--run-full`, an explicit `--output-dir`, and a reviewed `--source-snapshot-id`;
+it is not part of the local verification suite.

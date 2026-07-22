@@ -95,8 +95,6 @@ class _RustFeaturizerCacheKey:
     seed: _RustFeaturizerSeedFingerprint
 
 
-_RustFeaturizerBuildCountKey = str
-
 # Single WeakKeyDictionary eliminates desync risk between separate weak dicts.
 _RUST_FEATURIZER_CACHE: "weakref.WeakKeyDictionary[ANDData, dict[_RustFeaturizerCacheKey, _CacheEntry]]" = (
     weakref.WeakKeyDictionary()
@@ -105,9 +103,7 @@ _RUST_FEATURIZER_CACHE_LOCK = threading.RLock()
 _RUST_FEATURIZER_INFLIGHT_BUILDS: weakref.WeakKeyDictionary[
     ANDData, dict[_RustFeaturizerCacheKey, _InFlightFeaturizerBuild]
 ] = weakref.WeakKeyDictionary()
-_RUST_FEATURIZER_BUILD_COUNTS: "weakref.WeakKeyDictionary[ANDData, dict[_RustFeaturizerBuildCountKey, int]]" = (
-    weakref.WeakKeyDictionary()
-)
+_RUST_FEATURIZER_BUILD_COUNTS: "weakref.WeakKeyDictionary[ANDData, int]" = weakref.WeakKeyDictionary()
 _RUST_FEATURIZER_CACHE_EPOCHS: "weakref.WeakKeyDictionary[ANDData, int]" = weakref.WeakKeyDictionary()
 _RUST_CLUSTER_SEED_UPDATE_LOCKS: "weakref.WeakKeyDictionary[ANDData, Any]" = weakref.WeakKeyDictionary()
 RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES = 3
@@ -408,35 +404,15 @@ def update_rust_cluster_seeds(
             dataset._cluster_seeds_version = target_seed_version
 
 
-def _rust_featurizer_build_count_key(
-    cache_key: _RustFeaturizerCacheKey | None,
-) -> _RustFeaturizerBuildCountKey:
-    del cache_key
-    return "from_arrow_paths"
-
-
-def _increment_rust_featurizer_build_count_locked(
-    dataset: ANDData,
-    cache_key: _RustFeaturizerCacheKey | None = None,
-) -> int:
-    build_count_key = _rust_featurizer_build_count_key(cache_key)
-    counts = _RUST_FEATURIZER_BUILD_COUNTS.get(dataset)
-    if counts is None:
-        counts = {}
-        _RUST_FEATURIZER_BUILD_COUNTS[dataset] = counts
-    count = int(counts.get(build_count_key, 0)) + 1
-    counts[build_count_key] = count
+def _increment_rust_featurizer_build_count_locked(dataset: ANDData) -> int:
+    count = int(_RUST_FEATURIZER_BUILD_COUNTS.get(dataset, 0)) + 1
+    _RUST_FEATURIZER_BUILD_COUNTS[dataset] = count
     return count
 
 
-def _rust_featurizer_build_count(
-    dataset: ANDData,
-    cache_key: _RustFeaturizerCacheKey | None = None,
-) -> int:
-    build_count_key = _rust_featurizer_build_count_key(cache_key)
+def _rust_featurizer_build_count(dataset: ANDData) -> int:
     with _RUST_FEATURIZER_CACHE_LOCK:
-        counts = _RUST_FEATURIZER_BUILD_COUNTS.get(dataset)
-        return 0 if counts is None else int(counts.get(build_count_key, 0))
+        return int(_RUST_FEATURIZER_BUILD_COUNTS.get(dataset, 0))
 
 
 def build_rust_featurizer_from_arrow_paths(
@@ -751,7 +727,7 @@ def _build_and_cache_rust_featurizer(
             build_seconds,
             build_context.dataset_name_for_logs,
             "from_arrow_paths",
-            _rust_featurizer_build_count(dataset, cache_key),
+            _rust_featurizer_build_count(dataset),
             build_timings.get("pre_build_seconds", 0.0),
             build_timings.get("ffi_seconds", 0.0),
             build_timings.get("post_build_seconds", 0.0),
@@ -790,7 +766,7 @@ def _build_and_cache_rust_featurizer(
                         del _RUST_FEATURIZER_INFLIGHT_BUILDS[dataset]
                 return None
             _prune_stale_cache_entries_locked(dataset, build_context.cache_key)
-            build_count = _increment_rust_featurizer_build_count_locked(dataset, cache_key)
+            build_count = _increment_rust_featurizer_build_count_locked(dataset)
             entries = _RUST_FEATURIZER_CACHE.get(dataset)
             if entries is None:
                 entries = {}

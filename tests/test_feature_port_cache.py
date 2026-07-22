@@ -878,10 +878,9 @@ def test_clear_during_inflight_build_discards_stale_result(monkeypatch):
 
 def test_evict_rust_featurizer_clears_build_counts():
     dataset = DummyDataset("evict_build_counts", mode="train")
-    cache_key = feature_port._rust_featurizer_cache_key(dataset)  # noqa: SLF001
 
     feature_port._get_rust_featurizer(dataset)
 
-    assert feature_port._rust_featurizer_build_count(dataset, cache_key) == 1  # noqa: SLF001
+    assert feature_port._rust_featurizer_build_count(dataset) == 1  # noqa: SLF001
     assert feature_port.evict_rust_featurizer(dataset) is True
-    assert feature_port._rust_featurizer_build_count(dataset, cache_key) == 0  # noqa: SLF001
+    assert feature_port._rust_featurizer_build_count(dataset) == 0  # noqa: SLF001

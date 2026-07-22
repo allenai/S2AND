@@ -99,16 +99,12 @@ class _LazyConfig(MutableMapping[str, Any]):
 
 
 class _LazyDataPath(os.PathLike[str]):
-    def __init__(self, filename: str, *, fallback_url: str | None = None):
+    def __init__(self, filename: str):
         self._filename = filename
-        self._fallback_url = fallback_url
 
     def _resolve(self) -> str:
         main_data_dir = str(CONFIG["main_data_dir"])
-        candidate = os.path.join(main_data_dir, self._filename)
-        if self._fallback_url and not os.path.exists(candidate):
-            return self._fallback_url
-        return candidate
+        return os.path.join(main_data_dir, self._filename)
 
     def __fspath__(self) -> str:
         return self._resolve()
@@ -117,7 +113,7 @@ class _LazyDataPath(os.PathLike[str]):
         return self._resolve()
 
     def __repr__(self) -> str:
-        return f"_LazyDataPath(filename={self._filename!r}, fallback_url={self._fallback_url!r})"
+        return f"_LazyDataPath(filename={self._filename!r})"
 
 
 # Lazily-loaded path config to avoid import-time file I/O.

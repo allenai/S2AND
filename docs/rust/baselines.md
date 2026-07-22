@@ -1,15 +1,17 @@
 # Rust Operational Baselines
 
-Status date: 2026-05-27 (latest snapshot: [`profiling/2026-05-27-promoted-incremental-arrow.md`](profiling/2026-05-27-promoted-incremental-arrow.md))
+Status date: 2026-05-28 (latest snapshot: [`profiling/2026-05-28-promoted-incremental-arrow.md`](profiling/2026-05-28-promoted-incremental-arrow.md))
 
 This doc is the operator guide for rerunning Rust promotion gates.
-The JSON artifacts under `scratch/` are the source of truth; avoid copying full metric tables into Markdown.
+Local JSON artifacts under `scratch/` are the raw evidence for a run but are
+gitignored. A dated Markdown snapshot is the durable record of the command,
+environment, metrics, and interpretation worth retaining.
 
 ---
 
 ## Artifact conventions
 
-- Gate JSON artifacts are local evidence under `scratch/` (gitignored).
+- Gate JSON artifacts are local raw evidence under `scratch/` (gitignored).
 - Write outputs under `scratch/baselines_YYYYMMDD/`.
 - Promotion-grade runs should include `workload_id` when present (in the JSON).
 - Release-grade promotion still requires `run_metadata.git_dirty=false`.
@@ -30,9 +32,7 @@ When refreshing gates:
 
 | Date | Highlights |
 |---|---|
-| [2026-05-27](profiling/2026-05-27-promoted-incremental-arrow.md) | Arrow-only promoted incremental profile on the canonical replay bundle; operational evidence from a dirty/debug worktree. |
-| [2026-05-25](profiling/2026-05-25-promoted-incremental-preflight.md) | Arrow promoted-incremental tiny preflight and canonical profiler setup. |
-| [2026-03-02](profiling/2026-03-02.md) | Gate rerun refresh snapshot (commands + artifact paths). |
+| [2026-05-28](profiling/2026-05-28-promoted-incremental-arrow.md) | Release-build comparison retaining the measured rationale for memory-mapping the name-count index; not a release-grade promotion result because the worktree was dirty. |
 
 ---
 

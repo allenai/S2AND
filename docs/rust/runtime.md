@@ -58,15 +58,6 @@ reuse is keyed by the validated artifact generation and build settings.
 Replace an artifact by publishing a new generation rather than mutating a
 live path.
 
-Pair featurization selects a signature-index layout adaptively
-(`select_signature_index_layout`): dense direct indexing when the referenced
-index range is proportionate to the pair workload, and a compact remapped
-layout when indices are sparse. The retired always-dense layout allocated
-one slot per index up to `max_index`, so a request touching two signatures in
-a ten-million-signature corpus paid the full dense allocation; the compact
-layout bounds live memory by the distinct signatures actually referenced.
-Layout selection is covered by unit tests in `rust_featurizer.rs`.
-
 ## Threading
 
 `n_jobs` is passed as `num_threads` to maintained Rust batch APIs. LightGBM

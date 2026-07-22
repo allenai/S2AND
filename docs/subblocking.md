@@ -136,5 +136,5 @@ Rust extension is an error on the Arrow route.
 `Clusterer.predict_incremental_from_arrow_paths`, it caps the number of unassigned query signatures per linker batch.
 The standalone Python `Clusterer.predict_incremental` API does not take a batching parameter.
 
-See [production_inference.md](production_inference.md#large-blocks-and-incremental-inference) for the full
+See [production_inference.md](production_inference.md#incremental-decision-semantics) for the full
 caller-facing contract.

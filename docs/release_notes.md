@@ -86,38 +86,10 @@
   materialization. Paper-author inputs reject duplicate positions, empty names,
   and dangling references consistently in Python and Rust. Python subblocking
   rejects duplicate IDs with explicit runtime invariants.
-- Remaining non-artifact decisions are explicit: nullable
-  `signatures.author_position` is not made non-null until the new datasets are
-  audited, and `backend="python"` still uses the native scorer because the true
-  zero-Rust scorer measured about 27% lower throughput. The latter is not being
-  changed under the no-throughput-regression requirement. Canonical tuple
-  regeneration is metadata-last and fail-closed, but
-  true crash-atomic replacement would also require a generation-pointer layout.
-  Python `ANDData` now accepts a validated `name_counts_index` path or shared
-  immutable `NameCountsIndex` handle. The caller-owned dictionary seam, legacy
-  pickle loader, and process-wide Python count dictionaries are removed.
-  Preprocessing resolves counts in bounded native batches and retains only four
-  scalar values per signature. The v1 `pickle_sha256` provenance field remains
-  source-lineage metadata until the model contract is versioned; runtime never
-  opens that pickle.
-- A parsimony sweep removed duplicated artifact loaders, validators, cache
-  state, publication hardening, plan-window machinery, dead telemetry, no-op
-  CLI choices, legacy path fallbacks, mock-mirror tests, and redundant CI LFS
-  verification. Python owns name-tuple loading, Rust owns native SHA-256, graph
-  subblocking fails directly when explicitly selected, and production bundle
-  loading hashes only declared files once while ignoring unrelated files.
-- Local code-now performance gates stayed inside the requested envelope. The
-  specialized float32 scorer improved throughput by 26.8-34.9% while removing
-  roughly 74% of per-call RSS; retained model RSS rose 7.0-7.39%. On all 40,383
-  KISTI signatures, mmap-index count materialization kept Python signature
-  preprocessing within the gate (median +7.1%, best-run +9.0%) while replacing
-  3.390 GiB retained / 3.885 GiB peak historical dictionaries with a 0.52 MB
-  native open and 197.4 MB lookup-benchmark peak. Exact count-output digests
-  match. Deterministic ORCID JSON publication improved 300k-record throughput
-  by 713% and reduced incremental peak RSS by 13.5%. Follow-up profiling found
-  planner/featurizer window reuse worth only 2.6%, so that state machine was
-  removed. Removing the float32 threshold-floor cache preserved the prediction
-  digest and improved the 200k-row median by 5.6%.
+- Canonical-v2 removes legacy pickle/count-dictionary loading and redundant
+  artifact plumbing. Bounded native name-count lookups, optimized float32
+  scoring, and deterministic publication preserve output hashes while meeting
+  the recorded memory and throughput gates.
 
 ## 0.51.1
 

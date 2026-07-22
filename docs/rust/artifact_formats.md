@@ -121,8 +121,10 @@ planning. Do not hand-write the batch-index binary format.
 
 ## Format Ownership
 
-- `docs/rust/arrow_dataset_spec.md` owns the table schemas and manifest
-  checklist.
+- [arrow_dataset_spec.md](arrow_dataset_spec.md) owns the table schemas and
+  manifest checklist.
 - This document owns artifact-format choices and rejected alternatives.
-- `docs/rust/inference_architecture.md` owns the runtime boundary and
-  remaining Python-heavy paths.
+- [runtime.md](runtime.md) owns the Python/Rust execution boundary and failure
+  semantics.
+- [production_inference.md](../production_inference.md) owns production
+  prediction operations.

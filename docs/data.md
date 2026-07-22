@@ -94,12 +94,9 @@ manifest checksum. It records feature order and training params for the replay
 script.
 
 The promoted linker train/calibrate/eval replay data is published under the
-Arrow release prefix. Download it when you need to rebuild or audit the
-promoted linker artifact:
-
-```bash
-uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release-arrow/s2and_and_big_blocks_linker_dataset_20260525 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
-```
+Arrow release prefix. Use the standalone replay-subbundle download command in
+[Dataset download](#dataset-download) when you need to rebuild or audit the
+promoted linker artifact.
 
 This source bundle is the default `--source-bundle-root` for
 `scripts/production/model/linker_train_calibrate_eval.py`.

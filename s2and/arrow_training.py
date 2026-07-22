@@ -17,9 +17,9 @@ What stays outside Arrow, by design:
   dataset whose insertion order differed. Feature values for any given pair are
   parity-gated identical (tests/test_arrow_training_ingestion.py).
 
-Text columns hold ANDData-preprocessed values. The fixed constructor always
-uses the canonical preprocessing contract that the Rust Arrow readers assume
-(docs/rust/ingest_source_policy_inventory.md).
+Arrow text and name columns carry source/raw preprocessing inputs, and Rust
+performs canonical preprocessing while building the scoring view. See
+``docs/rust/arrow_dataset_spec.md`` for the authoritative contract.
 """
 
 from __future__ import annotations

@@ -142,19 +142,6 @@ print(metrics)
 
 `metrics_per_signature` is useful when you want to slice performance by signature properties.
 
-## Production pair selection
-
-The existing `train_pairwise_bundle` implementation samples internally from
-legacy JSON/pickle `ANDData` inputs. It does not consume the explicit pair
-catalogs produced by the pair-source experiments and therefore does not declare
-or claim a prospective experiment recipe.
-
-Before promoting an experiment result, route its exact selected rows through
-the maintained Arrow featurizer and record the realized source counts,
-selection audit, and pair-identity digest in the production training summary.
-A tiny end-to-end test must prove that the resolved rows are the rows actually
-used for training before running the full production job.
-
 ## Publish and reload a trained model
 
 Do not publish a pickle. The public loader accepts only a complete canonical
@@ -162,7 +149,7 @@ native bundle containing the pairwise boosters, clusterer configuration,
 promoted linker, reproducibility target, and checksummed manifest. The
 production training scripts write a pairwise-only staging bundle and then
 atomically finalize a complete bundle; see
-[production_inference.md](production_inference.md#atomic-publication) for the
+[production_inference.md](production_inference.md#staged-publication) for the
 exact commands and release gates.
 
 Pairwise production training also verifies that every dataset uses the packaged

@@ -4,17 +4,51 @@ Date: 2026-05-28 UTC
 
 ## Scope
 
-Release-grade refresh of the
-[2026-05-27 snapshot](2026-05-27-promoted-incremental-arrow.md), plus a
-follow-up change that replaces the name-count index reader's `fs::read` with
-memory-mapped IO. Uses the same canonical local bundle:
+Release-build comparison of the name-count index reader before and after
+replacing `fs::read` with memory-mapped IO. This is not a release-grade
+promotion result because the worktree was dirty. Both runs used the canonical
+local bundle:
 
 ```text
 s2and/data/s2and_and_big_blocks_linker_dataset_20260525
 ```
 
-Same command shape as the previous snapshot (25 query signatures, 25 synthetic
-seed clusters, 5 runs, `r agarwal`).
+Both runs used 25 query signatures, 25 synthetic seed clusters, 5 runs, and the
+target block `r agarwal`.
+
+## Commands
+
+Build the extension in release mode before each run:
+
+```powershell
+uv run maturin develop -m s2and_rust/Cargo.toml --release
+```
+
+Baseline:
+
+```powershell
+uv run python scripts/rust_suite.py promoted-incremental-arrow-profile `
+  --dataset pubmed `
+  --query-limit 25 `
+  --max-seed-clusters 25 `
+  --runs 5 `
+  --synthetic-seeds-when-clusters-missing `
+  --output-dir scratch/promoted_incremental_arrow_profile `
+  --write-json scratch/promoted_incremental_arrow_profile/pubmed_baseline.json
+```
+
+After the mmap change, rebuild in release mode and rerun:
+
+```powershell
+uv run python scripts/rust_suite.py promoted-incremental-arrow-profile `
+  --dataset pubmed `
+  --query-limit 25 `
+  --max-seed-clusters 25 `
+  --runs 5 `
+  --synthetic-seeds-when-clusters-missing `
+  --output-dir scratch/promoted_incremental_arrow_profile `
+  --write-json scratch/promoted_incremental_arrow_profile/pubmed_mmap.json
+```
 
 ## Builds compared
 
@@ -35,9 +69,9 @@ p50 over 5 runs, target block `r agarwal`:
 | `raw_arrow_window_featurizer_seconds` p50 | 0.996 s | 0.809 s | −18.8% |
 | `peak_rss_gb` max | 3.84 GB | 3.02 GB | −21.4% |
 
-The 2026-05-27 reading of `~11 s p50` was the debug-assertions cost. A clean
-release build alone drops p50 to ~2.18 s on the same workload; the mmap
-follow-up drops it further to ~2.01 s.
+A prior debug build measured `~11 s p50`. Rebuilding in release mode dropped
+p50 to ~2.18 s on the same workload; the mmap follow-up dropped it further to
+~2.01 s.
 
 ## Interpretation
 
@@ -62,11 +96,13 @@ scratch/promoted_incremental_arrow_profile/pubmed_baseline.json
 scratch/promoted_incremental_arrow_profile/pubmed_mmap.json
 ```
 
+These gitignored JSON files are the local raw evidence. This Markdown snapshot
+is the durable record of the command, metrics, and interpretation.
+
 ## Caveats
 
 - `run_metadata.git_dirty=true` (this profile run was taken from a working
   tree carrying the mmap edit and unrelated in-flight Rust changes); the
-  release extension was rebuilt before each run. A future release-grade
-  refresh from a clean worktree is still warranted before claiming this as a
-  release performance number.
+  release extension was rebuilt before each run. Treat this only as a
+  release-build comparison. A release-grade refresh requires a clean worktree.
 - `debug_assertions=false` for both builds.

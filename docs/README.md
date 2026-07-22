@@ -2,15 +2,6 @@
 
 This directory holds both user-facing guides and internal engineering notes.
 
-## Start here
-
-- Install and setup: [install.md](install.md)
-- Production inference: [production_inference.md](production_inference.md)
-- Training and evaluation: [training.md](training.md)
-- Development workflow: [development.md](development.md)
-- Rust runtime contract and verification commands: [rust/runtime.md](rust/runtime.md)
-- Rust and platform backlog: [work_plan.md](work_plan.md)
-
 ## User guides
 
 - Install and setup: [install.md](install.md)
@@ -28,10 +19,8 @@ This directory holds both user-facing guides and internal engineering notes.
 - Threading and parallelism: [threading.md](threading.md)
 - Subblocking for large blocks: [subblocking.md](subblocking.md)
 - Rust promotion baselines and gate commands: [rust/baselines.md](rust/baselines.md)
-- Rust inference architecture: [rust/inference_architecture.md](rust/inference_architecture.md)
 - Rust artifact formats: [rust/artifact_formats.md](rust/artifact_formats.md)
 - Direct Rust Arrow dataset schema: [rust/arrow_dataset_spec.md](rust/arrow_dataset_spec.md)
-- Historical profiling snapshots: [rust/profiling/README.md](rust/profiling/README.md)
 
 ## Deep dives and engineering notes
 

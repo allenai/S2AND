@@ -222,10 +222,8 @@ def write_production_manifest(
     sha256: dict[str, str] = {}
     for relpath in sorted(set(files.values())):
         path = bundle_dir / relpath
-        if path.is_dir():
-            continue
-        if not path.exists():
-            raise FileNotFoundError(f"Production bundle file is missing: {path}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Production bundle file is missing or not a regular file: {path}")
         sha256[relpath] = _sha256_file(path)
 
     status = production_bundle_status(incremental_linker_version)

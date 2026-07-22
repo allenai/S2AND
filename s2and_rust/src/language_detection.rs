@@ -22,6 +22,12 @@ pub(crate) struct LanguageDetectionAudit {
 }
 
 pub(crate) fn detect_language_compat(text: &str) -> LanguageDetectionAudit {
+    // The word gate intentionally uses Rust whitespace, not Python-compat
+    // whitespace: Python counts C0 separators (U+001C..=U+001F) as split
+    // points, but any input containing them makes pycld2 raise, which
+    // `s2and.text.detect_language` catches and maps to the same "un"/0.0
+    // this short-circuit returns. Widening the splitter here would DIVERGE
+    // from Python, because Rust cld2 accepts those inputs and detects.
     if text.split_whitespace().count() <= 1 || python_alpha_count(text) == 0 {
         return unknown_language_detection();
     }

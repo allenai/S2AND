@@ -1116,6 +1116,27 @@ def test_bundle_directory_version_must_match_explicit_version(
         )
 
 
+def test_manifest_writer_rejects_directory_at_required_file_path(tmp_path: Path) -> None:
+    files = production_bundle_module.production_manifest_files(
+        incremental_linker_version=None,
+        include_pairwise_reproducibility=False,
+    )
+    for relpath in files.values():
+        path = tmp_path / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"payload")
+    (tmp_path / "clusterer.json").unlink()
+    (tmp_path / "clusterer.json").mkdir()
+
+    with pytest.raises(FileNotFoundError, match="missing or not a regular file"):
+        production_bundle_module.write_production_manifest(
+            tmp_path,
+            bundle_version="9.9",
+            pairwise_model_version="9.9",
+        )
+    assert not (tmp_path / "manifest.json").exists()
+
+
 @pytest.mark.parametrize("invalid_version", (False, "   "))
 def test_manifest_writer_rejects_invalid_state_discriminator(tmp_path: Path, invalid_version: Any) -> None:
     with pytest.raises(ValueError, match="require a nonempty incremental_linker_version"):

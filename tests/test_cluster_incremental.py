@@ -2035,6 +2035,66 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
     assert cluster_seeds_require_inverse == {"7": ["seed0", "seed1"], "8": ["seed2", "seed3"], "9": ["seed4"]}
 
 
+def test_altered_presplit_cache_key_invariants_computed_at_most_once(monkeypatch: pytest.MonkeyPatch):
+    clusterer = _build_minimal_incremental_clusterer()
+
+    def fake_predict_from_arrow_paths(block_dict, arrow_paths, **kwargs):
+        del arrow_paths, kwargs
+        return {block_key: list(signature_ids) for block_key, signature_ids in block_dict.items()}, None
+
+    clusterer.predict_from_arrow_paths = cast(Any, fake_predict_from_arrow_paths)
+    name_tuples = frozenset({("anne", "ann")})
+    arrow_paths = {
+        "signatures": "signatures.arrow",
+        "papers": "papers.arrow",
+        "paper_authors": "paper_authors.arrow",
+    }
+    calls = {"arrow_fingerprint": 0, "name_tuples_key": 0}
+    real_arrow_fingerprint = model_module._arrow_paths_cache_fingerprint
+    real_cacheable_value = model_module._cacheable_value
+
+    def counting_arrow_fingerprint(paths):
+        calls["arrow_fingerprint"] += 1
+        return real_arrow_fingerprint(paths)
+
+    def counting_cacheable_value(value):
+        if value is name_tuples:
+            calls["name_tuples_key"] += 1
+        return real_cacheable_value(value)
+
+    monkeypatch.setattr(model_module, "_arrow_paths_cache_fingerprint", counting_arrow_fingerprint)
+    monkeypatch.setattr(model_module, "_cacheable_value", counting_cacheable_value)
+
+    def run(altered_cluster_signatures: list[str]) -> None:
+        dataset = cast(
+            ANDData,
+            SimpleNamespace(
+                cluster_seeds_require={"seed0": "7", "seed1": "7", "seed2": "8", "seed3": "8", "seed4": "9"},
+                cluster_seeds_disallow=set(),
+                altered_cluster_signatures=altered_cluster_signatures,
+                name_tuples=name_tuples,
+            ),
+        )
+        clusterer._build_incremental_seed_setup(
+            dataset,
+            {},
+            runtime_context=cast(Any, object()),
+            total_ram_bytes=123_456,
+            arrow_paths=arrow_paths,
+        )
+
+    # Two eligible multi-signature clusters ("7", "8") must share one computation.
+    run(["seed0", "seed2", "seed4"])
+    assert calls == {"arrow_fingerprint": 1, "name_tuples_key": 1}
+
+    # A request whose only altered cluster is a singleton builds no cache key
+    # and must not pay for the invariants at all.
+    calls["arrow_fingerprint"] = 0
+    calls["name_tuples_key"] = 0
+    run(["seed4"])
+    assert calls == {"arrow_fingerprint": 0, "name_tuples_key": 0}
+
+
 def test_build_incremental_seed_setup_loads_seed_and_altered_signatures_from_arrow_paths(tmp_path: Path):
     import pyarrow as pa
 

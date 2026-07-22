@@ -292,18 +292,21 @@ def _altered_presplit_cache_key(
     altered_cluster_num: int | str,
     signature_ids: Sequence[str],
     effective_partial_supervision: Mapping[tuple[Any, Any], int | float],
-    arrow_paths: Mapping[str, Any] | None,
-    name_tuples: Any,
+    arrow_paths_fingerprint: tuple[tuple[str, Any], ...],
+    name_tuples_key: Any,
     model_fingerprint: tuple[Any, ...],
 ) -> tuple[Any, ...]:
+    # arrow_paths_fingerprint and name_tuples_key are request-invariant and
+    # expensive (content hashing / full sort); callers compute them at most once
+    # per request via _arrow_paths_cache_fingerprint / _cacheable_value.
     return (
         "altered_presplit_v1",
         str(mode),
         str(altered_cluster_num),
         tuple(str(signature_id) for signature_id in signature_ids),
         _partial_supervision_cache_fingerprint(effective_partial_supervision),
-        _arrow_paths_cache_fingerprint(arrow_paths),
-        _cacheable_value(name_tuples),
+        arrow_paths_fingerprint,
+        name_tuples_key,
         model_fingerprint,
     )
 
@@ -4421,6 +4424,10 @@ class Clusterer:
                 )
             else:
                 presplit_arrow_paths = None
+            # Request-invariant cache-key parts (sidecar content hash + name-tuple
+            # sort) are expensive; computed lazily on the first eligible cluster so
+            # requests that build no cache key pay nothing.
+            presplit_cache_invariants: tuple[tuple[tuple[str, Any], ...], Any] | None = None
             reclustered_by_cluster_num: dict[int | str, list[list[str]]] = defaultdict(list)
             presplit_jobs: list[_AlteredPresplitJob] = []
             for altered_index, altered_cluster_num in enumerate(sorted_altered_cluster_nums):
@@ -4448,19 +4455,23 @@ class Clusterer:
                     partial_supervision,
                     cluster_seed_disallows=request_cluster_seed_disallows,
                 )
-                cache_key = (
-                    _altered_presplit_cache_key(
+                if presplit_arrow_paths is not None:
+                    if presplit_cache_invariants is None:
+                        presplit_cache_invariants = (
+                            _arrow_paths_cache_fingerprint(presplit_arrow_paths),
+                            _cacheable_value(name_tuples),
+                        )
+                    cache_key = _altered_presplit_cache_key(
                         mode="arrow",
                         altered_cluster_num=altered_cluster_num,
                         signature_ids=signature_ids_for_cluster_num,
                         effective_partial_supervision=effective_partial_supervision,
-                        arrow_paths=presplit_arrow_paths,
-                        name_tuples=name_tuples,
+                        arrow_paths_fingerprint=presplit_cache_invariants[0],
+                        name_tuples_key=presplit_cache_invariants[1],
                         model_fingerprint=model_cache_fingerprint,
                     )
-                    if presplit_arrow_paths is not None
-                    else None
-                )
+                else:
+                    cache_key = None
                 if cache_key is not None:
                     cached_clusters = _get_altered_presplit_cache_entry(self, cache_key)
                     if cached_clusters is not None:

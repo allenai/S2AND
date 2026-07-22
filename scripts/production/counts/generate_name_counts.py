@@ -20,6 +20,7 @@ from typing import Any
 
 from s2and._atomic_io import exclusive_file_lock, fsync_directory
 from s2and.consts import NORMALIZATION_VERSION
+from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts
 
 QUERY = """
@@ -137,7 +138,6 @@ def build_name_count_dicts(
     mappings = (counters[0], counters[1], counters[2], counters[3])
     return mappings, {
         "source_row_count": source_rows,
-        "selected_row_count": source_rows,
         "selected_rows_sha256": selected_rows_digest.hexdigest(),
         "rejected_row_count": rejected_rows,
     }
@@ -176,8 +176,6 @@ def publish_name_counts(
 
     if len(query_digest) != 64:
         raise ValueError("query_digest must be a SHA-256 hex digest")
-    if row_metrics.get("source_row_count") != row_metrics.get("selected_row_count"):
-        raise ValueError("row_metrics source_row_count/selected_row_count mismatch")
     selected_rows_sha256 = row_metrics.get("selected_rows_sha256")
     if not isinstance(selected_rows_sha256, str) or len(selected_rows_sha256) != 64:
         raise ValueError("row_metrics requires selected_rows_sha256")
@@ -208,7 +206,7 @@ def publish_name_counts(
             )
         )
         metadata = {
-            "schema_version": "name_counts_provenance_v1",
+            "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
             "normalization_version": NORMALIZATION_VERSION,
             "generation_id": generation_id,
             "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),

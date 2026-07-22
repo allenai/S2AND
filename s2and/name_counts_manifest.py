@@ -13,9 +13,26 @@ from typing import Any
 
 from s2and.consts import NORMALIZATION_VERSION
 
-NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v1"
-NAME_COUNTS_PROVENANCE_SCHEMA_VERSION = "name_counts_provenance_v1"
+NAME_COUNTS_INDEX_SCHEMA_VERSION = "name_counts_index_v2"
+NAME_COUNTS_PROVENANCE_SCHEMA_VERSION = "name_counts_provenance_v2"
 NAME_COUNTS_INDEX_FILE_KEYS = ("first", "last", "first_last", "last_first_initial")
+_NAME_COUNTS_PROVENANCE_FIELDS = frozenset(
+    {
+        "cardinalities",
+        "generated_at",
+        "generation_id",
+        "normalization_version",
+        "pickle_byte_count",
+        "pickle_sha256",
+        "rejected_row_count",
+        "schema_version",
+        "selected_rows_sha256",
+        "source_kind",
+        "source_query_sha256",
+        "source_row_count",
+        "source_snapshot_id",
+    }
+)
 _MAX_U64 = (1 << 64) - 1
 
 
@@ -58,10 +75,13 @@ def readonly_name_counts_provenance(value: Mapping[str, Any]) -> Mapping[str, An
 
 
 def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, Any]:
-    """Return one validated v1 source-provenance payload."""
+    """Return one validated v2 source-provenance payload."""
 
     if not isinstance(value, Mapping) or value.get("schema_version") != NAME_COUNTS_PROVENANCE_SCHEMA_VERSION:
         raise ValueError(f"{context} requires schema_version={NAME_COUNTS_PROVENANCE_SCHEMA_VERSION!r} provenance")
+    extra_fields = set(value) - _NAME_COUNTS_PROVENANCE_FIELDS
+    if extra_fields:
+        raise ValueError(f"{context} provenance has unsupported fields: {sorted(extra_fields)}")
     if value.get("normalization_version") != NORMALIZATION_VERSION:
         raise ValueError(
             f"{context} normalization_version={value.get('normalization_version')!r}; "
@@ -69,22 +89,15 @@ def validated_name_counts_provenance(value: Any, *, context: str) -> dict[str, A
         )
     for field in ("generation_id", "source_snapshot_id", "source_kind"):
         _require_nonempty_string(value.get(field), field=field, context=f"{context} provenance")
-    # pickle_sha256 remains the v1 source-lineage identity until the next model
+    # pickle_sha256 remains the source-lineage identity until the next model
     # feature-contract schema. Runtime lookup never opens or unpickles that file.
     for field in ("pickle_sha256", "source_query_sha256", "selected_rows_sha256"):
         _require_lowercase_sha256(value.get(field), field=field, context=f"{context} provenance")
-    selected_row_count = _require_u64(
-        value.get("selected_row_count"),
-        field="selected_row_count",
-        context=f"{context} provenance",
-    )
-    source_row_count = _require_u64(
+    _require_u64(
         value.get("source_row_count"),
         field="source_row_count",
         context=f"{context} provenance",
     )
-    if source_row_count != selected_row_count:
-        raise ValueError(f"{context} provenance selected_row_count/source_row_count mismatch")
     return dict(value)
 
 
@@ -149,11 +162,9 @@ class ValidatedNameCountsManifest:
     ) -> ValidatedNameCountsManifest:
         """Validate one exact manifest snapshot.
 
-        ``verify_file_digests=False`` is reserved for exact-snapshot callers:
-        either facts bound to a native handle with the same manifest digest,
-        or publication-locked cleanup that needs safe generation reachability
-        rather than material integrity. Native open remains the sole material-
-        digest and record-semantics authority on runtime paths.
+        ``verify_file_digests=False`` is reserved for exact-snapshot facts bound
+        to a native handle with the same manifest digest. Native open remains
+        the sole material-digest and record-semantics authority on runtime paths.
         """
 
         root = Path(index_dir).resolve()
@@ -186,6 +197,7 @@ class ValidatedNameCountsManifest:
         if not isinstance(raw_files, Mapping):
             raise ValueError(f"{context} manifest requires files mapping: {manifest_path}")
         files: dict[str, ValidatedNameCountsFile] = {}
+        generation_name: str | None = None
         for file_key in NAME_COUNTS_INDEX_FILE_KEYS:
             entry = raw_files.get(file_key)
             if not isinstance(entry, Mapping):
@@ -195,10 +207,22 @@ class ValidatedNameCountsManifest:
                 field=f"files.{file_key}.path",
                 context=f"{context} manifest",
             )
-            if not path_value.strip():
-                raise ValueError(f"{context} manifest requires nonempty string files.{file_key}.path")
-            declared_path = Path(path_value)
-            resolved_path = (declared_path if declared_path.is_absolute() else root / declared_path).resolve()
+            parts = path_value.split("/")
+            if (
+                len(parts) != 3
+                or parts[0] != "generations"
+                or parts[1] in {"", ".", ".."}
+                or "\\" in path_value
+                or parts[2] != f"{file_key}.bin"
+            ):
+                raise ValueError(
+                    f"{context} manifest files.{file_key}.path must equal generations/<generation-id>/{file_key}.bin"
+                )
+            if generation_name is None:
+                generation_name = parts[1]
+            elif parts[1] != generation_name:
+                raise ValueError(f"{context} manifest files must share one generation directory")
+            resolved_path = (root / path_value).resolve()
             try:
                 resolved_path.relative_to(root)
             except ValueError as exc:

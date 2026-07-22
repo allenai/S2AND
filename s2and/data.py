@@ -371,7 +371,7 @@ class Signature(NamedTuple):
     author_info_given_block: str | None
     author_info_estimated_gender: str | None
     author_info_estimated_ethnicity: str | None
-    paper_id: int
+    paper_id: str | int
     sourced_author_source: str | None
     sourced_author_ids: list[str]
     author_id: int | None
@@ -399,7 +399,7 @@ class Paper(NamedTuple):
     venue_ngrams: Counter | None
     journal_ngrams: Counter | None
     year: int | None
-    paper_id: int
+    paper_id: str | int
 
 
 class _SignaturePreprocessRow(TypedDict):
@@ -475,8 +475,8 @@ class ANDData:
     @classmethod
     def _from_validated_arrow_training(
         cls,
-        signatures: dict,
-        papers: dict,
+        signatures: dict[str, Signature],
+        papers: dict[str, Paper],
         name: str,
         *,
         arrow_paths: ValidatedArrowInputs,
@@ -485,8 +485,8 @@ class ANDData:
         """Construct a Rust-training dataset from one verified Arrow generation.
 
         Args:
-            signatures: Signature rows reconstructed from the Arrow bundle.
-            papers: Paper rows reconstructed from the Arrow bundle.
+            signatures: Final lightweight Python signature metadata.
+            papers: Final lightweight Python paper metadata.
             name: Human-readable dataset name used in logs and metrics.
             arrow_paths: Fully verified immutable Arrow artifact paths.
             **kwargs: Remaining train-mode ``ANDData`` construction arguments.
@@ -607,50 +607,53 @@ class ANDData:
         # Load signatures first so we can restrict papers/specter to relevant subset
         signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
-        raw_signatures = self._load_json_feature_source(signatures, "signatures")
-        self.signatures = {}
-        # convert dictionary to namedtuples for memory reduction
-        for signature_id, signature in raw_signatures.items():
-            self.signatures[signature_id] = Signature(
-                author_info_first=signature["author_info"]["first"],
-                author_info_first_normalized_without_apostrophe=None,
-                author_info_middle=signature["author_info"]["middle"],
-                author_info_middle_normalized_without_apostrophe=None,
-                author_info_last_normalized=None,
-                author_info_last=signature["author_info"]["last"],
-                author_info_suffix_normalized=None,
-                author_info_suffix=signature["author_info"]["suffix"],
-                author_info_coauthors=None,
-                author_info_coauthor_blocks=None,
-                author_info_full_name=None,
-                author_info_affiliations=signature["author_info"]["affiliations"],
-                author_info_affiliations_n_grams=None,
-                author_info_coauthor_n_grams=None,
-                author_info_email=signature["author_info"]["email"],
-                # use_orcid_id is an offline data-prep knob used by training data
-                # construction (incremental_linking_training.data_loading) to build
-                # datasets that strip ORCIDs entirely. Production callers leave the
-                # default True and let the per-request `Clusterer.suppress_orcid` flag
-                # drive ORCID enablement (which threads to Rust via `orcid_enabled` in
-                # raw_arrow_features). The two control surfaces are equivalent in
-                # effect; do not mix them.
-                author_info_orcid=(
-                    (signature["author_info"].get("source_ids") or [None])[0]
-                    if use_orcid_id and signature["author_info"].get("source_id_source") == "ORCID"
-                    else None
-                ),
-                author_info_name_counts=None,
-                author_info_position=signature["author_info"]["position"],
-                author_info_block=signature["author_info"]["block"],
-                author_info_given_block=signature["author_info"].get("given_block", None),
-                author_info_estimated_gender=signature["author_info"].get("estimated_gender", None),
-                author_info_estimated_ethnicity=signature["author_info"].get("estimated_ethnicity", None),
-                paper_id=signature["paper_id"],
-                sourced_author_source=signature.get("sourced_author_source", None),
-                sourced_author_ids=signature.get("sourced_author_ids", []),
-                author_id=signature.get("author_id", None),
-                signature_id=signature["signature_id"],
-            )
+        if self.arrow_paths is not None:
+            self.signatures = cast(dict[str, Signature], signatures)
+        else:
+            raw_signatures = self._load_json_feature_source(signatures, "signatures")
+            self.signatures = {}
+            # convert dictionary to namedtuples for memory reduction
+            for signature_id, signature in raw_signatures.items():
+                self.signatures[signature_id] = Signature(
+                    author_info_first=signature["author_info"]["first"],
+                    author_info_first_normalized_without_apostrophe=None,
+                    author_info_middle=signature["author_info"]["middle"],
+                    author_info_middle_normalized_without_apostrophe=None,
+                    author_info_last_normalized=None,
+                    author_info_last=signature["author_info"]["last"],
+                    author_info_suffix_normalized=None,
+                    author_info_suffix=signature["author_info"]["suffix"],
+                    author_info_coauthors=None,
+                    author_info_coauthor_blocks=None,
+                    author_info_full_name=None,
+                    author_info_affiliations=signature["author_info"]["affiliations"],
+                    author_info_affiliations_n_grams=None,
+                    author_info_coauthor_n_grams=None,
+                    author_info_email=signature["author_info"]["email"],
+                    # use_orcid_id is an offline data-prep knob used by training data
+                    # construction (incremental_linking_training.data_loading) to build
+                    # datasets that strip ORCIDs entirely. Production callers leave the
+                    # default True and let the per-request `Clusterer.suppress_orcid` flag
+                    # drive ORCID enablement (which threads to Rust via `orcid_enabled` in
+                    # raw_arrow_features). The two control surfaces are equivalent in
+                    # effect; do not mix them.
+                    author_info_orcid=(
+                        (signature["author_info"].get("source_ids") or [None])[0]
+                        if use_orcid_id and signature["author_info"].get("source_id_source") == "ORCID"
+                        else None
+                    ),
+                    author_info_name_counts=None,
+                    author_info_position=signature["author_info"]["position"],
+                    author_info_block=signature["author_info"]["block"],
+                    author_info_given_block=signature["author_info"].get("given_block", None),
+                    author_info_estimated_gender=signature["author_info"].get("estimated_gender", None),
+                    author_info_estimated_ethnicity=signature["author_info"].get("estimated_ethnicity", None),
+                    paper_id=signature["paper_id"],
+                    sourced_author_source=signature.get("sourced_author_source", None),
+                    sourced_author_ids=signature.get("sourced_author_ids", []),
+                    author_id=signature.get("author_id", None),
+                    signature_id=signature["signature_id"],
+                )
         logger.info("loaded signatures")
         logger.debug(
             "Telemetry stage: stage=anddata_ingest_signatures seconds=%.3f signatures=%d",
@@ -658,46 +661,49 @@ class ANDData:
             len(self.signatures),
         )
 
-        # Determine the set of papers referenced by signatures.
-        needed_paper_ids: set[str] = set(str(sig.paper_id) for sig in self.signatures.values())
-
         papers_stage_start = time.perf_counter()
         logger.info("loading papers (subset referenced by signatures)")
-        raw_papers = self._load_json_feature_source(papers, "papers")
-        filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
-        self.papers = {}
-        # convert dictionary to namedtuples for memory reduction
-        for paper_id, paper in filtered_papers.items():
-            self.papers[paper_id] = Paper(
-                title=paper["title"],
-                has_abstract=paper["abstract"] not in {"", None},
-                in_signatures=None,
-                is_english=None,
-                is_reliable=None,
-                language_reliability=None,
-                predicted_language=None,
-                title_ngrams_words=None,
-                authors=[
-                    Author(
-                        author_name=author["author_name"],
-                        position=author["position"],
-                    )
-                    for author in paper["authors"]
-                ],
-                venue=paper["venue"],
-                journal_name=paper["journal_name"],
-                title_ngrams_chars=None,
-                venue_ngrams=None,
-                journal_ngrams=None,
-                year=paper["year"],
-                paper_id=paper["paper_id"],
-            )
-        logger.info(f"loaded papers subset: {len(self.papers)}/{len(raw_papers)} relevant")
+        if self.arrow_paths is not None:
+            self.papers = cast(dict[str, Paper], papers)
+            source_paper_count = len(self.papers)
+        else:
+            needed_paper_ids = {str(signature.paper_id) for signature in self.signatures.values()}
+            raw_papers = self._load_json_feature_source(papers, "papers")
+            filtered_papers = {pid: p for pid, p in raw_papers.items() if str(pid) in needed_paper_ids}
+            self.papers = {}
+            # convert dictionary to namedtuples for memory reduction
+            for paper_id, paper in filtered_papers.items():
+                self.papers[paper_id] = Paper(
+                    title=paper["title"],
+                    has_abstract=paper["abstract"] not in {"", None},
+                    in_signatures=None,
+                    is_english=None,
+                    is_reliable=None,
+                    language_reliability=None,
+                    predicted_language=None,
+                    title_ngrams_words=None,
+                    authors=[
+                        Author(
+                            author_name=author["author_name"],
+                            position=author["position"],
+                        )
+                        for author in paper["authors"]
+                    ],
+                    venue=paper["venue"],
+                    journal_name=paper["journal_name"],
+                    title_ngrams_chars=None,
+                    venue_ngrams=None,
+                    journal_ngrams=None,
+                    year=paper["year"],
+                    paper_id=paper["paper_id"],
+                )
+            source_paper_count = len(raw_papers)
+        logger.info(f"loaded papers subset: {len(self.papers)}/{source_paper_count} relevant")
         logger.debug(
             "Telemetry stage: stage=anddata_ingest_papers seconds=%.3f retained_papers=%d source_papers=%d",
             time.perf_counter() - papers_stage_start,
             len(self.papers),
-            len(raw_papers),
+            source_paper_count,
         )
 
         self.name = name
@@ -808,9 +814,10 @@ class ANDData:
 
         self.n_jobs = resolve_n_jobs(n_jobs)
         self.signature_to_block = self.get_signatures_to_block()
-        papers_from_signatures = {str(signature.paper_id) for signature in self.signatures.values()}
-        for paper_id, paper in self.papers.items():
-            self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
+        if self.arrow_paths is None:
+            papers_from_signatures = {str(signature.paper_id) for signature in self.signatures.values()}
+            for paper_id, paper in self.papers.items():
+                self.papers[paper_id] = paper._replace(in_signatures=str(paper_id) in papers_from_signatures)
         self.preprocess = preprocess
 
         resolved_name_tuples: set[tuple[str, str]]
@@ -841,9 +848,12 @@ class ANDData:
         )
 
         preprocess_signatures_stage_start = time.perf_counter()
-        logger.info("preprocessing signatures")
-        self.preprocess_signatures()
-        logger.info("preprocessed signatures")
+        if self.arrow_paths is not None:
+            logger.info("Rust deferred signature preprocessing active: skipping Python signature preprocessing")
+        else:
+            logger.info("preprocessing signatures")
+            self.preprocess_signatures()
+            logger.info("preprocessed signatures")
         logger.debug(
             "Telemetry stage: stage=anddata_preprocess_signatures seconds=%.3f signatures=%d",
             time.perf_counter() - preprocess_signatures_stage_start,

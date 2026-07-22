@@ -232,6 +232,39 @@ def test_native_lightgbm_set_params_rejects_unknown_params(
         clusterer.classifier.set_params(learning_rate=0.1)
 
 
+def test_native_lightgbm_set_params_is_atomic_on_validation_failure(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    bundle_dir, _ = synthetic_pairwise_bundle
+    classifier = _load_pairwise_staging_model(bundle_dir).classifier
+    replacement_path = tmp_path / "replacement.lgb"
+    _tiny_binary_booster(classifier.n_features_in_ + 1, seed=103).booster_.save_model(str(replacement_path))
+    original_params = classifier.get_params()
+    original_scorer = classifier._rust_scorer
+    original_booster = classifier.booster_
+    original_fingerprint = classifier.cache_fingerprint()
+
+    with pytest.raises(ValueError, match="feature-count mismatch"):
+        classifier.set_params(
+            model_path=replacement_path,
+            n_features=classifier.n_features_in_,
+        )
+
+    assert classifier.get_params() == original_params
+    assert classifier._scorer is original_scorer
+    assert classifier._lazy_booster is original_booster
+    assert classifier.cache_fingerprint() == original_fingerprint
+
+    with pytest.raises(ValueError, match="must not be zero"):
+        classifier.set_params(model_path=replacement_path, n_jobs=0)
+
+    assert classifier.get_params() == original_params
+    assert classifier._scorer is original_scorer
+    assert classifier._lazy_booster is original_booster
+    assert classifier.cache_fingerprint() == original_fingerprint
+
+
 def test_native_lightgbm_deepcopy_does_not_require_model_path(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
@@ -448,6 +481,7 @@ def test_bundle_load_rejects_canonical_artifact_hash_mismatch(
     ("path", "schema_version"),
     (
         ("manifest.json", "s2and_production_model_bundle_v2"),
+        ("manifest.json", "s2and_production_model_bundle_v4"),
         ("clusterer.json", "s2and_clusterer_config_v2"),
         ("clusterer.json", "s2and_clusterer_config_v3"),
     ),
@@ -491,16 +525,25 @@ def test_canonical_artifact_hashes_feed_pairwise_bundle_binding(
     assert changed_binding["ordered_feature_contract_digest"] != original_binding["ordered_feature_contract_digest"]
 
 
-def test_manifest_rejects_noncanonical_paths(
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("bundle_status", "pairwise_only"),
+        ("files", {"clusterer_config": "clusterer.json"}),
+    ),
+)
+def test_manifest_rejects_redundant_legacy_state_fields(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
+    field: str,
+    value: object,
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
     manifest_path = bundle_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["files"]["clusterer_config"] = "../clusterer.json"
+    manifest[field] = value
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="files contract mismatch"):
+    with pytest.raises(ValueError, match="manifest field mismatch"):
         _load_pairwise_staging_model(bundle_dir)
 
 
@@ -521,7 +564,7 @@ def test_manifest_requires_nonempty_string_model_versions(
             production_model_module._validate_manifest(bundle_dir)
 
 
-def test_pairwise_only_manifest_requires_null_incremental_linker_version(
+def test_manifest_requires_null_or_nonempty_incremental_linker_version(
     synthetic_pairwise_bundle: tuple[Path, Clusterer],
 ) -> None:
     bundle_dir, _ = synthetic_pairwise_bundle
@@ -531,7 +574,7 @@ def test_pairwise_only_manifest_requires_null_incremental_linker_version(
     manifest = copy.deepcopy(original_manifest)
     manifest["incremental_linker_version"] = False
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="Pairwise-only.*incremental_linker_version must be null"):
+    with pytest.raises(ValueError, match="incremental_linker_version must be null or a nonempty string"):
         production_model_module._validate_manifest(bundle_dir)
 
 
@@ -555,11 +598,11 @@ def test_complete_manifest_requires_nonempty_string_incremental_linker_version(
     manifest_path = complete_bundle / "manifest.json"
     original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    for invalid_value in (None, "   "):
+    for invalid_value, message in ((None, "checksum coverage mismatch"), ("   ", "null or a nonempty string")):
         manifest = copy.deepcopy(original_manifest)
         manifest["incremental_linker_version"] = invalid_value
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="Complete.*incremental_linker_version must be a nonempty string"):
+        with pytest.raises(ValueError, match=message):
             production_model_module._validate_manifest(complete_bundle)
 
 
@@ -1073,22 +1116,14 @@ def test_bundle_directory_version_must_match_explicit_version(
         )
 
 
-def test_manifest_writer_rejects_contradictory_bundle_states(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid_version", (False, "   "))
+def test_manifest_writer_rejects_invalid_state_discriminator(tmp_path: Path, invalid_version: Any) -> None:
     with pytest.raises(ValueError, match="require a nonempty incremental_linker_version"):
         production_bundle_module.write_production_manifest(
             tmp_path,
             bundle_version="9.9",
             pairwise_model_version="9.9",
-            include_incremental_linker=True,
-            incremental_linker_version=None,
-        )
-    with pytest.raises(ValueError, match="cannot declare an incremental_linker_version"):
-        production_bundle_module.write_production_manifest(
-            tmp_path,
-            bundle_version="9.9",
-            pairwise_model_version="9.9",
-            include_incremental_linker=False,
-            incremental_linker_version="9.9",
+            incremental_linker_version=invalid_version,
         )
 
 

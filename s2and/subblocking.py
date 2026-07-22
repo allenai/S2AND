@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import combinations
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import genieclust
@@ -86,7 +86,7 @@ def _require_orcid_sha256(value: Any) -> str:
 
 def _load_canonical_orcid_prefix_count_artifact(
     data_dir: str | Path = _PACKAGE_DATA_DIR,
-) -> tuple[dict[str, dict[str, int]], str]:
+) -> tuple[Mapping[str, Mapping[str, int]], str]:
     """Load direct count data and its content hash after one-pass validation."""
 
     root = Path(data_dir)
@@ -109,7 +109,10 @@ def _load_canonical_orcid_prefix_count_artifact(
     if hashlib.sha256(data_payload).hexdigest() != expected_data_sha256:
         raise ValueError("Canonical ORCID prefix-count data SHA-256 does not match its metadata")
     validate_orcid_prefix_counts(raw_counts, context="Canonical ORCID prefix-count")
-    return raw_counts, expected_data_sha256
+    immutable_counts = MappingProxyType(
+        {prefix: MappingProxyType(dict(nested_counts)) for prefix, nested_counts in raw_counts.items()}
+    )
+    return immutable_counts, expected_data_sha256
 
 
 class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
@@ -117,10 +120,10 @@ class _LazyCanonicalOrcidPrefixCounts(Mapping[str, Mapping[str, int]]):
 
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
-        self._loaded: dict[str, dict[str, int]] | None = None
+        self._loaded: Mapping[str, Mapping[str, int]] | None = None
         self._data_sha256: str | None = None
 
-    def load(self) -> dict[str, dict[str, int]]:
+    def load(self) -> Mapping[str, Mapping[str, int]]:
         loaded = self._loaded
         if loaded is None:
             loaded, data_sha256 = _load_canonical_orcid_prefix_count_artifact(self._data_dir)
@@ -1701,12 +1704,13 @@ def _make_subblocks_with_telemetry_arrow_rust(
     from s2and.runtime import load_s2and_rust_extension
 
     first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
+    rust_prefix_counts = {prefix: dict(nested_counts) for prefix, nested_counts in first_k_letter_counts_sorted.items()}
     rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
     subblocks, telemetry = rust_make_subblocks(
         dict(arrow_paths),
         [str(signature_id) for signature_id in signature_ids],
         int(maximum_size),
-        first_k_letter_counts_sorted,
+        rust_prefix_counts,
         graph_subblocking_config,
         int(graph_subblocking_random_seed),
         bool(use_orcid_subblocking),

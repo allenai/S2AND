@@ -27,6 +27,7 @@ from s2and.incremental_linking.feature_block_contract import (
     _strict_string_tuple,
     filter_cluster_seed_disallows_for_signature_subset,
 )
+from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 
 
 def bounded_name_count_mappings_from_signature_payloads(
@@ -75,14 +76,13 @@ def write_bounded_name_counts_index(
     encoded_signatures = json.dumps(signatures, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     records_sha256 = hashlib.sha256(encoded_signatures).hexdigest()
     provenance = {
-        "schema_version": "name_counts_provenance_v1",
+        "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
         "normalization_version": NORMALIZATION_VERSION,
         "generation_id": f"bounded-{records_sha256[:16]}",
         "source_snapshot_id": f"bounded-json-{records_sha256[:16]}",
         "source_kind": "verification:bounded-json",
         "source_query_sha256": hashlib.sha256(b"bounded-name-counts-v1").hexdigest(),
         "selected_rows_sha256": records_sha256,
-        "selected_row_count": len(signatures),
         "source_row_count": len(signatures),
         "pickle_sha256": records_sha256,
     }

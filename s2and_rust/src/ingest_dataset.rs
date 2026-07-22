@@ -712,10 +712,11 @@ mod name_counts_empty_surname_tests {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&dir).expect("create temp index dir");
+        let generation_dir = dir.join("generations").join("empty-test-generation");
+        std::fs::create_dir_all(&generation_dir).expect("create temp generation dir");
         let mut files = serde_json::Map::new();
         for name in ["first", "last", "first_last", "last_first_initial"] {
-            let path = dir.join(format!("{name}.bin"));
+            let path = generation_dir.join(format!("{name}.bin"));
             let mut file = std::fs::File::create(&path).expect("create index file");
             file.write_all(&empty_index_bytes())
                 .expect("write index header");
@@ -723,18 +724,18 @@ mod name_counts_empty_surname_tests {
             files.insert(
                 name.to_string(),
                 serde_json::json!({
-                    "path": path.file_name().expect("file name").to_str().expect("utf-8 file name"),
+                    "path": format!("generations/empty-test-generation/{name}.bin"),
                     "byte_count": path.metadata().expect("file metadata").len(),
                     "sha256": sha256_file(&path).expect("hash fixture"),
                 }),
             );
         }
-        std::fs::write(dir.join(".published"), []).expect("write published marker");
+        std::fs::write(generation_dir.join(".published"), []).expect("write published marker");
         let manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v1",
+            "schema_version": "name_counts_index_v2",
             "normalization_version": "canonical_v2",
             "source_provenance": {
-                "schema_version": "name_counts_provenance_v1",
+                "schema_version": "name_counts_provenance_v2",
                 "normalization_version": "canonical_v2",
                 "generation_id": "empty-test-generation",
                 "pickle_sha256": "0".repeat(64),
@@ -742,7 +743,6 @@ mod name_counts_empty_surname_tests {
                 "source_kind": "test-fixture",
                 "source_query_sha256": "1".repeat(64),
                 "selected_rows_sha256": "2".repeat(64),
-                "selected_row_count": 0,
                 "source_row_count": 0,
             },
             "files": files,

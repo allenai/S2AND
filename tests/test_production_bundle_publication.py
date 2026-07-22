@@ -20,7 +20,7 @@ def _write_complete_stage(path: Path, writer: str) -> None:
         encoding="utf-8",
     )
     (path / "manifest.json").write_text(
-        json.dumps({"bundle_status": "complete", "writer": writer}),
+        json.dumps({"writer": writer}),
         encoding="utf-8",
     )
 

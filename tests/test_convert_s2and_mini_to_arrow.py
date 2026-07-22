@@ -785,10 +785,10 @@ def test_validate_arrow_dataset_manifest_rejects_incomplete_name_counts_index(tm
     (name_counts_index / "manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": "name_counts_index_v1",
+                "schema_version": "name_counts_index_v2",
                 "normalization_version": NORMALIZATION_VERSION,
                 "source_provenance": tiny_name_counts_provenance(),
-                "files": {"first": {"path": "missing-first.bin"}},
+                "files": {"first": {"path": "generations/missing/first.bin"}},
             }
         ),
         encoding="utf-8",

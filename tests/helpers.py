@@ -13,6 +13,7 @@ from typing import Any
 from s2and.data import ANDData
 from s2and.incremental_linking.query_adapter import ClusterSummary, QueryFeatures
 from s2and.name_counts_index import NameCountsIndex
+from s2and.name_counts_manifest import NAME_COUNTS_PROVENANCE_SCHEMA_VERSION
 from s2and.runtime import load_s2and_rust_extension
 
 
@@ -68,14 +69,13 @@ def tiny_name_counts_provenance() -> dict[str, Any]:
     """Return explicit provenance for synthetic in-memory name counts."""
 
     return {
-        "schema_version": "name_counts_provenance_v1",
+        "schema_version": NAME_COUNTS_PROVENANCE_SCHEMA_VERSION,
         "normalization_version": "canonical_v2",
         "generation_id": "test-tiny-name-counts",
         "source_snapshot_id": "test-fixture",
         "source_kind": "fixture:test",
         "source_query_sha256": "1" * 64,
         "selected_rows_sha256": "2" * 64,
-        "selected_row_count": 1,
         "source_row_count": 1,
         "pickle_sha256": "0" * 64,
     }

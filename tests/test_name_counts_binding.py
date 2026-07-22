@@ -246,11 +246,7 @@ def test_validated_arrow_binding_reuses_retained_name_count_manifest(
     def fail_revalidation(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("retained name-count manifest was revalidated")
 
-    monkeypatch.setattr(
-        policy_module.NameCountsBinding,
-        "from_arrow_name_counts_index",
-        fail_revalidation,
-    )
+    monkeypatch.setattr(ValidatedNameCountsManifest, "load", fail_revalidation)
 
     policy_module.require_arrow_name_counts_index_for_clusterer(
         clusterer,

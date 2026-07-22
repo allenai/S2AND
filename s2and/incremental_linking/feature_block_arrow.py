@@ -89,7 +89,7 @@ class _ArrowSourceDigests:
     size: int
     mtime_ns: int
     sha256: str
-    fingerprint: int
+    fingerprint: int | None
 
 
 def write_incremental_query_signatures_arrow(
@@ -530,11 +530,13 @@ def _batch_lookup_index_source_mismatch(
     header: Mapping[str, int | str],
     *,
     source_size: int,
-    source_fingerprint: int,
+    source_fingerprint: int | None,
 ) -> str | None:
     indexed_size = int(header["source_size"])
     indexed_fingerprint = int(header["source_fingerprint"])
-    if indexed_size == int(source_size) and indexed_fingerprint == int(source_fingerprint):
+    if indexed_size != int(source_size):
+        return f"indexed size={indexed_size} current size={int(source_size)}"
+    if source_fingerprint is None or indexed_fingerprint == int(source_fingerprint):
         return None
     return (
         "indexed size/fingerprint="
@@ -550,7 +552,7 @@ def _validate_arrow_batch_lookup_index_header_contract(
     index_path: Path,
     key_column: str,
     source_size: int,
-    source_fingerprint: int,
+    source_fingerprint: int | None,
     expected_row_count: int | None,
 ) -> int:
     """Validate header facts shared by standalone and generation-bound checks."""
@@ -840,14 +842,22 @@ def _validate_verified_arrow_batch_lookup_index(
     expected_index_byte_count: int,
     expected_index_sha256: str,
     expected_row_count: int | None = None,
+    validate_source_fingerprint: bool = True,
 ) -> dict[str, int | str]:
     """Validate one manifest-bound table/index pair with one full pass per file."""
 
     arrow_path_obj = Path(arrow_path)
     index_path_obj = Path(index_path)
-    source_digests = _stable_source_file_digests(
-        arrow_path_obj,
-        context="validating generation-bound batch lookup index",
+    source_digests = (
+        _stable_source_file_digests(
+            arrow_path_obj,
+            context="validating generation-bound batch lookup index",
+        )
+        if validate_source_fingerprint
+        else _stable_source_file_sha256(
+            arrow_path_obj,
+            context="validating generation-bound batch lookup index",
+        )
     )
     if source_digests.size != expected_arrow_byte_count:
         raise ValueError(f"Arrow artifact generation source byte_count mismatch: {arrow_path_obj}")
@@ -1287,6 +1297,29 @@ def _source_file_digests_once(path: Path, *, source_size: int) -> tuple[str, int
     return sha256.hexdigest(), fingerprint
 
 
+def _source_file_sha256_once(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as infile:
+        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stable_source_file_sha256(path: Path, *, context: str) -> _ArrowSourceDigests:
+    for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
+        before = path.stat()
+        sha256 = _source_file_sha256_once(path)
+        after = path.stat()
+        if int(before.st_size) == int(after.st_size) and int(before.st_mtime_ns) == int(after.st_mtime_ns):
+            return _ArrowSourceDigests(
+                size=int(after.st_size),
+                mtime_ns=int(after.st_mtime_ns),
+                sha256=sha256,
+                fingerprint=None,
+            )
+    _raise_arrow_source_changed(path, context=context)
+
+
 def _stable_source_file_digests(path: Path, *, context: str) -> _ArrowSourceDigests:
     for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
         before = path.stat()
@@ -1522,23 +1555,6 @@ def _name_count_index_disk_requirement(mapping: Mapping[Any, Any]) -> int:
     return sort_run_bytes + assembly_bytes + final_bytes + (4 * _NAME_COUNTS_WRITE_BUFFER_BYTES)
 
 
-def _name_counts_index_manifest_paths(index_dir: Path) -> dict[str, Path] | None:
-    manifest_path = index_dir / "manifest.json"
-    if not manifest_path.exists():
-        return None
-    manifest_bytes = manifest_path.read_bytes()
-    # Cleanup holds the publication lock and only needs to protect the exact
-    # generation referenced by this root snapshot. Validate declarations,
-    # containment, markers, and byte counts without hashing 1.8 GB under lock.
-    manifest = ValidatedNameCountsManifest._from_manifest_bytes(
-        index_dir,
-        manifest_bytes,
-        context="name-count index generation",
-        verify_file_digests=False,
-    )
-    return {kind: entry.path for kind, entry in manifest.files.items()}
-
-
 def _name_counts_manifest_sha256(index_dir: Path) -> str | None:
     """Return the small root-manifest identity without reading material files."""
 
@@ -1577,54 +1593,6 @@ def _name_counts_index_reuse_snapshot(
         manifest.payload.get("fingerprint") == expected_fingerprint
         and manifest.source_provenance == expected_source_provenance
     )
-
-
-def _current_name_counts_generation_name(index_dir: Path) -> str | None:
-    manifest_paths = _name_counts_index_manifest_paths(index_dir)
-    if manifest_paths is None:
-        return None
-    generation_names: set[str] = set()
-    generations_dir = index_dir / "generations"
-    for path in manifest_paths.values():
-        try:
-            relative = path.relative_to(generations_dir)
-        except ValueError:
-            try:
-                relative = path.resolve().relative_to(generations_dir.resolve())
-            except ValueError:
-                return None
-        if len(relative.parts) < 2:
-            return None
-        generation_names.add(relative.parts[0])
-    if len(generation_names) != 1:
-        return None
-    return next(iter(generation_names))
-
-
-def cleanup_stale_name_counts_generations(index_dir: str | Path) -> dict[str, int]:
-    """Delete published name-count generations not referenced by the current manifest."""
-
-    index_path = Path(index_dir)
-    with _exclusive_name_counts_publish_lock(index_path):
-        generations_dir = index_path / "generations"
-        if not generations_dir.exists():
-            return {"removed_generation_count": 0}
-        current_generation_name = _current_name_counts_generation_name(index_path)
-        if current_generation_name is None:
-            raise ValueError(
-                f"refusing to clean name-count generations without a resolvable current manifest: {index_path}"
-            )
-        removed = 0
-        for child in generations_dir.iterdir():
-            if child.name.startswith(".") or not child.is_dir():
-                continue
-            if not (child / ".published").exists():
-                continue
-            if child.name == current_generation_name:
-                continue
-            shutil.rmtree(child)
-            removed += 1
-        return {"removed_generation_count": removed}
 
 
 @contextmanager

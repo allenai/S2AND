@@ -30,31 +30,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 from s2and.arrow_inputs import (
     require_normalization_version,
     validate_arrow_training_artifacts,
 )
 from s2and.arrow_schema import validate_arrow_file_schema, validate_arrow_schema
-from s2and.data import ANDData
-from s2and.incremental_linking.feature_block_arrow import (
-    _arrow_rows_by_unique_key,
-    _read_arrow_ipc_table,
-)
+from s2and.data import ANDData, Author, Paper, Signature
 
 logger = logging.getLogger("s2and")
 
 if TYPE_CHECKING:
     import pandas as pd
-
-
-def _read_arrow_table(path: str | Path, *, table_name: str) -> Any:
-    import pyarrow as pa
-
-    table = _read_arrow_ipc_table(pa, path)
-    validate_arrow_schema(table.schema, table_name=table_name)
-    return table
 
 
 def _iter_arrow_rows(
@@ -90,8 +76,8 @@ def _required_id_value(raw_value: Any, table_name: str, column_name: str, row_in
     return value
 
 
-def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any]]:
-    """Read ``signatures.arrow`` into the JSON-shaped dict ``ANDData`` accepts."""
+def load_signatures_from_arrow(path: str | Path) -> dict[str, Signature]:
+    """Read the minimal Python signature metadata Rust-backed training needs."""
 
     required_columns = {
         "signature_id",
@@ -104,7 +90,7 @@ def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any
         "author_position",
         "author_block",
     }
-    signatures: dict[str, dict[str, Any]] = {}
+    signatures: dict[str, Signature] = {}
     for row_index, row in _iter_arrow_rows(
         path,
         table_name="signatures",
@@ -116,42 +102,53 @@ def load_signatures_dict_from_arrow(path: str | Path) -> dict[str, dict[str, Any
         paper_id = _required_id_value(row.get("paper_id"), "signatures", "paper_id", row_index)
         author_block = _required_id_value(row.get("author_block"), "signatures", "author_block", row_index)
         orcid = row.get("author_orcid")
-        signatures[signature_id] = {
-            "signature_id": signature_id,
-            "paper_id": paper_id,
-            "author_info": {
-                "first": row["author_first"],
-                "middle": row["author_middle"],
-                "last": row["author_last"],
-                "suffix": row["author_suffix"],
-                "affiliations": list(row["author_affiliations"] or []),
-                "email": row.get("author_email"),
-                "position": row["author_position"],
-                "block": author_block,
-                # ANDData derives author_info_orcid from source_ids +
-                # source_id_source; the Arrow column stores the derived value,
-                # so reconstruct the source shape it expects.
-                "source_ids": [orcid] if orcid else None,
-                "source_id_source": "ORCID" if orcid else None,
-            },
-            "sourced_author_ids": list(row.get("source_author_ids") or []),
-        }
+        signatures[signature_id] = Signature(
+            author_info_first=row["author_first"],
+            author_info_first_normalized_without_apostrophe=None,
+            author_info_middle=row["author_middle"],
+            author_info_middle_normalized_without_apostrophe=None,
+            author_info_last_normalized=None,
+            author_info_last=row["author_last"],
+            author_info_suffix_normalized=None,
+            author_info_suffix=row["author_suffix"],
+            author_info_coauthors=None,
+            author_info_coauthor_blocks=None,
+            author_info_full_name=None,
+            author_info_affiliations=list(row["author_affiliations"] or []),
+            author_info_affiliations_n_grams=None,
+            author_info_coauthor_n_grams=None,
+            author_info_email=row.get("author_email"),
+            author_info_orcid=str(orcid) if orcid else None,
+            author_info_name_counts=None,
+            author_info_position=int(row["author_position"]),
+            author_info_block=author_block,
+            author_info_given_block=None,
+            author_info_estimated_gender=None,
+            author_info_estimated_ethnicity=None,
+            paper_id=paper_id,
+            sourced_author_source=None,
+            sourced_author_ids=list(row.get("source_author_ids") or []),
+            author_id=None,
+            signature_id=signature_id,
+        )
     if not signatures:
         raise ValueError(f"Arrow signatures table has no rows: {path}")
     return signatures
 
 
-def load_papers_dict_from_arrow(
+def load_papers_from_arrow(
     papers_path: str | Path,
     paper_authors_path: str | Path,
-) -> dict[str, dict[str, Any]]:
-    """Read ``papers.arrow`` + ``paper_authors.arrow`` into the JSON paper shape.
+    *,
+    needed_paper_ids: set[str] | None = None,
+) -> dict[str, Paper]:
+    """Read the minimal Python paper metadata Rust-backed training needs.
 
     The Arrow bundle stores the abstract as a has-abstract sentinel, which is
     fine for training because ``ANDData`` reduces the abstract to a boolean.
     """
 
-    authors_by_paper_id: dict[str, list[dict[str, Any]]] = {}
+    authors_by_paper_id: dict[str, list[Author]] = {}
     paper_author_keys: set[tuple[str, int]] = set()
     for row_index, row in _iter_arrow_rows(
         paper_authors_path,
@@ -159,6 +156,8 @@ def load_papers_dict_from_arrow(
         required_columns={"paper_id", "position", "author_name"},
     ):
         paper_id = _required_id_value(row.get("paper_id"), "paper_authors", "paper_id", row_index)
+        if needed_paper_ids is not None and paper_id not in needed_paper_ids:
+            continue
         raw_author_name = row.get("author_name")
         if not isinstance(raw_author_name, str) or not raw_author_name.strip():
             raise ValueError(f"Arrow paper_authors table contains empty author_name at row {row_index}")
@@ -170,50 +169,56 @@ def load_papers_dict_from_arrow(
         if author_key in paper_author_keys:
             raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position)=({paper_id!r}, {position})")
         paper_author_keys.add(author_key)
-        authors_by_paper_id.setdefault(paper_id, []).append({"author_name": raw_author_name, "position": position})
+        authors_by_paper_id.setdefault(paper_id, []).append(Author(author_name=raw_author_name, position=position))
+    del paper_author_keys
 
-    papers: dict[str, dict[str, Any]] = {}
+    papers: dict[str, Paper] = {}
+    source_has_papers = False
     for row_index, row in _iter_arrow_rows(
         papers_path,
         table_name="papers",
         required_columns={"paper_id", "title", "venue", "journal_name"},
     ):
+        source_has_papers = True
         paper_id = _required_id_value(row.get("paper_id"), "papers", "paper_id", row_index)
+        if needed_paper_ids is not None and paper_id not in needed_paper_ids:
+            continue
         if paper_id in papers:
             raise ValueError(f"papers Arrow contains duplicate paper_id={paper_id!r}")
-        papers[paper_id] = {
-            "paper_id": paper_id,
-            "title": row["title"],
-            "abstract": row.get("abstract") or "",
-            "venue": row["venue"],
-            "journal_name": row["journal_name"],
-            "year": row.get("year"),
-            "authors": authors_by_paper_id.get(paper_id, []),
-        }
-    if not papers:
-        raise ValueError(f"Arrow papers table has no rows: {papers_path}")
-    unknown_author_paper_ids = sorted(set(authors_by_paper_id).difference(papers))
-    if unknown_author_paper_ids:
-        raise ValueError(
-            f"paper_authors Arrow references paper_id values absent from papers Arrow: {unknown_author_paper_ids[:10]}"
+        papers[paper_id] = Paper(
+            title=row["title"],
+            has_abstract=row.get("abstract") not in {"", None},
+            in_signatures=True,
+            is_english=None,
+            is_reliable=None,
+            language_reliability=None,
+            predicted_language=None,
+            title_ngrams_words=None,
+            authors=authors_by_paper_id.pop(paper_id, []),
+            venue=row["venue"],
+            journal_name=row["journal_name"],
+            title_ngrams_chars=None,
+            venue_ngrams=None,
+            journal_ngrams=None,
+            year=row.get("year"),
+            paper_id=paper_id,
         )
+    if not source_has_papers:
+        raise ValueError(f"Arrow papers table has no rows: {papers_path}")
+    if needed_paper_ids is None:
+        unknown_author_paper_ids = sorted(authors_by_paper_id)
+        if unknown_author_paper_ids:
+            raise ValueError(
+                "paper_authors Arrow references paper_id values absent from papers Arrow: "
+                f"{unknown_author_paper_ids[:10]}"
+            )
+    else:
+        missing_paper_ids = sorted(needed_paper_ids.difference(papers))
+        if missing_paper_ids:
+            raise ValueError(
+                f"signatures Arrow references paper_id values absent from papers Arrow: {missing_paper_ids[:10]}"
+            )
     return papers
-
-
-def load_specter_tuple_from_arrow(path: str | Path) -> tuple[np.ndarray, list[str]]:
-    """Read ``specter.arrow`` into the ``(matrix, keys)`` tuple ANDData accepts."""
-
-    table = _read_arrow_table(path, table_name="specter")
-    rows = table.to_pylist()
-    _arrow_rows_by_unique_key(rows, table_name="specter", key_column="paper_id")
-    keys = [str(row["paper_id"]) for row in rows]
-    embedding_column = table.column("embedding").combine_chunks()
-    if embedding_column.null_count > 0 or embedding_column.values.null_count > 0:
-        raise ValueError("specter Arrow cannot contain null embedding values")
-    dimension = int(embedding_column.type.list_size)
-    flat = np.asarray(embedding_column.values.to_numpy(zero_copy_only=False), dtype=np.float32)
-    matrix = flat.reshape(len(keys), dimension)
-    return matrix, keys
 
 
 def build_training_anddata_from_arrow(
@@ -260,8 +265,14 @@ def build_training_anddata_from_arrow(
     if "specter" in normalized_arrow_paths:
         validate_arrow_file_schema(normalized_arrow_paths["specter"], table_name="specter")
     training_arrow_paths = normalized_arrow_paths.without("query_signatures")
-    signatures = load_signatures_dict_from_arrow(training_arrow_paths["signatures"])
-    papers = load_papers_dict_from_arrow(training_arrow_paths["papers"], training_arrow_paths["paper_authors"])
+    signatures = load_signatures_from_arrow(training_arrow_paths["signatures"])
+    needed_paper_ids = {str(signature.paper_id) for signature in signatures.values()}
+    papers = load_papers_from_arrow(
+        training_arrow_paths["papers"],
+        training_arrow_paths["paper_authors"],
+        needed_paper_ids=needed_paper_ids,
+    )
+    del needed_paper_ids
 
     dataset = ANDData._from_validated_arrow_training(
         signatures=signatures,

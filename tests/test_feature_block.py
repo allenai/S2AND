@@ -1000,30 +1000,6 @@ def test_filter_arrow_table_by_values_rejects_post_cast_duplicates() -> None:
         feature_block_arrow_module._filter_arrow_table_by_values(pa, pc, table, "paper_id", ["p1", "p1"])  # noqa: SLF001
 
 
-def test_name_counts_generation_cleanup_skips_unpublished_generation(tmp_path: Path) -> None:
-    index_path, _metrics = write_name_counts_index(
-        tmp_path,
-        tiny_name_counts_tuple(),
-        tiny_name_counts_provenance(),
-        overwrite=True,
-    )
-    index_dir = Path(index_path)
-    manifest = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
-    current = index_dir / Path(manifest["files"]["first"]["path"]).parent
-    generations_dir = index_dir / "generations"
-    unpublished = generations_dir / "gen-unpublished"
-    old_published = generations_dir / "gen-old"
-    unpublished.mkdir()
-    old_published.mkdir()
-    (old_published / ".published").write_text("", encoding="utf-8")
-
-    feature_block_arrow_module.cleanup_stale_name_counts_generations(index_dir)
-
-    assert current.exists()
-    assert unpublished.exists()
-    assert not old_published.exists()
-
-
 def test_feature_block_from_arrow_paths_accepts_null_string_list_values(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     arrow_paths = _write_feature_block_arrow_paths(tmp_path)
@@ -1230,7 +1206,7 @@ def test_write_name_counts_index(tmp_path: Path) -> None:
     assert index_metrics["row_count"] == 4
     assert index_metrics["first_count"] == 1
     manifest = json.loads((Path(index_path) / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "name_counts_index_v1"
+    assert manifest["schema_version"] == "name_counts_index_v2"
     assert manifest["exact_string_verification"] is True
     assert manifest["files"]["first"]["path"].startswith("generations/")
     assert write_name_counts_index(tmp_path, mappings, provenance)[1] == {"reused": True}

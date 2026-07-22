@@ -45,12 +45,13 @@ production_model_vX.Y/
     incremental_linker_training_target.json
 ```
 
-The v4 complete manifest requires the fixed runtime entries shown above. The
-pairwise training config and summary may also appear, but only together as a
-reproducibility pair. The `files` mapping must match one of those two shapes
-exactly. The loader hashes every declared file once, derives the fixed
-`incremental_linker/` directory from the schema, and ignores unrelated files
-that are not part of the runtime contract.
+The v5 manifest uses `incremental_linker_version` as its sole bundle-state
+discriminator: `null` means a pairwise-only staging bundle and a nonempty
+string means a complete bundle. Runtime paths are fixed by the schema rather
+than serialized again. The pairwise training config and summary may also
+appear, but only together as a reproducibility pair. The loader requires exact
+checksum coverage for the derived paths, hashes every declared file once, and
+ignores unrelated files that are not part of the runtime contract.
 
 `load_production_model(path)` rejects legacy pickles, incomplete directories,
 and `pairwise_only` manifests. A pairwise-only bundle is an internal training

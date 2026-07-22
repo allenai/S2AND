@@ -9,7 +9,6 @@ import pytest
 
 from s2and.arrow_inputs import (
     MissingArrowArtifactError,
-    read_name_counts_index_normalization_version,
     require_feature_contract_normalization_version,
     require_name_counts_index_artifact,
     require_normalization_version,
@@ -40,21 +39,15 @@ def _write_minimal_name_counts_index(root: Path, *, normalization_version: str |
 
 
 @pytest.mark.parametrize("value", [None, "legacy_compat"])
-def test_name_count_manifest_reader_rejects_noncanonical_versions(tmp_path: Path, value: str | None) -> None:
+def test_noncanonical_manifest_fails_artifact_validation(tmp_path: Path, value: str | None) -> None:
     index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=value)
-    with pytest.raises(ValueError, match="invalid normalization_version"):
-        read_name_counts_index_normalization_version(index_dir)
-
-
-def test_name_count_manifest_reader_accepts_explicit_canonical_version(tmp_path: Path) -> None:
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION)
-    assert read_name_counts_index_normalization_version(index_dir) == NORMALIZATION_VERSION
-
-
-def test_legacy_manifest_fails_artifact_validation(tmp_path: Path) -> None:
-    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version="legacy_compat")
     with pytest.raises(MissingArrowArtifactError, match="invalid normalization_version"):
         require_name_counts_index_artifact(index_dir, context="test", producer_hint="test")
+
+
+def test_canonical_manifest_passes_artifact_validation(tmp_path: Path) -> None:
+    index_dir = _write_minimal_name_counts_index(tmp_path, normalization_version=NORMALIZATION_VERSION)
+    assert require_name_counts_index_artifact(index_dir, context="test", producer_hint="test") == str(index_dir)
 
 
 class _ContractOnly:

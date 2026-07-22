@@ -12,6 +12,7 @@ from types import ModuleType
 import pytest
 
 from s2and.consts import NORMALIZATION_VERSION
+from s2and.name_counts_manifest import ValidatedNameCountsManifest
 from scripts.production.counts import generate_name_counts
 
 
@@ -78,7 +79,7 @@ def test_fixture_generation_publishes_data_before_manifest(tmp_path: Path) -> No
     assert hashlib.sha256(provenance_path.read_bytes()).hexdigest() == manifest["provenance_sha256"]
     assert provenance_path.stat().st_size == manifest["provenance_byte_count"]
     assert provenance["source_row_count"] == 3
-    assert provenance["selected_row_count"] == 3
+    assert "selected_row_count" not in provenance
     assert len(provenance["selected_rows_sha256"]) == 64
     assert provenance["rejected_row_count"] == 1
     assert "manifest_path" not in provenance
@@ -152,7 +153,6 @@ def test_fixture_names_may_contain_the_legacy_delimiter(tmp_path: Path) -> None:
     assert first_last_counts == {"ana lopez": 2}
     assert last_first_initial_counts == {"lopez a": 2}
     assert row_metrics["source_row_count"] == 1
-    assert row_metrics["selected_row_count"] == 1
     assert row_metrics["rejected_row_count"] == 0
 
     _, differently_partitioned_metrics = generate_name_counts.build_name_count_dicts([("Ana", "Maria|||Lopez", 2)])
@@ -197,7 +197,6 @@ def test_failed_manifest_replace_removes_only_the_uncommitted_generation(
     mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
     metrics = {
         "source_row_count": 1,
-        "selected_row_count": 1,
         "selected_rows_sha256": "b" * 64,
         "rejected_row_count": 0,
     }
@@ -243,7 +242,6 @@ def test_committed_generation_is_retained_after_a_superseding_manifest(
     mappings = ({"ada": 1}, {"lovelace": 1}, {"ada lovelace": 1}, {"lovelace a": 1})
     metrics = {
         "source_row_count": 1,
-        "selected_row_count": 1,
         "selected_rows_sha256": "b" * 64,
         "rejected_row_count": 0,
     }
@@ -311,7 +309,6 @@ def test_failed_publication_cleans_uncommitted_generation_without_reading_manife
             query_digest="a" * 64,
             row_metrics={
                 "source_row_count": 1,
-                "selected_row_count": 1,
                 "selected_rows_sha256": "b" * 64,
                 "rejected_row_count": 0,
             },
@@ -339,6 +336,13 @@ def test_crash_between_counts_and_index_publication_fails_closed_and_repairs(
     root = tmp_path / "name_counts"
     index_dir = tmp_path / "name_counts_index"
 
+    def index_binding() -> NameCountsBinding:
+        manifest = ValidatedNameCountsManifest.load(index_dir, context="torn-publish test")
+        return NameCountsBinding.from_provenance(
+            manifest.source_provenance,
+            context="torn-publish test source_provenance",
+        )
+
     def run(snapshot_id: str, *, overwrite: bool) -> None:
         args = [
             "--fixture-input",
@@ -354,7 +358,7 @@ def test_crash_between_counts_and_index_publication_fails_closed_and_repairs(
 
     run("fixture-gen-a", overwrite=False)
     manifest_a = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    index_binding_a = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="torn-publish test")
+    index_binding_a = index_binding()
     assert index_binding_a.generation_id == manifest_a["generation_id"]
 
     real_write_index = feature_block_arrow.write_name_counts_index
@@ -378,7 +382,7 @@ def test_crash_between_counts_and_index_publication_fails_closed_and_repairs(
 
     manifest_b = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest_b["generation_id"] != manifest_a["generation_id"]
-    stale_index_binding = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="torn-publish test")
+    stale_index_binding = index_binding()
     assert stale_index_binding == index_binding_a
 
     provenance_b = json.loads((root / manifest_b["files"]["provenance"]).read_text(encoding="utf-8"))
@@ -393,5 +397,5 @@ def test_crash_between_counts_and_index_publication_fails_closed_and_repairs(
     monkeypatch.setattr(feature_block_arrow, "write_name_counts_index", real_write_index)
     run("fixture-gen-b", overwrite=True)
     manifest_repaired = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    repaired_binding = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="torn-publish test")
+    repaired_binding = index_binding()
     assert repaired_binding.generation_id == manifest_repaired["generation_id"]

@@ -34,10 +34,13 @@ from s2and.name_count_binding import NameCountsBinding
 from s2and.name_tuple_artifact import load_packaged_name_tuple_artifact
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
+    COMPLETE_MANIFEST_FILES,
+    PAIRWISE_ONLY_MANIFEST_FILES,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
+    production_bundle_status,
     production_manifest_files,
 )
 from s2and.runtime import load_s2and_rust_extension
@@ -114,15 +117,22 @@ class NativeLightGBMBinaryClassifier:
         self.fitted_ = True
 
     def _set_feature_count(self, n_features: int | None) -> None:
-        actual_features = _lightgbm_text_feature_count(Path(self.model_path))
+        actual_features = self._validated_feature_count(self.model_path, n_features)
+        self._n_features = actual_features
+        self._n_features_in = actual_features
+        self.n_features_in_ = actual_features
+
+    @staticmethod
+    def _validated_feature_count(model_path: str, n_features: int | None) -> int:
+        """Return the model's feature count after validating optional metadata."""
+
+        actual_features = _lightgbm_text_feature_count(Path(model_path))
         if n_features is not None and int(n_features) != actual_features:
             raise ValueError(
                 "Native LightGBM feature-count mismatch: "
                 f"metadata declares {int(n_features)} but booster contains {actual_features}"
             )
-        self._n_features = actual_features
-        self._n_features_in = self._n_features
-        self.n_features_in_ = self._n_features
+        return actual_features
 
     @property
     def _rust_scorer(self) -> Any:
@@ -155,17 +165,24 @@ class NativeLightGBMBinaryClassifier:
         invalid = sorted(set(params) - valid_params)
         if invalid:
             raise ValueError(f"Invalid parameter(s) for NativeLightGBMBinaryClassifier: {invalid}")
-        if "model_path" in params:
-            model_path = str(Path(params["model_path"]))
-            if model_path != self.model_path:
-                self.model_path = model_path
-                self._scorer = None
-                self._lazy_booster = None
-                self._model_sha256 = None
-        if "n_jobs" in params:
-            self.n_jobs = resolve_n_jobs(params["n_jobs"])
+
+        model_path = str(Path(params["model_path"])) if "model_path" in params else self.model_path
+        n_jobs = resolve_n_jobs(params["n_jobs"]) if "n_jobs" in params else self.n_jobs
+        feature_count: int | None = None
         if "model_path" in params or "n_features" in params:
-            self._set_feature_count(cast(int | None, params.get("n_features")))
+            feature_count = self._validated_feature_count(model_path, cast(int | None, params.get("n_features")))
+
+        model_changed = model_path != self.model_path
+        self.model_path = model_path
+        self.n_jobs = n_jobs
+        if feature_count is not None:
+            self._n_features = feature_count
+            self._n_features_in = feature_count
+            self.n_features_in_ = feature_count
+        if model_changed:
+            self._scorer = None
+            self._lazy_booster = None
+            self._model_sha256 = None
         return self
 
     def predict_proba_positive(
@@ -263,9 +280,7 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
     if manifest.get("schema_version") != PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION:
         raise ValueError(f"Unsupported production model bundle schema_version={manifest.get('schema_version')!r}")
     expected_manifest_fields = {
-        "bundle_status",
         "bundle_version",
-        "files",
         "incremental_linker_version",
         "pairwise_model_version",
         "schema_version",
@@ -277,42 +292,27 @@ def _validate_manifest(bundle_dir: Path) -> dict[str, Any]:
             f"missing={sorted(expected_manifest_fields - set(manifest))} "
             f"extra={sorted(set(manifest) - expected_manifest_fields)}"
         )
-    status = manifest.get("bundle_status")
-    if status not in {"pairwise_only", "complete"}:
-        raise ValueError(f"Unsupported production model bundle_status={status!r}")
-    complete = status == "complete"
     for version_field in ("bundle_version", "pairwise_model_version"):
         version = manifest.get(version_field)
         if not isinstance(version, str) or not version.strip():
             raise ValueError(f"Production model bundle {version_field} must be a nonempty string")
     incremental_linker_version = manifest.get("incremental_linker_version")
-    if complete:
-        if not isinstance(incremental_linker_version, str) or not incremental_linker_version.strip():
-            raise ValueError("Complete production model bundle incremental_linker_version must be a nonempty string")
-    elif incremental_linker_version is not None:
-        raise ValueError("Pairwise-only production model bundle incremental_linker_version must be null")
-    files = manifest.get("files")
-    if not isinstance(files, dict):
-        raise ValueError("Production model bundle manifest must contain a files object")
-    optional_keys = set(PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES)
-    present_optional_keys = optional_keys & set(files)
-    if present_optional_keys and present_optional_keys != optional_keys:
-        raise ValueError("Production model bundle must declare both pairwise reproducibility files or neither")
-    expected_files = production_manifest_files(
-        complete=complete,
-        include_pairwise_reproducibility=present_optional_keys == optional_keys,
-    )
-    if files != expected_files:
-        missing = sorted(set(expected_files) - set(files))
-        extra = sorted(set(files) - set(expected_files))
-        changed = sorted(key for key in expected_files if key in files and files[key] != expected_files[key])
-        raise ValueError(
-            f"Production model bundle files contract mismatch: missing={missing} extra={extra} changed={changed}"
-        )
+    if incremental_linker_version is not None and (
+        not isinstance(incremental_linker_version, str) or not incremental_linker_version.strip()
+    ):
+        raise ValueError("Production model bundle incremental_linker_version must be null or a nonempty string")
 
     expected_hashes = manifest.get("sha256")
     if not isinstance(expected_hashes, dict):
         raise ValueError("Production model bundle manifest sha256 must be an object")
+    optional_paths = set(PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES.values())
+    present_optional_paths = optional_paths & set(expected_hashes)
+    if present_optional_paths and present_optional_paths != optional_paths:
+        raise ValueError("Production model bundle must declare both pairwise reproducibility files or neither")
+    expected_files = production_manifest_files(
+        incremental_linker_version=incremental_linker_version,
+        include_pairwise_reproducibility=present_optional_paths == optional_paths,
+    )
     required_hashed_files = {str(value) for value in expected_files.values()}
     if set(expected_hashes) != required_hashed_files:
         raise ValueError(
@@ -477,7 +477,7 @@ def pairwise_bundle_binding(bundle_dir: str | Path) -> dict[str, Any]:
 
     root = Path(bundle_dir)
     manifest = _validate_manifest(root)
-    clusterer_config = _read_json(root / str(manifest["files"]["clusterer_config"]))
+    clusterer_config = _read_json(root / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
     _validate_clusterer_config(clusterer_config)
     featurizer_info = _featurization_info_from_payload(clusterer_config["featurizer_info"])
     nameless_info = _featurization_info_from_payload(clusterer_config["nameless_featurizer_info"])
@@ -510,8 +510,8 @@ def _pairwise_binding_from_validated_parts(
         "normalization_version": str(feature_contract["normalization_version"]),
         "featurizer_version": int(featurizer_info.featurizer_version),
         "ordered_feature_contract_digest": canonical_json_digest(ordered_feature_contract),
-        "main_booster_sha256": str(manifest["sha256"][str(manifest["files"]["pairwise_main_model"])]),
-        "nameless_booster_sha256": str(manifest["sha256"][str(manifest["files"]["pairwise_nameless_model"])]),
+        "main_booster_sha256": str(manifest["sha256"][PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"]]),
+        "nameless_booster_sha256": str(manifest["sha256"][PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"]]),
     }
 
 
@@ -578,7 +578,7 @@ def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Ma
 
 
 def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Clusterer:
-    clusterer_config = _read_json(bundle_dir / str(manifest["files"]["clusterer_config"]))
+    clusterer_config = _read_json(bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
     _validate_clusterer_config(clusterer_config)
     feature_contract = clusterer_config["feature_contract"]
     _require_bundle_normalization_version(bundle_dir, feature_contract)
@@ -597,10 +597,10 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         },
     )
     classifier = NativeLightGBMBinaryClassifier(
-        bundle_dir / str(manifest["files"]["pairwise_main_model"]),
+        bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"],
     )
     nameless_classifier = NativeLightGBMBinaryClassifier(
-        bundle_dir / str(manifest["files"]["pairwise_nameless_model"]),
+        bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"],
     )
     for name, model, info in (
         ("main", classifier, featurizer_info),
@@ -614,11 +614,11 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
             )
     _validate_pairwise_fixture(
         classifier,
-        bundle_dir / str(manifest["files"]["pairwise_main_fixture"]),
+        bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_fixture"],
     )
     _validate_pairwise_fixture(
         nameless_classifier,
-        bundle_dir / str(manifest["files"]["pairwise_nameless_fixture"]),
+        bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_fixture"],
     )
 
     cluster_model_config = clusterer_config["cluster_model"]
@@ -664,9 +664,9 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         ),
     )
     clusterer.incremental_mean_min_hybrid_weight = float(clusterer_config["incremental_mean_min_hybrid_weight"])
-    if manifest["bundle_status"] == "complete":
+    if manifest["incremental_linker_version"] is not None:
         incremental_linker_dir = bundle_dir / "incremental_linker"
-        incremental_booster_relpath = str(manifest["files"]["incremental_linker_booster"])
+        incremental_booster_relpath = COMPLETE_MANIFEST_FILES["incremental_linker_booster"]
         incremental_linker_artifact = _validate_incremental_linker_metadata(
             incremental_linker_dir,
             verified_booster_sha256=str(manifest["sha256"][incremental_booster_relpath]),
@@ -679,14 +679,14 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
         )
         if dict(incremental_linker_artifact.metadata.pairwise_bundle_binding) != expected_binding:
             raise ValueError("Incremental linker pairwise_bundle_binding does not match enclosing bundle")
-        target_path = bundle_dir / str(manifest["files"]["incremental_linker_training_target"])
+        target_path = bundle_dir / COMPLETE_MANIFEST_FILES["incremental_linker_training_target"]
         if canonical_json_digest(_read_json(target_path)) != incremental_linker_artifact.metadata.target_spec_digest:
             raise ValueError("Incremental linker target_spec_digest does not match enclosing bundle target JSON")
         clusterer.incremental_linker_artifact_dir = incremental_linker_dir
         clusterer.incremental_linker_artifact = incremental_linker_artifact
     clusterer.production_model_bundle_dir = bundle_dir
     clusterer.production_model_bundle_version = str(manifest["bundle_version"])
-    clusterer.production_model_bundle_status = str(manifest["bundle_status"])
+    clusterer.production_model_bundle_status = production_bundle_status(manifest["incremental_linker_version"])
     return clusterer
 
 
@@ -697,10 +697,9 @@ def _load_pairwise_staging_model(path: str | Path) -> Clusterer:
     if not bundle_dir.is_dir():
         raise ValueError(f"Pairwise staging model must be a native bundle directory: {bundle_dir}")
     manifest = _validate_manifest(bundle_dir)
-    if manifest["bundle_status"] != "pairwise_only":
-        raise ValueError(
-            f"Expected a pairwise_only production model bundle, got {manifest['bundle_status']!r}: {bundle_dir}"
-        )
+    status = production_bundle_status(manifest["incremental_linker_version"])
+    if status != "pairwise_only":
+        raise ValueError(f"Expected a pairwise_only production model bundle, got {status!r}: {bundle_dir}")
     return _load_bundle_clusterer(bundle_dir, manifest)
 
 
@@ -713,8 +712,7 @@ def load_production_model(path: str | Path | None = None) -> Clusterer:
     if not bundle_dir.is_dir():
         raise ValueError(f"Production model must be a complete native bundle directory: {bundle_dir}")
     manifest = _validate_manifest(bundle_dir)
-    if manifest["bundle_status"] != "complete":
-        raise ValueError(
-            f"Expected a complete production model bundle, got {manifest['bundle_status']!r}: {bundle_dir}"
-        )
+    status = production_bundle_status(manifest["incremental_linker_version"])
+    if status != "complete":
+        raise ValueError(f"Expected a complete production model bundle, got {status!r}: {bundle_dir}")
     return _load_bundle_clusterer(bundle_dir, manifest)

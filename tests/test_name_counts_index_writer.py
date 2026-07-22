@@ -167,31 +167,6 @@ def test_writer_never_hashes_name_count_material_under_publish_lock(
     assert metrics["reused"] is False
 
 
-def test_cleanup_identifies_current_generation_without_material_hashing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provenance = tiny_name_counts_provenance()
-    index_path, _metrics = feature_block_arrow.write_name_counts_index(
-        tmp_path,
-        ({"ada": 2.0}, {}, {}, {}),
-        provenance,
-    )
-    feature_block_arrow.write_name_counts_index(
-        tmp_path,
-        ({"ada": 3.0}, {}, {}, {}),
-        {**provenance, "generation_id": "generation-b"},
-        overwrite=True,
-    )
-
-    def unexpected_material_hash(_path: Path) -> str:
-        pytest.fail("cleanup needs manifest reachability, not material hashing")
-
-    monkeypatch.setattr("s2and.name_counts_manifest._sha256_file", unexpected_material_hash)
-
-    assert feature_block_arrow.cleanup_stale_name_counts_generations(index_path) == {"removed_generation_count": 1}
-
-
 @pytest.mark.parametrize(
     ("kind", "name"),
     (("first", "ada"), ("last", "李"), ("first_last", "anne marie o connor")),

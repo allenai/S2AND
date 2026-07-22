@@ -28,7 +28,7 @@ The preferred production publication layout is:
 ```text
 s2and/data/name_counts_index/
   manifest.json
-  generations/<generation-id>/
+  generations/<publication-generation>/
     .published
     first.bin
     last.bin
@@ -36,16 +36,21 @@ s2and/data/name_counts_index/
     last_first_initial.bin
 ```
 
-`manifest.json` must have `schema_version: "name_counts_index_v1"`,
+`manifest.json` must have `schema_version: "name_counts_index_v2"`,
 `normalization_version: "canonical_v2"`, a complete
-`name_counts_provenance_v1` `source_provenance`, and a `files` object with
+`name_counts_provenance_v2` `source_provenance`, and a `files` object with
 `first`, `last`, `first_last`, and `last_first_initial` entries. Each entry
 requires a nonempty contained `path`, unsigned `byte_count`, and lowercase
 SHA-256. The declared size and digest must match the file, and the file's
 directory must contain `.published`. A `record_count` may be descriptive but
-is not the acceptance authority. New writers set each path to
-`generations/<generation-id>/<kind>.bin`; direct manifest-relative paths such
-as `first.bin` remain valid when they satisfy the same contract.
+is not the acceptance authority. Each path must equal
+`generations/<publication-generation>/<kind>.bin`, and all four files must
+share the same nonempty publication-generation directory. This directory name
+is a storage identifier and need not equal `source_provenance.generation_id`.
+
+`name_counts_provenance_v2` records the input cardinality once as
+`source_row_count`; the duplicate `selected_row_count` field from v1 is not
+accepted.
 
 Python's `ValidatedNameCountsManifest` and the native Rust opener independently
 enforce this same acceptance contract. Cross-runtime mutation tests cover every
@@ -77,11 +82,10 @@ and attaches only the resulting scalar counts. Do not build any runtime path
 that loads `name_counts.pickle` into Python dicts/lists.
 
 The legacy direct-file layout with `first.bin`, `last.bin`, `first_last.bin`,
-and `last_first_initial.bin` directly under `name_counts_index/` is accepted
-only when referenced by `manifest.json`. New publication runs should regenerate
-a manifest-backed generation instead of reusing direct files. Production
-manifests must use the `name_counts_index` key; runtime boundaries reject the
-old `name_counts_index_dir` alias.
+and `last_first_initial.bin` directly under `name_counts_index/` is rejected.
+Regenerate it as a manifest-backed generation. Production manifests must use
+the `name_counts_index` key; runtime boundaries reject the old
+`name_counts_index_dir` alias.
 
 ## Arrow Runtime Writers
 

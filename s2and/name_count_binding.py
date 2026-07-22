@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from s2and.name_counts_manifest import ValidatedNameCountsManifest, validated_name_counts_provenance
+from s2and.name_counts_manifest import validated_name_counts_provenance
 
 _FEATURE_CONTRACT_FIELDS = (
     "name_counts_generation_id",
@@ -88,16 +87,6 @@ class NameCountsBinding:
             pickle_sha256=provenance["pickle_sha256"],
             source_snapshot_id=provenance["source_snapshot_id"],
             selected_rows_sha256=provenance["selected_rows_sha256"],
-        )
-
-    @classmethod
-    def from_arrow_name_counts_index(cls, index_dir: str | Path, *, context: str) -> NameCountsBinding:
-        """Read the binding from a validated Arrow name-count index manifest."""
-
-        manifest = ValidatedNameCountsManifest.load(index_dir, context=context)
-        return cls.from_provenance(
-            manifest.source_provenance,
-            context=f"{context} source_provenance",
         )
 
     @classmethod

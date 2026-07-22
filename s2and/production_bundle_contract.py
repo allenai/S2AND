@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v4"
+PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION = "s2and_production_model_bundle_v5"
 PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION = "pairwise_prediction_fixture_v1"
 PAIRWISE_PREDICTION_FIXTURE_TOLERANCE = 1e-10
 CLUSTERER_CONFIG_SCHEMA_VERSION = "s2and_clusterer_config_v4"
@@ -28,12 +28,18 @@ COMPLETE_MANIFEST_FILES = {
 
 def production_manifest_files(
     *,
-    complete: bool,
+    incremental_linker_version: str | None,
     include_pairwise_reproducibility: bool,
 ) -> dict[str, str]:
     """Return the exact supported manifest mapping for one bundle state."""
 
-    files = dict(COMPLETE_MANIFEST_FILES if complete else PAIRWISE_ONLY_MANIFEST_FILES)
+    files = dict(COMPLETE_MANIFEST_FILES if incremental_linker_version is not None else PAIRWISE_ONLY_MANIFEST_FILES)
     if include_pairwise_reproducibility:
         files.update(PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES)
     return files
+
+
+def production_bundle_status(incremental_linker_version: str | None) -> str:
+    """Derive the user-facing bundle status from its sole state discriminator."""
+
+    return "complete" if incremental_linker_version is not None else "pairwise_only"

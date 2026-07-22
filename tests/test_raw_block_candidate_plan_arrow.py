@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import s2and.incremental_linking.retrieval as retrieval_module
+from s2and.arrow_inputs import validate_arrow_publication_artifacts
 from s2and.incremental_linking.feature_block import (
     feature_block_signature_order_from_raw_candidate_plan,
     write_arrow_batch_lookup_index,
@@ -30,7 +31,12 @@ from s2and.incremental_linking.runtime import (
     _seed_setup_from_component_members,
 )
 from s2and.runtime import load_s2and_rust_extension
-from tests.helpers import build_cluster_summary, build_query_features, tiny_name_counts_provenance
+from tests.helpers import (
+    build_cluster_summary,
+    build_query_features,
+    tiny_name_counts_provenance,
+    write_test_arrow_artifact_manifest,
+)
 
 s2and_rust = load_s2and_rust_extension()
 
@@ -140,7 +146,13 @@ def _fnv64_bytes(value: bytes) -> int:
     return digest
 
 
-def _append_batch_index_record(index_path: str, *, key: str, batch_index: int) -> None:
+def _append_batch_index_record(
+    index_path: str,
+    *,
+    key: str,
+    batch_index: int,
+    replace_existing: bool = False,
+) -> None:
     path = Path(index_path)
     raw = path.read_bytes()
     magic, record_count, source_size, key_column_hash, source_fingerprint = (
@@ -152,7 +164,14 @@ def _append_batch_index_record(index_path: str, *, key: str, batch_index: int) -
         _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(raw, offset + index * record_size)
         for index in range(record_count)
     ]
-    records.append((_fnv64_bytes(key.encode("utf-8")), int(batch_index), 0))
+    key_hash = _fnv64_bytes(key.encode("utf-8"))
+    if replace_existing:
+        matching_indices = [index for index, record in enumerate(records) if record[0] == key_hash]
+        assert len(matching_indices) == 1
+        record_index = matching_indices[0]
+        records[record_index] = (key_hash, int(batch_index), records[record_index][2])
+    else:
+        records.append((key_hash, int(batch_index), 0))
     records.sort()
     payload = bytearray(
         _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.pack(
@@ -1123,9 +1142,22 @@ def test_raw_arrow_candidate_plan_extra_hash_selected_batch_is_exact_filtered(tm
 
 def test_raw_arrow_candidate_plan_rejects_out_of_range_batch_index(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
-    _append_batch_index_record(paths["signatures_batch_index"], key="q1", batch_index=999)
+    _append_batch_index_record(
+        paths["signatures_batch_index"],
+        key="s1",
+        batch_index=999,
+        replace_existing=True,
+    )
+    write_test_arrow_artifact_manifest(tmp_path, paths)
 
-    with pytest.raises(ValueError, match="references record batch 999"):
+    with pytest.raises(ValueError, match="batch index 999 is out of bounds"):
+        validate_arrow_publication_artifacts(
+            paths,
+            require_specter=False,
+            require_name_counts_index=False,
+        )
+
+    with pytest.raises(ValueError, match="Cannot set batch to index 999"):
         _raw_candidate_planner_from_query_signatures(
             paths,
             ["q1"],

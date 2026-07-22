@@ -490,7 +490,7 @@ Manifest expectations from this spec:
 2. Do not build a request-time pipeline that loads legacy name-count artifacts
    into Python dicts/lists. That defeats the purpose of this contract.
 
-The on-disk layout, manifest schema (`schema_version: "name_counts_index_v1"`),
+The on-disk layout, manifest schema (`schema_version: "name_counts_index_v2"`),
 binary record format, and immutable-generation publication ritual are owned by
 [`artifact_formats.md` -- Name Counts](artifact_formats.md#name-counts). New
 writers must publish through that contract.

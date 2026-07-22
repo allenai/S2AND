@@ -29,12 +29,11 @@ pa = pytest.importorskip("pyarrow")
 from s2and import feature_port  # noqa: E402
 from s2and.arrow_training import (  # noqa: E402
     build_training_anddata_from_arrow,
-    load_papers_dict_from_arrow,
-    load_signatures_dict_from_arrow,
-    load_specter_tuple_from_arrow,
+    load_papers_from_arrow,
+    load_signatures_from_arrow,
 )
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION  # noqa: E402
-from s2and.data import ANDData  # noqa: E402
+from s2and.data import ANDData, Author  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -145,7 +144,7 @@ def test_arrow_training_rejects_noncanonical_signature_physical_types(
         ValueError,
         match=rf"signatures column '{column_name}' expected {expected_type}",
     ):
-        load_signatures_dict_from_arrow(signatures_path)
+        load_signatures_from_arrow(signatures_path)
 
 
 def test_arrow_training_rejects_noncanonical_paper_id_physical_type(tmp_path: Path) -> None:
@@ -156,7 +155,7 @@ def test_arrow_training_rejects_noncanonical_paper_id_physical_type(tmp_path: Pa
     _replace_arrow_column(papers_path, "paper_id", pa.array([1], type=pa.int64()))
 
     with pytest.raises(ValueError, match="papers column 'paper_id' expected string"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
 
 def test_arrow_training_rejects_noncanonical_paper_author_position_type(tmp_path: Path) -> None:
@@ -167,38 +166,7 @@ def test_arrow_training_rejects_noncanonical_paper_author_position_type(tmp_path
     _replace_arrow_column(authors_path, "position", pa.array([0], type=pa.int32()))
 
     with pytest.raises(ValueError, match="paper_authors column 'position' expected int64"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
-
-
-@pytest.mark.parametrize(
-    ("column_name", "values", "expected_type"),
-    [
-        ("embedding", pa.array([[1.0, 0.0]], type=pa.list_(pa.float32())), r"fixed_size_list<float32>"),
-    ],
-)
-def test_arrow_training_rejects_noncanonical_specter_physical_types(
-    tmp_path: Path,
-    column_name: str,
-    values: Any,
-    expected_type: str,
-) -> None:
-    specter_path = tmp_path / "specter.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1"], type=pa.string()),
-                "embedding": pa.array([[1.0, 0.0]], type=pa.list_(pa.float32(), 2)),
-            }
-        ),
-        specter_path,
-    )
-    _replace_arrow_column(specter_path, column_name, values)
-
-    with pytest.raises(
-        ValueError,
-        match=rf"specter column '{column_name}' expected {expected_type}",
-    ):
-        load_specter_tuple_from_arrow(specter_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
 
 def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path) -> None:
@@ -206,11 +174,11 @@ def test_arrow_training_rejects_null_and_duplicate_signature_ids(tmp_path: Path)
 
     _write_minimal_signatures_table(signatures_path, [None, "s1"])
     with pytest.raises(ValueError, match="null signature_id"):
-        load_signatures_dict_from_arrow(signatures_path)
+        load_signatures_from_arrow(signatures_path)
 
     _write_minimal_signatures_table(signatures_path, ["s1", "s1"])
     with pytest.raises(ValueError, match="duplicate signature_id"):
-        load_signatures_dict_from_arrow(signatures_path)
+        load_signatures_from_arrow(signatures_path)
 
 
 @pytest.mark.parametrize("author_block", [None, ""])
@@ -220,7 +188,7 @@ def test_arrow_training_rejects_missing_author_block(tmp_path: Path, author_bloc
     _replace_arrow_column(signatures_path, "author_block", pa.array([author_block], type=pa.string()))
 
     with pytest.raises(ValueError, match="(null|empty) author_block"):
-        load_signatures_dict_from_arrow(signatures_path)
+        load_signatures_from_arrow(signatures_path)
 
 
 def test_arrow_training_rejects_absent_author_block_column(tmp_path: Path) -> None:
@@ -238,17 +206,16 @@ def test_arrow_training_rejects_absent_author_block_column(tmp_path: Path) -> No
     write_arrow_ipc_table(table_without_block, signatures_path)
 
     with pytest.raises(ValueError, match="missing loader-required columns.*author_block"):
-        load_signatures_dict_from_arrow(signatures_path)
+        load_signatures_from_arrow(signatures_path)
 
 
 def test_arrow_training_accepts_missing_orcid_column(tmp_path: Path) -> None:
     signatures_path = tmp_path / "signatures.arrow"
     _write_minimal_signatures_table(signatures_path, ["s1"])
 
-    signatures = load_signatures_dict_from_arrow(signatures_path)
+    signatures = load_signatures_from_arrow(signatures_path)
 
-    assert signatures["s1"]["author_info"]["source_ids"] is None
-    assert signatures["s1"]["author_info"]["source_id_source"] is None
+    assert signatures["s1"].author_info_orcid is None
 
 
 def test_arrow_training_rejects_null_and_duplicate_paper_ids(tmp_path: Path) -> None:
@@ -258,11 +225,11 @@ def test_arrow_training_rejects_null_and_duplicate_paper_ids(tmp_path: Path) -> 
 
     _write_minimal_papers_table(papers_path, [None, "p1"])
     with pytest.raises(ValueError, match="null paper_id"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
     _write_minimal_papers_table(papers_path, ["p1", "p1"])
     with pytest.raises(ValueError, match="duplicate paper_id"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
 
 def test_arrow_training_rejects_null_paper_author_ids(tmp_path: Path) -> None:
@@ -272,7 +239,7 @@ def test_arrow_training_rejects_null_paper_author_ids(tmp_path: Path) -> None:
     _write_minimal_paper_authors_table(authors_path, [None])
 
     with pytest.raises(ValueError, match="null paper_id"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
 
 def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path) -> None:
@@ -282,7 +249,7 @@ def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path)
     _write_minimal_paper_authors_table(authors_path, ["p1", "p1"])
 
     with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
 
 @pytest.mark.parametrize("author_name", [None, "   "])
@@ -302,39 +269,34 @@ def test_arrow_training_rejects_empty_paper_author_names(tmp_path: Path, author_
     )
 
     with pytest.raises(ValueError, match="empty author_name"):
-        load_papers_dict_from_arrow(papers_path, authors_path)
+        load_papers_from_arrow(papers_path, authors_path)
 
 
-def test_arrow_training_rejects_duplicate_specter_ids(tmp_path: Path) -> None:
-    specter_path = tmp_path / "specter.arrow"
+def test_arrow_training_filtered_papers_skip_irrelevant_validation_state(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1", "p2", "p2"])
     write_arrow_ipc_table(
         pa.table(
             {
-                "paper_id": pa.array(["p1", "p1"], type=pa.string()),
-                "embedding": pa.array([[1.0, 0.0], [0.0, 1.0]], type=pa.list_(pa.float32(), 2)),
+                "paper_id": pa.array(["p1", "p2", "p2"], type=pa.string()),
+                "position": pa.array([0, 0, 0], type=pa.int64()),
+                "author_name": pa.array(["Ada Lovelace", None, None], type=pa.string()),
             }
         ),
-        specter_path,
+        authors_path,
     )
 
-    with pytest.raises(ValueError, match="duplicate paper_id"):
-        load_specter_tuple_from_arrow(specter_path)
-
-
-def test_arrow_training_rejects_null_specter_embeddings(tmp_path: Path) -> None:
-    specter_path = tmp_path / "specter.arrow"
-    write_arrow_ipc_table(
-        pa.table(
-            {
-                "paper_id": pa.array(["p1", "p2"], type=pa.string()),
-                "embedding": pa.array([[1.0, 0.0], None], type=pa.list_(pa.float32(), 2)),
-            }
-        ),
-        specter_path,
+    papers = load_papers_from_arrow(
+        papers_path,
+        authors_path,
+        needed_paper_ids={"p1"},
     )
 
-    with pytest.raises(ValueError, match="null embedding"):
-        load_specter_tuple_from_arrow(specter_path)
+    assert list(papers) == ["p1"]
+    assert papers["p1"].authors == [Author(author_name="Ada Lovelace", position=0)]
+    with pytest.raises(ValueError, match="empty author_name"):
+        load_papers_from_arrow(papers_path, authors_path)
 
 
 def _json_training_anddata(name: str, specter: dict[str, np.ndarray], **overrides: Any) -> ANDData:
@@ -460,19 +422,11 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("S2AND_BACKEND", "python")
-    original_preprocess_signatures = ANDData.preprocess_signatures
-    observed_generation: list[str] = []
-
-    def record_initial_arrow_state(dataset: ANDData) -> None:
-        assert dataset.arrow_paths is not None
-        assert dataset.arrow_artifact_generation == dataset.arrow_paths.generation_id
-        assert dataset.arrow_paths.name_counts_manifest is not None
-        assert dataset.name_counts_provenance == dataset.arrow_paths.name_counts_manifest.source_provenance
-        assert isinstance(dataset.name_tuples, frozenset)
-        observed_generation.append(dataset.arrow_artifact_generation)
-        original_preprocess_signatures(dataset)
-
-    monkeypatch.setattr(ANDData, "preprocess_signatures", record_initial_arrow_state)
+    monkeypatch.setattr(
+        ANDData,
+        "preprocess_signatures",
+        lambda _dataset: pytest.fail("Arrow training must not run no-op Python signature preprocessing"),
+    )
     monkeypatch.setattr(
         feature_port,
         "evict_rust_featurizer",
@@ -494,7 +448,10 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.name_counts_index is None
     assert arrow_dataset.arrow_paths is not None
     assert arrow_dataset.arrow_artifact_generation
-    assert observed_generation == [arrow_dataset.arrow_artifact_generation]
+    assert arrow_dataset.arrow_artifact_generation == arrow_dataset.arrow_paths.generation_id
+    assert arrow_dataset.arrow_paths.name_counts_manifest is not None
+    assert arrow_dataset.name_counts_provenance == arrow_dataset.arrow_paths.name_counts_manifest.source_provenance
+    assert isinstance(arrow_dataset.name_tuples, frozenset)
 
 
 def _fixed_pair_frames(json_dataset: ANDData) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

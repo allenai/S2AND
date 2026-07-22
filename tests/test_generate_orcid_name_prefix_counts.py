@@ -5,10 +5,11 @@ import importlib.util
 import json
 import re
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import s2and.subblocking as subblocking_module
 from s2and.consts import NORMALIZATION_VERSION, PROJECT_ROOT_PATH
 from s2and.subblocking import _LazyCanonicalOrcidPrefixCounts
 
@@ -255,6 +256,118 @@ def test_fixture_cli_writes_runtime_artifact_and_generation_report(
         )
 
 
+@pytest.mark.parametrize(
+    "existing_filename",
+    [
+        "first_k_letter_counts_from_orcid.json",
+        "first_k_letter_counts_from_orcid.meta.json",
+        "first_k_letter_counts_from_orcid.generation.json",
+    ],
+)
+def test_cli_preflights_every_output_before_loading_source_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_filename: str,
+) -> None:
+    module = _load_module()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    existing_path = output_dir / existing_filename
+    existing_path.write_bytes(b"sentinel")
+
+    def fail_work(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("output collision reached warehouse or count-building work")
+
+    monkeypatch.setattr(module, "_load_warehouse_rows", fail_work)
+    monkeypatch.setattr(module, "_load_name_tuples_from_file", fail_work)
+    monkeypatch.setattr(module, "build_prefix_counts_from_sorted_rows", fail_work)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        module.main(
+            [
+                "--run-full",
+                "--output-dir",
+                str(output_dir),
+                "--source-snapshot-id",
+                "fixture-snapshot",
+            ]
+        )
+
+    assert existing_path.read_bytes() == b"sentinel"
+    assert list(output_dir.iterdir()) == [existing_path]
+
+
+def test_cli_preflights_non_directory_output_before_loading_source_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    output_path = tmp_path / "output"
+    output_path.write_bytes(b"sentinel")
+
+    def fail_work(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid output path reached warehouse or count-building work")
+
+    monkeypatch.setattr(module, "_load_warehouse_rows", fail_work)
+    monkeypatch.setattr(module, "_load_name_tuples_from_file", fail_work)
+    monkeypatch.setattr(module, "build_prefix_counts_from_sorted_rows", fail_work)
+
+    with pytest.raises(NotADirectoryError, match="output path is not a directory"):
+        module.main(
+            [
+                "--run-full",
+                "--output-dir",
+                str(output_path),
+                "--source-snapshot-id",
+                "fixture-snapshot",
+            ]
+        )
+
+    assert output_path.read_bytes() == b"sentinel"
+
+
+def test_publication_rolls_back_all_outputs_when_final_commit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    output_dir = tmp_path / "output"
+    initial_paths = module.write_publication(
+        {"al": {"am": 7}},
+        output_dir=output_dir,
+        source_snapshot_id="initial-snapshot",
+        source_digest="1" * 64,
+        generator_parameters={"limit": 1},
+        metrics={"source_rows": 1},
+        overwrite=False,
+    )[:3]
+    initial_payloads = {path.name: path.read_bytes() for path in initial_paths}
+    metadata_path = output_dir / "first_k_letter_counts_from_orcid.meta.json"
+    original_replace = Path.replace
+
+    def fail_metadata_commit(path: Path, target: str | Path) -> Path:
+        if path.name == metadata_path.name and Path(target) == metadata_path:
+            original_replace(path, target)
+            raise OSError("injected metadata commit failure after replace")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_metadata_commit)
+
+    with pytest.raises(OSError, match="injected metadata commit failure after replace"):
+        module.write_publication(
+            {"al": {"az": 9}},
+            output_dir=output_dir,
+            source_snapshot_id="replacement-snapshot",
+            source_digest="2" * 64,
+            generator_parameters={"limit": 2},
+            metrics={"source_rows": 2},
+            overwrite=True,
+        )
+
+    assert {path.name: path.read_bytes() for path in initial_paths} == initial_payloads
+    assert list(output_dir.glob(".orcid-prefix-publication.*")) == []
+
+
 def test_runtime_loader_is_lazy_and_verifies_the_direct_artifact(tmp_path: Path) -> None:
     module = _load_module()
     lazy_counts = _LazyCanonicalOrcidPrefixCounts(tmp_path)
@@ -277,6 +390,47 @@ def test_runtime_loader_is_lazy_and_verifies_the_direct_artifact(tmp_path: Path)
     data_path.write_text('{"al":{"az":9}}', encoding="utf-8")
     with pytest.raises(ValueError, match="data SHA-256"):
         _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
+
+
+def test_runtime_loader_exposes_recursively_immutable_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    module.write_artifact({"al": {"am": 7}}, output_dir=tmp_path, overwrite=False)
+    lazy_counts = _LazyCanonicalOrcidPrefixCounts(tmp_path)
+    loaded = lazy_counts.load()
+    original_sha256 = lazy_counts.data_sha256()
+
+    with pytest.raises(TypeError):
+        loaded["al"]["am"] = 999  # type: ignore[index]
+    with pytest.raises(TypeError):
+        loaded["al"] = {"az": 9}  # type: ignore[index]
+
+    def fake_rust_subblocking(
+        _arrow_paths: object,
+        _signature_ids: object,
+        _maximum_size: object,
+        rust_counts: object,
+        *_args: object,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        assert isinstance(rust_counts, dict)
+        assert isinstance(rust_counts["al"], dict)
+        rust_counts["al"]["am"] = 999
+        return {}, {}
+
+    monkeypatch.setattr(
+        "s2and.runtime.load_s2and_rust_extension",
+        lambda: SimpleNamespace(make_subblocks_with_telemetry_arrow_native_graph=fake_rust_subblocking),
+    )
+    subblocking_module._make_subblocks_with_telemetry_arrow_rust(
+        {},
+        [],
+        first_k_letter_counts_sorted=lazy_counts,
+    )
+
+    assert loaded["al"]["am"] == 7
+    assert lazy_counts.data_sha256() == original_sha256
 
 
 def test_runtime_loader_does_not_fall_back_to_unversioned_data(tmp_path: Path) -> None:
@@ -332,15 +486,14 @@ def test_runtime_loader_rejects_noncanonical_prefix_tokens(
         _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
-def test_compact_json_writer_matches_canonical_encoding(tmp_path: Path) -> None:
+def test_artifact_payload_matches_canonical_encoding() -> None:
     module = _load_module()
-    payload = {"zo": {"gian ": 2, "amy": 4}, "al": {"bob": 3}}
-    path = tmp_path / "counts.json"
+    payload = {"gi": {"greg": 2}, "al": {"ava": 3, "amy": 4}}
 
-    digest = module._write_compact_json(path, payload)
+    encoded, _metadata, digest = module._artifact_payloads(payload)
     expected = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-    assert path.read_bytes() == expected
+    assert encoded == expected
     assert digest == hashlib.sha256(expected).hexdigest()
 
 

@@ -26,6 +26,7 @@ from s2and.production_bundle_contract import (
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
     PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
+    production_bundle_status,
     production_manifest_files,
 )
 from s2and.production_model import (
@@ -205,19 +206,17 @@ def write_production_manifest(
     *,
     bundle_version: str,
     pairwise_model_version: str,
-    include_incremental_linker: bool,
     incremental_linker_version: str | None = None,
 ) -> ProductionBundleSummary:
     """Write the bundle manifest for either pairwise-only or complete bundles."""
 
     bundle_dir = Path(bundle_dir)
-    if include_incremental_linker:
-        if not isinstance(incremental_linker_version, str) or not incremental_linker_version.strip():
-            raise ValueError("Complete production manifests require a nonempty incremental_linker_version")
-    elif incremental_linker_version is not None:
-        raise ValueError("Pairwise-only production manifests cannot declare an incremental_linker_version")
+    if incremental_linker_version is not None and (
+        not isinstance(incremental_linker_version, str) or not incremental_linker_version.strip()
+    ):
+        raise ValueError("Complete production manifests require a nonempty incremental_linker_version")
     files = production_manifest_files(
-        complete=include_incremental_linker,
+        incremental_linker_version=incremental_linker_version,
         include_pairwise_reproducibility=_pairwise_reproducibility_present(bundle_dir),
     )
     sha256: dict[str, str] = {}
@@ -229,12 +228,10 @@ def write_production_manifest(
             raise FileNotFoundError(f"Production bundle file is missing: {path}")
         sha256[relpath] = _sha256_file(path)
 
-    status = "complete" if include_incremental_linker else "pairwise_only"
+    status = production_bundle_status(incremental_linker_version)
     manifest = {
-        "bundle_status": status,
         "bundle_version": str(bundle_version),
-        "files": files,
-        "incremental_linker_version": incremental_linker_version if include_incremental_linker else None,
+        "incremental_linker_version": incremental_linker_version,
         "pairwise_model_version": str(pairwise_model_version),
         "schema_version": PRODUCTION_MODEL_BUNDLE_SCHEMA_VERSION,
         "sha256": sha256,
@@ -302,7 +299,6 @@ def _write_pairwise_production_bundle_stage(
         bundle_dir,
         bundle_version=str(bundle_version),
         pairwise_model_version=source_version,
-        include_incremental_linker=False,
     )
 
 
@@ -362,10 +358,11 @@ def _copy_pairwise_stage(
     output_bundle_dir: Path,
     source_manifest: Mapping[str, Any],
 ) -> None:
-    files = source_manifest["files"]
-    for logical_name in (*PAIRWISE_ONLY_MANIFEST_FILES, *PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES):
-        relpath = files.get(logical_name)
-        if relpath is not None:
+    declared_paths = set(source_manifest["sha256"])
+    for relpath in PAIRWISE_ONLY_MANIFEST_FILES.values():
+        _copy_path(source_bundle_dir / relpath, output_bundle_dir / relpath)
+    for relpath in PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES.values():
+        if relpath in declared_paths:
             _copy_path(source_bundle_dir / relpath, output_bundle_dir / relpath)
 
 
@@ -450,7 +447,6 @@ def finalize_production_bundle(
                 if pairwise_model_version is None
                 else pairwise_model_version
             ),
-            include_incremental_linker=True,
             incremental_linker_version=str(incremental_linker_version or resolved_bundle_version),
         )
         load_production_model(staging_dir)

@@ -18,7 +18,6 @@ from s2and.arrow_inputs import (
     require_filtered_arrow_batch_indexes,
     validate_arrow_prediction_artifacts,
     validate_arrow_publication_artifacts,
-    verified_arrow_artifact_generation,
     write_arrow_artifact_manifest,
 )
 from s2and.incremental_linking.feature_block import (
@@ -122,10 +121,10 @@ def test_generation_verification_binds_exact_immutable_key_paths_in_either_order
     warm_paths = full_paths if warm_with_specter else {"signatures": str(signatures_path)}
     other_valid_paths = {"signatures": str(signatures_path)} if warm_with_specter else full_paths
 
-    assert verified_arrow_artifact_generation(warm_paths) == generation_id
-    assert verified_arrow_artifact_generation(other_valid_paths) == generation_id
+    assert arrow_inputs_module._verified_arrow_artifact_manifest(warm_paths).generation_id == generation_id
+    assert arrow_inputs_module._verified_arrow_artifact_manifest(other_valid_paths).generation_id == generation_id
     with pytest.raises(ValueError, match="path does not match supplied path"):
-        verified_arrow_artifact_generation(
+        arrow_inputs_module._verified_arrow_artifact_manifest(
             {
                 "signatures": str(signatures_path),
                 "specter": str(mismatched_specter_path),
@@ -185,7 +184,7 @@ def test_generation_manifest_rejects_request_sidecars_in_immutable_inventory(tmp
     _write_artifact_generation_manifest(tmp_path, paths)
 
     with pytest.raises(ValueError, match=r"request_sidecars=\['cluster_seeds'\]"):
-        verified_arrow_artifact_generation(paths)
+        arrow_inputs_module._verified_arrow_artifact_manifest(paths)
 
 
 def test_artifact_generation_writer_rejects_path_outside_manifest_directory(tmp_path: Path) -> None:
@@ -220,10 +219,11 @@ def test_canonical_manifest_accepts_linker_replay_shared_name_counts_index(tmp_p
 
     assert manifest["paths"]["name_counts_index"] == "../../../name_counts_index"
     assert manifest["artifact_generation"]["files"]["name_counts_index"]["path"] == "../../../name_counts_index"
-    assert (
-        verified_arrow_artifact_generation({**paths, "manifest": bundle_dir / "manifest.json"})
-        == manifest["artifact_generation"]["generation_id"]
+    verified = arrow_inputs_module._verified_arrow_artifact_manifest(
+        {**paths, "manifest": bundle_dir / "manifest.json"}
     )
+    assert verified is not None
+    assert verified.generation_id == manifest["artifact_generation"]["generation_id"]
 
 
 def test_manifest_path_serialization_normalizes_windows_separators() -> None:
@@ -302,7 +302,7 @@ def test_generation_manifest_rejects_paths_outside_manifest_authority(
 
     expected_message = "must be manifest-relative" if declared_path_kind == "absolute" else "escapes"
     with pytest.raises(ValueError, match=expected_message):
-        verified_arrow_artifact_generation(
+        arrow_inputs_module._verified_arrow_artifact_manifest(
             {
                 "manifest": str(manifest_path),
                 "signatures": str(outside_path),
@@ -343,11 +343,9 @@ def test_retained_validated_profile_reuses_in_memory_contract_without_io(
         "_sha256_file",
         "_validate_batch_indexes",
         "_verified_arrow_artifact_manifest",
-        "read_name_counts_index_normalization_version",
     ):
         monkeypatch.setattr(arrow_inputs_module, helper_name, fail_io)
 
-    assert verified_arrow_artifact_generation(validated) == validated.generation_id
     assert (
         validate_arrow_prediction_artifacts(
             validated,
@@ -525,7 +523,7 @@ def test_repeated_validation_checks_newly_required_specter_index(tmp_path: Path)
         )
 
 
-def test_repeated_raw_validation_rechecks_generation_integrity(tmp_path: Path) -> None:
+def test_repeated_raw_validation_reuses_immutable_generation(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     paths: dict[str, str] = {}
     for table_key, key_column in (
@@ -547,13 +545,19 @@ def test_repeated_raw_validation_rechecks_generation_integrity(tmp_path: Path) -
         require_name_counts_index=False,
     )
     write_arrow_ipc_table(pa.table({"signature_id": ["b"]}), paths["signatures"])
+    repeated = validate_arrow_prediction_artifacts(
+        paths,
+        require_specter=False,
+        require_name_counts_index=False,
+    )
+    assert repeated.generation_id == validated.generation_id
     with pytest.raises(ValueError, match="checksum mismatch"):
-        validate_arrow_prediction_artifacts(
-            paths,
+        validate_arrow_publication_artifacts(
+            validated,
             require_specter=False,
             require_name_counts_index=False,
         )
-    assert verified_arrow_artifact_generation(validated) == validated.generation_id
+    assert validated.generation_id
 
 
 def test_complete_bundle_streams_each_generation_file_once(
@@ -575,29 +579,35 @@ def test_complete_bundle_streams_each_generation_file_once(
     table_reads: list[Path] = []
     index_reads: list[Path] = []
     original_manifest_sha256 = arrow_inputs_module._sha256_file  # noqa: SLF001
-    original_table_digests = feature_block_arrow_module._source_file_digests_once  # noqa: SLF001
+    original_table_sha256 = feature_block_arrow_module._source_file_sha256_once  # noqa: SLF001
     original_index_validator = feature_block_arrow_module._validate_verified_arrow_batch_lookup_index  # noqa: SLF001
 
     def reject_duplicate_manifest_hash(path: Path) -> str:
         assert path.resolve() not in paired_paths, f"paired artifact was hashed separately: {path}"
         return original_manifest_sha256(path)
 
-    def record_table_read(path: Path, *, source_size: int) -> tuple[str, int]:
+    def record_table_read(path: Path) -> str:
         table_reads.append(path.resolve())
-        return original_table_digests(path, source_size=source_size)
+        return original_table_sha256(path)
 
     def record_index_read(*args: object, **kwargs: object) -> dict[str, int | str]:
         index_reads.append(Path(args[1]).resolve())
+        assert kwargs["validate_source_fingerprint"] is False
         return original_index_validator(*args, **kwargs)
 
     monkeypatch.setattr(arrow_inputs_module, "_sha256_file", reject_duplicate_manifest_hash)
-    monkeypatch.setattr(feature_block_arrow_module, "_source_file_digests_once", record_table_read)
+    monkeypatch.setattr(feature_block_arrow_module, "_source_file_sha256_once", record_table_read)
     monkeypatch.setattr(
         feature_block_arrow_module,
         "_validate_verified_arrow_batch_lookup_index",
         record_index_read,
     )
 
+    validate_arrow_prediction_artifacts(
+        paths,
+        require_specter=True,
+        require_name_counts_index=False,
+    )
     validate_arrow_prediction_artifacts(
         paths,
         require_specter=True,
@@ -634,14 +644,14 @@ def test_raw_validation_rejects_generation_bound_index_checksum_mutation(tmp_pat
         )
 
 
-def test_raw_validation_rejects_stale_index_in_regenerated_generation(tmp_path: Path) -> None:
+def test_publication_validation_rejects_stale_index_in_regenerated_generation(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     paths = _write_valid_prediction_bundle(tmp_path)
     write_arrow_ipc_table(pa.table({"signature_id": ["b"]}), paths["signatures"])
     write_test_arrow_artifact_manifest(tmp_path, paths)
 
     with pytest.raises(ValueError, match="is stale"):
-        validate_arrow_prediction_artifacts(
+        validate_arrow_publication_artifacts(
             paths,
             require_specter=False,
             require_name_counts_index=False,
@@ -816,14 +826,8 @@ def test_validate_arrow_prediction_artifacts_requires_manifest_backed_name_count
     assert "schema_version" in bad_schema_exc.value.missing_files["name_counts_index"]
 
 
-def test_repeated_raw_validation_detects_name_counts_file_mutation(tmp_path: Path) -> None:
+def test_publication_validation_detects_name_counts_file_mutation(tmp_path: Path) -> None:
     prediction_paths = _write_valid_prediction_bundle(tmp_path, include_name_counts=True)
-    validate_arrow_prediction_artifacts(
-        prediction_paths,
-        require_specter=False,
-        require_name_counts_index=True,
-    )
-
     index_dir = Path(prediction_paths["name_counts_index"])
     manifest = json.loads((index_dir / "manifest.json").read_text(encoding="utf-8"))
     binary_path = index_dir / manifest["files"]["first"]["path"]
@@ -831,7 +835,7 @@ def test_repeated_raw_validation_detects_name_counts_file_mutation(tmp_path: Pat
     payload[-1] ^= 1
     binary_path.write_bytes(payload)
     with pytest.raises(MissingArrowArtifactError, match="SHA-256 mismatch"):
-        validate_arrow_prediction_artifacts(
+        validate_arrow_publication_artifacts(
             prediction_paths,
             require_specter=False,
             require_name_counts_index=True,

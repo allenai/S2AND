@@ -182,25 +182,27 @@ impl ArrowBatchLookupIndex {
             record_count,
             max_batch_index: None,
         };
-        let mut previous_hash = None;
-        for record_index in 0..record_count {
-            let record_hash = index.record_hash(record_index);
-            if let Some(previous_hash) = previous_hash {
-                if record_hash < previous_hash {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Arrow batch lookup index '{path}' record hashes are not monotonic at \
-                         records {} and {record_index}: {previous_hash} > {record_hash}",
-                        record_index - 1
-                    )));
+        if source_validation == SourceValidationMode::StrictFingerprint {
+            let mut previous_hash = None;
+            for record_index in 0..record_count {
+                let record_hash = index.record_hash(record_index);
+                if let Some(previous_hash) = previous_hash {
+                    if record_hash < previous_hash {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "Arrow batch lookup index '{path}' record hashes are not monotonic at \
+                             records {} and {record_index}: {previous_hash} > {record_hash}",
+                            record_index - 1
+                        )));
+                    }
                 }
+                previous_hash = Some(record_hash);
+                let batch_index = index.record_batch_index(record_index);
+                index.max_batch_index = Some(
+                    index
+                        .max_batch_index
+                        .map_or(batch_index, |current| current.max(batch_index)),
+                );
             }
-            previous_hash = Some(record_hash);
-            let batch_index = index.record_batch_index(record_index);
-            index.max_batch_index = Some(
-                index
-                    .max_batch_index
-                    .map_or(batch_index, |current| current.max(batch_index)),
-            );
         }
         Ok(index)
     }
@@ -495,6 +497,15 @@ mod tests {
             Err(err) => err,
         };
         assert!(py_err_message(error).contains("record hashes are not monotonic"));
+        let request_index = ArrowBatchLookupIndex::open_for_request(
+            index_path
+                .to_str()
+                .expect("temp path should be valid unicode"),
+            &source_path_str,
+            "signature_id",
+        )
+        .expect("request-time opens rely on validation at immutable publication");
+        assert!(request_index.max_batch_index.is_none());
 
         fs::remove_dir_all(&temp_root).ok();
     }

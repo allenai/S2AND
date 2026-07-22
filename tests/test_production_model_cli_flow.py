@@ -376,7 +376,9 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     )
 
     pairwise_manifest = json.loads((pairwise_bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert pairwise_manifest["bundle_status"] == "pairwise_only"
+    assert pairwise_manifest["incremental_linker_version"] is None
+    assert "bundle_status" not in pairwise_manifest
+    assert "files" not in pairwise_manifest
     pairwise_config = json.loads((pairwise_bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     for field in ("name_tuples_data_sha256", "orcid_prefix_counts_data_sha256"):
         assert len(pairwise_config["feature_contract"][field]) == 64
@@ -425,7 +427,9 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     )
 
     final_manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert final_manifest["bundle_status"] == "complete"
+    assert final_manifest["incremental_linker_version"] == "9.8"
+    assert "bundle_status" not in final_manifest
+    assert "files" not in final_manifest
     assert final_manifest["bundle_version"] == "9.8"
     assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"
     assert not (pairwise_bundle_dir / "incremental_linker").exists()

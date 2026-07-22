@@ -8,8 +8,9 @@ import logging
 import os
 import threading
 import weakref
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,59 @@ from s2and.name_counts_manifest import (
 _INDEX_CACHE: weakref.WeakValueDictionary[tuple[str, str], NameCountsIndex] = weakref.WeakValueDictionary()
 _INDEX_CACHE_LOCK = threading.Lock()
 _INDEX_INFLIGHT: dict[tuple[str, str], Future[NameCountsIndex]] = {}
+_LATEST_INDEX_CACHE: OrderedDict[str, NameCountsIndex] = OrderedDict()
+_LATEST_INDEX_CACHE_MAX_PATHS = 4
 _MANIFEST_OPEN_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
+
+
+def clear_name_counts_index_cache() -> None:
+    """Release every completed cached native index handle."""
+
+    with _INDEX_CACHE_LOCK:
+        if _INDEX_INFLIGHT:
+            raise RuntimeError("cannot clear the name-count index cache while opens are in flight")
+        _INDEX_CACHE.clear()
+        _LATEST_INDEX_CACHE.clear()
+
+
+def evict_name_counts_index(path: str | os.PathLike[str]) -> bool:
+    """Release completed cached generations for one resolved index path."""
+
+    resolved_path = str(Path(os.fspath(path)).resolve())
+    with _INDEX_CACHE_LOCK:
+        if any(cache_path == resolved_path for cache_path, _manifest_sha256 in _INDEX_INFLIGHT):
+            raise RuntimeError(f"cannot evict name-count index while an open is in flight: {resolved_path}")
+        removed = _LATEST_INDEX_CACHE.pop(resolved_path, None) is not None
+        generation_keys = [cache_key for cache_key in _INDEX_CACHE if cache_key[0] == resolved_path]
+        for cache_key in generation_keys:
+            removed = _INDEX_CACHE.pop(cache_key, None) is not None or removed
+        return removed
+
+
+def _cached_index_locked(cache_key: tuple[str, str]) -> NameCountsIndex | None:
+    """Return and retain an exact cached generation while holding the cache lock."""
+
+    resolved_path, manifest_sha256 = cache_key
+    latest = _LATEST_INDEX_CACHE.get(resolved_path)
+    if latest is not None:
+        if latest.manifest_sha256 == manifest_sha256:
+            _LATEST_INDEX_CACHE.move_to_end(resolved_path)
+            return latest
+        del _LATEST_INDEX_CACHE[resolved_path]
+    cached = _INDEX_CACHE.get(cache_key)
+    if cached is not None:
+        _retain_latest_index_locked(cached)
+    return cached
+
+
+def _retain_latest_index_locked(index: NameCountsIndex) -> None:
+    """Strongly retain the newest generation for a bounded set of paths."""
+
+    _LATEST_INDEX_CACHE[index.path] = index
+    _LATEST_INDEX_CACHE.move_to_end(index.path)
+    while len(_LATEST_INDEX_CACHE) > _LATEST_INDEX_CACHE_MAX_PATHS:
+        _LATEST_INDEX_CACHE.popitem(last=False)
 
 
 class _ManifestGenerationChanged(RuntimeError):
@@ -178,20 +230,27 @@ class NameCountsIndex:
         """Open one exact manifest generation with per-generation single-flight."""
 
         cache_key = (resolved_path, manifest_sha256)
-        with _INDEX_CACHE_LOCK:
-            cached = _INDEX_CACHE.get(cache_key)
-            if cached is not None:
-                return cached
-            in_flight = _INDEX_INFLIGHT.get(cache_key)
-            if in_flight is None:
-                in_flight = Future()
-                _INDEX_INFLIGHT[cache_key] = in_flight
-                owns_open = True
-            else:
-                owns_open = False
+        while True:
+            with _INDEX_CACHE_LOCK:
+                cached = _cached_index_locked(cache_key)
+                if cached is not None:
+                    return cached
+                in_flight = _INDEX_INFLIGHT.get(cache_key)
+                if in_flight is None:
+                    in_flight = Future()
+                    _INDEX_INFLIGHT[cache_key] = in_flight
+                    owns_open = True
+                else:
+                    owns_open = False
 
-        if not owns_open:
-            return in_flight.result()
+            if owns_open:
+                break
+            try:
+                return in_flight.result()
+            except CancelledError:
+                # The owner was interrupted by a BaseException. The canceled
+                # future carries no unobserved exception; retry as a new owner.
+                continue
 
         try:
             from s2and.runtime import load_s2and_rust_extension
@@ -213,19 +272,27 @@ class NameCountsIndex:
                 normalization_version=manifest["normalization_version"],
                 source_provenance=manifest["source_provenance"],
             )
-        except Exception as error:
-            with _INDEX_CACHE_LOCK:
-                _INDEX_INFLIGHT.pop(cache_key, None)
-            in_flight.set_exception(error)
-            raise
 
+            with _INDEX_CACHE_LOCK:
+                cached = _cached_index_locked(cache_key)
+                result = opened if cached is None else cached
+                if cached is None:
+                    _INDEX_CACHE[cache_key] = opened
+                    _retain_latest_index_locked(opened)
+            in_flight.set_result(result)
+        except BaseException as error:
+            if not in_flight.done():
+                if isinstance(error, Exception):
+                    in_flight.set_exception(error)
+                else:
+                    in_flight.cancel()
+            with _INDEX_CACHE_LOCK:
+                if _INDEX_INFLIGHT.get(cache_key) is in_flight:
+                    del _INDEX_INFLIGHT[cache_key]
+            raise
         with _INDEX_CACHE_LOCK:
-            cached = _INDEX_CACHE.get(cache_key)
-            result = opened if cached is None else cached
-            if cached is None:
-                _INDEX_CACHE[cache_key] = opened
-            _INDEX_INFLIGHT.pop(cache_key, None)
-        in_flight.set_result(result)
+            if _INDEX_INFLIGHT.get(cache_key) is in_flight:
+                del _INDEX_INFLIGHT[cache_key]
         return result
 
     @classmethod

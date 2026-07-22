@@ -15,8 +15,8 @@ use crate::{
     FNV_OFFSET,
 };
 
-const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v1";
-const NAME_COUNTS_PROVENANCE_SCHEMA_VERSION: &str = "name_counts_provenance_v1";
+const NAME_COUNTS_INDEX_SCHEMA_VERSION: &str = "name_counts_index_v2";
+const NAME_COUNTS_PROVENANCE_SCHEMA_VERSION: &str = "name_counts_provenance_v2";
 const NAME_COUNTS_NORMALIZATION_VERSION: &str = "canonical_v2";
 
 #[derive(Clone)]
@@ -97,6 +97,7 @@ struct NameCountsManifest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NameCountsProvenance {
     schema_version: String,
     normalization_version: String,
@@ -106,8 +107,16 @@ struct NameCountsProvenance {
     source_kind: String,
     source_query_sha256: String,
     selected_rows_sha256: String,
-    selected_row_count: u64,
-    source_row_count: u64,
+    #[serde(rename = "source_row_count")]
+    _source_row_count: u64,
+    #[serde(default, rename = "generated_at")]
+    _generated_at: Option<serde_json::Value>,
+    #[serde(default, rename = "pickle_byte_count")]
+    _pickle_byte_count: Option<serde_json::Value>,
+    #[serde(default, rename = "cardinalities")]
+    _cardinalities: Option<serde_json::Value>,
+    #[serde(default, rename = "rejected_row_count")]
+    _rejected_row_count: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -810,12 +819,6 @@ impl NameCountsProvenance {
                 ));
             }
         }
-        if self.source_row_count != self.selected_row_count {
-            return Err(manifest_value_error(
-                manifest_path,
-                "source_provenance selected_row_count/source_row_count mismatch",
-            ));
-        }
         Ok(NameCountsProvenanceBinding {
             generation_id: self.generation_id,
             pickle_sha256: self.pickle_sha256,
@@ -889,13 +892,30 @@ fn validated_name_counts_index_manifest_path(
     canonical_index_dir: &Path,
     entry: NameCountsManifestFile,
     kind: &str,
+    generation_name: &mut Option<String>,
 ) -> PyResult<RawNameCountIndexFileSpec> {
     let manifest_path = index_dir.join("manifest.json");
-    if entry.path.trim().is_empty() {
+    let path_parts = entry.path.split('/').collect::<Vec<_>>();
+    if path_parts.len() != 3
+        || path_parts[0] != "generations"
+        || matches!(path_parts[1], "" | "." | "..")
+        || entry.path.contains('\\')
+        || path_parts[2] != format!("{kind}.bin")
+    {
         return Err(manifest_value_error(
             &manifest_path,
-            format!("requires nonempty string files.{kind}.path"),
+            format!("files.{kind}.path must equal generations/<generation-id>/{kind}.bin"),
         ));
+    }
+    match generation_name {
+        Some(expected) if expected != path_parts[1] => {
+            return Err(manifest_value_error(
+                &manifest_path,
+                "files must share one generation directory",
+            ));
+        }
+        Some(_) => {}
+        None => *generation_name = Some(path_parts[1].to_string()),
     }
     if !is_lowercase_sha256(&entry.sha256) {
         return Err(manifest_value_error(
@@ -903,12 +923,7 @@ fn validated_name_counts_index_manifest_path(
             format!("requires lowercase SHA-256 files.{kind}.sha256"),
         ));
     }
-    let raw_path = PathBuf::from(entry.path);
-    let resolved = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        index_dir.join(raw_path)
-    };
+    let resolved = index_dir.join(entry.path);
     let canonical_resolved = fs::canonicalize(&resolved).map_err(|err| {
         pyo3::exceptions::PyFileNotFoundError::new_err(format!(
             "name-count index manifest {} points to missing files.{} target {}: {}",
@@ -1007,6 +1022,7 @@ impl NameCountsManifest {
             ("first_last", files.first_last),
             ("last_first_initial", files.last_first_initial),
         ];
+        let mut generation_name = None;
         let paths: [RawNameCountIndexFileSpec; 4] = entries
             .into_iter()
             .map(|(kind, entry)| {
@@ -1015,6 +1031,7 @@ impl NameCountsManifest {
                     &canonical_index_dir,
                     entry,
                     kind,
+                    &mut generation_name,
                 )
             })
             .collect::<PyResult<Vec<_>>>()?
@@ -1133,7 +1150,7 @@ mod name_counts_tests {
 
     fn complete_source_provenance() -> serde_json::Value {
         serde_json::json!({
-            "schema_version": "name_counts_provenance_v1",
+            "schema_version": "name_counts_provenance_v2",
             "normalization_version": "canonical_v2",
             "generation_id": "generation-a",
             "pickle_sha256": "0".repeat(64),
@@ -1141,16 +1158,25 @@ mod name_counts_tests {
             "source_kind": "test-fixture",
             "source_query_sha256": "2".repeat(64),
             "selected_rows_sha256": "1".repeat(64),
-            "selected_row_count": 0,
             "source_row_count": 0,
         })
     }
 
-    fn manifest_file_entry(path: &std::path::Path) -> serde_json::Value {
+    const TEST_GENERATION_NAME: &str = "generation-a";
+
+    fn index_file_path(index_dir: &std::path::Path, kind: &str) -> std::path::PathBuf {
+        index_dir
+            .join("generations")
+            .join(TEST_GENERATION_NAME)
+            .join(format!("{kind}.bin"))
+    }
+
+    fn manifest_file_entry(index_dir: &std::path::Path, kind: &str) -> serde_json::Value {
+        let path = index_file_path(index_dir, kind);
         serde_json::json!({
-            "path": path.file_name().expect("file name").to_str().expect("utf-8 file name"),
+            "path": format!("generations/{TEST_GENERATION_NAME}/{kind}.bin"),
             "byte_count": path.metadata().expect("file metadata").len(),
-            "sha256": sha256_file(path).expect("hash fixture"),
+            "sha256": sha256_file(&path).expect("hash fixture"),
         })
     }
 
@@ -1168,18 +1194,20 @@ mod name_counts_tests {
 
     fn write_artifact(normalization_version_json: Option<&str>) -> std::path::PathBuf {
         let dir = unique_temp_dir("s2and_nc_version");
+        let generation_dir = dir.join("generations").join(TEST_GENERATION_NAME);
+        std::fs::create_dir_all(&generation_dir).expect("create generation dir");
         let mut files = serde_json::Map::new();
         for name in ["first", "last", "first_last", "last_first_initial"] {
-            let path = dir.join(format!("{name}.bin"));
+            let path = index_file_path(&dir, name);
             let mut file = std::fs::File::create(&path).expect("create index file");
             file.write_all(&empty_index_bytes())
                 .expect("write index header");
             drop(file);
-            files.insert(name.to_string(), manifest_file_entry(&path));
+            files.insert(name.to_string(), manifest_file_entry(&dir, name));
         }
-        std::fs::write(dir.join(".published"), []).expect("write published marker");
+        std::fs::write(generation_dir.join(".published"), []).expect("write published marker");
         let mut manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v1",
+            "schema_version": "name_counts_index_v2",
             "source_provenance": complete_source_provenance(),
             "files": files,
         });
@@ -1230,36 +1258,38 @@ mod name_counts_tests {
 
     fn write_lookup_artifact() -> std::path::PathBuf {
         let dir = unique_temp_dir("s2and_nc_lookup");
+        let generation_dir = dir.join("generations").join(TEST_GENERATION_NAME);
+        std::fs::create_dir_all(&generation_dir).expect("create generation dir");
         write_index_file(
-            &dir.join("first.bin"),
+            &index_file_path(&dir, "first"),
             RawNameCountKind::First,
             &[("alice", 7.0), ("élodie", 3.0)],
         );
         write_index_file(
-            &dir.join("last.bin"),
+            &index_file_path(&dir, "last"),
             RawNameCountKind::Last,
             &[("smith", 11.0)],
         );
         write_index_file(
-            &dir.join("first_last.bin"),
+            &index_file_path(&dir, "first_last"),
             RawNameCountKind::FirstLast,
             &[("alice smith", 5.0)],
         );
         write_index_file(
-            &dir.join("last_first_initial.bin"),
+            &index_file_path(&dir, "last_first_initial"),
             RawNameCountKind::LastFirstInitial,
             &[("smith a", 9.0)],
         );
-        std::fs::write(dir.join(".published"), []).expect("write published marker");
+        std::fs::write(generation_dir.join(".published"), []).expect("write published marker");
         let manifest = serde_json::json!({
-            "schema_version": "name_counts_index_v1",
+            "schema_version": "name_counts_index_v2",
             "normalization_version": "canonical_v2",
             "source_provenance": complete_source_provenance(),
             "files": {
-                "first": manifest_file_entry(&dir.join("first.bin")),
-                "last": manifest_file_entry(&dir.join("last.bin")),
-                "first_last": manifest_file_entry(&dir.join("first_last.bin")),
-                "last_first_initial": manifest_file_entry(&dir.join("last_first_initial.bin")),
+                "first": manifest_file_entry(&dir, "first"),
+                "last": manifest_file_entry(&dir, "last"),
+                "first_last": manifest_file_entry(&dir, "first_last"),
+                "last_first_initial": manifest_file_entry(&dir, "last_first_initial"),
             },
         });
         std::fs::write(
@@ -1275,7 +1305,7 @@ mod name_counts_tests {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
-        let path = dir.join(format!("{kind}.bin"));
+        let path = index_file_path(dir, kind);
         manifest["files"][kind]["sha256"] =
             serde_json::Value::String(sha256_file(&path).expect("hash mutated index"));
         std::fs::write(
@@ -1327,12 +1357,7 @@ mod name_counts_tests {
 
     #[test]
     fn source_provenance_rejects_every_required_lineage_field() {
-        for field in [
-            "source_kind",
-            "source_query_sha256",
-            "selected_row_count",
-            "source_row_count",
-        ] {
+        for field in ["source_kind", "source_query_sha256", "source_row_count"] {
             let mut provenance = complete_source_provenance();
             provenance
                 .as_object_mut()
@@ -1347,9 +1372,20 @@ mod name_counts_tests {
     }
 
     #[test]
+    fn source_provenance_rejects_removed_selected_row_count() {
+        let mut provenance = complete_source_provenance();
+        provenance["selected_row_count"] = serde_json::Value::from(0);
+
+        let error = serde_json::from_value::<NameCountsProvenance>(provenance)
+            .err()
+            .expect("removed selected_row_count must fail");
+        assert!(error.to_string().contains("selected_row_count"));
+    }
+
+    #[test]
     fn manifest_rejects_declared_sha256_mismatch() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         bytes[0] ^= 1;
         std::fs::write(&path, bytes).expect("corrupt first index");
@@ -1369,7 +1405,7 @@ mod name_counts_tests {
     #[test]
     fn manifest_resolution_defers_payload_digest_to_integrated_validation() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         let last = bytes.last_mut().expect("fixture has a name blob");
         *last ^= 1;
@@ -1392,7 +1428,7 @@ mod name_counts_tests {
     #[test]
     fn integrated_digest_mismatch_precedes_record_semantic_error() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         let name_offset = NAME_COUNTS_INDEX_HEADER_LEN + 16;
         bytes[name_offset..name_offset + 8].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -1416,7 +1452,7 @@ mod name_counts_tests {
     #[test]
     fn native_handle_rejects_checksum_consistent_unsorted_records() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         let first_start = NAME_COUNTS_INDEX_HEADER_LEN;
         let second_start = first_start + NAME_COUNTS_INDEX_RECORD_LEN;
@@ -1443,7 +1479,7 @@ mod name_counts_tests {
     #[test]
     fn native_handle_rejects_checksum_consistent_hash_name_mismatch() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         let first_start = NAME_COUNTS_INDEX_HEADER_LEN;
         let second_start = first_start + NAME_COUNTS_INDEX_RECORD_LEN;
@@ -1465,7 +1501,7 @@ mod name_counts_tests {
     #[test]
     fn native_handle_rejects_checksum_consistent_nonzero_reserved_field() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         let reserved_offset = NAME_COUNTS_INDEX_HEADER_LEN + 28;
         bytes[reserved_offset..reserved_offset + 4].copy_from_slice(&1_u32.to_le_bytes());
@@ -1484,7 +1520,7 @@ mod name_counts_tests {
     #[test]
     fn native_handle_rejects_checksum_consistent_duplicate_name() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut bytes = std::fs::read(&path).expect("read first index");
         let first_start = NAME_COUNTS_INDEX_HEADER_LEN;
         let second_start = first_start + NAME_COUNTS_INDEX_RECORD_LEN;
@@ -1512,7 +1548,7 @@ mod name_counts_tests {
             ("negative", -3.0),
         ] {
             let dir = write_lookup_artifact();
-            let path = dir.join("first.bin");
+            let path = index_file_path(&dir, "first");
             let mut bytes = std::fs::read(&path).expect("read first index");
             let count_offset = NAME_COUNTS_INDEX_HEADER_LEN + 32;
             bytes[count_offset..count_offset + 8].copy_from_slice(&count.to_le_bytes());
@@ -1533,15 +1569,13 @@ mod name_counts_tests {
     }
 
     #[test]
-    fn manifest_rejects_file_path_outside_index_directory() {
+    fn manifest_rejects_legacy_direct_file_path() {
         let dir = write_lookup_artifact();
-        let other = write_lookup_artifact();
         let manifest_path = dir.join("manifest.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
-        manifest["files"]["first"]["path"] =
-            serde_json::Value::String(other.join("first.bin").display().to_string());
+        manifest["files"]["first"]["path"] = serde_json::Value::String("first.bin".to_string());
         std::fs::write(
             &manifest_path,
             serde_json::to_vec(&manifest).expect("serialize manifest"),
@@ -1549,16 +1583,15 @@ mod name_counts_tests {
         .expect("write manifest");
 
         let error = match RawNameCountIndex::open(dir.to_str().expect("utf-8 temp path")) {
-            Ok(_) => panic!("escaping path must fail"),
+            Ok(_) => panic!("legacy direct path must fail"),
             Err(error) => error,
         };
         let message = py_err_message(error);
         assert!(
-            message.contains("files.first.path escapes the name_counts_index directory"),
+            message.contains("files.first.path must equal generations/<generation-id>/first.bin"),
             "{message}"
         );
         std::fs::remove_dir_all(&dir).expect("remove artifact");
-        std::fs::remove_dir_all(&other).expect("remove outside artifact");
     }
 
     #[test]
@@ -1675,7 +1708,7 @@ mod name_counts_tests {
     #[test]
     fn explicit_full_validation_rejects_corrupt_record_name_range() {
         let dir = write_lookup_artifact();
-        let path = dir.join("first.bin");
+        let path = index_file_path(&dir, "first");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)

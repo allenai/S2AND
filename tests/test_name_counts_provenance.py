@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import gc
+import hashlib
 import json
 import logging
+import shutil
 import threading
 import time
+import weakref
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import s2and.name_counts_index as name_counts_index_module
 import s2and.name_counts_manifest as name_counts_manifest_module
 import s2and.runtime as runtime_module
 from s2and.data import ANDData
-from s2and.incremental_linking.feature_block_arrow import (
-    cleanup_stale_name_counts_generations,
-    write_name_counts_index,
+from s2and.incremental_linking.feature_block_arrow import write_name_counts_index
+from s2and.name_counts_index import (
+    NameCountsIndex,
+    clear_name_counts_index_cache,
+    evict_name_counts_index,
 )
-from s2and.name_counts_index import NameCountsIndex
 from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple
 
 
@@ -27,6 +34,29 @@ def _write_index(root: Path, *, generation_id: str, first_count: int = 10) -> st
     provenance = {**tiny_name_counts_provenance(), "generation_id": generation_id}
     path, _metrics = write_name_counts_index(root, mappings, provenance, overwrite=True)
     return path
+
+
+def _fake_native_index(path: str) -> SimpleNamespace:
+    manifest_bytes = (Path(path) / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    provenance = manifest["source_provenance"]
+    return SimpleNamespace(
+        normalization_version=manifest["normalization_version"],
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        name_counts_provenance_binding=(
+            provenance["generation_id"],
+            provenance["pickle_sha256"],
+            provenance["source_snapshot_id"],
+            provenance["selected_rows_sha256"],
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_name_counts_index_cache() -> Iterator[None]:
+    clear_name_counts_index_cache()
+    yield
+    clear_name_counts_index_cache()
 
 
 def test_name_counts_index_open_is_shared_for_one_manifest_generation(tmp_path: Path) -> None:
@@ -105,6 +135,192 @@ def test_name_counts_index_concurrent_open_shares_published_instance(
     assert native_open_calls == 1
 
 
+def test_name_counts_index_remains_cached_after_callers_release_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one")
+    native_open_calls = 0
+
+    class CountingNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            native_open_calls += 1
+            return _fake_native_index(path_arg)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=CountingNativeNameCountsIndex),
+    )
+
+    first = NameCountsIndex.open(path)
+    retained = weakref.ref(first)
+    del first
+    gc.collect()
+    second = NameCountsIndex.open(path)
+
+    assert retained() is second
+    assert native_open_calls == 1
+
+
+def test_name_counts_index_strong_cache_is_bounded_and_explicitly_evictable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(name_counts_index_module, "_LATEST_INDEX_CACHE_MAX_PATHS", 2)
+    paths = [_write_index(tmp_path / f"index-{index}", generation_id=f"generation-{index}") for index in range(3)]
+    native_open_calls = 0
+
+    class CountingNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            native_open_calls += 1
+            return _fake_native_index(path_arg)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=CountingNativeNameCountsIndex),
+    )
+
+    for path in paths:
+        opened = NameCountsIndex.open(path)
+        del opened
+        gc.collect()
+    assert native_open_calls == 3
+
+    latest = NameCountsIndex.open(paths[-1])
+    del latest
+    gc.collect()
+    assert native_open_calls == 3
+
+    oldest = NameCountsIndex.open(paths[0])
+    del oldest
+    gc.collect()
+    assert native_open_calls == 4
+
+    assert evict_name_counts_index(paths[0]) is True
+    evicted = NameCountsIndex.open(paths[0])
+    del evicted
+    gc.collect()
+    assert native_open_calls == 5
+
+    clear_name_counts_index_cache()
+    cleared = NameCountsIndex.open(paths[0])
+    del cleared
+    assert native_open_calls == 6
+
+
+def test_name_counts_index_interrupted_owner_wakes_waiter_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one")
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+    call_lock = threading.Lock()
+    native_open_calls = 0
+
+    class InterruptOnceNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            with call_lock:
+                native_open_calls += 1
+                call_number = native_open_calls
+            if call_number == 1:
+                owner_started.set()
+                if not release_owner.wait(timeout=10):
+                    raise TimeoutError("test did not release interrupted name-count open")
+                raise KeyboardInterrupt
+            return _fake_native_index(path_arg)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=InterruptOnceNativeNameCountsIndex),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner_future = pool.submit(NameCountsIndex.open, path)
+        assert owner_started.wait(timeout=10)
+        waiter_future = pool.submit(NameCountsIndex.open, path)
+        try:
+            deadline = time.monotonic() + 10
+            while not waiter_future.running() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert waiter_future.running()
+        finally:
+            release_owner.set()
+        with pytest.raises(KeyboardInterrupt):
+            owner_future.result(timeout=10)
+        opened = waiter_future.result(timeout=10)
+
+    assert opened.source_provenance["generation_id"] == "generation-one"
+    assert native_open_calls == 2
+    assert name_counts_index_module._INDEX_INFLIGHT == {}
+
+
+def test_name_counts_index_success_publication_interrupt_wakes_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_index(tmp_path, generation_id="generation-one")
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+    native_open_calls = 0
+
+    class BlockingNativeNameCountsIndex:
+        @staticmethod
+        def open(path_arg: str):
+            nonlocal native_open_calls
+            native_open_calls += 1
+            owner_started.set()
+            if not release_owner.wait(timeout=10):
+                raise TimeoutError("test did not release interrupted name-count publication")
+            return _fake_native_index(path_arg)
+
+    real_future_type = name_counts_index_module.Future
+
+    class InterruptOnceFuture(real_future_type):
+        interrupt_next_result = True
+
+        def set_result(self, result: NameCountsIndex) -> None:
+            if self.interrupt_next_result:
+                self.interrupt_next_result = False
+                raise KeyboardInterrupt("injected during name-count success publication")
+            super().set_result(result)
+
+    monkeypatch.setattr(name_counts_index_module, "Future", InterruptOnceFuture)
+    monkeypatch.setattr(
+        runtime_module,
+        "load_s2and_rust_extension",
+        lambda: SimpleNamespace(NameCountsIndex=BlockingNativeNameCountsIndex),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner_future = pool.submit(NameCountsIndex.open, path)
+        assert owner_started.wait(timeout=10)
+        waiter_future = pool.submit(NameCountsIndex.open, path)
+        try:
+            deadline = time.monotonic() + 10
+            while not waiter_future.running() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert waiter_future.running()
+        finally:
+            release_owner.set()
+        with pytest.raises(KeyboardInterrupt, match="success publication"):
+            owner_future.result(timeout=10)
+        opened = waiter_future.result(timeout=10)
+
+    assert opened.source_provenance["generation_id"] == "generation-one"
+    assert native_open_calls == 1
+    assert name_counts_index_module._INDEX_INFLIGHT == {}
+
+
 def test_name_counts_index_open_retries_manifest_replacement_race(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -134,12 +350,14 @@ def test_name_counts_index_open_retries_manifest_replacement_race(
     assert "retrying attempt=1 max_attempts=3" in caplog.text
 
 
-def test_name_counts_index_open_retries_when_publisher_cleans_parsed_generation(
+def test_name_counts_index_open_retries_when_parsed_generation_disappears(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one", first_count=10)
+    manifest = json.loads((Path(path) / "manifest.json").read_text(encoding="utf-8"))
+    old_generation_dir = Path(path) / Path(manifest["files"]["first"]["path"]).parent
     real_extension = runtime_module.load_s2and_rust_extension()
     native_open_calls = 0
 
@@ -150,7 +368,7 @@ def test_name_counts_index_open_retries_when_publisher_cleans_parsed_generation(
             native_open_calls += 1
             if native_open_calls == 1:
                 _write_index(tmp_path, generation_id="generation-two", first_count=99)
-                cleanup_stale_name_counts_generations(path_arg)
+                shutil.rmtree(old_generation_dir)
                 raise FileNotFoundError("generation-one disappeared before mmap")
             return real_extension.NameCountsIndex.open(path_arg)
 

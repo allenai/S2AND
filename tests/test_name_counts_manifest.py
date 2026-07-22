@@ -25,7 +25,6 @@ _REQUIRED_PROVENANCE_FIELDS = (
     "source_kind",
     "source_query_sha256",
     "selected_rows_sha256",
-    "selected_row_count",
     "source_row_count",
 )
 _REQUIRED_FILE_KEYS = ("first", "last", "first_last", "last_first_initial")
@@ -74,10 +73,14 @@ def test_valid_manifest_has_identical_python_and_rust_binding(tmp_path: Path) ->
     index_dir = _write_index(tmp_path)
 
     python_manifest = ValidatedNameCountsManifest.load(index_dir, context="test valid manifest")
-    python_binding = NameCountsBinding.from_arrow_name_counts_index(index_dir, context="test valid binding")
+    python_binding = NameCountsBinding.from_provenance(
+        python_manifest.source_provenance,
+        context="test valid binding",
+    )
     rust_index = RUST_MODULE.NameCountsIndex.open(str(index_dir))
 
     assert python_manifest.normalization_version == rust_index.normalization_version
+    assert "selected_row_count" not in python_manifest.source_provenance
     assert rust_index.manifest_sha256 == hashlib.sha256((index_dir / "manifest.json").read_bytes()).hexdigest()
     assert not hasattr(rust_index, "lookup_many")
     assert callable(rust_index._lookup_many_unique)
@@ -96,6 +99,24 @@ def test_required_manifest_fields_are_rejected_by_python_and_rust(tmp_path: Path
         _assert_authorities_reject(index_dir, field)
 
 
+@pytest.mark.parametrize(
+    ("location", "schema_version"),
+    (("manifest", "name_counts_index_v1"), ("provenance", "name_counts_provenance_v1")),
+)
+def test_previous_schema_versions_are_rejected_by_python_and_rust(
+    tmp_path: Path,
+    location: str,
+    schema_version: str,
+) -> None:
+    index_dir = _write_index(tmp_path)
+    manifest = _read_manifest(index_dir)
+    target = manifest if location == "manifest" else manifest["source_provenance"]
+    target["schema_version"] = schema_version
+    _write_manifest(index_dir, manifest)
+
+    _assert_authorities_reject(index_dir, "schema_version")
+
+
 def test_required_provenance_fields_are_rejected_by_python_and_rust(tmp_path: Path) -> None:
     for field in _REQUIRED_PROVENANCE_FIELDS:
         index_dir = _write_index(tmp_path / field)
@@ -103,6 +124,15 @@ def test_required_provenance_fields_are_rejected_by_python_and_rust(tmp_path: Pa
         manifest["source_provenance"].pop(field)
         _write_manifest(index_dir, manifest)
         _assert_authorities_reject(index_dir, field)
+
+
+def test_removed_selected_row_count_is_rejected_by_python_and_rust(tmp_path: Path) -> None:
+    index_dir = _write_index(tmp_path)
+    manifest = _read_manifest(index_dir)
+    manifest["source_provenance"]["selected_row_count"] = manifest["source_provenance"]["source_row_count"]
+    _write_manifest(index_dir, manifest)
+
+    _assert_authorities_reject(index_dir, "selected_row_count")
 
 
 def test_required_file_entries_are_rejected_by_python_and_rust(tmp_path: Path) -> None:
@@ -127,7 +157,8 @@ def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: 
     mutations = (
         ("byte_count_mismatch", "byte_count"),
         ("sha256_mismatch", "SHA-256"),
-        ("path_escape", "escapes"),
+        ("legacy_direct_path", "must equal generations"),
+        ("mismatched_generation", "share one generation"),
         ("missing_published_marker", "published marker"),
     )
     for mutation, expected_field in mutations:
@@ -137,12 +168,10 @@ def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: 
             manifest["files"]["first"]["byte_count"] += 1
         elif mutation == "sha256_mismatch":
             manifest["files"]["first"]["sha256"] = "f" * 64
-        elif mutation == "path_escape":
-            outside_dir = _write_index(tmp_path / mutation / "outside")
-            outside_manifest = _read_manifest(outside_dir)
-            manifest["files"]["first"]["path"] = str(
-                (outside_dir / outside_manifest["files"]["first"]["path"]).resolve()
-            )
+        elif mutation == "legacy_direct_path":
+            manifest["files"]["first"]["path"] = "first.bin"
+        elif mutation == "mismatched_generation":
+            manifest["files"]["last"]["path"] = "generations/other-generation/last.bin"
         elif mutation == "missing_published_marker":
             first_path = index_dir / manifest["files"]["first"]["path"]
             (first_path.parent / ".published").unlink()
@@ -150,14 +179,6 @@ def test_material_contract_is_identical_at_python_and_rust_boundaries(tmp_path: 
             raise AssertionError(f"unknown mutation {mutation}")
         _write_manifest(index_dir, manifest)
         _assert_authorities_reject(index_dir, expected_field)
-
-
-def test_python_binding_translates_representative_manifest_failure(tmp_path: Path) -> None:
-    index_dir = _write_index(tmp_path)
-    _remove_manifest_field(index_dir, "normalization_version")
-
-    with pytest.raises(ValueError, match="normalization_version"):
-        NameCountsBinding.from_arrow_name_counts_index(index_dir, context="test Python binding")
 
 
 def test_arrow_boundary_translates_representative_manifest_failure(tmp_path: Path) -> None:

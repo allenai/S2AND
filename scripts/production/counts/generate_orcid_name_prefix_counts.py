@@ -12,6 +12,8 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from itertools import combinations
@@ -294,12 +296,99 @@ def build_prefix_counts_from_sorted_rows(
     return counts, {**dict(metrics), **count_metrics}, source_digest.hexdigest()
 
 
-def _write_compact_json(path: Path, payload: Mapping[str, object]) -> str:
-    """Write deterministic compact JSON without materializing an intermediate string."""
+def _artifact_payloads(
+    counts: Mapping[str, Mapping[str, int]],
+) -> tuple[bytes, bytes, str]:
+    """Encode and validate the runtime data/metadata pair in memory."""
 
-    encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
-    path.write_bytes(encoded)
-    return hashlib.sha256(encoded).hexdigest()
+    validate_orcid_prefix_counts(counts, context="counts")
+    data_payload = orjson.dumps(counts, option=orjson.OPT_SORT_KEYS)
+    data_sha256 = hashlib.sha256(data_payload).hexdigest()
+    metadata = {
+        "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
+        "normalization_version": NORMALIZATION_VERSION,
+        "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
+        "data_sha256": data_sha256,
+    }
+    metadata_payload = json.dumps(metadata, sort_keys=True, indent=2).encode("utf-8")
+    return data_payload, metadata_payload, data_sha256
+
+
+def _preflight_publication(
+    output_dir: Path,
+    filenames: Iterable[str],
+    *,
+    overwrite: bool,
+) -> dict[str, Path]:
+    """Reject every no-overwrite collision before producer work begins."""
+
+    if output_dir.exists() and not output_dir.is_dir():
+        raise NotADirectoryError(f"ORCID prefix-count output path is not a directory: {output_dir}")
+    paths = {filename: output_dir / filename for filename in filenames}
+    existing_paths = [path for path in paths.values() if path.exists()]
+    if existing_paths and not overwrite:
+        raise FileExistsError(
+            "ORCID prefix-count publication already exists; pass --overwrite to replace it: "
+            + ", ".join(str(path) for path in existing_paths)
+        )
+    return paths
+
+
+def _publish_staged_payloads(
+    payloads: Mapping[str, bytes],
+    *,
+    output_dir: Path,
+    overwrite: bool,
+    publication_order: Sequence[str],
+) -> dict[str, Path]:
+    """Stage complete payloads and roll back every target on publication failure."""
+
+    if set(payloads) != set(publication_order) or len(publication_order) != len(payloads):
+        raise ValueError("publication_order must contain every payload filename exactly once")
+    paths = _preflight_publication(output_dir, payloads, overwrite=overwrite)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".orcid-prefix-publication.", dir=output_dir) as staging_text:
+        staging_dir = Path(staging_text)
+        staged_paths: dict[str, Path] = {}
+        for filename, payload in payloads.items():
+            staged_path = staging_dir / filename
+            staged_path.write_bytes(payload)
+            staged_paths[filename] = staged_path
+
+        # Producer work may be long-running. Recheck immediately before the
+        # first destination mutation so a late no-overwrite collision is safe.
+        _preflight_publication(output_dir, payloads, overwrite=overwrite)
+        backup_paths: dict[str, Path] = {}
+        for filename, target_path in paths.items():
+            if target_path.exists():
+                backup_path = staging_dir / f"backup.{filename}"
+                shutil.copyfile(target_path, backup_path)
+                backup_paths[filename] = backup_path
+
+        attempted: list[str] = []
+        try:
+            for filename in publication_order:
+                attempted.append(filename)
+                staged_paths[filename].replace(paths[filename])
+        except BaseException as publication_error:
+            rollback_errors: list[OSError] = []
+            for filename in reversed(attempted):
+                target_path = paths[filename]
+                try:
+                    backup_path = backup_paths.get(filename)
+                    if backup_path is None:
+                        target_path.unlink(missing_ok=True)
+                    else:
+                        backup_path.replace(target_path)
+                except OSError as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise RuntimeError(
+                    "ORCID prefix-count publication failed and rollback was incomplete: "
+                    + "; ".join(str(error) for error in rollback_errors)
+                ) from publication_error
+            raise
+    return paths
 
 
 def write_artifact(
@@ -310,45 +399,32 @@ def write_artifact(
 ) -> tuple[Path, Path, str]:
     """Write the canonical data file and adjacent metadata sidecar."""
 
-    validate_orcid_prefix_counts(counts, context="counts")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    data_path = output_dir / ORCID_PREFIX_DATA_FILENAME
-    metadata_path = output_dir / ORCID_PREFIX_METADATA_FILENAME
-    existing_paths = [path for path in (data_path, metadata_path) if path.exists()]
-    if existing_paths and not overwrite:
-        raise FileExistsError(
-            "ORCID prefix-count artifact already exists; pass --overwrite to replace it: "
-            + ", ".join(str(path) for path in existing_paths)
-        )
-
-    data_sha256 = _write_compact_json(data_path, counts)
-    metadata = {
-        "schema_version": ORCID_PREFIX_ARTIFACT_SCHEMA_VERSION,
-        "normalization_version": NORMALIZATION_VERSION,
-        "pair_key_semantics": ORCID_PREFIX_PAIR_KEY_SEMANTICS,
-        "data_sha256": data_sha256,
-    }
-    metadata_path.write_text(json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8")
-    return data_path, metadata_path, data_sha256
+    data_payload, metadata_payload, data_sha256 = _artifact_payloads(counts)
+    paths = _publish_staged_payloads(
+        {
+            ORCID_PREFIX_DATA_FILENAME: data_payload,
+            ORCID_PREFIX_METADATA_FILENAME: metadata_payload,
+        },
+        output_dir=output_dir,
+        overwrite=overwrite,
+        publication_order=(ORCID_PREFIX_DATA_FILENAME, ORCID_PREFIX_METADATA_FILENAME),
+    )
+    return paths[ORCID_PREFIX_DATA_FILENAME], paths[ORCID_PREFIX_METADATA_FILENAME], data_sha256
 
 
-def write_generation_report(
+def write_publication(
+    counts: Mapping[str, Mapping[str, int]],
     *,
     output_dir: Path,
     source_snapshot_id: str,
     source_digest: str,
-    data_sha256: str,
     generator_parameters: Mapping[str, object],
     metrics: Mapping[str, int],
     overwrite: bool,
-) -> tuple[Path, dict[str, object]]:
-    """Write producer provenance separately from strict runtime metadata."""
+) -> tuple[Path, Path, Path, str, dict[str, object]]:
+    """Stage and publish the runtime pair and producer report together."""
 
-    report_path = output_dir / GENERATION_REPORT_FILENAME
-    if report_path.exists() and not overwrite:
-        raise FileExistsError(
-            f"ORCID prefix-count generation report already exists; pass --overwrite to replace it: {report_path}"
-        )
+    data_payload, metadata_payload, data_sha256 = _artifact_payloads(counts)
     report: dict[str, object] = {
         "schema_version": GENERATION_REPORT_SCHEMA_VERSION,
         "generator": "scripts/production/counts/generate_orcid_name_prefix_counts.py",
@@ -358,8 +434,28 @@ def write_generation_report(
         "generator_parameters": dict(generator_parameters),
         "metrics": dict(metrics),
     }
-    report_path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
-    return report_path, report
+    paths = _publish_staged_payloads(
+        {
+            ORCID_PREFIX_DATA_FILENAME: data_payload,
+            ORCID_PREFIX_METADATA_FILENAME: metadata_payload,
+            GENERATION_REPORT_FILENAME: json.dumps(report, sort_keys=True, indent=2).encode("utf-8"),
+        },
+        output_dir=output_dir,
+        overwrite=overwrite,
+        # Metadata is the runtime commit marker, so publish it last.
+        publication_order=(
+            ORCID_PREFIX_DATA_FILENAME,
+            GENERATION_REPORT_FILENAME,
+            ORCID_PREFIX_METADATA_FILENAME,
+        ),
+    )
+    return (
+        paths[ORCID_PREFIX_DATA_FILENAME],
+        paths[ORCID_PREFIX_METADATA_FILENAME],
+        paths[GENERATION_REPORT_FILENAME],
+        data_sha256,
+        report,
+    )
 
 
 def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]:
@@ -449,6 +545,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(_warehouse_query(args.limit))
         return 0
 
+    _preflight_publication(
+        args.output_dir,
+        (
+            ORCID_PREFIX_DATA_FILENAME,
+            ORCID_PREFIX_METADATA_FILENAME,
+            GENERATION_REPORT_FILENAME,
+        ),
+        overwrite=bool(args.overwrite),
+    )
     if args.input_json is not None:
         rows = _load_fixture_rows(args.input_json, args.limit)
     else:
@@ -461,11 +566,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_alias_count=MIN_ALIAS_COUNT,
         max_names_per_orcid=args.max_names_per_orcid,
     )
-    data_path, metadata_path, data_sha256 = write_artifact(
-        counts,
-        output_dir=args.output_dir,
-        overwrite=bool(args.overwrite),
-    )
     generator_parameters = {
         "k_values": list(K_VALUES),
         "limit": args.limit,
@@ -473,11 +573,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "min_alias_count": MIN_ALIAS_COUNT,
         "min_orcid_count": MIN_ORCID_COUNT,
     }
-    generation_report_path, generation_report = write_generation_report(
+    data_path, metadata_path, generation_report_path, data_sha256, generation_report = write_publication(
+        counts,
         output_dir=args.output_dir,
         source_snapshot_id=source_snapshot_id,
         source_digest=source_digest,
-        data_sha256=data_sha256,
         generator_parameters=generator_parameters,
         metrics=metrics,
         overwrite=bool(args.overwrite),

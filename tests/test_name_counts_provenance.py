@@ -264,57 +264,34 @@ def test_name_counts_index_interrupted_owner_wakes_waiter_and_allows_retry(
     assert name_counts_index_module._INDEX_INFLIGHT == {}
 
 
-def test_name_counts_index_success_publication_interrupt_wakes_waiter(
+def test_name_counts_index_waiter_discards_registered_cancelled_future(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = _write_index(tmp_path, generation_id="generation-one")
-    owner_started = threading.Event()
-    release_owner = threading.Event()
+    manifest_bytes = (Path(path) / "manifest.json").read_bytes()
+    cache_key = (str(Path(path).resolve()), hashlib.sha256(manifest_bytes).hexdigest())
+    cancelled_future = name_counts_index_module.Future()
+    assert cancelled_future.cancel()
+    with name_counts_index_module._INDEX_CACHE_LOCK:
+        name_counts_index_module._INDEX_INFLIGHT[cache_key] = cancelled_future
+
     native_open_calls = 0
 
-    class BlockingNativeNameCountsIndex:
+    class CountingNativeNameCountsIndex:
         @staticmethod
         def open(path_arg: str):
             nonlocal native_open_calls
             native_open_calls += 1
-            owner_started.set()
-            if not release_owner.wait(timeout=10):
-                raise TimeoutError("test did not release interrupted name-count publication")
             return _fake_native_index(path_arg)
 
-    real_future_type = name_counts_index_module.Future
-
-    class InterruptOnceFuture(real_future_type):
-        interrupt_next_result = True
-
-        def set_result(self, result: NameCountsIndex) -> None:
-            if self.interrupt_next_result:
-                self.interrupt_next_result = False
-                raise KeyboardInterrupt("injected during name-count success publication")
-            super().set_result(result)
-
-    monkeypatch.setattr(name_counts_index_module, "Future", InterruptOnceFuture)
     monkeypatch.setattr(
         runtime_module,
         "load_s2and_rust_extension",
-        lambda: SimpleNamespace(NameCountsIndex=BlockingNativeNameCountsIndex),
+        lambda: SimpleNamespace(NameCountsIndex=CountingNativeNameCountsIndex),
     )
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        owner_future = pool.submit(NameCountsIndex.open, path)
-        assert owner_started.wait(timeout=10)
-        waiter_future = pool.submit(NameCountsIndex.open, path)
-        try:
-            deadline = time.monotonic() + 10
-            while not waiter_future.running() and time.monotonic() < deadline:
-                time.sleep(0.001)
-            assert waiter_future.running()
-        finally:
-            release_owner.set()
-        with pytest.raises(KeyboardInterrupt, match="success publication"):
-            owner_future.result(timeout=10)
-        opened = waiter_future.result(timeout=10)
+    opened = NameCountsIndex.open(path)
 
     assert opened.source_provenance["generation_id"] == "generation-one"
     assert native_open_calls == 1

@@ -99,7 +99,6 @@ for dataset_name in DATASETS_TO_TRAIN:
         mode="train",
         specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
         clusters=clusters_path,
-        block_type="s2",
         train_pairs=train_pairs_path,
         val_pairs=val_pairs_path,
         test_pairs=test_pairs_path,

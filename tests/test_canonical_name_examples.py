@@ -68,7 +68,6 @@ def _skeleton_signature(author_info_last: str | None) -> Signature:
         author_info_name_counts=None,
         author_info_position=0,
         author_info_block="",
-        author_info_given_block=None,
         author_info_estimated_gender=None,
         author_info_estimated_ethnicity=None,
         paper_id=0,

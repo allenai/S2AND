@@ -449,7 +449,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         mode="inference",
         specter_embeddings=filtered_specter,
         clusters=None,
-        block_type="s2",
         train_pairs=None,
         val_pairs=None,
         test_pairs=None,

@@ -76,7 +76,11 @@ def _required_id_value(raw_value: Any, table_name: str, column_name: str, row_in
     return value
 
 
-def load_signatures_from_arrow(path: str | Path) -> dict[str, Signature]:
+def load_signatures_from_arrow(
+    path: str | Path,
+    *,
+    use_orcid_id: bool = True,
+) -> dict[str, Signature]:
     """Read the minimal Python signature metadata Rust-backed training needs."""
 
     required_columns = {
@@ -118,11 +122,10 @@ def load_signatures_from_arrow(path: str | Path) -> dict[str, Signature]:
             author_info_affiliations_n_grams=None,
             author_info_coauthor_n_grams=None,
             author_info_email=row.get("author_email"),
-            author_info_orcid=str(orcid) if orcid else None,
+            author_info_orcid=str(orcid) if use_orcid_id and orcid else None,
             author_info_name_counts=None,
             author_info_position=int(row["author_position"]),
             author_info_block=author_block,
-            author_info_given_block=None,
             author_info_estimated_gender=None,
             author_info_estimated_ethnicity=None,
             paper_id=paper_id,
@@ -230,19 +233,21 @@ def build_training_anddata_from_arrow(
     train_pairs: str | pd.DataFrame | None = None,
     val_pairs: str | pd.DataFrame | None = None,
     test_pairs: str | pd.DataFrame | None = None,
-    block_type: str = "s2",
     train_pairs_size: int = 30_000,
     val_pairs_size: int = 5_000,
     test_pairs_size: int = 5_000,
     random_seed: int = 1111,
     n_jobs: int = 1,
     name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
+    use_orcid_id: bool = True,
 ) -> ANDData:
     """Build a fully initialized Rust-backed train ``ANDData``.
 
     The bundle must include raw-planner indexes and ``name_counts_index``.
     Python SPECTER and name-count values are never materialized; Rust reads
     them directly from the one immutable ``dataset.arrow_paths`` mapping.
+    Set ``use_orcid_id=False`` to remove ORCID evidence from both the
+    Python-visible signatures and the Rust featurizer built from those paths.
     """
 
     expected_version = require_normalization_version(
@@ -265,7 +270,10 @@ def build_training_anddata_from_arrow(
     if "specter" in normalized_arrow_paths:
         validate_arrow_file_schema(normalized_arrow_paths["specter"], table_name="specter")
     training_arrow_paths = normalized_arrow_paths.without("query_signatures")
-    signatures = load_signatures_from_arrow(training_arrow_paths["signatures"])
+    signatures = load_signatures_from_arrow(
+        training_arrow_paths["signatures"],
+        use_orcid_id=use_orcid_id,
+    )
     needed_paper_ids = {str(signature.paper_id) for signature in signatures.values()}
     papers = load_papers_from_arrow(
         training_arrow_paths["papers"],
@@ -283,13 +291,13 @@ def build_training_anddata_from_arrow(
         train_pairs=train_pairs,
         val_pairs=val_pairs,
         test_pairs=test_pairs,
-        block_type=block_type,
         train_pairs_size=train_pairs_size,
         val_pairs_size=val_pairs_size,
         test_pairs_size=test_pairs_size,
         random_seed=random_seed,
         n_jobs=n_jobs,
         name_tuples=name_tuples,
+        use_orcid_id=use_orcid_id,
     )
     logger.debug(
         "Telemetry stage: stage=arrow_training_ingest seconds=%.3f signatures=%d papers=%d specter=%s",

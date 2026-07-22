@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -338,14 +337,10 @@ def _publish_staged_payloads(
     payloads: Mapping[str, bytes],
     *,
     output_dir: Path,
-    overwrite: bool,
-    publication_order: Sequence[str],
 ) -> dict[str, Path]:
-    """Stage complete payloads and roll back every target on publication failure."""
+    """Stage complete payloads and publish them in mapping order."""
 
-    if set(payloads) != set(publication_order) or len(publication_order) != len(payloads):
-        raise ValueError("publication_order must contain every payload filename exactly once")
-    paths = _preflight_publication(output_dir, payloads, overwrite=overwrite)
+    paths = {filename: output_dir / filename for filename in payloads}
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".orcid-prefix-publication.", dir=output_dir) as staging_text:
         staging_dir = Path(staging_text)
@@ -355,61 +350,9 @@ def _publish_staged_payloads(
             staged_path.write_bytes(payload)
             staged_paths[filename] = staged_path
 
-        # Producer work may be long-running. Recheck immediately before the
-        # first destination mutation so a late no-overwrite collision is safe.
-        _preflight_publication(output_dir, payloads, overwrite=overwrite)
-        backup_paths: dict[str, Path] = {}
-        for filename, target_path in paths.items():
-            if target_path.exists():
-                backup_path = staging_dir / f"backup.{filename}"
-                shutil.copyfile(target_path, backup_path)
-                backup_paths[filename] = backup_path
-
-        attempted: list[str] = []
-        try:
-            for filename in publication_order:
-                attempted.append(filename)
-                staged_paths[filename].replace(paths[filename])
-        except BaseException as publication_error:
-            rollback_errors: list[OSError] = []
-            for filename in reversed(attempted):
-                target_path = paths[filename]
-                try:
-                    backup_path = backup_paths.get(filename)
-                    if backup_path is None:
-                        target_path.unlink(missing_ok=True)
-                    else:
-                        backup_path.replace(target_path)
-                except OSError as rollback_error:
-                    rollback_errors.append(rollback_error)
-            if rollback_errors:
-                raise RuntimeError(
-                    "ORCID prefix-count publication failed and rollback was incomplete: "
-                    + "; ".join(str(error) for error in rollback_errors)
-                ) from publication_error
-            raise
+        for filename in payloads:
+            staged_paths[filename].replace(paths[filename])
     return paths
-
-
-def write_artifact(
-    counts: Mapping[str, Mapping[str, int]],
-    *,
-    output_dir: Path,
-    overwrite: bool,
-) -> tuple[Path, Path, str]:
-    """Write the canonical data file and adjacent metadata sidecar."""
-
-    data_payload, metadata_payload, data_sha256 = _artifact_payloads(counts)
-    paths = _publish_staged_payloads(
-        {
-            ORCID_PREFIX_DATA_FILENAME: data_payload,
-            ORCID_PREFIX_METADATA_FILENAME: metadata_payload,
-        },
-        output_dir=output_dir,
-        overwrite=overwrite,
-        publication_order=(ORCID_PREFIX_DATA_FILENAME, ORCID_PREFIX_METADATA_FILENAME),
-    )
-    return paths[ORCID_PREFIX_DATA_FILENAME], paths[ORCID_PREFIX_METADATA_FILENAME], data_sha256
 
 
 def write_publication(
@@ -420,7 +363,6 @@ def write_publication(
     source_digest: str,
     generator_parameters: Mapping[str, object],
     metrics: Mapping[str, int],
-    overwrite: bool,
 ) -> tuple[Path, Path, Path, str, dict[str, object]]:
     """Stage and publish the runtime pair and producer report together."""
 
@@ -437,17 +379,11 @@ def write_publication(
     paths = _publish_staged_payloads(
         {
             ORCID_PREFIX_DATA_FILENAME: data_payload,
-            ORCID_PREFIX_METADATA_FILENAME: metadata_payload,
             GENERATION_REPORT_FILENAME: json.dumps(report, sort_keys=True, indent=2).encode("utf-8"),
+            # Metadata is the runtime commit marker, so publish it last.
+            ORCID_PREFIX_METADATA_FILENAME: metadata_payload,
         },
         output_dir=output_dir,
-        overwrite=overwrite,
-        # Metadata is the runtime commit marker, so publish it last.
-        publication_order=(
-            ORCID_PREFIX_DATA_FILENAME,
-            GENERATION_REPORT_FILENAME,
-            ORCID_PREFIX_METADATA_FILENAME,
-        ),
     )
     return (
         paths[ORCID_PREFIX_DATA_FILENAME],
@@ -580,7 +516,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_digest=source_digest,
         generator_parameters=generator_parameters,
         metrics=metrics,
-        overwrite=bool(args.overwrite),
     )
     print(
         json.dumps(

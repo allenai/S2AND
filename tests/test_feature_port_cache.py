@@ -257,6 +257,7 @@ def test_rust_featurizer_cache_retries_when_seed_version_changes_during_build(mo
     ("case_name", "mutate_dataset"),
     [
         ("preprocess", lambda dataset: setattr(dataset, "preprocess", False)),
+        ("use_orcid_id", lambda dataset: setattr(dataset, "use_orcid_id", False)),
         ("n_jobs", lambda dataset: setattr(dataset, "n_jobs", 2)),
         ("name_tuples", lambda dataset: dataset.name_tuples.add(("bill", "william"))),
     ],
@@ -514,10 +515,12 @@ def test_rust_featurizer_cache_rejects_invalid_cluster_seed_version():
 
 
 @pytest.mark.parametrize("load_name_counts", [False, True])
+@pytest.mark.parametrize("use_orcid_id", [False, True])
 def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy(
     monkeypatch,
     tmp_path,
     load_name_counts: bool,
+    use_orcid_id: bool,
 ):
     calls: list[dict[str, Any]] = []
 
@@ -529,7 +532,8 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
                     "paths": dict(paths),
                     "signature_ids": _signature_ids,
                     "name_tuples": _name_tuples,
-                    "name_counts_index": _args[4] if len(_args) == 5 else None,
+                    "name_counts_index": _args[4] if len(_args) >= 5 else None,
+                    "use_orcid_id": _args[5] if len(_args) >= 6 else True,
                 }
             )
             return cls("arrow")
@@ -594,6 +598,7 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
         signature_ids=[1, "2"],
         load_name_counts=load_name_counts,
         name_counts_index=shared_name_counts_index,
+        use_orcid_id=use_orcid_id,
     )
 
     assert result.dataset_name == "arrow"
@@ -608,6 +613,7 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
             "signature_ids": ["1", "2"],
             "name_tuples": canonical_pairs,
             "name_counts_index": shared_name_counts_index,
+            "use_orcid_id": use_orcid_id,
         }
     ]
     if load_name_counts:

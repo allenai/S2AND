@@ -73,6 +73,7 @@ class _CollectionFingerprint:
 @dataclass(frozen=True)
 class _RustFeaturizerNonSeedFingerprint:
     preprocess: bool
+    use_orcid_id: bool
     n_jobs: int
     source_paths: tuple[_SourcePathFingerprint, ...]
     signatures: _CollectionFingerprint
@@ -222,6 +223,7 @@ def _rust_featurizer_non_seed_fingerprint(dataset: Any) -> _RustFeaturizerNonSee
     empty = _CollectionFingerprint(object_id=0, length=0)
     return _RustFeaturizerNonSeedFingerprint(
         preprocess=bool(getattr(dataset, "preprocess", False)),
+        use_orcid_id=bool(getattr(dataset, "use_orcid_id", True)),
         n_jobs=resolve_n_jobs(getattr(dataset, "n_jobs", 1)),
         source_paths=_rust_featurizer_source_paths(dataset),
         # from_arrow_paths does not consume the Python object graph. Excluding
@@ -449,11 +451,14 @@ def build_rust_featurizer_from_arrow_paths(
     cluster_seed_disallow_value: float = 10000.0,
     num_threads: int | None = None,
     name_counts_index: Any | None = None,
+    use_orcid_id: bool = True,
 ) -> Any:
     """Build a Rust featurizer directly from Arrow IPC FeatureBlock paths.
 
     ``name_counts_index`` is an already validated native snapshot. When it is
     omitted, the handle retained by Arrow validation is reused automatically.
+    ``use_orcid_id=False`` suppresses ORCID while native signature records are
+    constructed, without rewriting the immutable Arrow generation.
     """
 
     method = _require_rust_runtime().RustFeaturizer.from_arrow_paths
@@ -520,9 +525,11 @@ def build_rust_featurizer_from_arrow_paths(
         float(cluster_seed_disallow_value),
         None if num_threads is None else resolve_n_jobs(num_threads),
     )
-    if name_counts_index is None:
+    if name_counts_index is None and use_orcid_id:
         return method(*args)
-    return method(*args, name_counts_index)
+    if use_orcid_id:
+        return method(*args, name_counts_index)
+    return method(*args, name_counts_index, False)
 
 
 def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
@@ -562,6 +569,7 @@ def build_rust_featurizer(dataset: ANDData) -> tuple[Any, dict[str, float]]:
         cluster_seed_require_value=float(CLUSTER_SEEDS_LOOKUP["require"]),
         cluster_seed_disallow_value=float(CLUSTER_SEEDS_LOOKUP["disallow"]),
         num_threads=num_threads,
+        use_orcid_id=bool(getattr(dataset, "use_orcid_id", True)),
     )
     ffi_seconds = time.perf_counter() - ffi_start
     return (

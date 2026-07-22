@@ -62,7 +62,6 @@ class ArrowPlanningState:
     signatures: dict[str, Any]
     block_dict: dict[str, list[str]]
     random_seed: int = 42
-    block_type: str = "s2"
 
     def get_blocks(self) -> dict[str, list[str]]:
         """Return a copy of the raw S2 block mapping."""

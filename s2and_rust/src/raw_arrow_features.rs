@@ -122,12 +122,12 @@ pub(crate) fn build_raw_arrow_feature(
         hashes.dedup();
         hashes
     };
-    // ORCID enablement has two equivalent control surfaces and they should always agree:
+    // ORCID enablement has two distinct control scopes:
     //   1. Per-request: `orcid_enabled` here, derived from `not clusterer.suppress_orcid`
     //      in [s2and/incremental_linking/production.py] and threaded through the planner.
-    //   2. Per-ingest: Python `ANDData(use_orcid_id=False)` strips ORCIDs at signature
-    //      build time (see s2and/data.py author_info_orcid handling), used by offline
-    //      training data prep only.
+    //   2. Per-ingest: `use_orcid_id=false` strips ORCIDs while JSON `ANDData`
+    //      signatures or Arrow-backed Rust featurizer records are constructed,
+    //      as used by offline benchmark/training data prep.
     // When `orcid_enabled=false`, the kernel suppresses ORCID at hash time so the
     // signature.orcid value is irrelevant. When `orcid_enabled=true`, the kernel honors
     // whatever the ingest layer produced — a None signature.orcid is "no ORCID for this

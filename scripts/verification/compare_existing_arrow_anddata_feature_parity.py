@@ -221,7 +221,6 @@ def _run_dataset(args: argparse.Namespace, dataset_name: str) -> dict[str, Any]:
         clusters=None,
         specter_embeddings=specter_embeddings,
         cluster_seeds=None,
-        block_type="s2",
         train_pairs=None,
         val_pairs=None,
         test_pairs=None,

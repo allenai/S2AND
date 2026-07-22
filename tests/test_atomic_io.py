@@ -16,16 +16,6 @@ import s2and._atomic_io as atomic_io_module
 from s2and._atomic_io import exclusive_file_lock
 
 
-def _hold_windows_lock(path: Path, ready: Any, contender_started: Any) -> None:
-    """Hold a lock past the Windows CRT's former fixed retry window."""
-
-    with exclusive_file_lock(path):
-        ready.set()
-        if not contender_started.wait(timeout=5):
-            raise RuntimeError("contending test process did not start")
-        time.sleep(10.5)
-
-
 def _hold_lock_until_released(path: Path, ready: Any, release: Any) -> None:
     """Hold a lock until the parent has observed a bounded timeout."""
 
@@ -36,25 +26,43 @@ def _hold_lock_until_released(path: Path, ready: Any, release: Any) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows CRT locking regression")
-def test_exclusive_file_lock_waits_past_windows_crt_retry_window(tmp_path: Path) -> None:
-    context = multiprocessing.get_context("spawn")
-    ready = context.Event()
-    contender_started = context.Event()
-    lock_path = tmp_path / "publication.lock"
-    holder = context.Process(target=_hold_windows_lock, args=(lock_path, ready, contender_started))
-    holder.start()
-    try:
-        assert ready.wait(timeout=5)
-        contender_started.set()
-        with exclusive_file_lock(lock_path, timeout_seconds=15.0):
-            pass
-    finally:
-        holder.join(timeout=5)
-        if holder.is_alive():
-            holder.terminate()
-            holder.join(timeout=5)
+def test_exclusive_file_lock_retries_past_windows_crt_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import msvcrt
 
-    assert holder.exitcode == 0
+    clock = 0.0
+    acquisition_attempts = 0
+
+    def fake_monotonic() -> float:
+        return clock
+
+    def advance_clock(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    def contend_past_former_window(_descriptor: int, mode: int, _length: int) -> None:
+        nonlocal acquisition_attempts
+        if mode != msvcrt.LK_NBLCK:
+            return
+        acquisition_attempts += 1
+        if clock <= 10.5:
+            raise OSError(errno.EACCES, "simulated contention")
+
+    monkeypatch.setattr(atomic_io_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(atomic_io_module.time, "sleep", advance_clock)
+    monkeypatch.setattr(msvcrt, "locking", contend_past_former_window)
+
+    with exclusive_file_lock(
+        tmp_path / "publication.lock",
+        timeout_seconds=15.0,
+        poll_interval_seconds=0.1,
+    ):
+        pass
+
+    assert clock > 10.5
+    assert acquisition_attempts > 100
 
 
 def test_exclusive_file_lock_times_out_on_permanent_contention(

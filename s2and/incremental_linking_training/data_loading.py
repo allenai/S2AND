@@ -169,7 +169,6 @@ def load_giant_block_dataset(
             clusters=None,
             cluster_seeds=filtered_cluster_seeds,
             altered_cluster_signatures=filtered_altered,
-            block_type="s2",
             train_pairs=None,
             val_pairs=None,
             test_pairs=None,

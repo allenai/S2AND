@@ -373,7 +373,6 @@ def _run_single(
             mode="inference",
             specter_embeddings=paths["specter"] if has_specter else None,
             clusters=paths["clusters"] if has_clusters else None,
-            block_type="s2",
             train_pairs=None,
             val_pairs=None,
             test_pairs=None,

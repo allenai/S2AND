@@ -83,6 +83,14 @@ def _retain_latest_index_locked(index: NameCountsIndex) -> None:
         _LATEST_INDEX_CACHE.popitem(last=False)
 
 
+def _discard_inflight(cache_key: tuple[str, str], in_flight: Future[NameCountsIndex]) -> None:
+    """Remove one exact in-flight open without disturbing a replacement owner."""
+
+    with _INDEX_CACHE_LOCK:
+        if _INDEX_INFLIGHT.get(cache_key) is in_flight:
+            del _INDEX_INFLIGHT[cache_key]
+
+
 class _ManifestGenerationChanged(RuntimeError):
     """Signal that publication changed the root manifest during native open."""
 
@@ -249,7 +257,10 @@ class NameCountsIndex:
                 return in_flight.result()
             except CancelledError:
                 # The owner was interrupted by a BaseException. The canceled
-                # future carries no unobserved exception; retry as a new owner.
+                # future carries no unobserved exception. Remove it here as
+                # well as in the owner cleanup so an interrupted owner cannot
+                # leave every later caller retrying the same canceled future.
+                _discard_inflight(cache_key, in_flight)
                 continue
 
         try:
@@ -286,13 +297,9 @@ class NameCountsIndex:
                     in_flight.set_exception(error)
                 else:
                     in_flight.cancel()
-            with _INDEX_CACHE_LOCK:
-                if _INDEX_INFLIGHT.get(cache_key) is in_flight:
-                    del _INDEX_INFLIGHT[cache_key]
+            _discard_inflight(cache_key, in_flight)
             raise
-        with _INDEX_CACHE_LOCK:
-            if _INDEX_INFLIGHT.get(cache_key) is in_flight:
-                del _INDEX_INFLIGHT[cache_key]
+        _discard_inflight(cache_key, in_flight)
         return result
 
     @classmethod

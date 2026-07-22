@@ -985,7 +985,8 @@ impl RustFeaturizer {
             cluster_seed_require_value = 0.0,
             cluster_seed_disallow_value = 10000.0,
             num_threads = None,
-            name_counts_index = None
+            name_counts_index = None,
+            use_orcid_id = true
         )
     )]
     fn from_arrow_paths(
@@ -998,6 +999,7 @@ impl RustFeaturizer {
         cluster_seed_disallow_value: f64,
         num_threads: Option<usize>,
         name_counts_index: Option<Py<NameCountsIndex>>,
+        use_orcid_id: bool,
     ) -> PyResult<Self> {
         let signatures_path =
             extract_path_mapping_string(paths, "signatures", true)?.ok_or_else(|| {
@@ -1164,7 +1166,11 @@ impl RustFeaturizer {
                 email: raw_signature.email.clone(),
                 position,
                 affiliation_values: raw_signature.affiliations.clone(),
-                orcid: raw_signature.orcid.clone(),
+                orcid: if use_orcid_id {
+                    raw_signature.orcid.clone()
+                } else {
+                    None
+                },
             });
         }
 

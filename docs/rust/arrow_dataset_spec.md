@@ -251,7 +251,7 @@ batch index must be smaller than the Arrow file's IPC record-batch count.
 Rows must provide the source values needed for the local Rust runtime to produce
 the same feature view that S2AND would expose after normal preprocessing:
 
-- `block_type="s2"`
+- `author_block` is the sole supported blocking source
 - Python `name_tuples=None`, resolved to validated packaged pairs before the
   Rust call
 - `name_counts_index/` available when the selected model uses name-count features

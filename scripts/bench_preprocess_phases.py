@@ -106,7 +106,6 @@ def build_namedtuples(
             author_info_name_counts=None,
             author_info_position=author_info["position"],
             author_info_block=author_info["block"],
-            author_info_given_block=author_info.get("given_block", None),
             author_info_estimated_gender=author_info.get("estimated_gender", None),
             author_info_estimated_ethnicity=author_info.get("estimated_ethnicity", None),
             paper_id=signature.get("paper_id", signature.get("paperId")),

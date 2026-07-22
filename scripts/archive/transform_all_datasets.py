@@ -189,9 +189,6 @@ def transform_signature_file(full_file_name_source: str):
                 print(f"WARNING: affiliation has a quote {affiliations_list}")
             output_author_info["affiliations"] = affiliations_list
 
-        output_author_info["given_block"] = (
-            author_info.get("given-block", None) if not is_empty_value(author_info.get("given-block", None)) else None
-        )
         output_author_info["given_name"] = (
             signature_info.get("actual_name", None)
             if not is_empty_value(signature_info.get("actual_name", None))

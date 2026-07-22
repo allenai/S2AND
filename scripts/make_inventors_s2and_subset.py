@@ -7,7 +7,7 @@ Workflow:
    most frequent original block in each merged component
 4) write subset data files:
    - <prefix>_clusters.json
-   - <prefix>_signatures.json (with both `block` and `given_block` overwritten)
+   - <prefix>_signatures.json (with `block` overwritten)
    - <prefix>_papers.json
    - <prefix>_train_keys.json / <prefix>_val_keys.json (80/20 split on merged blocks, stratified)
 """
@@ -461,7 +461,6 @@ def main() -> None:
         for signature_id, signature in final_signature_records.items():
             canonical = raw_to_canonical[final_signature_block[signature_id]]
             signature["author_info"]["block"] = canonical
-            signature["author_info"]["given_block"] = canonical
             merged_block_counts[canonical] += 1
 
             if not first:

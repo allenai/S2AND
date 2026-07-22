@@ -51,7 +51,6 @@ enum SourceValidationMode {
 }
 
 impl ArrowBatchLookupIndex {
-    #[allow(dead_code)]
     fn open(path: &str, source_arrow_path: &str, key_column: &str) -> PyResult<Self> {
         Self::open_with_source_validation(
             path,

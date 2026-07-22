@@ -347,7 +347,6 @@ def main() -> None:
             mode="train",
             specter_embeddings=specter_path,
             clusters=clusters_path,
-            block_type="s2",
             train_pairs=None,
             val_pairs=None,
             test_pairs=None,

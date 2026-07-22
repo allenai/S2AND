@@ -368,7 +368,6 @@ class Signature(NamedTuple):
     author_info_name_counts: NameCounts | None
     author_info_position: int
     author_info_block: str
-    author_info_given_block: str | None
     author_info_estimated_gender: str | None
     author_info_estimated_ethnicity: str | None
     paper_id: str | int
@@ -445,7 +444,6 @@ class ANDData:
         train_signatures: path to predefined train signatures (or the json object)
         val_signatures: path to predefined val signatures (or the json object)
         test_signatures: path to predefined test signatures (or the json object)
-        block_type: can be either "s2" or "original"
         unit_of_data_split: options are ("signatures", "blocks", "time")
         num_clusters_for_block_size: probably leave as default,
             controls train/val/test splits based on block size
@@ -468,8 +466,10 @@ class ANDData:
         name_tuples: Canonical first-name aliases. ``None`` selects the
             packaged canonical artifact. Pass an explicit empty set or
             frozenset to disable aliases; pair order is ignored.
-        use_orcid_id: whether to use the orcid id for (a) constraints as true if orcids match and
-            (b) subblocking so that any sigs with the same orcid are in the same subblock
+        use_orcid_id: Whether ingestion retains ORCID IDs. ``False`` strips
+            them before preprocessing, disabling both ORCID constraints and
+            ORCID-aware subblocking. Arrow-backed training also threads this
+            policy into its native featurizer.
     """
 
     @classmethod
@@ -527,7 +527,6 @@ class ANDData:
         train_signatures: str | list | None = None,
         val_signatures: str | list | None = None,
         test_signatures: str | list | None = None,
-        block_type: str = "s2",
         unit_of_data_split: str = "blocks",
         num_clusters_for_block_size: int = 1,
         train_ratio: float = 0.8,
@@ -580,12 +579,10 @@ class ANDData:
             _validated_arrow_inputs.generation_id if _validated_arrow_inputs is not None else None
         )
         self.compute_block_fn = compute_block_fn
+        self.use_orcid_id = bool(use_orcid_id)
         pair_sampling_mode = _validate_pair_sampling_mode(pair_sampling_mode)
 
         if mode == "train":
-            if train_blocks is not None and block_type != "original":
-                logger.warning("If you are passing in training/val/test blocks, then you may want original blocks.")
-
             if unit_of_data_split == "blocks" and not _pair_sampling_uses_blocks(pair_sampling_mode):
                 raise ValueError("Block-based cluster splits are not compatible with sampling strategies 0 and 1.")
 
@@ -609,6 +606,11 @@ class ANDData:
         logger.info("loading signatures")
         if self.arrow_paths is not None:
             self.signatures = cast(dict[str, Signature], signatures)
+            if not self.use_orcid_id:
+                self.signatures = {
+                    signature_id: signature._replace(author_info_orcid=None)
+                    for signature_id, signature in self.signatures.items()
+                }
         else:
             raw_signatures = self._load_json_feature_source(signatures, "signatures")
             self.signatures = {}
@@ -630,22 +632,16 @@ class ANDData:
                     author_info_affiliations_n_grams=None,
                     author_info_coauthor_n_grams=None,
                     author_info_email=signature["author_info"]["email"],
-                    # use_orcid_id is an offline data-prep knob used by training data
-                    # construction (incremental_linking_training.data_loading) to build
-                    # datasets that strip ORCIDs entirely. Production callers leave the
-                    # default True and let the per-request `Clusterer.suppress_orcid` flag
-                    # drive ORCID enablement (which threads to Rust via `orcid_enabled` in
-                    # raw_arrow_features). The two control surfaces are equivalent in
-                    # effect; do not mix them.
+                    # Ingest-time stripping is stronger than scoring-time
+                    # `Clusterer.suppress_orcid`: it also affects subblocking.
                     author_info_orcid=(
                         (signature["author_info"].get("source_ids") or [None])[0]
-                        if use_orcid_id and signature["author_info"].get("source_id_source") == "ORCID"
+                        if self.use_orcid_id and signature["author_info"].get("source_id_source") == "ORCID"
                         else None
                     ),
                     author_info_name_counts=None,
                     author_info_position=signature["author_info"]["position"],
                     author_info_block=signature["author_info"]["block"],
-                    author_info_given_block=signature["author_info"].get("given_block", None),
                     author_info_estimated_gender=signature["author_info"].get("estimated_gender", None),
                     author_info_estimated_ethnicity=signature["author_info"].get("estimated_ethnicity", None),
                     paper_id=signature["paper_id"],
@@ -766,7 +762,6 @@ class ANDData:
         self.train_signatures = self.maybe_load_json(train_signatures)
         self.val_signatures = self.maybe_load_json(val_signatures)
         self.test_signatures = self.maybe_load_json(test_signatures)
-        self.block_type = block_type
         self.unit_of_data_split = unit_of_data_split
         self.num_clusters_for_block_size = num_clusters_for_block_size
         self.train_ratio = train_ratio
@@ -792,7 +787,6 @@ class ANDData:
             # sampling within blocks and exhaustive flag is turned on
             self.pair_sampling_mode = "within_block_random"
             self.all_test_pairs_flag = True
-            self.block_type = "s2"  # pure inference is for S2 probably?
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
@@ -1318,47 +1312,17 @@ class ANDData:
 
         raise TypeError(f"Unsupported specter pickle payload type: {type(loaded)}")
 
-    def _build_block_dict(self, key_attr: str) -> dict[str, list[str]]:
-        block: dict[str, list[str]] = defaultdict(list)
-        for signature_id, signature in self.signatures.items():
-            block_key = getattr(signature, key_attr)
-            block[block_key].append(signature_id)
-        return dict(block)
-
-    def get_original_blocks(self) -> dict[str, list[str]]:
-        """
-        Gets the block dict based on the blocks provided with the dataset
-
-        Returns
-        -------
-        Dict: mapping from block id to list of signatures in the block
-        """
-        return self._build_block_dict("author_info_given_block")
-
-    def get_s2_blocks(self) -> dict[str, list[str]]:
-        """
-        Gets the block dict based on the blocks provided by Semantic Scholar data
-
-        Returns
-        -------
-        Dict: mapping from block id to list of signatures in the block
-        """
-        return self._build_block_dict("author_info_block")
-
     def get_blocks(self) -> dict[str, list[str]]:
-        """
-        Gets the block dict
+        """Return signatures grouped by their Semantic Scholar block.
 
         Returns
         -------
         Dict: mapping from block id to list of signatures in the block
         """
-        if self.block_type == "s2":
-            return self.get_s2_blocks()
-        elif self.block_type == "original":
-            return self.get_original_blocks()
-        else:
-            raise ValueError(f"Unknown block type: {self.block_type}")
+        blocks: dict[str, list[str]] = defaultdict(list)
+        for signature_id, signature in self.signatures.items():
+            blocks[signature.author_info_block].append(signature_id)
+        return dict(blocks)
 
     def get_constraint(
         self,

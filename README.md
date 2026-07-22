@@ -151,7 +151,6 @@ dataset = build_training_anddata_from_arrow(
     "pubmed",
     expected_normalization_version=NORMALIZATION_VERSION,
     clusters=str((bundle_dir / manifest_paths["clusters"]).resolve()),
-    block_type="s2",
     train_pairs_size=1000,
     val_pairs_size=200,
     test_pairs_size=200,

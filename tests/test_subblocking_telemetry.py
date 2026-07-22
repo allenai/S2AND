@@ -36,7 +36,6 @@ def _signature(signature_id: str, *, first: str, middle: str | None = None, orci
         author_info_name_counts=None,
         author_info_position=0,
         author_info_block="h wang",
-        author_info_given_block=None,
         author_info_estimated_gender=None,
         author_info_estimated_ethnicity=None,
         paper_id=int(signature_id[1:]) if signature_id[1:].isdigit() else 0,

@@ -759,7 +759,6 @@ def build_eval_anddata(
             specter_suffix.lstrip("_"),
         ),
         clusters=resolve_dataset_file(data_root, dataset_name, f"{dataset_name}_clusters.json", "clusters.json"),
-        block_type="s2",
         train_pairs=None,
         val_pairs=None,
         test_pairs=None,

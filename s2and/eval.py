@@ -231,7 +231,6 @@ def incremental_cluster_eval(
 def facet_eval(
     dataset: "ANDData",
     metrics_per_signature: dict[str, tuple[float, float, float]],
-    block_type: str = "original",
 ) -> FacetEvalResult:
     """
     Extracts B3 per facets.
@@ -245,9 +244,6 @@ def facet_eval(
     metrics_per_signature: Dict
         B3 P/R/F1 per signature.
         Second output of cluster_eval function.
-    block_type: string
-        Whether to use Semantic Scholar ("s2") or "original" blocks
-
     Returns
     -------
     Dict: B3 F1 broken down by perceived estimated gender.
@@ -262,13 +258,7 @@ def facet_eval(
           Definition (per signature): Fraction of different names but within same clusters.
     """
     block_len_dict = {}
-    if block_type == "original":
-        blocks = dataset.get_original_blocks()
-    elif block_type == "s2":
-        blocks = dataset.get_s2_blocks()
-    else:
-        raise Exception("block_type must one of: {'original', 's2'}!")
-
+    blocks = dataset.get_blocks()
     for block_key, signature_ids in blocks.items():
         block_len_dict[block_key] = len(signature_ids)
 
@@ -291,10 +281,7 @@ def facet_eval(
             signature_a = dataset.signatures[signature_key_a]
             signature_b = dataset.signatures[signature_key_b]
             # these counts only make sense within blocks
-            if block_type == "original":
-                same_block = signature_a.author_info_given_block == signature_b.author_info_given_block
-            elif block_type == "s2":
-                same_block = signature_a.author_info_block == signature_b.author_info_block
+            same_block = signature_a.author_info_block == signature_b.author_info_block
             if same_block:
                 same_name = signature_a.author_info_full_name == signature_b.author_info_full_name
                 same_cluster = signature_to_cluster_id[signature_key_a] == signature_to_cluster_id[signature_key_b]
@@ -394,17 +381,8 @@ def facet_eval(
             coauthors_f1[0].append(f1)
             _signature_dict["multiple_authors"] = 0
 
-        if block_type == "original":
-            given_block = signature.author_info_given_block
-            if given_block is None:
-                raise ValueError(
-                    f"facet_eval requires author_info_given_block for original blocking; signature_id={signature_key!r}"
-                )
-            block_len_f1[block_len_dict[given_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[given_block]
-        elif block_type == "s2":
-            block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
-            _signature_dict["block size"] = block_len_dict[signature.author_info_block]
+        block_len_f1[block_len_dict[signature.author_info_block]].append(f1)
+        _signature_dict["block size"] = block_len_dict[signature.author_info_block]
 
         if homonymity[signature_key] > 0:
             homonymity_f1[np.round(homonymity[signature_key] / denominator[signature_key], 2)].append(f1)

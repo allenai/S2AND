@@ -45,7 +45,6 @@ DEFAULT_SPECTER_SUFFIX = "_specter2.pkl"
 DEFAULT_SIGNATURES_SUFFIX = "_signatures.json"
 DEFAULT_SOURCE_DATASET_NAMES = ("aminer", "arnetminer", "inspire", "kisti", "orcid", "pubmed", "qian", "zbmath")
 PAIRWISE_ONLY_DATASETS = frozenset({"medline", "augmented"})
-DEFAULT_BLOCK_TYPE = "s2"
 DEFAULT_TRAIN_PAIRS_SIZE = 100_000
 DEFAULT_VAL_TEST_SIZE = 10_000
 DEFAULT_N_ITER = 50
@@ -115,7 +114,6 @@ def _dataset_pair_paths(data_dir: Path, dataset_name: str) -> tuple[str | None, 
 
 def _training_config(args: argparse.Namespace, dataset_names: list[str]) -> dict[str, Any]:
     return {
-        "block_type": DEFAULT_BLOCK_TYPE,
         "chunk_size": int(args.chunk_size),
         "data_dir": str(Path(args.data_dir)),
         "features_to_use": list(DEFAULT_FEATURE_GROUPS),
@@ -208,7 +206,6 @@ def train_pairwise_bundle(args: argparse.Namespace) -> dict[str, Any]:
             "mode": "train",
             "specter_embeddings": specter_path,
             "clusters": clusters_path,
-            "block_type": DEFAULT_BLOCK_TYPE,
             "train_pairs": train_pairs_path,
             "val_pairs": val_pairs_path,
             "test_pairs": test_pairs_path,

@@ -64,22 +64,30 @@ if not HAS_RUST:
 DUMMY_DIR = Path(__file__).resolve().parent / "dummy"
 
 
-def _write_minimal_signatures_table(path: Path, signature_ids: list[str | None]) -> None:
+def _write_minimal_signatures_table(
+    path: Path,
+    signature_ids: list[str | None],
+    *,
+    author_orcids: list[str | None] | None = None,
+) -> None:
     row_count = len(signature_ids)
+    columns: dict[str, Any] = {
+        "signature_id": pa.array(signature_ids, type=pa.string()),
+        "paper_id": pa.array([f"p{i}" for i in range(row_count)], type=pa.string()),
+        "author_first": pa.array(["Ada"] * row_count, type=pa.string()),
+        "author_middle": pa.array([""] * row_count, type=pa.string()),
+        "author_last": pa.array(["Lovelace"] * row_count, type=pa.string()),
+        "author_suffix": pa.array([""] * row_count, type=pa.string()),
+        "author_affiliations": pa.array([[] for _ in range(row_count)], type=pa.list_(pa.string())),
+        "author_position": pa.array([0] * row_count, type=pa.int64()),
+        "author_block": pa.array(["lovelace"] * row_count, type=pa.string()),
+    }
+    if author_orcids is not None:
+        if len(author_orcids) != row_count:
+            raise ValueError("author_orcids must align with signature_ids")
+        columns["author_orcid"] = pa.array(author_orcids, type=pa.string())
     write_arrow_ipc_table(
-        pa.table(
-            {
-                "signature_id": pa.array(signature_ids, type=pa.string()),
-                "paper_id": pa.array([f"p{i}" for i in range(row_count)], type=pa.string()),
-                "author_first": pa.array(["Ada"] * row_count, type=pa.string()),
-                "author_middle": pa.array([""] * row_count, type=pa.string()),
-                "author_last": pa.array(["Lovelace"] * row_count, type=pa.string()),
-                "author_suffix": pa.array([""] * row_count, type=pa.string()),
-                "author_affiliations": pa.array([[] for _ in range(row_count)], type=pa.list_(pa.string())),
-                "author_position": pa.array([0] * row_count, type=pa.int64()),
-                "author_block": pa.array(["lovelace"] * row_count, type=pa.string()),
-            }
-        ),
+        pa.table(columns),
         path,
     )
 
@@ -218,6 +226,49 @@ def test_arrow_training_accepts_missing_orcid_column(tmp_path: Path) -> None:
     assert signatures["s1"].author_info_orcid is None
 
 
+def test_arrow_training_use_orcid_id_controls_python_and_native_ingestion(tmp_path: Path) -> None:
+    signatures_path = tmp_path / "signatures.arrow"
+    papers_path = tmp_path / "papers.arrow"
+    paper_authors_path = tmp_path / "paper_authors.arrow"
+    orcid = "0000-0002-1825-0097"
+    _write_minimal_signatures_table(
+        signatures_path,
+        ["s1", "s2"],
+        author_orcids=[orcid, orcid],
+    )
+    _write_minimal_papers_table(papers_path, ["p0", "p1"])
+    _write_minimal_paper_authors_table(paper_authors_path, ["p0", "p1"])
+
+    retained_signatures = load_signatures_from_arrow(signatures_path)
+    stripped_signatures = load_signatures_from_arrow(signatures_path, use_orcid_id=False)
+    assert [signature.author_info_orcid for signature in retained_signatures.values()] == [orcid, orcid]
+    assert all(signature.author_info_orcid is None for signature in stripped_signatures.values())
+
+    paths = {
+        "signatures": str(signatures_path),
+        "papers": str(papers_path),
+        "paper_authors": str(paper_authors_path),
+    }
+    paths, _ = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+
+    def native_constraint(use_orcid_id: bool) -> float | None:
+        featurizer = _RUST_MODULE.RustFeaturizer.from_arrow_paths(
+            paths,
+            None,
+            set(),
+            True,
+            0.0,
+            10000.0,
+            1,
+            None,
+            use_orcid_id,
+        )
+        return featurizer.get_constraints_matrix_indexed([(0, 1)])[0]
+
+    assert native_constraint(True) == 0.0
+    assert native_constraint(False) is None
+
+
 def test_arrow_training_rejects_null_and_duplicate_paper_ids(tmp_path: Path) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
@@ -307,7 +358,6 @@ def _json_training_anddata(name: str, specter: dict[str, np.ndarray], **override
         "name": name,
         "mode": "train",
         "specter_embeddings": dict(specter),
-        "block_type": "s2",
         "name_counts_index": tiny_name_counts_index(),
         "preprocess": True,
         "random_seed": 42,
@@ -343,7 +393,6 @@ def training_bundle(tmp_path_factory: pytest.TempPathFactory) -> Any:
             "dummy_arrow_training",
             expected_normalization_version=NORMALIZATION_VERSION,
             clusters=str(DUMMY_DIR / "clusters.json"),
-            block_type="s2",
             random_seed=42,
             n_jobs=1,
         )
@@ -438,7 +487,6 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
         "dummy_arrow_training_python_backend_specter",
         expected_normalization_version=NORMALIZATION_VERSION,
         clusters=str(DUMMY_DIR / "clusters.json"),
-        block_type="s2",
         random_seed=42,
         n_jobs=1,
     )
@@ -452,6 +500,21 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.arrow_paths.name_counts_manifest is not None
     assert arrow_dataset.name_counts_provenance == arrow_dataset.arrow_paths.name_counts_manifest.source_provenance
     assert isinstance(arrow_dataset.name_tuples, frozenset)
+
+
+def test_arrow_training_constructor_retains_disabled_orcid_policy(training_bundle: dict[str, Any]) -> None:
+    arrow_dataset = build_training_anddata_from_arrow(
+        training_bundle["arrow_paths"],
+        "dummy_arrow_training_without_orcid",
+        expected_normalization_version=NORMALIZATION_VERSION,
+        clusters=str(DUMMY_DIR / "clusters.json"),
+        random_seed=42,
+        n_jobs=1,
+        use_orcid_id=False,
+    )
+
+    assert arrow_dataset.use_orcid_id is False
+    assert all(signature.author_info_orcid is None for signature in arrow_dataset.signatures.values())
 
 
 def _fixed_pair_frames(json_dataset: ANDData) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -516,7 +579,6 @@ def test_featurize_end_to_end_with_fixed_pairs(
         training_bundle["arrow_paths"],
         "dummy_arrow_fixed_pairs",
         expected_normalization_version=NORMALIZATION_VERSION,
-        block_type="s2",
         random_seed=42,
         n_jobs=1,
         **pair_kwargs,

@@ -166,7 +166,6 @@ def _single_run(
             mode="train",
             specter_embeddings=paths["specter"],
             clusters=paths["clusters"],
-            block_type="s2",
             train_pairs=None,
             val_pairs=None,
             test_pairs=None,

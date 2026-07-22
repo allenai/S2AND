@@ -403,31 +403,12 @@ class TestData(unittest.TestCase):
         assert train_pairs
 
     def test_blocks(self):
-        original_blocks = self.dummy_dataset.get_original_blocks()
-        s2_blocks = self.dummy_dataset.get_s2_blocks()
-
-        expected_original_blocks = {
-            "a sattar": ["0", "1", "2"],
-            "a konovalov": ["3", "4", "5", "6", "7", "8"],
-        }
-        expected_s2_blocks = {
+        expected_blocks = {
             "a sattary": ["0", "1", "2"],
             "a konovalov": ["3", "4", "5", "6", "7", "8"],
         }
 
-        self.dummy_dataset.block_type = "s2"
-        s2_blocks_2 = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "original"
-        original_blocks_2 = self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "dummy"
-        with pytest.raises(ValueError):
-            self.dummy_dataset.get_blocks()
-        self.dummy_dataset.block_type = "s2"
-
-        assert original_blocks == expected_original_blocks
-        assert original_blocks_2 == expected_original_blocks
-        assert s2_blocks == expected_s2_blocks
-        assert s2_blocks_2 == expected_s2_blocks
+        assert self.dummy_dataset.get_blocks() == expected_blocks
 
     def test_initialization(self):
         with pytest.raises(ValueError):
@@ -498,7 +479,7 @@ class TestData(unittest.TestCase):
         dataset = ANDData(signatures={}, papers={}, name="", mode="inference", name_counts_index=None, preprocess=False)
         assert dataset.pair_sampling_mode == "within_block_random"
         assert dataset.all_test_pairs_flag
-        assert dataset.block_type == "s2"
+        assert not hasattr(dataset, "block_type")
 
         with pytest.raises(ValueError):
             dataset = ANDData(

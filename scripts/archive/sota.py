@@ -72,7 +72,6 @@ NAMELESS_FEATURIZER_INFO = FeaturizationInfo(
 )
 
 PAIRWISE_ONLY_DATASETS = {"medline"}
-BLOCK_TYPE = "original"
 N_TRAIN_PAIRS_SIZE = 100000
 N_VAL_TEST_SIZE = 10000
 N_ITER = 25
@@ -271,7 +270,6 @@ def main(
             mode="train",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
             clusters=clusters_path,
-            block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
             val_pairs=val_pairs_path,
             test_pairs=test_pairs_path,

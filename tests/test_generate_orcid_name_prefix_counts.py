@@ -28,6 +28,19 @@ def _load_module() -> ModuleType:
     return module
 
 
+def _write_runtime_artifact(
+    module: ModuleType,
+    counts: dict[str, dict[str, int]],
+    output_dir: Path,
+) -> None:
+    """Write a runtime fixture without exposing a production-only helper."""
+
+    data_payload, metadata_payload, _ = module._artifact_payloads(counts)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "first_k_letter_counts_from_orcid.json").write_bytes(data_payload)
+    (output_dir / "first_k_letter_counts_from_orcid.meta.json").write_bytes(metadata_payload)
+
+
 def test_warehouse_query_emits_and_orders_by_the_canonical_orcid() -> None:
     module = _load_module()
 
@@ -326,48 +339,6 @@ def test_cli_preflights_non_directory_output_before_loading_source_rows(
     assert output_path.read_bytes() == b"sentinel"
 
 
-def test_publication_rolls_back_all_outputs_when_final_commit_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_module()
-    output_dir = tmp_path / "output"
-    initial_paths = module.write_publication(
-        {"al": {"am": 7}},
-        output_dir=output_dir,
-        source_snapshot_id="initial-snapshot",
-        source_digest="1" * 64,
-        generator_parameters={"limit": 1},
-        metrics={"source_rows": 1},
-        overwrite=False,
-    )[:3]
-    initial_payloads = {path.name: path.read_bytes() for path in initial_paths}
-    metadata_path = output_dir / "first_k_letter_counts_from_orcid.meta.json"
-    original_replace = Path.replace
-
-    def fail_metadata_commit(path: Path, target: str | Path) -> Path:
-        if path.name == metadata_path.name and Path(target) == metadata_path:
-            original_replace(path, target)
-            raise OSError("injected metadata commit failure after replace")
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", fail_metadata_commit)
-
-    with pytest.raises(OSError, match="injected metadata commit failure after replace"):
-        module.write_publication(
-            {"al": {"az": 9}},
-            output_dir=output_dir,
-            source_snapshot_id="replacement-snapshot",
-            source_digest="2" * 64,
-            generator_parameters={"limit": 2},
-            metrics={"source_rows": 2},
-            overwrite=True,
-        )
-
-    assert {path.name: path.read_bytes() for path in initial_paths} == initial_payloads
-    assert list(output_dir.glob(".orcid-prefix-publication.*")) == []
-
-
 def test_runtime_loader_is_lazy_and_verifies_the_direct_artifact(tmp_path: Path) -> None:
     module = _load_module()
     lazy_counts = _LazyCanonicalOrcidPrefixCounts(tmp_path)
@@ -375,11 +346,7 @@ def test_runtime_loader_is_lazy_and_verifies_the_direct_artifact(tmp_path: Path)
     with pytest.raises(FileNotFoundError, match="Missing canonical ORCID prefix-count metadata"):
         len(lazy_counts)
 
-    module.write_artifact(
-        {"al": {"am": 7}},
-        output_dir=tmp_path,
-        overwrite=False,
-    )
+    _write_runtime_artifact(module, {"al": {"am": 7}}, tmp_path)
     assert _LazyCanonicalOrcidPrefixCounts(tmp_path).load() == {"al": {"am": 7}}
     assert lazy_counts.load() is lazy_counts.load()
     assert dict(lazy_counts) == {"al": {"am": 7}}
@@ -397,7 +364,7 @@ def test_runtime_loader_exposes_recursively_immutable_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_module()
-    module.write_artifact({"al": {"am": 7}}, output_dir=tmp_path, overwrite=False)
+    _write_runtime_artifact(module, {"al": {"am": 7}}, tmp_path)
     lazy_counts = _LazyCanonicalOrcidPrefixCounts(tmp_path)
     loaded = lazy_counts.load()
     original_sha256 = lazy_counts.data_sha256()
@@ -453,7 +420,7 @@ def test_runtime_loader_enforces_the_small_metadata_contract(
     expected_error: str,
 ) -> None:
     module = _load_module()
-    module.write_artifact({"al": {"am": 7}}, output_dir=tmp_path, overwrite=False)
+    _write_runtime_artifact(module, {"al": {"am": 7}}, tmp_path)
     metadata_path = tmp_path / "first_k_letter_counts_from_orcid.meta.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata.update(metadata_change)
@@ -469,11 +436,7 @@ def test_runtime_loader_rejects_noncanonical_prefix_tokens(
     counts: dict[str, dict[str, int]],
 ) -> None:
     module = _load_module()
-    module.write_artifact(
-        {"al": {"am": 7}},
-        output_dir=tmp_path,
-        overwrite=False,
-    )
+    _write_runtime_artifact(module, {"al": {"am": 7}}, tmp_path)
     data_path = tmp_path / "first_k_letter_counts_from_orcid.json"
     metadata_path = tmp_path / "first_k_letter_counts_from_orcid.meta.json"
     data_bytes = json.dumps(counts, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -535,30 +498,18 @@ def test_source_digest_covers_selected_content_and_deduplicates_rows() -> None:
     assert metrics["max_unique_names_per_orcid"] == 2
 
 
-def test_writer_rejects_noncanonical_count_pairs_before_writing(tmp_path: Path) -> None:
+def test_artifact_payloads_reject_noncanonical_count_pairs() -> None:
     module = _load_module()
 
     with pytest.raises(ValueError, match="lexicographically ordered"):
-        module.write_artifact(
-            {"am": {"al": 7}},
-            output_dir=tmp_path,
-            overwrite=False,
-        )
-
-    assert not list(tmp_path.iterdir())
+        module._artifact_payloads({"am": {"al": 7}})
 
 
-def test_writer_rejects_non_ascii_prefixes_before_writing(tmp_path: Path) -> None:
+def test_artifact_payloads_reject_non_ascii_prefixes() -> None:
     module = _load_module()
 
     with pytest.raises(ValueError, match="lowercase printable ASCII prefixes"):
-        module.write_artifact(
-            {"ál": {"amy": 7}},
-            output_dir=tmp_path,
-            overwrite=False,
-        )
-
-    assert not list(tmp_path.iterdir())
+        module._artifact_payloads({"ál": {"amy": 7}})
 
 
 def test_name_pair_expansion_has_an_explicit_per_orcid_bound() -> None:

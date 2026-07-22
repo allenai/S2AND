@@ -704,10 +704,6 @@ impl RawNameCountIndexFile {
             if record_pair > target_pair {
                 break;
             }
-            if record_pair < target_pair {
-                index += 1;
-                continue;
-            }
             let offset = self.record_offset(index);
             let name_offset = match usize::try_from(read_u64_le_unchecked(&self.mmap, offset + 16))
             {
@@ -1093,12 +1089,6 @@ fn canonical_name_counts_index_root(path: &str) -> PyResult<PathBuf> {
     })
 }
 
-/// Return the `normalization_version` from a fully validated name-count index.
-#[pyfunction]
-pub(crate) fn read_name_counts_index_normalization_version(path: &str) -> PyResult<String> {
-    Ok(RawNameCountIndex::open_fully_validated(path)?.normalization_version)
-}
-
 fn resolve_name_counts_index_paths(path: &str) -> PyResult<RawNameCountIndexPaths> {
     let index_root = unresolved_name_counts_index_root(path)?;
     read_name_counts_index_manifest(&index_root)
@@ -1117,11 +1107,10 @@ fn name_counts_index_hashes(kind: RawNameCountKind, name_bytes: &[u8]) -> (u64, 
 #[cfg(test)]
 mod name_counts_tests {
     use super::{
-        lookup_name_count_column, name_counts_index_hashes,
-        read_name_counts_index_normalization_version, resolve_name_counts_index_paths, sha256_file,
-        validate_lookup_column_lengths, NameCountsIndex, NameCountsProvenance, RawNameCountIndex,
-        RawNameCountIndexFile, RawNameCountKind, RawNameCountMaps, NAME_COUNTS_INDEX_HEADER_LEN,
-        NAME_COUNTS_INDEX_RECORD_LEN,
+        lookup_name_count_column, name_counts_index_hashes, resolve_name_counts_index_paths,
+        sha256_file, validate_lookup_column_lengths, NameCountsIndex, NameCountsProvenance,
+        RawNameCountIndex, RawNameCountIndexFile, RawNameCountKind, RawNameCountMaps,
+        NAME_COUNTS_INDEX_HEADER_LEN, NAME_COUNTS_INDEX_RECORD_LEN,
     };
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1316,7 +1305,10 @@ mod name_counts_tests {
     }
 
     fn read_version(dir: &std::path::Path) -> pyo3::PyResult<String> {
-        read_name_counts_index_normalization_version(dir.to_str().expect("utf-8 temp path"))
+        Ok(
+            RawNameCountIndex::open_fully_validated(dir.to_str().expect("utf-8 temp path"))?
+                .normalization_version,
+        )
     }
 
     fn py_err_message(err: pyo3::PyErr) -> String {

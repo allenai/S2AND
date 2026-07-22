@@ -245,7 +245,6 @@ def build_arrow_training_dataset(
         f"{dataset.name}_arrow",
         expected_normalization_version=NORMALIZATION_VERSION,
         clusters=clusters,
-        block_type=str(getattr(dataset, "block_type", "s2")),
         train_pairs_size=int(getattr(dataset, "train_pairs_size", 30_000)),
         val_pairs_size=int(getattr(dataset, "val_pairs_size", 5_000)),
         test_pairs_size=int(getattr(dataset, "test_pairs_size", 5_000)),

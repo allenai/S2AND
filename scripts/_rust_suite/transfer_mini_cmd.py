@@ -61,7 +61,6 @@ RESULT_JSON_START, RESULT_JSON_END = get_result_markers("profile")
 
 # Match the historical internal transfer-workload defaults.
 SPECTER_SUFFIX = "_specter.pickle"
-BLOCK_TYPE = "s2"
 PREPROCESS = True
 PAIRWISE_ONLY_DATASETS = {"medline", "augmented"}
 WORKLOAD_PRESETS: dict[str, dict[str, Any]] = {
@@ -385,7 +384,6 @@ def _build_anddata_kwargs(
         "mode": "train",
         "specter_embeddings": specter_path,
         "clusters": clusters_path,
-        "block_type": BLOCK_TYPE,
         "train_pairs": train_pairs_path,
         "val_pairs": val_pairs_path,
         "test_pairs": test_pairs_path,
@@ -502,7 +500,6 @@ def _single_run(
                     dataset_name,
                     expected_normalization_version=NORMALIZATION_VERSION,
                     clusters=clusters_path,
-                    block_type=BLOCK_TYPE,
                     train_pairs_size=effective_train_pairs_size,
                     val_pairs_size=N_VAL_TEST_SIZE,
                     test_pairs_size=N_VAL_TEST_SIZE,

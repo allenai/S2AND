@@ -250,7 +250,6 @@ def _run_single(args: argparse.Namespace) -> dict[str, Any]:
             clusters=None,
             specter_embeddings=None,
             cluster_seeds=None,
-            block_type="s2",
             train_pairs=None,
             val_pairs=None,
             test_pairs=None,

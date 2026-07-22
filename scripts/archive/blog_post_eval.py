@@ -68,7 +68,6 @@ FEATURES_TO_USE = [
     "advanced_name_similarity",
 ]
 
-BLOCK_TYPE = "s2"
 N_TRAIN_PAIRS_SIZE = 100000
 N_VAL_TEST_SIZE = 10000
 N_ITER = 50
@@ -150,7 +149,6 @@ def main(
             mode="train",
             specter_embeddings=os.path.join(DATA_DIR, dataset_name, dataset_name + "_specter.pickle"),
             clusters=clusters_path,
-            block_type=BLOCK_TYPE,
             train_pairs=train_pairs_path,
             val_pairs=val_pairs_path,
             test_pairs=test_pairs_path,
@@ -285,7 +283,6 @@ def main(
             papers=os.path.join(block_dir, "claims_papers.json"),
             mode="inference",
             specter_embeddings=os.path.join(block_dir, "claims_specter.pickle"),
-            block_type="s2",
             name=block_key.replace(" ", "_"),
             n_jobs=n_jobs,
             name_counts_index=NAME_COUNTS_INDEX_PATH,

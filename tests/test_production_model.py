@@ -872,6 +872,56 @@ def test_finalization_publishes_with_one_rename_and_is_retry_safe(
         )
 
 
+def test_finalization_defaults_pairwise_version_from_source_manifest(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    source_bundle, _ = synthetic_pairwise_bundle
+    source_manifest_path = source_bundle / "manifest.json"
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    source_manifest["pairwise_model_version"] = "1.2"
+    source_manifest_path.write_text(json.dumps(source_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(source_bundle, linker_dir)
+    output_bundle = tmp_path / "production_model_v8.8"
+
+    finalize_production_bundle(
+        pairwise_bundle_dir=source_bundle,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        bundle_version="8.8",
+    )
+
+    output_manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert source_bundle.name == "production_model_v9.9"
+    assert output_manifest["bundle_version"] == "8.8"
+    assert output_manifest["pairwise_model_version"] == "1.2"
+
+
+def test_finalization_does_not_copy_undeclared_reproducibility_files(
+    tmp_path: Path,
+    synthetic_pairwise_bundle: tuple[Path, Clusterer],
+) -> None:
+    source_bundle, _ = synthetic_pairwise_bundle
+    stale_path = source_bundle / "reproducibility" / "stale-sensitive.json"
+    stale_path.parent.mkdir()
+    stale_path.write_text('{"secret": true}\n', encoding="utf-8")
+    linker_dir = tmp_path / "linker"
+    target_json = _write_synthetic_linker(source_bundle, linker_dir)
+    output_bundle = tmp_path / "production_model_v9.8"
+
+    finalize_production_bundle(
+        pairwise_bundle_dir=source_bundle,
+        output_bundle_dir=output_bundle,
+        incremental_linker_artifact_dir=linker_dir,
+        target_json=target_json,
+        bundle_version="9.8",
+    )
+
+    assert not (output_bundle / "reproducibility" / stale_path.name).exists()
+
+
 def test_finalization_rejects_linker_bound_to_different_pairwise_bundle(
     tmp_path: Path,
     synthetic_pairwise_bundle: tuple[Path, Clusterer],

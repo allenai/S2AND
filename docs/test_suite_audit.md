@@ -200,7 +200,7 @@ Merge:
 
 **tests/test_memory_calibration.py** — optional: fold the two `ignores_other_stages` tests (L74, L113) into their siblings.
 
-**tests/test_run_ci_locally.py** — when the command-echo tests next churn, trim them to the env-hygiene asserts (`S2AND_BACKEND` must not leak); keep `test_rust_parity_test_paths_exist`.
+**tests/test_run_ci_locally.py** — when the command-echo tests next churn, trim them to the env-hygiene asserts (`S2AND_BACKEND` must not leak). The dedicated Rust parity file list and its path-existence test were removed when CI stopped running those files twice.
 
 ## Tier 4 — post-migration teardown checklist (~450+ lines, don't cut yet)
 

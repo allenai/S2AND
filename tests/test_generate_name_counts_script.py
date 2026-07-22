@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -131,6 +133,61 @@ def test_fixture_limit_is_bounded_and_reported(tmp_path: Path) -> None:
     manifest = json.loads((tmp_path / "name_counts" / "manifest.json").read_text(encoding="utf-8"))
     provenance = json.loads((tmp_path / "name_counts" / manifest["files"]["provenance"]).read_text(encoding="utf-8"))
     assert provenance["source_row_count"] == 1
+
+
+def test_fixture_names_may_contain_the_legacy_delimiter(tmp_path: Path) -> None:
+    fixture_path = tmp_path / "rows.json"
+    fixture_path.write_text(
+        json.dumps([{"first_name": "Ana|||Maria", "last_name": "Lopez", "count": 2}]),
+        encoding="utf-8",
+    )
+
+    mappings, row_metrics = generate_name_counts.build_name_count_dicts(
+        generate_name_counts._fixture_rows(fixture_path, None)
+    )
+
+    first_counts, last_counts, first_last_counts, last_first_initial_counts = mappings
+    assert first_counts == {"ana": 2}
+    assert last_counts == {"lopez": 2}
+    assert first_last_counts == {"ana lopez": 2}
+    assert last_first_initial_counts == {"lopez a": 2}
+    assert row_metrics["source_row_count"] == 1
+    assert row_metrics["selected_row_count"] == 1
+    assert row_metrics["rejected_row_count"] == 0
+
+    _, differently_partitioned_metrics = generate_name_counts.build_name_count_dicts([("Ana", "Maria|||Lopez", 2)])
+    assert row_metrics["selected_rows_sha256"] != differently_partitioned_metrics["selected_rows_sha256"]
+
+
+def test_warehouse_rows_keep_first_and_last_in_distinct_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    queries: list[str] = []
+    fake_pys2 = ModuleType("pys2")
+
+    def evaluate(query: str) -> dict[str, list[str] | list[int]]:
+        queries.append(query)
+        return {
+            "first_name": ["Ana|||Maria"],
+            "last_name": ["Lopez"],
+            "count": [2],
+        }
+
+    monkeypatch.setattr(fake_pys2, "_evaluate_redshift_query", evaluate, raising=False)
+    monkeypatch.setitem(sys.modules, "pys2", fake_pys2)
+
+    assert list(generate_name_counts._query_rows(None)) == [("Ana|||Maria", "Lopez", 2)]
+    assert "|||" not in queries[0]
+    assert "order by first_name, last_name" in queries[0]
+
+
+@pytest.mark.parametrize("field", ["first_name", "last_name"])
+def test_fixture_rejects_non_string_name_fields(tmp_path: Path, field: str) -> None:
+    row: dict[str, object] = {"first_name": "Ana", "last_name": "Lopez", "count": 2}
+    row[field] = None
+    fixture_path = tmp_path / "rows.json"
+    fixture_path.write_text(json.dumps([row]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="names must be strings"):
+        list(generate_name_counts._fixture_rows(fixture_path, None))
 
 
 def test_failed_manifest_replace_removes_only_the_uncommitted_generation(

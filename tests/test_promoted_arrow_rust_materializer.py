@@ -562,6 +562,73 @@ def test_semantic_row_nan_policy_uses_feature_direct_sources() -> None:
     assert np.isnan(adjusted["strong_positive_anchor_score"]).all()
 
 
+def test_block_local_member_ids_drop_foreign_members() -> None:
+    signature_blocks = {"local": "block-a", "foreign-1": "block-b", "foreign-2": "block-b"}
+
+    assert promoted_train._block_local_member_ids_from_signature_blocks(  # noqa: SLF001
+        "block-a::mixed",
+        ("local", "foreign-1"),
+        signature_blocks,
+    ) == ("local",)
+    assert (
+        promoted_train._block_local_member_ids_from_signature_blocks(  # noqa: SLF001
+            "block-a::foreign",
+            ("foreign-1", "foreign-2"),
+            signature_blocks,
+        )
+        == ()
+    )
+
+
+def test_arrow_rust_structural_cleaning_drops_all_foreign_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components_dir = tmp_path / "components"
+    components_dir.mkdir()
+    pd.DataFrame(
+        [
+            {"candidate_component_key": "block-a::foreign", "member_index": 0, "signature_id": "f1"},
+            {"candidate_component_key": "block-a::foreign", "member_index": 1, "signature_id": "f2"},
+        ]
+    ).to_parquet(components_dir / "toy_members.parquet", index=False)
+    bundle = OfficialBundle(
+        root=tmp_path,
+        bundle_name="toy",
+        assets={"candidate_members": {"datasets": {"toy": "components/toy_members.parquet"}}},
+        models={},
+        expected_metrics={},
+    )
+    rows = pd.DataFrame(
+        [
+            {
+                "dataset": "toy",
+                "query_group_id": "q1:full",
+                "query_signature_id": "q1",
+                "candidate_component_key": "block-a::foreign",
+                "label": 1,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        promoted_train,
+        "_load_arrow_signature_blocks",
+        lambda *_args, **_kwargs: {"q1": "block-a", "f1": "block-b", "f2": "block-b"},
+    )
+
+    cleaned, summary = _clean_arrow_rust_structural_rows(
+        source_bundle=bundle,
+        table_key="train_path",
+        rows=rows,
+        component_membership_cache={},
+        name_counts_index_root=None,
+    )
+
+    assert cleaned.empty
+    assert summary["rows_removed"] == 1
+    assert summary["positive_rows_removed"] == 1
+
+
 def test_arrow_rust_structural_cleaning_drops_self_only_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

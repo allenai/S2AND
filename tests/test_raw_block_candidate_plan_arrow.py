@@ -2134,6 +2134,43 @@ def test_raw_arrow_labeled_candidate_plan_applies_block_local_members(tmp_path: 
     assert raw_plan["row_component_sizes"].tolist() == [1]
 
 
+def test_raw_arrow_labeled_candidate_plan_drops_component_with_only_foreign_members(tmp_path: Path) -> None:
+    paths = _base_arrow_paths(tmp_path)
+    paths.pop("cluster_seeds")
+    signatures = pa.table(
+        {
+            "signature_id": pa.array(["q1", "s1", "s2"], type=pa.string()),
+            "paper_id": pa.array(["p_q", "p1", "p2"], type=pa.string()),
+            "author_first": pa.array(["Alice", "Alice", "Bob"], type=pa.string()),
+            "author_middle": pa.array(["", "", ""], type=pa.string()),
+            "author_last": pa.array(["Wang", "Wang", "Jones"], type=pa.string()),
+            "author_suffix": pa.array(["", "", ""], type=pa.string()),
+            "author_affiliations": pa.array([[], [], []], type=pa.list_(pa.string())),
+            "author_orcid": pa.array([None, None, None], type=pa.string()),
+            "author_position": pa.array([0, 0, 0], type=pa.int64()),
+            "author_block": pa.array(["block-a", "block-b", "block-b"], type=pa.string()),
+        }
+    )
+    paths["signatures"] = _write_ipc(tmp_path / "signatures_with_foreign_component.arrow", signatures)
+    paths, _index_metrics = write_raw_arrow_batch_lookup_indexes(paths, tmp_path)
+
+    raw_plan = s2and_rust.raw_arrow_labeled_candidate_plan(
+        paths,
+        ["q1"],
+        ["full"],
+        ["q1-full"],
+        ["block-a::foreign"],
+        np.asarray([1], dtype=np.uint16),
+        {"block-a::foreign": ["s1", "s2"]},
+        orcid_enabled=False,
+        num_threads=1,
+    )
+
+    assert raw_plan["left_signature_ids"] == []
+    assert raw_plan["right_signature_ids"] == []
+    assert raw_plan["row_component_sizes"].tolist() == [0]
+
+
 def test_raw_arrow_candidate_plan_emits_native_row_signals_from_name_counts_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

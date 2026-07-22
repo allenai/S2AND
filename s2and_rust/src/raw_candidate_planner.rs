@@ -2082,7 +2082,7 @@ fn raw_arrow_labeled_component_members(
     let Some((block_key, _cluster_key)) = component_key.split_once("::") else {
         return raw_members.to_vec();
     };
-    let filtered = raw_members
+    raw_members
         .iter()
         .filter(|signature_id| {
             signatures
@@ -2091,12 +2091,7 @@ fn raw_arrow_labeled_component_members(
                 .is_some_and(|author_block| author_block == block_key)
         })
         .cloned()
-        .collect::<Vec<_>>();
-    if filtered.is_empty() {
-        raw_members.to_vec()
-    } else {
-        filtered
-    }
+        .collect()
 }
 
 fn raw_arrow_active_members_for_row(

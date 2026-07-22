@@ -21,6 +21,7 @@ from s2and.model import Clusterer, _selected_feature_indices
 from s2and.model_pairwise import _validated_classifier_features, lightgbm_booster
 from s2and.production_bundle_contract import (
     CLUSTERER_CONFIG_SCHEMA_VERSION,
+    PAIRWISE_ONLY_MANIFEST_FILES,
     PAIRWISE_PREDICTION_FIXTURE_SCHEMA_VERSION,
     PAIRWISE_PREDICTION_FIXTURE_TOLERANCE,
     PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES,
@@ -356,15 +357,16 @@ def _copy_path(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def _copy_pairwise_stage(source_bundle_dir: Path, output_bundle_dir: Path) -> None:
-    for relpath in ("clusterer.json", "pairwise"):
-        _copy_path(source_bundle_dir / relpath, output_bundle_dir / relpath)
-    source_reproducibility = source_bundle_dir / "reproducibility"
-    if source_reproducibility.exists():
-        for path in source_reproducibility.iterdir():
-            if path.name == "incremental_linker_training_target.json":
-                continue
-            _copy_path(path, output_bundle_dir / "reproducibility" / path.name)
+def _copy_pairwise_stage(
+    source_bundle_dir: Path,
+    output_bundle_dir: Path,
+    source_manifest: Mapping[str, Any],
+) -> None:
+    files = source_manifest["files"]
+    for logical_name in (*PAIRWISE_ONLY_MANIFEST_FILES, *PAIRWISE_REPRODUCIBILITY_MANIFEST_FILES):
+        relpath = files.get(logical_name)
+        if relpath is not None:
+            _copy_path(source_bundle_dir / relpath, output_bundle_dir / relpath)
 
 
 def _publish_staged_bundle(staging_dir: Path, destination: Path) -> None:
@@ -421,6 +423,7 @@ def finalize_production_bundle(
         raise ValueError("bundle_version is required when output_bundle_dir is not named production_model_vX.Y")
 
     pairwise_binding = pairwise_bundle_binding(pairwise_bundle_dir)
+    pairwise_manifest = _read_json(pairwise_bundle_dir / "manifest.json")
     linker_metadata = _read_json(incremental_linker_artifact_dir / "metadata.json")
     if linker_metadata.get("pairwise_bundle_binding") != pairwise_binding:
         raise ValueError("Incremental linker pairwise_bundle_binding does not match pairwise bundle")
@@ -431,17 +434,21 @@ def finalize_production_bundle(
     output_bundle_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_bundle_dir.name}.staging-", dir=output_bundle_dir.parent))
     try:
-        _copy_pairwise_stage(pairwise_bundle_dir, staging_dir)
-        _copy_path(incremental_linker_artifact_dir, staging_dir / "incremental_linker")
+        _copy_pairwise_stage(pairwise_bundle_dir, staging_dir, pairwise_manifest)
+        for filename in ("booster.lgb", "metadata.json"):
+            _copy_path(
+                incremental_linker_artifact_dir / filename,
+                staging_dir / "incremental_linker" / filename,
+            )
         target_destination = staging_dir / "reproducibility" / "incremental_linker_training_target.json"
         _copy_path(target_json, target_destination)
         staged_summary = write_production_manifest(
             staging_dir,
             bundle_version=resolved_bundle_version,
             pairwise_model_version=str(
-                pairwise_model_version
-                or production_version_from_bundle_dir(pairwise_bundle_dir)
-                or resolved_bundle_version
+                pairwise_manifest["pairwise_model_version"]
+                if pairwise_model_version is None
+                else pairwise_model_version
             ),
             include_incremental_linker=True,
             incremental_linker_version=str(incremental_linker_version or resolved_bundle_version),

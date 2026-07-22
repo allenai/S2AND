@@ -16,20 +16,23 @@ uv run ty check s2and
 Run the full local CI wrapper:
 
 ```bash
-uv run python scripts/run_ci_locally.py
+uv run --no-project python scripts/run_ci_locally.py
 ```
 
 `scripts/run_ci_locally.py` mirrors `.github/workflows/main.yaml` by running:
 
 - lint (`scripts/sync_version.py --check`, `ruff check`, and `ruff format --check`)
 - one required-runtime `typecheck-and-test` job
-- Rust ABI/parity guardrails, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
+- an installed-Rust smoke check, `ty`, and the full pytest suite with `S2AND_BACKEND=python`
+
+The lint job runs the version check without a project environment and executes the exact Ruff pin from the `dev`
+extra in an isolated uv tool environment. It does not install the runtime or ML dependency stack.
 
 Hosted CI invokes this same script. Run one job independently with:
 
 ```bash
-uv run python scripts/run_ci_locally.py lint
-uv run python scripts/run_ci_locally.py typecheck-and-test
+uv run --no-project python scripts/run_ci_locally.py lint
+uv run --no-project python scripts/run_ci_locally.py typecheck-and-test
 ```
 
 Canonical-v2 requires the Rust-backed name-count index even when Python orchestration is selected. The runner builds

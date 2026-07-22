@@ -655,9 +655,11 @@ def _clean_arrow_rust_structural_rows(
                 f"{table_key} {dataset_name}: candidate components missing member metadata: {missing_keys[:10]}"
             )
         local_label = pd.to_numeric(local["label"], errors="coerce").fillna(0).astype(np.int8)
-        drop = (local["_component_member_count"].astype(np.int64) == 1) & local[
-            "_component_single_member_signature_id"
-        ].astype(str).eq(local["query_signature_id"].astype(str))
+        component_member_count = local["_component_member_count"].astype(np.int64)
+        drop = (component_member_count == 0) | (
+            (component_member_count == 1)
+            & local["_component_single_member_signature_id"].astype(str).eq(local["query_signature_id"].astype(str))
+        )
         drop_indices = local.loc[drop, "_global_index"].to_numpy(dtype=np.int64, copy=False)
         keep_mask[drop_indices] = False
         dataset_summaries.append(
@@ -702,10 +704,9 @@ def _block_local_member_ids_from_signature_blocks(
     if "::" not in str(component_key):
         return member_ids
     block_key, _cluster_id = str(component_key).split("::", 1)
-    filtered = tuple(
+    return tuple(
         signature_id for signature_id in member_ids if str(signature_to_block.get(str(signature_id), "")) == block_key
     )
-    return filtered or member_ids
 
 
 def _signature_id_to_index(featurizer: Any) -> dict[str, int]:

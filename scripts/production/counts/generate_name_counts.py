@@ -23,12 +23,14 @@ from s2and.consts import NORMALIZATION_VERSION
 from s2and.text import canonical_name_count_keys, canonicalize_name_parts
 
 QUERY = """
-select concat(concat(nvl(first_name, ''), '|||'), nvl(last_name, '')) as concat,
+select nvl(first_name, '') as first_name,
+       nvl(last_name, '') as last_name,
        count(*) as count
 from content.authors
-group by concat(concat(nvl(first_name, ''), '|||'), nvl(last_name, ''))
+group by nvl(first_name, ''), nvl(last_name, '')
 """.strip()
 
+NameCountRow = tuple[str, str, int]
 NameCountMappings = tuple[
     Mapping[str, int],
     Mapping[str, int],
@@ -40,7 +42,7 @@ NameCountMappings = tuple[
 def _query_text(limit: int | None) -> str:
     """Return the exact deterministic warehouse query for this run."""
 
-    ordered = f"{QUERY}\norder by concat"
+    ordered = f"{QUERY}\norder by first_name, last_name"
     return ordered if limit is None else f"{ordered}\nlimit {int(limit)}"
 
 
@@ -71,17 +73,17 @@ def _validated_limit(value: int | None) -> int | None:
     return value
 
 
-def _query_rows(limit: int | None) -> Iterator[tuple[str, int]]:
+def _query_rows(limit: int | None) -> Iterator[NameCountRow]:
     try:
         from pys2 import _evaluate_redshift_query  # type: ignore
     except ImportError as exc:
         raise RuntimeError("warehouse generation requires the internal pys2 package") from exc
     frame = _evaluate_redshift_query(_query_text(limit))
-    for raw, count in zip(frame["concat"], frame["count"], strict=True):
-        yield str(raw), int(count)
+    for first, last, count in zip(frame["first_name"], frame["last_name"], frame["count"], strict=True):
+        yield str(first), str(last), int(count)
 
 
-def _fixture_rows(path: Path, limit: int | None) -> Iterator[tuple[str, int]]:
+def _fixture_rows(path: Path, limit: int | None) -> Iterator[NameCountRow]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         raise ValueError("fixture input must contain a JSON list")
@@ -97,11 +99,11 @@ def _fixture_rows(path: Path, limit: int | None) -> Iterator[tuple[str, int]]:
             raise ValueError(f"fixture row {row_index} names must be strings")
         if not isinstance(count, int) or count < 1:
             raise ValueError(f"fixture row {row_index} count must be a positive integer")
-        yield f"{first}|||{last}", count
+        yield first, last, count
 
 
 def build_name_count_dicts(
-    rows: Iterable[tuple[str, int]],
+    rows: Iterable[NameCountRow],
 ) -> tuple[NameCountMappings, dict[str, int | str]]:
     """Canonicalize source rows and return the four filtered lookup mappings."""
 
@@ -110,16 +112,13 @@ def build_name_count_dicts(
     source_rows = 0
     rejected_rows = 0
     selected_rows_digest = hashlib.sha256()
-    for raw_concat, count in rows:
+    for raw_first, raw_last, count in rows:
         source_rows += 1
-        raw_bytes = raw_concat.encode("utf-8")
-        selected_rows_digest.update(len(raw_bytes).to_bytes(8, "little", signed=False))
-        selected_rows_digest.update(raw_bytes)
+        for raw_name in (raw_first, raw_last):
+            raw_bytes = raw_name.encode("utf-8")
+            selected_rows_digest.update(len(raw_bytes).to_bytes(8, "little", signed=False))
+            selected_rows_digest.update(raw_bytes)
         selected_rows_digest.update(int(count).to_bytes(8, "little", signed=True))
-        raw_first, separator, raw_last = raw_concat.partition("|||")
-        if not separator:
-            rejected_rows += 1
-            continue
         keys = canonical_name_count_keys(canonicalize_name_parts(raw_first, None, raw_last))
         accepted = False
         for counter, key_name in zip(counters, key_names, strict=True):

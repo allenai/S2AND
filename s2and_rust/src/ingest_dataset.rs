@@ -369,7 +369,6 @@ pub(crate) fn preprocess_stage_papers(
                     year: paper_input.year,
                     has_abstract: paper_input.has_abstract,
                     predicted_language: paper_input.predicted_language.clone(),
-                    is_reliable: paper_input.is_reliable,
                     language_reliability: paper_input.language_reliability,
                     title_words,
                     title_chars,

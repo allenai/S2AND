@@ -84,6 +84,14 @@ class _ArrowSourceSnapshot:
     fingerprint: int
 
 
+@dataclass(frozen=True)
+class _ArrowSourceDigests:
+    size: int
+    mtime_ns: int
+    sha256: str
+    fingerprint: int
+
+
 def write_incremental_query_signatures_arrow(
     path: Path,
     signature_ids: Iterable[Any],
@@ -535,6 +543,72 @@ def _batch_lookup_index_source_mismatch(
     )
 
 
+def _validate_arrow_batch_lookup_index_header_contract(
+    header: Mapping[str, int | str],
+    *,
+    arrow_path: Path,
+    index_path: Path,
+    key_column: str,
+    source_size: int,
+    source_fingerprint: int,
+    expected_row_count: int | None,
+) -> int:
+    """Validate header facts shared by standalone and generation-bound checks."""
+
+    key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
+    if int(header["key_column_hash"]) != key_column_hash:
+        raise ValueError(
+            f"Arrow batch lookup index '{index_path!s}' was built for a different key column: "
+            f"indexed hash={int(header['key_column_hash'])} expected hash={key_column_hash} "
+            f"key_column={key_column!r}"
+        )
+    source_mismatch = _batch_lookup_index_source_mismatch(
+        header,
+        source_size=source_size,
+        source_fingerprint=source_fingerprint,
+    )
+    if source_mismatch is not None:
+        raise ValueError(f"Arrow batch lookup index '{index_path!s}' is stale for '{arrow_path!s}': {source_mismatch}")
+    if expected_row_count is not None and int(header["record_count"]) != int(expected_row_count):
+        raise ValueError(
+            f"Arrow batch lookup index row count mismatch for {arrow_path!s}: "
+            f"index has {int(header['record_count'])} records, expected {int(expected_row_count)}. "
+            "Rebuild it with overwrite=True."
+        )
+    return int(header["record_count"])
+
+
+def _validate_arrow_batch_lookup_index_records(
+    records: Iterable[tuple[int, int, int]],
+    *,
+    index_path: Path,
+    record_count: int,
+    record_batch_count: int,
+) -> None:
+    """Validate ordering and record-batch bounds for one exact index body."""
+
+    previous_hash: int | None = None
+    observed_count = 0
+    for record_index, (key_hash, batch_index, _reserved) in enumerate(records):
+        if previous_hash is not None and key_hash < previous_hash:
+            raise ValueError(
+                f"Arrow batch lookup index '{index_path!s}' key hashes are not nondecreasing "
+                f"at record {record_index}: {key_hash} follows {previous_hash}"
+            )
+        if batch_index >= record_batch_count:
+            raise ValueError(
+                f"Arrow batch lookup index '{index_path!s}' batch index {batch_index} is out of bounds "
+                f"at record {record_index} for {record_batch_count} Arrow record batches"
+            )
+        previous_hash = int(key_hash)
+        observed_count += 1
+    if observed_count != record_count:
+        raise ValueError(
+            f"Arrow batch lookup index '{index_path!s}' record count changed while validating: "
+            f"expected {record_count}, observed {observed_count}"
+        )
+
+
 def _arrow_batch_lookup_record_hash(index_mmap: mmap.mmap, record_index: int) -> int:
     offset = _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_index * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
     return int(_ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(index_mmap, offset)[0])
@@ -704,29 +778,15 @@ def validate_arrow_batch_lookup_index(
     index_path_obj = Path(index_path)
     header = _read_arrow_batch_lookup_index_header(index_path_obj)
     source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating batch lookup index")
-    key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
-    if int(header["key_column_hash"]) != key_column_hash:
-        raise ValueError(
-            f"Arrow batch lookup index '{index_path_obj!s}' was built for a different key column: "
-            f"indexed hash={int(header['key_column_hash'])} expected hash={key_column_hash} "
-            f"key_column={key_column!r}"
-        )
-    source_mismatch = _batch_lookup_index_source_mismatch(
+    record_count = _validate_arrow_batch_lookup_index_header_contract(
         header,
+        arrow_path=arrow_path_obj,
+        index_path=index_path_obj,
+        key_column=key_column,
         source_size=source_snapshot.size,
         source_fingerprint=source_snapshot.fingerprint,
+        expected_row_count=expected_row_count,
     )
-    if source_mismatch is not None:
-        raise ValueError(
-            f"Arrow batch lookup index '{index_path_obj!s}' is stale for '{arrow_path_obj!s}': {source_mismatch}"
-        )
-    if expected_row_count is not None and int(header["record_count"]) != int(expected_row_count):
-        raise ValueError(
-            f"Arrow batch lookup index row count mismatch for {arrow_path_obj!s}: "
-            f"index has {int(header['record_count'])} records, expected {int(expected_row_count)}. "
-            "Rebuild it with overwrite=True."
-        )
-    record_count = int(header["record_count"])
     expected_length = (
         _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
     )
@@ -744,29 +804,113 @@ def validate_arrow_batch_lookup_index(
     if not _source_snapshot_matches_stat(source_snapshot, arrow_path_obj.stat()):
         _raise_arrow_source_changed(arrow_path_obj, context="validating batch lookup index")
 
-    previous_hash: int | None = None
     with index_path_obj.open("rb") as infile:
         with mmap.mmap(infile.fileno(), 0, access=mmap.ACCESS_READ) as index_mmap:
-            for record_index in range(record_count):
-                offset = (
-                    _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size
-                    + record_index * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
-                )
-                key_hash, batch_index, _reserved = _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(
+            records = (
+                _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(
                     index_mmap,
-                    offset,
+                    _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size
+                    + record_index * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size,
                 )
-                if previous_hash is not None and key_hash < previous_hash:
-                    raise ValueError(
-                        f"Arrow batch lookup index '{index_path_obj!s}' key hashes are not nondecreasing "
-                        f"at record {record_index}: {key_hash} follows {previous_hash}"
-                    )
-                if batch_index >= record_batch_count:
-                    raise ValueError(
-                        f"Arrow batch lookup index '{index_path_obj!s}' batch index {batch_index} is out of "
-                        f"bounds at record {record_index} for {record_batch_count} Arrow record batches"
-                    )
-                previous_hash = int(key_hash)
+                for record_index in range(record_count)
+            )
+            _validate_arrow_batch_lookup_index_records(
+                records,
+                index_path=index_path_obj,
+                record_count=record_count,
+                record_batch_count=record_batch_count,
+            )
+    return {
+        "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
+        "magic": str(header["magic"]),
+        "record_count": record_count,
+        "source_size": int(header["source_size"]),
+        "key_column_hash": int(header["key_column_hash"]),
+        "source_fingerprint": int(header["source_fingerprint"]),
+    }
+
+
+def _validate_verified_arrow_batch_lookup_index(
+    arrow_path: str | Path,
+    index_path: str | Path,
+    *,
+    key_column: str,
+    expected_arrow_byte_count: int,
+    expected_arrow_sha256: str,
+    expected_index_byte_count: int,
+    expected_index_sha256: str,
+    expected_row_count: int | None = None,
+) -> dict[str, int | str]:
+    """Validate one manifest-bound table/index pair with one full pass per file."""
+
+    arrow_path_obj = Path(arrow_path)
+    index_path_obj = Path(index_path)
+    source_digests = _stable_source_file_digests(
+        arrow_path_obj,
+        context="validating generation-bound batch lookup index",
+    )
+    if source_digests.size != expected_arrow_byte_count:
+        raise ValueError(f"Arrow artifact generation source byte_count mismatch: {arrow_path_obj}")
+    if source_digests.sha256 != expected_arrow_sha256:
+        raise ValueError(f"Arrow artifact generation source checksum mismatch: {arrow_path_obj}")
+
+    index_stat_before = index_path_obj.stat()
+    if int(index_stat_before.st_size) != expected_index_byte_count:
+        raise ValueError(f"Arrow artifact generation index byte_count mismatch: {index_path_obj}")
+
+    import pyarrow as pa
+
+    with pa.memory_map(str(arrow_path_obj), "r") as source:
+        record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
+    if not _source_digests_match_stat(source_digests, arrow_path_obj.stat()):
+        _raise_arrow_source_changed(arrow_path_obj, context="validating generation-bound batch lookup index")
+
+    index_digest = hashlib.sha256()
+    with index_path_obj.open("rb") as infile:
+        header_bytes = infile.read(_ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size)
+        index_digest.update(header_bytes)
+        header = _decode_arrow_batch_lookup_index_header(index_path_obj, header_bytes)
+        record_count = _validate_arrow_batch_lookup_index_header_contract(
+            header,
+            arrow_path=arrow_path_obj,
+            index_path=index_path_obj,
+            key_column=key_column,
+            source_size=source_digests.size,
+            source_fingerprint=source_digests.fingerprint,
+            expected_row_count=expected_row_count,
+        )
+        expected_length = (
+            _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
+        )
+        if int(index_stat_before.st_size) != expected_length:
+            raise ValueError(
+                f"Arrow batch lookup index '{index_path_obj!s}' length {index_stat_before.st_size} does not match "
+                f"expected length {expected_length} (record_count={record_count})"
+            )
+
+        def streamed_records() -> Iterator[tuple[int, int, int]]:
+            while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+                index_digest.update(chunk)
+                if len(chunk) % _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size != 0:
+                    raise ValueError(f"Arrow batch lookup index is truncated: {index_path_obj!s}")
+                yield from _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.iter_unpack(chunk)
+
+        _validate_arrow_batch_lookup_index_records(
+            streamed_records(),
+            index_path=index_path_obj,
+            record_count=record_count,
+            record_batch_count=record_batch_count,
+        )
+
+    index_stat_after = index_path_obj.stat()
+    if int(index_stat_before.st_size) != int(index_stat_after.st_size) or int(index_stat_before.st_mtime_ns) != int(
+        index_stat_after.st_mtime_ns
+    ):
+        raise ValueError(f"Arrow batch lookup index changed while validating: {index_path_obj!s}")
+    if index_digest.hexdigest() != expected_index_sha256:
+        raise ValueError(f"Arrow artifact generation index checksum mismatch: {index_path_obj}")
+    if not _source_digests_match_stat(source_digests, arrow_path_obj.stat()):
+        _raise_arrow_source_changed(arrow_path_obj, context="validating generation-bound batch lookup index")
     return {
         "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": str(header["magic"]),
@@ -1130,6 +1274,36 @@ def _source_file_fingerprint_once(path: Path, *, source_size: int) -> int:
                 break
             digest = _fnv64_update(digest, chunk)
     return digest
+
+
+def _source_file_digests_once(path: Path, *, source_size: int) -> tuple[str, int]:
+    sha256 = hashlib.sha256()
+    fingerprint = _fnv64_bytes(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN)
+    fingerprint = _fnv64_update(fingerprint, int(source_size).to_bytes(8, "little", signed=False))
+    with path.open("rb") as infile:
+        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+            sha256.update(chunk)
+            fingerprint = _fnv64_update(fingerprint, chunk)
+    return sha256.hexdigest(), fingerprint
+
+
+def _stable_source_file_digests(path: Path, *, context: str) -> _ArrowSourceDigests:
+    for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
+        before = path.stat()
+        sha256, fingerprint = _source_file_digests_once(path, source_size=int(before.st_size))
+        after = path.stat()
+        if int(before.st_size) == int(after.st_size) and int(before.st_mtime_ns) == int(after.st_mtime_ns):
+            return _ArrowSourceDigests(
+                size=int(after.st_size),
+                mtime_ns=int(after.st_mtime_ns),
+                sha256=sha256,
+                fingerprint=int(fingerprint),
+            )
+    _raise_arrow_source_changed(path, context=context)
+
+
+def _source_digests_match_stat(digests: _ArrowSourceDigests, stat_result: os.stat_result) -> bool:
+    return digests.size == int(stat_result.st_size) and digests.mtime_ns == int(stat_result.st_mtime_ns)
 
 
 def _stable_source_file_snapshot(path: Path, *, context: str) -> _ArrowSourceSnapshot:

@@ -1180,32 +1180,24 @@ impl RustFeaturizer {
                     "Arrow paper_authors are missing rows for paper_id '{paper_id}'"
                 ))
             })?;
-            let (is_reliable, predicted_language, language_reliability) = if raw_paper
+            let (predicted_language, language_reliability) = if raw_paper
                 .predicted_language
                 .is_some()
             {
-                let is_reliable = raw_paper.is_reliable.ok_or_else(|| {
+                raw_paper.is_reliable.ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(format!(
                         "papers Arrow predicted_language requires is_reliable for paper_id {paper_id:?}"
                     ))
                 })?;
                 let language_reliability = raw_paper.language_reliability.ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
-                    ))
-                })?;
-                (
-                    is_reliable,
-                    raw_paper.predicted_language.clone(),
-                    language_reliability,
-                )
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "papers Arrow predicted_language requires language_reliability for paper_id {paper_id:?}"
+                        ))
+                    })?;
+                (raw_paper.predicted_language.clone(), language_reliability)
             } else {
                 let audit = detect_language_compat(&raw_paper.title);
-                (
-                    audit.is_reliable,
-                    Some(audit.predicted_language),
-                    audit.language_reliability,
-                )
+                (Some(audit.predicted_language), audit.language_reliability)
             };
             paper_inputs.push(StagePaperInput {
                 paper_id: paper_id.clone(),
@@ -1216,7 +1208,6 @@ impl RustFeaturizer {
                 year: raw_paper.year.filter(|year| *year > 0),
                 has_abstract: !raw_paper.abstract_text.is_empty(),
                 predicted_language,
-                is_reliable,
                 language_reliability,
             });
         }
@@ -1271,7 +1262,6 @@ impl RustFeaturizer {
                     year: paper.year,
                     has_abstract: paper.has_abstract,
                     predicted_language: paper.predicted_language,
-                    is_reliable: paper.is_reliable,
                     language_reliability: paper.language_reliability,
                     journal_ngrams: paper.journal_ngrams,
                     specter,

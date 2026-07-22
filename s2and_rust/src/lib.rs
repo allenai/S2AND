@@ -194,7 +194,6 @@ struct PaperData {
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
-    is_reliable: bool,
     language_reliability: f64,
     journal_ngrams: Option<CounterData>,
     specter: Option<Vec<f32>>,
@@ -224,7 +223,6 @@ struct StagePaperInput {
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
-    is_reliable: bool,
     language_reliability: f64,
 }
 
@@ -234,7 +232,6 @@ struct StagePaperPreprocessed {
     year: Option<i64>,
     has_abstract: bool,
     predicted_language: Option<String>,
-    is_reliable: bool,
     language_reliability: f64,
     title_words: Option<CounterData>,
     title_chars: Option<CounterData>,
@@ -798,7 +795,6 @@ mod tests {
             year: Some(2024),
             has_abstract: false,
             predicted_language: None,
-            is_reliable: false,
             language_reliability: 0.0,
         };
 

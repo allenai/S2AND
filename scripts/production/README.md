@@ -118,9 +118,11 @@ The `counts/` scripts document production count artifacts:
   ORCID prefix pairs directly to `first_k_letter_counts_from_orcid.json` with
   an adjacent `.meta.json` sidecar. The runtime verifies the normalization and
   pair semantics plus the exact data SHA-256; it never accepts the data file
-  without its sidecar. `--max-names-per-orcid` is checked before quadratic pair
-  expansion. Install its JSON serializer with `uv sync --extra orcid-counts`
-  before running the producer.
+  without its sidecar. Producer-only source provenance, parameters, and metrics
+  are written separately to `first_k_letter_counts_from_orcid.generation.json`
+  so they do not expand the runtime metadata contract. `--max-names-per-orcid`
+  is checked before quadratic pair expansion. Install its JSON serializer with
+  `uv sync --extra orcid-counts` before running the producer.
 
 Both scripts are import-safe without the internal warehouse package. Start
 with `--help`, `--dry-run`, or a small `--input-json` fixture. A full internal

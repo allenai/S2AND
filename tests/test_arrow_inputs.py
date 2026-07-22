@@ -556,6 +556,98 @@ def test_repeated_raw_validation_rechecks_generation_integrity(tmp_path: Path) -
     assert verified_arrow_artifact_generation(validated) == validated.generation_id
 
 
+def test_complete_bundle_streams_each_generation_file_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _write_valid_prediction_bundle(tmp_path, specter_key="specter")
+    paired_keys = {
+        "signatures",
+        "signatures_batch_index",
+        "papers",
+        "papers_batch_index",
+        "paper_authors",
+        "paper_authors_batch_index",
+        "specter",
+        "specter_batch_index",
+    }
+    paired_paths = {Path(paths[key]).resolve() for key in paired_keys}
+    table_reads: list[Path] = []
+    index_reads: list[Path] = []
+    original_manifest_sha256 = arrow_inputs_module._sha256_file  # noqa: SLF001
+    original_table_digests = feature_block_arrow_module._source_file_digests_once  # noqa: SLF001
+    original_index_validator = feature_block_arrow_module._validate_verified_arrow_batch_lookup_index  # noqa: SLF001
+
+    def reject_duplicate_manifest_hash(path: Path) -> str:
+        assert path.resolve() not in paired_paths, f"paired artifact was hashed separately: {path}"
+        return original_manifest_sha256(path)
+
+    def record_table_read(path: Path, *, source_size: int) -> tuple[str, int]:
+        table_reads.append(path.resolve())
+        return original_table_digests(path, source_size=source_size)
+
+    def record_index_read(*args: object, **kwargs: object) -> dict[str, int | str]:
+        index_reads.append(Path(args[1]).resolve())
+        return original_index_validator(*args, **kwargs)
+
+    monkeypatch.setattr(arrow_inputs_module, "_sha256_file", reject_duplicate_manifest_hash)
+    monkeypatch.setattr(feature_block_arrow_module, "_source_file_digests_once", record_table_read)
+    monkeypatch.setattr(
+        feature_block_arrow_module,
+        "_validate_verified_arrow_batch_lookup_index",
+        record_index_read,
+    )
+
+    validate_arrow_prediction_artifacts(
+        paths,
+        require_specter=True,
+        require_name_counts_index=False,
+    )
+
+    assert table_reads == [Path(paths[key]).resolve() for key in ("signatures", "papers", "paper_authors", "specter")]
+    assert index_reads == [
+        Path(paths[key]).resolve()
+        for key in (
+            "signatures_batch_index",
+            "papers_batch_index",
+            "paper_authors_batch_index",
+            "specter_batch_index",
+        )
+    ]
+
+
+def test_raw_validation_rejects_generation_bound_index_checksum_mutation(tmp_path: Path) -> None:
+    paths = _write_valid_prediction_bundle(tmp_path)
+    index_path = Path(paths["signatures_batch_index"])
+    payload = bytearray(index_path.read_bytes())
+    header_size = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size  # noqa: SLF001
+    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
+    key_hash, batch_index, reserved = record_struct.unpack_from(payload, header_size)
+    record_struct.pack_into(payload, header_size, key_hash, batch_index, reserved + 1)
+    index_path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match="index checksum mismatch"):
+        validate_arrow_prediction_artifacts(
+            paths,
+            require_specter=False,
+            require_name_counts_index=False,
+        )
+
+
+def test_raw_validation_rejects_stale_index_in_regenerated_generation(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    paths = _write_valid_prediction_bundle(tmp_path)
+    write_arrow_ipc_table(pa.table({"signature_id": ["b"]}), paths["signatures"])
+    write_test_arrow_artifact_manifest(tmp_path, paths)
+
+    with pytest.raises(ValueError, match="is stale"):
+        validate_arrow_prediction_artifacts(
+            paths,
+            require_specter=False,
+            require_name_counts_index=False,
+        )
+
+
 def test_publication_validation_rejects_checksummed_semantically_invalid_batch_index(tmp_path: Path) -> None:
     paths = _write_valid_prediction_bundle(tmp_path)
     index_path = Path(paths["signatures_batch_index"])

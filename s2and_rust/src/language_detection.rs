@@ -18,7 +18,6 @@ pub(crate) fn python_alpha_count(text: &str) -> usize {
 
 pub(crate) struct LanguageDetectionAudit {
     pub(crate) predicted_language: String,
-    pub(crate) is_reliable: bool,
     pub(crate) language_reliability: f64,
 }
 
@@ -42,7 +41,6 @@ pub(crate) fn detect_language_compat(text: &str) -> LanguageDetectionAudit {
     };
     LanguageDetectionAudit {
         predicted_language,
-        is_reliable,
         language_reliability,
     }
 }
@@ -50,7 +48,6 @@ pub(crate) fn detect_language_compat(text: &str) -> LanguageDetectionAudit {
 fn unknown_language_detection() -> LanguageDetectionAudit {
     LanguageDetectionAudit {
         predicted_language: "un".to_string(),
-        is_reliable: false,
         language_reliability: 0.0,
     }
 }
@@ -88,7 +85,6 @@ mod alpha_gate_tests {
             "<div>This is a detailed English research title about neural systems and scientific evaluation.</div>",
         );
         assert_eq!(result.predicted_language, "en");
-        assert!(result.is_reliable);
         assert_eq!(result.language_reliability, 0.98);
     }
 }

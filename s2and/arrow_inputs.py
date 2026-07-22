@@ -27,11 +27,21 @@ class ArrowBatchIndexContract:
 
 
 @dataclass(frozen=True)
+class _ArrowArtifactGenerationFile:
+    """One manifest-bound immutable file retained for combined validation."""
+
+    path: Path
+    byte_count: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class _VerifiedArrowArtifactGeneration:
     """Manifest facts retained after one full immutable-generation check."""
 
     generation_id: str
     normalization_version: str | None
+    files: Mapping[str, _ArrowArtifactGenerationFile]
 
 
 @dataclass(frozen=True, init=False)
@@ -378,9 +388,10 @@ def _validate_arrow_bundle_manifest(
     context: str,
     required_keys: Sequence[str],
     producer_hint: str,
+    defer_batch_material: bool = False,
 ) -> _VerifiedArrowArtifactGeneration:
     manifest_path = _arrow_artifact_manifest_path(paths)
-    verified = _verified_arrow_artifact_manifest(paths)
+    verified = _verified_arrow_artifact_manifest(paths, defer_batch_material=defer_batch_material)
     if verified is None:
         manifest_exists = manifest_path is not None and manifest_path.is_file()
         missing_key = "manifest.artifact_generation" if manifest_exists else "manifest"
@@ -419,6 +430,8 @@ def _validate_arrow_bundle_manifest(
 
 def _verified_arrow_artifact_manifest(
     paths: Mapping[str, str],
+    *,
+    defer_batch_material: bool = False,
 ) -> _VerifiedArrowArtifactGeneration | None:
     """Verify one exact immutable generation."""
 
@@ -472,6 +485,12 @@ def _verified_arrow_artifact_manifest(
     material_keys = sorted(
         key for key in paths if key in _ARROW_IMMUTABLE_ARTIFACT_FILE_KEYS or key in _ARROW_IMMUTABLE_BATCH_INDEX_KEYS
     )
+    deferred_keys: set[str] = set()
+    if defer_batch_material:
+        for contract in RAW_PLANNER_ARROW_BATCH_INDEX_CONTRACTS:
+            if contract.table_key in paths and contract.index_key in paths:
+                deferred_keys.update((contract.table_key, contract.index_key))
+    verified_files: dict[str, _ArrowArtifactGenerationFile] = {}
     for key in material_keys:
         entry = files.get(key)
         if not isinstance(entry, Mapping):
@@ -520,12 +539,18 @@ def _verified_arrow_artifact_manifest(
             raise ValueError(f"Arrow artifact generation files.{key}.sha256 is invalid")
         if artifact_path.stat().st_size != expected_bytes:
             raise ValueError(f"Arrow artifact generation files.{key}.byte_count mismatch: {artifact_path}")
-        if _sha256_file(artifact_path) != expected_sha256:
+        if key not in deferred_keys and _sha256_file(artifact_path) != expected_sha256:
             raise ValueError(f"Arrow artifact generation files.{key} checksum mismatch: {artifact_path}")
+        verified_files[key] = _ArrowArtifactGenerationFile(
+            path=artifact_path,
+            byte_count=expected_bytes,
+            sha256=expected_sha256,
+        )
 
     return _VerifiedArrowArtifactGeneration(
         generation_id=computed_generation_id,
         normalization_version=None if normalization_version is None else str(normalization_version),
+        files=MappingProxyType(verified_files),
     )
 
 
@@ -740,20 +765,29 @@ def require_filtered_arrow_batch_indexes(
         )
 
 
-def _validate_batch_indexes(paths: Mapping[str, str]) -> None:
-    """Strictly validate the batch indexes for one immutable Arrow generation."""
+def _validate_batch_indexes(
+    paths: Mapping[str, str],
+    generation_files: Mapping[str, _ArrowArtifactGenerationFile],
+) -> None:
+    """Strictly validate paired files with one full pass per immutable artifact."""
 
     # Local import avoids a module cycle: feature_block_arrow consumes the
     # canonical path helpers defined in this module.
-    from s2and.incremental_linking.feature_block_arrow import validate_arrow_batch_lookup_index
+    from s2and.incremental_linking.feature_block_arrow import _validate_verified_arrow_batch_lookup_index
 
     for contract in RAW_PLANNER_ARROW_BATCH_INDEX_CONTRACTS:
         if contract.table_key not in paths:
             continue
-        validate_arrow_batch_lookup_index(
+        arrow_file = generation_files[contract.table_key]
+        index_file = generation_files[contract.index_key]
+        _validate_verified_arrow_batch_lookup_index(
             paths[contract.table_key],
             paths[contract.index_key],
             key_column=contract.key_column,
+            expected_arrow_byte_count=arrow_file.byte_count,
+            expected_arrow_sha256=arrow_file.sha256,
+            expected_index_byte_count=index_file.byte_count,
+            expected_index_sha256=index_file.sha256,
         )
 
 
@@ -927,6 +961,7 @@ def _validate_complete_arrow_artifacts(
         context=context,
         required_keys=sorted(required),
         producer_hint=producer_hint,
+        defer_batch_material=True,
     )
     if verified.normalization_version is None:  # pragma: no cover - manifest validation rejects this
         raise RuntimeError("validated Arrow artifact generation is missing normalization_version")
@@ -947,7 +982,7 @@ def _validate_complete_arrow_artifacts(
             },
             producer_hint=producer_hint,
         )
-    _validate_batch_indexes(normalized)
+    _validate_batch_indexes(normalized, verified.files)
     return ValidatedArrowInputs._from_verified(
         paths=normalized,
         generation_id=verified.generation_id,

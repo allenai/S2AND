@@ -562,7 +562,7 @@ def test_build_rust_featurizer_from_arrow_paths_honors_name_count_loading_policy
     index_path, _metrics = write_name_counts_index(tmp_path / "name_counts_index", tiny_name_counts_tuple(), provenance)
     complete_paths = {**paths, "name_counts_index": index_path}
     write_test_arrow_artifact_manifest(tmp_path, complete_paths)
-    monkeypatch.setattr("s2and.arrow_inputs._validate_batch_indexes", lambda _paths: None)
+    monkeypatch.setattr("s2and.arrow_inputs._validate_batch_indexes", lambda _paths, _generation_files: None)
     validated_paths = validate_arrow_training_artifacts(
         complete_paths,
         require_specter=False,

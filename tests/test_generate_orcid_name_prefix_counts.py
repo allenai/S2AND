@@ -181,7 +181,10 @@ def test_prefix_counts_are_unordered_and_deterministic() -> None:
     assert all(left <= right for left, nested in forward.items() for right in nested)
 
 
-def test_fixture_cli_writes_direct_data_and_metadata(tmp_path: Path) -> None:
+def test_fixture_cli_writes_runtime_artifact_and_generation_report(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     module = _load_module()
     fixture_path = tmp_path / "rows.json"
     fixture_path.write_text(
@@ -203,7 +206,7 @@ def test_fixture_cli_writes_direct_data_and_metadata(tmp_path: Path) -> None:
                 "--output-dir",
                 str(output_dir),
                 "--source-snapshot-id",
-                "fixture-2026-07-09",
+                "  fixture snapshot 2026-07-09  ",
             ]
         )
         == 0
@@ -211,6 +214,7 @@ def test_fixture_cli_writes_direct_data_and_metadata(tmp_path: Path) -> None:
 
     data_path = output_dir / "first_k_letter_counts_from_orcid.json"
     metadata_path = output_dir / "first_k_letter_counts_from_orcid.meta.json"
+    generation_report_path = output_dir / "first_k_letter_counts_from_orcid.generation.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata == {
         "schema_version": 1,
@@ -218,8 +222,27 @@ def test_fixture_cli_writes_direct_data_and_metadata(tmp_path: Path) -> None:
         "pair_key_semantics": "unordered_lexicographic",
         "data_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
     }
+    generation_report = json.loads(generation_report_path.read_text(encoding="utf-8"))
+    assert generation_report["schema_version"] == 1
+    assert generation_report["generator"] == "scripts/production/counts/generate_orcid_name_prefix_counts.py"
+    assert generation_report["source_snapshot_id"] == "fixture snapshot 2026-07-09"
+    assert generation_report["source_digest"]
+    assert generation_report["data_sha256"] == metadata["data_sha256"]
+    assert generation_report["generator_parameters"] == {
+        "k_values": [2, 3, 4, 5],
+        "limit": None,
+        "max_names_per_orcid": 100,
+        "min_alias_count": 2,
+        "min_orcid_count": 10,
+    }
+    assert generation_report["metrics"]["source_rows"] == 2
+    assert generation_report["metrics"]["accepted_rows"] == 2
+    stdout = capsys.readouterr().out
+    final_stdout_payload = json.loads(stdout[stdout.rfind("\n{") :])
+    for key, value in generation_report.items():
+        assert final_stdout_payload[key] == value
 
-    with pytest.raises(FileExistsError, match="artifact already exists"):
+    with pytest.raises(FileExistsError, match="already exists"):
         module.main(
             [
                 "--input-json",
@@ -309,29 +332,6 @@ def test_runtime_loader_rejects_noncanonical_prefix_tokens(
         _LazyCanonicalOrcidPrefixCounts(tmp_path).load()
 
 
-def test_streaming_source_digest_covers_selected_row_content() -> None:
-    module = _load_module()
-    rows = [
-        {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
-        {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
-    ]
-    counts, metrics, digest = module.build_prefix_counts_from_sorted_rows(
-        rows,
-        [],
-        min_orcid_count=1,
-    )
-    changed_counts, _, changed_digest = module.build_prefix_counts_from_sorted_rows(
-        [*rows[:1], {"orcid": ORCID_1, "first_name": "Ava", "middle": None}],
-        [],
-        min_orcid_count=1,
-    )
-
-    assert counts != changed_counts
-    assert digest != changed_digest
-    assert metrics["source_rows"] == 2
-    assert metrics["max_unique_names_per_orcid"] == 2
-
-
 def test_compact_json_writer_matches_canonical_encoding(tmp_path: Path) -> None:
     module = _load_module()
     payload = {"zo": {"gian ": 2, "amy": 4}, "al": {"bob": 3}}
@@ -344,13 +344,22 @@ def test_compact_json_writer_matches_canonical_encoding(tmp_path: Path) -> None:
     assert digest == hashlib.sha256(expected).hexdigest()
 
 
-def test_source_digest_covers_deduplicated_rows_and_name_tuple_content() -> None:
+def test_source_digest_covers_selected_content_and_deduplicates_rows() -> None:
     module = _load_module()
     rows = [
         {"orcid": ORCID_1, "first_name": "Alice", "middle": None},
         {"orcid": ORCID_1, "first_name": "Amy", "middle": None},
     ]
-    counts, _, digest = module.build_prefix_counts_from_sorted_rows(rows, [("alicia", "amanda")], min_orcid_count=1)
+    counts, metrics, digest = module.build_prefix_counts_from_sorted_rows(
+        rows,
+        [("alicia", "amanda")],
+        min_orcid_count=1,
+    )
+    changed_counts, _, changed_digest = module.build_prefix_counts_from_sorted_rows(
+        [*rows[:1], {"orcid": ORCID_1, "first_name": "Ava", "middle": None}],
+        [("alicia", "amanda")],
+        min_orcid_count=1,
+    )
     duplicate_counts, _, duplicate_digest = module.build_prefix_counts_from_sorted_rows(
         [*rows, rows[-1]],
         [("alicia", "amanda")],
@@ -363,10 +372,14 @@ def test_source_digest_covers_deduplicated_rows_and_name_tuple_content() -> None
         min_alias_count=1,
     )
 
+    assert changed_counts != counts
+    assert changed_digest != digest
     assert duplicate_counts == counts
     assert duplicate_digest == digest
     assert alias_counts != counts
     assert alias_digest != digest
+    assert metrics["source_rows"] == 2
+    assert metrics["max_unique_names_per_orcid"] == 2
 
 
 def test_writer_rejects_noncanonical_count_pairs_before_writing(tmp_path: Path) -> None:
@@ -444,7 +457,7 @@ def test_cli_rejects_invalid_snapshot_id_before_work(
         "--output-dir",
         str(tmp_path),
         "--source-snapshot-id",
-        "invalid snapshot",
+        "   ",
     ]
     if dry_run:
         argv.append("--dry-run")

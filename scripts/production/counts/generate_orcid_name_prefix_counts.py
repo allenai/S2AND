@@ -2,7 +2,8 @@
 
 Warehouse access is intentionally unavailable at import time. Use a bounded
 local JSON fixture for development, or pass ``--run-full`` explicitly on
-internal infrastructure. The output is one data file and its metadata sidecar.
+internal infrastructure. The output is one data file, its runtime metadata
+sidecar, and a producer-only generation report.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ from s2and.orcid_prefix_counts import (
 from s2and.text import canonicalize_name_parts, normalize_orcid, same_prefix_tokens
 
 K_VALUES = (2, 3, 4, 5)
+MIN_ORCID_COUNT = 10
+MIN_ALIAS_COUNT = 2
+GENERATION_REPORT_FILENAME = "first_k_letter_counts_from_orcid.generation.json"
+GENERATION_REPORT_SCHEMA_VERSION = 1
 _CANONICAL_SOURCE_ORCID_PATTERN = re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9Xx]")
 _CANONICAL_SOURCE_ORCID_SQL_PATTERN = (
     r"(?<![0-9x])[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{4}[-‐‑‒–—−﹘﹣－]?" r"[0-9]{4}[-‐‑‒–—−﹘﹣－]?[0-9]{3}[0-9x](?![0-9x])"
@@ -327,6 +332,36 @@ def write_artifact(
     return data_path, metadata_path, data_sha256
 
 
+def write_generation_report(
+    *,
+    output_dir: Path,
+    source_snapshot_id: str,
+    source_digest: str,
+    data_sha256: str,
+    generator_parameters: Mapping[str, object],
+    metrics: Mapping[str, int],
+    overwrite: bool,
+) -> tuple[Path, dict[str, object]]:
+    """Write producer provenance separately from strict runtime metadata."""
+
+    report_path = output_dir / GENERATION_REPORT_FILENAME
+    if report_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"ORCID prefix-count generation report already exists; pass --overwrite to replace it: {report_path}"
+        )
+    report: dict[str, object] = {
+        "schema_version": GENERATION_REPORT_SCHEMA_VERSION,
+        "generator": "scripts/production/counts/generate_orcid_name_prefix_counts.py",
+        "source_snapshot_id": source_snapshot_id,
+        "source_digest": source_digest,
+        "data_sha256": data_sha256,
+        "generator_parameters": dict(generator_parameters),
+        "metrics": dict(metrics),
+    }
+    report_path.write_text(json.dumps(report, sort_keys=True, indent=2), encoding="utf-8")
+    return report_path, report
+
+
 def _load_fixture_rows(path: Path, limit: int | None) -> list[Mapping[str, Any]]:
     rows = json.loads(path.read_bytes())
     if not isinstance(rows, list):
@@ -395,8 +430,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--limit must be positive")
     if args.max_names_per_orcid < 2:
         raise ValueError("--max-names-per-orcid must be at least 2")
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.source_snapshot_id) is None:
-        raise ValueError("source_snapshot_id must contain only letters, digits, '.', '_', and '-'")
+    source_snapshot_id = args.source_snapshot_id.strip()
+    if not source_snapshot_id:
+        raise ValueError("source_snapshot_id must be a nonempty string")
     if args.input_json is None and not args.run_full:
         raise ValueError("Choose --input-json for a fixture or explicitly authorize warehouse access with --run-full")
     source_context = {
@@ -404,7 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run_full": bool(args.run_full),
         "limit": args.limit,
         "output_dir": str(args.output_dir),
-        "source_snapshot_id": args.source_snapshot_id,
+        "source_snapshot_id": source_snapshot_id,
         "max_names_per_orcid": args.max_names_per_orcid,
     }
     print(json.dumps(source_context, indent=2))
@@ -421,6 +457,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     counts, metrics, source_digest = build_prefix_counts_from_sorted_rows(
         rows,
         name_tuples,
+        min_orcid_count=MIN_ORCID_COUNT,
+        min_alias_count=MIN_ALIAS_COUNT,
         max_names_per_orcid=args.max_names_per_orcid,
     )
     data_path, metadata_path, data_sha256 = write_artifact(
@@ -428,15 +466,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         overwrite=bool(args.overwrite),
     )
+    generator_parameters = {
+        "k_values": list(K_VALUES),
+        "limit": args.limit,
+        "max_names_per_orcid": args.max_names_per_orcid,
+        "min_alias_count": MIN_ALIAS_COUNT,
+        "min_orcid_count": MIN_ORCID_COUNT,
+    }
+    generation_report_path, generation_report = write_generation_report(
+        output_dir=args.output_dir,
+        source_snapshot_id=source_snapshot_id,
+        source_digest=source_digest,
+        data_sha256=data_sha256,
+        generator_parameters=generator_parameters,
+        metrics=metrics,
+        overwrite=bool(args.overwrite),
+    )
     print(
         json.dumps(
             {
                 "data": str(data_path),
                 "metadata": str(metadata_path),
-                "data_sha256": data_sha256,
-                "source_snapshot_id": args.source_snapshot_id,
-                "source_digest": source_digest,
-                "metrics": metrics,
+                "generation_report": str(generation_report_path),
+                **generation_report,
             },
             indent=2,
         )

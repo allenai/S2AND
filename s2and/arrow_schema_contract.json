@@ -39,7 +39,8 @@
       {"name": "author_position", "datatype": "int64", "required": true},
       {"name": "author_block", "datatype": "string", "required": false},
       {"name": "author_email", "datatype": "string", "required": false},
-      {"name": "source_author_ids", "datatype": "list<string>", "required": false}
+      {"name": "source_author_ids", "datatype": "list<string>", "required": false},
+      {"name": "author_ror_display_names", "datatype": "list<string>", "required": false}
     ],
     "specter": [
       {"name": "paper_id", "datatype": "string", "required": true},

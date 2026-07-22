@@ -91,6 +91,7 @@ class FeatureBlockSignature:
     author_block: str | None = None
     author_email: str | None = None
     source_author_ids: tuple[str, ...] = ()
+    author_ror_display_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "signature_id", str(self.signature_id))
@@ -104,6 +105,13 @@ class FeatureBlockSignature:
             self,
             "source_author_ids",
             _strict_string_tuple(self.source_author_ids, field_name="FeatureBlockSignature.source_author_ids"),
+        )
+        object.__setattr__(
+            self,
+            "author_ror_display_names",
+            _strict_string_tuple(
+                self.author_ror_display_names, field_name="FeatureBlockSignature.author_ror_display_names"
+            ),
         )
         if not self.signature_id:
             raise ValueError("FeatureBlockSignature.signature_id must be non-empty")
@@ -324,6 +332,10 @@ class FeatureBlock:
                     "author_email": pa.array([row.author_email for row in self.signatures], type=pa.string()),
                     "source_author_ids": pa.array(
                         [list(row.source_author_ids) for row in self.signatures],
+                        type=pa.list_(pa.string()),
+                    ),
+                    "author_ror_display_names": pa.array(
+                        [list(row.author_ror_display_names) for row in self.signatures],
                         type=pa.list_(pa.string()),
                     ),
                 }

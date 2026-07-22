@@ -1,5 +1,9 @@
 # Release Notes
 
+## 0.51.2
+
+- Adds `author_ror_display_names` to the FeatureBlock signatures Arrow contract (optional, defaults to empty). Plumbed through `FeatureBlockSignature` and `to_arrow_tables` so producers can carry ROR-normalized affiliation names; no feature consumes it yet.
+
 ## 0.51.1
 
 - Ships the package as `0.51.1` and pins optional Rust installs to `s2and-rust==0.51.1`.

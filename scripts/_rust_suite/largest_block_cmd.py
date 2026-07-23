@@ -490,7 +490,7 @@ def _run_single(
         "original_block_size": original_block_size,
         "effective_block_size": block_size,
         "num_pairs": num_pairs,
-        "subblocking_threshold": int(subblocking_threshold),
+        "subblocking_threshold": None,
         "max_block_size_limit": max_block_size,
         "n_jobs": n_jobs,
         "model_path": resolved_model_path,
@@ -582,6 +582,7 @@ def _run_single_arrow(
         num_pairs = block_size * (block_size - 1) // 2
         single_block_dict = {block_key: block_sigs}
         predict_arrow_paths = {key: value for key, value in arrow_paths.items() if key != "clusters"}
+        applied_subblocking_threshold = int(subblocking_threshold) if subblocking_threshold > 0 else None
 
         print(
             f"[{backend}] Running Arrow predict_from_arrow_paths on block {block_key!r} "
@@ -594,7 +595,7 @@ def _run_single_arrow(
             single_block_dict,
             predict_arrow_paths,
             total_ram_bytes=DEFAULT_ARROW_TOTAL_RAM_BYTES,
-            batching_threshold=(subblocking_threshold if subblocking_threshold > 0 else None),
+            batching_threshold=applied_subblocking_threshold,
             load_name_counts=True,
             name_tuples=None,
         )
@@ -628,6 +629,7 @@ def _run_single_arrow(
         "original_block_size": original_block_size,
         "effective_block_size": block_size,
         "num_pairs": num_pairs,
+        "subblocking_threshold": applied_subblocking_threshold,
         "max_block_size_limit": max_block_size,
         "n_jobs": n_jobs,
         "model_path": resolved_model_path,

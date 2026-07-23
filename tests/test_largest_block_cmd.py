@@ -3,11 +3,24 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from scripts._rust_suite import largest_block_cmd
+
+
+class _FakeRSSMonitor:
+    peak_gb = 0.25
+
+    def __init__(self, *, interval_seconds: float) -> None:
+        del interval_seconds
+
+    def __enter__(self) -> _FakeRSSMonitor:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
 
 
 def _comparison_result(*, backend: str, input_format: str, input_digest: str = "same") -> dict:
@@ -141,3 +154,101 @@ def test_single_subprocess_forwards_subblocking_threshold(tmp_path: Path, monkey
 
     threshold_index = captured["cmd"].index("--subblocking-threshold")
     assert captured["cmd"][threshold_index + 1] == "321"
+
+
+def test_json_result_reports_subblocking_threshold_as_not_applied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import s2and.data as data_module
+    import s2and.model as model_module
+    import s2and.production_model as production_model_module
+
+    fake_data = SimpleNamespace(clusters=None, get_blocks=lambda: {"a smith": ["s1", "s2"]})
+    fake_clusterer = SimpleNamespace(
+        classifier=object(),
+        nameless_classifier=object(),
+        predict_helper=lambda *_args, **_kwargs: ({"cluster": ["s1", "s2"]}, None),
+    )
+
+    monkeypatch.setattr(data_module, "ANDData", lambda **_kwargs: fake_data)
+    monkeypatch.setattr(production_model_module, "load_production_model", lambda _path: fake_clusterer)
+    monkeypatch.setattr(model_module, "_ensure_lightgbm_fitted", lambda _classifier: None)
+    monkeypatch.setattr(largest_block_cmd, "_check_paths", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(largest_block_cmd, "_write_profile_output", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(largest_block_cmd, "ProcessTreeRSSMonitor", _FakeRSSMonitor)
+    monkeypatch.setattr(largest_block_cmd, "build_run_metadata", lambda **_kwargs: {})
+
+    result = largest_block_cmd._run_single(
+        backend="python",
+        dataset_name="qian",
+        block_key="a smith",
+        n_jobs=1,
+        profile_output_path=str(tmp_path / "profile.txt"),
+        model_path=str(tmp_path / "model"),
+        data_root=str(tmp_path / "data"),
+        subblocking_threshold=321,
+    )
+
+    assert result["subblocking_threshold"] is None
+
+
+@pytest.mark.parametrize(
+    ("configured_threshold", "expected_applied_threshold"),
+    [(321, 321), (0, None)],
+)
+def test_arrow_result_reports_only_applied_subblocking_threshold(
+    configured_threshold: int,
+    expected_applied_threshold: int | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import s2and.model as model_module
+    import s2and.production_model as production_model_module
+
+    captured: dict[str, int | None] = {}
+
+    def predict_from_arrow_paths(*_args, **kwargs):
+        captured["batching_threshold"] = kwargs["batching_threshold"]
+        return {"cluster": ["s1", "s2"]}, None
+
+    fake_clusterer = SimpleNamespace(
+        classifier=object(),
+        nameless_classifier=object(),
+        predict_from_arrow_paths=predict_from_arrow_paths,
+    )
+    fake_eval_prod_models = ModuleType("scripts.eval_prod_models")
+    fake_eval_prod_models.resolve_arrow_dataset_paths = lambda *_args: {
+        "signatures": "signatures.arrow",
+        "clusters": "clusters.arrow",
+    }
+    fake_eval_prod_models.read_arrow_s2_blocks = lambda _path: {"a smith": ["s1", "s2"]}
+    fake_eval_prod_models.read_signature_to_cluster_id = lambda _path: {}
+
+    monkeypatch.setitem(sys.modules, "scripts.eval_prod_models", fake_eval_prod_models)
+    monkeypatch.setattr(production_model_module, "load_production_model", lambda _path: fake_clusterer)
+    monkeypatch.setattr(model_module, "_ensure_lightgbm_fitted", lambda _classifier: None)
+    monkeypatch.setattr(largest_block_cmd, "_write_profile_output", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(largest_block_cmd, "ProcessTreeRSSMonitor", _FakeRSSMonitor)
+    monkeypatch.setattr(largest_block_cmd, "build_run_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(largest_block_cmd, "collect_rust_extension_identity", lambda **_kwargs: None)
+
+    result = largest_block_cmd._run_single_arrow(
+        backend="rust",
+        dataset_name="qian",
+        block_key="a smith",
+        n_jobs=1,
+        profile_output_path=str(tmp_path / "profile.txt"),
+        model_path=str(tmp_path / "model"),
+        arrow_data_root=str(tmp_path / "arrow"),
+        specter_suffix="_specter2.pkl",
+        max_block_size=0,
+        run_label="rust",
+        quality_check=False,
+        emit_signature_map=False,
+        require_rust_release=False,
+        subblocking_threshold=configured_threshold,
+    )
+
+    assert captured["batching_threshold"] == expected_applied_threshold
+    assert result["subblocking_threshold"] == expected_applied_threshold

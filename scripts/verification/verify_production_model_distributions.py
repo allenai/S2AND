@@ -1,4 +1,4 @@
-"""Verify that Python distributions contain exactly the intended model assets."""
+"""Verify that Python distributions contain the required runtime and model assets."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
-FORBIDDEN_LEGACY_RUNTIME_PATHS = frozenset(
+REQUIRED_CANONICAL_RUNTIME_PATHS = frozenset(
     {
         "s2and/data/first_k_letter_counts_from_orcid.json",
         "s2and/data/first_k_letter_counts_from_orcid.meta.json",
@@ -19,9 +19,17 @@ FORBIDDEN_LEGACY_RUNTIME_PATHS = frozenset(
 
 
 def _load_expected_paths(source_root: Path) -> set[str]:
+    missing_runtime_sources = sorted(
+        path for path in REQUIRED_CANONICAL_RUNTIME_PATHS if not (source_root / path).is_file()
+    )
+    if missing_runtime_sources:
+        raise FileNotFoundError(
+            f"Source tree is missing required canonical runtime artifacts: {missing_runtime_sources}"
+        )
+
     declaration_path = source_root / "s2and" / "data" / "default_production_model.json"
     if not declaration_path.is_file():
-        return set()
+        return set(REQUIRED_CANONICAL_RUNTIME_PATHS)
     declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
     bundle_dir_name = str(declaration["bundle_dir"])
     bundle_version = str(declaration["bundle_version"])
@@ -31,6 +39,7 @@ def _load_expected_paths(source_root: Path) -> set[str]:
     if not default_dir.is_dir():
         raise FileNotFoundError(f"Declared default production bundle is missing: {default_dir}")
     expected = {
+        *REQUIRED_CANONICAL_RUNTIME_PATHS,
         "s2and/data/default_production_model.json",
         *(path.relative_to(source_root).as_posix() for path in sorted(default_dir.rglob("*")) if path.is_file()),
     }
@@ -57,13 +66,9 @@ def _verify_archive(
     read_prefix: Callable[[str, int], bytes],
     expected: set[str],
 ) -> None:
-    forbidden = sorted(paths.intersection(FORBIDDEN_LEGACY_RUNTIME_PATHS))
-    if forbidden:
-        raise ValueError(f"{archive_name} contains forbidden legacy runtime artifacts: {forbidden}")
-
     missing = sorted(expected - paths)
     if missing:
-        raise ValueError(f"{archive_name} missing production model files: {missing}")
+        raise ValueError(f"{archive_name} missing required distribution files: {missing}")
 
     undeclared = sorted(_production_model_asset_paths(paths) - expected)
     if undeclared:
@@ -137,7 +142,7 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path("."))
     args = parser.parse_args()
     verify_production_model_distributions(dist_dir=args.dist_dir, source_root=args.source_root)
-    print("Verified hydrated declared production models in the wheel and sdist.")
+    print("Verified canonical runtime artifacts and hydrated declared production models in the wheel and sdist.")
 
 
 if __name__ == "__main__":

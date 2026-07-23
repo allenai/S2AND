@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -154,7 +155,12 @@ def test_python_package_data_is_explicit() -> None:
 
     assert config["tool"]["setuptools"]["include-package-data"] is False
     package_data = config["tool"]["setuptools"]["package-data"]["s2and"]
+    canonical_orcid_artifacts = {
+        "data/first_k_letter_counts_from_orcid.json",
+        "data/first_k_letter_counts_from_orcid.meta.json",
+    }
     assert "arrow_schema_contract.json" in package_data
+    assert canonical_orcid_artifacts <= set(package_data)
     assert all("production_model" not in pattern for pattern in package_data)
     assert set(package_data).isdisjoint(
         {
@@ -163,6 +169,8 @@ def test_python_package_data_is_explicit() -> None:
             "data/s2and_unnormalized_filtered_name_tuples.txt",
         }
     )
+    excluded_package_data = config["tool"]["setuptools"].get("exclude-package-data", {}).get("s2and", [])
+    assert canonical_orcid_artifacts.isdisjoint(excluded_package_data)
 
 
 def _write_distribution_fixture(
@@ -171,9 +179,26 @@ def _write_distribution_fixture(
     extra_wheel: bool,
     extra_sdist: bool,
     declare_model: bool = True,
+    omit_wheel_path: str | None = None,
+    omit_sdist_path: str | None = None,
 ) -> tuple[Path, Path]:
     data_dir = root / "s2and" / "data"
     data_dir.mkdir(parents=True)
+    orcid_data_payload = b"{}\n"
+    (data_dir / "first_k_letter_counts_from_orcid.json").write_bytes(orcid_data_payload)
+    (data_dir / "first_k_letter_counts_from_orcid.meta.json").write_text(
+        json.dumps(
+            {
+                "data_sha256": hashlib.sha256(orcid_data_payload).hexdigest(),
+                "normalization_version": "canonical_v2",
+                "pair_key_semantics": "unordered_lexicographic",
+                "schema_version": 1,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     if declare_model:
         bundle_dir = data_dir / "production_model_v9.9"
         bundle_dir.mkdir()
@@ -190,13 +215,16 @@ def _write_distribution_fixture(
     wheel_path = dist_dir / "s2and-0.0.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel_path, "w") as wheel:
         for path, content in files.items():
-            wheel.writestr(path, content)
+            if path != omit_wheel_path:
+                wheel.writestr(path, content)
         if extra_wheel:
             wheel.writestr("s2and/data/production_model_v8.8/manifest.json", b"{}\n")
 
     sdist_path = dist_dir / "s2and-0.0.0.tar.gz"
     with tarfile.open(sdist_path, "w:gz") as sdist:
         for path, content in files.items():
+            if path == omit_sdist_path:
+                continue
             member = tarfile.TarInfo(f"s2and-0.0.0/{path}")
             member.size = len(content)
             sdist.addfile(member, io.BytesIO(content))
@@ -244,11 +272,45 @@ def test_distribution_verifier_rejects_undeclared_model_assets(
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
 
 
-def test_distribution_verifier_rejects_unversioned_orcid_counts(tmp_path: Path) -> None:
-    dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
-    wheel_path = next(dist_dir.glob("s2and-*.whl"))
-    with zipfile.ZipFile(wheel_path, "a") as wheel:
-        wheel.writestr("s2and/data/first_k_letter_counts_from_orcid.json", b"{}\n")
+@pytest.mark.parametrize(
+    ("omit_wheel_path", "omit_sdist_path"),
+    (
+        ("s2and/data/first_k_letter_counts_from_orcid.json", None),
+        ("s2and/data/first_k_letter_counts_from_orcid.meta.json", None),
+        (None, "s2and/data/first_k_letter_counts_from_orcid.json"),
+        (None, "s2and/data/first_k_letter_counts_from_orcid.meta.json"),
+    ),
+)
+def test_distribution_verifier_requires_canonical_orcid_artifact_pair(
+    tmp_path: Path,
+    omit_wheel_path: str | None,
+    omit_sdist_path: str | None,
+) -> None:
+    dist_dir, source_root = _write_distribution_fixture(
+        tmp_path,
+        extra_wheel=False,
+        extra_sdist=False,
+        omit_wheel_path=omit_wheel_path,
+        omit_sdist_path=omit_sdist_path,
+    )
 
-    with pytest.raises(ValueError, match="forbidden legacy runtime artifacts"):
+    with pytest.raises(ValueError, match="missing required distribution files"):
+        verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)
+
+
+@pytest.mark.parametrize(
+    "missing_source_path",
+    (
+        "s2and/data/first_k_letter_counts_from_orcid.json",
+        "s2and/data/first_k_letter_counts_from_orcid.meta.json",
+    ),
+)
+def test_distribution_verifier_rejects_missing_canonical_orcid_source(
+    tmp_path: Path,
+    missing_source_path: str,
+) -> None:
+    dist_dir, source_root = _write_distribution_fixture(tmp_path, extra_wheel=False, extra_sdist=False)
+    (source_root / missing_source_path).unlink()
+
+    with pytest.raises(FileNotFoundError, match="missing required canonical runtime artifacts"):
         verify_production_model_distributions(dist_dir=dist_dir, source_root=source_root)

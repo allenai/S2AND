@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import s2and.arrow_inputs as arrow_inputs_module
+import s2and.name_counts_index as name_counts_index_module
+import scripts.verification.validate_local_arrow_release as release_validation_module
 from s2and.arrow_inputs import build_arrow_artifact_manifest, require_name_counts_index_artifact
 from s2and.incremental_linking.feature_block import (
     write_arrow_batch_lookup_index,
@@ -193,6 +196,71 @@ def test_docs_work_plan_arrow_release_layout_required_files(tmp_path: Path) -> N
         "default_model_manifest": None,
         "network_access": False,
     }
+
+
+def test_release_validation_checks_shared_name_counts_generation_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_root, dataset_name = _build_arrow_release_fixture(tmp_path)
+    root_manifest_path = release_root / "manifest.json"
+    root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
+    replay_manifest_path = release_root / "replay" / "manifest.json"
+    replay_dataset_entry = dict(root_manifest["dataset_manifests"][0])
+    replay_dataset_entry["manifest_path"] = f"../{dataset_name}/manifest.json"
+    _touch_json(replay_manifest_path, {"dataset_manifests": [replay_dataset_entry]})
+    replay_manifest_bytes = replay_manifest_path.read_bytes()
+    root_manifest["replay_bundles"] = [
+        {
+            "bundle": "duplicate-name-counts-reference",
+            "manifest_path": "replay/manifest.json",
+            "manifest_size_bytes": len(replay_manifest_bytes),
+            "manifest_sha256": hashlib.sha256(replay_manifest_bytes).hexdigest(),
+        }
+    ]
+    _touch_json(root_manifest_path, root_manifest)
+
+    manifest_loads = 0
+    native_opens = 0
+    fallback_validations = 0
+    original_manifest_load = arrow_inputs_module.ValidatedNameCountsManifest.load
+    original_native_open = name_counts_index_module.NameCountsIndex._open_with_manifest
+    original_fallback_validation = release_validation_module._validate_name_counts_index  # noqa: SLF001
+
+    def counted_manifest_load(cls, index_dir: str | Path, *, context: str):
+        nonlocal manifest_loads
+        manifest_loads += 1
+        return original_manifest_load(index_dir, context=context)
+
+    def counted_native_open(cls, path: str | Path, *, context: str):
+        nonlocal native_opens
+        native_opens += 1
+        return original_native_open(path, context=context)
+
+    def counted_fallback_validation(path: Path, errors: list[str], *, label: str) -> None:
+        nonlocal fallback_validations
+        fallback_validations += 1
+        original_fallback_validation(path, errors, label=label)
+
+    monkeypatch.setattr(
+        arrow_inputs_module.ValidatedNameCountsManifest,
+        "load",
+        classmethod(counted_manifest_load),
+    )
+    monkeypatch.setattr(
+        name_counts_index_module.NameCountsIndex,
+        "_open_with_manifest",
+        classmethod(counted_native_open),
+    )
+    monkeypatch.setattr(release_validation_module, "_validate_name_counts_index", counted_fallback_validation)
+
+    metrics = validate_release_root(release_root, include_replay_bundles=True)
+
+    assert metrics["dataset_manifest_count"] == 1
+    assert metrics["replay_dataset_manifest_count"] == 1
+    assert manifest_loads == 0
+    assert native_opens == 1
+    assert fallback_validations == 0
 
 
 def test_validate_release_root_reports_dataset_manifest_checksum_mismatch(tmp_path: Path) -> None:

@@ -61,7 +61,12 @@ def _write_papers_table(pa: Any, path: Path, paper_ids: list[str]) -> None:
     )
 
 
-def _write_paper_authors_table(pa: Any, path: Path, paper_ids: list[str], author_names: list[str]) -> None:
+def _write_paper_authors_table(
+    pa: Any,
+    path: Path,
+    paper_ids: list[str],
+    author_names: list[str | None],
+) -> None:
     write_arrow_ipc_table(
         pa.table(
             {
@@ -158,6 +163,7 @@ def test_run_full_discovers_datasets_only_when_explicit(
     convert_to_arrow.main()
 
     assert [call["sources"].dataset for call in calls] == ["first", "second"]
+    assert [call["selected_embedding"] for call in calls] == ["specter2", "specter2"]
 
     calls.clear()
 
@@ -194,6 +200,98 @@ def test_run_full_discovers_datasets_only_when_explicit(
     convert_to_arrow.main()
 
     assert [call["sources"].dataset for call in calls] == ["pubmed"]
+    assert calls[0]["selected_embedding"] == "specter2"
+
+
+def test_runtime_conversion_requires_selected_specter2_before_writing(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out" / "dummy"
+
+    with pytest.raises(FileNotFoundError, match="requires SPECTER2"):
+        convert_to_arrow.convert_runtime_dataset_to_arrow(
+            sources=_fake_sources(tmp_path, "dummy"),
+            output_dir=output_dir,
+            root_manifest_dir=tmp_path / "out",
+            name_counts_index_root=None,
+            n_jobs=1,
+            overwrite=False,
+            skip_name_counts_index=True,
+        )
+
+    assert not output_dir.exists()
+
+
+def test_runtime_conversion_defaults_to_one_physical_specter2_table(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source" / "dummy"
+    source_dir.mkdir(parents=True)
+    signatures_path = source_dir / "dummy_signatures.json"
+    papers_path = source_dir / "dummy_papers.json"
+    specter1_path = source_dir / "dummy_specter.pickle"
+    specter2_path = source_dir / "dummy_specter2.pkl"
+    signatures_path.write_text(
+        json.dumps(
+            {
+                "s1": {
+                    "signature_id": "s1",
+                    "paper_id": "p1",
+                    "author_info": {
+                        "position": 0,
+                        "block": "a lovelace",
+                        "first": "Ada",
+                        "middle": None,
+                        "last": "Lovelace",
+                        "suffix": None,
+                        "affiliations": [],
+                        "email": None,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    papers_path.write_text(
+        json.dumps(
+            {
+                "p1": {
+                    "paper_id": "p1",
+                    "title": "Notes on the Analytical Engine",
+                    "abstract": None,
+                    "authors": [{"position": 0, "author_name": "Ada Lovelace"}],
+                    "venue": None,
+                    "journal_name": None,
+                    "year": 1843,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with specter1_path.open("wb") as stream:
+        pickle.dump({"p1": np.asarray([1.0, 1.0], dtype=np.float32)}, stream)
+    with specter2_path.open("wb") as stream:
+        pickle.dump({"p1": np.asarray([2.0, 2.0], dtype=np.float32)}, stream)
+
+    output_root = tmp_path / "out"
+    output_dir = output_root / "dummy"
+    manifest = convert_to_arrow.convert_runtime_dataset_to_arrow(
+        sources=RuntimeDatasetSources(
+            dataset="dummy",
+            source_dir=source_dir,
+            signatures_path=signatures_path,
+            papers_path=papers_path,
+            specter_path=specter1_path,
+            specter2_path=specter2_path,
+        ),
+        output_dir=output_dir,
+        root_manifest_dir=output_root,
+        name_counts_index_root=None,
+        n_jobs=1,
+        overwrite=False,
+        skip_name_counts_index=True,
+    )
+
+    assert Path(manifest["paths"]["specter"]).name == "specter2.arrow"
+    assert set(manifest["specter"]) == {"specter2"}
+    assert (output_dir / "specter2.arrow").is_file()
+    assert not (output_dir / "specter.arrow").exists()
 
 
 def test_root_manifest_upsert_keeps_dataset_order_stable(tmp_path: Path) -> None:
@@ -661,13 +759,13 @@ def test_validate_arrow_dataset_manifest_rejects_malformed_optional_column(tmp_p
     ("signature_id", "author_name", "message"),
     [
         (None, "Ada Lovelace", "signatures.signature_id contains null value"),
-        ("s1", "", "paper_authors.author_name contains empty value"),
+        ("s1", None, "paper_authors.author_name contains null value"),
     ],
 )
-def test_validate_arrow_dataset_manifest_rejects_null_or_empty_required_strings(
+def test_validate_arrow_dataset_manifest_rejects_null_required_strings(
     tmp_path: Path,
     signature_id: str | None,
-    author_name: str,
+    author_name: str | None,
     message: str,
 ) -> None:
     pa = pytest.importorskip("pyarrow")
@@ -691,6 +789,35 @@ def test_validate_arrow_dataset_manifest_rejects_null_or_empty_required_strings(
             require_embeddings=False,
             require_name_counts_index=False,
         )
+
+
+@pytest.mark.parametrize("author_name", ["", "   "])
+def test_validate_arrow_dataset_manifest_accepts_blank_paper_author_names(
+    tmp_path: Path,
+    author_name: str,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    signatures_path = tmp_path / "signatures.arrow"
+    papers_path = tmp_path / "papers.arrow"
+    paper_authors_path = tmp_path / "paper_authors.arrow"
+    _write_signatures_table(pa, signatures_path, ["s1"], ["p1"])
+    _write_papers_table(pa, papers_path, ["p1"])
+    _write_paper_authors_table(pa, paper_authors_path, ["p1"], [author_name])
+
+    metrics = convert_to_arrow.validate_arrow_dataset_manifest(
+        {
+            "normalization_version": NORMALIZATION_VERSION,
+            "paths": {
+                "signatures": str(signatures_path),
+                "papers": str(papers_path),
+                "paper_authors": str(paper_authors_path),
+            },
+        },
+        require_embeddings=False,
+        require_name_counts_index=False,
+    )
+
+    assert metrics["paper_author_count"] == 1
 
 
 def test_validate_manifest_can_require_complete_specter_rows(tmp_path: Path) -> None:

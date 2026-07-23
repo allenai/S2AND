@@ -255,7 +255,7 @@ def test_validated_arrow_binding_reuses_retained_name_count_manifest(
     )
 
 
-def test_prebuilt_rust_featurizer_prediction_checks_binding_once_per_request(
+def test_prebuilt_rust_featurizer_prediction_checks_binding_once_and_skips_singletons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provenance = tiny_name_counts_provenance()
@@ -289,7 +289,7 @@ def test_prebuilt_rust_featurizer_prediction_checks_binding_once_per_request(
 
     assert clusters == {"a_0": ["1"], "b_0": ["2"]}
     assert dists is None
-    assert make_calls == ["a", "b"]
+    assert make_calls == []
     assert featurizer.binding_read_count == 1
 
 

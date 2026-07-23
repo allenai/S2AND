@@ -237,6 +237,8 @@ def facet_eval(
     The returned dictionaries are keyed by the metric itself. For example, the keys of the
     homonymity_f1 variable are floating points between 0 and 1 indicating the amount
     of homonymity. The values are the per-signature B3s that have this amount of homonymity.
+    ``facet_eval`` no longer accepts ``block_type``; block-size, homonymity,
+    and synonymity facets use the canonical S2 block in ``author_info.block``.
 
     Parameters
     ----------
@@ -583,6 +585,26 @@ def f1_score(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def _validated_cluster_partition_members(clusters: dict, *, label: str) -> set:
+    """Return partition members after rejecting repeated signature assignments."""
+
+    counts = Counter(itertools.chain.from_iterable(clusters.values()))
+    duplicates = sorted((signature_id for signature_id, count in counts.items() if count > 1), key=str)
+    if duplicates:
+        raise ValueError(f"{label} clustering must be a partition; duplicate signatures: {duplicates}")
+    return set(counts)
+
+
+def _validated_cluster_partition_coverage(true_clus: dict, pred_clus: dict) -> tuple[set, set]:
+    """Validate two partitions and return their equally covered signature sets."""
+
+    true_members = _validated_cluster_partition_members(true_clus, label="Ground-truth")
+    predicted_members = _validated_cluster_partition_members(pred_clus, label="Predicted")
+    if true_members != predicted_members:
+        raise ValueError("Predictions do not cover all the signatures!")
+    return true_members, predicted_members
+
+
 def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     """
     Compute the B^3 variant of precision, recall and F-score.
@@ -617,11 +639,7 @@ def b3_precision_recall_fscore(true_clus, pred_clus, skip_signatures=None):
     true_clusters = true_clus.copy()
     pred_clusters = pred_clus.copy()
 
-    tcset = set(itertools.chain.from_iterable(true_clusters.values()))
-    pcset = set(itertools.chain.from_iterable(pred_clusters.values()))
-
-    if tcset != pcset:
-        raise ValueError("Predictions do not cover all the signatures!")
+    tcset, _pcset = _validated_cluster_partition_coverage(true_clusters, pred_clusters)
 
     # incremental evaluation contains partially observed signatures
     # skip_signatures are observed signatures, which we skip for b3 calc.
@@ -733,6 +751,8 @@ def cluster_precision_recall_fscore(
     Science and Technology (2012): 1030-1047.
     """
 
+    _validated_cluster_partition_coverage(true_clus, pred_clus)
+
     goldpairs = set()
     syspairs = set()
 
@@ -795,11 +815,7 @@ def pairwise_precision_recall_fscore(true_clus, pred_clus, test_block, strategy=
     true_clusters = true_clus.copy()
     pred_clusters = pred_clus.copy()
 
-    tcset = set(itertools.chain.from_iterable(true_clusters.values()))
-    pcset = set(itertools.chain.from_iterable(pred_clusters.values()))
-
-    if tcset != pcset:
-        raise ValueError("predictions do not cover all the signatures.")
+    _validated_cluster_partition_coverage(true_clusters, pred_clusters)
 
     if strategy == "clusters":
         precision, recall, f1 = cluster_precision_recall_fscore(true_clus, pred_clus)

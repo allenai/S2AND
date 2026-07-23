@@ -208,6 +208,12 @@ class IncrementalLinkingArtifactMetadata:
                 "audit_metadata key 'pairwise_bundle_binding' is reserved; "
                 "use the top-level pairwise_bundle_binding field"
             )
+        expected_runtime_decision_policy = retrieval_constraint_decision_policy_payload()
+        if self.audit_metadata.get("runtime_decision_policy") != expected_runtime_decision_policy:
+            raise ValueError(
+                "Incremental linker artifact audit_metadata runtime_decision_policy must match "
+                "the runtime retrieval-constraint decision policy"
+            )
 
         frozen_gate_config = _freeze_json_mapping(self.gate_config)
         frozen_pairwise_binding = _freeze_json_mapping(self.pairwise_bundle_binding)

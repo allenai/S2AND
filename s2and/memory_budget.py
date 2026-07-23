@@ -167,6 +167,41 @@ class NativeScorerChunkPlan:
 
 
 @dataclass(frozen=True)
+class PromotedComponentSizeSummary:
+    """Immutable component-size statistics reused by Phase A RSS refreshes."""
+
+    sizes_descending: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """Validate the precomputed ordering consumed by constant-time refreshes."""
+
+        normalized = tuple(int(size) for size in self.sizes_descending)
+        if any(size <= 0 for size in normalized):
+            raise ValueError("Promoted component-size summaries must contain only positive sizes")
+        if any(left < right for left, right in zip(normalized, normalized[1:], strict=False)):
+            raise ValueError("Promoted component-size summaries must be sorted descending")
+        object.__setattr__(self, "sizes_descending", normalized)
+
+    @property
+    def component_count(self) -> int:
+        """Return the number of positive-size components."""
+
+        return len(self.sizes_descending)
+
+    @property
+    def max_component_size(self) -> int:
+        """Return the largest component size, or zero when there are none."""
+
+        return self.sizes_descending[0] if self.sizes_descending else 0
+
+    def top_k_totals(self, retrieval_top_k: int) -> tuple[int, int]:
+        """Return candidate rows and pairs for the largest ``retrieval_top_k`` components."""
+
+        count = min(max(0, int(retrieval_top_k)), self.component_count)
+        return count, int(sum(self.sizes_descending[:count]))
+
+
+@dataclass(frozen=True)
 class PredictionAccuracySummary:
     stage_name: str
     prediction_contract_version: str
@@ -774,16 +809,52 @@ def compute_rust_batch_chunk_plan(
     )
 
 
-def _largest_sum(values: list[int], count: int) -> int:
-    if count <= 0 or not values:
-        return 0
-    return int(sum(sorted((max(0, int(value)) for value in values), reverse=True)[:count]))
+def summarize_promoted_component_sizes(
+    component_sizes: Mapping[Any, int] | Iterable[int],
+) -> PromotedComponentSizeSummary:
+    """Normalize and sort seeded component sizes once for repeated RSS planning."""
+
+    size_values = (
+        cast(Iterable[int], component_sizes.values()) if isinstance(component_sizes, Mapping) else component_sizes
+    )
+    return PromotedComponentSizeSummary(
+        sizes_descending=tuple(
+            sorted(
+                (size for value in size_values if (size := max(0, int(value))) > 0),
+                reverse=True,
+            )
+        )
+    )
+
+
+def compute_promoted_phase_a_window_query_limit(
+    limits: PromotedPhaseALimits,
+    *,
+    max_window_query_count: int,
+) -> int:
+    """Size a reuse window as one scoring batch plus resident raw payload.
+
+    The active scoring batch already reserves its complete Phase A peak in
+    ``limits``. Additional window queries retain only raw-plan and featurizer
+    payload, represented by the calibrated retrieval pair and row widths.
+    """
+
+    max_window = max(1, int(max_window_query_count))
+    scoring_batch_size = max(1, min(max_window, int(limits.query_batch_size or 1)))
+    raw_payload_bytes_per_query = int(limits.conservative_pairs_per_query) * int(limits.retrieval_pair_bytes) + int(
+        limits.candidate_rows_per_query
+    ) * int(limits.retrieval_row_bytes)
+    if raw_payload_bytes_per_query <= 0:
+        return max_window
+    headroom_bytes = max(0, int(limits.stage_budget_bytes) - int(limits.predicted_peak_delta_bytes))
+    additional_queries = headroom_bytes // raw_payload_bytes_per_query
+    return min(max_window, scoring_batch_size + int(additional_queries))
 
 
 def compute_promoted_phase_a_limits(
     *,
     query_count: int,
-    component_sizes: Mapping[Any, int] | list[int] | tuple[int, ...],
+    component_sizes: Mapping[Any, int] | list[int] | tuple[int, ...] | PromotedComponentSizeSummary,
     retrieval_top_k: int,
     final_matrix_feature_count: int,
     pairwise_matrix_feature_count: int,
@@ -805,6 +876,7 @@ def compute_promoted_phase_a_limits(
     candidate_rows_total_floor: int | None = None,
     pairs_total_floor: int | None = None,
     observed_safety_multiplier: float = 2.0,
+    retrieval_payload_resident: bool = False,
     detect_cgroup_fn: Callable[[], tuple[int | None, str]] | None = None,
     detect_total_fn: Callable[[], tuple[int | None, str]] | None = None,
     current_rss_fn: Callable[[int], tuple[int, str]] | None = None,
@@ -813,7 +885,9 @@ def compute_promoted_phase_a_limits(
 
     The planner sizes the retrieval-owned ``LinkerCandidateBatch`` before Rust
     retrieval allocation and reuses the Rust pair chunk planner for pair scoring.
-    ``component_sizes`` should contain the current seeded component sizes.
+    ``component_sizes`` should contain the current seeded component sizes. Set
+    ``retrieval_payload_resident`` after the raw plan has been allocated so its
+    pair and row arrays are observed in RSS instead of reserved a second time.
     """
 
     parsed_query_count = int(query_count)
@@ -831,15 +905,14 @@ def compute_promoted_phase_a_limits(
         raise ValueError("pairwise_matrix_feature_count must be positive")
     if parsed_aggregate_feature_count < 0:
         raise ValueError("aggregate_feature_count must be nonnegative")
-    size_values: Iterable[int] = (
-        cast(Iterable[int], component_sizes.values()) if isinstance(component_sizes, Mapping) else component_sizes
+    component_summary = (
+        component_sizes
+        if isinstance(component_sizes, PromotedComponentSizeSummary)
+        else summarize_promoted_component_sizes(component_sizes)
     )
-    sizes = [max(0, int(value)) for value in size_values]
-    sizes = [size for size in sizes if size > 0]
-    component_count = len(sizes)
-    top_k_candidate_rows_per_query = min(parsed_top_k, component_count)
-    top_k_pairs_per_query = _largest_sum(sizes, top_k_candidate_rows_per_query)
-    max_component_size = max(sizes, default=0)
+    component_count = component_summary.component_count
+    top_k_candidate_rows_per_query, top_k_pairs_per_query = component_summary.top_k_totals(parsed_top_k)
+    max_component_size = component_summary.max_component_size
     parsed_observed_query_count = max(0, int(observed_query_count))
     multiplier = float(observed_safety_multiplier)
     if not math.isfinite(multiplier) or multiplier < 1.0:
@@ -933,12 +1006,14 @@ def compute_promoted_phase_a_limits(
         + parsed_final_matrix_feature_count * 4
         + scorer_output_bytes_per_row
     )
+    pending_retrieval_pair_bytes = 0 if retrieval_payload_resident else int(retrieval_pair_bytes)
+    pending_retrieval_row_bytes = 0 if retrieval_payload_resident else int(retrieval_row_bytes)
     hard_persistent_bytes_per_query = conservative_pairs_per_query * (
-        int(retrieval_pair_bytes) + int(pair_label_bytes)
-    ) + candidate_rows_per_query * (int(retrieval_row_bytes) + row_state_bytes_per_row)
+        pending_retrieval_pair_bytes + int(pair_label_bytes)
+    ) + candidate_rows_per_query * (pending_retrieval_row_bytes + row_state_bytes_per_row)
     operational_persistent_bytes_per_query = operational_pairs_per_query * (
-        int(retrieval_pair_bytes) + int(pair_label_bytes)
-    ) + operational_candidate_rows_per_query * (int(retrieval_row_bytes) + row_state_bytes_per_row)
+        pending_retrieval_pair_bytes + int(pair_label_bytes)
+    ) + operational_candidate_rows_per_query * (pending_retrieval_row_bytes + row_state_bytes_per_row)
     single_query_predicted_persistent_bytes = (
         int(fixed_overhead_bytes) + hard_persistent_bytes_per_query + scorer_scratch_bytes_per_row
     )
@@ -986,8 +1061,8 @@ def compute_promoted_phase_a_limits(
             predicted_pairs_per_batch = max(predicted_pairs_per_batch, pair_total_floor)
         hard_predicted_candidate_rows_per_batch = max(hard_predicted_candidate_rows_per_batch, row_total_floor)
         hard_predicted_pairs_per_batch = max(hard_predicted_pairs_per_batch, pair_total_floor)
-    predicted_retrieval_pair_arrays_bytes = predicted_pairs_per_batch * int(retrieval_pair_bytes)
-    predicted_retrieval_row_bytes = predicted_candidate_rows_per_batch * int(retrieval_row_bytes)
+    predicted_retrieval_pair_arrays_bytes = predicted_pairs_per_batch * pending_retrieval_pair_bytes
+    predicted_retrieval_row_bytes = predicted_candidate_rows_per_batch * pending_retrieval_row_bytes
     predicted_pair_label_bytes = predicted_pairs_per_batch * int(pair_label_bytes)
     predicted_aggregate_bytes = predicted_candidate_rows_per_batch * parsed_aggregate_feature_count * 3 * 8
     predicted_distance_row_bytes = predicted_candidate_rows_per_batch * int(distance_row_bytes)

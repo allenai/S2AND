@@ -47,6 +47,7 @@ from s2and.name_counts_manifest import (
     ValidatedNameCountsManifest,
     validated_name_counts_provenance,
 )
+from s2and.text import canonicalize_name_text
 
 ARROW_PHYSICAL_LAYOUT_SCHEMA_VERSION = "s2and_arrow_physical_v1"
 ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION = "arrow_batch_lookup_index"
@@ -63,6 +64,9 @@ _NAME_COUNTS_SORT_BUFFER_RECORDS = 1_000_000
 _NAME_COUNTS_WRITE_BUFFER_BYTES = 1024 * 1024
 _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT = struct.Struct("<8sQQQQ")
 _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT = struct.Struct("<QII")
+_ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS = 1_000_000
+_ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS = 16_384
+_ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES = 1024 * 1024
 _FNV64_OFFSET = 14695981039346656037
 _FNV64_PRIME = 1099511628211
 _ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS = 2
@@ -90,6 +94,18 @@ class _ArrowSourceDigests:
     mtime_ns: int
     sha256: str
     fingerprint: int | None
+
+
+@dataclass
+class _ArrowBatchLookupRecords:
+    """Bounded-memory records and physical-layout facts for one index build."""
+
+    buffered_records: list[tuple[int, int]]
+    run_paths: list[Path]
+    row_count: int
+    max_batch_rows: int
+    record_batch_count: int
+    peak_buffered_records: int
 
 
 def write_incremental_query_signatures_arrow(
@@ -780,10 +796,37 @@ def validate_arrow_batch_lookup_index(
     index_path_obj = Path(index_path)
     header = _read_arrow_batch_lookup_index_header(index_path_obj)
     source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="validating batch lookup index")
-    record_count = _validate_arrow_batch_lookup_index_header_contract(
-        header,
+    import pyarrow as pa
+
+    with pa.memory_map(str(arrow_path_obj), "r") as source:
+        record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
+    return _validate_arrow_batch_lookup_index_material(
         arrow_path=arrow_path_obj,
         index_path=index_path_obj,
+        key_column=key_column,
+        expected_row_count=expected_row_count,
+        header=header,
+        source_snapshot=source_snapshot,
+        record_batch_count=record_batch_count,
+    )
+
+
+def _validate_arrow_batch_lookup_index_material(
+    *,
+    arrow_path: Path,
+    index_path: Path,
+    key_column: str,
+    expected_row_count: int | None,
+    header: Mapping[str, int | str],
+    source_snapshot: _ArrowSourceSnapshot,
+    record_batch_count: int,
+) -> dict[str, int | str]:
+    """Validate exact index material using already-established source facts."""
+
+    record_count = _validate_arrow_batch_lookup_index_header_contract(
+        header,
+        arrow_path=arrow_path,
+        index_path=index_path,
         key_column=key_column,
         source_size=source_snapshot.size,
         source_fingerprint=source_snapshot.fingerprint,
@@ -792,21 +835,17 @@ def validate_arrow_batch_lookup_index(
     expected_length = (
         _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.size + record_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
     )
-    observed_length = index_path_obj.stat().st_size
+    observed_length = index_path.stat().st_size
     if observed_length != expected_length:
         raise ValueError(
-            f"Arrow batch lookup index '{index_path_obj!s}' length {observed_length} does not match "
+            f"Arrow batch lookup index '{index_path!s}' length {observed_length} does not match "
             f"expected length {expected_length} (record_count={record_count})"
         )
 
-    import pyarrow as pa
+    if not _source_snapshot_matches_stat(source_snapshot, arrow_path.stat()):
+        _raise_arrow_source_changed(arrow_path, context="validating batch lookup index")
 
-    with pa.memory_map(str(arrow_path_obj), "r") as source:
-        record_batch_count = int(pa.ipc.open_file(source).num_record_batches)
-    if not _source_snapshot_matches_stat(source_snapshot, arrow_path_obj.stat()):
-        _raise_arrow_source_changed(arrow_path_obj, context="validating batch lookup index")
-
-    with index_path_obj.open("rb") as infile:
+    with index_path.open("rb") as infile:
         with mmap.mmap(infile.fileno(), 0, access=mmap.ACCESS_READ) as index_mmap:
             records = (
                 _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.unpack_from(
@@ -818,10 +857,12 @@ def validate_arrow_batch_lookup_index(
             )
             _validate_arrow_batch_lookup_index_records(
                 records,
-                index_path=index_path_obj,
+                index_path=index_path,
                 record_count=record_count,
                 record_batch_count=record_batch_count,
             )
+    if not _source_snapshot_matches_stat(source_snapshot, arrow_path.stat()):
+        _raise_arrow_source_changed(arrow_path, context="validating batch lookup index")
     return {
         "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": str(header["magic"]),
@@ -931,18 +972,101 @@ def _validate_verified_arrow_batch_lookup_index(
     }
 
 
+def _write_arrow_batch_lookup_sort_run(path: Path, records: list[tuple[int, int]]) -> None:
+    """Sort and persist one temporary run in final-record binary form."""
+
+    records.sort()
+    buffer = bytearray()
+    with path.open("wb") as output:
+        for key_hash, batch_index in records:
+            buffer.extend(_ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.pack(key_hash, batch_index, 0))
+            if len(buffer) >= _ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES:
+                output.write(buffer)
+                buffer.clear()
+        if buffer:
+            output.write(buffer)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _iter_arrow_batch_lookup_sort_run(path: Path) -> Generator[tuple[int, int, int], None, None]:
+    """Yield one exact sorted run in bounded chunks."""
+
+    with path.open("rb") as source:
+        while chunk := source.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
+            if len(chunk) % _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size != 0:
+                raise ValueError(f"truncated Arrow batch lookup sort run: {path}")
+            yield from _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.iter_unpack(chunk)
+
+
+def _write_sorted_arrow_batch_lookup_records(
+    output: Any,
+    records: _ArrowBatchLookupRecords,
+) -> None:
+    """Write the exact sorted record body and verify its cardinality."""
+
+    if len(records.run_paths) == 1:
+        expected_size = records.row_count * _ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.size
+        observed_size = records.run_paths[0].stat().st_size
+        if observed_size != expected_size:
+            raise RuntimeError(f"Arrow batch lookup sort run has {observed_size} bytes, expected {expected_size}")
+        with records.run_paths[0].open("rb") as source:
+            shutil.copyfileobj(source, output, length=_ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES)
+        return
+
+    run_iterators: list[Generator[tuple[int, int, int], None, None]] = []
+    try:
+        if records.run_paths:
+            run_iterators = [_iter_arrow_batch_lookup_sort_run(path) for path in records.run_paths]
+            sorted_records: Iterable[tuple[int, int, int]] = heapq.merge(*run_iterators)
+        else:
+            records.buffered_records.sort()
+            sorted_records = ((key_hash, batch_index, 0) for key_hash, batch_index in records.buffered_records)
+
+        written_records = 0
+        buffer = bytearray()
+        for key_hash, batch_index, reserved in sorted_records:
+            buffer.extend(_ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.pack(key_hash, batch_index, reserved))
+            written_records += 1
+            if len(buffer) >= _ARROW_BATCH_LOOKUP_WRITE_BUFFER_BYTES:
+                output.write(buffer)
+                buffer.clear()
+        if buffer:
+            output.write(buffer)
+        if written_records != records.row_count:
+            raise RuntimeError(
+                f"Arrow batch lookup sort emitted {written_records} records, expected {records.row_count}"
+            )
+    finally:
+        for run_iterator in run_iterators:
+            run_iterator.close()
+
+
 def _read_arrow_batch_lookup_records(
     arrow_path: Path,
     *,
     key_column: str,
     table_name: str,
     max_record_batch_rows: int | None,
-) -> tuple[list[tuple[int, int]], int, int, int]:
+    sort_run_dir: Path,
+    max_records_in_memory: int,
+) -> _ArrowBatchLookupRecords:
     import pyarrow as pa
 
-    records: list[tuple[int, int]] = []
+    if max_records_in_memory < 1:
+        raise ValueError("max_records_in_memory must be positive")
+    buffered_records: list[tuple[int, int]] = []
+    run_paths: list[Path] = []
     row_count = 0
     max_batch_rows = 0
+    peak_buffered_records = 0
+
+    def flush_run() -> None:
+        run_path = sort_run_dir / f"run-{len(run_paths):06d}.bin"
+        _write_arrow_batch_lookup_sort_run(run_path, buffered_records)
+        run_paths.append(run_path)
+        buffered_records.clear()
+
     with pa.memory_map(str(arrow_path), "r") as source:
         reader = pa.ipc.open_file(source)
         record_batch_count = int(reader.num_record_batches)
@@ -960,15 +1084,31 @@ def _read_arrow_batch_lookup_records(
                 batch_rows=batch_rows,
                 max_record_batch_rows=max_record_batch_rows,
             )
-            keys = batch.column(key_column_index).to_pylist()
-            row_count += len(keys)
-            if any(key is None for key in keys):
+            keys = batch.column(key_column_index)
+            row_count += batch_rows
+            if keys.null_count:
                 raise ValueError(
                     f"Arrow IPC file {arrow_path!s} contains null values in key column {key_column!r} "
                     f"for batch {batch_index}"
                 )
-            records.extend((_fnv64_bytes(str(key).encode("utf-8")), batch_index) for key in keys)
-    return records, row_count, max_batch_rows, record_batch_count
+            for offset in range(0, batch_rows, _ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS):
+                key_chunk = keys.slice(offset, _ARROW_BATCH_LOOKUP_KEY_CHUNK_ROWS).to_pylist()
+                key_hashes = _fnv64_utf8_batch([str(key) for key in key_chunk])
+                for key_hash in key_hashes:
+                    buffered_records.append((key_hash, batch_index))
+                    peak_buffered_records = max(peak_buffered_records, len(buffered_records))
+                    if len(buffered_records) == max_records_in_memory:
+                        flush_run()
+    if run_paths and buffered_records:
+        flush_run()
+    return _ArrowBatchLookupRecords(
+        buffered_records=buffered_records,
+        run_paths=run_paths,
+        row_count=row_count,
+        max_batch_rows=max_batch_rows,
+        record_batch_count=record_batch_count,
+        peak_buffered_records=peak_buffered_records,
+    )
 
 
 def write_arrow_batch_lookup_index(
@@ -1018,11 +1158,14 @@ def write_arrow_batch_lookup_index(
                 f"index has {int(index_header['record_count'])} records, "
                 f"Arrow file has {int(layout['row_count'])} rows. Rebuild it with overwrite=True."
             )
-        validate_arrow_batch_lookup_index(
-            arrow_path_obj,
-            output_path,
+        _validate_arrow_batch_lookup_index_material(
+            arrow_path=arrow_path_obj,
+            index_path=output_path,
             key_column=key_column,
             expected_row_count=int(layout["row_count"]),
+            header=index_header,
+            source_snapshot=source_snapshot,
+            record_batch_count=int(layout["record_batch_count"]),
         )
         return str(output_path), {
             "reused": True,
@@ -1037,69 +1180,75 @@ def write_arrow_batch_lookup_index(
         }
 
     arrow_path_obj = Path(arrow_path)
-    records: list[tuple[int, int]] = []
-    row_count = 0
-    max_batch_rows = 0
-    record_batch_count = 0
-    source_snapshot: _ArrowSourceSnapshot | None = None
-    for _attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
-        source_stat_before = arrow_path_obj.stat()
-        records, row_count, max_batch_rows, record_batch_count = _read_arrow_batch_lookup_records(
-            arrow_path_obj,
-            key_column=key_column,
-            table_name=table_name,
-            max_record_batch_rows=max_record_batch_rows,
-        )
-        source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="building batch lookup index")
-        if _source_snapshot_matches_stat(source_snapshot, source_stat_before):
-            break
-    else:
-        _raise_arrow_source_changed(arrow_path_obj, context="building batch lookup index")
-    if source_snapshot is None:
-        raise AssertionError("source snapshot must be populated")
-
-    records.sort()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    records: _ArrowBatchLookupRecords | None = None
+    source_snapshot: _ArrowSourceSnapshot | None = None
     key_column_hash = _fnv64_bytes(str(key_column).encode("utf-8"))
     tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "wb",
-            dir=output_path.parent,
-            prefix=f".{output_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as outfile:
-            tmp_path = Path(outfile.name)
-            outfile.write(
-                _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.pack(
-                    _ARROW_BATCH_LOOKUP_INDEX_MAGIC,
-                    len(records),
-                    source_snapshot.size,
-                    key_column_hash,
-                    source_snapshot.fingerprint,
-                )
+    with tempfile.TemporaryDirectory(
+        dir=output_path.parent,
+        prefix=f".{output_path.name}.sort.",
+    ) as sort_tmp_text:
+        sort_tmp = Path(sort_tmp_text)
+        for attempt in range(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_SNAPSHOT_ATTEMPTS):
+            source_stat_before = arrow_path_obj.stat()
+            attempt_dir = sort_tmp / f"attempt-{attempt}"
+            attempt_dir.mkdir()
+            records = _read_arrow_batch_lookup_records(
+                arrow_path_obj,
+                key_column=key_column,
+                table_name=table_name,
+                max_record_batch_rows=max_record_batch_rows,
+                sort_run_dir=attempt_dir,
+                max_records_in_memory=_ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS,
             )
-            for key_hash, batch_index in records:
-                outfile.write(_ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.pack(key_hash, batch_index, 0))
-        if not _source_snapshot_matches_stat(source_snapshot, arrow_path_obj.stat()):
-            _raise_arrow_source_changed(arrow_path_obj, context="publishing batch lookup index")
-        tmp_path.replace(output_path)
-    except Exception:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-        raise
+            source_snapshot = _stable_source_file_snapshot(arrow_path_obj, context="building batch lookup index")
+            if _source_snapshot_matches_stat(source_snapshot, source_stat_before):
+                break
+        else:
+            _raise_arrow_source_changed(arrow_path_obj, context="building batch lookup index")
+        if source_snapshot is None or records is None:
+            raise AssertionError("source snapshot and sorted records must be populated")
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=output_path.parent,
+                prefix=f".{output_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as outfile:
+                tmp_path = Path(outfile.name)
+                outfile.write(
+                    _ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.pack(
+                        _ARROW_BATCH_LOOKUP_INDEX_MAGIC,
+                        records.row_count,
+                        source_snapshot.size,
+                        key_column_hash,
+                        source_snapshot.fingerprint,
+                    )
+                )
+                _write_sorted_arrow_batch_lookup_records(outfile, records)
+                outfile.flush()
+                os.fsync(outfile.fileno())
+            if not _source_snapshot_matches_stat(source_snapshot, arrow_path_obj.stat()):
+                _raise_arrow_source_changed(arrow_path_obj, context="publishing batch lookup index")
+            tmp_path.replace(output_path)
+        except Exception:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise
     return str(output_path), {
         "reused": False,
         "schema_version": ARROW_BATCH_LOOKUP_INDEX_SCHEMA_VERSION,
         "magic": _ARROW_BATCH_LOOKUP_INDEX_MAGIC.decode("ascii"),
-        "row_count": row_count,
-        "record_count": len(records),
+        "row_count": records.row_count,
+        "record_count": records.row_count,
         "key_column_hash": key_column_hash,
         "source_fingerprint": source_snapshot.fingerprint,
         "source_fingerprint_kind": "fnv1a64_full_file",
-        "record_batch_count": record_batch_count,
-        "actual_max_batch_rows": max_batch_rows,
+        "record_batch_count": records.record_batch_count,
+        "actual_max_batch_rows": records.max_batch_rows,
         "max_record_batch_rows": int(max_record_batch_rows or 0),
     }
 
@@ -1223,26 +1372,39 @@ def _fnv64_text(digest: int, value: str) -> int:
     return _fnv64_update(digest, raw)
 
 
-def _name_counts_arrow_fingerprint(mappings: Mapping[str, Mapping[Any, Any]]) -> int:
+def _name_count_fingerprint_digest(kind_seed: int, name: str, count: float) -> int:
+    entry_digest = _fnv64_text(kind_seed, name)
+    return _fnv64_text(entry_digest, float(count).hex())
+
+
+def _finish_name_counts_arrow_fingerprint(
+    accumulators: Mapping[str, tuple[int, int, int, int]],
+) -> int:
     digest = _fnv64_bytes(b"s2and-name-counts-arrow-v2-order-independent\x00")
-    for kind, mapping in sorted(mappings.items()):
+    for kind, (record_count, xor_accumulator, sum_accumulator, square_accumulator) in sorted(accumulators.items()):
+        digest = _fnv64_text(digest, kind)
+        digest = _fnv64_update(digest, record_count.to_bytes(8, "little", signed=False))
+        digest = _fnv64_update(digest, xor_accumulator.to_bytes(8, "little", signed=False))
+        digest = _fnv64_update(digest, sum_accumulator.to_bytes(8, "little", signed=False))
+        digest = _fnv64_update(digest, square_accumulator.to_bytes(8, "little", signed=False))
+    return digest
+
+
+def _name_counts_arrow_fingerprint(mappings: Mapping[str, Mapping[Any, Any]]) -> int:
+    accumulators: dict[str, tuple[int, int, int, int]] = {}
+    for kind, mapping in mappings.items():
         xor_accumulator = 0
         sum_accumulator = 0
         square_accumulator = 0
         kind_seed = _fnv64_text(_fnv64_bytes(b"s2and-name-count-entry-v1\x00"), kind)
         for raw_name, raw_count in mapping.items():
             name, count = _validated_name_count_entry(kind, raw_name, raw_count)
-            entry_digest = _fnv64_text(kind_seed, name)
-            entry_digest = _fnv64_text(entry_digest, float(count).hex())
+            entry_digest = _name_count_fingerprint_digest(kind_seed, name, count)
             xor_accumulator ^= entry_digest
             sum_accumulator = (sum_accumulator + entry_digest) & 0xFFFFFFFFFFFFFFFF
             square_accumulator = (square_accumulator + (entry_digest * entry_digest)) & 0xFFFFFFFFFFFFFFFF
-        digest = _fnv64_text(digest, kind)
-        digest = _fnv64_update(digest, len(mapping).to_bytes(8, "little", signed=False))
-        digest = _fnv64_update(digest, xor_accumulator.to_bytes(8, "little", signed=False))
-        digest = _fnv64_update(digest, sum_accumulator.to_bytes(8, "little", signed=False))
-        digest = _fnv64_update(digest, square_accumulator.to_bytes(8, "little", signed=False))
-    return digest
+        accumulators[kind] = (len(mapping), xor_accumulator, sum_accumulator, square_accumulator)
+    return _finish_name_counts_arrow_fingerprint(accumulators)
 
 
 def _validated_name_count_entry(kind: str, raw_name: Any, raw_count: Any) -> tuple[str, float]:
@@ -1250,6 +1412,22 @@ def _validated_name_count_entry(kind: str, raw_name: Any, raw_count: Any) -> tup
 
     if not isinstance(raw_name, str):
         raise TypeError(f"name-count {kind} keys must be strings, got {type(raw_name).__name__}: {raw_name!r}")
+    if raw_name != canonicalize_name_text(raw_name):
+        raise ValueError(f"name-count {kind} key {raw_name!r} must be canonical_v2 normalized")
+    if kind == "first":
+        structurally_valid = len(raw_name) > 1
+    elif kind == "last":
+        structurally_valid = bool(raw_name)
+    elif kind == "first_last":
+        first, separator, _last = raw_name.rpartition(" ")
+        structurally_valid = bool(separator) and len(first) > 1
+    elif kind == "last_first_initial":
+        last, separator, initial = raw_name.rpartition(" ")
+        structurally_valid = bool(last and separator) and len(initial) == 1
+    else:
+        raise ValueError(f"unknown name-count kind: {kind!r}")
+    if not structurally_valid:
+        raise ValueError(f"name-count {kind} key {raw_name!r} does not satisfy the canonical_v2 key contract")
     try:
         count: float = float(raw_count)
     except (TypeError, ValueError, OverflowError) as error:
@@ -1274,27 +1452,36 @@ def _fnv64_bytes(value: bytes) -> int:
     return _fnv64_update(_FNV64_OFFSET, value)
 
 
+def _fnv64_utf8_batch(values: Sequence[str]) -> list[int]:
+    """Hash UTF-8 keys through the native batch boundary."""
+
+    from s2and.runtime import load_s2and_rust_extension
+
+    return [int(value) for value in load_s2and_rust_extension().fnv64_utf8_batch(list(values))]
+
+
 def _source_file_fingerprint_once(path: Path, *, source_size: int) -> int:
-    digest = _fnv64_bytes(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN)
-    digest = _fnv64_update(digest, int(source_size).to_bytes(8, "little", signed=False))
-    with path.open("rb") as infile:
-        while True:
-            chunk = infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES)
-            if not chunk:
-                break
-            digest = _fnv64_update(digest, chunk)
-    return digest
+    from s2and.runtime import load_s2and_rust_extension
+
+    _sha256, fingerprint = load_s2and_rust_extension().arrow_source_file_digests(
+        str(path),
+        int(source_size),
+        False,
+    )
+    return int(fingerprint)
 
 
 def _source_file_digests_once(path: Path, *, source_size: int) -> tuple[str, int]:
-    sha256 = hashlib.sha256()
-    fingerprint = _fnv64_bytes(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN)
-    fingerprint = _fnv64_update(fingerprint, int(source_size).to_bytes(8, "little", signed=False))
-    with path.open("rb") as infile:
-        while chunk := infile.read(_ARROW_BATCH_LOOKUP_INDEX_SOURCE_READ_BYTES):
-            sha256.update(chunk)
-            fingerprint = _fnv64_update(fingerprint, chunk)
-    return sha256.hexdigest(), fingerprint
+    from s2and.runtime import load_s2and_rust_extension
+
+    sha256, fingerprint = load_s2and_rust_extension().arrow_source_file_digests(
+        str(path),
+        int(source_size),
+        True,
+    )
+    if not isinstance(sha256, str):  # pragma: no cover - native return contract
+        raise RuntimeError("native Arrow source digest omitted requested SHA-256")
+    return sha256, int(fingerprint)
 
 
 def _source_file_sha256_once(path: Path) -> str:
@@ -1495,9 +1682,17 @@ def _write_name_count_index_file(
     run_bytes = 0
     peak_buffered_records = 0
     kind_hash_seed = _name_counts_index_kind_hash_seed(kind)
+    fingerprint_kind_seed = _fnv64_text(_fnv64_bytes(b"s2and-name-count-entry-v1\x00"), kind)
+    fingerprint_xor = 0
+    fingerprint_sum = 0
+    fingerprint_square_sum = 0
     try:
         for raw_name, raw_count in mapping.items():
             name, count = _validated_name_count_entry(kind, raw_name, raw_count)
+            entry_digest = _name_count_fingerprint_digest(fingerprint_kind_seed, name, count)
+            fingerprint_xor ^= entry_digest
+            fingerprint_sum = (fingerprint_sum + entry_digest) & 0xFFFFFFFFFFFFFFFF
+            fingerprint_square_sum = (fingerprint_square_sum + (entry_digest * entry_digest)) & 0xFFFFFFFFFFFFFFFF
             name_bytes = name.encode("utf-8")
             hash_1 = _fnv64_bytes(name_bytes)
             hash_2 = _fnv64_update(kind_hash_seed, name_bytes)
@@ -1539,6 +1734,9 @@ def _write_name_count_index_file(
         "sort_run_count": len(run_paths),
         "peak_buffered_records": peak_buffered_records,
         "temporary_byte_count": run_bytes + assembly_tmp_bytes,
+        "fingerprint_xor": fingerprint_xor,
+        "fingerprint_sum": fingerprint_sum,
+        "fingerprint_square_sum": fingerprint_square_sum,
     }
 
 
@@ -1620,17 +1818,18 @@ def write_name_counts_index(
         context="write_name_counts_index",
     )
     first_dict, last_dict, first_last_dict, last_first_initial_dict = mappings
-    fingerprint = _name_counts_arrow_fingerprint(
-        {
-            "first": first_dict,
-            "last": last_dict,
-            "first_last": first_last_dict,
-            "last_first_initial": last_first_initial_dict,
-        }
-    )
+    fingerprint: int | None = None
     reuse_manifest_sha256: str | None = None
     reuse_matches = False
-    if not overwrite:
+    if not overwrite and manifest_path.is_file():
+        fingerprint = _name_counts_arrow_fingerprint(
+            {
+                "first": first_dict,
+                "last": last_dict,
+                "first_last": first_last_dict,
+                "last_first_initial": last_first_initial_dict,
+            }
+        )
         reuse_manifest_sha256, reuse_matches = _name_counts_index_reuse_snapshot(
             index_dir,
             expected_fingerprint=fingerprint,
@@ -1662,6 +1861,7 @@ def write_name_counts_index(
     }
     total_records = 0
     total_bytes = 0
+    fingerprint_accumulators: dict[str, tuple[int, int, int, int]] = {}
     manifest_files: dict[str, dict[str, int | str]] = {}
     generations_dir = index_dir / "generations"
     generations_dir.mkdir(parents=True, exist_ok=True)
@@ -1686,6 +1886,12 @@ def write_name_counts_index(
             metrics[f"{kind}_bytes"] = byte_count
             total_records += record_count
             total_bytes += byte_count
+            fingerprint_accumulators[kind] = (
+                record_count,
+                file_metrics["fingerprint_xor"],
+                file_metrics["fingerprint_sum"],
+                file_metrics["fingerprint_square_sum"],
+            )
             manifest_files[kind] = {
                 "path": f"generations/{generation_name}/{filename}",
                 "record_count": record_count,
@@ -1696,6 +1902,10 @@ def write_name_counts_index(
             metrics[f"{kind}_peak_buffered_records"] = file_metrics["peak_buffered_records"]
             metrics[f"{kind}_temporary_bytes"] = file_metrics["temporary_byte_count"]
 
+        built_fingerprint = _finish_name_counts_arrow_fingerprint(fingerprint_accumulators)
+        if fingerprint is not None and built_fingerprint != fingerprint:
+            raise ValueError("name-count mappings changed while building the index generation")
+        fingerprint = built_fingerprint
         manifest = {
             "schema_version": NAME_COUNTS_INDEX_SCHEMA_VERSION,
             "normalization_version": source_provenance["normalization_version"],
@@ -1843,8 +2053,6 @@ def feature_block_from_arrow_paths(
             if author_name_value is None:
                 raise ValueError("paper_authors Arrow cannot contain null author_name values")
             author_name = str(author_name_value)
-            if not author_name:
-                raise ValueError("paper_authors Arrow cannot contain empty author_name values")
             key = (paper_id, position)
             if key in seen_paper_author_positions:
                 raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position): {key!r}")

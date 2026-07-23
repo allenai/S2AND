@@ -410,12 +410,12 @@ class FakeProductionClusterer:
         _partial_supervision: dict[tuple[str, str], int | float],
         _runtime_context: object,
         total_ram_bytes: int | None = None,
-    ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
         del total_ram_bytes
         inverse: dict[str, list[str]] = {}
         for signature_id, cluster_id in self.seed_map.items():
             inverse.setdefault(cluster_id, []).append(signature_id)
-        return dict(self.seed_map), dict(self.recluster_map), inverse
+        return dict(self.seed_map), dict(self.recluster_map), inverse, inverse
 
     def _resolve_constraint_batch(
         self,
@@ -494,6 +494,7 @@ def test_private_production_forwards_four_element_seed_setup_to_retrieval_slice(
     )
 
     assert result.ok is True
+    assert len(captured["seed_setup"]) == 4
     assert captured["seed_setup"][3] is split_inverse
 
 
@@ -2166,7 +2167,7 @@ def test_from_retrieval_validates_partial_supervision_against_full_seed_map() ->
             queries=[object()],
             query_signature_ids=["q1"],
             partial_supervision={("q1", "s2"): 0},
-            seed_setup=({"s1": "c1"}, {}, {"c1": ["s1"]}),
+            seed_setup=({"s1": "c1"}, {}, {"c1": ["s1"]}, {"c1": ["s1"]}),
             partial_supervision_seed_signature_to_component={"s1": "c1", "s2": "c2"},
         )
 
@@ -2204,7 +2205,7 @@ def test_from_retrieval_records_artifact_retrieval_top_k_when_not_passed(
         retrieval_batch=retrieval_batch,
         queries=[object()],
         query_signature_ids=["q1"],
-        seed_setup=({"s1": "c1"}, {}, {"c1": ["s1"]}),
+        seed_setup=({"s1": "c1"}, {}, {"c1": ["s1"]}, {"c1": ["s1"]}),
     )
 
     assert result.telemetry["retrieval_top_k"] == 37

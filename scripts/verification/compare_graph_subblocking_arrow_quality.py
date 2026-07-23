@@ -340,9 +340,10 @@ def _paper_author_rows_by_paper(rows: Iterable[Mapping[str, Any]]) -> dict[str, 
         if position in seen_positions[paper_id]:
             raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position): ({paper_id!r}, {position})")
         seen_positions[paper_id].add(position)
-        author_name = str(row.get("author_name") or "").strip()
-        if not author_name:
-            raise ValueError("paper_authors Arrow cannot contain empty author_name values")
+        author_name_value = row.get("author_name")
+        if author_name_value is None:
+            raise ValueError("paper_authors Arrow cannot contain null author_name values")
+        author_name = str(author_name_value)
         out[paper_id].append({"position": position, "author_name": author_name})
     for authors in out.values():
         authors.sort(key=lambda author: int(author["position"]))

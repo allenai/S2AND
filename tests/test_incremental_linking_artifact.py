@@ -147,6 +147,34 @@ def test_save_rejects_reserved_audit_metadata_binding_key(tmp_path: Path) -> Non
     assert not (tmp_path / METADATA_FILENAME).exists()
 
 
+def test_metadata_build_rejects_false_runtime_decision_policy() -> None:
+    columns = promoted_linker_feature_columns()
+
+    with pytest.raises(ValueError, match="runtime_decision_policy must match"):
+        IncrementalLinkingArtifactMetadata.build(
+            feature_columns=columns,
+            gate_config=_logistic_gate_config(),
+            prediction_fixture_matrix=((0.0,) * len(columns),),
+            prediction_fixture_expected_probabilities=(0.5,),
+            booster_sha256="a" * 64,
+            lightgbm_version="test-version",
+            target_spec_digest=canonical_json_digest(_TEST_TARGET_SPEC),
+            pairwise_bundle_binding=synthetic_pairwise_bundle_binding(),
+            audit_metadata={"runtime_decision_policy": {"constraint_resolution": "false"}},
+        )
+
+
+def test_metadata_load_rejects_false_runtime_decision_policy(tmp_path: Path) -> None:
+    artifact_dir = _write_fake_artifact(tmp_path / "artifact")
+    metadata_path = artifact_dir / METADATA_FILENAME
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["audit_metadata"]["runtime_decision_policy"] = {"constraint_resolution": "false"}
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="runtime_decision_policy must match"):
+        load_incremental_linking_artifact(artifact_dir)
+
+
 def test_save_rejects_empty_pairwise_bundle_binding(tmp_path: Path) -> None:
     booster, fixture = build_tiny_promoted_booster()
     with pytest.raises(ValueError, match="pairwise_bundle_binding is required"):

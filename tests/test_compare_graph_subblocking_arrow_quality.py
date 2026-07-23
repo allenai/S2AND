@@ -73,9 +73,12 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
         arrow_root / "paper_authors.arrow",
         pa.table(
             {
-                "paper_id": pa.array(["p1", "p1", "p2", "p2"], type=pa.string()),
-                "position": pa.array([0, 1, 0, 1], type=pa.int64()),
-                "author_name": pa.array(["Hui Wang", "Ada Lovelace", "Hui Wang", "Ada Lovelace"], type=pa.string()),
+                "paper_id": pa.array(["p1", "p1", "p1", "p2", "p2", "p2"], type=pa.string()),
+                "position": pa.array([0, 1, 2, 0, 1, 2], type=pa.int64()),
+                "author_name": pa.array(
+                    ["Hui Wang", "Ada Lovelace", "", "Hui Wang", "Ada Lovelace", "   "],
+                    type=pa.string(),
+                ),
             }
         ),
         key_column="paper_id",
@@ -103,4 +106,6 @@ def test_load_lightweight_dataset_from_arrow_builds_python_subblocking_view(tmp_
     assert signature_ids == ["s1", "s2"]
     assert dataset.signatures["s1"].author_info_first == "Hui"
     assert dataset.signatures["s1"].author_info_coauthor_blocks == ("a lovelace",)
+    assert dataset.papers["p1"]["authors"][2] == {"position": 2, "author_name": ""}
+    assert dataset.papers["p2"]["authors"][2] == {"position": 2, "author_name": "   "}
     assert np.allclose(dataset.specter_embeddings["p1"], np.array([1.0, 0.0], dtype=np.float32))

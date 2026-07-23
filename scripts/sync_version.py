@@ -184,16 +184,15 @@ def release_decisions(
     """Resolve release policy once for all workflow jobs."""
 
     on_main = ref == "refs/heads/main"
-    publish_s2and = on_main and (
-        (event_name == "push" and version_changed) or (event_name == "workflow_dispatch" and publish_s2and_requested)
-    )
-    publish_rust = on_main and (
-        (event_name == "push" and version_changed) or (event_name == "workflow_dispatch" and publish_rust_requested)
-    )
-    build_s2and = version_changed or force_build or publish_s2and_requested
-    build_rust = version_changed or force_build or publish_s2and_requested or publish_rust_requested
+    publish_s2and = on_main and event_name == "workflow_dispatch" and publish_s2and_requested
+    publish_rust = on_main and event_name == "workflow_dispatch" and publish_rust_requested
+    publish_requested = publish_s2and_requested or publish_rust_requested
+    build_s2and = version_changed or force_build or publish_requested
+    build_rust = version_changed or force_build or publish_requested
     run_release_smoke = (
         publish_s2and
+        or publish_rust
+        or (event_name == "push" and on_main and version_changed)
         or (event_name == "pull_request" and force_build)
         or (event_name == "workflow_dispatch" and on_main and force_build)
     )

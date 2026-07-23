@@ -11,9 +11,9 @@ Snapshot identity is fail-closed: if any feature input lacks verifiable
 content identity, the owned build-and-cache operation raises instead of
 caching blind.
 
-Concurrency: snapshots are content-addressed and written once. Publication
-happens under a short file lock, an existing snapshot is never overwritten,
-and losing writers load the published winner before returning.
+Concurrency: snapshots are content-addressed and written once. A per-snapshot
+build lock covers the second cache check, featurization, and publication, so
+competing processes wait and load the winner instead of duplicating the work.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from s2and.text import compute_block
 logger = logging.getLogger("s2and")
 
 SNAPSHOT_SCHEMA_VERSION = 1
+_SNAPSHOT_BUILD_LOCK_TIMEOUT_SECONDS = 3600.0
 
 _PairList = list[tuple[str, str, int | float]]
 
@@ -392,42 +393,50 @@ def _cached_featurize_fresh(
             )
             continue
 
-        logger.info("Feature snapshot miss split=%s pairs=%d; computing", split_name, len(split_pairs))
-        features, labels, nameless = many_pairs_featurize(
-            split_pairs,
-            dataset,
-            featurizer_info,
-            n_jobs=n_jobs,
-            chunk_size=chunk_size,
-            nameless_featurizer_info=nameless_featurizer_info,
-            nan_value=nan_value,
-            total_ram_bytes=total_ram_bytes,
-        )
-        arrays = {"key": np.array(key), "X": features, "y": labels}
-        if nameless is not None:
-            arrays["nameless_X"] = nameless
-        validated = _validate_snapshot_arrays(
-            arrays,
-            path=path,
-            expected_key=key,
-            expected_rows=expected_rows,
-            expected_width=expected_width,
-            expected_nameless_width=expected_nameless_width,
-        )
-        if _publish_snapshot(path, arrays):
+        build_lock_path = path.with_suffix(f"{path.suffix}.build.lock")
+        with exclusive_file_lock(
+            build_lock_path,
+            timeout_seconds=_SNAPSHOT_BUILD_LOCK_TIMEOUT_SECONDS,
+        ):
+            if path.exists():
+                logger.info("Feature snapshot filled while waiting split=%s path=%s", split_name, path)
+                results.append(
+                    _load_snapshot(
+                        path,
+                        expected_key=key,
+                        expected_rows=expected_rows,
+                        expected_width=expected_width,
+                        expected_nameless_width=expected_nameless_width,
+                    )
+                )
+                continue
+
+            logger.info("Feature snapshot miss split=%s pairs=%d; computing", split_name, len(split_pairs))
+            features, labels, nameless = many_pairs_featurize(
+                split_pairs,
+                dataset,
+                featurizer_info,
+                n_jobs=n_jobs,
+                chunk_size=chunk_size,
+                nameless_featurizer_info=nameless_featurizer_info,
+                nan_value=nan_value,
+                total_ram_bytes=total_ram_bytes,
+            )
+            arrays = {"key": np.array(key), "X": features, "y": labels}
+            if nameless is not None:
+                arrays["nameless_X"] = nameless
+            validated = _validate_snapshot_arrays(
+                arrays,
+                path=path,
+                expected_key=key,
+                expected_rows=expected_rows,
+                expected_width=expected_width,
+                expected_nameless_width=expected_nameless_width,
+            )
+            if not _publish_snapshot(path, arrays):
+                raise RuntimeError(f"Feature snapshot publication lost exclusive build ownership for {path}")
             logger.info("Feature snapshot published split=%s path=%s bytes=%d", split_name, path, path.stat().st_size)
             results.append(validated)
-        else:
-            logger.info("Feature snapshot race lost split=%s path=%s; loading winner", split_name, path)
-            results.append(
-                _load_snapshot(
-                    path,
-                    expected_key=key,
-                    expected_rows=expected_rows,
-                    expected_width=expected_width,
-                    expected_nameless_width=expected_nameless_width,
-                )
-            )
 
     train_result, val_result, test_result = results
     return train_result, val_result, test_result

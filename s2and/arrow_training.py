@@ -152,7 +152,6 @@ def load_papers_from_arrow(
     """
 
     authors_by_paper_id: dict[str, list[Author]] = {}
-    paper_author_keys: set[tuple[str, int]] = set()
     for row_index, row in _iter_arrow_rows(
         paper_authors_path,
         table_name="paper_authors",
@@ -162,18 +161,17 @@ def load_papers_from_arrow(
         if needed_paper_ids is not None and paper_id not in needed_paper_ids:
             continue
         raw_author_name = row.get("author_name")
-        if not isinstance(raw_author_name, str) or not raw_author_name.strip():
-            raise ValueError(f"Arrow paper_authors table contains empty author_name at row {row_index}")
+        if raw_author_name is None:
+            raise ValueError(f"Arrow paper_authors table contains null author_name at row {row_index}")
+        if not isinstance(raw_author_name, str):
+            raise ValueError(f"Arrow paper_authors table contains non-string author_name at row {row_index}")
         raw_position = row.get("position")
         if raw_position is None:
             raise ValueError(f"Arrow paper_authors table contains null position at row {row_index}")
         position = int(raw_position)
-        author_key = (paper_id, position)
-        if author_key in paper_author_keys:
-            raise ValueError(f"paper_authors Arrow contains duplicate (paper_id, position)=({paper_id!r}, {position})")
-        paper_author_keys.add(author_key)
         authors_by_paper_id.setdefault(paper_id, []).append(Author(author_name=raw_author_name, position=position))
-    del paper_author_keys
+    for paper_id, authors in authors_by_paper_id.items():
+        _validate_unique_author_positions(paper_id, authors)
 
     papers: dict[str, Paper] = {}
     source_has_papers = False
@@ -222,6 +220,20 @@ def load_papers_from_arrow(
                 f"signatures Arrow references paper_id values absent from papers Arrow: {missing_paper_ids[:10]}"
             )
     return papers
+
+
+def _validate_unique_author_positions(paper_id: str, authors: list[Author]) -> None:
+    """Reject duplicate positions while retaining state for only one paper."""
+
+    if len(authors) < 2:
+        return
+    positions: set[int] = set()
+    for author in authors:
+        if author.position in positions:
+            raise ValueError(
+                f"paper_authors Arrow contains duplicate (paper_id, position)=({paper_id!r}, {author.position})"
+            )
+        positions.add(author.position)
 
 
 def build_training_anddata_from_arrow(

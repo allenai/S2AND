@@ -60,8 +60,13 @@ The loader validates the complete bundle, loads the linker once, and retains
 that immutable native artifact on the clusterer. Deep copies share it; pickle
 round trips revalidate and reload it from the recorded bundle path.
 
-`clusterer.json` is the sole authority for the clustering `eps`. There are no
-version- or path-based threshold overrides.
+`clusterer.json` is the authority for clustering `eps` except for one published
+compatibility policy: after all current-schema and checksum validation passes,
+the exact historical v1.21 pairwise artifact identity resolves its stored
+`0.6064583975886222` value to the effective production value `0.65`. The match
+uses the pairwise version plus both verified booster hashes, never a bundle
+path or bundle-version name. Every other bundle, including a newly tuned model
+that reuses old boosters, keeps its configured value.
 
 ### Staged publication
 
@@ -120,7 +125,11 @@ dependency is part of the normal S2AND install; there is no `s2and[rust]`
 compatibility extra.
 
 Classic `ANDData` prediction remains useful for Python training, fixtures, and
-reference checks:
+reference checks over the canonical S2 partition. `author_info.block` is its
+sole grouping authority. The legacy `block_type` selector,
+`author_info.given_block`, `get_original_blocks()`, and `get_s2_blocks()` are
+not part of the canonical-v2 API; preserve any historical/original partition
+outside `ANDData` if it is still needed.
 
 ```python
 pred_clusters, pred_distance_matrices = clusterer.predict(
@@ -190,9 +199,23 @@ Full-block inference accepts blocks plus the validated Arrow-path mapping:
 pred_clusters, pred_distance_matrices = clusterer.predict_from_arrow_paths(
     blocks,
     arrow_paths,
+    batching_threshold=15_000,
+    cluster_seeds_require=current_seed_assignments,
+    altered_cluster_signatures=corrected_claimed_profiles,
     total_ram_bytes=32 * 1024**3,
 )
 ```
+
+`batching_threshold` is optional. When set, blocks larger than the threshold
+use strict Arrow-native Rust subblocking; smaller blocks retain the full-block
+route. The native graph fallback requires indexed SPECTER evidence even when
+the pairwise model itself does not select an embedding feature. Initial-only
+groups attach through the production bundle's promoted incremental linker.
+An explicit `cluster_seeds_require` mapping takes precedence over the Arrow
+seed sidecar. When altered claimed profiles are supplied on a subblocked
+request, their components are naturally pre-split before native subblocking;
+the resulting request-local seed view is shared by subblocking and
+featurization.
 
 Promoted incremental inference accepts either `cluster_seeds` in the Arrow
 paths or an explicit seed mapping:
@@ -231,12 +254,13 @@ model’s actual final, pairwise, and aggregate feature widths.
 ## Name-count and cache boundaries
 
 Canonical-v2 uses one binary `NameCountsIndex` in Python and Rust. Classic
-`ANDData` accepts either a verified index path, a shared open index handle, or
-`None` when count features are intentionally absent. Arrow routes carry the
-same index under `arrow_paths["name_counts_index"]`. Runtime code does not open
-the historical source pickle. Python deduplicates each 2,048-signature batch
-before unique keys cross the native boundary, scatters the four result columns
-back onto signatures, and discards all temporary key maps with the batch. The
+`ANDData` defaults to the canonical configured index and also accepts a
+verified alternate path, a shared open index handle, or explicit `None` when
+count features are intentionally absent. Arrow routes carry the same index
+under `arrow_paths["name_counts_index"]`. Runtime code does not open the
+historical source pickle. Python deduplicates each 2,048-signature batch before
+unique keys cross the native boundary, scatters the four result columns back
+onto signatures, and discards all temporary key maps with the batch. The
 v1 `pickle_sha256` field is source-lineage metadata, not a runtime dependency.
 
 Python is the sole name-tuple artifact loader. It validates the data and

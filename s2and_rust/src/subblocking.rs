@@ -1731,9 +1731,7 @@ pub(crate) fn build_native_graph_evidence_store(
                 }
                 let trimmed = author_name.trim();
                 if trimmed.is_empty() {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "paper_authors Arrow cannot contain empty author_name values",
-                    ));
+                    continue;
                 }
                 let normalized =
                     normalize_text_compat_from_map(trimmed, false, &unidecode_char_map);
@@ -2705,12 +2703,14 @@ pub(crate) fn make_subblocks_with_telemetry_arrow_native_graph(
     let signatures_index_path =
         extract_path_mapping_string(paths, "signatures_batch_index", false)?;
     let mut seen_signature_ids = HashSet::<String>::new();
-    let mut requested_signature_ids = Vec::<String>::new();
-    for signature_id in signature_ids {
-        if seen_signature_ids.insert(signature_id.clone()) {
-            requested_signature_ids.push(signature_id);
+    for signature_id in &signature_ids {
+        if !seen_signature_ids.insert(signature_id.clone()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Subblocking signature_ids must be unique after string coercion: {signature_id:?}"
+            )));
         }
     }
+    let requested_signature_ids = signature_ids;
     let keep_signature_ids: HashSet<String> = requested_signature_ids.iter().cloned().collect();
     let (subblocking_rows, _read_stats) = read_subblocking_signature_rows_with_optional_index(
         &signatures_path,

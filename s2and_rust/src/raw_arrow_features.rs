@@ -355,9 +355,9 @@ pub(crate) fn select_raw_arrow_exemplars(
         .collect()
 }
 
-pub(crate) fn build_raw_arrow_summary(
+pub(crate) fn build_raw_arrow_summary<S: AsRef<str>>(
     component_key: &str,
-    signature_ids: &[String],
+    signature_ids: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     max_exemplars: usize,
 ) -> Result<RetrievalSummaryData, RetrievalError> {
@@ -374,6 +374,7 @@ pub(crate) fn build_raw_arrow_summary(
     let mut max_paper_author_count = 0usize;
 
     for signature_id in signature_ids {
+        let signature_id = signature_id.as_ref();
         let feature = features_by_signature_id.get(signature_id).ok_or_else(|| {
             RetrievalError::MissingKey(format!(
                 "cluster seed signature_id '{}' is missing from computed raw Arrow features",
@@ -477,8 +478,8 @@ pub(crate) fn build_raw_arrow_summary(
     })
 }
 
-pub(crate) fn build_raw_arrow_summary_signals(
-    signature_ids: &[String],
+pub(crate) fn build_raw_arrow_summary_signals<S: AsRef<str>>(
+    signature_ids: &[S],
     features_by_signature_id: &HashMap<String, RawArrowFeature>,
     signatures: &HashMap<String, RawArrowSignature>,
     paper_authors: &HashMap<String, Vec<(i64, String)>>,
@@ -492,6 +493,7 @@ pub(crate) fn build_raw_arrow_summary_signals(
     let mut member_signature_ids = Vec::<String>::with_capacity(signature_ids.len());
 
     for signature_id in signature_ids {
+        let signature_id = signature_id.as_ref();
         let feature = features_by_signature_id.get(signature_id).ok_or_else(|| {
             format!(
                 "cluster seed signature_id '{}' is missing from computed raw Arrow features",
@@ -515,7 +517,7 @@ pub(crate) fn build_raw_arrow_summary_signals(
         member_paper_author_names.push(author_signals.paper_author_names);
         member_paper_author_counts.push(feature.paper_author_count);
         member_local10_author_names.push(author_signals.local10_author_names);
-        member_signature_ids.push(signature_id.clone());
+        member_signature_ids.push(signature_id.to_string());
     }
 
     Ok(RawArrowSummarySignalData {
@@ -771,6 +773,53 @@ mod tests {
         assert_eq!(feature.query_author, "b smith phd");
         assert!(feature.query.title_hashes.contains(&fnv64(b"1")));
         assert!(feature.query.title_hashes.contains(&fnv64(b"co3o4")));
+    }
+
+    #[test]
+    fn raw_feature_counts_blank_author_rows_without_name_evidence() {
+        let signature = RawArrowSignature {
+            paper_id: "p1".to_string(),
+            author_first: "Alice".to_string(),
+            author_middle: String::new(),
+            author_last: "Smith".to_string(),
+            author_suffix: String::new(),
+            author_block: None,
+            affiliations: Vec::new(),
+            email: None,
+            orcid: None,
+            position: Some(0),
+        };
+        let paper_authors = vec![
+            (0, "Alice Smith".to_string()),
+            (1, String::new()),
+            (2, "   ".to_string()),
+            (3, "Bob Jones".to_string()),
+        ];
+
+        let feature = build_raw_arrow_feature(
+            &signature,
+            None,
+            Some(&paper_authors),
+            None,
+            &RawNameCountMaps::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            false,
+        );
+        let author_signals =
+            build_raw_arrow_author_signal_data(&signature, Some(&paper_authors), &HashMap::new());
+
+        assert_eq!(feature.paper_author_count, 4);
+        assert_eq!(feature.query.coauthor_hashes.len(), 1);
+        assert_eq!(
+            author_signals.paper_author_names,
+            HashSet::from(["alice smith".to_string(), "bob jones".to_string()])
+        );
+        assert_eq!(
+            author_signals.local10_author_names,
+            HashSet::from(["bob jones".to_string()])
+        );
     }
 
     #[test]

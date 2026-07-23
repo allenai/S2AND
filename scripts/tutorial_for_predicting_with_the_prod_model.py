@@ -18,10 +18,10 @@ Examples:
       --model-path path/to/complete-production-bundle \
       --input-format json --dataset qian --data-root tests --load-name-counts 0
 
-  # Show subblocking + memory budget knobs (for large blocks)
+  # Show subblocking for large blocks
   uv run python scripts/tutorial_for_predicting_with_the_prod_model.py \
       --model-path path/to/complete-production-bundle \
-      --input-format json --dataset qian --batching-threshold 5000 --desired-memory-use 25000000
+      --input-format json --dataset qian --batching-threshold 5000
 """
 
 import argparse
@@ -58,8 +58,6 @@ def _select_input_route(
     dataset_name: str,
     arrow_data_root: str,
     specter_suffix: str,
-    batching_threshold: int | None,
-    desired_memory_use: int | None,
     resolve_arrow_dataset_paths,
 ) -> tuple[str, ValidatedArrowInputs | None]:
     """Resolve tutorial input routing without loading models or ANDData."""
@@ -74,14 +72,9 @@ def _select_input_route(
                 raise
             input_format = "json"
         else:
-            if input_format == "auto" and (batching_threshold is not None or desired_memory_use is not None):
-                input_format = "json"
-            else:
-                input_format = "arrow"
+            input_format = "arrow"
 
     if input_format == "arrow":
-        if batching_threshold is not None or desired_memory_use is not None:
-            raise ValueError("--batching-threshold and --desired-memory-use are JSON/ANDData tutorial knobs")
         if arrow_paths is None:
             raise RuntimeError("Arrow input selected without resolved Arrow paths")
     return input_format, arrow_paths
@@ -94,7 +87,6 @@ def _cluster_eval_with_predict_options(
     split: str,
     use_s2_clusters: bool,
     batching_threshold: int | None,
-    desired_memory_use: int | None,
 ):
     import numpy as np
 
@@ -116,7 +108,6 @@ def _cluster_eval_with_predict_options(
         dataset,
         use_s2_clusters=use_s2_clusters,
         batching_threshold=batching_threshold,
-        desired_memory_use=desired_memory_use,
     )
 
     (
@@ -166,10 +157,7 @@ def main() -> None:
         "--input-format",
         choices=["auto", "arrow", "json"],
         default="auto",
-        help=(
-            "Input route. auto uses Arrow when the requested dataset exists under --arrow-data-root, "
-            "unless JSON-only subblocking knobs are supplied."
-        ),
+        help="Input route. auto uses Arrow when the requested dataset exists under --arrow-data-root.",
     )
     parser.add_argument(
         "--arrow-data-root",
@@ -207,17 +195,8 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            "Optional subblocking threshold for Clusterer.predict. "
-            "Blocks larger than this use subblocking/incremental flow."
-        ),
-    )
-    parser.add_argument(
-        "--desired-memory-use",
-        type=int,
-        default=None,
-        help=(
-            "Optional desired memory budget for subblocked predict path "
-            "(signature-pair units). Requires --batching-threshold."
+            "Optional maximum subblock size for Python or Arrow/Rust prediction. "
+            "Blocks larger than this use the route's native subblocking/incremental flow."
         ),
     )
     parser.add_argument(
@@ -234,9 +213,6 @@ def main() -> None:
         help="Complete native production model bundle directory, relative to repo root or absolute.",
     )
     args = parser.parse_args()
-
-    if args.desired_memory_use is not None and args.batching_threshold is None:
-        raise ValueError("--desired-memory-use requires --batching-threshold")
 
     from s2and.consts import FEATURIZER_VERSION, NAME_COUNTS_INDEX_PATH, PROJECT_ROOT_PATH
     from s2and.data import ANDData
@@ -289,7 +265,6 @@ def main() -> None:
         f"runtime_context_default={os.environ.get('S2AND_BACKEND', 'python')}, "
         f"split={args.split}, n_jobs={n_jobs}, "
         f"batching_threshold={args.batching_threshold}, "
-        f"desired_memory_use={args.desired_memory_use}, "
         f"load_name_counts={args.load_name_counts}, "
         f"input_format={args.input_format}"
     )
@@ -304,8 +279,6 @@ def main() -> None:
             dataset_name=dataset_name,
             arrow_data_root=arrow_data_root,
             specter_suffix=args.specter_suffix,
-            batching_threshold=args.batching_threshold,
-            desired_memory_use=args.desired_memory_use,
             resolve_arrow_dataset_paths=resolve_arrow_dataset_paths,
         )
 
@@ -319,6 +292,7 @@ def main() -> None:
                 n_jobs=n_jobs,
                 split=args.split,
                 total_ram_bytes=int(args.arrow_total_ram_bytes),
+                batching_threshold=args.batching_threshold,
             )
             print(f"[{dataset_name}] Arrow predict_from_arrow_paths (Rust)")
             print(cluster_metrics)
@@ -368,7 +342,6 @@ def main() -> None:
             split=args.split,
             use_s2_clusters=False,
             batching_threshold=args.batching_threshold,
-            desired_memory_use=args.desired_memory_use,
         )
         print(cluster_metrics)
         cluster_metrics_all.append(cluster_metrics)

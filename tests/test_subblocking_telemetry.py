@@ -88,6 +88,42 @@ def test_make_subblocks_rejects_duplicate_ids_after_string_coercion() -> None:
         )
 
 
+def test_rust_arrow_make_subblocks_rejects_duplicate_ids_after_string_coercion(tmp_path) -> None:
+    _require_rust_arrow_subblocking()
+    signatures_path = tmp_path / "signatures.arrow"
+    _write_signatures_arrow(signatures_path, [("1", "anna", "", None)])
+    paths = {
+        "signatures": str(signatures_path),
+        "signatures_batch_index": _add_batch_index(
+            signatures_path,
+            tmp_path / "signatures.signatures_batch_index.bin",
+            key_column="signature_id",
+            table_name="signatures",
+        ),
+    }
+
+    with pytest.raises(ValueError, match="must be unique.*'1'"):
+        subblocking._make_subblocks_with_telemetry_arrow_rust(
+            paths,
+            [1, "1"],
+            maximum_size=2,
+            first_k_letter_counts_sorted={},
+            graph_subblocking_config=subblocking.GraphSubblockingConfig(),
+        )
+
+    rust_module = pytest.importorskip("s2and_rust")
+    with pytest.raises(ValueError, match='must be unique.*"1"'):
+        rust_module.make_subblocks_with_telemetry_arrow_native_graph(
+            paths,
+            ["1", "1"],
+            2,
+            {},
+            subblocking.GraphSubblockingConfig(),
+            0,
+            True,
+        )
+
+
 def test_make_subblocks_skips_specter_when_single_letter_block_is_in_budget(monkeypatch):
     dataset = SimpleNamespace(
         signatures={
@@ -342,9 +378,9 @@ def test_signature_name_parts_for_subblocking_treats_all_dashes_uniformly() -> N
 def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) -> None:
     paper_authors = pa.table(
         {
-            "paper_id": pa.array(["p1", "p1"], type=pa.string()),
-            "position": pa.array([0, 1], type=pa.int64()),
-            "author_name": pa.array(["O'Connor", "Maciej Górski"], type=pa.string()),
+            "paper_id": pa.array(["p1", "p1", "p1", "p1"], type=pa.string()),
+            "position": pa.array([0, 1, 2, 3], type=pa.int64()),
+            "author_name": pa.array(["O'Connor", "", "   ", "Maciej Górski"], type=pa.string()),
         }
     )
 
@@ -357,13 +393,40 @@ def test_coauthor_blocks_from_rowwise_arrow_normalizes_author_names(tmp_path) ->
         table_name="paper_authors",
     )
 
+    load_metrics: dict[str, int] = {}
     out = subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
         {"paper_authors": paper_authors_path, "paper_authors_batch_index": str(paper_authors_index_path)},
         ["p1"],
-        load_metrics={},
+        load_metrics=load_metrics,
     )
 
-    assert out == {"p1": [(0, "o connor"), (1, "m gorski")]}
+    assert out == {"p1": [(0, "o connor"), (3, "m gorski")]}
+    assert load_metrics["paper_authors_rows_loaded"] == 4
+
+
+def test_coauthor_blocks_from_rowwise_arrow_validates_blank_row_positions(tmp_path) -> None:
+    paper_authors = pa.table(
+        {
+            "paper_id": pa.array(["p1", "p1"], type=pa.string()),
+            "position": pa.array([0, 0], type=pa.int64()),
+            "author_name": pa.array(["", "   "], type=pa.string()),
+        }
+    )
+    paper_authors_path = _write_ipc(tmp_path / "paper_authors.arrow", paper_authors)
+    paper_authors_index_path = tmp_path / "paper_authors.paper_authors_batch_index.bin"
+    write_arrow_batch_lookup_index(
+        paper_authors_path,
+        paper_authors_index_path,
+        key_column="paper_id",
+        table_name="paper_authors",
+    )
+
+    with pytest.raises(ValueError, match=r"duplicate \(paper_id, position\)"):
+        subblocking._coauthor_blocks_by_paper_from_arrow(  # noqa: SLF001
+            {"paper_authors": paper_authors_path, "paper_authors_batch_index": str(paper_authors_index_path)},
+            ["p1"],
+            load_metrics={},
+        )
 
 
 def test_subblock_merge_candidate_metadata_preserves_middle_values_with_equals() -> None:
@@ -747,18 +810,24 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_
         paper_authors_path,
         pa.table(
             {
-                "paper_id": pa.array(["p_s1", "p_s1", "p_s2", "p_s2", "p_s3", "p_s3", "p_s4", "p_s4"]),
-                "position": pa.array([0, 1, 0, 1, 0, 1, 0, 1], type=pa.int64()),
+                "paper_id": pa.array(
+                    ["p_s1", "p_s1", "p_s1", "p_s2", "p_s2", "p_s2", "p_s3", "p_s3", "p_s3", "p_s4", "p_s4", "p_s4"]
+                ),
+                "position": pa.array([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], type=pa.int64()),
                 "author_name": pa.array(
                     [
                         "Hui Wang",
                         "Ada Lovelace",
+                        "",
                         "Hui Wang",
                         "Ada Lovelace",
+                        "   ",
                         "Hui Wang",
                         "Grace Hopper",
+                        "",
                         "Hui Wang",
                         "Grace Hopper",
+                        "\t",
                     ],
                     type=pa.string(),
                 ),
@@ -820,7 +889,7 @@ def test_rust_arrow_native_graph_subblocking_uses_arrow_evidence_without_python_
     assert telemetry["specter_invocation_count"] == 1
     assert telemetry["graph_fallback_native"] is True
     assert telemetry["graph_fallback_invocation_count"] == 1
-    assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 8
+    assert telemetry["graph_fallback_load_metrics"]["paper_authors_rows_loaded"] == 12
     assert telemetry["graph_fallback_stats"][0]["packed_component_count"] == 2
 
 

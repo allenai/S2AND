@@ -165,7 +165,7 @@ def test_python_predicted_batches_use_effective_pair_chunk_size(monkeypatch):
     assert [len(batch.predictions) for batch in batches] == [2, 2, 1]
 
 
-def test_fused_constraint_fallback_resumes_at_failed_offset(monkeypatch):
+def test_fused_constraint_failure_propagates_with_offset(monkeypatch):
     dataset = _as_anddata(SimpleNamespace(cluster_seeds_require={}, cluster_seeds_disallow=set()))
     clusterer = Clusterer(
         featurizer_info=FeaturizationInfo(features_to_use=["year_diff", "misc_features"]),
@@ -195,6 +195,8 @@ def test_fused_constraint_fallback_resumes_at_failed_offset(monkeypatch):
     def fake_build_backend(*_args, **_kwargs):
         return backend
 
+    observed_offsets: list[int] = []
+
     def fake_constraints(
         _block_signature_indices,
         *,
@@ -202,41 +204,30 @@ def test_fused_constraint_fallback_resumes_at_failed_offset(monkeypatch):
         max_pairs,
         **_kwargs,
     ):
+        observed_offsets.append(start_offset)
         if start_offset == 0:
             local_i, local_j = model_module._upper_triangle_indices_for_range(4, start_offset, max_pairs)
             return local_i.tolist(), local_j.tolist(), [None] * len(local_i)
-        raise RuntimeError("optional fused failure")
-
-    def fake_resolve_constraint_batch(self, _dataset, pair_batch_ids, **_kwargs):
-        del self, _dataset, _kwargs
-        return [float("nan")] * len(pair_batch_ids), model_module._ConstraintBatchTelemetry(
-            total_pairs=len(pair_batch_ids),
-            partial_supervision_hits=0,
-            unresolved_pairs=len(pair_batch_ids),
-            rust_batch_call_count=0,
-            api_mode="test",
-            elapsed_seconds=0.0,
-        )
+        raise RuntimeError("fused failure")
 
     monkeypatch.setattr(model_module, "_build_incremental_constraint_backend", fake_build_backend)
     monkeypatch.setattr(model_module, "get_constraints_block_upper_triangle_indexed_rust", fake_constraints)
-    monkeypatch.setattr(model_module, "_handle_optional_rust_exception", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(Clusterer, "_resolve_constraint_batch", fake_resolve_constraint_batch)
 
-    chunks = list(
-        clusterer._distance_matrix_chunk_helper_rust(
-            {"block": signatures},
-            dataset,
-            {},
-            runtime_context=RuntimeContext(
-                operation="constraints",
-                backend="rust",
-                run_id="test-fused-fallback",
-            ),
+    with pytest.raises(RuntimeError, match=r"block=block start_offset=2 pairs=2.*fused failure"):
+        list(
+            clusterer._distance_matrix_chunk_helper_rust(
+                {"block": signatures},
+                dataset,
+                {},
+                runtime_context=RuntimeContext(
+                    operation="constraints",
+                    backend="rust",
+                    run_id="test-fused-failure",
+                ),
+            )
         )
-    )
 
-    assert [chunk.start_offset for chunk in chunks] == [0, 2, 4]
+    assert observed_offsets == [0, 2]
 
 
 def test_predict_from_arrow_paths_rejects_disallows_with_precomputed_dists_before_build(monkeypatch, tmp_path):

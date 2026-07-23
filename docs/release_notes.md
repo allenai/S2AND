@@ -18,8 +18,24 @@
 - Breaking: runtime legacy-normalization shims, Sinonym rewriting, fastText,
   and reference features are removed. `s2and-rust` is a required runtime
   dependency. Production Rust featurization and ingest enter through validated
-  Arrow IPC artifacts; classic JSON/`ANDData` remains a Python compatibility
-  and reference surface.
+  Arrow IPC artifacts; classic JSON/`ANDData` remains a Python training,
+  fixture, and reference surface for the canonical S2 partition.
+- Breaking: `ANDData` blocking is S2-only. `author_info.block` is the sole
+  grouping authority; the `block_type` constructor argument,
+  `Signature.author_info_given_block`, `get_original_blocks()`, and
+  `get_s2_blocks()` are removed, as is the `block_type` argument to
+  `facet_eval()`. Its block-size, homonymity, and synonymity facets now use the
+  same S2 block. A legacy `author_info.given_block` JSON field is tolerated as
+  an ignored extra field, not used as a fallback. Workflows that require
+  original benchmark partitions must preserve those groupings externally or
+  use S2AND 0.51.x and earlier.
+- Breaking: current production conversion and evaluation are SPECTER2-only.
+  Runtime dataset conversion writes exactly one selected embedding table under
+  canonical manifest key `specter`, defaulting to physical `specter2.arrow`,
+  and fails if that source is absent. `eval_prod_models.py` no longer accepts a
+  SPECTER1 production bundle or `--specter1-model-path`; SPECTER1 remains an
+  explicit `--train` research comparison, while its historical production
+  surface remains in S2AND v1.21 and earlier.
 - Breaking: `NameTupleArtifact.identity` and
   `s2and_rust.read_name_tuple_artifact_identity` are removed. The Python loader
   validates each artifact once and retains only frozen alias pairs plus
@@ -72,8 +88,12 @@
   Production training records the canonical name-tuple and ORCID prefix-count
   data SHA-256 values in the feature contract; bundle export and load require
   exact matches, and the linker binding covers both through its ordered
-  feature-contract digest. The production-bundle and clusterer-config schemas
-  are version 4; older bundles are rejected rather than adapted.
+  feature-contract digest. The production-bundle schema is version 5 and the
+  clusterer-config schema is version 4; older bundles are rejected rather than
+  adapted. A canonical rewrap of the exact published v1.21 pairwise boosters
+  retains their historical load-time clustering threshold of `0.65`; the
+  identity check includes both booster hashes and the stale stored threshold,
+  so newly tuned bundles retain their own `clusterer.json` value.
 - The release workflow builds and installs the exact Python and Rust wheels
   outside the source tree. A synthetic public
   `Clusterer.predict_incremental_from_arrow_paths` smoke has passed from the

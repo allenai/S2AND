@@ -182,7 +182,7 @@ def test_sync_version_rejects_ambiguous_targets(tmp_path: Path) -> None:
             False,
             False,
             False,
-            (True, True, True, True, True),
+            (True, True, True, False, False),
         ),
         (
             "workflow_dispatch",
@@ -200,7 +200,7 @@ def test_sync_version_rejects_ambiguous_targets(tmp_path: Path) -> None:
             False,
             False,
             True,
-            (False, True, False, False, True),
+            (True, True, True, False, True),
         ),
         (
             "workflow_dispatch",
@@ -269,9 +269,9 @@ def test_manual_release_policy_does_not_infer_a_version_change(tmp_path: Path) -
     assert before_version is None
     assert current_version == "0.50.0"
     assert decisions == sync_version.ReleaseDecisions(
-        build_s2and=False,
+        build_s2and=True,
         build_rust=True,
-        run_release_smoke=False,
+        run_release_smoke=True,
         publish_s2and=False,
         publish_rust=True,
     )

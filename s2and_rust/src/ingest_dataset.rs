@@ -687,6 +687,59 @@ pub(crate) fn build_name_counts_data_from_artifact(
 }
 
 #[cfg(test)]
+mod blank_paper_author_tests {
+    use super::*;
+    use crate::name_counts::RawNameCountMaps;
+
+    #[test]
+    fn classic_preprocessing_retains_legacy_blank_coauthor_sets() {
+        let signature_inputs = vec![StageSignatureInput {
+            sig_id: "s1".to_string(),
+            paper_id: "p1".to_string(),
+            raw_first: "Alice".to_string(),
+            raw_middle: String::new(),
+            raw_last: "Smith".to_string(),
+            email: None,
+            position: 0,
+            affiliation_values: Vec::new(),
+            orcid: None,
+        }];
+        let papers = HashMap::from([(
+            "p1".to_string(),
+            StagePaperPreprocessed {
+                authors: vec![(0, "alice smith".to_string()), (1, String::new())],
+                year: None,
+                has_abstract: false,
+                predicted_language: None,
+                language_reliability: 0.0,
+                title_words: None,
+                title_chars: None,
+                venue_ngrams: None,
+                journal_ngrams: None,
+            },
+        )]);
+
+        let preprocessed = preprocess_stage_signatures(
+            &signature_inputs,
+            &papers,
+            &RawNameCountMaps::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            true,
+        );
+        let signature = &preprocessed[0].1;
+
+        assert_eq!(signature.coauthors, Some(HashSet::from([String::new()])));
+        assert_eq!(
+            signature.coauthor_blocks,
+            Some(HashSet::from([String::new()]))
+        );
+        assert!(signature.coauthor_ngrams.is_none());
+    }
+}
+
+#[cfg(test)]
 mod name_counts_empty_surname_tests {
     use crate::name_counts::{sha256_file, RawNameCountIndex, RawNameCountMaps};
     use std::io::Write;

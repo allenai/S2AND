@@ -1,4 +1,7 @@
 import os
+import threading
+import weakref
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,6 +11,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import pytest
 from lightgbm import LGBMClassifier
+from sklearn.neighbors import KNeighborsClassifier
 
 import s2and.incremental_linking.production as production_module
 import s2and.model as model_module
@@ -113,6 +117,7 @@ def _patch_fake_raw_arrow_planner(
             self._name_counts_index = object()
             if captured is not None:
                 captured.setdefault("planner_inits", []).append(self._query_signature_ids)
+                captured.setdefault("planner_refs", []).append(weakref.ref(self))
                 captured["planner_name_counts_index"] = self._name_counts_index
 
         @classmethod
@@ -181,6 +186,53 @@ def _patch_fake_raw_arrow_planner(
         "build_rust_featurizer_from_arrow_paths",
         lambda *_args, **_kwargs: object(),
     )
+
+
+def test_raw_plan_window_subset_preserves_rows_pairs_and_zeroes_reused_telemetry() -> None:
+    plan: dict[str, Any] = {
+        "schema_version": RAW_CANDIDATE_PLAN_SCHEMA_VERSION,
+        "query_signature_ids": ["q0", "q1", "q2"],
+        "query_views": ["full", "full", "full"],
+        "query_authors": ["A", "B", "C"],
+        "row_count": 3,
+        "pair_count": 3,
+        "row_query_signature_indices": np.asarray([0, 1, 2], dtype=np.uint32),
+        "row_component_keys": ["c0", "c1", "c2"],
+        "retrieval_scores": np.asarray([0.9, 0.8, 0.7], dtype=np.float32),
+        "retrieval_ranks": np.asarray([1, 1, 1], dtype=np.uint16),
+        "pair_row_indices": np.asarray([0, 1, 2], dtype=np.uint32),
+        "left_signature_ids": ["q0", "q1", "q2"],
+        "right_signature_ids": ["s0", "s1", "s2"],
+        "component_members": {"c0": ["s0"], "c1": ["s1"], "c2": ["s2"]},
+        "telemetry": {"query_signature_count": 3, "timings": {"total_secs": 1.0}},
+    }
+    for raw_key, _signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS:
+        fill_value: Any = "" if dtype is object else 0
+        plan[raw_key] = np.asarray([fill_value] * 3, dtype=dtype)
+    bundle = RawArrowPlanBundle.from_mapping(plan)
+    production_module._validate_raw_plan_bundle_window_order(bundle)  # noqa: SLF001
+
+    first = production_module._subset_raw_plan_bundle_for_contiguous_queries(  # noqa: SLF001
+        bundle,
+        ["q1", "q2"],
+        include_plan_telemetry=True,
+    )
+    reused = production_module._subset_raw_plan_bundle_for_contiguous_queries(  # noqa: SLF001
+        bundle,
+        ["q1", "q2"],
+        include_plan_telemetry=False,
+    )
+
+    assert first.query_signature_ids == ("q1", "q2")
+    assert first.query_authors == ("B", "C")
+    assert first.row_query_offsets.tolist() == [0, 1]
+    assert first.pair_row_indices.tolist() == [0, 1]
+    assert first.left_signature_ids == ("q1", "q2")
+    assert first.right_signature_ids == ("s1", "s2")
+    assert first.row_component_keys == ("c1", "c2")
+    assert np.shares_memory(first.retrieval_scores, bundle.retrieval_scores)
+    assert first.telemetry == bundle.telemetry
+    assert reused.telemetry == {"query_signature_count": 0, "timings": {"total_secs": 0.0}}
 
 
 def test_finish_incremental_uses_split_inverse_for_altered_incompatibility_check() -> None:
@@ -268,6 +320,59 @@ def test_finish_incremental_lazily_resolves_default_name_tuples_for_direct_arrow
     assert clusters == {"0": ["seed_xavier"], "1": ["new_zelda"]}
 
 
+def test_finish_incremental_resolves_name_tuples_once_for_all_assignments(monkeypatch: pytest.MonkeyPatch) -> None:
+    def signature(first: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            author_info_first=first,
+            author_info_first_normalized_without_apostrophe=first.lower(),
+            author_info_last="Jones",
+            paper_id=f"p-{first.lower()}",
+        )
+
+    dataset = SimpleNamespace(
+        signatures={
+            "seed": signature("William"),
+            "new_1": signature("Bill"),
+            "new_2": signature("Bill"),
+            "new_3": signature("Bill"),
+        },
+        name_tuples={("william", "bill")},
+        max_seed_cluster_id=0,
+    )
+    clusterer = SimpleNamespace(
+        use_default_constraints_as_supervision=True,
+        suppress_orcid=False,
+    )
+    original_resolver = model_module._name_tuples_for_incremental_rules
+    resolver_calls = 0
+
+    def recording_resolver(name_tuples):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return original_resolver(name_tuples)
+
+    monkeypatch.setattr(model_module, "_name_tuples_for_incremental_rules", recording_resolver)
+    clusters = Clusterer._finish_incremental_with_seed_links(
+        cast(Any, clusterer),
+        ["new_1", "new_2", "new_3"],
+        cast(Any, dataset),
+        {"new_1": "0_0", "new_2": "0_1", "new_3": "0_2"},
+        {"0_0": "0", "0_1": "0", "0_2": "0"},
+        {"0": ["seed"]},
+        prevent_new_incompatibilities=True,
+        partial_supervision={},
+        runtime_context=cast(Any, SimpleNamespace()),
+        split_cluster_seeds_require_inverse={
+            "0_0": ["seed"],
+            "0_1": ["seed"],
+            "0_2": ["seed"],
+        },
+    )
+
+    assert clusters == {"0": ["seed", "new_1", "new_2", "new_3"]}
+    assert resolver_calls == 1
+
+
 def test_model_presplit_cache_fingerprint_drops_cluster_model_identity() -> None:
     class DummyClusterModel:
         def get_params(self, *, deep: bool = False) -> dict[str, float]:
@@ -327,11 +432,98 @@ def test_model_presplit_cache_fingerprint_tracks_classifier_state() -> None:
     assert model_module._model_presplit_cache_fingerprint(clusterer) != before
 
 
+def test_model_presplit_cache_fingerprint_hashes_complete_numpy_fitted_state() -> None:
+    fit_x = np.concatenate((np.zeros((1_000, 1)), np.full((1_000, 1), 10.0)))
+    fit_y = np.concatenate((np.zeros(1_000, dtype=int), np.ones(1_000, dtype=int)))
+    classifier = KNeighborsClassifier(n_neighbors=1, algorithm="brute").fit(fit_x, fit_y)
+    clusterer = SimpleNamespace(
+        classifier=classifier,
+        nameless_classifier=None,
+        cluster_model=None,
+        featurizer_info=SimpleNamespace(features_to_use=("year_diff",)),
+        nameless_featurizer_info=SimpleNamespace(features_to_use=()),
+        use_default_constraints_as_supervision=True,
+        dont_merge_cluster_seeds=True,
+        suppress_orcid=False,
+    )
+
+    legacy_state_repr = repr(classifier.__dict__)
+    before = model_module._model_presplit_cache_fingerprint(clusterer)
+    assert model_module._model_presplit_cache_fingerprint(clusterer) == before
+    assert classifier.predict([[9.0]]).item() == 1
+
+    # This fitted row is hidden behind NumPy's repr ellipsis but changes predictions.
+    classifier._fit_X[500, 0] = 9.0
+
+    assert repr(classifier.__dict__) == legacy_state_repr
+    assert classifier.predict([[9.0]]).item() == 0
+    assert model_module._model_presplit_cache_fingerprint(clusterer) != before
+
+
+def test_estimator_cache_fingerprint_disables_reuse_without_complete_serialization() -> None:
+    estimator = SimpleNamespace(unpickleable=lambda: None)
+
+    assert model_module._estimator_cache_fingerprint(estimator) != model_module._estimator_cache_fingerprint(estimator)
+
+
+def test_altered_presplit_lru_serializes_concurrent_get_and_eviction() -> None:
+    read_paused = threading.Event()
+    allow_read_return = threading.Event()
+    writer_done = threading.Event()
+
+    class PausingCache(OrderedDict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if key == ("target",):
+                read_paused.set()
+                assert allow_read_return.wait(timeout=5)
+            return value
+
+    target_key = ("target",)
+    cache = PausingCache(
+        [(target_key, (("target-sig",),))] + [((f"filler-{index}",), ((f"sig-{index}",),)) for index in range(127)]
+    )
+    clusterer = SimpleNamespace(_s2and_altered_presplit_cache=cache)
+    reader_values: list[tuple[tuple[str, ...], ...] | None] = []
+    thread_errors: list[Exception] = []
+
+    def read_target() -> None:
+        try:
+            reader_values.append(model_module._get_altered_presplit_cache_entry(clusterer, target_key))
+        except Exception as exc:  # pragma: no cover - asserted below
+            thread_errors.append(exc)
+
+    def evict_oldest() -> None:
+        try:
+            model_module._put_altered_presplit_cache_entry(clusterer, ("new",), [["new-sig"]])
+        except Exception as exc:  # pragma: no cover - asserted below
+            thread_errors.append(exc)
+        finally:
+            writer_done.set()
+
+    reader = threading.Thread(target=read_target)
+    writer = threading.Thread(target=evict_oldest)
+    reader.start()
+    assert read_paused.wait(timeout=5)
+    writer.start()
+    writer_finished_during_get = writer_done.wait(timeout=1)
+    allow_read_return.set()
+    reader.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert not writer_finished_during_get
+    assert thread_errors == []
+    assert reader_values == [(("target-sig",),)]
+    assert target_key in cache
+
+
 def test_cluster_seed_inverse_canonicalizes_component_ids() -> None:
     assert model_module._cluster_seeds_require_inverse({"s1": 7, "s2": "7"}) == {"7": ["s1", "s2"]}
 
 
-def test_predict_from_rust_featurizer_proxy_exposes_signature_rule_metadata() -> None:
+def test_predict_from_rust_featurizer_skips_unused_signature_rule_metadata() -> None:
     captured: dict[str, Any] = {}
 
     class DummyClusterer:
@@ -344,11 +536,7 @@ def test_predict_from_rust_featurizer_proxy_exposes_signature_rule_metadata() ->
 
     class FakeRustFeaturizer:
         def signature_rule_metadata(self):
-            return [
-                ("s_alice", "Alice", "0000-0000-0000-0001"),
-                ("s_bob", "Bob", None),
-                ("s_alicia", "Alicia", "0000-0000-0000-0001"),
-            ]
+            raise AssertionError("full-block prediction does not consume signature rule metadata")
 
     clusterer = DummyClusterer()
     cast(Any, clusterer).predict_from_rust_featurizer(
@@ -359,21 +547,7 @@ def test_predict_from_rust_featurizer_proxy_exposes_signature_rule_metadata() ->
     )
 
     proxy_dataset = captured["dataset"]
-    assert proxy_dataset.signatures["s_alice"].author_info_first == "Alice"
-    groups = model_module._residual_phase_b_first_initial_groups(
-        SimpleNamespace(use_default_constraints_as_supervision=True, suppress_orcid=False),
-        proxy_dataset,
-        ["s_alice", "s_bob"],
-        {},
-    )
-    assert groups == [["s_alice"], ["s_bob"]]
-    assert model_module._can_skip_orcid_homogeneous_altered_presplit(
-        SimpleNamespace(use_default_constraints_as_supervision=True, suppress_orcid=False),
-        proxy_dataset,
-        ["s_alice", "s_alicia"],
-        {},
-        set(),
-    )
+    assert proxy_dataset.signatures == {}
 
 
 def _seeds_preserved(clusters: dict[str, list[str]], seed_groups: list[list[str]]) -> bool:
@@ -458,25 +632,45 @@ def test_predict_incremental_return_contract(clusterer_dataset_factory):
 
 
 def test_promoted_incremental_orcid_fanout_by_query_counts_matching_components() -> None:
+    class CountingSeedMap(dict[str, str]):
+        values_call_count = 0
+
+        def values(self):
+            self.values_call_count += 1
+            return super().values()
+
     dataset = SimpleNamespace(
         signatures={
             "q": SimpleNamespace(author_info_orcid=" 0000-0000-0000-0001 "),
+            "q_alias": SimpleNamespace(author_info_orcid="0000-0000-0000-0001"),
             "blank": SimpleNamespace(author_info_orcid="   "),
             "other": SimpleNamespace(author_info_orcid="0000-0000-0000-0002"),
             "seed_a": SimpleNamespace(author_info_orcid=" 0000-0000-0000-0001 "),
             "seed_b": SimpleNamespace(author_info_orcid="0000-0000-0000-0001"),
+            "seed_b_duplicate": SimpleNamespace(author_info_orcid="0000-0000-0000-0001"),
             "seed_c": SimpleNamespace(author_info_orcid="0000-0000-0000-0003"),
             "seed_blank": SimpleNamespace(author_info_orcid="   "),
         }
     )
+    seed_map = CountingSeedMap(
+        {
+            "seed_a": "cluster_a",
+            "seed_b": "cluster_b",
+            "seed_b_duplicate": "cluster_b",
+            "seed_c": "cluster_b",
+            "seed_blank": "cluster_blank",
+        }
+    )
     fanout = production_module.promoted_incremental_orcid_fanout_by_query(
         dataset,  # type: ignore[arg-type]
-        ["q", "blank", "other"],
-        {"seed_a": "cluster_a", "seed_b": "cluster_b", "seed_c": "cluster_b", "seed_blank": "cluster_blank"},
+        ["q", "q_alias", "blank", "other"],
+        seed_map,
         orcid_enabled=True,
+        component_sizes={"cluster_a": 1, "cluster_b": 3, "cluster_blank": 1},
     )
 
-    assert fanout == {"q": (2, 3)}
+    assert fanout == {"q": (2, 4), "q_alias": (2, 4)}
+    assert seed_map.values_call_count == 0
     assert (
         production_module.promoted_incremental_orcid_fanout_by_query(
             dataset,  # type: ignore[arg-type]
@@ -865,6 +1059,40 @@ def test_direct_arrow_incremental_requires_loaded_artifact() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("seed_setup_source", "recluster_map", "planner_disallows", "arrow_disallows", "expected"),
+    [
+        pytest.param("arrow", {}, {("query", "seed")}, {("query", "seed")}, True, id="exact-arrow-source"),
+        pytest.param("dataset", {}, set(), set(), False, id="explicit-dataset-source"),
+        pytest.param(
+            "arrow",
+            {"component_split": "component"},
+            set(),
+            set(),
+            False,
+            id="altered-profile-recluster-rewrite",
+        ),
+        pytest.param("arrow", {}, {("query", "seed")}, set(), False, id="request-disallow-rewrite"),
+    ],
+)
+def test_seed_arrow_reuse_uses_source_provenance_and_rejects_rewrites(
+    seed_setup_source: str,
+    recluster_map: Mapping[str, str],
+    planner_disallows: set[tuple[str, str]],
+    arrow_disallows: set[tuple[str, str]],
+    expected: bool,
+) -> None:
+    assert (
+        production_module._seed_arrow_source_is_reusable(  # noqa: SLF001
+            seed_setup_source=seed_setup_source,
+            recluster_map=recluster_map,
+            planner_disallows=planner_disallows,
+            arrow_disallows=arrow_disallows,
+        )
+        is expected
+    )
+
+
 def test_predict_incremental_arrow_promoted_linker_cleans_up_temp_seed_context_on_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -938,6 +1166,8 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    import pyarrow as pa
+
     class FakeArtifact:
         metadata = SimpleNamespace(
             retrieval_top_k=25,
@@ -959,12 +1189,22 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
         "altered_cluster_signatures": str(altered_path),
     }
     disallow_read_count = 0
+    cluster_seed_read_count = 0
     original_disallow_reader = production_module.cluster_seed_disallows_from_arrow_paths
+    original_memory_map = pa.memory_map
 
     def counting_disallow_reader(paths: Mapping[str, Any]) -> set[tuple[str, str]]:
         nonlocal disallow_read_count
         disallow_read_count += 1
         return set(original_disallow_reader(paths))
+
+    def counting_memory_map(path: str, *args: object, **kwargs: object):
+        nonlocal cluster_seed_read_count
+        if Path(path) == cluster_seeds_path:
+            cluster_seed_read_count += 1
+        return original_memory_map(path, *args, **kwargs)
+
+    monkeypatch.setattr(pa, "memory_map", counting_memory_map)
 
     class FakeClusterer:
         n_jobs = 1
@@ -1040,6 +1280,7 @@ def test_predict_incremental_arrow_promoted_linker_uses_loaded_artifact_and_type
     assert captured["finish_disallows"] == {("query", "seed")}
     assert captured["finish_arrow_paths"]["cluster_seeds"] == str(cluster_seeds_path)
     assert disallow_read_count == 1
+    assert cluster_seed_read_count == 0
     assert captured["planner_inits"] == [()]
     assert captured["planner_plans"] == [("query",)]
     assert result["clusters"] == {"c_seed": ["seed", "query"]}
@@ -1187,11 +1428,277 @@ def test_query_disallow_resolution_is_batching_threshold_invariant_and_replans_c
     assert captured["planner_name_counts_index_calls"] == 1
     assert captured["featurizer_name_counts_indexes"]
     assert all(index is captured["planner_name_counts_index"] for index in captured["featurizer_name_counts_indexes"])
+    assert len(captured["featurizer_name_counts_indexes"]) == len(captured["planner_plans"]) - 1
     assert result["clusters"] == {
         "c_seed_0": ["seed-z", "seed-a", "q-require"],
         "c_outside_retained_top_k": ["q-score"],
     }
-    assert result["incremental_linker_telemetry"]["global_query_disallow_rescore_count"] == 1
+    telemetry = result["incremental_linker_telemetry"]
+    assert telemetry["global_query_disallow_rescore_count"] == 1
+    assert telemetry["raw_arrow_batch_featurizer_count"] == len(captured["featurizer_name_counts_indexes"])
+
+
+def test_query_disallow_rescores_reuse_two_bounded_window_featurizers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    query_ids = ["q0", "q1", "q2", "q3"]
+    captured: dict[str, Any] = {
+        "featurizer_builds": [],
+        "featurizer_refs": [],
+        "rescore_callback_refs": [],
+        "rescore_context_refs": [],
+        "rescored": [],
+    }
+
+    class FakeArtifact:
+        artifact_dir = tmp_path
+        metadata = SimpleNamespace(retrieval_top_k=25, feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS)
+
+    class FakeClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+
+        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
+            seeds = {"s0": "c0", "s1": "c1"}
+            inverse = {"c0": ["s0"], "c1": ["s1"]}
+            return seeds, {}, inverse, inverse
+
+        def _finish_incremental_with_seed_links(self, *args: object, **_kwargs: object):
+            captured["linked"] = dict(cast(Mapping[str, str], args[2]))
+            captured["phase_a_released_before_finish"] = {
+                "featurizers": all(reference() is None for reference in captured["featurizer_refs"]),
+                "planner": all(reference() is None for reference in captured["planner_refs"]),
+                "rescore_callback": all(reference() is None for reference in captured["rescore_callback_refs"]),
+                "rescore_context": all(reference() is None for reference in captured["rescore_context_refs"]),
+            }
+            return {"done": [*query_ids]}
+
+    class FakeFeaturizer:
+        def __init__(self, signature_ids: tuple[str, ...]) -> None:
+            self._signature_ids = signature_ids
+
+        def signature_ids(self) -> list[str]:
+            return list(self._signature_ids)
+
+    def fake_featurizer(*_args: object, **kwargs: object) -> FakeFeaturizer:
+        signature_ids = tuple(cast(Any, kwargs["signature_ids"]))
+        captured["featurizer_builds"].append(signature_ids)
+        featurizer = FakeFeaturizer(signature_ids)
+        captured["featurizer_refs"].append(weakref.ref(featurizer))
+        return featurizer
+
+    initial_components = {"q0": "c0", "q1": "c0", "q2": "c1", "q3": "c1"}
+    initial_scores = {"q0": 0.99, "q1": 0.80, "q2": 0.70, "q3": 0.60}
+    rescored_components = {"q1": "c2", "q3": "c3"}
+
+    def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
+        batch = [str(value) for value in cast(Any, kwargs["query_signature_ids"])]
+        featurizer = cast(FakeFeaturizer, kwargs["rust_featurizer"])
+        is_rescore = kwargs["cluster_seed_disallow_excluded_components"] is not None
+        decisions = []
+        for signature_id in batch:
+            if is_rescore:
+                captured["rescored"].append(signature_id)
+                component_key = rescored_components[signature_id]
+                score = 0.50
+            else:
+                component_key = initial_components[signature_id]
+                score = initial_scores[signature_id]
+            decisions.append(
+                LinkOrAbstainDecision(
+                    query_signature_index=featurizer.signature_ids().index(signature_id),
+                    action="link",
+                    row_index=0,
+                    component_key=component_key,
+                    score=score,
+                    runner_up_score=None,
+                    score_margin=None,
+                )
+            )
+        return SimpleNamespace(
+            compact_result=SimpleNamespace(decisions=tuple(decisions)),
+            pairwise_model_result=SimpleNamespace(row_signals={}),
+            decision_row_signals={"constraint_require_count": np.zeros(len(batch), dtype=np.float32)},
+            linked_signature_clusters={},
+            telemetry={"query_count": len(batch), "candidate_row_count": 0, "pair_count": 0},
+        )
+
+    def fake_limits(**kwargs: object):
+        return _mock_promoted_limits(
+            query_count=int(kwargs["query_count"]),
+            query_batch_size=1,
+            predicted_peak_delta_bytes=8_500,
+        )
+
+    real_rescore_context = production_module._QueryDisallowRescoreContext  # noqa: SLF001
+    real_resolve_query_disallows = production_module._resolve_query_disallows_globally  # noqa: SLF001
+
+    def capturing_rescore_context(**kwargs: Any) -> Any:
+        context = real_rescore_context(**kwargs)
+        captured["rescore_context_refs"].append(weakref.ref(context))
+        return context
+
+    def capturing_resolve_query_disallows(
+        initial_decisions: Mapping[str, Any],
+        disallow_partners: Mapping[str, set[str]],
+        *,
+        rescore: Any,
+    ) -> tuple[dict[str, str], dict[str, int]]:
+        captured["rescore_callback_refs"].append(weakref.ref(rescore))
+        return real_resolve_query_disallows(initial_decisions, disallow_partners, rescore=rescore)
+
+    monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)
+    monkeypatch.setattr(production_module, "_QueryDisallowRescoreContext", capturing_rescore_context)
+    monkeypatch.setattr(production_module, "_resolve_query_disallows_globally", capturing_resolve_query_disallows)
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        fake_linker,
+    )
+    _patch_fake_raw_arrow_planner(monkeypatch, captured=captured)
+    monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_paths", fake_featurizer)
+
+    result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
+        FakeClusterer(),
+        ["s0", "s1", *query_ids],
+        _direct_arrow_dataset(
+            cluster_seeds_disallow={("q0", "q1"), ("q2", "q3")},
+        ),
+        arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
+        artifact=FakeArtifact(),
+        prevent_new_incompatibilities=False,
+        partial_supervision={},
+        runtime_context=cast(Any, SimpleNamespace(run_id="test")),
+        total_ram_bytes=100_000,
+        batching_threshold=1,
+    )
+
+    assert captured["planner_plans"][:2] == [("q0", "q1"), ("q2", "q3")]
+    assert captured["planner_plans"][2:] == [("q1",), ("q3",)]
+    assert captured["rescored"] == ["q1", "q3"]
+    assert len(captured["featurizer_builds"]) == 2
+    assert captured["linked"] == {"q0": "c0", "q1": "c2", "q2": "c1", "q3": "c3"}
+    assert captured["phase_a_released_before_finish"] == {
+        "featurizers": True,
+        "planner": True,
+        "rescore_callback": True,
+        "rescore_context": True,
+    }
+    assert result["incremental_linker_telemetry"]["raw_arrow_batch_featurizer_count"] == 2
+
+
+def test_promoted_linker_reuses_one_memory_safe_plan_and_featurizer_for_four_batches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeArtifact:
+        artifact_dir = tmp_path
+        metadata = SimpleNamespace(
+            retrieval_top_k=25,
+            feature_columns=_PROMOTED_TEST_FEATURE_COLUMNS,
+        )
+
+    query_ids = [f"q{index:02d}" for index in range(20)]
+    captured: dict[str, Any] = {"featurizer_windows": [], "scored_batches": []}
+
+    class FakeClusterer:
+        n_jobs = 1
+        suppress_orcid = True
+        featurizer_info = _PROMOTED_TEST_FEATURIZER_INFO
+        feature_contract = {"normalization_version": NORMALIZATION_VERSION}
+        _last_incremental_seed_setup_telemetry = {"seed_setup_cluster_seeds_source": "python"}
+
+        def _build_incremental_seed_setup(self, *_args: object, **_kwargs: object):
+            return {"seed": "c_seed"}, {}, {"c_seed": ["seed"]}, {"c_seed": ["seed"]}
+
+        def _finish_incremental_with_seed_links(self, *_args: object, **_kwargs: object):
+            return {"c_seed": ["seed", *query_ids]}
+
+    def fake_limits(**kwargs: object):
+        query_count = int(kwargs["query_count"])
+        max_query_batch_size = int(cast(int, kwargs["max_query_batch_size"]))
+        return _mock_promoted_limits(
+            query_count=query_count,
+            query_batch_size=min(query_count, max_query_batch_size),
+        )
+
+    def fake_featurizer(*_args: object, **kwargs: object) -> object:
+        captured["featurizer_windows"].append(tuple(cast(Any, kwargs["signature_ids"])))
+        return object()
+
+    def fake_linker(*_args: object, **kwargs: object) -> SimpleNamespace:
+        batch = tuple(cast(Any, kwargs["query_signature_ids"]))
+        captured["scored_batches"].append(batch)
+        return SimpleNamespace(
+            linked_signature_clusters={signature_id: "c_seed" for signature_id in batch},
+            telemetry={"query_count": len(batch), "candidate_row_count": 0, "pair_count": 0},
+        )
+
+    monkeypatch.setattr(production_module, "compute_promoted_incremental_limits", fake_limits)
+    monkeypatch.setattr(
+        production_module.runtime_module,
+        "_predict_incremental_link_or_abstain_from_preplanned_raw_arrow",
+        fake_linker,
+    )
+    _patch_fake_raw_arrow_planner(monkeypatch, captured=captured)
+    monkeypatch.setattr(production_module.feature_port, "build_rust_featurizer_from_arrow_paths", fake_featurizer)
+
+    result = production_module.predict_incremental_promoted_linker_from_arrow_paths(
+        FakeClusterer(),
+        ["seed", *query_ids],
+        _direct_arrow_dataset(),
+        arrow_paths=_validated_promoted_arrow_paths(_minimal_arrow_paths(tmp_path)),
+        artifact=FakeArtifact(),
+        prevent_new_incompatibilities=False,
+        partial_supervision={},
+        runtime_context=cast(Any, SimpleNamespace(run_id="test")),
+        total_ram_bytes=100_000,
+        batching_threshold=2,
+    )
+
+    assert captured["planner_plans"] == [tuple(query_ids[:8]), tuple(query_ids[8:16]), tuple(query_ids[16:])]
+    assert captured["featurizer_windows"] == captured["planner_plans"]
+    assert captured["scored_batches"] == [tuple(query_ids[start : start + 2]) for start in range(0, 20, 2)]
+    telemetry = result["incremental_linker_telemetry"]
+    assert telemetry["raw_arrow_batch_plan_count"] == 3
+    assert telemetry["raw_arrow_batch_featurizer_count"] == 3
+    assert telemetry["raw_arrow_batch_featurizer_reused_batch_count"] == 7
+    assert telemetry["raw_arrow_batch_plan_window_size"] == 8
+
+
+def test_promoted_plan_window_exceeds_ram_limited_scoring_batch_when_raw_headroom_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        production_module.memory_budget,
+        "current_rss_bytes_best_effort",
+        lambda _total: (10_000_000, "rss:test"),
+    )
+    component_summary = production_module.memory_budget.summarize_promoted_component_sizes([1] * 25)
+
+    window, scoring_batch_size, limits = production_module._memory_safe_promoted_plan_window(  # noqa: SLF001
+        [f"q{index}" for index in range(8)],
+        max_scoring_batch_size=2,
+        orcid_fanout_by_query={},
+        component_sizes=component_summary,
+        retrieval_top_k=25,
+        memory_layout=production_module._PromotedIncrementalMemoryLayout(  # noqa: SLF001
+            final_matrix_feature_count=53,
+            pairwise_matrix_feature_count=35,
+            aggregate_feature_count=18,
+        ),
+        total_ram_bytes=48_600_000,
+        base_candidate_rows_per_query=25,
+        base_pairs_per_query=25,
+    )
+
+    assert limits.query_batch_size == 2
+    assert scoring_batch_size == 2
+    assert len(window) == 3
 
 
 def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
@@ -1268,7 +1775,9 @@ def test_promoted_linker_replans_batch_when_post_featurizer_ram_limit_shrinks(
     assert scored_signature_ids == query_ids
     assert all(1 <= len(batch) <= 2 for batch in captured["scored_batches"])
     assert captured["featurizer_batches"] == captured["planner_plans"]
-    assert captured["featurizer_batches"][1:] == captured["scored_batches"]
+    replanned_signature_ids = [signature_id for window in captured["featurizer_batches"][1:] for signature_id in window]
+    assert replanned_signature_ids == query_ids
+    assert len(captured["featurizer_batches"][1:]) < len(captured["scored_batches"])
     assert result["clusters"] == {"c_seed": ["seed", *query_ids]}
     assert result["incremental_linker_telemetry"]["raw_arrow_batch_memory_replan_count"] >= 1
 
@@ -1534,6 +2043,54 @@ def test_subblocked_single_letter_cleanup_skips_missing_dataset_rust_featurizer(
 
     assert result == {"single": ["s1", "s2"]}
     assert dataset.cluster_seeds_require == {"seed": "seed_cluster"}
+
+
+def test_arrow_subblocked_single_letter_groups_reuse_and_extend_one_seed_map() -> None:
+    clusterer = _build_minimal_incremental_clusterer()
+    seed_map_ids: list[int] = []
+    seed_map_snapshots: list[dict[str, str]] = []
+
+    def fake_predict_incremental_from_arrow_paths(
+        block_signatures: list[str],
+        _arrow_paths: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        seed_map = cast(dict[str, str], kwargs["cluster_seeds_require"])
+        seed_map_ids.append(id(seed_map))
+        seed_map_snapshots.append(dict(seed_map))
+        if block_signatures == ["q1"]:
+            return {"clusters": {"seed_cluster": ["seed0", "seed1", "q1"]}}
+        assert block_signatures == ["q2"]
+        return {
+            "clusters": {
+                "seed_cluster": ["seed0", "seed1", "q1"],
+                "new_cluster": ["q2"],
+            }
+        }
+
+    clusterer.predict_incremental_from_arrow_paths = cast(Any, fake_predict_incremental_from_arrow_paths)
+
+    result = clusterer._predict_subblocked_single_letter_groups_from_arrow_paths(
+        {"group_b": ["q2"], "group_a": ["q1"]},
+        pred_clusters={"seed_cluster": ["seed0", "seed1"]},
+        arrow_paths={},
+        batching_threshold=10,
+        partial_supervision={},
+        runtime_context=cast(Any, _strict_rust_context("arrow-sequential-seed-map")),
+        total_ram_bytes=None,
+        name_tuples=frozenset(),
+        cluster_seeds_disallow=set(),
+    )
+
+    assert result == {
+        "seed_cluster": ["seed0", "seed1", "q1"],
+        "new_cluster": ["q2"],
+    }
+    assert seed_map_ids[0] == seed_map_ids[1]
+    assert seed_map_snapshots == [
+        {"seed0": "seed_cluster", "seed1": "seed_cluster"},
+        {"seed0": "seed_cluster", "seed1": "seed_cluster", "q1": "seed_cluster"},
+    ]
 
 
 def test_next_unused_cluster_id_prevents_overwrite():
@@ -1993,7 +2550,7 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
     }
     runtime_context = cast(Any, object())
 
-    cluster_seeds_require, recluster_map, cluster_seeds_require_inverse, _split_inverse = (
+    cluster_seeds_require, recluster_map, cluster_seeds_require_inverse, split_inverse = (
         clusterer._build_incremental_seed_setup(
             dataset,
             {},
@@ -2033,6 +2590,14 @@ def test_build_incremental_seed_setup_uses_arrow_paths_for_altered_profile_reclu
     }
     assert recluster_map == {"7_0": "7", "7_1": "7", "8_0": "8", "8_1": "8"}
     assert cluster_seeds_require_inverse == {"7": ["seed0", "seed1"], "8": ["seed2", "seed3"], "9": ["seed4"]}
+    assert split_inverse == {
+        "7_0": ["seed0"],
+        "7_1": ["seed1"],
+        "8_0": ["seed2"],
+        "8_1": ["seed3"],
+        "9": ["seed4"],
+    }
+    assert split_inverse is not cluster_seeds_require_inverse
 
 
 def test_altered_presplit_cache_key_invariants_computed_at_most_once(monkeypatch: pytest.MonkeyPatch):
@@ -2183,6 +2748,86 @@ def test_build_incremental_seed_setup_loads_seed_and_altered_signatures_from_arr
     assert cluster_seeds_require == {"seed0": "7_0", "seed1": "7_1", "seed2": "8"}
     assert recluster_map == {"7_0": "7", "7_1": "7"}
     assert clusterer._last_incremental_seed_setup_telemetry["seed_setup_altered_signature_count"] == 1
+
+
+def test_build_incremental_seed_setup_normalizes_without_copying_source_seed_map() -> None:
+    class ReadOnlySourceSeeds(dict[str, int]):
+        def __deepcopy__(self, _memo: object) -> object:
+            raise AssertionError("source seed map must not be deep-copied")
+
+    source_seeds = ReadOnlySourceSeeds({"seed0": 7, "seed1": 7, "seed2": 8})
+    dataset = cast(
+        ANDData,
+        SimpleNamespace(
+            cluster_seeds_require=source_seeds,
+            cluster_seeds_disallow=set(),
+            altered_cluster_signatures=[],
+            name_tuples=None,
+        ),
+    )
+    clusterer = _build_minimal_incremental_clusterer()
+
+    cluster_seeds_require, recluster_map, inverse, split_inverse = clusterer._build_incremental_seed_setup(
+        dataset,
+        {},
+        runtime_context=cast(Any, object()),
+    )
+
+    assert cluster_seeds_require == {"seed0": "7", "seed1": "7", "seed2": "8"}
+    assert inverse == {"7": ["seed0", "seed1"], "8": ["seed2"]}
+    assert recluster_map == {}
+    assert split_inverse == inverse
+    assert split_inverse is inverse
+    assert source_seeds == {"seed0": 7, "seed1": 7, "seed2": 8}
+
+
+def test_build_incremental_seed_setup_reuses_owned_normalized_direct_arrow_map() -> None:
+    source_seeds: dict[str, int | str] = {"seed0": "7", "seed1": "7", "seed2": "8"}
+    dataset = production_module._DirectArrowIncrementalDataset(  # noqa: SLF001
+        name_tuples=frozenset(),
+        cluster_seeds_require=source_seeds,
+        _cluster_seeds_source="dataset",
+        cluster_seeds_disallow=set(),
+        altered_cluster_signatures=[],
+        max_seed_cluster_id=8,
+        signatures={},
+    )
+    clusterer = _build_minimal_incremental_clusterer()
+
+    cluster_seeds_require, recluster_map, inverse, split_inverse = clusterer._build_incremental_seed_setup(
+        cast(ANDData, dataset),
+        {},
+        runtime_context=cast(Any, object()),
+    )
+
+    assert cluster_seeds_require is source_seeds
+    assert cluster_seeds_require == {"seed0": "7", "seed1": "7", "seed2": "8"}
+    assert recluster_map == {}
+    assert split_inverse is inverse
+
+
+def test_build_incremental_seed_setup_copies_direct_arrow_map_before_altered_processing() -> None:
+    source_seeds: dict[str, int | str] = {"seed0": "7"}
+    dataset = production_module._DirectArrowIncrementalDataset(  # noqa: SLF001
+        name_tuples=frozenset(),
+        cluster_seeds_require=source_seeds,
+        _cluster_seeds_source="dataset",
+        cluster_seeds_disallow=set(),
+        altered_cluster_signatures=["seed0"],
+        max_seed_cluster_id=7,
+        signatures={},
+    )
+    clusterer = _build_minimal_incremental_clusterer()
+
+    cluster_seeds_require, recluster_map, _inverse, _split_inverse = clusterer._build_incremental_seed_setup(
+        cast(ANDData, dataset),
+        {},
+        runtime_context=cast(Any, object()),
+    )
+
+    assert cluster_seeds_require == source_seeds
+    assert cluster_seeds_require is not source_seeds
+    assert recluster_map == {}
 
 
 def test_cluster_seeds_arrow_read_is_request_local(monkeypatch, tmp_path: Path):

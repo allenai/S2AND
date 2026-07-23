@@ -161,7 +161,7 @@ class LinkerRetrievalBatch:
 
 @dataclass(frozen=True)
 class RawArrowPlanBundle:
-    """Owned, validated raw-plan values used by the linker runtime."""
+    """Validated, immutable raw-plan values used by the linker runtime."""
 
     signature_order: FeatureBlockSignatureOrder
     query_signature_ids: tuple[str, ...]
@@ -185,6 +185,7 @@ class RawArrowPlanBundle:
     def _from_normalized_values(
         cls,
         *,
+        copy_arrays: bool,
         query_signature_ids: Sequence[Any],
         query_views: Sequence[QueryView],
         query_authors: Sequence[Any],
@@ -205,33 +206,37 @@ class RawArrowPlanBundle:
         owned_query_signature_ids = tuple(str(value) for value in query_signature_ids)
         owned_query_views = tuple(query_views)
         owned_query_authors = tuple(str(value or "") for value in query_authors)
-        owned_row_query_offsets = _owned_readonly_array(row_query_offsets, dtype=np.uint32)
+        owned_row_query_offsets = _readonly_array(row_query_offsets, dtype=np.uint32, copy=copy_arrays)
         owned_left_signature_ids = tuple(str(value) for value in left_signature_ids)
         owned_right_signature_ids = tuple(str(value) for value in right_signature_ids)
-        owned_pair_row_indices = _owned_readonly_array(pair_row_indices, dtype=np.uint32)
+        owned_pair_row_indices = _readonly_array(pair_row_indices, dtype=np.uint32, copy=copy_arrays)
         owned_row_component_keys = tuple(str(value) for value in row_component_keys)
-        owned_retrieval_scores = _owned_readonly_array(retrieval_scores, dtype=np.float32)
-        owned_retrieval_ranks = _owned_readonly_array(retrieval_ranks, dtype=np.uint16)
+        owned_retrieval_scores = _readonly_array(retrieval_scores, dtype=np.float32, copy=copy_arrays)
+        owned_retrieval_ranks = _readonly_array(retrieval_ranks, dtype=np.uint16, copy=copy_arrays)
         owned_normalized_row_signals = {
-            signal_key: _owned_readonly_array(values) for signal_key, values in normalized_row_signals.items()
+            signal_key: _readonly_array(values, copy=copy_arrays)
+            for signal_key, values in normalized_row_signals.items()
         }
-        row_query_views = _owned_readonly_array(
+        row_query_views = _readonly_array(
             [owned_query_views[int(offset)] for offset in owned_row_query_offsets],
             dtype=object,
+            copy=False,
         )
-        row_query_authors = _owned_readonly_array(
+        row_query_authors = _readonly_array(
             [owned_query_authors[int(offset)] for offset in owned_row_query_offsets],
             dtype=object,
+            copy=False,
         )
         row_signals = {
             "retrieval_score": owned_retrieval_scores,
             "retrieval_rank": owned_retrieval_ranks,
-            "candidate_component_key": _owned_readonly_array(owned_row_component_keys, dtype=object),
+            "candidate_component_key": _readonly_array(owned_row_component_keys, dtype=object, copy=False),
             "query_view": row_query_views,
             "query_author": row_query_authors,
-            "first_name_bucket": _owned_readonly_array(
+            "first_name_bucket": _readonly_array(
                 first_name_bucket_array(owned_normalized_row_signals["query_first_token"], row_query_views),
                 dtype=object,
+                copy=False,
             ),
             **owned_normalized_row_signals,
         }
@@ -285,6 +290,23 @@ class RawArrowPlanBundle:
     @classmethod
     def from_mapping(cls, plan: Mapping[str, Any]) -> RawArrowPlanBundle:
         """Validate once and own every value consumed by the linker bridge."""
+
+        return cls._from_mapping(plan, copy_arrays=True)
+
+    @classmethod
+    def from_native_mapping(cls, plan: Mapping[str, Any]) -> RawArrowPlanBundle:
+        """Validate and adopt arrays freshly returned by the native planner.
+
+        Native planner results transfer exclusive array ownership to Python.
+        Adopting those arrays avoids a second full payload copy; the adopted
+        arrays are made read-only before the caller can observe the bundle.
+        """
+
+        return cls._from_mapping(plan, copy_arrays=False)
+
+    @classmethod
+    def _from_mapping(cls, plan: Mapping[str, Any], *, copy_arrays: bool) -> RawArrowPlanBundle:
+        """Validate a raw plan using the requested array-ownership policy."""
 
         schema_version = _required_raw_plan_value(plan, "schema_version")
         if schema_version != RAW_CANDIDATE_PLAN_SCHEMA_VERSION:
@@ -374,6 +396,7 @@ class RawArrowPlanBundle:
             for raw_key, signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
         }
         return cls._from_normalized_values(
+            copy_arrays=copy_arrays,
             query_signature_ids=query_signature_ids,
             query_views=query_views,
             query_authors=query_authors,
@@ -462,14 +485,14 @@ def _uint8_flag_array(key: str, raw_values: Any, expected_length: int | None = N
     if bool(np.any(invalid)):
         invalid_value = values[invalid][0]
         raise ValueError(f"raw candidate plan key {key!r} contains non-0/1 flag value {invalid_value!r}")
-    return values.astype(np.uint8)
+    return values.astype(np.uint8, copy=False)
 
 
-def _owned_readonly_array(values: Any, *, dtype: Any | None = None) -> np.ndarray:
-    """Copy a normalized 1D array into bundle-owned read-only storage."""
+def _readonly_array(values: Any, *, dtype: Any | None = None, copy: bool) -> np.ndarray:
+    """Return normalized read-only storage, copying only untrusted inputs."""
 
-    owned = np.array(values, dtype=dtype, copy=True, order="C")
-    if owned.dtype.hasobject:
+    owned = np.array(values, dtype=dtype, copy=True, order="C") if copy else np.asarray(values, dtype=dtype, order="C")
+    if copy and owned.dtype.hasobject:
         for index, item in np.ndenumerate(owned):
             owned[index] = _owned_plan_value(item)
     owned.setflags(write=False)
@@ -486,7 +509,7 @@ def _owned_plan_value(value: Any) -> Any:
                 owned[index] = _owned_plan_value(item)
             owned.setflags(write=False)
             return owned
-        return _owned_readonly_array(value, dtype=value.dtype)
+        return _readonly_array(value, dtype=value.dtype, copy=True)
     if isinstance(value, Mapping):
         return MappingProxyType({key: _owned_plan_value(item) for key, item in value.items()})
     if isinstance(value, bytearray):

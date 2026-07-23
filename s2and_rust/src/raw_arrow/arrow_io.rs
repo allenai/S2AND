@@ -95,6 +95,16 @@ impl<'a> ArrowStringColumn<'a> {
             pyo3::exceptions::PyValueError::new_err(format!("{context} is null at row {row}"))
         })
     }
+
+    pub(crate) fn required_borrowed_value(&self, row: usize, context: &str) -> PyResult<&'a str> {
+        let value = match self {
+            Self::Utf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
+            Self::LargeUtf8(values) => (!values.is_null(row)).then(|| (*values).value(row)),
+        };
+        value.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!("{context} is null at row {row}"))
+        })
+    }
 }
 
 pub(crate) struct ArrowI64Column<'a>(&'a Int64Array);

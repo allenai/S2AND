@@ -89,6 +89,7 @@ RESULT_JSON_START, RESULT_JSON_END = get_result_markers("largest_block")
 JSON_DATA_DIR = PROJECT_ROOT / "s2and" / "data-backup"
 DEFAULT_SPECTER_SUFFIX = "_specter2.pkl"
 DEFAULT_ARROW_TOTAL_RAM_BYTES = 1_000_000_000_000
+DEFAULT_SUBBLOCKING_THRESHOLD = 15_000
 
 # All known dataset directories under s2and/data/.
 DATASET_CANDIDATES = [
@@ -309,6 +310,7 @@ def _run_single(
     input_format: str = "json",
     arrow_data_root: str = "",
     specter_suffix: str = DEFAULT_SPECTER_SUFFIX,
+    subblocking_threshold: int = DEFAULT_SUBBLOCKING_THRESHOLD,
 ) -> dict[str, Any]:
     """Run prediction on a single block and return metrics."""
 
@@ -327,6 +329,7 @@ def _run_single(
             quality_check=quality_check,
             emit_signature_map=emit_signature_map,
             require_rust_release=require_rust_release,
+            subblocking_threshold=subblocking_threshold,
         )
     if input_format != "json":
         raise ValueError(f"Unsupported input_format: {input_format}")
@@ -487,6 +490,7 @@ def _run_single(
         "original_block_size": original_block_size,
         "effective_block_size": block_size,
         "num_pairs": num_pairs,
+        "subblocking_threshold": int(subblocking_threshold),
         "max_block_size_limit": max_block_size,
         "n_jobs": n_jobs,
         "model_path": resolved_model_path,
@@ -525,6 +529,7 @@ def _run_single_arrow(
     quality_check: bool,
     emit_signature_map: bool,
     require_rust_release: bool,
+    subblocking_threshold: int,
 ) -> dict[str, Any]:
     if backend != "rust":
         raise ValueError("--input-format arrow requires --backend rust")
@@ -589,6 +594,7 @@ def _run_single_arrow(
             single_block_dict,
             predict_arrow_paths,
             total_ram_bytes=DEFAULT_ARROW_TOTAL_RAM_BYTES,
+            batching_threshold=(subblocking_threshold if subblocking_threshold > 0 else None),
             load_name_counts=True,
             name_tuples=None,
         )
@@ -712,6 +718,7 @@ def _run_single_subprocess(
     input_format: str = "json",
     arrow_data_root: str = "",
     specter_suffix: str = DEFAULT_SPECTER_SUFFIX,
+    subblocking_threshold: int = DEFAULT_SUBBLOCKING_THRESHOLD,
 ) -> dict[str, Any]:
     """Run a single backend in a subprocess (isolation for RSS measurement)."""
     rust_suite_path = PROJECT_ROOT / "scripts" / "rust_suite.py"
@@ -748,6 +755,7 @@ def _run_single_subprocess(
     ]
     if max_block_size > 0:
         cmd.extend(["--max-block-size", str(max_block_size)])
+    cmd.extend(["--subblocking-threshold", str(subblocking_threshold)])
     if quality_check:
         cmd.append("--quality-check")
     if emit_signature_map:
@@ -851,6 +859,7 @@ def _compare_runs(args: argparse.Namespace) -> None:
         emit_signature_map=True,
         require_rust_release=bool(args.require_rust_release),
         input_format="json",
+        subblocking_threshold=args.subblocking_threshold,
     )
 
     # Run Rust
@@ -871,6 +880,7 @@ def _compare_runs(args: argparse.Namespace) -> None:
         input_format="arrow",
         arrow_data_root=args.arrow_data_root,
         specter_suffix=args.specter_suffix,
+        subblocking_threshold=args.subblocking_threshold,
     )
 
     _assert_comparison_inputs_identical(
@@ -1091,6 +1101,12 @@ def main() -> None:
         help=("Limit block to first N signatures (default: 1000). Compare mode requires a positive bound."),
     )
     parser.add_argument(
+        "--subblocking-threshold",
+        type=int,
+        default=DEFAULT_SUBBLOCKING_THRESHOLD,
+        help=("Maximum native Rust subblock size for Arrow runs (default: 15000). Set 0 to disable subblocking."),
+    )
+    parser.add_argument(
         "--model-path",
         required=True,
         help="Path to a complete native production bundle.",
@@ -1193,6 +1209,7 @@ def main() -> None:
             input_format=args.input_format,
             arrow_data_root=args.arrow_data_root,
             specter_suffix=args.specter_suffix,
+            subblocking_threshold=args.subblocking_threshold,
         )
 
         print(f"\n[{args.backend}] Done in {result['total_seconds']:.1f}s")

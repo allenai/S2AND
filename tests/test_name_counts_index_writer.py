@@ -46,7 +46,8 @@ def _read_index(path: Path) -> dict[str, float]:
 
 
 def test_bounded_sort_runs_preserve_exact_binary_lookup_values(tmp_path: Path) -> None:
-    mapping = {f"name {index}": float(index + 2) for index in range(11)}
+    names = ("ada", "bea", "cy", "dee", "eve", "fay", "gia", "hal", "ian", "jay", "kim")
+    mapping = {name: float(index + 2) for index, name in enumerate(names)}
     output_path = tmp_path / "first.bin"
     metrics = feature_block_arrow._write_name_count_index_file(
         output_path,
@@ -81,6 +82,48 @@ def test_writer_rejects_keys_that_would_collide_after_stringification(tmp_path: 
         )
 
 
+@pytest.mark.parametrize(
+    ("kind", "name"),
+    (
+        ("first", "Ada"),
+        ("first", "a"),
+        ("first", "ada!"),
+        ("first", "ada  marie"),
+        ("last", ""),
+        ("first_last", "adasmith"),
+        ("first_last", "a smith"),
+        ("last_first_initial", "smith ad"),
+        ("last_first_initial", "smith A"),
+    ),
+)
+def test_writer_rejects_noncanonical_name_count_keys(tmp_path: Path, kind: str, name: str) -> None:
+    mappings = {mapping_kind: {} for mapping_kind in ("first", "last", "first_last", "last_first_initial")}
+    mappings[kind] = {name: 2.0}
+
+    with pytest.raises(ValueError, match=rf"name-count {kind} key .*canonical_v2"):
+        feature_block_arrow.write_name_counts_index(
+            tmp_path,
+            tuple(mappings[mapping_kind] for mapping_kind in ("first", "last", "first_last", "last_first_initial")),
+            tiny_name_counts_provenance(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "name"),
+    (
+        ("first", "ada"),
+        ("first", "a b"),
+        ("last", "van der berg"),
+        ("first_last", "ada smith"),
+        ("first_last", "a b smith"),
+        ("first_last", "ada van der berg"),
+        ("last_first_initial", "van der berg a"),
+    ),
+)
+def test_name_count_key_contract_accepts_producible_canonical_keys(kind: str, name: str) -> None:
+    assert feature_block_arrow._validated_name_count_entry(kind, name, 2.0) == (name, 2.0)
+
+
 @pytest.mark.parametrize("count", [float("nan"), float("inf"), float("-inf"), 0.0, -3.0])
 def test_writer_rejects_nonfinite_and_nonpositive_counts(tmp_path: Path, count: float) -> None:
     with pytest.raises(ValueError, match="must be a finite positive number"):
@@ -95,7 +138,7 @@ def test_disk_preflight_fails_before_creating_index_temporaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mapping = {"a": 2.0, "b": 3.0}
+    mapping = {"ada": 2.0, "bea": 3.0}
     monkeypatch.setattr(
         feature_block_arrow.shutil,
         "disk_usage",
@@ -124,6 +167,30 @@ def test_name_count_fingerprint_is_order_independent_and_content_sensitive() -> 
     assert feature_block_arrow._name_counts_arrow_fingerprint(forward) != (
         feature_block_arrow._name_counts_arrow_fingerprint(changed)
     )
+
+
+def test_fresh_writer_validates_each_name_count_entry_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mappings = ({"ada": 2.0, "grace": 3.0}, {"smith": 4.0}, {"ada smith": 2.0}, {"smith a": 2.0})
+    validation_calls = 0
+    original_validator = feature_block_arrow._validated_name_count_entry
+
+    def counted_validator(kind: str, raw_name: object, raw_count: object) -> tuple[str, float]:
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validator(kind, raw_name, raw_count)
+
+    monkeypatch.setattr(feature_block_arrow, "_validated_name_count_entry", counted_validator)
+
+    feature_block_arrow.write_name_counts_index(
+        tmp_path,
+        mappings,
+        tiny_name_counts_provenance(),
+    )
+
+    assert validation_calls == sum(len(mapping) for mapping in mappings)
 
 
 def test_writer_never_hashes_name_count_material_under_publish_lock(

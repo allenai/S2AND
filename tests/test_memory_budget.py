@@ -223,6 +223,87 @@ def test_compute_promoted_phase_a_limits_uses_top_k_largest_components():
     assert int(limits.predicted_scorer_persistent_output_bytes) == 60 * 8
 
 
+def test_promoted_component_size_summary_is_reused_without_reinspecting_mapping():
+    class CountingSizes(dict[str, int]):
+        values_call_count = 0
+
+        def values(self):
+            self.values_call_count += 1
+            return super().values()
+
+    component_sizes = CountingSizes({f"c{index}": index + 1 for index in range(1_000)})
+    summary = memory_budget.summarize_promoted_component_sizes(component_sizes)
+
+    raw_limits = _compute_promoted_phase_a_limits(
+        query_count=20,
+        component_sizes=component_sizes,
+        retrieval_top_k=25,
+        total_ram_bytes=1_000_000_000,
+        fixed_overhead_bytes=1024,
+        current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+    )
+    summarized_limits = [
+        _compute_promoted_phase_a_limits(
+            query_count=20,
+            component_sizes=summary,
+            retrieval_top_k=25,
+            total_ram_bytes=1_000_000_000,
+            fixed_overhead_bytes=1024,
+            current_rss_fn=lambda _total: (100_000_000, "rss:test"),
+        )
+        for _ in range(3)
+    ]
+
+    assert component_sizes.values_call_count == 2
+    assert all(limits == raw_limits for limits in summarized_limits)
+    assert summary.component_count == 1_000
+    assert summary.max_component_size == 1_000
+    assert summary.top_k_totals(25) == (25, sum(range(976, 1_001)))
+
+
+def test_promoted_window_uses_raw_payload_headroom_beyond_memory_limited_batch():
+    limits = _compute_promoted_phase_a_limits(
+        query_count=20,
+        component_sizes=[1] * 25,
+        retrieval_top_k=25,
+        total_ram_bytes=48_600_000,
+        max_query_batch_size=20,
+        detect_cgroup_fn=lambda: (None, "unavailable"),
+        detect_total_fn=lambda: (None, "unavailable"),
+        current_rss_fn=lambda _total: (10_000_000, "rss:test"),
+    )
+
+    assert limits.query_batch_size == 2
+    assert (
+        memory_budget.compute_promoted_phase_a_window_query_limit(
+            limits,
+            max_window_query_count=8,
+        )
+        == 3
+    )
+
+
+def test_promoted_resident_retrieval_payload_is_not_reserved_twice():
+    kwargs = {
+        "query_count": 4,
+        "component_sizes": [10, 8, 6, 4],
+        "retrieval_top_k": 4,
+        "total_ram_bytes": 100_000_000,
+        "max_query_batch_size": 4,
+        "detect_cgroup_fn": lambda: (None, "unavailable"),
+        "detect_total_fn": lambda: (None, "unavailable"),
+        "current_rss_fn": lambda _total: (10_000_000, "rss:test"),
+    }
+    pending = _compute_promoted_phase_a_limits(**kwargs)
+    resident = _compute_promoted_phase_a_limits(**kwargs, retrieval_payload_resident=True)
+
+    assert pending.predicted_retrieval_pair_arrays_bytes > 0
+    assert pending.predicted_retrieval_row_bytes > 0
+    assert resident.predicted_retrieval_pair_arrays_bytes == 0
+    assert resident.predicted_retrieval_row_bytes == 0
+    assert resident.predicted_peak_delta_bytes < pending.predicted_peak_delta_bytes
+
+
 def test_native_scorer_chunk_plan_uses_full_call_when_scratch_fits() -> None:
     plan = memory_budget.compute_native_scorer_chunk_plan(
         row_count=1_000,

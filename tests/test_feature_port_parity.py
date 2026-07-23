@@ -278,7 +278,6 @@ def test_rust_featurizer_supports_string_paper_ids(tmp_path):
                 "suffix": None,
                 "email": None,
                 "affiliations": [],
-                "given_block": "alice_smith",
             },
         },
         "s2": {
@@ -293,7 +292,6 @@ def test_rust_featurizer_supports_string_paper_ids(tmp_path):
                 "suffix": None,
                 "email": None,
                 "affiliations": [],
-                "given_block": "alice_smith",
             },
         },
     }
@@ -375,7 +373,6 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
                 "suffix": None,
                 "email": None,
                 "affiliations": [],
-                "given_block": "a_smith",
             },
         },
         "s2": {
@@ -390,7 +387,6 @@ def test_single_initial_name_text_features_match_rust(monkeypatch: pytest.Monkey
                 "suffix": None,
                 "email": None,
                 "affiliations": [],
-                "given_block": "alice_smith",
             },
         },
     }

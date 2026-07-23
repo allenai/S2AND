@@ -49,7 +49,7 @@
 
 | Script | What it does |
 |---|---|
-| `eval_prod_models.py` | Evaluate production models (SPECTER1 vs SPECTER2) on full, inventors_s2and, or mini datasets; non-training evals use Arrow automatically when complete Arrow artifacts exist |
+| `eval_prod_models.py` | Evaluate current SPECTER2 production models on full, inventors_s2and, or mini datasets; SPECTER1 is available only as an explicit from-scratch research retraining comparison, and non-training evals use Arrow automatically when complete artifacts exist |
 | `verification/validate_local_arrow_release.py` | Non-network local Arrow release-root smoke; checks manifests, checksum fields, required files, batch-index paths, replay bundle manifests, and `name_counts_index` targets without scanning large Arrow tables |
 | `verification/compare_full_predict_arrow_parity.py` | Build a manifest-bound Arrow artifact with current raw-planner indexes and a generated bounded (or supplied) canonical name-count index, then compare Python/`ANDData` full predict against direct Arrow/Rust full predict |
 | `verification/compare_existing_arrow_anddata_feature_parity.py` | Compare Rust feature matrices from existing raw `ANDData` JSON/pickle inputs against existing Arrow release bundles |

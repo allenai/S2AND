@@ -128,7 +128,6 @@ def _empty_first_constraint_dataset() -> ANDData:
                 "email": "",
                 "position": 0,
                 "block": "smith",
-                "given_block": "smith",
             },
             "sourced_author_ids": [],
             "sourced_author_source": "Extracted",
@@ -419,6 +418,70 @@ def test_make_distance_matrices_rust_fused_upper_triangle_api(monkeypatch):
     assert captured["feature_calls"] == 3
 
 
+def test_make_distance_matrices_releases_chunk_payloads_before_next_build(monkeypatch):
+    live_feature_chunks = []
+    live_native_chunks = []
+
+    class _TrackedFeatureChunk:
+        def __init__(self, chunk_id):
+            self.chunk_id = chunk_id
+            live_feature_chunks.append(chunk_id)
+
+        def __del__(self):
+            live_feature_chunks.remove(self.chunk_id)
+
+    class _TrackedNativeChunk(list):
+        def __init__(self, chunk_id, values):
+            super().__init__(values)
+            self.chunk_id = chunk_id
+            live_native_chunks.append(chunk_id)
+
+        def __del__(self):
+            live_native_chunks.remove(self.chunk_id)
+
+    def fake_constraints(_block_signature_indices, *, start_offset, max_pairs, **_kwargs):
+        assert live_feature_chunks == []
+        assert live_native_chunks == []
+        count = int(max_pairs)
+        return (
+            _TrackedNativeChunk((start_offset, "left"), range(count)),
+            _TrackedNativeChunk((start_offset, "right"), range(count)),
+            _TrackedNativeChunk((start_offset, "constraints"), [None] * count),
+        )
+
+    def fake_features(_block_signature_indices, *, start_offset, **_kwargs):
+        assert live_feature_chunks == []
+        return _TrackedFeatureChunk(start_offset)
+
+    def fake_predict_and_combine(
+        _classifier,
+        _nameless_classifier,
+        _features,
+        labels,
+        _nameless_features,
+        _batch_label,
+        **_kwargs,
+    ):
+        return np.full(len(labels), 0.25, dtype=np.float64), 0.0
+
+    monkeypatch.setattr(model_module, "get_constraints_block_upper_triangle_indexed_rust", fake_constraints)
+    monkeypatch.setattr(model_module, "build_block_upper_triangle_feature_matrix_indexed_rust", fake_features)
+    monkeypatch.setattr(model_module, "_predict_and_combine", fake_predict_and_combine)
+
+    clusterer = _dummy_clusterer(
+        cluster_model=model_module.FastCluster(linkage="average"),
+        use_default_constraints_as_supervision=True,
+    )
+    output = clusterer.make_distance_matrices_from_rust_featurizer(
+        {"block": ["0", "1", "2", "3"]},
+        type("FakeFeaturizer", (), {"signature_ids": lambda self: ["0", "1", "2", "3"]})(),
+    )
+
+    np.testing.assert_allclose(output["block"], np.full(6, 0.25, dtype=np.float64), rtol=0, atol=0)
+    assert live_feature_chunks == []
+    assert live_native_chunks == []
+
+
 def test_make_distance_matrices_from_rust_featurizer_skips_fastcluster_indices_without_constraints(monkeypatch):
     monkeypatch.setattr(
         model_module,
@@ -520,18 +583,32 @@ def test_make_distance_matrices_from_rust_featurizer_checks_fastcluster_constrai
 def test_predict_from_rust_featurizer_builds_and_clusters_one_block_at_a_time(monkeypatch):
     make_calls = []
     cluster_calls = []
+    live_distance_blocks = []
+    signature_index_calls = 0
+    shared_signature_index = {str(index): index for index in range(4)}
 
     class _FakeFeaturizer:
         def signature_rule_metadata(self):
             return [(str(index), f"First{index}", None) for index in range(4)]
 
+    class _TrackedBlockDists(dict):
+        def __init__(self, block_key, pairwise_proba):
+            super().__init__({block_key: pairwise_proba})
+            self.block_key = block_key
+            live_distance_blocks.append(block_key)
+
+        def __del__(self):
+            live_distance_blocks.remove(self.block_key)
+
     def fake_make_dists(
         self,
         block_dict,
         _rust_featurizer,
-        **_kwargs,
+        **kwargs,
     ):
+        assert live_distance_blocks == []
         make_calls.append(tuple(block_dict))
+        assert kwargs["signature_index_by_id"] is shared_signature_index
         assert len(block_dict) == 1
         block_key, signatures = next(iter(block_dict.items()))
         self._last_rust_featurizer_make_dists_telemetry = {
@@ -541,6 +618,68 @@ def test_predict_from_rust_featurizer_builds_and_clusters_one_block_at_a_time(mo
             "nameless_feature_matrix_seconds": 0.0,
             "model_predict_seconds": 0.3,
             "matrix_write_seconds": 0.4,
+            "block_count": 1,
+            "pair_count": len(signatures) * (len(signatures) - 1) // 2,
+        }
+        return _TrackedBlockDists(
+            block_key,
+            np.zeros((len(signatures), len(signatures)), dtype=np.float16),
+        )
+
+    def fake_cluster_one_block(
+        self,
+        signatures,
+        pairwise_proba,
+        effective_cluster_model_params,
+        dataset,
+        all_disallow_signature_ids,
+        *,
+        block_key,
+    ):
+        del self, pairwise_proba, effective_cluster_model_params, dataset, all_disallow_signature_ids
+        cluster_calls.append((block_key, tuple(signatures)))
+        return [0 for _signature in signatures]
+
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", fake_make_dists)
+    monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", fake_cluster_one_block)
+
+    def fake_build_signature_index(_rust_featurizer):
+        nonlocal signature_index_calls
+        signature_index_calls += 1
+        return shared_signature_index
+
+    monkeypatch.setattr(model_module, "_build_signature_index_by_id", fake_build_signature_index)
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    result, dists = clusterer.predict_from_rust_featurizer(
+        {"a": ["0", "1"], "b": ["2", "3"]},
+        _FakeFeaturizer(),
+        cluster_seeds_require={},
+    )
+
+    assert dists is None
+    assert make_calls == [("a",), ("b",)]
+    assert live_distance_blocks == []
+    assert signature_index_calls == 1
+    assert cluster_calls == [("a", ("0", "1")), ("b", ("2", "3"))]
+    assert result == {"a_0": ["0", "1"], "b_0": ["2", "3"]}
+    telemetry = clusterer._last_rust_featurizer_predict_telemetry
+    assert float(telemetry["make_dists_total_seconds"]) >= 0.0
+    assert telemetry["make_dists_constraint_seconds"] == 0.2
+    assert telemetry["make_dists_block_count"] == 2
+    assert telemetry["make_dists_pair_count"] == 2
+
+
+def test_predict_from_rust_featurizer_skips_pairwise_work_for_empty_and_singleton_blocks(monkeypatch):
+    make_calls = []
+    cluster_calls = []
+    shared_signature_index = {"0": 0, "1": 1, "2": 2}
+
+    def fake_make_dists(self, block_dict, _rust_featurizer, **kwargs):
+        make_calls.append(tuple(block_dict))
+        assert kwargs["signature_index_by_id"] is shared_signature_index
+        block_key, signatures = next(iter(block_dict.items()))
+        self._last_rust_featurizer_make_dists_telemetry = {
             "block_count": 1,
             "pair_count": len(signatures) * (len(signatures) - 1) // 2,
         }
@@ -562,23 +701,44 @@ def test_predict_from_rust_featurizer_builds_and_clusters_one_block_at_a_time(mo
 
     monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", fake_make_dists)
     monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", fake_cluster_one_block)
+    monkeypatch.setattr(model_module, "_build_signature_index_by_id", lambda _featurizer: shared_signature_index)
 
     clusterer = _dummy_clusterer(cluster_model=None)
     result, dists = clusterer.predict_from_rust_featurizer(
-        {"a": ["0", "1"], "b": ["2", "3"]},
-        _FakeFeaturizer(),
+        {"empty": [], "singleton": ["2"], "multi": ["0", "1"]},
+        object(),
         cluster_seeds_require={},
     )
 
     assert dists is None
-    assert make_calls == [("a",), ("b",)]
-    assert cluster_calls == [("a", ("0", "1")), ("b", ("2", "3"))]
-    assert result == {"a_0": ["0", "1"], "b_0": ["2", "3"]}
+    assert make_calls == [("multi",)]
+    assert cluster_calls == [("multi", ("0", "1"))]
+    assert result == {"singleton_0": ["2"], "multi_0": ["0", "1"]}
     telemetry = clusterer._last_rust_featurizer_predict_telemetry
-    assert float(telemetry["make_dists_total_seconds"]) >= 0.0
-    assert telemetry["make_dists_constraint_seconds"] == 0.2
-    assert telemetry["make_dists_block_count"] == 2
-    assert telemetry["make_dists_pair_count"] == 2
+    assert telemetry["make_dists_block_count"] == 3
+    assert telemetry["make_dists_pair_count"] == 1
+
+
+def test_predict_from_rust_featurizer_avoids_signature_index_for_only_singletons(monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("empty and singleton blocks must not run pairwise prediction setup")
+
+    monkeypatch.setattr(model_module, "_build_signature_index_by_id", unexpected)
+    monkeypatch.setattr(Clusterer, "_make_distance_matrices_from_verified_rust_featurizer", unexpected)
+    monkeypatch.setattr(Clusterer, "_cluster_one_block_with_logging", unexpected)
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    result, dists = clusterer.predict_from_rust_featurizer(
+        {"empty": [], "first": ["0"], "second": ["1"]},
+        object(),
+        cluster_seeds_require={},
+    )
+
+    assert dists is None
+    assert result == {"first_0": ["0"], "second_0": ["1"]}
+    telemetry = clusterer._last_rust_featurizer_predict_telemetry
+    assert telemetry["make_dists_block_count"] == 3
+    assert telemetry["make_dists_pair_count"] == 0
 
 
 @pytest.mark.parametrize("seed_mode", ["explicit_disallow", "explicit_require", "implicit_require"])
@@ -611,6 +771,9 @@ def test_predict_from_rust_featurizer_injects_seed_overrides_into_distance_build
     captured_incremental_flags: list[bool] = []
 
     class _FakeFeaturizer:
+        def signature_ids(self):
+            return [str(index) for index in range(4)]
+
         def signature_rule_metadata(self):
             return [(str(index), f"First{index}", None) for index in range(4)]
 
@@ -907,3 +1070,516 @@ def test_predict_from_arrow_paths_rejects_declared_missing_optional_sidecar(tmp_
     assert exc_info.value.missing_files == {
         "cluster_seed_disallows": str(tmp_path / "missing_cluster_seed_disallows.arrow")
     }
+
+
+def test_predict_from_arrow_paths_routes_only_oversized_blocks_through_native_subblocking(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    native_calls: list[dict[str, Any]] = []
+    predicted_blocks: list[str] = []
+    predict_calls: list[tuple[str, ...]] = []
+    events: list[str] = []
+
+    class FakeRustFeaturizer:
+        def cluster_seeds_require(self):
+            return []
+
+        def signature_rule_metadata(self):
+            raise AssertionError("subblocking must not export all signature metadata")
+
+    def fake_native_subblocking(paths, signature_ids, **kwargs):
+        events.append("subblocking")
+        native_calls.append({"paths": paths, "signature_ids": list(signature_ids), **kwargs})
+        return {"beta": ["s3", "s4"], "alpha": ["s1", "s2"]}, {"final_subblock_count": 2}
+
+    def fake_build_rust_featurizer(*_args, **_kwargs):
+        events.append("featurizer")
+        return FakeRustFeaturizer()
+
+    def fake_load_representative_metadata(_paths, signature_ids):
+        events.append("representatives")
+        assert list(signature_ids) == ["s1", "s3", "s0"]
+        return {
+            signature_id: SimpleNamespace(
+                author_info_first="john",
+                author_info_first_normalized_without_apostrophe="john",
+            )
+            for signature_id in signature_ids
+        }
+
+    def fake_predict_from_prepared_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
+        del self, rust_featurizer, kwargs
+        events.append("predict")
+        predict_calls.append(tuple(block_dict))
+        predicted_blocks.extend(block_dict)
+        return {f"cluster:{block_key}": list(signature_ids) for block_key, signature_ids in block_dict.items()}, None
+
+    monkeypatch.setattr(
+        model_module,
+        "build_rust_featurizer_from_arrow_paths",
+        fake_build_rust_featurizer,
+    )
+    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+    monkeypatch.setattr(model_module, "_load_arrow_incremental_signature_info", fake_load_representative_metadata)
+    monkeypatch.setattr(
+        Clusterer,
+        "_predict_from_prepared_rust_featurizer",
+        fake_predict_from_prepared_rust_featurizer,
+    )
+    monkeypatch.setattr(
+        model_module,
+        "make_subblocks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python subblocking must not run")),
+    )
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    clusterer.random_state = 17
+    result, dists = clusterer.predict_from_arrow_paths(
+        {"small": ["s0"], "large": ["s1", "s2", "s3", "s4"]},
+        arrow_paths,
+        batching_threshold=2,
+    )
+
+    assert dists is None
+    assert native_calls[0]["signature_ids"] == ["s1", "s2", "s3", "s4"]
+    assert native_calls[0]["maximum_size"] == 2
+    assert native_calls[0]["graph_subblocking_random_seed"] == 17
+    assert native_calls[0]["use_orcid_subblocking"] is True
+    assert predicted_blocks == ["large|subblock=alpha", "large|subblock=beta", "small"]
+    assert predict_calls == [("large|subblock=alpha", "large|subblock=beta", "small")]
+    assert events == ["subblocking", "representatives", "featurizer", "predict"]
+    assert {signature_id for cluster in result.values() for signature_id in cluster} == {
+        "s0",
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+    }
+    assert clusterer._last_rust_arrow_subblocking_telemetry["oversized_block_count"] == 1
+
+
+def test_predict_from_arrow_paths_uses_explicit_current_cluster_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path)
+    captured: dict[str, Any] = {}
+
+    class FakeRustFeaturizer:
+        def cluster_seeds_require(self):
+            return [("s1", "stale"), ("s2", "stale")]
+
+    monkeypatch.setattr(
+        model_module,
+        "build_rust_featurizer_from_arrow_paths",
+        lambda *_args, **_kwargs: FakeRustFeaturizer(),
+    )
+
+    def fake_predict_from_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
+        del self, rust_featurizer
+        captured.update(kwargs)
+        return {"cluster": list(block_dict["block"])}, None
+
+    monkeypatch.setattr(Clusterer, "predict_from_rust_featurizer", fake_predict_from_rust_featurizer)
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    result, _ = clusterer.predict_from_arrow_paths(
+        {"block": ["s1", "s2"]},
+        arrow_paths,
+        cluster_seeds_require={"s1": "current", "s2": "current"},
+    )
+
+    assert result == {"cluster": ["s1", "s2"]}
+    assert captured["cluster_seeds_require"] == {"s1": "current", "s2": "current"}
+
+
+def test_arrow_subblocking_presplits_altered_profiles_before_partition_and_uses_rewritten_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    events: list[str] = []
+    captured: dict[str, Any] = {}
+
+    class FakeRustFeaturizer:
+        def cluster_seeds_require(self):
+            return [("s1", "claimed_0"), ("s2", "claimed_0"), ("s3", "claimed_1")]
+
+    def fake_seed_setup(self, dataset, *_args, **_kwargs):
+        del self
+        events.append("presplit")
+        captured["presplit_input_seeds"] = dict(dataset.cluster_seeds_require)
+        captured["presplit_altered"] = list(dataset.altered_cluster_signatures or [])
+        split = {"s1": "claimed_0", "s2": "claimed_0", "s3": "claimed_1"}
+        return split, {"claimed_0": "claimed", "claimed_1": "claimed"}, {}, {}
+
+    def fake_native_subblocking(paths, signature_ids, **_kwargs):
+        events.append("subblocking")
+        captured["native_seed_path"] = paths["cluster_seeds"]
+        captured["native_seed_map"] = model_module._read_cluster_seeds_arrow(Path(paths["cluster_seeds"]))
+        assert captured["native_seed_map"] == {"s1": "claimed_0", "s2": "claimed_0", "s3": "claimed_1"}
+        return {"left": [signature_ids[0], signature_ids[2]], "right": [signature_ids[1]]}, {}
+
+    def fake_build_rust_featurizer(paths, **_kwargs):
+        captured["build_seed_path"] = paths["cluster_seeds"]
+        captured["build_seed_map"] = model_module._read_cluster_seeds_arrow(Path(paths["cluster_seeds"]))
+        return FakeRustFeaturizer()
+
+    def fake_predict_from_prepared_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
+        del self, rust_featurizer
+        captured["predicted_blocks"] = dict(block_dict)
+        captured["explicit_cluster_seeds_require"] = kwargs["explicit_cluster_seeds_require"]
+        captured["proxy_cluster_seeds_require"] = dict(kwargs["proxy_dataset"].cluster_seeds_require)
+        return {f"cluster:{key}": list(values) for key, values in block_dict.items()}, None
+
+    monkeypatch.setattr(Clusterer, "_build_incremental_seed_setup", fake_seed_setup)
+    monkeypatch.setattr(model_module, "_make_subblocks_with_telemetry_arrow_rust", fake_native_subblocking)
+    monkeypatch.setattr(
+        model_module,
+        "build_rust_featurizer_from_arrow_paths",
+        fake_build_rust_featurizer,
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_load_arrow_incremental_signature_info",
+        lambda _paths, signature_ids: {
+            str(signature_id): SimpleNamespace(
+                author_info_first="john",
+                author_info_first_normalized_without_apostrophe="john",
+                author_info_orcid=None,
+            )
+            for signature_id in signature_ids
+        },
+    )
+    monkeypatch.setattr(
+        Clusterer,
+        "_predict_from_prepared_rust_featurizer",
+        fake_predict_from_prepared_rust_featurizer,
+    )
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    clusterer.predict_from_arrow_paths(
+        {"block": ["s1", "s2", "s3"]},
+        arrow_paths,
+        batching_threshold=2,
+        cluster_seeds_require={"s1": "claimed", "s2": "claimed", "s3": "claimed"},
+        altered_cluster_signatures=["s1"],
+    )
+
+    assert events == ["presplit", "subblocking"]
+    assert captured["presplit_input_seeds"] == {"s1": "claimed", "s2": "claimed", "s3": "claimed"}
+    assert captured["presplit_altered"] == ["s1"]
+    expected_rewritten_seeds = {"s1": "claimed_0", "s2": "claimed_0", "s3": "claimed_1"}
+    assert captured["native_seed_map"] == expected_rewritten_seeds
+    assert captured["build_seed_map"] == expected_rewritten_seeds
+    assert captured["native_seed_path"] == captured["build_seed_path"]
+    assert captured["explicit_cluster_seeds_require"] == expected_rewritten_seeds
+    assert captured["proxy_cluster_seeds_require"] == expected_rewritten_seeds
+    assert ["s1", "s2"] in captured["predicted_blocks"].values()
+
+
+def test_arrow_subblocking_attaches_initial_only_groups_sequentially(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    incremental_calls: list[dict[str, Any]] = []
+    featurizer_name_tuples: list[object] = []
+    featurizer_signature_ids: list[tuple[str, ...]] = []
+    release_events: list[str] = []
+
+    class FakeRustFeaturizer:
+        def cluster_seeds_require(self):
+            return []
+
+        def __del__(self):
+            release_events.append("released")
+
+        def signature_rule_metadata(self):
+            raise AssertionError("subblocking must not export all signature metadata")
+
+    def fake_build_rust_featurizer(*_args, **kwargs):
+        featurizer_name_tuples.append(kwargs["name_tuples"])
+        featurizer_signature_ids.append(tuple(kwargs["signature_ids"]))
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_rust_featurizer)
+    monkeypatch.setattr(
+        model_module,
+        "_make_subblocks_with_telemetry_arrow_rust",
+        lambda *_args, **_kwargs: (
+            {"multi": ["m0", "m1"], "initial_a": ["i0"], "initial_b": ["i1"]},
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_load_arrow_incremental_signature_info",
+        lambda _paths, signature_ids: {
+            signature_id: SimpleNamespace(
+                author_info_first=("j" if str(signature_id).startswith("i") else "john"),
+                author_info_first_normalized_without_apostrophe=("j" if str(signature_id).startswith("i") else "john"),
+            )
+            for signature_id in signature_ids
+        },
+    )
+
+    def fake_predict_from_prepared_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
+        del self, rust_featurizer, kwargs
+        assert block_dict == {"block|subblock=multi": ["m0", "m1"]}
+        return {"seed": ["m0", "m1"]}, None
+
+    def fake_predict_incremental_from_arrow_paths(self, block_signatures, paths, **kwargs):
+        del self, paths
+        assert release_events == ["released"]
+        incremental_calls.append(
+            {
+                "block_signatures": list(block_signatures),
+                **kwargs,
+                "cluster_seeds_require": dict(kwargs["cluster_seeds_require"]),
+            }
+        )
+        clusters = {"seed": list(kwargs["cluster_seeds_require"])}
+        clusters[f"new_{len(incremental_calls)}"] = list(block_signatures)
+        return {"clusters": clusters}
+
+    monkeypatch.setattr(
+        Clusterer,
+        "_predict_from_prepared_rust_featurizer",
+        fake_predict_from_prepared_rust_featurizer,
+    )
+    monkeypatch.setattr(
+        Clusterer,
+        "predict_incremental_from_arrow_paths",
+        fake_predict_incremental_from_arrow_paths,
+    )
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    mutable_name_tuples = {("john", "jon")}
+    result, _ = clusterer.predict_from_arrow_paths(
+        {"block": ["m0", "m1", "i0", "i1"]},
+        arrow_paths,
+        batching_threshold=2,
+        name_tuples=mutable_name_tuples,
+    )
+
+    assert [call["block_signatures"] for call in incremental_calls] == [["i0"], ["i1"]]
+    assert incremental_calls[0]["cluster_seeds_require"] == {"m0": "seed", "m1": "seed"}
+    assert incremental_calls[1]["cluster_seeds_require"] == {
+        "m0": "seed",
+        "m1": "seed",
+        "i0": "new_1",
+    }
+    assert all(call["altered_cluster_signatures"] == [] for call in incremental_calls)
+    assert all(call["batching_threshold"] == 2 for call in incremental_calls)
+    assert featurizer_signature_ids == [("m0", "m1")]
+    assert clusterer._last_arrow_predict_telemetry["featurizer_signature_count"] == 2
+    resolved_name_tuples = featurizer_name_tuples[0]
+    assert isinstance(resolved_name_tuples, frozenset)
+    assert all(call["name_tuples"] is resolved_name_tuples for call in incremental_calls)
+    assert {signature_id for cluster in result.values() for signature_id in cluster} == {"m0", "m1", "i0", "i1"}
+
+
+def test_arrow_subblocking_keeps_singleton_seed_initial_group_on_sequential_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    featurizer_signature_ids: list[tuple[str, ...]] = []
+    incremental_calls: list[dict[str, Any]] = []
+
+    class FakeRustFeaturizer:
+        def cluster_seeds_require(self):
+            return [("i0", "singleton")]
+
+    def fake_build_rust_featurizer(*_args, **kwargs):
+        featurizer_signature_ids.append(tuple(kwargs["signature_ids"]))
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_rust_featurizer)
+    monkeypatch.setattr(
+        model_module,
+        "_make_subblocks_with_telemetry_arrow_rust",
+        lambda *_args, **_kwargs: ({"multi": ["m0", "m1"], "initial": ["i0"]}, {}),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_load_arrow_incremental_signature_info",
+        lambda _paths, signature_ids: {
+            signature_id: SimpleNamespace(
+                author_info_first=("j" if signature_id == "i0" else "john"),
+                author_info_first_normalized_without_apostrophe=("j" if signature_id == "i0" else "john"),
+            )
+            for signature_id in signature_ids
+        },
+    )
+
+    def fake_predict_from_prepared_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
+        del self, rust_featurizer, kwargs
+        assert block_dict == {"block|subblock=multi": ["m0", "m1"]}
+        return {"bulk": ["m0", "m1"]}, None
+
+    def fake_predict_incremental_from_arrow_paths(self, block_signatures, paths, **kwargs):
+        del self, paths
+        incremental_calls.append(
+            {
+                "block_signatures": list(block_signatures),
+                "cluster_seeds_require": dict(kwargs["cluster_seeds_require"]),
+            }
+        )
+        return {
+            "clusters": {
+                "bulk": ["m0", "m1"],
+                "singleton": ["i0"],
+            }
+        }
+
+    monkeypatch.setattr(
+        Clusterer,
+        "_predict_from_prepared_rust_featurizer",
+        fake_predict_from_prepared_rust_featurizer,
+    )
+    monkeypatch.setattr(
+        Clusterer,
+        "predict_incremental_from_arrow_paths",
+        fake_predict_incremental_from_arrow_paths,
+    )
+
+    result, _ = _dummy_clusterer(cluster_model=None).predict_from_arrow_paths(
+        {"block": ["m0", "m1", "i0"]},
+        arrow_paths,
+        batching_threshold=2,
+        cluster_seeds_require={"i0": "singleton"},
+    )
+
+    assert featurizer_signature_ids == [("m0", "m1")]
+    assert incremental_calls == [
+        {
+            "block_signatures": ["i0"],
+            "cluster_seeds_require": {
+                "m0": "bulk",
+                "m1": "bulk",
+                "i0": "singleton",
+            },
+        }
+    ]
+    assert result == {"bulk": ["m0", "m1"], "singleton": ["i0"]}
+
+
+def test_arrow_subblocking_all_initial_groups_do_not_require_incremental_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    featurizer_signature_ids: list[tuple[str, ...]] = []
+
+    class FakeRustFeaturizer:
+        def cluster_seeds_require(self):
+            return []
+
+        def signature_rule_metadata(self):
+            raise AssertionError("subblocking must not export all signature metadata")
+
+    def fake_build_rust_featurizer(*_args, **kwargs):
+        featurizer_signature_ids.append(tuple(kwargs["signature_ids"]))
+        return FakeRustFeaturizer()
+
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", fake_build_rust_featurizer)
+    monkeypatch.setattr(
+        model_module,
+        "_make_subblocks_with_telemetry_arrow_rust",
+        lambda *_args, **_kwargs: ({"a": ["i0", "i1"], "b": ["i2"]}, {}),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_load_arrow_incremental_signature_info",
+        lambda _paths, signature_ids: {
+            signature_id: SimpleNamespace(
+                author_info_first="j",
+                author_info_first_normalized_without_apostrophe="j",
+            )
+            for signature_id in signature_ids
+        },
+    )
+    monkeypatch.setattr(
+        Clusterer,
+        "predict_incremental_from_arrow_paths",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("seedless incremental must not run")),
+    )
+
+    def fake_predict_from_prepared_rust_featurizer(self, block_dict, rust_featurizer, **kwargs):
+        del self, rust_featurizer, kwargs
+        return {block_key: list(signature_ids) for block_key, signature_ids in block_dict.items()}, None
+
+    monkeypatch.setattr(
+        Clusterer,
+        "_predict_from_prepared_rust_featurizer",
+        fake_predict_from_prepared_rust_featurizer,
+    )
+
+    clusterer = _dummy_clusterer(cluster_model=None)
+    result, _ = clusterer.predict_from_arrow_paths(
+        {"block": ["i0", "i1", "i2"]},
+        arrow_paths,
+        batching_threshold=2,
+    )
+
+    assert {signature_id for cluster in result.values() for signature_id in cluster} == {"i0", "i1", "i2"}
+    assert featurizer_signature_ids == [("i0", "i1", "i2")]
+
+
+@pytest.mark.parametrize("batching_threshold", [0, -1])
+def test_predict_from_arrow_paths_rejects_nonpositive_batching_threshold(batching_threshold: int) -> None:
+    clusterer = _dummy_clusterer(cluster_model=None)
+
+    with pytest.raises(ValueError, match="batching_threshold must be positive"):
+        clusterer.predict_from_arrow_paths({}, {}, batching_threshold=batching_threshold)
+
+
+def test_predict_from_arrow_paths_rejects_subblocking_with_precomputed_dists() -> None:
+    clusterer = _dummy_clusterer(cluster_model=None)
+
+    with pytest.raises(ValueError, match="batching_threshold cannot be used with precomputed dists"):
+        clusterer.predict_from_arrow_paths(
+            {"block": ["s0", "s1"]},
+            {},
+            dists={"block": np.zeros((2, 2))},
+            batching_threshold=1,
+        )
+
+
+def test_predict_from_arrow_paths_native_subblocking_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path, include_specter=True)
+    monkeypatch.setattr(model_module, "build_rust_featurizer_from_arrow_paths", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        model_module,
+        "_make_subblocks_with_telemetry_arrow_rust",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("native subblocking failed")),
+    )
+    clusterer = _dummy_clusterer(cluster_model=None)
+
+    with pytest.raises(RuntimeError, match="native subblocking failed"):
+        clusterer.predict_from_arrow_paths(
+            {"block": ["s0", "s1"]},
+            arrow_paths,
+            batching_threshold=1,
+        )
+
+
+def test_predict_from_arrow_paths_requires_specter_when_subblocking_needs_graph(tmp_path: Path) -> None:
+    arrow_paths = write_minimal_arrow_prediction_bundle(tmp_path)
+    clusterer = _dummy_clusterer(cluster_model=None)
+
+    with pytest.raises(model_module.MissingArrowArtifactError) as exc_info:
+        clusterer.predict_from_arrow_paths(
+            {"block": ["s0", "s1"]},
+            arrow_paths,
+            batching_threshold=1,
+        )
+
+    assert "specter" in exc_info.value.required_keys

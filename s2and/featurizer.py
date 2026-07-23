@@ -1,4 +1,3 @@
-import contextlib
 import functools
 import gc
 import logging
@@ -64,11 +63,16 @@ DEFAULT_NAMELESS_FEATURE_GROUPS: tuple[str, ...] = tuple(
     feature_group for feature_group in DEFAULT_FEATURE_GROUPS if feature_group not in NAME_DEPENDENT_FEATURE_GROUPS
 )
 
-global_dataset: ANDData | None = None
-global_runtime_context: RuntimeContext | None = None
+_FEATURIZATION_WORKER_STATE = threading.local()
 _RUST_BATCH_CALIBRATION_LOCK = threading.Lock()
 _RUST_BATCH_CALIBRATED_FIXED_OVERHEAD_BYTES: int | None = None
 _RUST_BATCH_CALIBRATION_ATTEMPTED = False
+
+
+def _initialize_featurization_worker(dataset: ANDData) -> None:
+    """Bind one dataset to the current featurization worker."""
+
+    _FEATURIZATION_WORKER_STATE.dataset = dataset
 
 
 def _use_rust_featurizer(
@@ -782,12 +786,12 @@ def _single_pair_featurize(
     index: int = -1,
     *,
     dataset: ANDData | None = None,
-    runtime_context: RuntimeContext | None = None,
 ) -> tuple[list[int | float], int]:
     """
     Creates the features array for a single signature pair
-    The default worker path reads dataset/runtime context from globals so process pools do not pickle the dataset
-    into every submitted chunk. Direct tests may pass them explicitly.
+    Pool workers read the dataset initialized once in worker-local state so
+    process pools do not pickle it into every submitted chunk. Direct and
+    serial callers pass it explicitly.
 
     Parameters
     ----------
@@ -801,13 +805,10 @@ def _single_pair_featurize(
     -------
     Tuple: tuple of the features array, and the index, which is simply passed through
     """
-    global global_dataset
-    global global_runtime_context
-
     if dataset is None:
-        dataset = global_dataset
+        dataset = getattr(_FEATURIZATION_WORKER_STATE, "dataset", None)
     if dataset is None:
-        raise RuntimeError("global_dataset is not initialized; call many_pairs_featurize first")
+        raise RuntimeError("featurization worker dataset is not initialized")
 
     features = []
 
@@ -1067,6 +1068,7 @@ def parallel_helper(piece_of_work: tuple, worker_func: Callable):
 
 def _execute_python_featurization_phase(
     *,
+    dataset: ANDData,
     pieces_of_work: list[tuple[tuple[str, str], int]],
     n_jobs: int,
     chunk_size: int,
@@ -1079,7 +1081,12 @@ def _execute_python_featurization_phase(
         pool_size = n_jobs if len(pieces_of_work) > 1000 else 1
         # Explicit platform policy to avoid implicit UniversalPool defaults at call sites.
         use_threads = platform.system() in ("Windows", "Darwin")
-        with UniversalPool(processes=pool_size, use_threads=use_threads) as p:
+        with UniversalPool(
+            processes=pool_size,
+            use_threads=use_threads,
+            initializer=_initialize_featurization_worker,
+            initargs=(dataset,),
+        ) as p:
             work_count = len(pieces_of_work)
             with tqdm(total=work_count, desc="Doing work", disable=work_count <= 10000) as pbar:
                 for feature_output, index in p.imap(
@@ -1098,7 +1105,10 @@ def _execute_python_featurization_phase(
 
     backend_used = "python_serial"
     logger.info("Making %d feature vectors in serial", len(pieces_of_work))
-    partial_func = functools.partial(parallel_helper, worker_func=_single_pair_featurize)
+    partial_func = functools.partial(
+        parallel_helper,
+        worker_func=functools.partial(_single_pair_featurize, dataset=dataset),
+    )
     for piece in tqdm(pieces_of_work, total=len(pieces_of_work), desc="Doing work"):
         result = partial_func(piece)
         _scatter_feature_row_from_source(
@@ -1143,32 +1153,6 @@ def _execute_rust_batch_featurization_phase(
         rss_now, _ = memory_budget.current_rss_bytes_best_effort(rust_batch_total_ram_for_stage)
         if rss_now > rust_batch_rss_peak_bytes:
             rust_batch_rss_peak_bytes = rss_now
-
-    class _RustBatchRssSampler:
-        def __init__(self, interval_seconds: float):
-            self.interval_seconds = interval_seconds
-            self._stop = threading.Event()
-            self._thread: threading.Thread | None = None
-
-        def _run(self) -> None:
-            while not self._stop.is_set():
-                _sample_rss_peak()
-                self._stop.wait(self.interval_seconds)
-
-        def __enter__(self):
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            self._stop.set()
-            if self._thread is not None:
-                self._thread.join(timeout=2)
-            return False
-
-    def _rust_batch_sampler_context():
-        return contextlib.nullcontext()
 
     rust_featurizer = feature_port._get_rust_featurizer(
         dataset,
@@ -1278,86 +1262,83 @@ def _execute_rust_batch_featurization_phase(
 
     num_threads = max(1, int(n_jobs))
     rust_batch_adaptive_halvings = 0
-    with _rust_batch_sampler_context():
-        with tqdm(
-            total=len(pieces_of_work),
-            desc="Rust batch featurization",
-            disable=len(pieces_of_work) <= 10000,
-        ) as pbar:
-            start_index = 0
-            while start_index < len(pieces_of_work):
-                chunk_work = pieces_of_work[start_index : start_index + target_chunk_size]
-                rust_pairs_chunk = [pair for pair, _ in chunk_work]
-                rust_pairs_chunk_indexed = [
-                    (
-                        _signature_id_to_index_or_raise(signature_id_to_index, pair[0]),
-                        _signature_id_to_index_or_raise(signature_id_to_index, pair[1]),
-                    )
-                    for pair in rust_pairs_chunk
-                ]
-                rust_features_chunk = np.asarray(
-                    rust_featurizer.featurize_pairs_matrix_indexed(
-                        rust_pairs_chunk_indexed,
-                        rust_selected_indices,
-                        num_threads,
-                        np.nan,
-                    ),
-                    dtype=np.float64,
+    with tqdm(
+        total=len(pieces_of_work),
+        desc="Rust batch featurization",
+        disable=len(pieces_of_work) <= 10000,
+    ) as pbar:
+        start_index = 0
+        while start_index < len(pieces_of_work):
+            chunk_work = pieces_of_work[start_index : start_index + target_chunk_size]
+            rust_pairs_chunk = [pair for pair, _ in chunk_work]
+            rust_pairs_chunk_indexed = [
+                (
+                    _signature_id_to_index_or_raise(signature_id_to_index, pair[0]),
+                    _signature_id_to_index_or_raise(signature_id_to_index, pair[1]),
                 )
+                for pair in rust_pairs_chunk
+            ]
+            rust_features_chunk = np.asarray(
+                rust_featurizer.featurize_pairs_matrix_indexed(
+                    rust_pairs_chunk_indexed,
+                    rust_selected_indices,
+                    num_threads,
+                    np.nan,
+                ),
+                dtype=np.float64,
+            )
 
-                if rust_features_chunk.shape[0] != len(chunk_work):
-                    raise RuntimeError(
-                        "Rust batch featurizer returned mismatched feature count: "
-                        f"expected={len(chunk_work)} got={rust_features_chunk.shape[0]}"
-                    )
-                rust_chunk_columns = int(rust_features_chunk.shape[1])
-                selected_column_count = (
-                    len(rust_selected_indices) if rust_selected_indices is not None else NUM_FEATURES
+            if rust_features_chunk.shape[0] != len(chunk_work):
+                raise RuntimeError(
+                    "Rust batch featurizer returned mismatched feature count: "
+                    f"expected={len(chunk_work)} got={rust_features_chunk.shape[0]}"
                 )
-                if rust_selected_indices is None and rust_chunk_columns != NUM_FEATURES:
-                    raise RuntimeError(
-                        "Rust batch featurizer returned unexpected feature width: "
-                        f"expected={NUM_FEATURES} got={rust_chunk_columns}"
-                    )
-                if rust_selected_indices is not None and rust_chunk_columns not in {
-                    NUM_FEATURES,
-                    selected_column_count,
-                }:
-                    raise RuntimeError(
-                        "Rust batch featurizer returned unexpected feature width: "
-                        f"expected={selected_column_count} (selected) or {NUM_FEATURES} (full) "
-                        f"got={rust_chunk_columns}"
-                    )
-                rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
-                chunk_indices = [index for _, index in chunk_work]
+            rust_chunk_columns = int(rust_features_chunk.shape[1])
+            selected_column_count = len(rust_selected_indices) if rust_selected_indices is not None else NUM_FEATURES
+            if rust_selected_indices is None and rust_chunk_columns != NUM_FEATURES:
+                raise RuntimeError(
+                    "Rust batch featurizer returned unexpected feature width: "
+                    f"expected={NUM_FEATURES} got={rust_chunk_columns}"
+                )
+            if rust_selected_indices is not None and rust_chunk_columns not in {
+                NUM_FEATURES,
+                selected_column_count,
+            }:
+                raise RuntimeError(
+                    "Rust batch featurizer returned unexpected feature width: "
+                    f"expected={selected_column_count} (selected) or {NUM_FEATURES} (full) "
+                    f"got={rust_chunk_columns}"
+                )
+            rust_chunk_is_full = rust_chunk_columns == NUM_FEATURES
+            chunk_indices = [index for _, index in chunk_work]
 
-                _scatter_chunk_to_output(
-                    rust_features_chunk=rust_features_chunk,
-                    chunk_indices=chunk_indices,
-                    scatter_context=rust_scatter_context,
-                    rust_chunk_is_full=rust_chunk_is_full,
-                )
-                _sample_rss_peak()
-                if (
-                    rust_batch_total_ram_for_stage is not None
-                    and rust_batch_adaptive_halvings < 3
-                    and predicted_stage_peak_delta_bytes > 0
-                ):
-                    observed_delta = max(0, rust_batch_rss_peak_bytes - rust_batch_rss_before_bytes)
-                    if observed_delta > predicted_stage_peak_delta_bytes * 1.2:
-                        target_chunk_size = max(1, target_chunk_size // 2)
-                        rust_batch_adaptive_halvings += 1
-                        logger.warning(
-                            "Rust batch adaptive chunking: observed_delta=%d > predicted_delta=%d * 1.2; "
-                            "halving target_chunk_size to %d (halving %d/3) run_id=%s",
-                            observed_delta,
-                            predicted_stage_peak_delta_bytes,
-                            target_chunk_size,
-                            rust_batch_adaptive_halvings,
-                            runtime_context.run_id,
-                        )
-                pbar.update(len(chunk_work))
-                start_index += len(chunk_work)
+            _scatter_chunk_to_output(
+                rust_features_chunk=rust_features_chunk,
+                chunk_indices=chunk_indices,
+                scatter_context=rust_scatter_context,
+                rust_chunk_is_full=rust_chunk_is_full,
+            )
+            _sample_rss_peak()
+            if (
+                rust_batch_total_ram_for_stage is not None
+                and rust_batch_adaptive_halvings < 3
+                and predicted_stage_peak_delta_bytes > 0
+            ):
+                observed_delta = max(0, rust_batch_rss_peak_bytes - rust_batch_rss_before_bytes)
+                if observed_delta > predicted_stage_peak_delta_bytes * 1.2:
+                    target_chunk_size = max(1, target_chunk_size // 2)
+                    rust_batch_adaptive_halvings += 1
+                    logger.warning(
+                        "Rust batch adaptive chunking: observed_delta=%d > predicted_delta=%d * 1.2; "
+                        "halving target_chunk_size to %d (halving %d/3) run_id=%s",
+                        observed_delta,
+                        predicted_stage_peak_delta_bytes,
+                        target_chunk_size,
+                        rust_batch_adaptive_halvings,
+                        runtime_context.run_id,
+                    )
+            pbar.update(len(chunk_work))
+            start_index += len(chunk_work)
 
     _sample_rss_peak()
     return RustBatchExecutionResult(
@@ -1426,11 +1407,6 @@ def many_pairs_featurize(
         runtime_context = dataset.runtime_context
     signature_pairs = [(str(pair[0]), str(pair[1]), pair[2]) for pair in signature_pairs]
     _ensure_python_pair_signature_ngrams(dataset, signature_pairs, runtime_context)
-
-    global global_dataset
-    global global_runtime_context
-    global_dataset = dataset
-    global_runtime_context = runtime_context
 
     did_rust_batch = False
     rust_batch_plan: memory_budget.RustBatchChunkPlan | None = None
@@ -1592,6 +1568,7 @@ def many_pairs_featurize(
 
         if not did_rust_batch:
             backend_used = _execute_python_featurization_phase(
+                dataset=dataset,
                 pieces_of_work=pieces_of_work,
                 n_jobs=n_jobs,
                 chunk_size=chunk_size,

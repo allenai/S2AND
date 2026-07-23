@@ -50,7 +50,9 @@ expensive or internal-data operation. Then:
     Reuse promoted features only when every materialization sidecar verifies
     against the current inputs.
 11. Finalize and reload the complete bundle, then verify every cross-artifact
-    identity before evaluation.
+    identity before evaluation. A canonical parity rewrap of the published
+    v1.21 boosters must load with effective clustering `eps=0.65`; a newly
+    tuned v1.3 bundle must retain its own configured threshold.
 12. Run pairwise, clustering, subblocking, Python/Rust parity, quality,
     throughput, and peak-RSS gates.
 13. Build clean Python and Rust distributions, install them outside the source

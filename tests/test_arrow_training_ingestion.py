@@ -33,7 +33,7 @@ from s2and.arrow_training import (  # noqa: E402
     load_signatures_from_arrow,
 )
 from s2and.consts import FEATURIZER_VERSION, NORMALIZATION_VERSION  # noqa: E402
-from s2and.data import ANDData, Author  # noqa: E402
+from s2and.data import ANDData, Author, Signature  # noqa: E402
 from s2and.featurizer import (  # noqa: E402
     DEFAULT_FEATURE_GROUPS,
     DEFAULT_NAMELESS_FEATURE_GROUPS,
@@ -303,8 +303,8 @@ def test_arrow_training_rejects_duplicate_paper_author_positions(tmp_path: Path)
         load_papers_from_arrow(papers_path, authors_path)
 
 
-@pytest.mark.parametrize("author_name", [None, "   "])
-def test_arrow_training_rejects_empty_paper_author_names(tmp_path: Path, author_name: str | None) -> None:
+@pytest.mark.parametrize("author_name", ["", "   "])
+def test_arrow_training_preserves_blank_paper_author_names(tmp_path: Path, author_name: str) -> None:
     papers_path = tmp_path / "papers.arrow"
     authors_path = tmp_path / "paper_authors.arrow"
     _write_minimal_papers_table(papers_path, ["p1"])
@@ -319,7 +319,27 @@ def test_arrow_training_rejects_empty_paper_author_names(tmp_path: Path, author_
         authors_path,
     )
 
-    with pytest.raises(ValueError, match="empty author_name"):
+    papers = load_papers_from_arrow(papers_path, authors_path)
+
+    assert papers["p1"].authors == [Author(author_name=author_name, position=0)]
+
+
+def test_arrow_training_rejects_null_paper_author_name(tmp_path: Path) -> None:
+    papers_path = tmp_path / "papers.arrow"
+    authors_path = tmp_path / "paper_authors.arrow"
+    _write_minimal_papers_table(papers_path, ["p1"])
+    write_arrow_ipc_table(
+        pa.table(
+            {
+                "paper_id": pa.array(["p1"], type=pa.string()),
+                "position": pa.array([0], type=pa.int64()),
+                "author_name": pa.array([None], type=pa.string()),
+            }
+        ),
+        authors_path,
+    )
+
+    with pytest.raises(ValueError, match="null author_name"):
         load_papers_from_arrow(papers_path, authors_path)
 
 
@@ -346,7 +366,7 @@ def test_arrow_training_filtered_papers_skip_irrelevant_validation_state(tmp_pat
 
     assert list(papers) == ["p1"]
     assert papers["p1"].authors == [Author(author_name="Ada Lovelace", position=0)]
-    with pytest.raises(ValueError, match="empty author_name"):
+    with pytest.raises(ValueError, match="null author_name"):
         load_papers_from_arrow(papers_path, authors_path)
 
 
@@ -500,9 +520,21 @@ def test_arrow_training_constructor_is_always_rust_and_never_materializes_python
     assert arrow_dataset.arrow_paths.name_counts_manifest is not None
     assert arrow_dataset.name_counts_provenance == arrow_dataset.arrow_paths.name_counts_manifest.source_provenance
     assert isinstance(arrow_dataset.name_tuples, frozenset)
+    assert arrow_dataset._cluster_seeds_source == "arrow"
 
 
-def test_arrow_training_constructor_retains_disabled_orcid_policy(training_bundle: dict[str, Any]) -> None:
+def test_arrow_training_constructor_retains_disabled_orcid_policy(
+    training_bundle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replace_calls = 0
+    original_replace = Signature._replace
+
+    def recording_replace(signature: Signature, **changes: Any) -> Signature:
+        nonlocal replace_calls
+        replace_calls += 1
+        return original_replace(signature, **changes)
+
+    monkeypatch.setattr(Signature, "_replace", recording_replace)
     arrow_dataset = build_training_anddata_from_arrow(
         training_bundle["arrow_paths"],
         "dummy_arrow_training_without_orcid",
@@ -515,6 +547,7 @@ def test_arrow_training_constructor_retains_disabled_orcid_policy(training_bundl
 
     assert arrow_dataset.use_orcid_id is False
     assert all(signature.author_info_orcid is None for signature in arrow_dataset.signatures.values())
+    assert replace_calls == 0
 
 
 def _fixed_pair_frames(json_dataset: ANDData) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

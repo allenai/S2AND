@@ -126,10 +126,6 @@ from s2and.model import Clusterer, FastCluster, PairwiseModeler
 bundle_dir = Path("/path/to/canonical_arrow_training_bundle/pubmed")
 manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
 manifest_paths = manifest["paths"]
-embedding_key = next(key for key in ("specter", "specter2") if key in manifest_paths)
-embedding_index_key = next(
-    key for key in ("specter_batch_index", "specter2_batch_index") if key in manifest_paths
-)
 training_keys = [
     "signatures",
     "signatures_batch_index",
@@ -138,8 +134,8 @@ training_keys = [
     "paper_authors",
     "paper_authors_batch_index",
     "name_counts_index",
-    embedding_key,
-    embedding_index_key,
+    "specter",
+    "specter_batch_index",
 ]
 arrow_paths = {
     key: str((bundle_dir / manifest_paths[key]).resolve())

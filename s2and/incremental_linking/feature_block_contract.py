@@ -133,11 +133,13 @@ class FeatureBlockPaper:
             raise ValueError("FeatureBlockPaper.paper_id must be non-empty")
         if self.year is not None:
             object.__setattr__(self, "year", int(self.year))
+        predicted_language = None if self.predicted_language is None else str(self.predicted_language)
         is_reliable = _optional_bool(self.is_reliable, field_name="FeatureBlockPaper.is_reliable")
         language_reliability = _optional_float(
             self.language_reliability,
             field_name="FeatureBlockPaper.language_reliability",
         )
+        object.__setattr__(self, "predicted_language", predicted_language)
         object.__setattr__(
             self,
             "is_reliable",
@@ -157,7 +159,15 @@ class FeatureBlockPaper:
                 raise ValueError(
                     "FeatureBlockPaper.language_reliability must be 0.0 when FeatureBlockPaper.is_reliable is false"
                 )
-        if self.predicted_language is not None:
+        if predicted_language is None:
+            if is_reliable is not None or language_reliability is not None:
+                raise ValueError(
+                    "FeatureBlockPaper.is_reliable and FeatureBlockPaper.language_reliability "
+                    "require FeatureBlockPaper.predicted_language"
+                )
+        else:
+            if not predicted_language.strip():
+                raise ValueError("FeatureBlockPaper.predicted_language must be non-empty")
             if is_reliable is None:
                 raise ValueError("FeatureBlockPaper.predicted_language requires FeatureBlockPaper.is_reliable")
             if language_reliability is None:
@@ -178,8 +188,6 @@ class FeatureBlockPaperAuthor:
         object.__setattr__(self, "author_name", str(self.author_name))
         if not self.paper_id:
             raise ValueError("FeatureBlockPaperAuthor.paper_id must be non-empty")
-        if not self.author_name:
-            raise ValueError("FeatureBlockPaperAuthor.author_name must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -285,6 +293,10 @@ class FeatureBlock:
         object.__setattr__(self, "cluster_seeds_disallow", disallow_pairs)
 
         specter_paper_ids = tuple(str(value) for value in self.specter_paper_ids)
+        if any(not paper_id for paper_id in specter_paper_ids):
+            raise ValueError("specter_paper_ids cannot contain empty paper_id values")
+        if len(set(specter_paper_ids)) != len(specter_paper_ids):
+            raise ValueError("specter_paper_ids must contain unique paper_id values")
         if self.specter_embeddings is None:
             if specter_paper_ids:
                 raise ValueError("specter_paper_ids requires specter_embeddings")

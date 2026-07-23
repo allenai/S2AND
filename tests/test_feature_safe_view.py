@@ -38,7 +38,6 @@ def _signature(
         "suffix": None,
         "email": None,
         "affiliations": [],
-        "given_block": f"{first[:1].lower()} {last.lower()}",
     }
     if orcid is not None:
         author_info["source_id_source"] = "ORCID"

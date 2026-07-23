@@ -32,6 +32,8 @@ EXPECTED_REQUIRED_COLUMNS = {
 
 
 def test_arrow_schema_contract_required_columns_are_pinned() -> None:
+    """Require an explicit contract-version decision when required columns change."""
+
     payload = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
     assert payload["schema_version"] == "s2and_arrow_schema_contract_v1"
@@ -45,6 +47,7 @@ def test_arrow_schema_contract_required_columns_are_pinned() -> None:
 
 def test_arrow_schema_contract_has_no_duplicate_columns() -> None:
     payload = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "s2and_arrow_schema_contract_v1"
 
     for table_name, columns in payload["tables"].items():
         column_names = [column["name"] for column in columns]

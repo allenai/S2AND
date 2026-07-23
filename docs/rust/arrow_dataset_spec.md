@@ -30,8 +30,9 @@ Required for full-block prediction:
 - `signatures.arrow`
 - `papers.arrow`
 - `paper_authors.arrow`
-- `specter.arrow` or `specter2.arrow` when the model uses
-  `embedding_similarity`
+- one selected embedding table under the canonical `specter` manifest key when
+  the model uses `embedding_similarity`; production/eval bundles use physical
+  `specter2.arrow`
 
 Required in addition for seeded prediction or incremental prediction promoted
 through Arrow:
@@ -70,12 +71,10 @@ Preferred on-disk layout:
     signatures.arrow
     papers.arrow
     paper_authors.arrow
-    specter.arrow
     specter2.arrow
     signatures.signatures_batch_index.bin
     papers.papers_batch_index.bin
     paper_authors.paper_authors_batch_index.bin
-    specter.specter_batch_index.bin
     specter2.specter_batch_index.bin
     query_signatures.arrow
     cluster_seeds.arrow
@@ -113,11 +112,12 @@ Notes:
   ANDData-compatible training tooling.
 - `<dataset>_clusters.json` is ground truth for offline evaluation only. It is
   not part of production inference scoring.
-- `specter.arrow` is the SPECTER v1 embedding table. `specter2.arrow` is the
-  SPECTER v2 embedding table. Include whichever model family will be used; eval
-  bundles usually include both.
+- Each bundle contains exactly one selected embedding table under manifest key
+  `specter`. Production and evaluation bundles select physical
+  `specter2.arrow`. An explicit research-training bundle may instead select
+  historical `specter.arrow`; it does not ship both tables.
 - If embeddings are requested but no block papers have embeddings, emit a valid
-  zero-row `specter.arrow` rather than omitting the table so production
+  zero-row selected embedding table rather than omitting it so production
   prediction degrades through missing-vector features.
 - The Arrow files must be Arrow IPC file format, not Arrow stream format. The
   current writer uses `pyarrow.ipc.new_file(...)`; readers use
@@ -223,17 +223,17 @@ Recommended sidecar filenames are stem-qualified:
 signatures.signatures_batch_index.bin
 papers.papers_batch_index.bin
 paper_authors.paper_authors_batch_index.bin
-specter.specter_batch_index.bin
 specter2.specter_batch_index.bin
 ```
 
 The double stem is intentional: the first stem identifies the Arrow file and the
 trailing `<table>_batch_index` stem matches the manifest path key.
 
-When both `specter.arrow` and `specter2.arrow` are present, write one embedding
-index per file. At runtime, the selected embedding file is passed under the
-`specter` path key, and S2AND uses the adjacent
-`<embedding-stem>.specter_batch_index.bin` sidecar when present.
+At runtime, the one selected embedding file is passed under the `specter` path
+key, and S2AND uses the adjacent
+`<embedding-stem>.specter_batch_index.bin` sidecar. A historical SPECTER1
+research-training bundle therefore uses `specter.specter_batch_index.bin`
+instead of the production `specter2.specter_batch_index.bin`.
 
 The batch-index format is S2AND-owned. Current writers and readers require
 `arrow_batch_lookup_index` / `S2ABI002`, which records the key-column hash and
@@ -368,8 +368,14 @@ One row per paper-author child row. Required columns:
 
 Rows should be ordered by `paper_id` then `position` where practical. Ordering is
 not the identity contract, but stable ordering makes diffs and validation easier.
+An empty or whitespace-only `author_name` is valid and must remain a row so that
+source author positions and list cardinality are preserved. Consumers apply their
+existing preprocessing semantics to that retained value: modern raw-planner and
+subblocking name evidence ignores names that normalize empty, while classic
+pairwise preprocessing retains the legacy coauthor-set behavior. A null
+`author_name` is invalid.
 
-### `specter.arrow` and `specter2.arrow`
+### Selected embedding table (`specter2.arrow` in production)
 
 One row per embedded paper. Required columns:
 
@@ -556,9 +562,6 @@ Conditional `paths` entries:
 - `specter` is required when the selected model uses `embedding_similarity`.
   This is the selected embedding file for the run, even when the physical file is
   named `specter2.arrow`.
-- `specter2` may be included as bundle inventory when both embedding versions
-  are shipped, but runtime callers still pass the selected embedding as
-  `specter`.
 - `cluster_seeds` is required only when the published Arrow sidecar is the seed
   source. Seeded or incremental Arrow prediction may instead receive a
   normalized request/dataset seed mapping and materialize request-local Arrow.
@@ -577,11 +580,11 @@ Large-block optimized artifacts should also include:
 ```json
 {
   "paths": {
-    "specter": "specter.arrow",
+    "specter": "specter2.arrow",
     "signatures_batch_index": "signatures.signatures_batch_index.bin",
     "papers_batch_index": "papers.papers_batch_index.bin",
     "paper_authors_batch_index": "paper_authors.paper_authors_batch_index.bin",
-    "specter_batch_index": "specter.specter_batch_index.bin"
+    "specter_batch_index": "specter2.specter_batch_index.bin"
   },
   "physical_layout": {
     "schema": "s2and_arrow_physical_v1",
@@ -629,9 +632,8 @@ Large-block optimized artifacts should also include:
 ```
 
 Repeat the `physical_layout.tables` entry for every large lookup table shipped
-for indexed raw planning. If both `specter.arrow` and `specter2.arrow` are
-included, inventory both embedding layouts or clearly identify which embedding
-is selected for the manifest.
+for indexed raw planning. Inventory the bundle's one selected embedding layout
+under `specter`.
 
 Recommended additional fields:
 
@@ -640,7 +642,7 @@ Recommended additional fields:
 - `generated_at`.
 - `generator_version` or git commit.
 - `specter` metadata with `row_count`, `dimension`, and source artifact id for
-  each embedding file.
+  the selected embedding file.
 - `name_counts_index` metadata with the shared index path and schema version.
 - `physical_layout.tables.<table>` entries for every large lookup table:
   `row_count`, `record_batch_count`, `actual_max_batch_rows`,
@@ -733,7 +735,7 @@ uv run python scripts/eval_prod_models.py `
   --dataset full `
   --use-arrow `
   --datasets qian `
-  --specter-suffixes _specter2.pkl `
+  --specter2-model-path path\to\production_model_bundle `
   --n_jobs 4 `
   --seed 42
 ```
@@ -750,7 +752,7 @@ uv run python scripts/eval_prod_models.py \
   --dataset full \
   --use-arrow \
   --datasets qian \
-  --specter-suffixes _specter2.pkl \
+  --specter2-model-path /path/to/production_model_bundle \
   --n_jobs 4 \
   --seed 42
 ```

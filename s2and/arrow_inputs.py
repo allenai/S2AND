@@ -9,6 +9,7 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from types import MappingProxyType
@@ -235,6 +236,7 @@ _RUNTIME_ARROW_GENERATION_CACHE_SIZE = 4
 _RUNTIME_ARROW_GENERATION_CACHE: OrderedDict[tuple[str, tuple[tuple[str, str], ...]], ValidatedArrowInputs] = (
     OrderedDict()
 )
+_RUNTIME_ARROW_GENERATION_INFLIGHT: dict[tuple[str, tuple[tuple[str, str], ...]], Future[ValidatedArrowInputs]] = {}
 _RUNTIME_ARROW_GENERATION_CACHE_LOCK = threading.Lock()
 
 
@@ -797,6 +799,7 @@ def _open_validated_arrow_generation(
     required_keys: Sequence[str],
     context: str,
     producer_hint: str,
+    retained_name_counts: ValidatedArrowInputs | None = None,
 ) -> ValidatedArrowInputs:
     """Open retained native state and validate material at one generation boundary."""
 
@@ -805,26 +808,32 @@ def _open_validated_arrow_generation(
     if "name_counts_index" in paths:
         index_path = Path(paths["name_counts_index"])
         try:
-            strict_manifest = (
-                ValidatedNameCountsManifest.load(
-                    index_path,
-                    context=f"{context} name_counts_index publication",
-                )
-                if strict_integrity
-                else None
-            )
-            # Local import avoids the name_counts_index -> arrow_inputs
-            # error-reporting cycle.
-            from s2and.name_counts_index import NameCountsIndex
+            generation_file = verified.files.get("name_counts_index")
+            if generation_file is None:
+                raise ValueError("Arrow artifact generation is missing name_counts_index material facts")
+            if retained_name_counts is not None:
+                retained_manifest = retained_name_counts.name_counts_manifest
+                retained_index = retained_name_counts._name_counts_index
+                if retained_manifest is None or retained_index is None:
+                    raise ValueError("retained Arrow generation does not contain a validated name-count index")
+                if retained_manifest.index_dir != index_path.resolve():
+                    raise ValueError(
+                        "retained name-count index path mismatch: "
+                        f"retained={retained_manifest.index_dir} requested={index_path.resolve()}"
+                    )
+                name_counts_manifest = retained_manifest
+                name_counts_index = retained_index
+            else:
+                # Local import avoids the name_counts_index -> arrow_inputs
+                # error-reporting cycle.
+                from s2and.name_counts_index import NameCountsIndex
 
-            name_counts_index, name_counts_manifest = NameCountsIndex._open_with_manifest(
-                index_path,
-                context=f"{context} name_counts_index",
-            )
-            if strict_manifest is not None:
-                if strict_manifest.manifest_sha256 != name_counts_manifest.manifest_sha256:
-                    raise ValueError("name-count manifest changed during publication validation")
-                name_counts_manifest = strict_manifest
+                name_counts_index, name_counts_manifest = NameCountsIndex._open_with_manifest(
+                    index_path,
+                    context=f"{context} name_counts_index",
+                )
+            if name_counts_manifest.manifest_sha256 != generation_file.sha256:
+                raise ValueError("opened name-count manifest does not match the Arrow artifact generation")
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise MissingArrowArtifactError(
                 context=context,
@@ -865,6 +874,74 @@ def _open_validated_arrow_generation(
     )
 
 
+def _open_runtime_arrow_generation_singleflight(
+    paths: Mapping[str, str],
+    verified: _VerifiedArrowArtifactGeneration,
+    *,
+    required_keys: Sequence[str],
+    context: str,
+    producer_hint: str,
+) -> ValidatedArrowInputs:
+    """Open one runtime generation once while concurrent callers share the result."""
+
+    cache_key = _runtime_arrow_generation_cache_key(paths, verified.generation_id)
+    while True:
+        with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
+            cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
+            if cached is not None:
+                _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
+                return cached
+            in_flight = _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key)
+            if in_flight is None:
+                in_flight = Future()
+                _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key] = in_flight
+                owns_open = True
+            else:
+                owns_open = False
+
+        if owns_open:
+            break
+        try:
+            return in_flight.result()
+        except CancelledError:
+            with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
+                if _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key) is in_flight:
+                    del _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key]
+
+    try:
+        opened = _open_validated_arrow_generation(
+            paths,
+            verified,
+            strict_integrity=False,
+            required_keys=required_keys,
+            context=context,
+            producer_hint=producer_hint,
+        )
+    except BaseException as error:
+        with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
+            if _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key) is in_flight:
+                del _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key]
+        if isinstance(error, Exception):
+            in_flight.set_exception(error)
+        else:
+            in_flight.cancel()
+        raise
+
+    with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
+        cached = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
+        result = opened if cached is None else cached
+        if cached is None:
+            _RUNTIME_ARROW_GENERATION_CACHE[cache_key] = opened
+            while len(_RUNTIME_ARROW_GENERATION_CACHE) > _RUNTIME_ARROW_GENERATION_CACHE_SIZE:
+                _RUNTIME_ARROW_GENERATION_CACHE.popitem(last=False)
+        else:
+            _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
+        if _RUNTIME_ARROW_GENERATION_INFLIGHT.get(cache_key) is in_flight:
+            del _RUNTIME_ARROW_GENERATION_INFLIGHT[cache_key]
+    in_flight.set_result(result)
+    return result
+
+
 def require_arrow_artifacts(
     arrow_paths: Mapping[str, Any],
     *,
@@ -901,6 +978,7 @@ def _validate_complete_arrow_artifacts(
     strict_integrity: bool = False,
     context: str,
     producer_hint: str,
+    retained_name_counts: ValidatedArrowInputs | None = None,
 ) -> ValidatedArrowInputs:
     """Apply the shared complete-bundle contract used by the fixed profiles."""
 
@@ -1035,31 +1113,18 @@ def _validate_complete_arrow_artifacts(
             required_keys=sorted_required,
             context=context,
             producer_hint=producer_hint,
+            retained_name_counts=retained_name_counts,
         )
     else:
-        cache_key = _runtime_arrow_generation_cache_key(generation_paths, verified.generation_id)
-        with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-            validated_generation = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
-            if validated_generation is not None:
-                _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
-        if validated_generation is None:
-            opened_generation = _open_validated_arrow_generation(
-                generation_paths,
-                verified,
-                strict_integrity=False,
-                required_keys=sorted_required,
-                context=context,
-                producer_hint=producer_hint,
-            )
-            with _RUNTIME_ARROW_GENERATION_CACHE_LOCK:
-                validated_generation = _RUNTIME_ARROW_GENERATION_CACHE.get(cache_key)
-                if validated_generation is None:
-                    validated_generation = opened_generation
-                    _RUNTIME_ARROW_GENERATION_CACHE[cache_key] = validated_generation
-                    while len(_RUNTIME_ARROW_GENERATION_CACHE) > _RUNTIME_ARROW_GENERATION_CACHE_SIZE:
-                        _RUNTIME_ARROW_GENERATION_CACHE.popitem(last=False)
-                else:
-                    _RUNTIME_ARROW_GENERATION_CACHE.move_to_end(cache_key)
+        if retained_name_counts is not None:
+            raise ValueError("retained_name_counts is only supported for strict publication validation")
+        validated_generation = _open_runtime_arrow_generation_singleflight(
+            generation_paths,
+            verified,
+            required_keys=sorted_required,
+            context=context,
+            producer_hint=producer_hint,
+        )
 
     required_sidecars = set(str(key) for key in required_request_sidecars)
     if require_cluster_seeds:
@@ -1132,6 +1197,29 @@ def validate_arrow_publication_artifacts(
 ) -> ValidatedArrowInputs:
     """Validate the fixed publication/integrity profile."""
 
+    return _validate_arrow_publication_artifacts_with_retained_name_counts(
+        arrow_paths,
+        require_specter=require_specter,
+        require_name_counts_index=require_name_counts_index,
+        expected_normalization_version=expected_normalization_version,
+        context=context,
+        producer_hint=producer_hint,
+        retained_name_counts=None,
+    )
+
+
+def _validate_arrow_publication_artifacts_with_retained_name_counts(
+    arrow_paths: Mapping[str, Any],
+    *,
+    require_specter: bool,
+    require_name_counts_index: bool,
+    expected_normalization_version: str | None = None,
+    context: str = "Arrow publication integrity",
+    producer_hint: str = "publish a complete immutable Arrow bundle with all batch indexes",
+    retained_name_counts: ValidatedArrowInputs | None,
+) -> ValidatedArrowInputs:
+    """Validate publication material while reusing an exact retained name-count generation."""
+
     return _validate_complete_arrow_artifacts(
         arrow_paths,
         require_specter=require_specter,
@@ -1140,4 +1228,5 @@ def validate_arrow_publication_artifacts(
         strict_integrity=True,
         context=context,
         producer_hint=producer_hint,
+        retained_name_counts=retained_name_counts,
     )

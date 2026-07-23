@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +42,7 @@ def _compare_args(tmp_path: Path, **overrides) -> argparse.Namespace:
         "data_root": str(tmp_path / "json"),
         "input_format": "json",
         "max_block_size": 10,
+        "subblocking_threshold": largest_block_cmd.DEFAULT_SUBBLOCKING_THRESHOLD,
         "n_jobs": 1,
         "quality_check": False,
         "require_rust_release": False,
@@ -106,3 +108,36 @@ def test_removed_json_constraint_sampling_option_is_rejected(
         largest_block_cmd.main()
 
     assert "unrecognized arguments: --constraint-sample 1" in capsys.readouterr().err
+
+
+def test_single_subprocess_forwards_subblocking_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(largest_block_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(largest_block_cmd, "extract_marked_json_payload", lambda *_args, **_kwargs: {})
+
+    largest_block_cmd._run_single_subprocess(
+        backend="rust",
+        dataset_name="qian",
+        block_key="a smith",
+        n_jobs=1,
+        profile_output_path=str(tmp_path / "profile.txt"),
+        model_path=str(tmp_path / "model"),
+        data_root=str(tmp_path / "data"),
+        max_block_size=0,
+        run_label="rust",
+        timeout_seconds=10,
+        quality_check=False,
+        emit_signature_map=False,
+        require_rust_release=False,
+        input_format="arrow",
+        arrow_data_root=str(tmp_path / "arrow"),
+        subblocking_threshold=321,
+    )
+
+    threshold_index = captured["cmd"].index("--subblocking-threshold")
+    assert captured["cmd"][threshold_index + 1] == "321"

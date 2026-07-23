@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 mod arrow_batch_lookup;
+mod artifact_hash;
 mod constraints;
 mod features;
 mod ingest_dataset;
@@ -269,53 +270,6 @@ fn get_build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
 mod tests {
     use super::*;
 
-    const ARROW_SCHEMA_CONTRACT_COLUMNS: &[(&str, &str, &str, bool)] = &[
-        ("altered_cluster_signatures", "signature_id", "string", true),
-        ("cluster_seed_disallows", "signature_id_1", "string", true),
-        ("cluster_seed_disallows", "signature_id_2", "string", true),
-        ("cluster_seeds", "signature_id", "string", true),
-        ("cluster_seeds", "cluster_id", "string", true),
-        (
-            "incremental_query_signatures",
-            "signature_id",
-            "string",
-            true,
-        ),
-        ("incremental_query_signatures", "query_view", "string", true),
-        (
-            "incremental_query_signatures",
-            "query_author",
-            "string",
-            true,
-        ),
-        ("paper_authors", "paper_id", "string", true),
-        ("paper_authors", "position", "int64", true),
-        ("paper_authors", "author_name", "string", true),
-        ("papers", "paper_id", "string", true),
-        ("papers", "title", "string", true),
-        ("papers", "abstract", "string", false),
-        ("papers", "venue", "string", true),
-        ("papers", "journal_name", "string", true),
-        ("papers", "year", "int64", false),
-        ("papers", "predicted_language", "string", false),
-        ("papers", "is_reliable", "bool", false),
-        ("papers", "language_reliability", "float64", false),
-        ("signatures", "signature_id", "string", true),
-        ("signatures", "paper_id", "string", true),
-        ("signatures", "author_first", "string", true),
-        ("signatures", "author_middle", "string", true),
-        ("signatures", "author_last", "string", true),
-        ("signatures", "author_suffix", "string", true),
-        ("signatures", "author_affiliations", "list<string>", true),
-        ("signatures", "author_orcid", "string", false),
-        ("signatures", "author_position", "int64", true),
-        ("signatures", "author_block", "string", false),
-        ("signatures", "author_email", "string", false),
-        ("signatures", "source_author_ids", "list<string>", false),
-        ("specter", "paper_id", "string", true),
-        ("specter", "embedding", "fixed_size_list<float32>", true),
-    ];
-
     fn raw_arrow_feature_for_test(first: &str, year: Option<i64>) -> RawArrowFeature {
         RawArrowFeature {
             query: RetrievalQueryData {
@@ -372,50 +326,6 @@ mod tests {
                 .expect("test error messages are ASCII")
                 .to_string()
         })
-    }
-
-    #[test]
-    fn arrow_schema_contract_json_matches_rust_column_contract() {
-        let payload: serde_json::Value =
-            serde_json::from_str(include_str!("../../s2and/arrow_schema_contract.json"))
-                .expect("schema contract JSON should parse");
-        assert_eq!(
-            payload
-                .get("schema_version")
-                .and_then(serde_json::Value::as_str),
-            Some("s2and_arrow_schema_contract_v1")
-        );
-        let tables = payload
-            .get("tables")
-            .and_then(serde_json::Value::as_object)
-            .expect("schema contract should contain a tables object");
-        let mut observed = Vec::new();
-        for (table_name, columns) in tables {
-            for column in columns
-                .as_array()
-                .expect("schema contract table columns should be arrays")
-            {
-                observed.push((
-                    table_name.as_str(),
-                    column
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .expect("schema contract column should contain name"),
-                    column
-                        .get("datatype")
-                        .and_then(serde_json::Value::as_str)
-                        .expect("schema contract column should contain datatype"),
-                    column
-                        .get("required")
-                        .and_then(serde_json::Value::as_bool)
-                        .expect("schema contract column should contain required"),
-                ));
-            }
-        }
-        observed.sort_unstable();
-        let mut expected = ARROW_SCHEMA_CONTRACT_COLUMNS.to_vec();
-        expected.sort_unstable();
-        assert_eq!(observed, expected);
     }
 
     #[test]
@@ -955,6 +865,7 @@ fn _s2and_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         RAW_ARROW_QUERY_SIGNATURE_PLANNER_METHODS.to_vec(),
     )?;
     m.add_function(wrap_pyfunction!(get_build_info, m)?)?;
+    artifact_hash::add_to_module(m)?;
     m.add_function(wrap_pyfunction!(raw_arrow_labeled_candidate_plan, m)?)?;
     promoted_linker::add_to_module(m)?;
     lightgbm_booster::add_to_module(m)?;

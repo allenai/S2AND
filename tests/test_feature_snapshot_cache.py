@@ -6,6 +6,7 @@ import hashlib
 import json
 import pickle
 import shutil
+import time
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
@@ -193,6 +194,7 @@ def test_specter_capture_streams_and_hashes_the_full_pickle(tmp_path: Path, monk
         clusters=str(base_dir / "clusters.json"),
         name="snapshot_cache_specter_stream",
         specter_embeddings=str(specter_path),
+        name_counts_index=None,
         name_tuples=set(),
         preprocess=True,
         n_jobs=1,
@@ -324,6 +326,9 @@ def test_snapshot_key_changes_with_featurizer_version_and_pairs(
 def test_cold_arrays_are_validated_before_publication(
     dummy_builder: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    original_featurize = feature_cache_mod.many_pairs_featurize
+    original_publish = feature_cache_mod._publish_snapshot
+
     def invalid_featurize(pairs, *_args, **_kwargs):
         return (
             np.zeros((len(pairs), 1), dtype=np.float32),
@@ -344,6 +349,18 @@ def test_cold_arrays_are_validated_before_publication(
             cache_dir=tmp_path,
         )
     assert list(tmp_path.glob("*.npz")) == []
+
+    # Validation failure releases the build claim so a bounded retry can own
+    # and publish the same content-addressed snapshots.
+    monkeypatch.setattr(feature_cache_mod, "many_pairs_featurize", original_featurize)
+    monkeypatch.setattr(feature_cache_mod, "_publish_snapshot", original_publish)
+    _, retried = build_and_cached_featurize(
+        dummy_builder,
+        FeaturizationInfo(features_to_use=["year_diff"]),
+        cache_dir=tmp_path,
+    )
+    assert len(retried) == 3
+    assert len(list(tmp_path.glob("*.npz"))) == 3
 
 
 def test_corrupt_snapshots_raise_contextual_errors(dummy_builder: dict[str, Any], tmp_path: Path) -> None:
@@ -444,6 +461,7 @@ def _file_backed_kwargs(
         "name": name,
         "mode": "train",
         "specter_embeddings": specter_embeddings,
+        "name_counts_index": None,
         "name_tuples": set(),
         "preprocess": preprocess,
         "compute_block_fn": compute_block_fn,
@@ -624,6 +642,92 @@ def test_concurrent_competing_writers_publish_exactly_once(tmp_path: Path) -> No
     assert list(tmp_path.glob("*.tmp")) == []
 
 
+def _contended_cache_build_worker(cache_dir_str: str, counter_path_str: str) -> tuple[int, tuple[tuple[int, int], ...]]:
+    """Build the same three cold snapshots and record each real computation."""
+
+    import os
+
+    from s2and._atomic_io import exclusive_file_lock
+
+    os.environ["S2AND_BACKEND"] = "python"
+    cache_dir = Path(cache_dir_str)
+    counter_path = Path(counter_path_str)
+    dummy_dir = Path("tests/dummy").resolve()
+
+    def record(event: str) -> None:
+        with exclusive_file_lock(f"{counter_path}.lock"):
+            with counter_path.open("a", encoding="utf-8") as counter:
+                counter.write(f"{event}\n")
+
+    record("ready")
+    ready_deadline = time.monotonic() + 10.0
+    while True:
+        with exclusive_file_lock(f"{counter_path}.lock"):
+            events = counter_path.read_text(encoding="utf-8").splitlines()
+        if events.count("ready") == 2:
+            break
+        if time.monotonic() >= ready_deadline:
+            raise TimeoutError("timed out waiting for both feature-cache test workers")
+        time.sleep(0.01)
+
+    def fixed_pairs(_dataset):
+        pairs = [("0", "1", 1.0)]
+        return pairs, pairs, pairs
+
+    def recording_featurize(pairs, _dataset, info, **_kwargs):
+        record("compute")
+        time.sleep(0.2)
+        width = len(info.selected_feature_indices())
+        return (
+            np.zeros((len(pairs), width), dtype=np.float64),
+            np.zeros(len(pairs), dtype=np.float64),
+            None,
+        )
+
+    original_savez = feature_cache_mod.np.savez
+
+    def recording_savez(*args, **kwargs):
+        record("serialize")
+        return original_savez(*args, **kwargs)
+
+    feature_cache_mod.resolve_training_pairs = fixed_pairs
+    feature_cache_mod.many_pairs_featurize = recording_featurize
+    feature_cache_mod.np.savez = recording_savez
+    kwargs = _dataset_kwargs(
+        signatures=str(dummy_dir / "signatures.json"),
+        papers=str(dummy_dir / "papers.json"),
+        clusters=str(dummy_dir / "clusters.json"),
+    )
+    _, splits = build_and_cached_featurize(
+        kwargs,
+        FeaturizationInfo(features_to_use=["year_diff"]),
+        cache_dir=cache_dir,
+        n_jobs=1,
+    )
+    return os.getpid(), tuple(features.shape for features, _labels, _nameless in splits)
+
+
+def test_concurrent_cold_builds_compute_each_snapshot_once(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    counter_path = tmp_path / "compute-count.txt"
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                _contended_cache_build_worker,
+                [str(cache_dir)] * 2,
+                [str(counter_path)] * 2,
+            )
+        )
+
+    assert len({worker_pid for worker_pid, _shapes in results}) == 2
+    assert [shapes for _worker_pid, shapes in results] == [((1, 1), (1, 1), (1, 1))] * 2
+    events = counter_path.read_text(encoding="utf-8").splitlines()
+    assert events.count("ready") == 2
+    assert events.count("compute") == 3
+    assert events.count("serialize") == 3
+    assert len(list(cache_dir.glob("*.npz"))) == 3
+
+
 def test_end_to_end_cached_matches_uncached_with_real_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fixed-pairs cached output is bit-identical to uncached output."""
     monkeypatch.setenv("S2AND_BACKEND", "python")
@@ -646,6 +750,7 @@ def test_end_to_end_cached_matches_uncached_with_real_resolver(tmp_path: Path, m
         "train_pairs": str(base_dir / "train_pairs.csv"),
         "val_pairs": str(base_dir / "val_pairs.csv"),
         "test_pairs": str(base_dir / "test_pairs.csv"),
+        "name_counts_index": None,
         "name_tuples": set(),
         "preprocess": True,
         "n_jobs": 1,

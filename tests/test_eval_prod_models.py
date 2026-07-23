@@ -27,6 +27,20 @@ requires_canonical_source_bundle = pytest.mark.skip(
 )
 
 
+def test_specter2_is_default_and_specter1_is_train_only() -> None:
+    parser = eval_prod_models._build_parser()
+
+    assert eval_prod_models.specter_suffixes == [eval_prod_models.SPECTER2_SUFFIX]
+    assert eval_prod_models._resolve_requested_specter_suffixes(eval_prod_models.specter_suffixes, None) == [
+        eval_prod_models.SPECTER2_SUFFIX
+    ]
+    training_args = parser.parse_args(["--train", "--specter-suffixes", eval_prod_models.SPECTER1_SUFFIX])
+    assert training_args.train
+    assert training_args.specter_suffixes == [eval_prod_models.SPECTER1_SUFFIX]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--specter1-model-path", "legacy-model"])
+
+
 def _is_lfs_pointer(path: Path) -> bool:
     if not path.is_file():
         return False
@@ -536,10 +550,12 @@ def test_cluster_eval_arrow_passes_name_counts_index_and_batch_indexes(monkeypat
         SimpleNamespace(predict_from_arrow_paths=FakeClusterer().predict_from_arrow_paths),
         random_seed=42,
         n_jobs=1,
+        batching_threshold=7,
     )
 
     assert captured["block_dict"] == {"block": ["s1"]}
     assert "load_name_counts" not in captured["kwargs"]
+    assert captured["kwargs"]["batching_threshold"] == 7
     assert captured["arrow_paths"]["name_counts_index"] == "name_counts_index"
     assert captured["arrow_paths"]["signatures_batch_index"] == "signatures.signatures_batch_index.bin"
     assert "clusters" not in captured["arrow_paths"]
@@ -593,8 +609,6 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
             "mini",
             "--datasets",
             "pubmed",
-            "--specter-suffixes",
-            "_specter2.pkl",
             "--specter2-model-path",
             str(model_path),
             "--use-arrow",
@@ -620,6 +634,10 @@ def test_eval_main_use_arrow_calls_arrow_eval_without_anddata(
 def test_eval_main_rejects_invalid_mode_combinations(monkeypatch: pytest.MonkeyPatch) -> None:
     cases = (
         (["--dataset", "mini", "--specter-suffixes", "_specter2.pkl"], "requires an explicit model path"),
+        (
+            ["--dataset", "mini", "--specter-suffixes", "_specter.pickle"],
+            "SPECTER1 production evaluation was removed",
+        ),
         (["--train", "--specter2-model-path", "unused-model"], "cannot be combined with --train"),
         (["--dataset", "mini", "--use-arrow", "--train"], "cannot be combined with --train"),
         (["--dataset", "inventors_s2and", "--use-arrow"], "supports --dataset mini and --dataset full only"),

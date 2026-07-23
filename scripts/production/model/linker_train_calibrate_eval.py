@@ -3140,7 +3140,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             incremental_linker_artifact_dir=save_artifact_to,
             target_json=Path(args.target_json),
             bundle_version=args.production_bundle_version or production_version_from_bundle_dir(production_bundle_dir),
-            pairwise_model_version=_version_from_production_model_path(Path(args.pairwise_model_path)),
             incremental_linker_version=str(args.linker_artifact_version).removeprefix("v"),
         )
     result = {

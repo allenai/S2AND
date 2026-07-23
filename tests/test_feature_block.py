@@ -19,7 +19,7 @@ from s2and.arrow_inputs import (
     validate_arrow_prediction_artifacts,
 )
 from s2and.consts import NORMALIZATION_VERSION
-from s2and.data import ANDData, NameCounts
+from s2and.data import ANDData, Author, NameCounts
 from s2and.feature_port import build_rust_featurizer_from_arrow_paths
 from s2and.featurizer import FeaturizationInfo
 from s2and.incremental_linking.feature_block import (
@@ -93,7 +93,9 @@ def test_feature_block_paper_is_reliable_parses_false_string() -> None:
         venue="",
         journal_name="",
         year=None,
+        predicted_language="en",
         is_reliable=cast(Any, "false"),
+        language_reliability=0.0,
     )
 
     assert paper.is_reliable is False
@@ -146,6 +148,49 @@ def test_feature_block_paper_validates_language_reliability() -> None:
 
     assert reliable.language_reliability == 1.0
     assert unreliable.language_reliability == 0.0
+
+
+@pytest.mark.parametrize(
+    ("predicted_language", "is_reliable", "language_reliability", "match"),
+    [
+        (None, True, 0.75, "require FeatureBlockPaper.predicted_language"),
+        (None, True, None, "require FeatureBlockPaper.predicted_language"),
+        (None, None, 0.75, "require FeatureBlockPaper.predicted_language"),
+        ("", True, 0.75, "predicted_language must be non-empty"),
+        (" \t", True, 0.75, "predicted_language must be non-empty"),
+    ],
+)
+def test_feature_block_paper_rejects_partial_or_blank_language_metadata(
+    predicted_language: str | None,
+    is_reliable: bool | None,
+    language_reliability: float | None,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        FeatureBlockPaper(
+            paper_id="p1",
+            title=None,
+            abstract=None,
+            venue=None,
+            journal_name=None,
+            year=None,
+            predicted_language=predicted_language,
+            is_reliable=is_reliable,
+            language_reliability=language_reliability,
+        )
+
+
+def test_feature_block_paper_accepts_all_null_language_metadata() -> None:
+    paper = FeatureBlockPaper(
+        paper_id="p1",
+        title=None,
+        abstract=None,
+        venue=None,
+        journal_name=None,
+        year=None,
+    )
+
+    assert (paper.predicted_language, paper.is_reliable, paper.language_reliability) == (None, None, None)
 
 
 def _signature_payload(
@@ -490,6 +535,21 @@ def test_feature_block_from_anddata_builds_requested_mini_contract() -> None:
     np.testing.assert_allclose(feature_block.specter_embeddings, [[1.0, 0.0], [1.0, 0.1]])
 
 
+def test_feature_block_from_anddata_preserves_blank_paper_author_rows() -> None:
+    dataset = _tiny_anddata()
+    dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
+        authors=[Author(author_name="", position=0), Author(author_name="   ", position=1)]
+    )
+
+    feature_block = feature_block_from_anddata(dataset, signature_ids=["q"], query_signature_ids=["q"])
+
+    assert [(row.position, row.author_name) for row in feature_block.paper_authors] == [(0, ""), (1, "   ")]
+    assert feature_block.to_arrow_tables()["paper_authors"].to_pylist() == [
+        {"paper_id": "p_q", "position": 0, "author_name": ""},
+        {"paper_id": "p_q", "position": 1, "author_name": "   "},
+    ]
+
+
 def test_feature_block_from_anddata_does_not_infer_reliability_from_boolean() -> None:
     dataset = _tiny_anddata()
     dataset.papers["p_q"] = dataset.papers["p_q"]._replace(
@@ -769,6 +829,27 @@ def test_feature_block_from_arrow_paths_reads_cluster_seed_disallows(tmp_path: P
     assert feature_block.cluster_seeds_disallow == (("q", "s2"),)
 
 
+def test_feature_block_from_arrow_paths_preserves_blank_paper_author_rows(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    arrow_paths = _write_feature_block_arrow_paths(tmp_path)
+    paper_authors_path = Path(arrow_paths["paper_authors"])
+    with pa.memory_map(str(paper_authors_path), "r") as source:
+        paper_authors = pa.ipc.open_file(source).read_all()
+    rows = paper_authors.to_pylist()
+    schema = paper_authors.schema
+    del paper_authors
+    rows[0]["author_name"] = ""
+    rows[1]["author_name"] = "   "
+    write_arrow_ipc_table(pa.Table.from_pylist(rows, schema=schema), paper_authors_path)
+
+    feature_block = feature_block_from_arrow_paths(arrow_paths, raw_candidate_plan=_raw_plan())
+
+    assert [(row.position, row.author_name) for row in feature_block.paper_authors if row.paper_id == "p_q"] == [
+        (0, ""),
+        (1, "   "),
+    ]
+
+
 def test_feature_block_from_arrow_paths_accepts_missing_orcid_column(tmp_path: Path) -> None:
     pa = pytest.importorskip("pyarrow")
     arrow_paths = _write_feature_block_arrow_paths(tmp_path)
@@ -1034,6 +1115,26 @@ def test_feature_block_from_arrow_paths_reads_specter_when_requested(tmp_path: P
     assert materialized.specter_paper_ids == ("p_q", "p1")
     assert materialized.specter_embeddings is not None
     np.testing.assert_allclose(materialized.specter_embeddings, [[1.0, 0.0], [0.5, 0.5]])
+
+
+@pytest.mark.parametrize(
+    ("paper_ids", "match"),
+    [
+        (("",), "cannot contain empty"),
+        (("p1", "p1"), "must contain unique"),
+        (cast(Any, (1, "1")), "must contain unique"),
+    ],
+)
+def test_feature_block_rejects_invalid_specter_paper_ids(
+    paper_ids: tuple[str, ...],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        FeatureBlock(
+            signatures=(),
+            specter_paper_ids=paper_ids,
+            specter_embeddings=np.ones((len(paper_ids), 1), dtype=np.float32),
+        )
 
 
 def test_write_arrow_ipc_table_writes_bounded_record_batches(tmp_path: Path) -> None:
@@ -1540,9 +1641,14 @@ def test_feature_block_rejects_duplicate_paper_author_positions() -> None:
         )
 
 
-def test_feature_block_rejects_empty_paper_author_name() -> None:
-    with pytest.raises(ValueError, match="author_name must be non-empty"):
-        FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name="")
+@pytest.mark.parametrize("author_name", ["", "   "])
+def test_feature_block_accepts_blank_paper_author_name(author_name: str) -> None:
+    row = FeatureBlockPaperAuthor(paper_id="p1", position=0, author_name=author_name)
+
+    assert row.author_name == author_name
+    assert FeatureBlock(signatures=(), paper_authors=(row,)).to_arrow_tables()["paper_authors"].to_pylist() == [
+        {"paper_id": "p1", "position": 0, "author_name": author_name}
+    ]
 
 
 def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
@@ -1672,7 +1778,9 @@ def test_raw_arrow_scoring_wrapper_uses_direct_arrow_featurizer(
     queries = captured["queries"]
     assert isinstance(queries, tuple)
     assert queries[0].query_author == "Ada Lovelace"
+    assert len(captured["seed_setup"]) == 4
     assert captured["seed_setup"][0] == {"s1": "c_ada", "s2": "c_other", "s3": "c_other"}
+    assert captured["seed_setup"][3] is captured["seed_setup"][2]
     assert result.linked_signature_clusters == {"q": "c_ada"}
     assert result.telemetry["raw_arrow_signature_count"] == 5
     assert result.telemetry["raw_arrow_plan_signature_count"] == 4
@@ -2281,6 +2389,7 @@ def test_from_retrieval_skips_pair_id_build_when_partial_supervision_empty(
         seed_setup=(
             {"s1": "c_ada", "s2": "c_other", "s3": "c_other"},
             {"c_ada": "c_ada", "c_other": "c_other"},
+            {"c_ada": ["s1"], "c_other": ["s2", "s3"]},
             {"c_ada": ["s1"], "c_other": ["s2", "s3"]},
         ),
         n_jobs=1,

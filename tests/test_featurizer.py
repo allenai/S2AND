@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -120,6 +122,44 @@ def test_malformed_emails_produce_only_missing_features() -> None:
 
     assert features.shape == (1, 2)
     assert np.isnan(features).all()
+
+
+def test_concurrent_python_featurization_uses_each_request_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_dataset = _dummy_dataset("concurrent_first", load_name_counts=False)
+    second_dataset = _dummy_dataset("concurrent_second", load_name_counts=False)
+    for dataset, year_difference in ((first_dataset, 5), (second_dataset, 20)):
+        first_paper_id = str(dataset.signatures["0"].paper_id)
+        second_paper_id = str(dataset.signatures["1"].paper_id)
+        dataset.papers[first_paper_id] = dataset.papers[first_paper_id]._replace(year=2000)
+        dataset.papers[second_paper_id] = dataset.papers[second_paper_id]._replace(year=2000 + year_difference)
+
+    original_execute = featurizer_module._execute_python_featurization_phase  # noqa: SLF001
+    execute_barrier = threading.Barrier(2)
+
+    def synchronized_execute(**kwargs: Any) -> str:
+        execute_barrier.wait(timeout=5)
+        return original_execute(**kwargs)
+
+    monkeypatch.setattr(featurizer_module, "_execute_python_featurization_phase", synchronized_execute)
+    featurizer = FeaturizationInfo(features_to_use=["year_diff"])
+
+    def featurize(dataset: ANDData) -> float:
+        features, _labels, _nameless = many_pairs_featurize(
+            [("0", "1", 0)],
+            dataset,
+            featurizer,
+            n_jobs=1,
+            chunk_size=1,
+            nan_value=np.nan,
+        )
+        return float(features[0, 0])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(featurize, first_dataset)
+        second_future = executor.submit(featurize, second_dataset)
+
+    assert first_future.result() == 5.0
+    assert second_future.result() == 20.0
 
 
 @pytest.mark.parametrize("zero_embedding", [[0.0, 0.0], np.asarray([0.0, 0.0])])
@@ -250,7 +290,13 @@ def test_delete_training_data_uses_global_coauthor_similarity_index(monkeypatch:
         run_id="run-delete-training-data",
     )
 
-    def fake_single_pair_featurize(_pair: tuple[str, str], index: int) -> tuple[np.ndarray, int]:
+    def fake_single_pair_featurize(
+        _pair: tuple[str, str],
+        index: int,
+        *,
+        dataset: ANDData | None = None,
+    ) -> tuple[np.ndarray, int]:
+        assert dataset is not None
         row = np.zeros(NUM_FEATURES, dtype=np.float64)
         row[featurizer_info.feature_group_to_index["coauthor_similarity"][1]] = 1.0
         return row, index

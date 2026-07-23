@@ -1091,14 +1091,14 @@ def _coauthor_blocks_by_paper_from_arrow(
                 if author_name_value is None:
                     raise ValueError("paper_authors Arrow cannot contain null author_name values")
                 author_name = str(author_name_value).strip()
-                if not author_name:
-                    raise ValueError("paper_authors Arrow cannot contain empty author_name values")
                 position_key = int(position)
                 if position_key in seen_positions_by_paper[paper_id]:
                     raise ValueError(
                         f"paper_authors Arrow contains duplicate (paper_id, position): ({paper_id!r}, {position_key})"
                     )
                 seen_positions_by_paper[paper_id].add(position_key)
+                if not author_name:
+                    continue
                 block = _coauthor_block_from_arrow_author_name(author_name)
                 if block:
                     out[paper_id].append((position_key, block))
@@ -1690,6 +1690,18 @@ def _sorted_subblock_merge_candidates(
     return sorted(candidates, key=lambda x: (x[1], x[0][0], x[0][1]), reverse=True)
 
 
+def _normalize_unique_subblocking_signature_ids(signature_ids: Iterable[Any]) -> list[str]:
+    """Normalize subblocking IDs and reject duplicate identities."""
+
+    normalized_signature_ids = [str(signature_id) for signature_id in signature_ids]
+    seen_signature_ids: set[str] = set()
+    for signature_id in normalized_signature_ids:
+        if signature_id in seen_signature_ids:
+            raise ValueError(f"Subblocking signature_ids must be unique after string coercion: {signature_id!r}")
+        seen_signature_ids.add(signature_id)
+    return normalized_signature_ids
+
+
 def _make_subblocks_with_telemetry_arrow_rust(
     arrow_paths: Mapping[str, Any],
     signature_ids,
@@ -1708,7 +1720,7 @@ def _make_subblocks_with_telemetry_arrow_rust(
     rust_make_subblocks = load_s2and_rust_extension().make_subblocks_with_telemetry_arrow_native_graph
     subblocks, telemetry = rust_make_subblocks(
         dict(arrow_paths),
-        [str(signature_id) for signature_id in signature_ids],
+        _normalize_unique_subblocking_signature_ids(signature_ids),
         int(maximum_size),
         rust_prefix_counts,
         graph_subblocking_config,
@@ -1754,14 +1766,7 @@ def make_subblocks_with_telemetry(
     """
     logger.info("Beginning subblocking...")
     first_k_letter_counts_sorted = _resolved_orcid_prefix_counts(first_k_letter_counts_sorted)
-    normalized_signature_ids = [str(signature_id) for signature_id in signature_ids]
-    seen_signature_ids: set[str] = set()
-    for signature_id in normalized_signature_ids:
-        if signature_id in seen_signature_ids:
-            raise ValueError(f"Subblocking signature_ids must be unique after string coercion: {signature_id!r}")
-        seen_signature_ids.add(signature_id)
-    signature_ids = np.asarray(normalized_signature_ids)
-    del normalized_signature_ids, seen_signature_ids
+    signature_ids = np.asarray(_normalize_unique_subblocking_signature_ids(signature_ids))
     first_middle_names = [signature_name_parts_for_subblocking(anddata.signatures[i]) for i in signature_ids]
     first_names = np.array([name_parts[0] for name_parts in first_middle_names])
     middle_names = np.array([name_parts[1] for name_parts in first_middle_names])

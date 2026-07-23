@@ -99,14 +99,18 @@ The public routes are method-based:
   Oversized fallback groups call the Python graph fallback.
 - **Rust Arrow prediction.** Call
   `Clusterer.predict_from_arrow_paths(blocks, arrow_paths,
-  total_ram_bytes=...)`. This validates the indexed Arrow generation and builds
-  the Rust featurizer directly; it does not route through `Clusterer.predict`.
+  batching_threshold=N, total_ram_bytes=...)`. This validates the indexed Arrow
+  generation, partitions oversized blocks with the native Rust graph
+  subblocker, and reuses one Rust featurizer across the emitted subblocks.
 
-`predict_from_arrow_paths` does not currently expose `batching_threshold` and
-does not invoke the Python subblocking orchestration. `total_ram_bytes` controls
-pair-batch sizing and allocation checks; it is not a block partitioning knob.
-Missing required Arrow tables or batch indexes raise a structured artifact
-error instead of falling back to `ANDData`.
+`batching_threshold=None` retains full-block prediction. A positive threshold
+is the maximum native subblock size; blocks at or below it are unchanged.
+Multi-letter subblocks are predicted first, then initial-only groups attach to
+those clusters through the promoted Rust incremental linker. `total_ram_bytes`
+still controls pair-batch sizing and allocation checks; it is not a block
+partitioning knob. Missing required Arrow tables, embedding evidence, batch
+indexes, or the incremental artifact raise instead of falling back to Python or
+`ANDData`.
 
 ## Telemetry
 

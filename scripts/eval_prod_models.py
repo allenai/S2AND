@@ -1,11 +1,11 @@
 # mypy: ignore-errors
 
 """
-Evaluate production S2AND models (SPECTER1 vs SPECTER2) on various datasets.
+Evaluate current SPECTER2 production bundles and embedding retraining experiments.
 
-
-In this script we try to answer the question: if we deploy SPECTER2, will S2AND care?
-Both with retraining and without retraining.
+Current production evaluation is SPECTER2-only. SPECTER1 production belongs to
+S2AND v1.21 and earlier; SPECTER1 remains available here only as an explicit
+``--train --specter-suffixes _specter.pickle`` research comparison.
 
 ================================================================================
 Which bundle the numbers below refer to
@@ -66,22 +66,16 @@ SPECTER2 numbers verified 2026-05-21 against the ANDData/Python backend; all
 six datasets reproduce bit-identically on 2026-05-28 by passing the evaluated
 bundle explicitly with `--specter2-model-path`.
 
-Performance with SPECTERv1 data, on arnetminer (B3): (0.988, 0.972, 0.98)
 Performance with SPECTERv2 data, on arnetminer (B3): (0.946, 0.982, 0.963)
 
-Performance with SPECTERv1 data, on inspire (B3): (0.994, 0.954, 0.973)
 Performance with SPECTERv2 data, on inspire (B3): (0.998, 0.927, 0.961)
 
-Performance with SPECTERv1 data, on kisti (B3): (0.964, 0.937, 0.95)
 Performance with SPECTERv2 data, on kisti (B3): (0.96, 0.96, 0.96)
 
-Performance with SPECTERv1 data, on pubmed (B3): (1.0, 0.895, 0.945)
 Performance with SPECTERv2 data, on pubmed (B3): (1.0, 0.892, 0.943)
 
-Performance with SPECTERv1 data, on qian (B3): (0.991, 0.937, 0.963)
 Performance with SPECTERv2 data, on qian (B3): (0.978, 0.964, 0.971)
 
-Performance with SPECTERv1 data, on zbmath (B3): (0.966, 0.986, 0.975)
 Performance with SPECTERv2 data, on zbmath (B3): (0.961, 0.992, 0.976)
 
 ================================================================================
@@ -89,8 +83,8 @@ Full-bundle Arrow numbers (no retraining, SPECTER2, --dataset full --use-arrow)
 ================================================================================
 
 For reference, when evaluating the full bundle through the Arrow + Rust
-production path (`--dataset full --use-arrow --specter-suffixes _specter2.pkl
---specter2-model-path /path/to/bundle --seed 42`), measured 2026-05-28:
+production path (`--dataset full --use-arrow --specter2-model-path
+/path/to/bundle --seed 42`), measured 2026-05-28:
 
 Performance on arnetminer (B3): (0.946, 0.982, 0.963)    # matches mini
 Performance on inspire    (B3): (0.983, 0.932, 0.957)    # mini ⊂ full
@@ -105,22 +99,23 @@ Usage
 
     # Evaluate one explicit SPECTER2 model on inventors_s2and
     uv run python scripts/eval_prod_models.py --dataset inventors_s2and \
-        --specter-suffixes _specter2.pkl \
         --specter2-model-path /path/to/production_model_bundle
 
     # Reproduce the docstring numbers above (mini bundle, ANDData backend)
     S2AND_BACKEND=python uv run python scripts/eval_prod_models.py \
         --dataset mini --no-arrow --seed 42 \
-        --specter-suffixes _specter2.pkl \
         --specter2-model-path /path/to/production_model_bundle
 
     # Evaluate the full released benchmark via Arrow + Rust production path
     uv run python scripts/eval_prod_models.py --dataset full --use-arrow \
-        --specter-suffixes _specter2.pkl \
         --specter2-model-path /path/to/production_model_bundle
 
-    # Retrain from scratch instead of using prod models
+    # Retrain SPECTER2 from scratch instead of using a production model
     uv run python scripts/eval_prod_models.py --train
+
+    # Opt into a historical SPECTER1-vs-SPECTER2 retraining comparison
+    uv run python scripts/eval_prod_models.py --train \
+        --specter-suffixes _specter.pickle _specter2.pkl
 
     # Override seed / n_jobs
     uv run python scripts/eval_prod_models.py --seed 42 --n_jobs 8
@@ -159,7 +154,7 @@ SPECTER_SUFFIXES = (SPECTER1_SUFFIX, SPECTER2_SUFFIX)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate prod S2AND models (SPECTER1 vs SPECTER2)")
+    parser = argparse.ArgumentParser(description="Evaluate SPECTER2 production bundles or retrain embedding variants")
     parser.add_argument(
         "--dataset",
         choices=["inventors_s2and", "mini", "full"],
@@ -184,13 +179,10 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="*",
         choices=SPECTER_SUFFIXES,
         default=None,
-        help="Optional subset of embedding suffixes to evaluate.",
-    )
-    parser.add_argument(
-        "--specter1-model-path",
-        type=Path,
-        default=None,
-        help="Explicit model bundle for _specter.pickle production evaluation.",
+        help=(
+            "Embedding suffixes to evaluate. Defaults to SPECTER2. "
+            "SPECTER1 is accepted only with --train for historical research comparisons."
+        ),
     )
     parser.add_argument(
         "--specter2-model-path",
@@ -392,7 +384,7 @@ def _should_use_arrow_eval(
     return bool(arrow_available and not no_arrow)
 
 
-specter_suffixes = list(SPECTER_SUFFIXES)
+specter_suffixes = [SPECTER2_SUFFIX]
 
 
 def resolve_dataset_file(data_root: str, dataset_name: str, preferred_name: str, fallback_name: str) -> str:
@@ -670,6 +662,7 @@ def cluster_eval_arrow(
     n_jobs: int,
     split: str = "test",
     total_ram_bytes: int = 1_000_000_000_000,
+    batching_threshold: int | None = None,
 ) -> tuple[dict[str, tuple], dict[str, tuple[float, float, float]]]:
     import numpy as np
 
@@ -694,6 +687,7 @@ def cluster_eval_arrow(
         block_dict,
         predict_arrow_paths,
         total_ram_bytes=total_ram_bytes,
+        batching_threshold=batching_threshold,
         name_tuples=None,
     )
     (
@@ -1136,19 +1130,15 @@ def main() -> None:
         data_original = args.json_data_root or _default_json_data_root(PROJECT_ROOT_PATH, args.dataset)
         _validate_train_mode_scope(train_modes, datasets)
     active_specter_suffixes = _resolve_requested_specter_suffixes(specter_suffixes, args.specter_suffixes)
-    production_model_paths: dict[str, Path | None] = {
-        SPECTER1_SUFFIX: args.specter1_model_path,
-        SPECTER2_SUFFIX: args.specter2_model_path,
-    }
-    if train_flag and any(path is not None for path in production_model_paths.values()):
+    if not train_flag and SPECTER1_SUFFIX in active_specter_suffixes:
+        raise ValueError(
+            "SPECTER1 production evaluation was removed; use S2AND v1.21 or earlier for the historical "
+            "production model, or pass --train for a research retraining comparison"
+        )
+    if train_flag and args.specter2_model_path is not None:
         raise ValueError("Explicit production model paths cannot be combined with --train")
-    if not train_flag:
-        missing_model_paths = [suffix for suffix in active_specter_suffixes if production_model_paths[suffix] is None]
-        if missing_model_paths:
-            raise ValueError(
-                "Production evaluation requires an explicit model path for every selected SPECTER suffix; "
-                f"missing={missing_model_paths!r}"
-            )
+    if not train_flag and args.specter2_model_path is None:
+        raise ValueError("Production evaluation requires an explicit model path via --specter2-model-path")
     missing_arrow_error = (
         first_missing_arrow_dataset_error(arrow_data_root, datasets, active_specter_suffixes)
         if _supports_arrow_eval(args.dataset) and not train_flag
@@ -1192,7 +1182,7 @@ def main() -> None:
         for train_mode in train_modes:
             clusterer = None
             if not train_flag:
-                model_path = cast(Path, production_model_paths[specter_suffix])
+                model_path = cast(Path, args.specter2_model_path)
                 if not model_path.exists():
                     raise FileNotFoundError(f"Missing explicit model artifact at {model_path}")
                 print(f"=== specter_suffix: {specter_suffix}, model: {model_path} ===")
@@ -1352,24 +1342,13 @@ def main() -> None:
     print("=" * 60)
     print("Summary")
     print("=" * 60)
-    production_key_s1 = (SPECTER1_SUFFIX, "production")
-    production_key_s2 = (SPECTER2_SUFFIX, "production")
-    if production_key_s1 in results and production_key_s2 in results:
-        result_specter1 = results[production_key_s1]
-        result_specter2 = results[production_key_s2]
-
+    for (specter_suffix, train_mode), metrics_by_dataset in results.items():
         for i, dataset_name in enumerate(datasets):
-            print(f"Performance with SPECTERv1 data, on {dataset_name} (B3): {result_specter1[i]['B3 (P, R, F1)']}")
-            print(f"Performance with SPECTERv2 data, on {dataset_name} (B3): {result_specter2[i]['B3 (P, R, F1)']}")
-            print()
-    else:
-        for (specter_suffix, train_mode), metrics_by_dataset in results.items():
-            for i, dataset_name in enumerate(datasets):
-                print(
-                    f"Performance with {specter_suffix} data, mode={train_mode}, on {dataset_name} (B3): "
-                    f"{metrics_by_dataset[i]['B3 (P, R, F1)']}"
-                )
-            print()
+            print(
+                f"Performance with {specter_suffix} data, mode={train_mode}, on {dataset_name} (B3): "
+                f"{metrics_by_dataset[i]['B3 (P, R, F1)']}"
+            )
+        print()
 
 
 if __name__ == "__main__":

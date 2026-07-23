@@ -379,6 +379,13 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     assert pairwise_manifest["incremental_linker_version"] is None
     assert "bundle_status" not in pairwise_manifest
     assert "files" not in pairwise_manifest
+    # Pairwise lineage is manifest authority and need not match the staging
+    # directory's release name (for example, a canonical v1.21 rewrap).
+    pairwise_manifest["pairwise_model_version"] = "1.2"
+    (pairwise_bundle_dir / "manifest.json").write_text(
+        json.dumps(pairwise_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     pairwise_config = json.loads((pairwise_bundle_dir / "clusterer.json").read_text(encoding="utf-8"))
     for field in ("name_tuples_data_sha256", "orcid_prefix_counts_data_sha256"):
         assert len(pairwise_config["feature_contract"][field]) == 64
@@ -431,6 +438,7 @@ def test_tiny_qian_production_model_two_step_cli_flow(tmp_path: Path, monkeypatc
     assert "bundle_status" not in final_manifest
     assert "files" not in final_manifest
     assert final_manifest["bundle_version"] == "9.8"
+    assert final_manifest["pairwise_model_version"] == "1.2"
     assert _load_pairwise_staging_model(pairwise_bundle_dir).production_model_bundle_status == "pairwise_only"
     assert not (pairwise_bundle_dir / "incremental_linker").exists()
     assert (tmp_path / "linker_run" / "production_incremental_linker" / "metadata.json").is_file()

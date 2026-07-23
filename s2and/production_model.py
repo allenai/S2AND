@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from collections.abc import Mapping
 from pathlib import Path
@@ -47,8 +48,21 @@ from s2and.runtime import load_s2and_rust_extension
 from s2and.subblocking import canonical_orcid_prefix_counts_data_sha256
 from s2and.thread_config import resolve_n_jobs
 
+logger = logging.getLogger(__name__)
+
 _INCREMENTAL_BROADCAST_MODES = frozenset({"always", "never", "top1_consensus"})
 _INCREMENTAL_SEED_SCORE_MODES = frozenset({"mean", "min", "mean_min_hybrid"})
+PUBLISHED_V121_RUNTIME_CLUSTER_EPS = 0.65
+_PUBLISHED_V121_STORED_CLUSTER_EPS = 0.6064583975886222
+_PUBLISHED_V121_PAIRWISE_MODEL_VERSION = "1.2"
+_PUBLISHED_V121_PAIRWISE_SHA256 = {
+    PAIRWISE_ONLY_MANIFEST_FILES["pairwise_main_model"]: (
+        "7163ecbb7f0f16511da31478b7fcb9ca3ba36730635cb05fa5a2e0a00b5a2da7"
+    ),
+    PAIRWISE_ONLY_MANIFEST_FILES["pairwise_nameless_model"]: (
+        "659264660c33a891b23caac653ae17bebd039c9fd3651e702e57e57f1393d576"
+    ),
+}
 _CANONICAL_ARTIFACT_HASH_FIELDS = (
     "name_tuples_data_sha256",
     "orcid_prefix_counts_data_sha256",
@@ -577,6 +591,32 @@ def _require_bundle_normalization_version(bundle_dir: Path, feature_contract: Ma
         )
 
 
+def _effective_cluster_eps(manifest: Mapping[str, Any], cluster_model_config: Mapping[str, Any]) -> float:
+    """Resolve the published v1.21 runtime threshold after bundle validation.
+
+    The historical v1.21 bundle stored the pre-release search result in
+    ``clusterer.json`` but production loaded it with ``eps=0.65``. Match that
+    exact pairwise artifact identity and stale stored value so a new model that
+    reuses either the version label or boosters keeps its own configured
+    threshold.
+    """
+
+    configured_eps = float(cluster_model_config["eps"])
+    if configured_eps != _PUBLISHED_V121_STORED_CLUSTER_EPS:
+        return configured_eps
+    if manifest["pairwise_model_version"] != _PUBLISHED_V121_PAIRWISE_MODEL_VERSION:
+        return configured_eps
+    manifest_hashes = cast(Mapping[str, Any], manifest["sha256"])
+    if any(manifest_hashes.get(path) != expected for path, expected in _PUBLISHED_V121_PAIRWISE_SHA256.items()):
+        return configured_eps
+    logger.info(
+        "Applying published v1.21 runtime cluster eps override: stored_eps=%s effective_eps=%s",
+        configured_eps,
+        PUBLISHED_V121_RUNTIME_CLUSTER_EPS,
+    )
+    return PUBLISHED_V121_RUNTIME_CLUSTER_EPS
+
+
 def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Clusterer:
     clusterer_config = _read_json(bundle_dir / PAIRWISE_ONLY_MANIFEST_FILES["clusterer_config"])
     _validate_clusterer_config(clusterer_config)
@@ -622,9 +662,10 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     )
 
     cluster_model_config = clusterer_config["cluster_model"]
+    effective_eps = _effective_cluster_eps(manifest, cluster_model_config)
     cluster_model = FastCluster(
         linkage=str(cluster_model_config["linkage"]),
-        eps=float(cluster_model_config["eps"]),
+        eps=effective_eps,
     )
     clusterer = Clusterer(
         featurizer_info=featurizer_info,
@@ -644,7 +685,7 @@ def _load_bundle_clusterer(bundle_dir: Path, manifest: dict[str, Any]) -> Cluste
     )
     clusterer.feature_contract = dict(feature_contract)
     clusterer.best_params = {
-        "eps": float(cluster_model_config["eps"]),
+        "eps": effective_eps,
         "linkage": str(cluster_model_config["linkage"]),
     }
     clusterer.incremental_precluster_broadcast_mode = cast(

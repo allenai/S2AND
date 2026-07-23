@@ -10,12 +10,58 @@ import pytest
 import s2and.data as data_module
 from s2and.data import ANDData
 from s2and.name_tuple_artifact import build_name_tuple_artifact_metadata
-from tests.helpers import tiny_name_counts_provenance
+from tests.helpers import tiny_name_counts_index, tiny_name_counts_provenance
 
 
 def test_split_ratios_reject_default_isclose_near_miss() -> None:
     with pytest.raises(ValueError, match="must add to 1"):
         data_module._validate_split_ratios(5e-10, 0.5, 0.5000000004)
+
+
+def test_anddata_uses_only_s2_blocks_and_ignores_legacy_given_block() -> None:
+    signatures = {}
+    papers = {}
+    for index, legacy_block in enumerate(("legacy one", "legacy two"), start=1):
+        signature_id = f"s{index}"
+        paper_id = f"p{index}"
+        signatures[signature_id] = {
+            "signature_id": signature_id,
+            "paper_id": paper_id,
+            "author_info": {
+                "position": 0,
+                "block": "a canonical",
+                "given_block": legacy_block,
+                "first": "Ada",
+                "middle": None,
+                "last": "Canonical",
+                "suffix": None,
+                "affiliations": [],
+                "email": None,
+            },
+        }
+        papers[paper_id] = {
+            "paper_id": paper_id,
+            "title": f"Paper {index}",
+            "abstract": None,
+            "authors": [{"position": 0, "author_name": "Ada Canonical"}],
+            "venue": None,
+            "journal_name": None,
+            "year": 2026,
+        }
+
+    dataset = ANDData(
+        signatures=signatures,
+        papers=papers,
+        name="s2_only_blocks",
+        mode="inference",
+        name_counts_index=None,
+        name_tuples=set(),
+        preprocess=False,
+    )
+
+    assert dataset.get_blocks() == {"a canonical": ["s1", "s2"]}
+    assert not hasattr(dataset, "block_type")
+    assert not hasattr(dataset.signatures["s1"], "author_info_given_block")
 
 
 def test_split_ratios_do_not_create_a_partition_for_tolerated_roundoff() -> None:
@@ -479,7 +525,6 @@ class TestData(unittest.TestCase):
         dataset = ANDData(signatures={}, papers={}, name="", mode="inference", name_counts_index=None, preprocess=False)
         assert dataset.pair_sampling_mode == "within_block_random"
         assert dataset.all_test_pairs_flag
-        assert not hasattr(dataset, "block_type")
 
         with pytest.raises(ValueError):
             dataset = ANDData(
@@ -542,7 +587,7 @@ def test_preprocessing_name_counts_use_single_character_initial(tmp_path):
 
     index_path, _metrics = write_name_counts_index(
         tmp_path,
-        ({}, {"sattar": 11}, {}, {"sattar a": 17, "sattar abdul": 41}),
+        ({}, {"sattar": 11}, {}, {"sattar a": 17}),
         tiny_name_counts_provenance(),
     )
     dataset = ANDData(
@@ -564,6 +609,55 @@ def test_preprocessing_name_counts_use_single_character_initial(tmp_path):
 
     counts = dataset.signatures[signature_id].author_info_name_counts
     assert counts.last_first_initial == 17
+
+
+def test_default_name_counts_index_populates_canonical_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    canonical_index = tiny_name_counts_index()
+    opened_paths = []
+
+    def open_canonical_index(_cls, path):
+        opened_paths.append(path)
+        return canonical_index
+
+    monkeypatch.setattr(data_module.NameCountsIndex, "open", classmethod(open_canonical_index))
+
+    dataset = ANDData(
+        signatures={
+            "s1": {
+                "signature_id": "s1",
+                "paper_id": 1,
+                "author_info": {
+                    "position": 0,
+                    "block": "a sattary",
+                    "first": "Abdul",
+                    "middle": "",
+                    "last": "Sattar",
+                    "suffix": None,
+                    "email": None,
+                    "affiliations": [],
+                },
+            }
+        },
+        papers={
+            "1": {
+                "paper_id": 1,
+                "title": "A paper",
+                "abstract": "",
+                "journal_name": "",
+                "venue": "",
+                "year": 2026,
+                "authors": [{"position": 0, "author_name": "Abdul Sattar"}],
+                "references": [],
+            }
+        },
+        name="default_name_counts",
+        mode="inference",
+        preprocess=True,
+        n_jobs=1,
+    )
+
+    assert opened_paths == [data_module.NAME_COUNTS_INDEX_PATH]
+    assert dataset.signatures["s1"].author_info_name_counts == data_module.NameCounts(10.0, 40.0, 60.0, 90.0)
 
 
 def test_empty_altered_cluster_signatures_file_loads_as_empty_list(tmp_path):

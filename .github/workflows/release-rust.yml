@@ -12,11 +12,11 @@ on:
         required: false
         type: boolean
       publish_s2and:
-        description: "Publish s2and to PyPI (manual run)"
+        description: "Release-ready: publish s2and to PyPI (manual run)"
         required: false
         type: boolean
       publish_rust:
-        description: "Publish s2and-rust to PyPI (manual run)"
+        description: "Release-ready: publish s2and-rust to PyPI (manual run/recovery)"
         required: false
         type: boolean
 
@@ -219,6 +219,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Build sdist
         uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
@@ -226,6 +233,17 @@ jobs:
           command: sdist
           args: --out dist
           working-directory: s2and_rust
+
+      - name: Install and exercise sdist
+        shell: bash
+        run: |
+          smoke_venv="$RUNNER_TEMP/s2and-rust-sdist-smoke"
+          sdist="$(find s2and_rust/dist -type f -name '*.tar.gz' -print -quit)"
+          test -n "$sdist"
+          uv venv --python 3.11 "$smoke_venv"
+          uv pip install --python "$smoke_venv/bin/python" "$sdist"
+          uv run --no-project --python "$smoke_venv/bin/python" python \
+            scripts/verification/smoke_installed_rust_api.py
 
       - uses: actions/upload-artifact@v6
         with:
@@ -274,7 +292,7 @@ jobs:
 
   release-tests:
     name: release tests (exact commit)
-    if: needs.detect-versions.outputs.publish_s2and == 'true'
+    if: needs.detect-versions.outputs.run_release_smoke == 'true'
     needs: [detect-versions]
     runs-on: ubuntu-latest
     steps:
@@ -318,7 +336,7 @@ jobs:
   publish-rust:
     name: publish s2and-rust to PyPI
     if: needs.detect-versions.outputs.publish_rust == 'true'
-    needs: [detect-versions, wheels-windows, wheels-macos, wheels-linux, sdist]
+    needs: [detect-versions, wheels-windows, wheels-macos, wheels-linux, sdist, release-smoke, release-tests]
     runs-on: ubuntu-latest
     environment:
       name: pypi

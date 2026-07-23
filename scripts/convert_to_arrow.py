@@ -953,10 +953,10 @@ def convert_runtime_dataset_to_arrow(
     overwrite: bool,
     skip_name_counts_index: bool,
     include_empty_cluster_seeds: bool = False,
-    selected_embedding: str | None = None,
+    selected_embedding: str = "specter2",
     validate: bool = True,
 ) -> dict[str, Any]:
-    """Write one benchmark or linker-replay dataset as Arrow artifacts."""
+    """Write one benchmark or linker-replay dataset with one selected embedding table."""
 
     from s2and.data import ANDData
     from s2and.incremental_linking.feature_block import (
@@ -967,6 +967,14 @@ def convert_runtime_dataset_to_arrow(
     from scripts.arrow_conversion_helpers import write_feature_block_arrow_from_anddata
 
     dataset_name = sources.dataset
+    if selected_embedding not in {"specter", "specter2"}:
+        raise ValueError(f"unsupported selected embedding: {selected_embedding!r}")
+    embedding_source = sources.specter_path if selected_embedding == "specter" else sources.specter2_path
+    if embedding_source is None or not embedding_source.is_file():
+        raise FileNotFoundError(
+            f"Dataset {dataset_name!r} has no {selected_embedding} source; "
+            "canonical benchmark and production conversion requires SPECTER2"
+        )
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
         raise FileExistsError(
             f"output directory already contains files for dataset {dataset_name!r}: {output_dir}. "
@@ -1018,21 +1026,14 @@ def convert_runtime_dataset_to_arrow(
 
     needed_paper_ids = {str(signature.paper_id) for signature in dataset.signatures.values()}
     specter_reports: dict[str, Any] = {}
-    embedding_label = selected_embedding
-    if embedding_label is None:
-        embedding_label = "specter" if sources.specter_path is not None else "specter2"
-    if embedding_label not in {"specter", "specter2"}:
-        raise ValueError(f"unsupported selected embedding: {embedding_label!r}")
-    embedding_source = sources.specter_path if embedding_label == "specter" else sources.specter2_path
-    if embedding_source is not None:
-        embedding_path = output_dir / f"{embedding_label}.arrow"
-        specter_reports[embedding_label] = _write_specter_arrow(
-            source_path=embedding_source,
-            output_path=embedding_path,
-            needed_paper_ids=needed_paper_ids,
-            overwrite=overwrite,
-        )
-        paths["specter"] = str(embedding_path)
+    embedding_path = output_dir / f"{selected_embedding}.arrow"
+    specter_reports[selected_embedding] = _write_specter_arrow(
+        source_path=embedding_source,
+        output_path=embedding_path,
+        needed_paper_ids=needed_paper_ids,
+        overwrite=overwrite,
+    )
+    paths["specter"] = str(embedding_path)
 
     start = time.perf_counter()
     paths, raw_planner_index_metrics = write_raw_arrow_batch_lookup_indexes(
@@ -1080,7 +1081,7 @@ def convert_runtime_dataset_to_arrow(
     if validate:
         manifest["validation"] = validate_arrow_dataset_manifest(
             manifest,
-            require_embeddings=sources.specter_path is not None or sources.specter2_path is not None,
+            require_embeddings=True,
             require_name_counts_index=not skip_name_counts_index,
             base_dir=output_dir,
         )
@@ -1102,14 +1103,20 @@ def _table_values(table: Any, column: str) -> list[Any]:
     return table[column].to_pylist()
 
 
-def _required_string_values(table: Any, column: str, *, label: str) -> list[str]:
+def _required_string_values(
+    table: Any,
+    column: str,
+    *,
+    label: str,
+    allow_empty: bool = False,
+) -> list[str]:
     values = _table_values(table, column)
     out: list[str] = []
     for row_index, value in enumerate(values):
         if value is None:
             raise ValueError(f"{label} contains null value at row {row_index}")
         text = str(value)
-        if not text:
+        if not allow_empty and not text:
             raise ValueError(f"{label} contains empty value at row {row_index}")
         out.append(text)
     return out
@@ -1175,7 +1182,12 @@ def validate_arrow_dataset_manifest(
     signature_paper_ids = _required_string_values(signatures, "paper_id", label="signatures.paper_id")
     paper_ids = _required_string_values(papers, "paper_id", label="papers.paper_id")
     paper_author_paper_ids = _required_string_values(paper_authors, "paper_id", label="paper_authors.paper_id")
-    _required_string_values(paper_authors, "author_name", label="paper_authors.author_name")
+    _required_string_values(
+        paper_authors,
+        "author_name",
+        label="paper_authors.author_name",
+        allow_empty=True,
+    )
     paper_author_positions = _table_values(paper_authors, "position")
     _ensure_unique(signature_ids, label="signatures.signature_id")
     _ensure_unique(paper_ids, label="papers.paper_id")
@@ -1407,7 +1419,7 @@ def _run_benchmark(args: argparse.Namespace) -> None:
             n_jobs=int(args.n_jobs),
             overwrite=bool(args.overwrite),
             skip_name_counts_index=bool(args.skip_name_counts_index),
-            selected_embedding=None,
+            selected_embedding="specter2",
             validate=not bool(args.skip_validation),
         )
         report["total_seconds"] = time.perf_counter() - start

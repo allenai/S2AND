@@ -24,6 +24,7 @@ from s2and.consts import (
     _PACKAGE_DATA_DIR,
     CLUSTER_SEEDS_LOOKUP,
     LARGE_DISTANCE,
+    NAME_COUNTS_INDEX_PATH,
     NORMALIZATION_VERSION,
     NUMPY_NAN,
 )
@@ -424,6 +425,11 @@ class ANDData:
     """
     The main class for holding our representation of an author disambiguation dataset
 
+    Blocking uses ``author_info.block`` exclusively. The legacy
+    ``block_type`` selector, ``author_info.given_block``,
+    ``get_original_blocks()``, and ``get_s2_blocks()`` are removed; callers
+    that need a historical partition must retain it outside ``ANDData``.
+
     Input:
         signatures: path to the signatures json file (or the json object)
         papers: path to the papers information json file (or the json object)
@@ -457,10 +463,12 @@ class ANDData:
         all_test_pairs_flag: With blocking, for the linkage function evaluation task, should the test
             contain all possible pairs from test blocks, or the given number of pairs (test_pairs_size)
         random_seed: random seed
-        name_counts_index: Manifest-backed binary name-count index, or ``None``
-            to leave Python-side name-count features unmaterialized. A path is
-            verified and opened once per immutable manifest generation; an
-            already-open ``NameCountsIndex`` handle can be shared explicitly.
+        name_counts_index: Manifest-backed binary name-count index. Defaults to
+            the canonical configured ``NAME_COUNTS_INDEX_PATH``; pass ``None``
+            explicitly to leave Python-side name-count features unmaterialized.
+            A path is verified and opened once per immutable manifest
+            generation; an already-open ``NameCountsIndex`` handle can be
+            shared explicitly.
         n_jobs: number of cpus to use
         preprocess: whether to preprocess the data (normalization, etc)
         name_tuples: Canonical first-name aliases. ``None`` selects the
@@ -538,7 +546,7 @@ class ANDData:
         pair_sampling_mode: PairSamplingMode = "within_block_random",
         all_test_pairs_flag: bool = False,
         random_seed: int = 1111,
-        name_counts_index: str | os.PathLike[str] | NameCountsIndex | None = None,
+        name_counts_index: str | os.PathLike[str] | NameCountsIndex | None = NAME_COUNTS_INDEX_PATH,
         n_jobs: int = 1,
         preprocess: bool = True,
         name_tuples: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
@@ -605,12 +613,9 @@ class ANDData:
         signatures_stage_start = time.perf_counter()
         logger.info("loading signatures")
         if self.arrow_paths is not None:
+            # Arrow ingestion already applied use_orcid_id before construction.
+            # Preserve those objects; native training owns preprocessing.
             self.signatures = cast(dict[str, Signature], signatures)
-            if not self.use_orcid_id:
-                self.signatures = {
-                    signature_id: signature._replace(author_info_orcid=None)
-                    for signature_id, signature in self.signatures.items()
-                }
         else:
             raw_signatures = self._load_json_feature_source(signatures, "signatures")
             self.signatures = {}
@@ -740,12 +745,17 @@ class ANDData:
             self.max_seed_cluster_id = cluster_num
         logger.info("loaded cluster seeds")
         # Versioned seed state for Rust sync dedupe.
+        self._cluster_seeds_source = "arrow" if self.arrow_paths is not None else "python"
+        self._cluster_seeds_initial_require_id = id(self.cluster_seeds_require)
+        self._cluster_seeds_initial_disallow_id = id(self.cluster_seeds_disallow)
+        self._cluster_seed_tracking_initialized = False
         self._cluster_seeds_version = 1
         self._rust_cluster_seeds_synced_version = 0
         self._rust_cluster_seeds_sync_calls = 0
         self._rust_cluster_seeds_sync_attempted = 0
         self._rust_cluster_seeds_sync_succeeded = 0
         self._rust_cluster_seeds_sync_skipped_unchanged = 0
+        self._rust_cluster_seeds_sync_skipped_arrow_authority = 0
         self._rust_cluster_seeds_sync_seconds_total = 0.0
         self._rust_cluster_seeds_sync_seconds_max = 0.0
         # check that all altered_cluster_signatures are in cluster_seeds_require
@@ -1313,7 +1323,11 @@ class ANDData:
         raise TypeError(f"Unsupported specter pickle payload type: {type(loaded)}")
 
     def get_blocks(self) -> dict[str, list[str]]:
-        """Return signatures grouped by their Semantic Scholar block.
+        """Return signatures grouped by their canonical Semantic Scholar block.
+
+        ``author_info.block`` is the sole grouping authority. Legacy
+        ``author_info.given_block`` values are intentionally ignored during
+        ingestion.
 
         Returns
         -------

@@ -21,7 +21,9 @@ benchmark dataset directories, the legacy shared `name_counts_index/`, the
 legacy `production_model_v1.21/`, and the promoted-linker replay bundle.
 
 Download the legacy JSON/pickle S2AND release only when you need paper-era
-`ANDData` inputs:
+JSON/pickle inputs for canonical S2-block `ANDData` workflows. Canonical-v2
+does not restore the release's original/given-block partition inside
+`ANDData`:
 
 ```bash
 uvx --from awscli aws s3 sync --no-sign-request s3://ai2-s2-research-public/s2and-release s2and/data/
@@ -130,7 +132,9 @@ Arrow production/eval workflows use each dataset's `manifest.json` to resolve:
 - `signatures.arrow`
 - `papers.arrow`
 - `paper_authors.arrow`
-- `specter.arrow` or `specter2.arrow`
+- one selected embedding table under manifest key `specter`; production and
+  evaluation bundles use physical `specter2.arrow` (an explicit historical
+  SPECTER1 research-training bundle may instead use `specter.arrow`)
 - raw-planner `*_batch_index.bin` sidecars
 - shared `name_counts_index/`
 - eval-only clusters JSON when metrics are requested
@@ -142,7 +146,9 @@ part of that generation. Older local Arrow directories without this inventory
 are intentionally rejected and must be reconverted; relabeling their manifests
 is not sufficient.
 
-Legacy workflows use the standard S2AND JSON files for:
+Legacy-input workflows use the standard S2AND JSON files below, but current
+`ANDData` always groups them by `author_info.block`; it ignores any
+`author_info.given_block` field:
 
 - signatures
 - papers

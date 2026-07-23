@@ -80,6 +80,32 @@ def test_convert_service_json_to_arrow_rejects_altered_without_seed(tmp_path: Pa
         )
 
 
+@pytest.mark.parametrize("source_author_name", ["", "   ", "24"])
+def test_convert_service_json_to_arrow_preserves_author_rows_that_normalize_empty(
+    tmp_path: Path,
+    source_author_name: str,
+) -> None:
+    payload = _minimal_service_payload()
+    payload["papers"][0]["authors"][0]["author_name"] = source_author_name
+    input_json = tmp_path / "service_payload.json"
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+
+    manifest = convert_service_json_to_arrow(
+        input_json=input_json,
+        output_root=tmp_path / "arrow",
+        dataset_name="service_payload",
+        name_counts_index_root=tmp_path,
+        n_jobs=1,
+        overwrite=True,
+        skip_name_counts_index=True,
+    )
+
+    dataset_dir = tmp_path / "arrow" / "service_payload"
+    paper_authors = _read_table(str(_manifest_path(manifest, dataset_dir, "paper_authors")))
+    assert paper_authors.to_pylist() == [{"paper_id": "1", "position": 0, "author_name": ""}]
+    assert manifest["validation"]["paper_author_count"] == 1
+
+
 def test_convert_service_json_to_arrow_preserves_seed_and_altered_tables(
     tmp_path: Path,
     monkeypatch,

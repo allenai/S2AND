@@ -26,7 +26,14 @@ class UniversalPool:
     with ordered streaming imap and cross-platform support.
     """
 
-    def __init__(self, processes: int | None = None, use_threads: bool | None = None):
+    def __init__(
+        self,
+        processes: int | None = None,
+        use_threads: bool | None = None,
+        *,
+        initializer: Callable[..., Any] | None = None,
+        initargs: tuple[Any, ...] = (),
+    ):
         """
         Initialize UniversalPool with optimal worker selection.
 
@@ -36,6 +43,8 @@ class UniversalPool:
                         auto-selects based on platform: processes on Linux (fork
                         is cheap and bypasses the GIL for CPU-bound work), threads
                         on Windows/macOS (spawn overhead is too high).
+            initializer: Optional callable invoked once when each worker starts.
+            initargs: Positional arguments supplied to ``initializer``.
         """
         if use_threads is None:
             use_threads = platform.system() in ("Windows", "Darwin")
@@ -50,7 +59,11 @@ class UniversalPool:
         self._pool: ProcessPoolExecutor | ThreadPoolExecutor
 
         if use_threads:
-            self._pool = ThreadPoolExecutor(max_workers=self.processes)
+            self._pool = ThreadPoolExecutor(
+                max_workers=self.processes,
+                initializer=initializer,
+                initargs=initargs,
+            )
         else:
             # Try process workers with an explicit start method:
             # - fork on Linux (fast, avoids re-import)
@@ -59,7 +72,12 @@ class UniversalPool:
                 ctx = mp.get_context("fork")
             else:
                 ctx = mp.get_context("spawn")
-            self._pool = ProcessPoolExecutor(max_workers=self.processes, mp_context=ctx)
+            self._pool = ProcessPoolExecutor(
+                max_workers=self.processes,
+                mp_context=ctx,
+                initializer=initializer,
+                initargs=initargs,
+            )
 
     # ---------- public API ----------
     def imap(

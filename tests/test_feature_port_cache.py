@@ -10,11 +10,13 @@ import numpy as np
 import pytest
 
 import s2and.feature_port as feature_port
+import s2and.model as model_module
 import s2and.runtime as runtime
 from s2and.arrow_inputs import validate_arrow_training_artifacts
 from s2and.consts import NORMALIZATION_VERSION
 from s2and.data import ANDData
 from s2and.incremental_linking.feature_block import write_name_counts_index
+from s2and.runtime import RuntimeContext
 from tests.helpers import tiny_name_counts_provenance, tiny_name_counts_tuple, write_test_arrow_artifact_manifest
 
 
@@ -86,11 +88,18 @@ class DummyDataset(ANDData):
 
 
 def _cache_size() -> int:
-    return sum(len(entries) for entries in feature_port._RUST_FEATURIZER_CACHE.values())
+    return sum(state.entry is not None for state in feature_port._RUST_FEATURIZER_STATES.values())
+
+
+def _cached_entry(dataset: DummyDataset) -> feature_port._CacheEntry | None:
+    state = feature_port._RUST_FEATURIZER_STATES.get(dataset)
+    return None if state is None else state.entry
 
 
 def _cache_keys(dataset: DummyDataset) -> list[feature_port._RustFeaturizerCacheKey]:
-    return list(feature_port._RUST_FEATURIZER_CACHE[dataset])
+    entry = _cached_entry(dataset)
+    assert entry is not None
+    return [entry.cache_key]
 
 
 def _dummy_build_rust_featurizer(dataset):
@@ -129,8 +138,8 @@ def test_rust_featurizer_in_memory_cache_keeps_train_entries():
 
     feature_port._get_rust_featurizer(d2)
     assert _cache_size() == 2
-    assert feature_port._RUST_FEATURIZER_CACHE.get(d1) is not None
-    assert feature_port._RUST_FEATURIZER_CACHE.get(d2) is not None
+    assert _cached_entry(d1) is not None
+    assert _cached_entry(d2) is not None
 
     # Re-access d1 — should be a cache hit, no rebuild.
     feature_port._get_rust_featurizer(d1)
@@ -187,7 +196,7 @@ def test_rust_featurizer_cache_key_does_not_recheck_immutable_files(tmp_path: Pa
     assert second_key == first_key
 
 
-def test_rust_featurizer_cache_key_rechecks_non_seed_fingerprint(monkeypatch):
+def test_rust_featurizer_cache_key_rechecks_build_inputs(monkeypatch):
     dataset = DummyDataset("memoized_non_seed_cache_dataset", mode="train")
     calls = {"count": 0}
 
@@ -201,56 +210,29 @@ def test_rust_featurizer_cache_key_rechecks_non_seed_fingerprint(monkeypatch):
     second_key = feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)
 
     assert calls["count"] == 2
-    assert first_key.non_seed == second_key.non_seed
-    assert first_key.seed.cluster_seeds_version == 0
-    assert second_key.seed.cluster_seeds_version == 1
+    assert first_key.build == second_key.build
+    assert first_key.cluster_seeds_version == 0
+    assert second_key.cluster_seeds_version == 1
 
 
-def test_rust_featurizer_cache_retries_when_seed_version_changes_during_lookup(monkeypatch):
-    dataset = DummyDataset("seed_version_race_dataset", mode="train")
-    versions = [0, 1]
-
-    def next_seed_version(_dataset):
-        if versions:
-            return versions.pop(0)
-        return 1
-
-    monkeypatch.setattr(feature_port, "_cluster_seeds_version_for_cache", next_seed_version)
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS", 0.0)
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES", 3)
-
-    featurizer = feature_port._get_rust_featurizer(dataset)
-
-    assert featurizer.dataset_name == "seed_version_race_dataset"
-    assert DummyRustFeaturizer.created == ["seed_version_race_dataset"]
-    assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)]
-
-
-def test_rust_featurizer_cache_retries_when_seed_version_changes_during_build(monkeypatch):
+def test_rust_featurizer_rejects_inputs_changing_during_build(monkeypatch):
     dataset = DummyDataset("seed_version_build_race_dataset", mode="train")
     dataset._cluster_seeds_version = 0
-    build_calls = {"count": 0}
 
     def _build_stub(dataset_arg):
-        build_calls["count"] += 1
-        if build_calls["count"] == 1:
-            dataset_arg._cluster_seeds_version = 1
-            featurizer_name = "stale"
-        else:
-            featurizer_name = "fresh"
+        dataset_arg._cluster_seeds_version = 1
         return (
-            DummyRustFeaturizer(featurizer_name),
+            DummyRustFeaturizer("stale"),
             {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
             0.0,
         )
 
     monkeypatch.setattr(feature_port, "_build_rust_featurizer_strict", _build_stub)
 
-    featurizer = feature_port._get_rust_featurizer(dataset)
+    with pytest.raises(RuntimeError, match="inputs changed while it was being built"):
+        feature_port._get_rust_featurizer(dataset)
 
-    assert featurizer.dataset_name == "fresh"
-    assert build_calls["count"] == 2
-    assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)]
+    assert _cached_entry(dataset) is None
 
 
 @pytest.mark.parametrize(
@@ -477,27 +459,179 @@ def test_update_rust_cluster_seeds_leaves_version_unchanged_on_ffi_failure():
     assert _cache_keys(dataset) == [feature_port._rust_featurizer_cache_key(dataset, cluster_seeds_version=1)]
 
 
-def test_update_rust_cluster_seeds_rolls_back_featurizer_on_promotion_failure(monkeypatch):
+@pytest.mark.parametrize("cache_action", ["evict", "clear"])
+def test_cache_eviction_waits_for_cluster_seed_update(cache_action):
     from s2and.feature_port import update_rust_cluster_seeds
 
-    dataset = DummyDataset("promotion_failure_seed_update_dataset", mode="train")
+    dataset = DummyDataset(f"seed_update_{cache_action}_race_dataset", mode="train")
     dataset._cluster_seeds_version = 1
     featurizer = feature_port._get_rust_featurizer(dataset)
-    featurizer.update_cluster_seeds({"old": "c0"}, {("old", "other")})
-    dataset.cluster_seeds_require["s1"] = "c1"
+    featurizer.update_cluster_seeds({"old": "c-old"}, {("old", "other")})
+    dataset.cluster_seeds_require = {"new": "c-new"}
+    dataset.cluster_seeds_disallow = {("new", "other")}
+    update_started = threading.Event()
+    release_update = threading.Event()
+    update_errors: list[Exception] = []
+    eviction_results: list[bool | int] = []
+    original_update = featurizer.update_cluster_seeds
 
-    def fail_promote(_dataset, _featurizer, *, target_seed_version):
-        del _dataset, _featurizer, target_seed_version
-        raise RuntimeError("promotion failed")
+    def blocking_update(require, disallow):
+        update_started.set()
+        assert release_update.wait(timeout=2)
+        original_update(require, disallow)
 
-    monkeypatch.setattr(feature_port, "_promote_cached_rust_featurizer_cluster_seed_version", fail_promote)
+    featurizer.update_cluster_seeds = blocking_update
 
-    with pytest.raises(RuntimeError, match="promotion failed"):
-        update_rust_cluster_seeds(dataset, bump_version=True)
+    def update_worker():
+        try:
+            update_rust_cluster_seeds(dataset, bump_version=True)
+        except Exception as exc:
+            update_errors.append(exc)
 
-    assert int(dataset._cluster_seeds_version) == 1
-    assert featurizer.cluster_seeds_require() == [("old", "c0")]
-    assert featurizer.cluster_seeds_disallow() == [("old", "other")]
+    update_thread = threading.Thread(target=update_worker)
+    update_thread.start()
+    assert update_started.wait(timeout=2)
+
+    def evict_worker():
+        if cache_action == "evict":
+            eviction_results.append(feature_port.evict_rust_featurizer(dataset))
+        else:
+            eviction_results.append(feature_port.clear_rust_featurizer_cache())
+
+    eviction_thread = threading.Thread(target=evict_worker)
+    eviction_thread.start()
+    time.sleep(0.05)
+    assert eviction_thread.is_alive()
+    assert _cached_entry(dataset) is not None
+
+    release_update.set()
+    update_thread.join(timeout=5)
+    eviction_thread.join(timeout=5)
+
+    assert not update_thread.is_alive()
+    assert not eviction_thread.is_alive()
+    assert update_errors == []
+    assert eviction_results == [True if cache_action == "evict" else 1]
+    assert int(dataset._cluster_seeds_version) == 2
+    assert featurizer.cluster_seeds_require() == [("new", "c-new")]
+    assert featurizer.cluster_seeds_disallow() == [("new", "other")]
+    assert _cached_entry(dataset) is None
+
+
+@pytest.mark.parametrize("cache_action", ["evict", "clear"])
+def test_successful_seed_sync_survives_later_cache_eviction(monkeypatch, cache_action):
+    dataset = DummyDataset(f"synced_seed_{cache_action}_rebuild_dataset", mode="train")
+    dataset.runtime_context = RuntimeContext(operation="constraints", backend="rust", run_id="seed-rebuild")
+    dataset._cluster_seeds_version = 1
+    dataset.cluster_seeds_require = {"current": "c-current"}
+    dataset.cluster_seeds_disallow = {("current", "other")}
+
+    def build_with_immutable_arrow_seeds(dataset_arg):
+        DummyRustFeaturizer.created.append(dataset_arg.name)
+        featurizer = DummyRustFeaturizer(dataset_arg.name)
+        featurizer.update_cluster_seeds({"arrow": "c-arrow"}, {("arrow", "other")})
+        return (
+            featurizer,
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+        )
+
+    monkeypatch.setattr(model_module, "_use_rust_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(feature_port, "build_rust_featurizer", build_with_immutable_arrow_seeds)
+
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=dataset.runtime_context)
+    first = feature_port._get_rust_featurizer(dataset)
+    assert first.cluster_seeds_require() == [("current", "c-current")]
+    assert first.cluster_seeds_disallow() == [("current", "other")]
+
+    if cache_action == "evict":
+        assert feature_port.evict_rust_featurizer(dataset)
+    else:
+        assert feature_port.clear_rust_featurizer_cache() == 1
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=dataset.runtime_context)
+    assert dataset._rust_cluster_seeds_sync_skipped_unchanged == 1
+
+    rebuilt = feature_port._get_rust_featurizer(dataset)
+    assert rebuilt is not first
+    assert rebuilt.cluster_seeds_require() == [("current", "c-current")]
+    assert rebuilt.cluster_seeds_disallow() == [("current", "other")]
+
+
+def test_arrow_authoritative_seeds_survive_initial_sync_and_cache_rebuild(monkeypatch):
+    dataset = DummyDataset("arrow_seed_authority_dataset", mode="train")
+    dataset.runtime_context = RuntimeContext(operation="constraints", backend="rust", run_id="arrow-seed-authority")
+    dataset._cluster_seeds_version = 1
+    dataset._rust_cluster_seeds_synced_version = 0
+    dataset._cluster_seeds_source = "arrow"
+
+    def build_with_immutable_arrow_seeds(dataset_arg):
+        DummyRustFeaturizer.created.append(dataset_arg.name)
+        featurizer = DummyRustFeaturizer(dataset_arg.name)
+        featurizer.update_cluster_seeds({"arrow": "c-arrow"}, {("arrow", "other")})
+        return (
+            featurizer,
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+        )
+
+    monkeypatch.setattr(model_module, "_use_rust_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(feature_port, "build_rust_featurizer", build_with_immutable_arrow_seeds)
+
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=dataset.runtime_context)
+    first = feature_port._get_rust_featurizer(dataset)
+    assert first.cluster_seeds_require() == [("arrow", "c-arrow")]
+    assert first.cluster_seeds_disallow() == [("arrow", "other")]
+
+    assert feature_port.evict_rust_featurizer(dataset)
+    rebuilt = feature_port._get_rust_featurizer(dataset)
+    assert rebuilt.cluster_seeds_require() == [("arrow", "c-arrow")]
+    assert rebuilt.cluster_seeds_disallow() == [("arrow", "other")]
+
+    dataset.cluster_seeds_require = {"python": "c-python"}
+    dataset.cluster_seeds_disallow = {("python", "other")}
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=dataset.runtime_context)
+
+    assert dataset._cluster_seeds_source == "python"
+    assert rebuilt.cluster_seeds_require() == [("python", "c-python")]
+    assert rebuilt.cluster_seeds_disallow() == [("python", "other")]
+
+
+@pytest.mark.parametrize("replace_with_empty", [False, True])
+def test_python_seed_assignment_before_first_arrow_sync_takes_authority(monkeypatch, replace_with_empty):
+    dataset = DummyDataset(f"pre_sync_python_seed_{replace_with_empty}", mode="train")
+    dataset.runtime_context = RuntimeContext(operation="constraints", backend="rust", run_id="pre-sync-python-seed")
+    dataset._cluster_seeds_version = 1
+    dataset._rust_cluster_seeds_synced_version = 0
+    dataset._cluster_seeds_source = "arrow"
+    dataset._cluster_seeds_initial_require_id = id(dataset.cluster_seeds_require)
+    dataset._cluster_seeds_initial_disallow_id = id(dataset.cluster_seeds_disallow)
+
+    def build_with_immutable_arrow_seeds(dataset_arg):
+        featurizer = DummyRustFeaturizer(dataset_arg.name)
+        featurizer.update_cluster_seeds({"arrow": "c-arrow"}, {("arrow", "other")})
+        return (
+            featurizer,
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+        )
+
+    monkeypatch.setattr(model_module, "_use_rust_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(feature_port, "build_rust_featurizer", build_with_immutable_arrow_seeds)
+
+    if replace_with_empty:
+        dataset.cluster_seeds_require = {}
+        dataset.cluster_seeds_disallow = set()
+        expected_require = []
+        expected_disallow = []
+    else:
+        dataset.cluster_seeds_require["python"] = "c-python"
+        dataset.cluster_seeds_disallow.add(("python", "other"))
+        expected_require = [("python", "c-python")]
+        expected_disallow = [("python", "other")]
+
+    model_module._sync_rust_cluster_seeds(dataset, runtime_context=dataset.runtime_context)
+    featurizer = feature_port._get_rust_featurizer(dataset)
+
+    assert dataset._cluster_seeds_source == "python"
+    assert featurizer.cluster_seeds_require() == expected_require
+    assert featurizer.cluster_seeds_disallow() == expected_disallow
 
 
 def test_rust_featurizer_cache_rejects_invalid_cluster_seed_version():
@@ -685,88 +819,43 @@ def test_concurrent_builds_for_distinct_datasets_do_not_serialize(monkeypatch):
     assert latest_start < earliest_end
 
 
-def test_get_rust_featurizer_raises_after_repeated_empty_wait(monkeypatch):
-    dataset = DummyDataset("empty_wait_retry_budget", mode="train")
-    attempts = {"count": 0}
-    runtime_context = type("RuntimeContext", (), {"operation": "test_empty_wait", "run_id": "run-empty-wait"})()
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES", 2)
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS", 0.0)
+def test_concurrent_builds_for_same_dataset_build_once(monkeypatch):
+    dataset = DummyDataset("same_dataset", mode="train")
+    build_started = threading.Event()
+    release_build = threading.Event()
+    build_calls = 0
 
-    def _always_empty(_dataset, *, build_context):
-        del build_context
-        attempts["count"] += 1
-        return None, None
+    def _build_stub(dataset_arg):
+        nonlocal build_calls
+        build_calls += 1
+        build_started.set()
+        assert release_build.wait(timeout=2)
+        return (
+            DummyRustFeaturizer(dataset_arg.name),
+            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
+            0.0,
+        )
 
-    monkeypatch.setattr(feature_port, "_get_or_wait_for_cached", _always_empty)
+    monkeypatch.setattr(feature_port, "_build_rust_featurizer_strict", _build_stub)
+    results: list[DummyRustFeaturizer] = []
 
-    with pytest.raises(RuntimeError, match="empty wait state") as exc_info:
-        feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context)
-    message = str(exc_info.value)
-    assert "dataset=empty_wait_retry_budget" in message
-    assert "run=run-empty-wait" in message
-    assert "attempts=3" in message
-    assert attempts["count"] == 3
+    threads = [
+        threading.Thread(target=lambda: results.append(feature_port._get_rust_featurizer(dataset))) for _ in range(2)
+    ]
+    threads[0].start()
+    assert build_started.wait(timeout=2)
+    threads[1].start()
+    time.sleep(0.05)
+    assert build_calls == 1
 
+    release_build.set()
+    for thread in threads:
+        thread.join(timeout=5)
 
-def test_get_rust_featurizer_retries_empty_wait_then_builds(monkeypatch):
-    dataset = DummyDataset("empty_wait_then_build", mode="train")
-    attempts = {"count": 0}
-    build_calls = {"count": 0}
-    inflight = feature_port._InFlightFeaturizerBuild()
-    expected_featurizer = DummyRustFeaturizer("built_after_empty_wait")
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES", 2)
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_BACKOFF_SECONDS", 0.0)
-
-    def _empty_then_build(_dataset, *, build_context):
-        del build_context
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            return None, None
-        return None, inflight
-
-    def _build_stub(_dataset, *, inflight_build, build_context):
-        del build_context
-        build_calls["count"] += 1
-        assert inflight_build is inflight
-        return expected_featurizer
-
-    monkeypatch.setattr(feature_port, "_get_or_wait_for_cached", _empty_then_build)
-    monkeypatch.setattr(feature_port, "_build_and_cache_rust_featurizer", _build_stub)
-
-    featurizer = feature_port._get_rust_featurizer(dataset)
-    assert featurizer is expected_featurizer
-    assert attempts["count"] == 2
-    assert build_calls["count"] == 1
-
-
-def test_get_rust_featurizer_raises_after_repeated_stale_build(monkeypatch):
-    dataset = DummyDataset("stale_build_retry_budget", mode="train")
-    runtime_context = type("RuntimeContext", (), {"operation": "test_stale_build", "run_id": "run-stale-build"})()
-    inflight = feature_port._InFlightFeaturizerBuild()
-    build_calls = {"count": 0}
-    monkeypatch.setattr(feature_port, "RUST_FEATURIZER_EMPTY_WAIT_MAX_RETRIES", 2)
-
-    def _always_build(_dataset, *, build_context):
-        del build_context
-        return None, inflight
-
-    def _always_stale(_dataset, *, inflight_build, build_context):
-        del build_context
-        assert inflight_build is inflight
-        build_calls["count"] += 1
-        return None
-
-    monkeypatch.setattr(feature_port, "_get_or_wait_for_cached", _always_build)
-    monkeypatch.setattr(feature_port, "_build_and_cache_rust_featurizer", _always_stale)
-
-    with pytest.raises(RuntimeError, match="stale build state") as exc_info:
-        feature_port._get_rust_featurizer(dataset, runtime_context=runtime_context)
-
-    message = str(exc_info.value)
-    assert "dataset=stale_build_retry_budget" in message
-    assert "run=run-stale-build" in message
-    assert "attempts=3" in message
-    assert build_calls["count"] == 3
+    assert all(not thread.is_alive() for thread in threads)
+    assert build_calls == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
 
 
 def test_explicit_evict_and_clear_api():
@@ -786,101 +875,45 @@ def test_explicit_evict_and_clear_api():
     assert _cache_size() == 0
 
 
-def test_evict_during_inflight_build_discards_stale_result(monkeypatch):
-    dataset = DummyDataset("evict_inflight", mode="train")
+@pytest.mark.parametrize("cache_action", ["evict", "clear"])
+def test_cache_eviction_waits_for_build_then_removes_entry(monkeypatch, cache_action):
+    dataset = DummyDataset(f"{cache_action}_inflight", mode="train")
     first_build_started = threading.Event()
     release_first_build = threading.Event()
-    build_calls = {"count": 0}
 
     def _build_stub(dataset_arg):
-        build_calls["count"] += 1
-        if build_calls["count"] == 1:
-            first_build_started.set()
-            release_first_build.wait(timeout=2)
-            return (
-                DummyRustFeaturizer(f"{dataset_arg.name}_stale"),
-                {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
-                0.0,
-            )
+        first_build_started.set()
+        assert release_first_build.wait(timeout=2)
         return (
-            DummyRustFeaturizer(f"{dataset_arg.name}_fresh"),
+            DummyRustFeaturizer(dataset_arg.name),
             {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
             0.0,
         )
 
     monkeypatch.setattr(feature_port, "_build_rust_featurizer_strict", _build_stub)
     results: list[DummyRustFeaturizer] = []
-    errors: list[Exception] = []
+    eviction_results: list[bool | int] = []
 
-    def _worker():
-        try:
-            results.append(feature_port._get_rust_featurizer(dataset))
-        except Exception as exc:  # pragma: no cover - assertion guard
-            errors.append(exc)
-
-    thread = threading.Thread(target=_worker)
-    thread.start()
+    build_thread = threading.Thread(target=lambda: results.append(feature_port._get_rust_featurizer(dataset)))
+    build_thread.start()
     assert first_build_started.wait(timeout=2)
-    assert feature_port.evict_rust_featurizer(dataset) is False
+
+    def evict_worker():
+        if cache_action == "evict":
+            eviction_results.append(feature_port.evict_rust_featurizer(dataset))
+        else:
+            eviction_results.append(feature_port.clear_rust_featurizer_cache())
+
+    eviction_thread = threading.Thread(target=evict_worker)
+    eviction_thread.start()
+    time.sleep(0.05)
+    assert eviction_thread.is_alive()
     release_first_build.set()
-    thread.join(timeout=5)
+    build_thread.join(timeout=5)
+    eviction_thread.join(timeout=5)
 
-    assert errors == []
-    assert [result.dataset_name for result in results] == ["evict_inflight_fresh"]
-    assert build_calls["count"] == 2
-    assert feature_port._get_rust_featurizer(dataset).dataset_name == "evict_inflight_fresh"
-
-
-def test_clear_during_inflight_build_discards_stale_result(monkeypatch):
-    dataset = DummyDataset("clear_inflight", mode="train")
-    first_build_started = threading.Event()
-    release_first_build = threading.Event()
-    build_calls = {"count": 0}
-
-    def _build_stub(dataset_arg):
-        build_calls["count"] += 1
-        if build_calls["count"] == 1:
-            first_build_started.set()
-            release_first_build.wait(timeout=2)
-            return (
-                DummyRustFeaturizer(f"{dataset_arg.name}_stale"),
-                {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
-                0.0,
-            )
-        return (
-            DummyRustFeaturizer(f"{dataset_arg.name}_fresh"),
-            {"pre_build_seconds": 0.0, "ffi_seconds": 0.0, "post_build_seconds": 0.0},
-            0.0,
-        )
-
-    monkeypatch.setattr(feature_port, "_build_rust_featurizer_strict", _build_stub)
-    results: list[DummyRustFeaturizer] = []
-    errors: list[Exception] = []
-
-    def _worker():
-        try:
-            results.append(feature_port._get_rust_featurizer(dataset))
-        except Exception as exc:  # pragma: no cover - assertion guard
-            errors.append(exc)
-
-    thread = threading.Thread(target=_worker)
-    thread.start()
-    assert first_build_started.wait(timeout=2)
-    assert feature_port.clear_rust_featurizer_cache() == 0
-    release_first_build.set()
-    thread.join(timeout=5)
-
-    assert errors == []
-    assert [result.dataset_name for result in results] == ["clear_inflight_fresh"]
-    assert build_calls["count"] == 2
-    assert feature_port._get_rust_featurizer(dataset).dataset_name == "clear_inflight_fresh"
-
-
-def test_evict_rust_featurizer_clears_build_counts():
-    dataset = DummyDataset("evict_build_counts", mode="train")
-
-    feature_port._get_rust_featurizer(dataset)
-
-    assert feature_port._rust_featurizer_build_count(dataset) == 1  # noqa: SLF001
-    assert feature_port.evict_rust_featurizer(dataset) is True
-    assert feature_port._rust_featurizer_build_count(dataset) == 0  # noqa: SLF001
+    assert not build_thread.is_alive()
+    assert not eviction_thread.is_alive()
+    assert [result.dataset_name for result in results] == [dataset.name]
+    assert eviction_results == [True if cache_action == "evict" else 1]
+    assert _cached_entry(dataset) is None

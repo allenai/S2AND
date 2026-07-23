@@ -145,6 +145,37 @@ def test_signature_coauthor_blocks_tolerates_null_paper_author_position() -> Non
     ) == frozenset({"g hopper"})
 
 
+def test_query_features_count_blank_author_rows_without_modern_name_evidence() -> None:
+    signature = _signature("paper")
+    signature.author_info_coauthor_blocks = None
+    signature.author_info_coauthors = None
+    dataset = SimpleNamespace(
+        signatures={"q": signature},
+        papers={
+            "paper": SimpleNamespace(
+                title="Paper",
+                venue=None,
+                journal_name=None,
+                year=2020,
+                authors=[
+                    SimpleNamespace(position=0, author_name="Alice Smith"),
+                    SimpleNamespace(position=1, author_name=""),
+                    SimpleNamespace(position=2, author_name="   "),
+                    SimpleNamespace(position=3, author_name="Bob Jones"),
+                ],
+            )
+        },
+        specter_embeddings=None,
+    )
+
+    features = extract_query_features(_dataset_arg(dataset), "q")
+
+    assert features.paper_author_count == 4
+    assert features.paper_author_names == frozenset({"alice smith", "bob jones"})
+    assert features.local10_author_names == frozenset({"bob jones"})
+    assert features.coauthor_blocks == frozenset({"b jones"})
+
+
 def test_mask_query_features_keeps_orcid_only_when_enabled() -> None:
     base = build_query_features(
         first="alice",

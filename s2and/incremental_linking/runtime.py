@@ -61,39 +61,17 @@ from s2and.runtime import build_runtime_context
 from s2and.thread_config import resolve_n_jobs
 
 LinkAction = Literal["link", "abstain"]
-SeedSetup = (
-    tuple[
-        Mapping[str, int | str],
-        Mapping[str, int | str],
-        Mapping[str, Sequence[str]],
-    ]
-    | tuple[
-        Mapping[str, int | str],
-        Mapping[str, int | str],
-        Mapping[str, Sequence[str]],
-        Mapping[str, Sequence[str]],
-    ]
-)
+SeedSetup = tuple[
+    Mapping[str, int | str],
+    Mapping[str, int | str],
+    Mapping[str, Sequence[str]],
+    Mapping[str, Sequence[str]],
+]
 
 # Production 1.2 dense output semantics. The pairwise distance model preserves
 # NaNs internally; only the exported pw_* aggregate features are zero-filled.
 _PAIRWISE_MODEL_NAN_VALUE: float = float("nan")
 _PAIRWISE_AGGREGATE_NAN_VALUE: float = 0.0
-
-
-def _unpack_seed_setup(
-    seed_setup: SeedSetup,
-) -> tuple[
-    Mapping[str, int | str],
-    Mapping[str, int | str],
-    Mapping[str, Sequence[str]],
-    Mapping[str, Sequence[str]] | None,
-]:
-    if len(seed_setup) == 3:
-        seed_to_component, seed_to_original_cluster, component_to_signatures = seed_setup
-        return seed_to_component, seed_to_original_cluster, component_to_signatures, None
-    seed_to_component, seed_to_original_cluster, component_to_signatures, split_component_to_signatures = seed_setup
-    return seed_to_component, seed_to_original_cluster, component_to_signatures, split_component_to_signatures
 
 
 @dataclass(frozen=True)
@@ -1502,7 +1480,7 @@ def _predict_incremental_link_or_abstain_production_private(
     else:
         resolved_seed_setup = seed_setup
     cluster_seeds_require, _recluster_map, _cluster_seeds_require_inverse, _split_cluster_seeds_require_inverse = (
-        _unpack_seed_setup(resolved_seed_setup)
+        resolved_seed_setup
     )
     cluster_seeds_require = dict(cluster_seeds_require)
 
@@ -1633,7 +1611,7 @@ def _predict_incremental_link_or_abstain_production_from_retrieval_private(
     else:
         resolved_seed_setup = seed_setup
     cluster_seeds_require, _recluster_map, _cluster_seeds_require_inverse, _split_cluster_seeds_require_inverse = (
-        _unpack_seed_setup(resolved_seed_setup)
+        resolved_seed_setup
     )
     cluster_seeds_require = dict(cluster_seeds_require)
 
@@ -1815,13 +1793,13 @@ def _strip_raw_query_signature_sidecar(arrow_paths: ValidatedArrowInputs) -> Val
 
 def _identity_seed_setup(
     cluster_seeds_require: Mapping[str, int | str],
-) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
     normalized = {str(signature_id): str(component_id) for signature_id, component_id in cluster_seeds_require.items()}
     recluster_map: dict[str, str] = {component_id: component_id for component_id in normalized.values()}
     inverse: dict[str, list[str]] = {}
     for signature_id, component_id in normalized.items():
         inverse.setdefault(component_id, []).append(signature_id)
-    return (normalized, recluster_map, inverse)
+    return (normalized, recluster_map, inverse, inverse)
 
 
 def _raw_candidate_plan_telemetry_fields(telemetry: Mapping[str, Any] | None) -> dict[str, int | float | str]:
@@ -1893,7 +1871,7 @@ def _merge_raw_arrow_planner_build_telemetry(
 
 def _seed_setup_from_component_members(
     component_members: Mapping[str, Sequence[str]],
-) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]], dict[str, list[str]]]:
     cluster_seeds_require: dict[str, str] = {}
     for component_key, members in component_members.items():
         for signature_id in members:
@@ -1982,7 +1960,8 @@ def predict_incremental_link_or_abstain_from_raw_arrow_paths(
     raw_arrow_retrieval_seconds = time.perf_counter() - stage_start
 
     scoring_arrow_paths = _strip_raw_query_signature_sidecar(arrow_path_payload)
-    raw_plan_bundle = RawArrowPlanBundle.from_mapping(raw_candidate_plan_mapping)
+    raw_plan_bundle = RawArrowPlanBundle.from_native_mapping(raw_candidate_plan_mapping)
+    del raw_candidate_plan_mapping
     _validate_raw_plan_query_signature_ids(raw_plan_bundle, query_signature_id_strings)
     resolved_load_name_counts = _resolve_load_name_counts_policy(
         clusterer,

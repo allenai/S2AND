@@ -82,6 +82,29 @@ def test_release_maturin_action_matches_rust_build_system_floor() -> None:
     assert set(maturin_action_versions) == {expected_action_version}
 
 
+def test_rust_sdist_contains_vendored_cld2_and_is_clean_installed() -> None:
+    rust_project = tomllib.loads((REPO_ROOT / "s2and_rust" / "pyproject.toml").read_text(encoding="utf-8"))
+    assert rust_project["tool"]["maturin"]["include"] == [{"path": "vendor/cld2/**/*", "format": "sdist"}]
+
+    sdist_job = _release_workflow_jobs()["sdist"]
+    steps = sdist_job["steps"]
+    step_names = [step.get("name") for step in steps]
+    build_index = step_names.index("Build sdist")
+    smoke_index = step_names.index("Install and exercise sdist")
+    upload_index = next(
+        index for index, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert build_index < smoke_index < upload_index
+
+    setup_python = next(step for step in steps if str(step.get("uses", "")).startswith("actions/setup-python@"))
+    assert setup_python["with"]["python-version"] == "3.11"
+    smoke_script = steps[smoke_index]["run"]
+    assert "-name '*.tar.gz'" in smoke_script
+    assert "uv venv --python 3.11" in smoke_script
+    assert "uv pip install --python" in smoke_script
+    assert "scripts/verification/smoke_installed_rust_api.py" in smoke_script
+
+
 def test_release_workflow_consumes_only_final_policy_outputs() -> None:
     jobs = _release_workflow_jobs()
 
@@ -94,12 +117,36 @@ def test_release_workflow_consumes_only_final_policy_outputs() -> None:
     )
     assert conditions["needs.detect-versions.outputs.build_s2and == 'true'"] == 1
     assert conditions["needs.detect-versions.outputs.build_rust == 'true'"] == 4
-    assert conditions["needs.detect-versions.outputs.run_release_smoke == 'true'"] == 1
-    assert conditions["needs.detect-versions.outputs.publish_s2and == 'true'"] == 2
+    assert conditions["needs.detect-versions.outputs.run_release_smoke == 'true'"] == 2
+    assert conditions["needs.detect-versions.outputs.publish_s2and == 'true'"] == 1
     assert conditions["needs.detect-versions.outputs.publish_rust == 'true'"] == 1
     needs_lists = [job.get("needs") for job in jobs.values() if isinstance(job.get("needs"), list)]
     assert ["detect-versions", "s2and-dist", "release-smoke", "release-tests", "probe-rust-release"] in needs_lists
+    assert [
+        "detect-versions",
+        "wheels-windows",
+        "wheels-macos",
+        "wheels-linux",
+        "sdist",
+        "release-smoke",
+        "release-tests",
+    ] in needs_lists
     assert ["detect-versions", "publish-rust"] in needs_lists
+
+
+def test_publish_jobs_require_manual_release_intent_and_full_release_gates() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    jobs = workflow["jobs"]
+
+    assert inputs["publish_s2and"]["type"] == "boolean"
+    assert inputs["publish_rust"]["type"] == "boolean"
+    assert "Release-ready" in inputs["publish_s2and"]["description"]
+    assert "Release-ready" in inputs["publish_rust"]["description"]
+
+    for job_name in ("publish-s2and", "publish-rust"):
+        needs = set(jobs[job_name]["needs"])
+        assert {"release-smoke", "release-tests"} <= needs
 
 
 def test_python_package_data_is_explicit() -> None:

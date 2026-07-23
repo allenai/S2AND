@@ -526,6 +526,7 @@ def test_raw_arrow_candidate_plan_matches_existing_rust_retriever(tmp_path: Path
     _assert_retrieval_plan_equal(raw_plan, direct_plan)
     assert raw_plan["left_signature_ids"] == ["q1", "q1"]
     assert raw_plan["right_signature_ids"] == ["s1", "s2"]
+    assert raw_plan["left_signature_ids"][0] is raw_plan["left_signature_ids"][1]
     assert raw_plan["query_views"] == ["full"]
     assert raw_plan["telemetry"]["signature_count"] == 3
 
@@ -1800,6 +1801,9 @@ def test_raw_arrow_candidate_plan_matches_multi_query_auto_views_and_specter(tmp
     assert raw_plan["query_views"] == ["full", "initial_only"]
     assert raw_plan["left_signature_ids"] == ["q_full", "q_full", "q_initial", "q_initial"]
     assert raw_plan["right_signature_ids"] == ["s_full", "s_other", "s_initial", "s_other"]
+    assert raw_plan["left_signature_ids"][0] is raw_plan["left_signature_ids"][1]
+    assert raw_plan["left_signature_ids"][2] is raw_plan["left_signature_ids"][3]
+    assert raw_plan["right_signature_ids"][1] is raw_plan["right_signature_ids"][3]
 
 
 def test_raw_arrow_candidate_plan_excludes_query_seed_and_handles_missing_metadata(tmp_path: Path) -> None:
@@ -2031,6 +2035,43 @@ def test_raw_arrow_plan_bundle_owns_normalized_bridge_values(monkeypatch: pytest
     assert bundle.telemetry["timings"]["total_secs"] == pytest.approx(0.5)
 
 
+def test_raw_arrow_plan_bundle_adopts_native_numeric_arrays_without_copying() -> None:
+    raw_plan = _minimal_raw_candidate_plan(
+        row_count=1,
+        pair_count=1,
+        retrieval_scores=np.asarray([0.25], dtype=np.float32),
+        retrieval_ranks=np.asarray([1], dtype=np.uint16),
+        left_signature_ids=["q0"],
+        right_signature_ids=["s0"],
+        row_query_first_tokens=np.asarray(["Alice"], dtype=object),
+        row_component_sizes=np.asarray([3.0], dtype=np.float32),
+        component_members={"c0": ["s0"]},
+    )
+    source_arrays = {
+        key: value for key, value in raw_plan.items() if isinstance(value, np.ndarray) and value.dtype != object
+    }
+
+    bundle = RawArrowPlanBundle.from_native_mapping(raw_plan)
+
+    adopted_arrays = {
+        "row_query_signature_indices": bundle.row_query_offsets,
+        "pair_row_indices": bundle.pair_row_indices,
+        "retrieval_scores": bundle.retrieval_scores,
+        "retrieval_ranks": bundle.retrieval_ranks,
+        **{
+            raw_key: bundle.row_signals[signal_key]
+            for raw_key, signal_key, dtype in RAW_CANDIDATE_PLAN_ROW_SIGNAL_FIELDS
+            if dtype is not object
+        },
+    }
+    assert source_arrays.keys() <= adopted_arrays.keys()
+    for key, source in source_arrays.items():
+        adopted = adopted_arrays[key]
+        assert np.shares_memory(adopted, source), key
+        assert not source.flags.writeable, key
+        assert not adopted.flags.writeable, key
+
+
 def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_seeds(tmp_path: Path) -> None:
     paths = _base_arrow_paths(tmp_path)
     paths.pop("cluster_seeds")
@@ -2051,6 +2092,9 @@ def test_raw_arrow_labeled_candidate_plan_scores_frozen_rows_without_cluster_see
     assert raw_plan["row_component_keys"] == ["c_other", "c_match"]
     assert raw_plan["left_signature_ids"] == ["q1", "q1"]
     assert raw_plan["right_signature_ids"] == ["s2", "s1"]
+    assert raw_plan["left_signature_ids"][0] is raw_plan["left_signature_ids"][1]
+    q1_index = raw_plan["signature_ids"].index("q1")
+    assert raw_plan["left_signature_ids"][0] is raw_plan["signature_ids"][q1_index]
     np.testing.assert_array_equal(raw_plan["pair_row_indices"], np.asarray([0, 1], dtype=np.uint32))
     assert raw_plan["retrieval_ranks"].tolist() == [2, 1]
     assert raw_plan["retrieval_scores"][1] > raw_plan["retrieval_scores"][0]

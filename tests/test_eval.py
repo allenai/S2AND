@@ -14,9 +14,11 @@ from s2and.eval import (
     _write_claims_eval_shap_plots,
     b3_precision_recall_fscore,
     claims_eval,
+    cluster_precision_recall_fscore,
     f1_score,
     facet_eval,
     pairwise_eval,
+    pairwise_precision_recall_fscore,
 )
 
 
@@ -58,6 +60,57 @@ class TestB3AndF1(unittest.TestCase):
         self.assertEqual(f1_score(0, 1), 0.0)
         self.assertEqual(f1_score(1, 0), 0.0)
         self.assertAlmostEqual(f1_score(0.5, 0.5), 0.5)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        b3_precision_recall_fscore,
+        cluster_precision_recall_fscore,
+        lambda true_clus, pred_clus: pairwise_precision_recall_fscore(
+            true_clus,
+            pred_clus,
+            {"block": ["s1", "s2"]},
+        ),
+    ),
+    ids=("b3", "cluster", "pairwise"),
+)
+@pytest.mark.parametrize(
+    ("true_clus", "pred_clus", "label"),
+    (
+        ({"t1": ["s1", "s1"], "t2": ["s2"]}, {"p1": ["s1"], "p2": ["s2"]}, "Ground-truth"),
+        ({"t1": ["s1"], "t2": ["s1", "s2"]}, {"p1": ["s1"], "p2": ["s2"]}, "Ground-truth"),
+        ({"t1": ["s1"], "t2": ["s2"]}, {"p1": ["s1", "s1"], "p2": ["s2"]}, "Predicted"),
+        ({"t1": ["s1"], "t2": ["s2"]}, {"p1": ["s1"], "p2": ["s1", "s2"]}, "Predicted"),
+    ),
+    ids=("truth-within", "truth-across", "prediction-within", "prediction-across"),
+)
+def test_cluster_metrics_reject_non_partition_memberships(
+    metric: Any,
+    true_clus: dict[str, list[str]],
+    pred_clus: dict[str, list[str]],
+    label: str,
+) -> None:
+    with pytest.raises(ValueError, match=rf"{label} clustering must be a partition"):
+        metric(true_clus, pred_clus)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        b3_precision_recall_fscore,
+        cluster_precision_recall_fscore,
+        lambda true_clus, pred_clus: pairwise_precision_recall_fscore(
+            true_clus,
+            pred_clus,
+            {"block": ["s1"]},
+        ),
+    ),
+    ids=("b3", "cluster", "pairwise"),
+)
+def test_cluster_metrics_reject_unequal_coverage(metric: Any) -> None:
+    with pytest.raises(ValueError, match="Predictions do not cover all the signatures"):
+        metric({"t1": ["s1"]}, {"p1": ["s2"]})
 
 
 def test_facet_eval_includes_zero_homonymity_and_synonymity_buckets() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -24,6 +25,102 @@ def _write_tiny_index(tmp_path: Path) -> tuple[str, Path]:
     index_path = tmp_path / "signatures.signatures_batch_index.bin"
     write_arrow_batch_lookup_index(path, index_path, key_column="signature_id", table_name="signatures")
     return path, index_path
+
+
+def test_native_source_digests_match_v1_fingerprint_and_sha256(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.bin"
+    source_path.write_bytes(b"abc")
+    source_size = source_path.stat().st_size
+    expected_fingerprint = feature_block_arrow_module._fnv64_bytes(  # noqa: SLF001
+        feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_SOURCE_HASH_DOMAIN  # noqa: SLF001
+    )
+    expected_fingerprint = feature_block_arrow_module._fnv64_update(  # noqa: SLF001
+        expected_fingerprint,
+        source_size.to_bytes(8, "little", signed=False),
+    )
+    expected_fingerprint = feature_block_arrow_module._fnv64_update(  # noqa: SLF001
+        expected_fingerprint,
+        b"abc",
+    )
+
+    observed_fingerprint = feature_block_arrow_module._source_file_fingerprint_once(  # noqa: SLF001
+        source_path,
+        source_size=source_size,
+    )
+    observed_sha256, observed_combined_fingerprint = feature_block_arrow_module._source_file_digests_once(  # noqa: SLF001
+        source_path,
+        source_size=source_size,
+    )
+
+    assert observed_fingerprint == expected_fingerprint == 11851141429550314739
+    assert observed_combined_fingerprint == expected_fingerprint
+    assert observed_sha256 == hashlib.sha256(b"abc").hexdigest()
+
+
+def test_native_utf8_batch_hash_matches_python_fnv1a64() -> None:
+    values = ["", "abc", "Renée", "李", "emoji-🧪"]
+
+    assert feature_block_arrow_module._fnv64_utf8_batch(values) == [  # noqa: SLF001
+        feature_block_arrow_module._fnv64_bytes(value.encode("utf-8"))  # noqa: SLF001
+        for value in values
+    ]
+
+
+def test_write_uses_bounded_sorted_runs_and_preserves_v1_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    keys = ["zeta", "alpha", "theta", "beta", "eta", "gamma", "delta"]
+    path = write_arrow_ipc_table(
+        pa.table({"signature_id": pa.array(keys, type=pa.string())}),
+        tmp_path / "signatures.arrow",
+        max_record_batch_rows=2,
+    )
+    index_path = tmp_path / "signatures.signatures_batch_index.bin"
+    buffered_run_sizes: list[int] = []
+    original_run_writer = feature_block_arrow_module._write_arrow_batch_lookup_sort_run  # noqa: SLF001
+
+    def record_run(run_path: Path, records: list[tuple[int, int]]) -> None:
+        buffered_run_sizes.append(len(records))
+        original_run_writer(run_path, records)
+
+    monkeypatch.setattr(feature_block_arrow_module, "_ARROW_BATCH_LOOKUP_SORT_BUFFER_RECORDS", 2)
+    monkeypatch.setattr(feature_block_arrow_module, "_write_arrow_batch_lookup_sort_run", record_run)
+
+    write_arrow_batch_lookup_index(
+        path,
+        index_path,
+        key_column="signature_id",
+        table_name="signatures",
+        max_record_batch_rows=2,
+    )
+
+    source_path = Path(path)
+    source_size = source_path.stat().st_size
+    source_fingerprint = feature_block_arrow_module._source_file_fingerprint_once(  # noqa: SLF001
+        source_path,
+        source_size=source_size,
+    )
+    records = sorted(
+        (feature_block_arrow_module._fnv64_bytes(key.encode("utf-8")), row_index // 2, 0)  # noqa: SLF001
+        for row_index, key in enumerate(keys)
+    )
+    expected = bytearray(
+        feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT.pack(  # noqa: SLF001
+            feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_MAGIC,  # noqa: SLF001
+            len(keys),
+            source_size,
+            feature_block_arrow_module._fnv64_bytes(b"signature_id"),  # noqa: SLF001
+            source_fingerprint,
+        )
+    )
+    for record in records:
+        expected.extend(feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT.pack(*record))  # noqa: SLF001
+
+    assert buffered_run_sizes == [2, 2, 2, 1]
+    assert index_path.read_bytes() == expected
+    assert not list(tmp_path.glob(f".{index_path.name}.*"))
 
 
 @pytest.mark.parametrize("mutation", ["truncated", "trailing"])
@@ -82,6 +179,41 @@ def test_write_reuse_rejects_corrupt_batch_index(tmp_path: Path) -> None:
             table_name="signatures",
             overwrite=False,
         )
+
+
+def test_write_reuse_fingerprints_source_once_and_validates_last_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, index_path = _write_tiny_index(tmp_path)
+    payload = bytearray(index_path.read_bytes())
+    header_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_HEADER_STRUCT  # noqa: SLF001
+    record_struct = feature_block_arrow_module._ARROW_BATCH_LOOKUP_INDEX_RECORD_STRUCT  # noqa: SLF001
+    record_count = int(header_struct.unpack_from(payload)[1])
+    last_record_offset = header_struct.size + (record_count - 1) * record_struct.size
+    key_hash, _batch_index, reserved = record_struct.unpack_from(payload, last_record_offset)
+    record_struct.pack_into(payload, last_record_offset, key_hash, 3, reserved)
+    index_path.write_bytes(payload)
+
+    snapshot_calls: list[Path] = []
+    original_snapshot = feature_block_arrow_module._stable_source_file_snapshot  # noqa: SLF001
+
+    def record_snapshot(source_path: Path, *, context: str):
+        snapshot_calls.append(source_path)
+        return original_snapshot(source_path, context=context)
+
+    monkeypatch.setattr(feature_block_arrow_module, "_stable_source_file_snapshot", record_snapshot)
+
+    with pytest.raises(ValueError, match="batch index 3 is out of bounds"):
+        write_arrow_batch_lookup_index(
+            path,
+            index_path,
+            key_column="signature_id",
+            table_name="signatures",
+            overwrite=False,
+        )
+
+    assert snapshot_calls == [Path(path)]
 
 
 def test_raw_planner_index_rejects_same_size_unsampled_middle_rewrite_python(tmp_path: Path) -> None:
